@@ -1,18 +1,22 @@
-//! Colored terminal display for simulation reports.
+//! The one renderer for simulation reports.
 //!
-//! Provides rich, colorized output for TTY stderr. Falls back to the plain
-//! `Display` impl when stderr is not a terminal or `NO_COLOR` is set.
+//! `write_report` renders every section once, with or without ANSI colour.
+//! [`eprint_report`] uses it with colour when stderr is a terminal and
+//! `NO_COLOR` is unset; the report's `Display` impl uses it with colour off
+//! through `fmt_report`, so the plain text and the coloured text never
+//! drift apart.
 
+use std::fmt;
 use std::io::{IsTerminal, Write};
 
 use moonpool_assertions::AssertKind;
-use moonpool_core::metrics::HistogramValue;
 use moonpool_core::metrics::query::{MetricQueryReport, MetricWindowSummary};
+use moonpool_core::metrics::{HistogramValue, f64_to_u64};
 
 use super::report::{
     AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SaturationSignal,
-    SimulationReport, f64_to_u64_saturating, fmt_duration, fmt_num, fmt_sim_ms, format_recipe,
-    kind_label, kind_sort_order,
+    SimulationReport, fmt_duration, fmt_num, fmt_sim_ms, format_recipe, kind_label,
+    kind_sort_order,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,8 +53,9 @@ fn progress_bar(fraction: f64, color: bool) -> String {
     let filled_f = (fraction * f64::from(bar_width_u32))
         .round()
         .clamp(0.0, f64::from(bar_width_u32));
-    // SAFETY: `filled_f` is in `[0, BAR_WIDTH]` and finite.
-    let filled = unsafe { filled_f.to_int_unchecked::<usize>() }.min(BAR_WIDTH);
+    let filled = usize::try_from(f64_to_u64(filled_f))
+        .unwrap_or(usize::MAX)
+        .min(BAR_WIDTH);
     let empty = BAR_WIDTH - filled;
 
     let bar_color = if !color {
@@ -128,12 +133,51 @@ fn status_icon(status: AssertionStatus, color: bool) -> &'static str {
 
 /// Print the simulation report to stderr with colors if supported.
 ///
-/// Falls back to the plain `Display` impl when stderr is not a terminal
-/// or the `NO_COLOR` environment variable is set.
+/// Colour is dropped when stderr is not a terminal or the `NO_COLOR`
+/// environment variable is set; the text is then the report's `Display`
+/// output.
 pub fn eprint_report(report: &SimulationReport) {
     let color = use_color();
     let mut w = std::io::stderr().lock();
     write_report(&mut w, report, color);
+}
+
+/// Render the plain (uncoloured) report into a `fmt::Formatter`: the body of
+/// `impl Display for SimulationReport`.
+///
+/// [`write_report`] writes to an `io::Write` and drops write errors, so the
+/// formatter is wrapped in an adapter that latches the first `fmt::Error`
+/// and reports it once the render is over.
+pub(crate) fn fmt_report(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Result {
+    let mut w = FormatterWriter { f, error: None };
+    write_report(&mut w, report, false);
+    w.error.map_or(Ok(()), Err)
+}
+
+/// `fmt::Formatter` seen as an `io::Write`.
+///
+/// Every chunk `write_fmt` hands over is a whole formatted piece, so it is
+/// valid UTF-8; a formatter failure is latched in `error` because the
+/// renderer ignores the `io::Error` it is also handed.
+struct FormatterWriter<'a, 'b> {
+    f: &'a mut fmt::Formatter<'b>,
+    error: Option<fmt::Error>,
+}
+
+impl Write for FormatterWriter<'_, '_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = std::str::from_utf8(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if let Err(e) = self.f.write_str(text) {
+            self.error.get_or_insert(e);
+            return Err(std::io::Error::other(e));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn write_report_summary(w: &mut impl Write, report: &SimulationReport, color: bool) {
@@ -185,7 +229,7 @@ fn write_report_timing(w: &mut impl Write, report: &SimulationReport) {
     let _ = writeln!(
         w,
         "  Events       {} avg",
-        fmt_num(f64_to_u64_saturating(report.average_events_processed())),
+        fmt_num(f64_to_u64(report.average_events_processed().round())),
     );
 }
 
@@ -202,7 +246,10 @@ fn write_report_faulty_seeds(w: &mut impl Write, report: &SimulationReport, colo
     let _ = writeln!(w, "{:?}", report.seeds_failing);
 }
 
-fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
+/// Render the whole report — every section, in order — to `w`, with ANSI
+/// colour when `color` is set. Write errors are ignored: the report is a
+/// best-effort diagnostic, never a result.
+pub(crate) fn write_report(w: &mut impl Write, report: &SimulationReport, color: bool) {
     // === Header ===
     section_header(w, "Simulation Report", color, ansi::BOLD_CYAN);
 
@@ -671,7 +718,7 @@ fn write_query_stats(w: &mut impl Write, window: &MetricWindowSummary, indent: &
 /// counter reads `1,234` rather than `1234.00`.
 fn fmt_metric(v: f64) -> String {
     if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e15 {
-        let magnitude = fmt_num(f64_to_u64_saturating(v.abs()));
+        let magnitude = fmt_num(f64_to_u64(v.abs().round()));
         if v.is_sign_negative() && v != 0.0 {
             format!("-{magnitude}")
         } else {

@@ -178,13 +178,6 @@ pub fn cleanup_assertions() {
     ASSERTION_REGIONS.with(|regions| regions.borrow_mut().take());
 }
 
-/// Zero assertion table memory for between-run resets.
-///
-/// No-op if not initialized.
-pub fn reset_assertions() {
-    moonpool_assertions::reset();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

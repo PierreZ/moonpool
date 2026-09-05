@@ -184,7 +184,7 @@ fn machine_reboot_is_collocated() {
             })
         })
         .workload(TimedWorkload(Duration::from_secs(20)))
-        .fault(MachineRebootInjector)
+        .fault_factory(|| Box::new(MachineRebootInjector))
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(1)
         .set_debug_seeds(vec![42])

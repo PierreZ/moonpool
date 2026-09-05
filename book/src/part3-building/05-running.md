@@ -47,25 +47,30 @@ Notice what is missing: there is no runtime to build. `run()` drives each iterat
 The report prints to stderr with `.eprint()`. Here is what a healthy report looks like:
 
 ```
-=== Simulation Report ===
-  Iterations: 100  |  Passed: 100  |  Failed: 0  |  Rate: 100.0%
 
-  Avg Wall Time:     12ms           Total: 1.20s
-  Avg Sim Time:      45.23s
-  Avg Events:        8,432
+━━━ Simulation Report ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  100 iterations   100 passed   0 failed   ✓ 100.0%
 
---- Assertions (4) ---
-  PASS  [always    ]  "read matches model"              12,847 pass  0 fail
-  PASS  [always    ]  "conservation law"                 8,200 pass  0 fail
-  PASS  [sometimes ]  "set_succeeded"                    6,102 / 12,847 (47.5%)
-  PASS  [sometimes ]  "set_failed_network"               412 / 12,847 (3.2%)
+  Wall Time    12ms avg       1.20s total
+  Sim Time     45.23s avg
+  Events       8,432 avg
+
+━━━ Assertions (4) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓  always       "conservation law"  8,200 pass  0 fail
+  ✓  always       "read matches model" 12,847 pass  0 fail
+  ✓  sometimes    "set_failed_network" 412 / 12,847  (3.2%)
+  ✓  sometimes    "set_succeeded"     6,102 / 12,847  (47.5%)
 ```
+
+The same text, coloured when stderr is a terminal, is what `.eprint()`
+prints; `format!("{report}")` gives the plain form.
 
 The critical lines:
 
-- **Rate: 100.0%** means no iteration panicked or returned an error
+- **✓ 100.0%** means no iteration panicked or returned an error
 - **0 fail** on always-assertions means no invariant violations
-- **PASS** on sometimes-assertions means every coverage goal was hit at least once
+- **✓** on sometimes-assertions means every coverage goal was hit at least once (a
+  never-fired one shows as **○**)
 
 ## What Success Means
 
@@ -81,19 +86,24 @@ Both matter. A simulation that never violates invariants but also never exercise
 A failing report shows faulty seeds and violations:
 
 ```
-=== Simulation Report ===
-  Iterations: 100  |  Passed: 98  |  Failed: 2  |  Rate: 98.0%
+
+━━━ Simulation Report ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  100 iterations   98 passed   2 failed   ✗ 98.0%
+
+  Wall Time    12ms avg       1.20s total
+  Sim Time     45.23s avg
+  Events       8,432 avg
 
   Faulty seeds: [7891, 42033]
 
---- Assertions (4) ---
-  FAIL  [always    ]  "read matches model"              12,800 pass  47 fail
-  PASS  [always    ]  "conservation law"                 8,200 pass  0 fail
-  PASS  [sometimes ]  "set_succeeded"                    6,102 / 12,847 (47.5%)
-  PASS  [sometimes ]  "set_failed_network"               412 / 12,847 (3.2%)
+━━━ Assertions (4) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✗  always       "read matches model" 12,800 pass  47 fail
+  ✓  always       "conservation law"  8,200 pass  0 fail
+  ✓  sometimes    "set_failed_network" 412 / 12,847  (3.2%)
+  ✓  sometimes    "set_succeeded"     6,102 / 12,847  (47.5%)
 
---- Assertion Violations ---
-  - Always "read matches model": 47 failures out of 12,847 evaluations
+━━━ Violations ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✗  Always "read matches model": 47 failures out of 12,847 evaluations
 ```
 
 The report tells you:
@@ -134,7 +144,7 @@ The debugging workflow:
 
 ## Stop Conditions
 
-How long should a chaos run last? Any fixed seed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count** — when the run has nothing left to discover. Moonpool exposes three answers via `IterationControl`.
+How long should a chaos run last? Any fixed seed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count** — when the run has nothing left to discover. Moonpool exposes two answers via `IterationControl`.
 
 **`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default, and the one you want most of the time. It stops when every observed `assert_sometimes!` / `assert_reachable!` has fired at least once **and** code coverage has not grown for `plateau_seeds` consecutive seeds. The `max_iterations` field is a safety cap. Under `cargo xtask sim run` the binaries are sancov-instrumented, so the progress signal is **real code coverage** — the count of distinct edges the seeds have exercised. Under plain `cargo nextest run` there is no instrumentation, so it falls back to **assertion coverage** — the set of sometimes/reachable messages that have fired. The report names which signal it used, so the fallback is never silent. This works **with or without** exploration; no fork happens unless you call `.enable_exploration()`.
 
@@ -146,8 +156,6 @@ SimulationBuilder::new()
 ```
 
 **`FixedCount(n)`** is the workhorse for reproducible replay. You commit to running exactly `n` seeds, the duration is bounded, and the report is identical across machines. Reach for this when debugging a specific seed or when budgets must be predictable.
-
-**`TimeLimit(d)`** is the answer when "as much chaos as we have time for" is the right framing. Long-running soak runs and overnight loops use this. The seed count is unbounded but the wall clock is.
 
 `UntilCoverageStable` sets `report.convergence_timeout = true` when the safety cap is hit before the run saturates, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
 
@@ -179,6 +187,6 @@ Check both `seeds_failing` (iterations that panicked or errored) and `assertion_
 
 Simulation testing is iterative. You write a workload, run it, find a bug, fix the bug, add assertions to prevent regression, run again. Each round makes the system more robust.
 
-The report's assertion table is your scoreboard. When you see all PASS with high hit counts, you know your test is both thorough and correct. When you see MISS on a sometimes-assertion, you know there is a code path your chaos is not reaching. When you see FAIL on an always-assertion, you know there is a real bug to fix.
+The report's assertion table is your scoreboard. When every row shows ✓ with high hit counts, you know your test is both thorough and correct. When a sometimes-assertion shows ○, you know there is a code path your chaos is not reaching. When an always-assertion shows ✗, you know there is a real bug to fix.
 
 This is the rhythm of simulation-driven development: build, test, observe, improve.

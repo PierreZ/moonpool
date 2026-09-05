@@ -73,9 +73,12 @@ pub fn clear_random_source() {
 /// Initialize buggify for a simulation run.
 ///
 /// Clears per-location activation decisions from any previous run and enables
-/// firing with the given activation probability. The random source must have
-/// been installed via [`set_random_source`] for call sites to fire.
-pub fn buggify_init(activation_prob: f64, _firing_prob: f64) {
+/// firing with the given activation probability. The firing probability is
+/// not a run-level knob: [`buggify!`] fires an active location at 25% per
+/// call, and [`buggify_with_prob!`] takes its own per-site rate. The random
+/// source must have been installed via [`set_random_source`] for call sites
+/// to fire.
+pub fn buggify_init(activation_prob: f64) {
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.enabled = true;
@@ -187,7 +190,7 @@ mod tests {
     #[test]
     fn enabled_without_source_is_inert() {
         clear_random_source();
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
         assert!(!buggify_internal(1.0, "no_source"));
         buggify_reset();
     }
@@ -196,7 +199,7 @@ mod tests {
     fn activation_decision_is_consistent() {
         reset_test_source();
         set_random_source(test_source);
-        buggify_init(0.5, 1.0);
+        buggify_init(0.5);
 
         let location = "consistent_location";
         let first = buggify_internal(1.0, location);
@@ -213,7 +216,7 @@ mod tests {
         let run = || {
             reset_test_source();
             set_random_source(test_source);
-            buggify_init(0.5, 0.5);
+            buggify_init(0.5);
             let out: Vec<bool> = (0..5)
                 .map(|i| {
                     let location = Box::leak(format!("loc_{i}").into_boxed_str());
@@ -231,7 +234,7 @@ mod tests {
     fn always_active_always_fires() {
         reset_test_source();
         set_random_source(test_source);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
         let fired = (0..20).any(|_| buggify_internal(1.0, "always"));
         assert!(fired, "activation 1.0 + prob 1.0 must fire");
         buggify_reset();
@@ -242,7 +245,7 @@ mod tests {
     fn reset_disables_firing() {
         reset_test_source();
         set_random_source(test_source);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
         assert!(buggify_internal(1.0, "reset_case"));
         buggify_reset();
         assert!(!buggify_internal(1.0, "reset_case"));
@@ -253,7 +256,7 @@ mod tests {
     fn macros_share_crate_state() {
         reset_test_source();
         set_random_source(test_source);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
         // buggify! fires at 25% per call; over many calls it must fire.
         assert!(
             (0..100).any(|_| crate::buggify!()),

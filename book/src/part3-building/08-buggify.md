@@ -22,14 +22,14 @@ Moonpool uses FoundationDB's two-phase activation model:
 
 ```rust
 // Each call site is a unique location (identified by file:line).
-// First encounter: 50% chance of activation (configurable).
+// First encounter: 50% chance of activation.
 // Subsequent encounters at an active site: 25% chance of firing.
 if buggify!() {
     return Err(Error::timeout("simulated timeout"));
 }
 ```
 
-The activation probability is configurable per simulation. The firing probability can be customized per call site:
+Neither rate is a builder setting: the runner activates each location at a fixed 50% per seed, and `buggify!` fires an active location at a fixed 25% per call. What can vary is the firing probability, per call site, with `buggify_with_prob!`:
 
 ```rust
 // Fire at 50% probability instead of the default 25%

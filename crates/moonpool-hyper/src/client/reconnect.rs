@@ -1164,8 +1164,11 @@ mod tests {
 
     fn assert_sim_shutdown_cancels_attempt(failures: u32) {
         let sim = SimWorld::new();
+        // `SimProviders::new` no longer seeds the thread-local stream; seed it
+        // explicitly so the backoff draws stay the ones this test was written on.
+        moonpool_sim::set_sim_seed(17);
         let ip = "10.0.1.1".parse().expect("test IP must be valid");
-        let providers = SimProviders::new(sim.downgrade(), 17, ip);
+        let providers = SimProviders::new(sim.downgrade(), ip);
         let mut executor = moonpool_sim::executor::Executor::new(17);
 
         executor.block_on(async {

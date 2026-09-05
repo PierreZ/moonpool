@@ -93,7 +93,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use super::{MetricPoint, MetricSample};
+use super::{MetricPoint, MetricSample, u64_to_f64_exact};
 
 // ---------------------------------------------------------------------------
 // Series identity
@@ -343,10 +343,14 @@ impl Aggregator {
     }
 }
 
+/// Widen a length or index to `f64` (see [`u64_to_f64_exact`]).
+fn len_to_f64(value: usize) -> f64 {
+    u64_to_f64_exact(u64::try_from(value).unwrap_or(u64::MAX))
+}
+
 /// Arithmetic mean of a non-empty slice.
 fn mean(values: &[f64]) -> f64 {
-    let n = u32::try_from(values.len()).map_or(f64::INFINITY, f64::from);
-    values.iter().sum::<f64>() / n
+    values.iter().sum::<f64>() / len_to_f64(values.len())
 }
 
 /// Percentile of an already-sorted slice, linearly interpolated between the
@@ -357,8 +361,7 @@ fn percentile_of_sorted(sorted: &[f64], p: f64) -> f64 {
     debug_assert!(!sorted.is_empty(), "caller checked for emptiness");
     let p = if p.is_nan() { 0.0 } else { p.clamp(0.0, 1.0) };
     let last = sorted.len() - 1;
-    let last_f = u32::try_from(last).map_or(f64::INFINITY, f64::from);
-    let rank = p * last_f;
+    let rank = p * len_to_f64(last);
     let lower = rank.floor();
     let upper = rank.ceil();
     // SAFETY-adjacent: `rank` is finite and within `[0, last]`, so both bounds
@@ -383,16 +386,33 @@ fn f64_to_index(v: f64) -> usize {
     }
 }
 
-/// Truncate a non-negative finite `f64` to `u64`, saturating.
-fn f64_to_u64(v: f64) -> u64 {
+/// Truncate an `f64` toward zero into a `u64`, saturating.
+///
+/// NaN, negatives and everything below `1.0` become `0`; anything at or above
+/// `2^64` (infinity included) becomes `u64::MAX`. In between, the IEEE-754
+/// fields are decoded by hand, which is exact and keeps the conversion free
+/// of both `unsafe` and a lossy primitive cast. This is the one float-to-int
+/// conversion the workspace uses; every renderer and query goes through it.
+#[must_use]
+pub fn f64_to_u64(v: f64) -> u64 {
     const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
-    if !v.is_finite() || v <= 0.0 {
-        0
-    } else if v >= TWO_POW_64 {
-        u64::MAX
+    const MANTISSA_BITS: u32 = 52;
+    const EXPONENT_BIAS: u32 = 1023;
+    if v.is_nan() || v < 1.0 {
+        return 0;
+    }
+    if v >= TWO_POW_64 {
+        return u64::MAX;
+    }
+    let bits = v.to_bits();
+    let biased = u32::try_from((bits >> MANTISSA_BITS) & 0x7FF).unwrap_or(0);
+    // `1.0 <= v < 2^64` pins the unbiased exponent to `0..=63`.
+    let exponent = biased.saturating_sub(EXPONENT_BIAS).min(63);
+    let mantissa = (bits & ((1 << MANTISSA_BITS) - 1)) | (1 << MANTISSA_BITS);
+    if exponent >= MANTISSA_BITS {
+        mantissa << (exponent - MANTISSA_BITS)
     } else {
-        // SAFETY: `v` is finite, non-negative and strictly below `2^64`.
-        unsafe { v.to_int_unchecked::<u64>() }
+        mantissa >> (MANTISSA_BITS - exponent)
     }
 }
 
@@ -827,7 +847,7 @@ impl<S: Stage> MetricQuery<S> {
         self
     }
 
-    /// Finish the query, naming it for the report.    /// Finish the query, naming it for the report.
+    /// Finish the query, naming it for the report.
     #[must_use]
     pub fn named(self, name: impl Into<String>) -> MetricQueryPlan {
         MetricQueryPlan {
@@ -1165,7 +1185,7 @@ fn rate(windows: &[Window]) -> Vec<Window> {
             // Prometheus' reset rule: a drop means the counter restarted, so
             // the new value is the whole delta rather than a negative rate.
             let delta = if v1 >= v0 { v1 - v0 } else { v1 };
-            let seconds = u32::try_from(elapsed_ms).map_or(f64::INFINITY, f64::from) / 1000.0;
+            let seconds = u64_to_f64_exact(elapsed_ms) / 1000.0;
             Some(Window {
                 start_ms: t0,
                 end_ms: t1,
@@ -1269,8 +1289,8 @@ fn interpolate_gaps(windows: &[Window], every_ms: u64, end_time_ms: u64) -> Vec<
     regrid(windows, every_ms, end_time_ms, |known, index| {
         let (&before, &before_value) = known.range(..index).next_back()?;
         let (&after, &after_value) = known.range(index..).next()?;
-        let span = u32::try_from(after - before).map_or(f64::INFINITY, f64::from);
-        let offset = u32::try_from(index - before).map_or(f64::INFINITY, f64::from);
+        let span = u64_to_f64_exact(after - before);
+        let offset = u64_to_f64_exact(index - before);
         Some(before_value + (after_value - before_value) * (offset / span))
     })
 }
@@ -1475,6 +1495,21 @@ mod tests {
     use super::*;
     use crate::metrics::MetricValue;
 
+    #[test]
+    fn f64_to_u64_truncates_and_saturates() {
+        assert_eq!(f64_to_u64(f64::NAN), 0);
+        assert_eq!(f64_to_u64(-3.0), 0);
+        assert_eq!(f64_to_u64(0.0), 0);
+        assert_eq!(f64_to_u64(0.999), 0);
+        assert_eq!(f64_to_u64(1.0), 1);
+        assert_eq!(f64_to_u64(1.999), 1);
+        assert_eq!(f64_to_u64(4_294_967_296.5), 4_294_967_296);
+        assert_eq!(f64_to_u64(9_007_199_254_740_992.0), 1 << 53);
+        assert_eq!(f64_to_u64(1e19), 10_000_000_000_000_000_000);
+        assert_eq!(f64_to_u64(18_446_744_073_709_551_616.0), u64::MAX);
+        assert_eq!(f64_to_u64(f64::INFINITY), u64::MAX);
+    }
+
     /// Floating-point comparison for the expected values in these tests, which
     /// are small and exactly representable up to accumulated rounding.
     fn is_close(a: f64, b: f64) -> bool {
@@ -1649,6 +1684,37 @@ mod tests {
             (1_000, 3_000)
         );
         assert!(is_close(rows[1].value, 10.0), "20 over 2s");
+    }
+
+    #[test]
+    fn rate_survives_a_gap_longer_than_u32_milliseconds() {
+        // 60 simulated days is ~5.18e9 ms, past u32::MAX (~49.7 days). Widening
+        // the gap through `u32::try_from` used to read it as infinity, and the
+        // rate as zero.
+        const SIXTY_DAYS_MS: u64 = 60 * 24 * 60 * 60 * 1_000;
+        assert!(SIXTY_DAYS_MS > u64::from(u32::MAX));
+        let end = 1_000 + SIXTY_DAYS_MS;
+        // One increment per second across the whole gap.
+        let gap_increments = 10.0 + 60.0 * 24.0 * 60.0 * 60.0;
+        let snap = snapshot(
+            &[("hits_total", &[(1_000, 10.0), (end, gap_increments)])],
+            end,
+        );
+        let rows = MetricQuery::select("hits_total")
+            .rate()
+            .named("r")
+            .evaluate(&snap, 1, 1);
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[1].bucket_start_ms, rows[1].bucket_end_ms),
+            (1_000, end)
+        );
+        assert!(
+            is_close(rows[1].value, 1.0),
+            "1/s across 60 days, got {}",
+            rows[1].value
+        );
     }
 
     #[test]
@@ -1889,7 +1955,7 @@ mod tests {
             .collect();
         assert_eq!(values.len(), 5);
         for (i, value) in values.iter().enumerate() {
-            let expected = 25.0 * u32::try_from(i).map_or(f64::INFINITY, f64::from);
+            let expected = 25.0 * len_to_f64(i);
             assert!(is_close(*value, expected), "bucket {i}: {value}");
         }
     }

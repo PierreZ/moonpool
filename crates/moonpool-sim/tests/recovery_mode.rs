@@ -890,9 +890,8 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
     );
 }
 
-/// The per-IP setters are the same hole with a narrower blast radius. Both
-/// spellings — `set_storage_config_for` and `set_process_storage_config` —
-/// reach the same per-process map, so both are checked.
+/// The per-IP setter is the same hole with a narrower blast radius: it
+/// reaches the per-process map, so it is checked for two hosts.
 #[test]
 fn per_process_storage_setters_cannot_rearm_faults_after_recovery() {
     let mut sim = SimWorld::new_with_seed(20_260_901);
@@ -903,7 +902,7 @@ fn per_process_storage_setters_cannot_rearm_faults_after_recovery() {
     rearmed.write_fault_probability = 1.0;
     rearmed.disk_stall_probability = 1.0;
     rearmed.iops = 8765;
-    sim.set_storage_config_for(ip(1), rearmed.clone());
+    sim.set_process_storage_config(ip(1), rearmed.clone());
     sim.set_process_storage_config(ip(2), rearmed);
 
     let payload = vec![0x33_u8; SECTOR_SIZE];

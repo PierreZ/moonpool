@@ -12,8 +12,9 @@
 //! `prometheus::Registry` among them) have no reset, so reusing one instance
 //! would make seed 50 report the sum of fifty runs. A fresh
 //! [`MetricsHandle`] is built for every iteration, which is the same reasoning
-//! behind [`fault_factory`](super::builder::SimulationBuilder::fault_factory)
-//! versus [`fault`](super::builder::SimulationBuilder::fault).
+//! behind registering a fault injector through
+//! [`fault_factory`](super::builder::SimulationBuilder::fault_factory) rather
+//! than as an instance.
 //!
 //! Reboots are the other way round: a process that crashes and restarts gets a
 //! fresh [`Process`](super::process::Process) instance but the *same* source,
@@ -219,7 +220,7 @@ impl MetricClock for SimClock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use moonpool_core::metrics::MetricValue;
+    use moonpool_core::metrics::{MetricValue, u64_to_f64_exact};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct Counting {
@@ -228,8 +229,7 @@ mod tests {
 
     impl MetricsSource for Counting {
         fn collect(&self) -> Vec<MetricSample> {
-            let hits =
-                u32::try_from(self.hits.load(Ordering::Relaxed)).map_or(f64::INFINITY, f64::from);
+            let hits = u64_to_f64_exact(self.hits.load(Ordering::Relaxed));
             vec![MetricSample::new(
                 "hits_total",
                 Vec::new(),

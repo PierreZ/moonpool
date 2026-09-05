@@ -181,7 +181,7 @@ fn no_progress_io_polls_do_not_consume_simulation_rng() {
     // Keep random-close call sites enabled but inactive. Their first encounter
     // would still consume an activation draw, making this a sensitive check
     // that neither pending path reaches a random decision.
-    buggify_init(0.0, 1.0);
+    buggify_init(0.0);
     reset_rng_call_count();
 
     let mut byte = [0_u8; 1];
@@ -275,7 +275,7 @@ fn fault_replay(seed: u64) -> ReplayTrace {
     config.chaos.bit_flip_cooldown = Duration::ZERO;
 
     let mut sim = SimWorld::new_with_network_config_and_seed(config, seed);
-    buggify_init(1.0, 1.0);
+    buggify_init(1.0);
     let provider = sim.network_provider("127.0.0.1".parse().expect("valid loopback IP"));
     let listener = drive(&mut sim, provider.bind("replay-listener")).expect("listener binds");
     let mut client = drive(&mut sim, provider.connect("replay-listener")).expect("client connects");

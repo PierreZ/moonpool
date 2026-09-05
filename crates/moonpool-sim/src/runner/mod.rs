@@ -33,7 +33,7 @@ pub mod workload;
 
 // Re-export main types at module level
 pub use app_metrics::{INSTANCE_LABEL, MetricsHandle};
-pub use builder::{Chaos, ChaosMode, ClientId, WorkloadCount};
+pub use builder::{Chaos, ChaosMode, WorkloadCount};
 pub use builder::{IterationControl, SimulationBuilder};
 pub use context::SimContext;
 pub use fault_injector::{FaultContext, FaultInjector};

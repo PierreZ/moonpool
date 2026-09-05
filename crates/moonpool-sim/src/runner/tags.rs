@@ -146,12 +146,6 @@ impl TagRegistry {
             .map(|(ip, _)| *ip)
             .collect()
     }
-
-    /// Get all registered process IPs.
-    #[must_use]
-    pub fn all_ips(&self) -> Vec<IpAddr> {
-        self.ip_tags.keys().copied().collect()
-    }
 }
 
 #[cfg(test)]
@@ -214,8 +208,6 @@ mod tests {
         let west_ips = registry.ips_tagged("dc", "west");
         assert_eq!(west_ips.len(), 1);
         assert!(west_ips.contains(&ip2));
-
-        assert_eq!(registry.all_ips().len(), 3);
     }
 
     #[test]

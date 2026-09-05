@@ -16,13 +16,16 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
     fn sleep(
         &self,
         duration: Duration,
-    ) -> impl Future<Output = Result<(), TimeError>> + Send + Sync;
+    ) -> impl Future<Output = Result<(), TimeError>> + Send;
 
     /// Get exact current time.
     fn now(&self) -> Duration;
 
     /// Get drifted timer time (simulates clock drift between nodes).
-    fn timer(&self) -> Duration;
+    /// Defaults to `now()`; the simulation overrides it.
+    fn timer(&self) -> Duration {
+        self.now()
+    }
 
     /// Run a future with a timeout.
     fn timeout<F, T>(
@@ -36,7 +39,7 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
 }
 ```
 
-The distinction between `now()` and `timer()` is borrowed from FoundationDB's `sim2`. In production, both return the same value. In simulation, `timer()` can drift up to 100ms ahead of `now()`, testing how your code handles clock skew between processes. Use `now()` for event scheduling. Use `timer()` for application-level time checks like lease expiry and heartbeat deadlines.
+The distinction between `now()` and `timer()` is borrowed from FoundationDB's `sim2`. `timer()` is a default method that returns `now()`, which is what production keeps; only the simulation overrides it. In simulation, `timer()` can drift up to 100ms ahead of `now()`, testing how your code handles clock skew between processes. Use `now()` for event scheduling. Use `timer()` for application-level time checks like lease expiry and heartbeat deadlines.
 
 **Production**: `TokioTimeProvider` delegates `sleep` to `tokio::time::sleep`, `timeout` to `tokio::time::timeout`, and `now` to `std::time::Instant::elapsed`.
 
@@ -98,7 +101,7 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
     /// Join handle returned by `spawn_task`. `Detach` provides explicit
     /// fire-and-forget: `spawn_task(...).detach()` leaves the task running
     /// without keeping the handle.
-    type JoinHandle: Future<Output = Result<(), JoinError>> + Detach + Send + Sync + 'static;
+    type JoinHandle: Future<Output = Result<(), JoinError>> + Detach + Send + 'static;
 
     /// Spawn a named task.
     fn spawn_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
@@ -110,9 +113,9 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 }
 ```
 
-Spawned futures are **`Send + 'static`**. The runtime still pins everything to one OS thread for determinism, but the bound matches what `tokio::spawn` expects, so customer code reads exactly like normal tokio code. The `name` parameter shows up in event logs so you can trace which task generated which event.
+Spawned futures are **`Send + 'static`**. The runtime still pins everything to one OS thread for determinism, but the bound matches what `tokio::spawn` expects, so customer code reads exactly like normal tokio code. The `name` parameter is diagnostic only. In simulation the executor stores it with the task and traces every poll under it; in production `TokioTaskProvider` merely emits a `tracing::trace!` event when the task starts and when it completes.
 
-**Production**: `TokioTaskProvider` uses plain `tokio::spawn`. The name only feeds the trace spans around the task.
+**Production**: `TokioTaskProvider` uses plain `tokio::spawn`. The name feeds those two trace events and nothing else — it is not attached to the tokio task.
 
 **Simulation**: `SimTaskProvider` spawns onto the [deterministic executor](./11-executor.md), so scheduling order is a seeded-random, fully reproducible function of the iteration seed.
 
@@ -131,12 +134,18 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
         T: SampleUniform + PartialOrd;
 
     /// Generate a random f64 between 0.0 and 1.0.
-    fn random_ratio(&self) -> f64;
+    fn random_ratio(&self) -> f64 {
+        self.random()
+    }
 
     /// Generate a random bool with the given probability of being true.
-    fn random_bool(&self, probability: f64) -> bool;
+    fn random_bool(&self, probability: f64) -> bool {
+        self.random_ratio() < probability
+    }
 }
 ```
+
+Only `random` and `random_range` are required; `random_ratio` and `random_bool` are default methods derived from them.
 
 `RandomProvider` is fully synchronous. The other four providers expose async methods via native AFIT, but random number generation never needs to suspend, so its trait has no `async fn` at all. The supertrait shape (`Clone + Send + Sync + 'static`) stays consistent with the rest of the provider family.
 

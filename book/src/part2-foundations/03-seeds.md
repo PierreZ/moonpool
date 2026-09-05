@@ -43,11 +43,11 @@ SimulationBuilder::new()
     .run();
 ```
 
-**TimeLimit** runs for a wall-clock duration, burning through as many seeds as time allows:
+**UntilCoverageStable** (the default) keeps drawing seeds until every observed `assert_sometimes!` / `assert_reachable!` has fired and code coverage has stopped growing, capped at a safety limit:
 
 ```rust
 SimulationBuilder::new()
-    .set_time_limit(Duration::from_secs(300))  // 5 minutes of exploration
+    .until_coverage_stable(10, 5_000)  // 10 quiet seeds, 5_000 safety cap
     // ... workloads ...
     .run();
 ```

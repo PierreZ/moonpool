@@ -39,9 +39,9 @@ process has no unrelated threads or external resources that a child could
 inherit.
 
 Use `.workload_factory(...)` or `.workloads(...)` for the client driver.
-Exploration rejects a single `.workload(instance)`, `before_iteration` hooks,
-and custom fault-injector instances because those opaque values cannot be
-reconstructed for every continuation. Built-in `Chaos` surfaces are supported.
+Exploration rejects a single `.workload(instance)` and custom fault-injector
+instances because those opaque values cannot be reconstructed for every
+continuation. Built-in `Chaos` surfaces are supported.
 Keep authoritative test state inside fresh processes and factory-created
 workloads; do not depend on external clocks, randomness, threads, files, or
 sockets outside Moonpool providers.
@@ -158,8 +158,7 @@ assert_eq!(replay.failed_runs, 1);
 ```
 
 If replay does not reproduce, audit the integration for direct Tokio calls,
-unseeded collections or randomness, reused workload state, `before_iteration`
-state, and external I/O. A recipe is exact only when the entire test harness is
+unseeded collections or randomness, reused workload state, and external I/O. A recipe is exact only when the entire test harness is
 deterministic and starts each timeline from the same logical state.
 
 ## Current Operational Limits

@@ -33,6 +33,28 @@
 //! reports.
 
 pub mod query;
+pub use query::f64_to_u64;
+
+/// Widen a `u64` to `f64`, exactly for every value below `2^53`.
+///
+/// Split into 32-bit halves rather than cast: `f64` holds every integer below
+/// `2^53` exactly, and going through two `f64::from(u32)` conversions gets
+/// there without a lossy primitive cast. The alternative idiom,
+/// `u32::try_from(v).map_or(f64::INFINITY, f64::from)`, silently turns any
+/// value above `u32::MAX` into infinity — a rate across a gap longer than
+/// about 49.7 simulated days would read as zero — which is why every widening
+/// in the metrics engine goes through here.
+///
+/// At or above `2^53` the value is no longer representable: the high half is
+/// scaled exactly (a multiply by a power of two) and the final addition rounds
+/// once, so the result is the nearest `f64` to the integer, never infinity or
+/// zero. No simulated clock or counter reaches that range.
+#[must_use]
+pub fn u64_to_f64_exact(value: u64) -> f64 {
+    let high = f64::from(u32::try_from(value >> 32).unwrap_or(u32::MAX));
+    let low = f64::from(u32::try_from(value & 0xFFFF_FFFF).unwrap_or(u32::MAX));
+    high * 4_294_967_296.0 + low
+}
 
 /// The value carried by a single metric sample.
 ///
@@ -94,8 +116,7 @@ impl HistogramValue {
         if self.count == 0 {
             0.0
         } else {
-            // Precision loss acceptable: observation counts fit within 2^52.
-            self.sum / u32::try_from(self.count).map_or(f64::INFINITY, f64::from)
+            self.sum / u64_to_f64_exact(self.count)
         }
     }
 
@@ -275,21 +296,6 @@ impl SeriesRecorder {
     /// Panics if the recorder's lock is poisoned by a prior task panic.
     pub fn set_capacity(&self, capacity: Option<usize>) {
         self.state().capacity = capacity;
-    }
-
-    /// Whether a clock is installed. `false` means every `record` is a no-op,
-    /// which is the case in production.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the recorder's lock is poisoned by a prior task panic.
-    #[must_use]
-    pub fn is_armed(&self) -> bool {
-        self.inner
-            .clock
-            .read()
-            .expect("RwLock poisoned: prior task panicked")
-            .is_some()
     }
 
     /// Record `value` for the series named `key`, at the clock's current time.
@@ -477,9 +483,37 @@ mod tests {
     }
 
     #[test]
+    fn u64_to_f64_exact_is_exact_across_the_32_bit_boundary() {
+        for value in [0, 1, 4_294_967_295, 4_294_967_296, 1_000_000_000_000] {
+            let expected: f64 = value.to_string().parse().expect("decimal literal");
+            assert!((u64_to_f64_exact(value) - expected).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn u64_to_f64_exact_is_exact_up_to_two_pow_53() {
+        let max_exact = (1_u64 << 53) - 1;
+        assert!((u64_to_f64_exact(max_exact) - 9_007_199_254_740_991.0).abs() < f64::EPSILON);
+        assert!((u64_to_f64_exact(1 << 53) - 9_007_199_254_740_992.0).abs() < f64::EPSILON);
+        // Above 2^53 the result rounds to the nearest f64 rather than degrading
+        // to zero or infinity.
+        assert!((u64_to_f64_exact(u64::MAX) - 18_446_744_073_709_551_615.0).abs() < 1.0);
+        assert!(u64_to_f64_exact(u64::MAX).is_finite());
+    }
+
+    #[test]
+    fn histogram_mean_survives_counts_above_u32() {
+        let histogram = HistogramValue {
+            count: 5_000_000_000,
+            sum: 10_000_000_000.0,
+            buckets: Vec::new(),
+        };
+        assert!((histogram.mean() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn recorder_is_inert_without_a_clock() {
         let recorder = SeriesRecorder::new();
-        assert!(!recorder.is_armed());
         recorder.record("hits", 1.0);
         assert!(recorder.series().is_empty(), "no clock, nothing recorded");
     }
@@ -489,7 +523,6 @@ mod tests {
         let clock = std::sync::Arc::new(FixedClock(std::sync::atomic::AtomicU64::new(10)));
         let recorder = SeriesRecorder::new();
         recorder.set_clock(clock.clone());
-        assert!(recorder.is_armed());
 
         recorder.record("hits", 1.0);
         clock.0.store(25, std::sync::atomic::Ordering::Relaxed);

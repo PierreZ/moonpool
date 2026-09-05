@@ -66,7 +66,7 @@ fn test_bit_flip_injection_with_high_probability() {
 
     local_runtime.block_on(async move {
         // Enable buggify for chaos testing
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.bit_flip_probability = 0.5; // Very high probability
@@ -112,7 +112,7 @@ fn test_bit_flip_cooldown() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.bit_flip_probability = 1.0; // Always trigger (when not in cooldown)
@@ -152,7 +152,7 @@ fn test_peer_checksum_error_recovery() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.bit_flip_probability = 0.3;
@@ -190,7 +190,7 @@ fn test_bit_flip_with_message_exchange() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.bit_flip_probability = 0.1; // Moderate probability

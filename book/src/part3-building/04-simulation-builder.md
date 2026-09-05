@@ -41,14 +41,6 @@ One iteration is not enough. Different seeds produce different scheduling orders
 
 ```rust
 .set_iterations(100)
-// or equivalently:
-.set_iteration_control(IterationControl::FixedCount(100))
-```
-
-**Time limit** runs until a wall-clock deadline:
-
-```rust
-.set_time_limit(Duration::from_secs(60))
 ```
 
 **Until coverage stable** is the default. It stops once every observed `assert_sometimes!` / `assert_reachable!` has fired **and** code coverage has not grown for a configurable number of consecutive seeds. Useful when you want chaos to run as long as it keeps finding new behaviour and stop automatically once it does not:

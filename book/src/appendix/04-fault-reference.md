@@ -30,7 +30,6 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Black hole cooldown | `black_hole_cooldown` | 5s | Spaces out black holes across connections |
 | Connect failure | `connect_failure_mode` | `Probabilistic` (50% refused, 50% hang) | Connection establishment retries, timeout handling |
 | Connect failure probability | `connect_failure_probability` | 50% | Ratio of failed vs hanging connections |
-| Stable connection exemption | `mark_connection_stable()` | Manual | Exempt supervision channels from random-close chaos |
 
 ### Latency and Congestion
 

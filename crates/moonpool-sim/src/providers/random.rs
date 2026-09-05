@@ -4,7 +4,7 @@ use moonpool_core::RandomProvider;
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
 use std::ops::Range;
 
-use crate::sim::rng::{set_sim_seed, sim_random, sim_random_range};
+use crate::sim::rng::{sim_random, sim_random_range};
 
 /// Random provider for simulation that uses the thread-local deterministic RNG.
 ///
@@ -12,31 +12,26 @@ use crate::sim::rng::{set_sim_seed, sim_random, sim_random_range};
 /// `crate::sim::rng` to provide deterministic random number generation within
 /// the simulation environment.
 ///
-/// The provider sets the thread-local seed during construction and then
-/// delegates all random generation to the existing `sim_random()` functions.
-#[derive(Clone, Debug)]
+/// The provider holds no state and never seeds anything: every draw goes to
+/// the thread-local stream that [`set_sim_seed`](crate::set_sim_seed) seeded
+/// once for the current simulation (the runner does that per iteration, and
+/// [`SimWorld`](crate::SimWorld) construction does it for hand-driven tests).
+/// Constructing a provider — at boot, at a mid-run restart, for a workload or
+/// a fault injector — therefore never rewinds the simulation's randomness.
+#[derive(Clone, Debug, Default)]
 pub struct SimRandomProvider {
     // No internal state - uses thread-local RNG from crate::sim::rng
     _marker: std::marker::PhantomData<()>,
 }
 
 impl SimRandomProvider {
-    /// Create a new simulation random provider with the specified seed.
+    /// Create a simulation random provider over the thread-local RNG.
     ///
-    /// This sets the thread-local RNG seed using `set_sim_seed()` and
-    /// creates a provider that will use that seeded RNG for all operations.
-    ///
-    /// # Arguments
-    ///
-    /// * `seed` - The seed value for deterministic random generation
+    /// The stream it draws from must already have been seeded with
+    /// [`set_sim_seed`](crate::set_sim_seed); construction does not seed it.
     #[must_use]
-    pub fn new(seed: u64) -> Self {
-        // Set the thread-local RNG seed
-        set_sim_seed(seed);
-
-        Self {
-            _marker: std::marker::PhantomData,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 
@@ -71,15 +66,19 @@ impl RandomProvider for SimRandomProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::rng::set_sim_seed;
 
     #[test]
     fn test_deterministic_randomness() {
-        // Two providers with same seed should produce same values
-        let provider1 = SimRandomProvider::new(42);
+        // The same seed yields the same values; the provider itself neither
+        // seeds nor rewinds the stream, so the test seeds explicitly.
+        set_sim_seed(42);
+        let provider1 = SimRandomProvider::new();
         let value1_1: f64 = provider1.random();
         let value1_2: u32 = provider1.random();
 
-        let provider2 = SimRandomProvider::new(42);
+        set_sim_seed(42);
+        let provider2 = SimRandomProvider::new();
         let value2_1: f64 = provider2.random();
         let value2_2: u32 = provider2.random();
 
@@ -88,8 +87,24 @@ mod tests {
     }
 
     #[test]
+    fn constructing_a_provider_does_not_rewind_the_stream() {
+        set_sim_seed(42);
+        let first: u64 = SimRandomProvider::new().random();
+        let second: u64 = SimRandomProvider::new().random();
+
+        set_sim_seed(42);
+        let replay_first: u64 = SimRandomProvider::new().random();
+        let replay_second: u64 = SimRandomProvider::new().random();
+
+        assert_eq!(first, replay_first);
+        assert_eq!(second, replay_second);
+        assert_ne!(first, second, "a fresh provider must continue the stream");
+    }
+
+    #[test]
     fn test_random_range() {
-        let provider = SimRandomProvider::new(123);
+        set_sim_seed(123);
+        let provider = SimRandomProvider::new();
 
         // Test integer range
         for _ in 0..100 {
@@ -108,7 +123,8 @@ mod tests {
 
     #[test]
     fn test_random_ratio() {
-        let provider = SimRandomProvider::new(456);
+        set_sim_seed(456);
+        let provider = SimRandomProvider::new();
 
         for _ in 0..100 {
             let ratio = provider.random_ratio();
@@ -119,7 +135,8 @@ mod tests {
 
     #[test]
     fn test_random_bool() {
-        let provider = SimRandomProvider::new(789);
+        set_sim_seed(789);
+        let provider = SimRandomProvider::new();
 
         // Test probability 0.0 - should always be false
         for _ in 0..10 {
@@ -146,7 +163,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Probability must be between 0.0 and 1.0")]
     fn test_random_bool_invalid_probability() {
-        let provider = SimRandomProvider::new(999);
+        let provider = SimRandomProvider::new();
         provider.random_bool(1.5); // Should panic
     }
 }

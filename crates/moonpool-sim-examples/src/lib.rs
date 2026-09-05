@@ -11,7 +11,6 @@
 
 pub mod axum_web;
 pub mod dungeon;
-pub mod fdb;
 pub mod maze;
 pub mod metrics_service;
 pub mod tonic_grpc;

@@ -43,15 +43,17 @@
 //! ## Two-Phase Activation
 //!
 //! 1. **Activation** (once per location per seed): `random() < activation_prob`
-//! 2. **Firing** (each call): If active, `random() < firing_prob`
+//! 2. **Firing** (each call): If active, `random() < p`, where `p` is the
+//!    rate the macro names — 25% for `buggify!`, the per-site argument for
+//!    `buggify_with_prob!`
 //!
 //! This ensures consistent behavior within a run while varying which
 //! locations are active across different seeds.
 //!
-//! | Parameter | Default | FDB Reference |
-//! |-----------|---------|---------------|
-//! | `activation_prob` | 25% | `Buggify.h:79-88` |
-//! | `firing_prob` | 25% | `P_GENERAL_BUGGIFIED_SECTION_FIRES` |
+//! | Parameter | Value | FDB Reference |
+//! |-----------|-------|---------------|
+//! | `activation_prob` | 50%, set by the runner's `buggify_init(0.5)` | `Buggify.h:79-88` |
+//! | firing rate | 25% in `buggify!`; per site in `buggify_with_prob!` | `P_GENERAL_BUGGIFIED_SECTION_FIRES` |
 //!
 //! # Fault Injection Mechanisms
 //!

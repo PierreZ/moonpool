@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use moonpool_assertions::AssertKind;
 use moonpool_core::metrics::query::MetricQueryReport;
-use moonpool_core::metrics::{HistogramValue, MetricPoint, MetricSample, MetricValue};
+use moonpool_core::metrics::{
+    HistogramValue, MetricPoint, MetricSample, MetricValue, u64_to_f64_exact,
+};
 
 use crate::SimulationResult;
 use crate::chaos::AssertionStats;
@@ -112,9 +114,7 @@ impl MetricAggregate {
     #[must_use]
     pub fn mean(&self) -> f64 {
         if self.observations > 0 {
-            // Precision loss acceptable: point counts fit well within 2^52.
-            return self.observation_sum
-                / u32::try_from(self.observations).map_or(f64::INFINITY, f64::from);
+            return self.observation_sum / u64_to_f64_exact(self.observations);
         }
         self.per_seed_mean()
     }
@@ -125,8 +125,7 @@ impl MetricAggregate {
         if self.seeds == 0 {
             0.0
         } else {
-            // Precision loss acceptable: seed counts fit well within 2^52.
-            self.total / u32::try_from(self.seeds).map_or(f64::INFINITY, f64::from)
+            self.total / usize_to_f64(self.seeds)
         }
     }
 
@@ -372,9 +371,8 @@ impl SimulationReport {
         if self.iterations == 0 {
             0.0
         } else {
-            // Precision loss acceptable: simulation counts fit well within 2^52.
-            let successful = u32::try_from(self.successful_runs).map_or(f64::INFINITY, f64::from);
-            let total = u32::try_from(self.iterations).map_or(f64::INFINITY, f64::from);
+            let successful = usize_to_f64(self.successful_runs);
+            let total = usize_to_f64(self.iterations);
             (successful / total) * 100.0
         }
     }
@@ -407,18 +405,16 @@ impl SimulationReport {
         if self.successful_runs == 0 {
             0.0
         } else {
-            // Precision loss acceptable: simulation counts fit within 2^52.
-            let events =
-                u32::try_from(self.metrics.events_processed).map_or(f64::INFINITY, f64::from);
-            let runs = u32::try_from(self.successful_runs).map_or(f64::INFINITY, f64::from);
+            let events = u64_to_f64_exact(self.metrics.events_processed);
+            let runs = usize_to_f64(self.successful_runs);
             events / runs
         }
     }
 
     /// Print the report to stderr with colors when the terminal supports it.
     ///
-    /// Falls back to the plain `Display` output when stderr is not a TTY
-    /// or `NO_COLOR` is set.
+    /// Colour is dropped when stderr is not a TTY or `NO_COLOR` is set; the
+    /// text is then identical to the report's `Display` output.
     pub fn eprint(&self) {
         super::display::eprint_report(self);
     }
@@ -428,22 +424,10 @@ impl SimulationReport {
 // Display helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a non-negative finite `f64` to a saturated `u64`.
-///
-/// Returns 0 for NaN / negative values and `u64::MAX` for values that exceed
-/// `u64::MAX`. Smaller magnitudes round to the nearest integer.
-pub(crate) fn f64_to_u64_saturating(v: f64) -> u64 {
-    // `2^64` as an `f64` — values at or above this saturate to `u64::MAX`.
-    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
-    if !v.is_finite() || v <= 0.0 {
-        0
-    } else if v >= TWO_POW_64 {
-        u64::MAX
-    } else {
-        // SAFETY: `v` is finite, non-negative, and strictly below `2^64`;
-        // `to_int_unchecked` is therefore well-defined.
-        unsafe { v.round().to_int_unchecked::<u64>() }
-    }
+/// Widen a count to `f64` through [`u64_to_f64_exact`]: exact for every
+/// count a run can reach, and never an infinity.
+pub(crate) fn usize_to_f64(n: usize) -> f64 {
+    u64_to_f64_exact(u64::try_from(n).unwrap_or(u64::MAX))
 }
 
 /// Format a number with comma separators (e.g., 123456 -> "123,456").
@@ -471,38 +455,6 @@ pub(crate) fn fmt_duration(d: Duration) -> String {
         let secs = d.as_secs() % 60;
         format!("{mins}m {secs:02}s")
     }
-}
-
-/// One metric-query window as a single line, for the plain `Display` path.
-///
-/// `min`/`max` carry the seed that produced them; the percentiles are across
-/// runs, not across the observations beneath each run's value.
-fn fmt_query_window(window: &moonpool_core::metrics::query::MetricWindowSummary) -> String {
-    // A whole-run value has no meaningful span; both bounds are WHOLE_RUN_MS.
-    let bounds = if window.bucket_start_ms == window.bucket_end_ms {
-        "whole run".to_owned()
-    } else {
-        format!(
-            "[{},{})",
-            fmt_sim_ms(window.bucket_start_ms),
-            fmt_sim_ms(window.bucket_end_ms)
-        )
-    };
-    let span = match &window.group {
-        Some(group) => format!("{group} {bounds}"),
-        None => bounds,
-    };
-    format!(
-        "{span}  min={:.2} (seed={})  mean={:.2}  max={:.2} (seed={})  p50={:.2}  p95={:.2}  p99={:.2}",
-        window.min,
-        window.min_seed,
-        window.mean,
-        window.max,
-        window.max_seed,
-        window.p50,
-        window.p95,
-        window.p99,
-    )
 }
 
 /// Simulated milliseconds as the shortest exact label, e.g. `60s` or `1500ms`.
@@ -542,326 +494,11 @@ pub(crate) fn kind_sort_order(kind: AssertKind) -> u8 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Display impl
-// ---------------------------------------------------------------------------
-
-fn fmt_summary(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Result {
-    writeln!(f, "=== Simulation Report ===")?;
-    writeln!(
-        f,
-        "  Iterations: {}  |  Passed: {}  |  Failed: {}  |  Rate: {:.1}%",
-        report.iterations,
-        report.successful_runs,
-        report.failed_runs,
-        report.success_rate()
-    )?;
-    writeln!(f)
-}
-
-fn fmt_timing(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Result {
-    writeln!(
-        f,
-        "  Avg Wall Time:     {:<14}Total: {}",
-        fmt_duration(report.average_wall_time()),
-        fmt_duration(report.metrics.wall_time)
-    )?;
-    writeln!(
-        f,
-        "  Avg Sim Time:      {}",
-        fmt_duration(report.average_simulated_time())
-    )?;
-    writeln!(
-        f,
-        "  Avg Events:        {}",
-        fmt_num(f64_to_u64_saturating(report.average_events_processed()))
-    )
-}
-
-/// Render the `UntilCoverageStable` saturation outcome: which signal it
-/// plateaued on, the coverage numbers, and whether the cap was hit first.
-fn fmt_saturation(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Result {
-    let Some(sat) = &report.saturation else {
-        return Ok(());
-    };
-    writeln!(f)?;
-    let status = if report.convergence_timeout {
-        "NOT saturated"
-    } else {
-        "saturated"
-    };
-    match sat.signal {
-        SaturationSignal::CodeCoverage => writeln!(
-            f,
-            "  {status}: {}/{} sometimes hit · code coverage stable at {}/{} edges for {} seeds",
-            sat.sometimes_hit,
-            sat.sometimes_total,
-            sat.edges_covered,
-            sat.edges_total,
-            sat.plateau_seeds,
-        )?,
-        SaturationSignal::AssertionCoverage => writeln!(
-            f,
-            "  {status}: {}/{} sometimes hit · assertion coverage stable for {} seeds (no sancov — run via 'cargo xtask sim run' for code-coverage-driven stop)",
-            sat.sometimes_hit, sat.sometimes_total, sat.plateau_seeds,
-        )?,
-    }
-    if report.convergence_timeout {
-        writeln!(
-            f,
-            "  UntilCoverageStable hit the iteration cap without saturating."
-        )?;
-    }
-    Ok(())
-}
-
-fn fmt_exploration(f: &mut fmt::Formatter<'_>, exp: &ExplorationReport) -> fmt::Result {
-    writeln!(f)?;
-    writeln!(f, "--- Exploration ---")?;
-    writeln!(
-        f,
-        "  Timelines:    {:<18}Bugs found:     {}",
-        fmt_num(exp.total_timelines),
-        fmt_num(exp.bugs_found)
-    )?;
-    writeln!(
-        f,
-        "  Expansions:   {:<18}Discoveries:    {}",
-        fmt_num(exp.expansions),
-        fmt_num(exp.discoveries)
-    )?;
-    if exp.max_active_workers > 0 {
-        writeln!(
-            f,
-            "  Peak workers: {}",
-            fmt_num(u64::try_from(exp.max_active_workers).unwrap_or(u64::MAX))
-        )?;
-    }
-    if exp.sancov_edges_total > 0 {
-        let covered = u64::try_from(exp.sancov_edges_covered).unwrap_or(u64::MAX);
-        let total = u64::try_from(exp.sancov_edges_total).unwrap_or(u64::MAX);
-        let covered_u32 = u32::try_from(exp.sancov_edges_covered).unwrap_or(u32::MAX);
-        let total_u32 = u32::try_from(exp.sancov_edges_total).unwrap_or(u32::MAX);
-        writeln!(
-            f,
-            "  Sancov:       {} / {} edges ({:.1}%)",
-            fmt_num(covered),
-            fmt_num(total),
-            (f64::from(covered_u32) / f64::from(total_u32)) * 100.0
-        )?;
-    }
-    for br in &exp.bug_recipes {
-        writeln!(
-            f,
-            "  Bug recipe (seed={}): {}",
-            br.seed,
-            format_recipe(&br.recipe)
-        )?;
-    }
-    Ok(())
-}
-
-fn fmt_assertion_detail(f: &mut fmt::Formatter<'_>, detail: &AssertionDetail) -> fmt::Result {
-    let status_tag = match detail.status {
-        AssertionStatus::Pass => "PASS",
-        AssertionStatus::Fail => "FAIL",
-        AssertionStatus::Miss => "MISS",
-    };
-    let kind_tag = kind_label(detail.kind);
-    let quoted_msg = format!("\"{}\"", detail.msg);
-
-    match detail.kind {
-        AssertKind::Sometimes | AssertKind::Reachable => {
-            let total = detail.pass_count + detail.fail_count;
-            let rate = if total > 0 {
-                let pass_u32 = u32::try_from(detail.pass_count).unwrap_or(u32::MAX);
-                let total_u32 = u32::try_from(total).unwrap_or(u32::MAX);
-                (f64::from(pass_u32) / f64::from(total_u32)) * 100.0
-            } else {
-                0.0
-            };
-            writeln!(
-                f,
-                "  {}  [{:<10}]  {:<34}  {} / {} ({:.1}%)",
-                status_tag,
-                kind_tag,
-                quoted_msg,
-                fmt_num(detail.pass_count),
-                fmt_num(total),
-                rate
-            )
-        }
-        AssertKind::NumericSometimes | AssertKind::NumericAlways => writeln!(
-            f,
-            "  {}  [{:<10}]  {:<34}  {} pass  {} fail  watermark: {}",
-            status_tag,
-            kind_tag,
-            quoted_msg,
-            fmt_num(detail.pass_count),
-            fmt_num(detail.fail_count),
-            detail.watermark
-        ),
-        AssertKind::BooleanSometimesAll => writeln!(
-            f,
-            "  {}  [{:<10}]  {:<34}  {} calls  frontier: {}/{}  combinations: {}",
-            status_tag,
-            kind_tag,
-            quoted_msg,
-            fmt_num(detail.pass_count),
-            detail.frontier,
-            detail.frontier_target,
-            detail.combinations_seen
-        ),
-        _ => writeln!(
-            f,
-            "  {}  [{:<10}]  {:<34}  {} pass  {} fail",
-            status_tag,
-            kind_tag,
-            quoted_msg,
-            fmt_num(detail.pass_count),
-            fmt_num(detail.fail_count)
-        ),
-    }
-}
-
-fn fmt_assertion_details(f: &mut fmt::Formatter<'_>, details: &[AssertionDetail]) -> fmt::Result {
-    if details.is_empty() {
-        return Ok(());
-    }
-    writeln!(f)?;
-    writeln!(f, "--- Assertions ({}) ---", details.len())?;
-
-    let mut sorted: Vec<&AssertionDetail> = details.iter().collect();
-    sorted.sort_by(|a, b| {
-        kind_sort_order(a.kind)
-            .cmp(&kind_sort_order(b.kind))
-            .then(a.status.cmp(&b.status))
-            .then(a.msg.cmp(&b.msg))
-    });
-
-    for detail in &sorted {
-        fmt_assertion_detail(f, detail)?;
-    }
-    Ok(())
-}
-
 impl fmt::Display for SimulationReport {
+    /// The plain-text report: exactly what [`SimulationReport::eprint`]
+    /// prints when stderr is not a terminal, rendered by the one renderer
+    /// in `display.rs` with colour off.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_summary(f, self)?;
-        fmt_timing(f, self)?;
-
-        // === Faulty Seeds ===
-        if !self.seeds_failing.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "  Faulty seeds: {:?}", self.seeds_failing)?;
-        }
-
-        if let Some(ref exp) = self.exploration {
-            fmt_exploration(f, exp)?;
-        }
-
-        fmt_assertion_details(f, &self.assertion_details)?;
-
-        // === Assertion Violations ===
-        if !self.assertion_violations.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "--- Assertion Violations ---")?;
-            for v in &self.assertion_violations {
-                writeln!(f, "  - {v}")?;
-            }
-        }
-
-        // === Coverage Gaps ===
-        if !self.coverage_violations.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "--- Coverage Gaps ---")?;
-            for v in &self.coverage_violations {
-                writeln!(f, "  - {v}")?;
-            }
-        }
-
-        // === Buckets ===
-        if !self.bucket_summaries.is_empty() {
-            let total_buckets: usize = self
-                .bucket_summaries
-                .iter()
-                .map(|s| s.buckets_discovered)
-                .sum();
-            writeln!(f)?;
-            writeln!(
-                f,
-                "--- Buckets ({} across {} sites) ---",
-                total_buckets,
-                self.bucket_summaries.len()
-            )?;
-            for bs in &self.bucket_summaries {
-                writeln!(
-                    f,
-                    "  {:<34}  {:>3} buckets  {:>8} hits",
-                    format!("\"{}\"", bs.msg),
-                    bs.buckets_discovered,
-                    fmt_num(bs.total_hits)
-                )?;
-            }
-        }
-
-        // === Saturation (UntilCoverageStable) ===
-        fmt_saturation(f, self)?;
-        if self.saturation.is_none() && self.convergence_timeout {
-            writeln!(f)?;
-            writeln!(
-                f,
-                "  UntilCoverageStable hit the iteration cap without saturating."
-            )?;
-        }
-
-        // === Metric Queries ===
-        if !self.metric_queries.is_empty() {
-            writeln!(f)?;
-            writeln!(f, "--- Metric Queries ({}) ---", self.metric_queries.len())?;
-            for query in &self.metric_queries {
-                writeln!(
-                    f,
-                    "  {}  [{}]  {} per run  runs: {}",
-                    query.name,
-                    query.description,
-                    query.provenance.label(),
-                    query.runs
-                )?;
-                for window in &query.windows {
-                    writeln!(f, "    {}", fmt_query_window(window))?;
-                }
-            }
-        }
-
-        // === Per-Seed Metrics ===
-        if self.seeds_used.len() > 1 {
-            writeln!(f)?;
-            writeln!(f, "--- Seeds ---")?;
-            let per_seed_tl = self.exploration.as_ref().map(|e| &e.per_seed_timelines);
-            for (i, seed) in self.seeds_used.iter().enumerate() {
-                if let Some(Ok(m)) = self.individual_metrics.get(i) {
-                    let tl_suffix = per_seed_tl
-                        .and_then(|v| v.get(i))
-                        .map(|t| format!("  timelines={}", fmt_num(*t)))
-                        .unwrap_or_default();
-                    writeln!(
-                        f,
-                        "  #{:<3}  seed={:<14}  wall={:<10}  sim={:<10}  events={}{}",
-                        i + 1,
-                        seed,
-                        fmt_duration(m.wall_time),
-                        fmt_duration(m.simulated_time),
-                        fmt_num(m.events_processed),
-                        tl_suffix,
-                    )?;
-                } else if let Some(Err(_)) = self.individual_metrics.get(i) {
-                    writeln!(f, "  #{:<3}  seed={:<14}  FAILED", i + 1, seed)?;
-                }
-            }
-        }
-
-        writeln!(f)?;
-        Ok(())
+        super::display::fmt_report(f, self)
     }
 }

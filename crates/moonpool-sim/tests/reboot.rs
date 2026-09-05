@@ -194,7 +194,7 @@ fn test_manual_reboot_via_fault_injector() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(EchoProcess))
         .workload(TimedWorkload(Duration::from_secs(15)))
-        .fault(RebootOnceInjector)
+        .fault_factory(|| Box::new(RebootOnceInjector))
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
@@ -271,7 +271,7 @@ fn test_tag_based_reboot() {
         .tags(&[("dc", &["east", "west"])])
         .expect("tags after processes")
         .workload(TimedWorkload(Duration::from_secs(20)))
-        .fault(RebootTaggedInjector)
+        .fault_factory(|| Box::new(RebootTaggedInjector))
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
@@ -392,7 +392,7 @@ fn test_graceful_reboot_signals_shutdown_token() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(GracefulProcess))
         .workload(TimedWorkload(Duration::from_secs(25)))
-        .fault(GracefulRebootInjector)
+        .fault_factory(|| Box::new(GracefulRebootInjector))
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
@@ -433,7 +433,7 @@ fn test_graceful_reboot_force_kills_stuck_process() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(StuckProcess))
         .workload(TimedWorkload(Duration::from_secs(25)))
-        .fault(GracefulRebootInjector)
+        .fault_factory(|| Box::new(GracefulRebootInjector))
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
@@ -546,7 +546,7 @@ fn test_graceful_reboot_timing_invariant() {
     let report = SimulationBuilder::new()
         .processes(3, || Box::new(GracefulProcess))
         .workload(TimedWorkload(Duration::from_secs(25)))
-        .fault(GracefulRebootInjector)
+        .fault_factory(|| Box::new(GracefulRebootInjector))
         .invariant(RebootTimingInvariant::new())
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
@@ -809,8 +809,13 @@ fn run_crash_scenario(seed: u64) -> (moonpool_sim::SimulationReport, CrashObserv
     let report = SimulationBuilder::new()
         .processes(2, || Box::new(HeartbeatProcess))
         .workload(TimedWorkload(Duration::from_secs(8)))
-        .fault(CrashOnceInjector {
-            observations: observations.clone(),
+        .fault_factory({
+            let observations = observations.clone();
+            move || {
+                Box::new(CrashOnceInjector {
+                    observations: observations.clone(),
+                })
+            }
         })
         .invariant(DeadProcessIsSilentInvariant::new(observations.clone()))
         .invariant(RebootTimingInvariant::new())

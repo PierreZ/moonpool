@@ -156,8 +156,6 @@ pub struct ExplorationStats {
     pub bug_found: u64,
     /// Peak number of simultaneously live worker processes.
     pub max_active_workers: usize,
-    /// Peak frontier size.
-    pub frontier_peak: usize,
 }
 
 /// A replayable way to reach one semantic state: replay `recipe`, and the
@@ -545,7 +543,6 @@ impl Explorer {
             recipe.push((anchor, seed));
             self.frontier.push_back(ExploreJob { recipe });
         }
-        self.stats.frontier_peak = self.stats.frontier_peak.max(self.frontier.len());
     }
 
     /// Frontier is empty but budget remains: schedule a fresh continuation

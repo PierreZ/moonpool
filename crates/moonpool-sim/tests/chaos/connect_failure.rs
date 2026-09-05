@@ -24,7 +24,7 @@ fn test_connect_failure_mode_disabled() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0); // Enable buggify
+        buggify_init(1.0); // Enable buggify
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::Disabled;
@@ -61,7 +61,7 @@ fn test_connect_failure_mode_always_fail() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0); // Enable buggify with 100% activation
+        buggify_init(1.0); // Enable buggify with 100% activation
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
@@ -101,7 +101,7 @@ fn test_connect_failure_mode_probabilistic_error() {
 
     local_runtime.block_on(async move {
         moonpool_sim::set_sim_seed(99999);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
@@ -183,7 +183,7 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
 
     local_runtime.block_on(async move {
         moonpool_sim::set_sim_seed(42);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
@@ -232,7 +232,7 @@ fn test_connect_failure_deterministic() {
 
         local_runtime.block_on(async move {
             moonpool_sim::set_sim_seed(12345);
-            buggify_init(1.0, 1.0);
+            buggify_init(1.0);
 
             let mut config = NetworkConfiguration::fast_local();
             config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
@@ -317,7 +317,7 @@ fn test_connect_failure_error_message_always_fail() {
 
     local_runtime.block_on(async move {
         moonpool_sim::set_sim_seed(77777);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::AlwaysFail;
@@ -357,7 +357,7 @@ fn test_connect_failure_error_message_probabilistic() {
 
     local_runtime.block_on(async move {
         moonpool_sim::set_sim_seed(88888);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
@@ -403,7 +403,7 @@ fn test_connect_failure_random_config() {
 
     local_runtime.block_on(async move {
         moonpool_sim::set_sim_seed(11111);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         // Use randomized config
         let config = NetworkConfiguration::random_for_seed();

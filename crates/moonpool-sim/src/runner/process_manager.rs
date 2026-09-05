@@ -49,11 +49,10 @@ impl ProcessConfig<'_> {
 
 /// Everything a restarted process needs to rebuild its [`SimContext`].
 ///
-/// `Copy`, being nothing but shared borrows and a seed.
+/// `Copy`, being nothing but shared borrows.
 #[derive(Clone, Copy)]
 pub(crate) struct RestartEnv<'a> {
     pub(crate) sim: &'a crate::sim::WeakSimWorld,
-    pub(crate) seed: u64,
     pub(crate) state: &'a StateHandle,
     pub(crate) obs: &'a SimulationLayerHandle,
     pub(crate) metrics: &'a MetricsHandle,
@@ -175,7 +174,6 @@ impl<'a> ProcessManager<'a> {
     pub(crate) fn restart(&mut self, ip: std::net::IpAddr, env: &RestartEnv<'_>) {
         let RestartEnv {
             sim,
-            seed,
             state,
             obs,
             metrics,
@@ -217,7 +215,7 @@ impl<'a> ProcessManager<'a> {
             shutdown_signal: process_token,
         });
         let ctx = SimContext::new(
-            crate::SimProviders::new(sim.clone(), seed, ip),
+            crate::SimProviders::new(sim.clone(), ip),
             topology,
             state.clone(),
             obs.clone(),

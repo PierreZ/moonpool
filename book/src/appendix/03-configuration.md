@@ -11,23 +11,17 @@ The builder pattern for configuring and running simulation experiments. Created 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
 | `workload(w)` | `impl Workload` | Add a single workload instance, reused across iterations |
-| `workload_with_client_id(cid, w)` | `ClientId`, `impl Workload` | Single workload with custom client ID strategy |
 | `workloads(count, factory)` | `WorkloadCount`, `Fn(usize) -> Box<dyn Workload>` | Add factory-created workload instances |
-| `workloads_with_client_id(count, cid, factory)` | `WorkloadCount`, `ClientId`, factory | Factory workloads with custom client IDs |
 | `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add one group of server processes (system under test); repeatable, one group per role, each on its own `10.0.{group}.x` range |
 | `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add one group of processes laid out across a datacenter/zone/machine topology (repeatable like `processes`) |
 | `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
 | `network_fault_mask(mask)` | `NetworkFaultMask` | Suppress selected families after each Random/Swarm network profile is sampled; deterministic and exploration-safe |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
-| `attrition(config)` | `Attrition` | Add one automatic process-reboot injector for the chaos phase (repeatable: one per victim pool) |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
-| `fault(f)` | `impl FaultInjector` | Add a custom fault injector instance for the chaos phase (reused across iterations; rejected by exploration) |
-| `fault_factory(f)` | `Fn() -> Box<dyn FaultInjector>` | Add a fault injector rebuilt fresh for every root and explored timeline (exploration-compatible) |
+| `fault_factory(f)` | `Fn() -> Box<dyn FaultInjector>` | Add a custom fault injector for the chaos phase, rebuilt fresh for every root and explored timeline |
 | `chaos_duration(dur)` | `Duration` | Bound the window in which new faults may be injected (see [Chaos duration and recovery mode](#chaos-duration-and-recovery-mode)) |
 | `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
-| `set_iteration_control(ctrl)` | `IterationControl` | Set the iteration control strategy |
-| `set_time_limit(dur)` | `Duration` | Run for a wall-clock time duration |
 | `set_debug_seeds(seeds)` | `Vec<u64>` | Use specific seeds for deterministic debugging |
 | `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
 | `swarm_operations()` | -- | Enable per-seed swarm of each workload's operation alphabet |
@@ -54,7 +48,6 @@ Controls how many iterations a simulation runs.
 |---------|------|-------------|
 | `UntilCoverageStable { plateau_seeds, max_iterations }` | `usize`, `usize` | **Default.** Stop once every observed `assert_sometimes!` / `assert_reachable!` has fired AND code coverage has not grown for `plateau_seeds` consecutive seeds. `max_iterations` is a safety cap. |
 | `FixedCount(n)` | `usize` | Run exactly `n` iterations |
-| `TimeLimit(duration)` | `Duration` | Run for a wall-clock time duration |
 
 **Note**: `UntilCoverageStable` uses real LLVM sancov code coverage when the binary is instrumented (built via `cargo xtask sim run`) and falls back to assertion-slot coverage otherwise. The report names the signal it used.
 
@@ -77,17 +70,6 @@ Controls how many workload instances to spawn per iteration.
 |---------|------|-------------|
 | `Fixed(n)` | `usize` | Spawn exactly `n` instances |
 | `Random(range)` | `Range<usize>` | Spawn a seeded random count from the half-open range |
-
-## ClientId
-
-Strategy for assigning client IDs to workload instances.
-
-| Variant | Type | Description |
-|---------|------|-------------|
-| `Fixed(base)` | `usize` | Sequential IDs starting from `base`: instance 0 gets `base`, instance 1 gets `base + 1`, etc. |
-| `RandomRange(range)` | `Range<usize>` | Random ID drawn from `[start..end)` per instance (not guaranteed unique) |
-
-**Default**: `Fixed(0)` (sequential starting from 0, matching FoundationDB's `WorkloadContext.clientId`).
 
 ## Chaos duration and recovery mode
 

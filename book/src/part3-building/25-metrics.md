@@ -68,7 +68,8 @@ label naming the node — Prometheus' own label for a scrape target.
 
 The factory also runs afresh every iteration. Most registries have no reset, so
 a reused instance would make seed 50 report the sum of fifty runs. This is the
-same reasoning behind [`fault_factory`](./07-chaos.md) versus `fault`.
+same reason a custom fault injector is registered through
+[`fault_factory`](./09-attrition.md) rather than as an instance.
 
 A **reboot** is the exception: a source is keyed by IP, so a crashed and
 restarted process keeps its counters, exactly as a real node's `/metrics` does
@@ -151,7 +152,7 @@ Queries are declared before `run()` and their results travel with the report,
 in `SimulationReport::metric_queries`. Nothing reconstructs them afterwards
 from raw snapshots: the runner already knew what mattered.
 
-### The five operations
+### The operations
 
 | Op | What it does |
 |----|--------------|
@@ -348,10 +349,12 @@ pub trait MetricsSource: Send + Sync + 'static {
     fn collect(&self) -> Vec<MetricSample>;
     fn set_clock(&self, clock: Arc<dyn MetricClock>) {}
     fn series(&self) -> BTreeMap<String, Vec<MetricPoint>> { BTreeMap::new() }
+    fn dropped_points(&self) -> u64 { 0 }
 }
 ```
 
 `collect` alone is enough for a scrape-only adapter over any registry. The other
-two are what an adapter implements to deliver an exact time series. An
+three are what an adapter implements to deliver an exact time series
+(`dropped_points` reports how many points a capped series discarded). An
 OpenTelemetry adapter slots in the same way, with no change to the simulation
 runner.

@@ -21,7 +21,7 @@ use moonpool_sim::{
 /// returning how many reads it took to drain the fully-buffered payload. Asserts
 /// reassembly correctness and that no read returns 0 bytes while data is buffered.
 async fn drain_with_partial_reads(seed: u64, max_bytes: usize, payload: &[u8]) -> usize {
-    buggify_init(1.0, 1.0); // location always active; fires at the macro's 25%
+    buggify_init(1.0); // location always active; fires at the macro's 25%
 
     let mut config = NetworkConfiguration::fast_local();
     config.chaos.partial_read_max_bytes = max_bytes;

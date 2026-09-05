@@ -18,7 +18,7 @@
 //!
 //! - [`SimWorld`]: The simulation runtime managing events and time
 //! - [`SimulationBuilder`]: Configure and run simulations
-//! - [`chaos`]: Fault injection (buggify, 14 assertion macros, invariants)
+//! - [`chaos`]: Fault injection (buggify, 15 assertion macros, invariants)
 //! - [`storage`]: Storage simulation with fault injection
 //! - Multiverse exploration via `moonpool-explorer` (configured with [`ExplorationConfig`])
 //!
@@ -120,9 +120,6 @@ pub mod observability;
 /// Storage simulation and configuration.
 pub mod storage;
 
-/// Simulation workloads and binary targets.
-pub mod simulations;
-
 // =============================================================================
 // Public API Re-exports
 // =============================================================================
@@ -141,11 +138,10 @@ pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 
 // Runner module re-exports
 pub use runner::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ClientId, FaultContext,
-    FaultInjector, GroupRegistry, INSTANCE_LABEL, IterationControl, LocalityConfig,
-    MachineRegistry, MetricsHandle, Process, ProcessTags, RebootKind, SimContext,
-    SimulationBuilder, SimulationMetrics, SimulationReport, TagRegistry, Workload, WorkloadCount,
-    WorkloadTopology,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, FaultContext, FaultInjector,
+    GroupRegistry, INSTANCE_LABEL, IterationControl, LocalityConfig, MachineRegistry,
+    MetricsHandle, Process, ProcessTags, RebootKind, SimContext, SimulationBuilder,
+    SimulationMetrics, SimulationReport, TagRegistry, Workload, WorkloadCount, WorkloadTopology,
 };
 
 // Application-metrics vocabulary, re-exported from moonpool-core so a
@@ -154,7 +150,7 @@ pub use runner::{
 // `MetricsSource` against these types.
 pub use moonpool_core::metrics::{
     HistogramValue, MetricClock, MetricPoint, MetricSample, MetricValue, MetricsSource,
-    SeriesRecorder,
+    SeriesRecorder, f64_to_u64, u64_to_f64_exact,
 };
 
 // The metric query/report vocabulary, so a runner declaring

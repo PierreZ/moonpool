@@ -339,7 +339,7 @@ fn test_exploration_basic() {
 
 /// A typed network fault mask is reconstructed before every root and
 /// continuation timeline, so explored Swarm campaigns can exclude corruption
-/// without falling back to a forbidden `before_iteration` hook.
+/// without any per-iteration reset hook.
 #[test]
 fn test_network_fault_mask_with_exploration() {
     let run = || {

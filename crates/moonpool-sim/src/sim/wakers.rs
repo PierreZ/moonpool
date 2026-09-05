@@ -24,56 +24,14 @@ impl<K: Ord> WakerRegistry<K> {
         self.entries.insert(key, waker.clone());
     }
 
-    pub(crate) fn insert(&mut self, key: K, waker: Waker) {
-        if self
-            .entries
-            .get(&key)
-            .is_some_and(|registered| registered.will_wake(&waker))
-        {
-            return;
-        }
-        self.entries.insert(key, waker);
-    }
-
     /// Removes and returns the waker registered for `key`.
     pub fn take(&mut self, key: &K) -> Option<Waker> {
         self.entries.remove(key)
     }
 
-    pub(crate) fn remove(&mut self, key: &K) -> Option<Waker> {
-        self.take(key)
-    }
-
-    /// Returns whether `key` has a registered waker.
-    #[must_use]
-    pub fn contains(&self, key: &K) -> bool {
-        self.entries.contains_key(key)
-    }
-
-    /// Returns the number of registered keys.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Returns whether the registry contains no wakers.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     /// Removes every registered waker.
     pub fn drain(&mut self) -> impl Iterator<Item = (K, Waker)> + '_ {
         std::mem::take(&mut self.entries).into_iter()
-    }
-}
-
-impl<K> IntoIterator for WakerRegistry<K> {
-    type Item = (K, Waker);
-    type IntoIter = std::collections::btree_map::IntoIter<K, Waker>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.entries.into_iter()
     }
 }
 
@@ -147,9 +105,9 @@ mod tests {
 
         registry.register(7, &waker);
         registry.register(7, &waker);
-        assert_eq!(registry.len(), 1);
 
         registry.take(&7).expect("waker should exist").wake();
+        assert!(registry.take(&7).is_none(), "one key holds one waker");
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     }
 

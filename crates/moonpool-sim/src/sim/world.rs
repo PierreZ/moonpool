@@ -216,7 +216,7 @@ impl SimWorld {
                 Event::Timer { task_id } => {
                     inner.timer_schedules.remove(&task_id);
                     inner.awakened_tasks.insert(task_id);
-                    wakes.push(inner.wakers.tasks.remove(&task_id));
+                    wakes.push(inner.wakers.tasks.take(&task_id));
                 }
                 Event::Network(event) => {
                     if let NetworkEvent::OperationReady { operation_id } = &event {
@@ -390,12 +390,6 @@ impl SimWorld {
         crate::providers::SimTimeProvider::new(self.downgrade())
     }
 
-    /// Creates a task provider.
-    #[must_use]
-    pub fn task_provider(&self) -> crate::providers::SimTaskProvider {
-        crate::providers::SimTaskProvider
-    }
-
     /// Creates a storage provider scoped to an IP.
     #[must_use]
     pub fn storage_provider(&self, ip: IpAddr) -> crate::storage::SimStorageProvider {
@@ -415,22 +409,6 @@ impl SimWorld {
             config.disable_fault_injection();
         }
         inner.storage.set_config(config);
-    }
-
-    /// Replaces storage configuration for one IP.
-    ///
-    /// Recovery-aware in the same way as
-    /// [`set_storage_config`](Self::set_storage_config).
-    pub fn set_storage_config_for(
-        &mut self,
-        ip: IpAddr,
-        mut config: crate::storage::StorageConfiguration,
-    ) {
-        let mut inner = self.inner.write();
-        if inner.recovery_mode() {
-            config.disable_fault_injection();
-        }
-        inner.storage.set_config_for(ip, config);
     }
 
     /// Returns an active disk episode for one IP.
@@ -544,11 +522,16 @@ impl SimWorld {
     ///
     /// Everything already done. Corrupted sectors stay corrupted, lost writes
     /// stay lost, misdirected and phantom writes are not undone, a connection
-    /// the application already saw close stays closed, a process already
-    /// killed is not resurrected, and application state is left exactly as the
-    /// chaos phase left it. Finite effects already started — a disk stall or
-    /// throttle episode, a clog, a packet already scheduled with delay — keep
-    /// their deadlines and expire on their own rather than being rewritten.
+    /// the application already saw close stays closed, a black-holed
+    /// connection (one whose sends are silently discarded) stays black-holed,
+    /// a process already killed is not resurrected, and application state is
+    /// left exactly as the chaos phase left it. A failed disk (see
+    /// [`is_disk_failed`](Self::is_disk_failed)) is permanent for the rest of
+    /// the run: it keeps parking every operation, and once the cutoff has
+    /// passed nothing can crash or wipe it. Finite
+    /// effects already started — a disk stall or throttle episode, a clog, a
+    /// packet already scheduled with delay — keep their deadlines and expire
+    /// on their own rather than being rewritten.
     ///
     /// This is emphatically **not** "the cluster is now healthy": it is only
     /// "the environment stops making it worse". Recovering from the damage is
@@ -560,19 +543,20 @@ impl SimWorld {
     /// is made. Every setter that installs a caller-supplied fault
     /// configuration — [`set_network_config`](Self::set_network_config),
     /// [`set_storage_config`](Self::set_storage_config),
-    /// [`set_storage_config_for`](Self::set_storage_config_for),
     /// [`set_process_storage_config`](Self::set_process_storage_config),
     /// [`set_block_fault_config`](Self::set_block_fault_config) — strips the
     /// fault knobs out of what it is handed once recovery mode is on, while
     /// installing the performance half unchanged. Reconfiguring a disk or link
     /// in the quiet tail therefore cannot re-arm chaos.
     ///
-    /// Directed fault APIs are deliberately left alone: a caller that reaches
-    /// for [`partition_pair`](Self::partition_pair),
+    /// The directed fault APIs stay callable after the cutoff: a caller that
+    /// reaches for [`partition_pair`](Self::partition_pair),
     /// [`simulate_crash_for_process`](Self::simulate_crash_for_process), or the
     /// [`SimBlockStore`](crate::SimBlockStore) targeted-fault methods is
     /// scripting a specific fault by hand rather than asking the simulator to
-    /// generate one, and red tests depend on that still working.
+    /// generate one, and red tests depend on that still working. Note that a
+    /// directed partition already in force is healed like any other at the
+    /// cutoff (see *What is healed*); only the API remains available.
     ///
     /// Idempotent, and consumes no randomness.
     ///
@@ -609,7 +593,7 @@ impl SimWorld {
     pub(crate) fn poll_sleep(&self, task_id: u64, waker: &Waker) -> bool {
         let mut inner = self.inner.write();
         if inner.awakened_tasks.remove(&task_id) {
-            inner.wakers.tasks.remove(&task_id);
+            inner.wakers.tasks.take(&task_id);
             true
         } else {
             inner.wakers.tasks.register(task_id, waker);
@@ -621,26 +605,13 @@ impl SimWorld {
         let mut inner = self.inner.write();
         inner.scheduler.cancel(schedule_id);
         inner.timer_schedules.remove(&task_id);
-        inner.wakers.tasks.remove(&task_id);
+        inner.wakers.tasks.take(&task_id);
         inner.awakened_tasks.remove(&task_id);
     }
 
     /// Schedules a process restart.
     pub fn schedule_process_restart(&self, ip: IpAddr, recovery_delay: Duration) {
         self.schedule_event(Event::ProcessRestart { ip }, recovery_delay);
-    }
-
-    /// Returns all tracked assertion results.
-    #[must_use]
-    pub fn assertion_results(
-        &self,
-    ) -> std::collections::BTreeMap<String, crate::chaos::AssertionStats> {
-        crate::chaos::assertion_results()
-    }
-
-    /// Clears assertion statistics.
-    pub fn reset_assertion_results(&self) {
-        crate::chaos::reset_assertion_results();
     }
 }
 
@@ -817,10 +788,10 @@ mod tests {
             sim.poll_accept("shutdown-listener", accept_waiter, waiter.clone()),
             Ok(None)
         ));
-        assert!(sim.register_read_waker(server, waiter.clone()));
-        assert!(sim.register_clog_waker(client, waiter.clone()));
-        assert!(sim.register_read_clog_waker(server, waiter.clone()));
-        assert!(sim.register_send_buffer_waker(client, waiter));
+        assert!(sim.register_read_waker(server, &waiter));
+        assert!(sim.register_clog_waker(client, &waiter));
+        assert!(sim.register_read_clog_waker(server, &waiter));
+        assert!(sim.register_send_buffer_waker(client, &waiter));
         sim.schedule_event(
             Event::Network(crate::network::sim::NetworkEvent::Maintenance),
             Duration::from_mins(2),
@@ -849,10 +820,10 @@ mod tests {
             sim.poll_accept("shutdown-listener", accept_waiter, waiter.clone()),
             Err(SimulationError::SimulationShutdown)
         ));
-        assert!(!sim.register_read_waker(server, waiter.clone()));
-        assert!(!sim.register_clog_waker(client, waiter.clone()));
-        assert!(!sim.register_read_clog_waker(server, waiter.clone()));
-        assert!(!sim.register_send_buffer_waker(client, waiter));
+        assert!(!sim.register_read_waker(server, &waiter));
+        assert!(!sim.register_clog_waker(client, &waiter));
+        assert!(!sim.register_read_clog_waker(server, &waiter));
+        assert!(!sim.register_send_buffer_waker(client, &waiter));
         assert!(sim.inner.read().awakened_tasks.is_empty());
     }
 
@@ -957,7 +928,7 @@ mod tests {
         let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let waiter = Waker::from(Arc::clone(&counter));
         for _ in 0..100 {
-            assert!(sim.register_send_buffer_waker(client, waiter.clone()));
+            assert!(sim.register_send_buffer_waker(client, &waiter));
         }
 
         sim.close_connection_abort(client);
@@ -971,7 +942,7 @@ mod tests {
         );
         assert!(sim.take_faults().is_empty());
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-        assert!(!sim.register_send_buffer_waker(client, waiter));
+        assert!(!sim.register_send_buffer_waker(client, &waiter));
     }
 
     #[test]
