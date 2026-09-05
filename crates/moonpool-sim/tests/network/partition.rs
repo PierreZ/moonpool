@@ -266,7 +266,7 @@ fn a_partition_between_chunks_never_leaves_a_hole_in_the_stream() {
     sim.run_until_empty();
     assert_eq!(sim.pending_event_count(), 0, "the handshake has settled");
 
-    let capacity = sim.available_send_buffer(client.connection_id());
+    let capacity = sim.available_send_bytes(client.connection_id());
     assert_eq!(
         poll_write_once(&mut client, FIRST).map(|result| result.expect("first chunk is accepted")),
         Poll::Ready(FIRST.len())
@@ -278,7 +278,7 @@ fn a_partition_between_chunks_never_leaves_a_hole_in_the_stream() {
     assert!(sim.step(), "the engine drains the queued send");
 
     assert_eq!(
-        sim.available_send_buffer(client.connection_id()),
+        sim.available_send_bytes(client.connection_id()),
         capacity - FIRST.len(),
         "a partitioned send holds its bytes instead of dropping them"
     );

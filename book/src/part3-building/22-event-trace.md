@@ -22,7 +22,7 @@ lock.
 When you enable trace-level logging (`RUST_LOG=trace`), you see every event as it fires:
 
 ```
-  Processing event at t=1.234s seq=47: Network(DataDelivery { connection_id: 3, ... })
+  Processing event at t=1.234s seq=47: Network(Delivery { connection_id: 3, seq: 12 })
   Processing event at t=1.234s seq=48: Timer { task_id: 12 }
   Processing event at t=2.500s seq=49: Storage(operation_id=9, WriteComplete)
 ```
@@ -36,9 +36,12 @@ The simulation has a small set of event types, and learning to recognize them ma
 **Timer** events wake sleeping tasks. When your workload calls `time.sleep(Duration::from_secs(1))`, that schedules a Timer event one second in the future. These are the heartbeat of your simulation.
 
 **Network** events target the network engine. `OperationReady` completes one
-delayed bind, connect, or accept latency. `DataDelivery` puts bytes into a
-connection's receive buffer. `ProcessSendBuffer` drains the send side.
-`FinDelivery` signals a graceful close after all data has been delivered.
+delayed bind, connect, or accept latency. `ProcessSendBuffer` moves the next
+chunk of a connection's send queue onto the wire. `Delivery` says an in-flight
+item (a data chunk, or the FIN of a graceful close) has reached its delivery
+time; the item itself lives in the sender's in-flight queue, and the event
+lands it only if no partition is holding that direction, so a `Delivery` that
+fires under a cut does nothing and the heal re-times the item.
 
 **Network maintenance** events change connection-wide state. `PartitionRestore`,
 `SendPartitionClear`, and `RecvPartitionClear` remove expired cuts. `ClogClear`
@@ -59,12 +62,12 @@ only that operation's waiter.
 When an assertion fires, the question is: **what caused this?** The event trace gives you the answer, but you read it backwards.
 
 Start at the failure. Look at the last few events before the assertion. Usually
-one of them is the trigger: a `DataDelivery` that delivered a stale message, a
+one of them is the trigger: a `Delivery` that landed a stale message, a
 `Timer` that expired causing a timeout, or an `OperationReady` that let a
 connection race complete. Then ask which component requested that schedule.
 Follow the chain back through the trace.
 
-For example, suppose your conservation law invariant fires after event #312. Look at event #312: it is a `DataDelivery` on connection 7. What was connection 7? The trace shows it was established at event #201 between the workload and a KV server process. What did the delivery contain? A withdraw response. But the model expected a deposit. Now you have a lead.
+For example, suppose your conservation law invariant fires after event #312. Look at event #312: it is a `Delivery` on connection 7. What was connection 7? The trace shows it was established at event #201 between the workload and a KV server process. What did the delivery contain? A withdraw response. But the model expected a deposit. Now you have a lead.
 
 ## Using RNG Call Count
 
@@ -84,7 +87,7 @@ simulation state but do not represent application work.
 The simulation uses this distinction internally to decide when to terminate.
 After all workloads finish, if only infrastructure events remain in the
 scheduler, the simulation can safely end. When reading traces, you can often
-skip them and focus on `OperationReady`, `DataDelivery`, `Timer`, and `Storage`
+skip them and focus on `OperationReady`, `Delivery`, `Timer`, and `Storage`
 events that directly affect application progress.
 
 ## Practical Tips

@@ -48,12 +48,13 @@ fn connection_aborted_error() -> io::Error {
 ///                                                        
 /// stream.write_all(data) ──► poll_write(data) ────────► buffer_send(data)
 ///                                                        └─► ProcessSendBuffer event
-///                                                            └─► DataDelivery event
-///                                                                └─► paired connection
-///                                                        
+///                                                            └─► in-flight queue
+///                                                                └─► Delivery event
+///                                                                    └─► peer receive_buffer
+///
 /// stream.read(buf) ◄────── poll_read(buf) ◄──────────── receive_buffer
 ///                          │                           └─► waker registration
-///                          └─► Poll::Pending/Ready     
+///                          └─► Poll::Pending/Ready
 /// ```
 ///
 /// ## TCP Semantics Implemented
@@ -70,10 +71,20 @@ fn connection_aborted_error() -> io::Error {
 /// - Achieved through per-connection send buffering
 /// - Critical for protocols that depend on message ordering
 ///
-/// ### 3. Flow Control Simulation
+/// ### 3. Flow Control
 /// - Read operations block (`Poll::Pending`) when no data is available
-/// - Write operations complete immediately (buffering model)
-/// - Backpressure handled at the application layer
+/// - Each direction has an end-to-end byte window
+///   ([`NetworkConfiguration::tcp_send_window_bytes`](crate::NetworkConfiguration::tcp_send_window_bytes)):
+///   a write accepts at most what the window has left (a short write when
+///   some room remains) and parks when it has none
+/// - The window is taken when the write is accepted and returned only when
+///   the *peer's application reads* the bytes, so a slow reader backs the
+///   writer up through the send queue, the flight and the peer's receive
+///   buffer alike; a direction that stops delivering (partition, black hole)
+///   fills its window and blocks instead of accepting data forever
+/// - A parked writer is woken by the peer's read, or by the connection
+///   failing (an abort wakes it to the error; it is never left waiting on a
+///   destroyed connection)
 ///
 /// ## Usage Examples
 ///
@@ -81,7 +92,7 @@ fn connection_aborted_error() -> io::Error {
 ///
 /// ## Performance Characteristics
 ///
-/// - **Write Latency**: O(1) - writes are buffered immediately
+/// - **Write Latency**: O(1) while the window has room
 /// - **Read Latency**: `O(network_delay)` - depends on simulation configuration
 /// - **Memory Usage**: `O(buffered_data)` - proportional to unread data
 /// - **CPU Overhead**: Minimal - leverages efficient event system
@@ -398,12 +409,14 @@ impl AsyncWrite for SimTcpStream {
             return Poll::Ready(Ok(0));
         }
 
-        // Match write(2): accept a short write when some capacity remains and
-        // park only when the send buffer has no room at all.
-        let available = sim.available_send_buffer(self.connection_id);
+        // Match write(2): accept a short write when some window remains and
+        // park only when the window has no room at all. The window is
+        // end-to-end (queued + in flight + unread at the peer), so this is
+        // where a slow reader shows up as backpressure.
+        let available = sim.available_send_bytes(self.connection_id);
         if available == 0 {
             tracing::debug!(
-                "SimTcpStream::poll_write connection_id={} buffer full (needed={}), waiting",
+                "SimTcpStream::poll_write connection_id={} window full (needed={}), waiting",
                 self.connection_id.0,
                 buf.len()
             );
@@ -413,7 +426,7 @@ impl AsyncWrite for SimTcpStream {
             return Poll::Pending;
         }
 
-        // A full send buffer makes this a no-progress poll, not a fresh I/O
+        // A full window makes this a no-progress poll, not a fresh I/O
         // operation. Roll random-close chaos only after capacity is available
         // so backpressure repolls cannot perturb deterministic replay.
         if let Some(true) = sim.roll_random_close(self.connection_id) {
@@ -466,7 +479,7 @@ impl AsyncWrite for SimTcpStream {
 
         // writev(2) partial-accept semantics: if there's SOME room, accept what
         // fits and report a short count; only block when there is NO room at all.
-        let available = sim.available_send_buffer(self.connection_id);
+        let available = sim.available_send_bytes(self.connection_id);
         if available == 0 {
             if !sim.register_send_buffer_waker(self.connection_id, cx.waker()) {
                 return Poll::Ready(Err(sim_shutdown_error()));

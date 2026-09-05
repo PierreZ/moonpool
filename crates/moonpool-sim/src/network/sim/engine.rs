@@ -22,7 +22,8 @@ use super::{
     ConnectionId, ListenerId, NetworkEvent,
     event::NetworkOperationId,
     state::{
-        ClogState, CloseReason, ConnectionFlags, ConnectionState, NetworkState, PartitionState,
+        ClogState, CloseReason, ConnectionFlags, ConnectionState, InFlight, InFlightPayload,
+        NetworkState, PartitionState, SendWindow,
     },
 };
 
@@ -133,17 +134,28 @@ impl NetworkSimulation {
         id
     }
 
+    /// Drain up to `buf.len()` bytes from `connection_id`'s receive buffer.
+    ///
+    /// Exactly the bytes handed to the application are released from the
+    /// peer's send window (see [`SendWindow`]): a partial read returns a
+    /// partial credit, and a writer parked on that window is woken. Draws
+    /// randomness only when data is available and the partial-read fault
+    /// fires; an empty read consumes none.
     pub(crate) fn read(
         &mut self,
         connection_id: ConnectionId,
         buf: &mut [u8],
-    ) -> SimulationResult<usize> {
+    ) -> (SimulationResult<usize>, WakeBatch) {
         let partial_read_max_bytes = self.state.config.chaos.partial_read_max_bytes;
-        let connection = self
-            .state
-            .connections
-            .get_mut(&connection_id)
-            .ok_or_else(|| SimulationError::InvalidState("connection not found".to_string()))?;
+        let mut wakes = WakeBatch::default();
+        let Some(connection) = self.state.connections.get_mut(&connection_id) else {
+            return (
+                Err(SimulationError::InvalidState(
+                    "connection not found".to_string(),
+                )),
+                wakes,
+            );
+        };
         let available = buf.len().min(connection.receive_buffer.len());
         let limit = if available > 0 && crate::buggify!() {
             let max_read = available.min(partial_read_max_bytes);
@@ -158,7 +170,60 @@ impl NetworkSimulation {
         for (slot, byte) in buf.iter_mut().zip(connection.receive_buffer.drain(..limit)) {
             *slot = byte;
         }
-        Ok(limit)
+        if limit > 0
+            && let Some(sender) = connection.paired_connection
+        {
+            self.release_window(sender, limit, &mut wakes);
+        }
+        (Ok(limit), wakes)
+    }
+
+    /// Return `bytes` to `sender`'s window and wake a writer parked on it.
+    fn release_window(&mut self, sender: ConnectionId, bytes: usize, wakes: &mut WakeBatch) {
+        if bytes == 0 {
+            return;
+        }
+        if let Some(sender_state) = self.state.connections.get_mut(&sender) {
+            sender_state.window.release(bytes);
+            Self::take_waiter(&mut self.waiters.send_buffers, sender, wakes);
+        }
+    }
+
+    /// Drop everything still queued locally on `id`, returning its bytes to
+    /// the window: nothing can deliver them any more, so nothing else could
+    /// ever release them.
+    fn discard_send_queue(&mut self, id: ConnectionId) {
+        if let Some(connection) = self.state.connections.get_mut(&id) {
+            let queued = connection.queued_bytes();
+            connection.send_buffer.clear();
+            connection.window.release(queued);
+        }
+    }
+
+    /// Drop what `id` received but never read — its application closed or shut
+    /// its receive side, so nothing will read it now — and return the bytes
+    /// to the peer's window, waking a writer parked on them. The kernel does
+    /// the same: a receive buffer freed by a close was acknowledged already.
+    fn discard_receive_buffer(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
+        let Some(connection) = self.state.connections.get_mut(&id) else {
+            return;
+        };
+        let unread = connection.receive_buffer.len();
+        connection.receive_buffer.clear();
+        if let Some(sender) = connection.paired_connection {
+            self.release_window(sender, unread, wakes);
+        }
+    }
+
+    /// Drop everything `id` has on the wire (an abort resets the flight) and
+    /// return its bytes to the window.
+    fn discard_in_flight(&mut self, id: ConnectionId) {
+        if let Some(connection) = self.state.connections.get_mut(&id) {
+            let in_flight = connection.in_flight_bytes();
+            connection.in_flight.clear();
+            connection.in_flight_held_since = None;
+            connection.window.release(in_flight);
+        }
     }
 
     pub(crate) fn has_readable_data(&self, connection_id: ConnectionId) -> bool {
@@ -179,6 +244,9 @@ impl NetworkSimulation {
             .connections
             .get_mut(&connection_id)
             .ok_or_else(|| SimulationError::InvalidState("connection not found".to_string()))?;
+        // The window is taken here, the moment the application's bytes are
+        // accepted, and given back only by the peer's read.
+        connection.window.acquire(data.len());
         connection.send_buffer.push_back(data);
         let mut actions = NetworkActions::default();
         if !connection.flags.send_in_progress() {
@@ -192,9 +260,8 @@ impl NetworkSimulation {
         &mut self,
         client_addr: &str,
         server_addr: &str,
-        now: Duration,
     ) -> (ConnectionId, ConnectionId) {
-        const DEFAULT_SEND_BUFFER_CAPACITY: usize = 64 * 1024;
+        let send_window = self.state.config.tcp_send_window_bytes;
         let client_conn = ConnectionId(self.state.next_connection_id);
         self.state.next_connection_id += 1;
         let server_conn = ConnectionId(self.state.next_connection_id);
@@ -231,11 +298,13 @@ impl NetworkSimulation {
             receive_buffer: VecDeque::new(),
             paired_connection: Some(paired_connection),
             send_buffer: VecDeque::new(),
-            next_send_time: now,
+            in_flight: VecDeque::new(),
+            in_flight_held_since: None,
+            next_in_flight_seq: 0,
+            last_delivery_at: None,
             flags: ConnectionFlags::default(),
             close_reason: CloseReason::None,
-            send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
-            last_data_delivery_scheduled_at: None,
+            window: SendWindow::new(send_window),
         };
         self.state.connections.insert(
             client_conn,
@@ -472,31 +541,25 @@ impl NetworkSimulation {
                 self.state.ip_partitions.retain(|_, state| {
                     state.expires_at != expected_deadline || now < expected_deadline
                 });
-                self.resume_stalled_sends(now, &mut actions);
+                self.resume_after_heal(now, &mut actions);
             }
             NetworkEvent::SendPartitionClear { expected_deadline } => {
                 self.state.send_partitions.retain(|_, deadline| {
                     *deadline != expected_deadline || now < expected_deadline
                 });
-                self.resume_stalled_sends(now, &mut actions);
+                self.resume_after_heal(now, &mut actions);
             }
             NetworkEvent::RecvPartitionClear { expected_deadline } => {
                 self.state.recv_partitions.retain(|_, deadline| {
                     *deadline != expected_deadline || now < expected_deadline
                 });
-                self.resume_stalled_sends(now, &mut actions);
+                self.resume_after_heal(now, &mut actions);
             }
-            NetworkEvent::DataDelivery {
-                connection_id,
-                data,
-            } => {
-                self.handle_data_delivery(connection_id, &data, now, &mut actions, &mut wakes);
+            NetworkEvent::Delivery { connection_id, seq } => {
+                self.handle_delivery(connection_id, seq, now, &mut actions, &mut wakes);
             }
             NetworkEvent::ProcessSendBuffer { connection_id } => {
                 self.handle_process_send_buffer(connection_id, now, &mut actions, &mut wakes);
-            }
-            NetworkEvent::FinDelivery { connection_id } => {
-                self.handle_fin_delivery(connection_id, &mut wakes);
             }
         }
         (actions, wakes)
@@ -523,54 +586,235 @@ impl NetworkSimulation {
         }
     }
 
-    fn handle_data_delivery(
+    /// Land every item at the head of `sender`'s flight whose delivery time
+    /// has come.
+    ///
+    /// The event that wakes this names one item, but the flight is the truth:
+    /// an item is delivered only from the head, only once its `deliver_at`
+    /// has passed, and never while the direction is held by a partition. A
+    /// stale event (its item already delivered, or re-timed by a heal) finds
+    /// nothing to do. Faults are judged *now*, at landing, not when the
+    /// chunk was put on the wire: a partition or black hole injected while
+    /// the bytes were in flight still decides their fate.
+    fn handle_delivery(
         &mut self,
-        id: ConnectionId,
-        data: &[u8],
+        sender: ConnectionId,
+        seq: u64,
         now: Duration,
         actions: &mut NetworkActions,
         wakes: &mut WakeBatch,
     ) {
-        if !self.state.connections.get(&id).is_some_and(|connection| {
-            !connection.flags.is_closed() && !connection.flags.recv_closed()
-        }) {
-            return;
+        loop {
+            let Some(connection) = self.state.connections.get(&sender) else {
+                return;
+            };
+            if connection.in_flight_held_since.is_some() {
+                return;
+            }
+            let Some(head) = connection.in_flight.front() else {
+                return;
+            };
+            if head.deliver_at > now {
+                return;
+            }
+            // A partition that somehow reached this direction without freezing
+            // the flight (there is no such path today) still holds it here,
+            // from this instant, rather than letting the bytes cross the cut.
+            if self
+                .state
+                .connection_partition_clear_at(sender, now)
+                .is_some()
+            {
+                self.hold_in_flight(sender, now);
+                return;
+            }
+            let Some(connection) = self.state.connections.get_mut(&sender) else {
+                return;
+            };
+            let Some(item) = connection.in_flight.pop_front() else {
+                return;
+            };
+            debug_assert!(
+                item.seq <= seq,
+                "a delivery event never lands an item queued after the one it names"
+            );
+            self.land(sender, item.payload, now, actions, wakes);
         }
-        // The chunk left a black-holed sender: it was acknowledged into that
-        // side's buffer and is gone. No bytes, no wake — the reader keeps
-        // waiting for data that will never come.
-        if self.peer_send_black_holed(id) {
-            return;
-        }
-        let delivered = self.maybe_corrupt_data(id, data, now, actions);
-        if let Some(connection) = self.state.connections.get_mut(&id) {
-            connection.receive_buffer.extend(delivered);
-        }
-        wakes.push(self.waiters.reads.take(&id));
     }
 
-    fn handle_fin_delivery(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
-        // A FIN is a send like any other: from a black-holed peer it vanishes,
-        // and the reader never sees EOF.
-        if self.peer_send_black_holed(id) {
+    /// Put one item that reached its delivery time where it belongs.
+    fn land(
+        &mut self,
+        sender: ConnectionId,
+        payload: InFlightPayload,
+        now: Duration,
+        actions: &mut NetworkActions,
+        wakes: &mut WakeBatch,
+    ) {
+        let Some((black_holed, receiver)) = self.state.connections.get(&sender).map(|connection| {
+            (
+                connection.flags.send_black_holed(),
+                connection.paired_connection,
+            )
+        }) else {
+            return;
+        };
+        // The item left a black-holed sender: it was acknowledged into that
+        // side's window and is gone. No bytes, no EOF, no wake, and the
+        // window credit it took is never returned — the reader keeps waiting
+        // for data that will never come, and once the window is full the
+        // writer waits with it.
+        if black_holed {
             return;
         }
+        let receiver_open = receiver
+            .and_then(|id| self.state.connections.get(&id))
+            .is_some_and(|connection| !connection.flags.is_closed());
+        match payload {
+            InFlightPayload::Data(data) => {
+                let receiver_reading = receiver
+                    .and_then(|id| self.state.connections.get(&id))
+                    .is_some_and(|connection| {
+                        !connection.flags.is_closed() && !connection.flags.recv_closed()
+                    });
+                let Some(receiver) = receiver.filter(|_| receiver_reading) else {
+                    // A closed or receive-shut peer discards what arrives and
+                    // acknowledges it, so the writer is not left waiting on
+                    // credits nobody will ever read back.
+                    self.release_window(sender, data.len(), wakes);
+                    return;
+                };
+                let delivered = self.maybe_corrupt_data(receiver, &data, now, actions);
+                if let Some(connection) = self.state.connections.get_mut(&receiver) {
+                    connection.receive_buffer.extend(delivered);
+                }
+                wakes.push(self.waiters.reads.take(&receiver));
+            }
+            InFlightPayload::Fin => {
+                if let Some(receiver) = receiver.filter(|_| receiver_open)
+                    && let Some(connection) = self.state.connections.get_mut(&receiver)
+                {
+                    connection.flags.set_remote_fin_received(true);
+                    wakes.push(self.waiters.reads.take(&receiver));
+                }
+            }
+        }
+    }
+
+    /// Put `payload` on the wire from `id`, strictly after everything already
+    /// in flight, and schedule the event that will land it.
+    ///
+    /// `at` is the delivery time the sender computed; the flight's FIFO floor
+    /// (`last_delivery_at + 1ns`) still applies. Enqueuing into a direction a
+    /// partition currently cuts freezes the flight from this instant, which
+    /// is how a FIN queued under a partition (the one send that bypasses the
+    /// send queue) waits for the heal like everything else.
+    fn put_in_flight(
+        &mut self,
+        id: ConnectionId,
+        payload: InFlightPayload,
+        at: Duration,
+        now: Duration,
+        actions: &mut NetworkActions,
+    ) {
+        let partitioned = self.state.connection_partition_clear_at(id, now).is_some();
+        let Some(connection) = self.state.connections.get_mut(&id) else {
+            return;
+        };
+        let deliver_at = connection.last_delivery_at.map_or(at, |last| {
+            at.max(last.saturating_add(Duration::from_nanos(1)))
+        });
+        let seq = connection.next_in_flight_seq;
+        connection.next_in_flight_seq += 1;
+        connection.last_delivery_at = Some(deliver_at);
+        connection.in_flight.push_back(InFlight {
+            seq,
+            deliver_at,
+            payload,
+        });
+        if partitioned && connection.in_flight_held_since.is_none() {
+            connection.in_flight_held_since = Some(now);
+        }
+        actions.schedule_at(
+            deliver_at,
+            NetworkEvent::Delivery {
+                connection_id: id,
+                seq,
+            },
+        );
+    }
+
+    /// Freeze `id`'s flight as of `now`. Idempotent while held.
+    fn hold_in_flight(&mut self, id: ConnectionId, now: Duration) {
         if let Some(connection) = self.state.connections.get_mut(&id)
-            && !connection.flags.is_closed()
+            && connection.in_flight_held_since.is_none()
+            && !connection.in_flight.is_empty()
         {
-            connection.flags.set_remote_fin_received(true);
-            wakes.push(self.waiters.reads.take(&id));
+            connection.in_flight_held_since = Some(now);
         }
     }
 
-    /// Whether the endpoint that sends *to* `id` has its sends black-holed.
-    fn peer_send_black_holed(&self, id: ConnectionId) -> bool {
-        self.state
+    /// A partition just went up: freeze the flight of every direction it
+    /// cuts. Bytes on the wire when a cut lands do not cross it.
+    fn hold_partitioned_in_flight(&mut self, now: Duration) {
+        let cut = self
+            .state
             .connections
-            .get(&id)
-            .and_then(|connection| connection.paired_connection)
-            .and_then(|peer| self.state.connections.get(&peer))
-            .is_some_and(|peer| peer.flags.send_black_holed())
+            .iter()
+            .filter(|(id, connection)| {
+                connection.in_flight_held_since.is_none()
+                    && !connection.in_flight.is_empty()
+                    && self
+                        .state
+                        .connection_partition_clear_at(**id, now)
+                        .is_some()
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in cut {
+            self.hold_in_flight(id, now);
+        }
+    }
+
+    /// Thaw every held flight whose partitions have all healed.
+    ///
+    /// Each item is re-timed by the time the direction spent cut and its
+    /// delivery event re-scheduled; the FIFO floor moves with it, so a chunk
+    /// sent after the heal still lands behind the last one that was frozen.
+    fn release_held_in_flight(&mut self, now: Duration, actions: &mut NetworkActions) {
+        let thawed = self
+            .state
+            .connections
+            .iter()
+            .filter_map(|(id, connection)| {
+                connection.in_flight_held_since.and_then(|since| {
+                    self.state
+                        .connection_partition_clear_at(*id, now)
+                        .is_none()
+                        .then_some((*id, since))
+                })
+            })
+            .collect::<Vec<_>>();
+        for (id, since) in thawed {
+            let Some(connection) = self.state.connections.get_mut(&id) else {
+                continue;
+            };
+            let shift = now.saturating_sub(since);
+            connection.in_flight_held_since = None;
+            connection.last_delivery_at = connection
+                .last_delivery_at
+                .map(|last| last.saturating_add(shift));
+            for item in &mut connection.in_flight {
+                item.deliver_at = item.deliver_at.saturating_add(shift);
+                actions.schedule_at(
+                    item.deliver_at,
+                    NetworkEvent::Delivery {
+                        connection_id: id,
+                        seq: item.seq,
+                    },
+                );
+            }
+        }
     }
 
     fn calculate_flip_bit_count(random_value: u32, min_bits: u32, max_bits: u32) -> u32 {
@@ -632,8 +876,8 @@ impl NetworkSimulation {
             (connection.flags.is_closed() || connection.flags.send_closed())
                 && !connection.flags.graceful_close_pending()
         }) {
+            self.discard_send_queue(id);
             if let Some(connection) = self.state.connections.get_mut(&id) {
-                connection.send_buffer.clear();
                 connection.flags.set_send_in_progress(false);
                 connection.flags.set_send_stalled(false);
             }
@@ -651,7 +895,7 @@ impl NetworkSimulation {
         if has_queued_bytes && self.state.connection_partition_clear_at(id, now).is_some() {
             self.stall_partitioned_send(id);
         } else {
-            self.handle_normal_send(id, now, actions, wakes);
+            self.handle_normal_send(id, now, actions);
         }
     }
 
@@ -665,12 +909,13 @@ impl NetworkSimulation {
     /// a clogged pair into added delay (`getRecvDelay` clamps to
     /// `clogPairUntil`), and only an explicit disconnect fails the connection.
     ///
-    /// Send-buffer waiters are deliberately left registered: no buffer space is
-    /// released while the stream is stalled, so writers keep seeing
-    /// backpressure until the send actually drains.
+    /// Send-window waiters are deliberately left registered: no window is
+    /// released while the stream is stalled (nothing reaches the peer's
+    /// reader), so writers keep seeing backpressure until the bytes land and
+    /// are read.
     ///
     /// A stalled connection owns no scheduled work. It is re-driven by
-    /// [`resume_stalled_sends`](Self::resume_stalled_sends) when the partitions
+    /// [`resume_after_heal`](Self::resume_after_heal) when the partitions
     /// blocking it heal, whether that happens at their deadline or earlier.
     fn stall_partitioned_send(&mut self, id: ConnectionId) {
         if let Some(connection) = self.state.connections.get_mut(&id) {
@@ -678,12 +923,17 @@ impl NetworkSimulation {
         }
     }
 
-    /// Re-drive every connection whose blocking partitions have healed.
+    /// Re-drive every direction whose blocking partitions have healed: thaw
+    /// what was frozen in flight, then resume the stalled send queue behind
+    /// it.
     ///
     /// Runs from each partition-clearing path, so a stream stalled by a
     /// partition that is healed early releases its bytes early instead of
-    /// waiting out the deadline it stalled under.
-    fn resume_stalled_sends(&mut self, now: Duration, actions: &mut NetworkActions) {
+    /// waiting out the deadline it stalled under. Consumes no randomness: the
+    /// thawed items keep the latency they sampled, and the queued chunk
+    /// samples its own when its `ProcessSendBuffer` runs, as it always did.
+    fn resume_after_heal(&mut self, now: Duration, actions: &mut NetworkActions) {
+        self.release_held_in_flight(now, actions);
         let resumed = self
             .state
             .connections
@@ -710,19 +960,17 @@ impl NetworkSimulation {
         id: ConnectionId,
         now: Duration,
         actions: &mut NetworkActions,
-        wakes: &mut WakeBatch,
     ) {
         let Some(snapshot) = self.state.connections.get(&id).map(|connection| {
             (
                 connection.paired_connection,
-                connection.next_send_time,
                 connection.local_ip,
                 connection.remote_ip,
             )
         }) else {
             return;
         };
-        let (paired_id, next_send_time, local_ip, remote_ip) = snapshot;
+        let (paired_id, local_ip, remote_ip) = snapshot;
         let pair_extra = local_ip
             .zip(remote_ip)
             .and_then(|pair| self.state.pair_latencies.get(&pair).copied())
@@ -736,16 +984,13 @@ impl NetworkSimulation {
             connection.flags.set_send_in_progress(false);
             if connection.flags.graceful_close_pending() {
                 connection.flags.set_graceful_close_pending(false);
-                Self::schedule_fin(
-                    connection.paired_connection,
-                    connection.last_data_delivery_scheduled_at,
-                    now,
-                    actions,
-                );
+                self.put_fin_in_flight(id, now, actions);
             }
             return;
         };
-        Self::take_waiter(&mut self.waiters.send_buffers, id, wakes);
+        // No window is released here: the bytes have only moved from the
+        // queue onto the wire, and they stay charged to the writer until the
+        // peer's application reads them.
         if crate::buggify!() && !data.is_empty() {
             let max_send = data.len().min(partial_max);
             let truncate_to = sim_random_range(0..max_send + 1);
@@ -760,49 +1005,43 @@ impl NetworkSimulation {
         } else {
             Duration::from_nanos(1)
         };
-        let earliest = now.saturating_add(base_delay).max(next_send_time);
-        connection.next_send_time = earliest.saturating_add(Duration::from_nanos(1));
-        if let Some(paired) = paired_id {
-            let at = earliest.saturating_add(pair_extra);
-            actions.schedule_at(
-                at,
-                NetworkEvent::DataDelivery {
-                    connection_id: paired,
-                    data,
-                },
-            );
-            connection.last_data_delivery_scheduled_at = Some(at);
+        let at = now.saturating_add(base_delay).saturating_add(pair_extra);
+        let queue_drained = connection.send_buffer.is_empty();
+        let close_pending = connection.flags.graceful_close_pending();
+        if paired_id.is_some() {
+            self.put_in_flight(id, InFlightPayload::Data(data), at, now, actions);
         }
-        if connection.send_buffer.is_empty() {
+        let Some(connection) = self.state.connections.get_mut(&id) else {
+            return;
+        };
+        if queue_drained {
             connection.flags.set_send_in_progress(false);
-            if connection.flags.graceful_close_pending() {
+            if close_pending {
                 connection.flags.set_graceful_close_pending(false);
-                Self::schedule_fin(
-                    connection.paired_connection,
-                    connection.last_data_delivery_scheduled_at,
-                    now,
-                    actions,
-                );
+                self.put_fin_in_flight(id, now, actions);
             }
         } else {
             actions.schedule_at(now, NetworkEvent::ProcessSendBuffer { connection_id: id });
         }
     }
 
-    fn schedule_fin(
-        paired: Option<ConnectionId>,
-        last_delivery: Option<Duration>,
-        now: Duration,
-        actions: &mut NetworkActions,
-    ) {
-        let Some(connection_id) = paired else {
+    /// Put `id`'s FIN on the wire, behind every data chunk in flight.
+    fn put_fin_in_flight(&mut self, id: ConnectionId, now: Duration, actions: &mut NetworkActions) {
+        if self
+            .state
+            .connections
+            .get(&id)
+            .is_none_or(|connection| connection.paired_connection.is_none())
+        {
             return;
-        };
-        let at = last_delivery
-            .filter(|time| *time >= now)
-            .unwrap_or(now)
-            .saturating_add(Duration::from_nanos(1));
-        actions.schedule_at(at, NetworkEvent::FinDelivery { connection_id });
+        }
+        self.put_in_flight(
+            id,
+            InFlightPayload::Fin,
+            now.saturating_add(Duration::from_nanos(1)),
+            now,
+            actions,
+        );
     }
 
     pub(crate) fn shutdown_waiters(&mut self) -> WakeBatch {
@@ -911,18 +1150,53 @@ impl NetworkSimulation {
             .is_some_and(|c| c.flags.remote_fin_received())
     }
 
-    pub(crate) fn send_buffer_capacity(&self, id: ConnectionId) -> usize {
+    pub(crate) fn send_window_bytes(&self, id: ConnectionId) -> usize {
         self.state
             .connections
             .get(&id)
-            .map_or(0, |c| c.send_buffer_capacity)
+            .map_or(0, |c| c.window.capacity())
     }
 
-    pub(crate) fn send_buffer_used(&self, id: ConnectionId) -> usize {
+    pub(crate) fn outstanding_send_bytes(&self, id: ConnectionId) -> usize {
         self.state
             .connections
             .get(&id)
-            .map_or(0, |c| c.send_buffer.iter().map(Vec::len).sum())
+            .map_or(0, |c| c.window.outstanding())
+    }
+
+    pub(crate) fn available_send_bytes(&self, id: ConnectionId) -> usize {
+        self.state
+            .connections
+            .get(&id)
+            .map_or(0, |c| c.window.available())
+    }
+
+    pub(crate) fn queued_send_bytes(&self, id: ConnectionId) -> usize {
+        self.state
+            .connections
+            .get(&id)
+            .map_or(0, ConnectionState::queued_bytes)
+    }
+
+    pub(crate) fn in_flight_bytes(&self, id: ConnectionId) -> usize {
+        self.state
+            .connections
+            .get(&id)
+            .map_or(0, ConnectionState::in_flight_bytes)
+    }
+
+    pub(crate) fn unread_bytes(&self, id: ConnectionId) -> usize {
+        self.state
+            .connections
+            .get(&id)
+            .map_or(0, |c| c.receive_buffer.len())
+    }
+
+    pub(crate) fn is_in_flight_held(&self, id: ConnectionId) -> bool {
+        self.state
+            .connections
+            .get(&id)
+            .is_some_and(|c| c.in_flight_held_since.is_some())
     }
 
     pub(crate) fn register_send_buffer(&mut self, id: ConnectionId, waker: &Waker) -> bool {
@@ -1164,6 +1438,7 @@ impl NetworkSimulation {
                 expected_deadline: deadline,
             },
         );
+        self.hold_partitioned_in_flight(now);
         actions
     }
 
@@ -1244,6 +1519,7 @@ impl NetworkSimulation {
             from: from.to_string(),
             to: to.to_string(),
         });
+        self.hold_partitioned_in_flight(now);
         actions
     }
 
@@ -1263,6 +1539,7 @@ impl NetworkSimulation {
             },
         );
         actions.record(SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
+        self.hold_partitioned_in_flight(now);
         actions
     }
 
@@ -1282,6 +1559,7 @@ impl NetworkSimulation {
             },
         );
         actions.record(SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
+        self.hold_partitioned_in_flight(now);
         actions
     }
 
@@ -1298,7 +1576,7 @@ impl NetworkSimulation {
             from: from.to_string(),
             to: to.to_string(),
         });
-        self.resume_stalled_sends(now, &mut actions);
+        self.resume_after_heal(now, &mut actions);
         actions
     }
 
@@ -1306,8 +1584,10 @@ impl NetworkSimulation {
     /// cuts plus the send-side and receive-side blocks that
     /// [`restore_partition`](Self::restore_partition) cannot reach.
     ///
-    /// Connections held back by a partition are re-driven, so a stalled send
-    /// resumes instead of waiting out a deadline that no longer applies.
+    /// Connections held back by a partition are re-driven — what was frozen in
+    /// flight thaws and the stalled send queue follows it — so a stalled
+    /// stream resumes instead of waiting out a deadline that no longer
+    /// applies. No new randomness: this only re-times work already sampled.
     pub(crate) fn heal_all_partitions(&mut self, now: Duration) -> NetworkActions {
         let mut actions = NetworkActions::default();
         for (from, to) in std::mem::take(&mut self.state.ip_partitions).into_keys() {
@@ -1322,7 +1602,7 @@ impl NetworkSimulation {
         for ip in std::mem::take(&mut self.state.recv_partitions).into_keys() {
             actions.record(SimFaultEvent::RecvPartitionHealed { ip: ip.to_string() });
         }
-        self.resume_stalled_sends(now, &mut actions);
+        self.resume_after_heal(now, &mut actions);
         actions
     }
 
@@ -1362,7 +1642,9 @@ impl NetworkSimulation {
         let close_send = a > 0.33;
         if close_send && let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_send_closed(true);
-            c.send_buffer.clear();
+        }
+        if close_send {
+            self.discard_send_queue(id);
         }
         if close_recv && let Some(c) = paired.and_then(|peer| self.state.connections.get_mut(&peer))
         {
@@ -1371,9 +1653,11 @@ impl NetworkSimulation {
         let mut wakes = WakeBatch::default();
         if close_send {
             wakes.push(self.waiters.reads.take(&id));
+            Self::take_waiter(&mut self.waiters.send_buffers, id, &mut wakes);
         }
         if close_recv && let Some(peer) = paired {
             wakes.push(self.waiters.reads.take(&peer));
+            self.discard_receive_buffer(peer, &mut wakes);
         }
         let explicit = sim_random_f64() < self.state.config.chaos.random_close_explicit_ratio;
         let mut actions = NetworkActions::default();
@@ -1473,30 +1757,34 @@ impl NetworkSimulation {
         let mut wakes = WakeBatch::default();
         let Some(snapshot) = self.state.connections.get(&id).map(|c| {
             (
-                c.paired_connection,
                 c.flags.send_closed(),
                 c.flags.is_closed(),
                 c.flags.send_in_progress(),
                 c.send_buffer.is_empty(),
-                c.last_data_delivery_scheduled_at,
             )
         }) else {
             return (actions, wakes);
         };
-        if snapshot.1 || snapshot.2 {
+        let (send_closed, is_closed, send_in_progress, queue_empty) = snapshot;
+        if send_closed || is_closed {
             return (actions, wakes);
         }
         if let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_is_closed(true);
             c.flags.set_send_closed(true);
             c.close_reason = CloseReason::Graceful;
-            if snapshot.3 || !snapshot.4 {
+            if send_in_progress || !queue_empty {
                 c.flags.set_graceful_close_pending(true);
             }
         }
         wakes.push(self.waiters.reads.take(&id));
-        if !snapshot.3 && snapshot.4 {
-            Self::schedule_fin(snapshot.0, snapshot.5, now, &mut actions);
+        // A close frees what this side never read; the peer's writer gets the
+        // window back (and, on its next write, the FIN below).
+        self.discard_receive_buffer(id, &mut wakes);
+        // The FIN goes on the wire behind whatever is already in flight; it
+        // can never overtake the stream's last bytes.
+        if !send_in_progress && queue_empty {
+            self.put_fin_in_flight(id, now, &mut actions);
         }
         (actions, wakes)
     }
@@ -1515,11 +1803,18 @@ impl NetworkSimulation {
                 c.flags.set_send_in_progress(false);
                 c.flags.set_send_stalled(false);
                 c.flags.set_graceful_close_pending(false);
-                c.send_buffer.clear();
                 c.close_reason = CloseReason::Aborted;
             }
+            // An RST resets both directions: the queue, the flight and the
+            // unread bytes are gone, and every writer parked on the window
+            // wakes to the error.
+            self.discard_send_queue(current);
+            self.discard_in_flight(current);
         }
         let mut wakes = WakeBatch::default();
+        for current in [Some(id), paired].into_iter().flatten() {
+            self.discard_receive_buffer(current, &mut wakes);
+        }
         for current in [Some(id), paired].into_iter().flatten() {
             wakes.push(self.waiters.reads.take(&current));
             Self::take_waiter(&mut self.waiters.write_clogs, current, &mut wakes);
@@ -1542,7 +1837,9 @@ impl NetworkSimulation {
             .and_then(|c| c.paired_connection);
         if close_send && let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_send_closed(true);
-            c.send_buffer.clear();
+        }
+        if close_send {
+            self.discard_send_queue(id);
         }
         if close_recv && let Some(c) = paired.and_then(|peer| self.state.connections.get_mut(&peer))
         {
@@ -1551,9 +1848,11 @@ impl NetworkSimulation {
         let mut wakes = WakeBatch::default();
         if close_send {
             wakes.push(self.waiters.reads.take(&id));
+            Self::take_waiter(&mut self.waiters.send_buffers, id, &mut wakes);
         }
         if close_recv && let Some(peer) = paired {
             wakes.push(self.waiters.reads.take(&peer));
+            self.discard_receive_buffer(peer, &mut wakes);
         }
         wakes
     }

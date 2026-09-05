@@ -23,7 +23,7 @@ Running an axum service inside moonpool-sim exercises a specific slice of your a
 
 **TLS**. Simulated TCP streams are plaintext. TLS handshake failures, certificate validation, protocol negotiation: not exercised. If your service has a TLS configuration bug, you need integration tests against real TLS.
 
-**Real TCP backpressure and congestion**. moonpool-sim models connection-level faults (drops, latency, corruption) but not TCP flow control, window sizing, or congestion algorithms. If your service has a bug that only manifests under real TCP backpressure, simulation won't find it.
+**Real TCP congestion**. moonpool-sim models connection-level faults (drops, latency, corruption) and end-to-end flow control (a fixed byte window per direction that a slow reader fills, see [Flow control](../part3-building/10-network-faults.md#flow-control)), but not congestion algorithms, window autotuning, retransmission timers, or real segment boundaries. A bug that only manifests under a kernel's actual congestion behavior won't be found here; one that manifests because a writer never expected to block will.
 
 **OS resource limits**. File descriptor exhaustion, memory pressure, CPU scheduling. The simulation runs in a single process with no OS-level resource constraints. A service that leaks file descriptors will appear healthy in simulation.
 
