@@ -715,9 +715,29 @@ pub struct NetworkConfiguration {
     /// topology. See [`LinkLatencyConfig`].
     pub link_latency: Option<LinkLatencyConfig>,
 
+    /// End-to-end byte window of each stream direction, in bytes.
+    ///
+    /// This many bytes may be written ahead of what the peer's application
+    /// has read, counting the local send queue, everything in flight and the
+    /// peer's unread receive buffer together. Once the window is full,
+    /// `poll_write` returns `Poll::Pending` until the peer reads, so a slow
+    /// reader backs a fast writer up end to end, as TCP flow control does.
+    /// A direction that stops making progress (a partition, a black hole)
+    /// fills its window and blocks instead of accepting data forever.
+    ///
+    /// The value is read when a connection is created; changing it later
+    /// applies to new connections only. Default 64 KiB
+    /// ([`DEFAULT_TCP_SEND_WINDOW_BYTES`]); `fast_local` and the per-seed
+    /// configurations keep the default, a smaller window is a deliberate
+    /// choice for a test that wants backpressure to bite early.
+    pub tcp_send_window_bytes: usize,
+
     /// Chaos injection configuration
     pub chaos: ChaosConfiguration,
 }
+
+/// Default [`NetworkConfiguration::tcp_send_window_bytes`]: 64 KiB.
+pub const DEFAULT_TCP_SEND_WINDOW_BYTES: usize = 64 * 1024;
 
 impl Default for NetworkConfiguration {
     fn default() -> Self {
@@ -740,6 +760,7 @@ impl Default for NetworkConfiguration {
             },
             // Realism knob, opt-in: distance-blind by default.
             link_latency: None,
+            tcp_send_window_bytes: DEFAULT_TCP_SEND_WINDOW_BYTES,
             chaos: ChaosConfiguration::default(),
         }
     }
@@ -946,6 +967,9 @@ impl NetworkConfiguration {
             // Distance latency models the deployment, not the seed, so chaos
             // runs leave it to the caller (and draw no RNG for it).
             link_latency: None,
+            // The window is a deployment property too: keep it fixed so a
+            // seed's draw schedule is not spent on it.
+            tcp_send_window_bytes: DEFAULT_TCP_SEND_WINDOW_BYTES,
             chaos: ChaosConfiguration::random_for_seed(),
         }
     }
@@ -975,6 +999,7 @@ impl NetworkConfiguration {
             connect_latency: uniform(ten_us, ten_us),
             write_latency: uniform(one_us, one_us),
             link_latency: None,
+            tcp_send_window_bytes: DEFAULT_TCP_SEND_WINDOW_BYTES,
             chaos: ChaosConfiguration::disabled(),
         }
     }

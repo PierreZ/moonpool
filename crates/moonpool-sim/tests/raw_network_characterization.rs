@@ -122,13 +122,14 @@ fn scalar_and_vectored_writes_share_partial_backpressure_semantics() {
         drive(&mut sim, provider.connect("backpressure-listener")).expect("scalar client connects");
     let mut vectored = drive(&mut sim, provider.connect("backpressure-listener"))
         .expect("vectored client connects");
-    let (_scalar_server, _) = drive(&mut sim, listener.accept()).expect("accept scalar client");
-    let (_vectored_server, _) = drive(&mut sim, listener.accept()).expect("accept vectored client");
+    let (mut scalar_server, _) = drive(&mut sim, listener.accept()).expect("accept scalar client");
+    let (mut vectored_server, _) =
+        drive(&mut sim, listener.accept()).expect("accept vectored client");
 
-    let capacity = sim.available_send_buffer(scalar.connection_id());
+    let capacity = sim.available_send_bytes(scalar.connection_id());
     assert!(capacity > 0, "a fresh connection has send capacity");
     assert_eq!(
-        sim.available_send_buffer(vectored.connection_id()),
+        sim.available_send_bytes(vectored.connection_id()),
         capacity,
         "fresh connections use the same send capacity"
     );
@@ -145,15 +146,21 @@ fn scalar_and_vectored_writes_share_partial_backpressure_semantics() {
 
     assert_eq!(scalar_accepted, Poll::Ready(capacity));
     assert_eq!(vectored_accepted, Poll::Ready(capacity));
-    assert_eq!(sim.available_send_buffer(scalar.connection_id()), 0);
-    assert_eq!(sim.available_send_buffer(vectored.connection_id()), 0);
+    assert_eq!(sim.available_send_bytes(scalar.connection_id()), 0);
+    assert_eq!(sim.available_send_bytes(vectored.connection_id()), 0);
     assert!(poll_write_once(&mut scalar, b"x").is_pending());
     assert!(poll_write_once(&mut vectored, b"x").is_pending());
 
-    // Processing the queued sends releases capacity for both forms.
+    // Draining the queue onto the wire releases nothing: the window is
+    // end-to-end, and only the peer's read returns it, for both forms.
     sim.run_until_empty();
-    assert!(sim.available_send_buffer(scalar.connection_id()) > 0);
-    assert!(sim.available_send_buffer(vectored.connection_id()) > 0);
+    assert_eq!(sim.available_send_bytes(scalar.connection_id()), 0);
+    assert_eq!(sim.available_send_bytes(vectored.connection_id()), 0);
+    let mut sink = vec![0_u8; 1024];
+    let read = drive(&mut sim, scalar_server.read(&mut sink)).expect("scalar peer reads");
+    assert_eq!(sim.available_send_bytes(scalar.connection_id()), read);
+    let read = drive(&mut sim, vectored_server.read(&mut sink)).expect("vectored peer reads");
+    assert_eq!(sim.available_send_bytes(vectored.connection_id()), read);
 }
 
 #[test]
@@ -166,12 +173,12 @@ fn no_progress_io_polls_do_not_consume_simulation_rng() {
         drive(&mut sim, provider.connect("poll-entropy-listener")).expect("client connects");
     let (mut server, _) = drive(&mut sim, listener.accept()).expect("server accepts");
 
-    let capacity = sim.available_send_buffer(client.connection_id());
+    let capacity = sim.available_send_bytes(client.connection_id());
     let payload = vec![0x5a; capacity];
     let accepted = poll_write_once(&mut client, &payload)
         .map(|result| result.expect("initial write succeeds"));
     assert_eq!(accepted, Poll::Ready(capacity));
-    assert_eq!(sim.available_send_buffer(client.connection_id()), 0);
+    assert_eq!(sim.available_send_bytes(client.connection_id()), 0);
 
     let mut chaos = NetworkConfiguration::fast_local();
     chaos.chaos.random_close_probability = 0.5;

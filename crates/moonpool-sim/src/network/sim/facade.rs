@@ -50,7 +50,11 @@ impl SimWorld {
         id: ConnectionId,
         buf: &mut [u8],
     ) -> SimulationResult<usize> {
-        self.inner.write().network.read(id, buf)
+        let (result, wakes) = self.inner.write().network.read(id, buf);
+        // The bytes just read return window to the peer's writer; wake it
+        // outside the lock like every other waiter.
+        wakes.wake();
+        result
     }
 
     pub(crate) fn has_readable_data(&self, id: ConnectionId) -> bool {
@@ -227,23 +231,27 @@ impl SimWorld {
         self.inner.write().network.register_read_clog(id, waker)
     }
 
-    /// Returns send-buffer capacity.
+    /// The end-to-end byte window of `id`'s sending direction (see
+    /// [`NetworkConfiguration::tcp_send_window_bytes`]).
     #[must_use]
-    pub fn send_buffer_capacity(&self, id: ConnectionId) -> usize {
-        self.inner.read().network.send_buffer_capacity(id)
+    pub fn send_window_bytes(&self, id: ConnectionId) -> usize {
+        self.inner.read().network.send_window_bytes(id)
     }
 
-    /// Returns used send-buffer bytes.
+    /// Bytes `id` has written that its peer's application has not read yet,
+    /// wherever they sit: queued locally, in flight, or unread at the peer.
+    /// Never exceeds [`send_window_bytes`](Self::send_window_bytes).
     #[must_use]
-    pub fn send_buffer_used(&self, id: ConnectionId) -> usize {
-        self.queued_send_bytes(id)
+    pub fn outstanding_send_bytes(&self, id: ConnectionId) -> usize {
+        self.inner.read().network.outstanding_send_bytes(id)
     }
 
-    /// Returns available send-buffer bytes.
+    /// Bytes a write on `id` may accept right now: the window minus what is
+    /// outstanding. Zero means the next `poll_write` parks until the peer
+    /// reads.
     #[must_use]
-    pub fn available_send_buffer(&self, id: ConnectionId) -> usize {
-        self.send_buffer_capacity(id)
-            .saturating_sub(self.send_buffer_used(id))
+    pub fn available_send_bytes(&self, id: ConnectionId) -> usize {
+        self.inner.read().network.available_send_bytes(id)
     }
 
     /// Bytes `id` has accepted but not yet put on the wire.

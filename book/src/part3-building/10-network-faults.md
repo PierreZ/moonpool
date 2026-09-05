@@ -52,7 +52,7 @@ A cooldown period prevents cascading closes from overwhelming the system. The go
 
 ### Black Holes
 
-A silent close still ends: the peer eventually reads EOF and learns something. A **black hole** never ends. When `black_hole_probability` fires, one direction of a connection (this side's sends, the peer's, or both, the same three-way draw random close makes) starts accepting every write and delivering nothing. The bytes are acknowledged into the sender's buffer and vanish when they would land, the peer's reads stay `Pending` with no data and no EOF, and a graceful close from the holed side never arrives either. Both ends see a connection that looks perfectly alive. That is what a peer whose kernel keeps acknowledging into a frozen application looks like, or a middlebox that dropped its connection state, and it is the fault that finds a request without a timeout: nothing errors, nothing closes, and only the caller's own deadline can notice. An application-level timeout, an HTTP/2 keep-alive ping, a heartbeat: whatever detects it in production is what has to detect it here.
+A silent close still ends: the peer eventually reads EOF and learns something. A **black hole** never ends. When `black_hole_probability` fires, one direction of a connection (this side's sends, the peer's, or both, the same three-way draw random close makes) starts delivering nothing. The bytes are acknowledged into the sender's window and vanish when they would land, the peer's reads stay `Pending` with no data and no EOF, and a graceful close from the holed side never arrives either. Both ends see a connection that looks perfectly alive. Because the window is end-to-end (see [Flow control](#flow-control)) the swallowed bytes stay charged to the writer: a small request goes in and times out at the application, exactly the failure the fault exists for, while a bulk stream fills its window and its writer parks forever, as a TCP sender whose peer stopped acknowledging would. That is what a peer whose kernel keeps acknowledging into a frozen application looks like, or a middlebox that dropped its connection state, and it is the fault that finds a request without a timeout: nothing errors, nothing closes, and only the caller's own deadline can notice. An application-level timeout, an HTTP/2 keep-alive ping, a heartbeat: whatever detects it in production is what has to detect it here.
 
 ```rust
 let mut config = NetworkConfiguration::fast_local();
@@ -146,13 +146,13 @@ its fate. Every byte moves through four places, in order:
 
 ```text
 application write
-    │  poll_write
+    │  poll_write takes window
 local send queue          stalls under a cut
     │  ProcessSendBuffer samples latency
 in flight                 frozen under a cut, re-timed by the heal
     │  Delivery event
 peer receive buffer       the peer's now; nothing takes it back
-    │  poll_read
+    │  poll_read returns window
 application read
 ```
 
@@ -186,9 +186,45 @@ The hanging mode is particularly nasty. Code that does not implement connect tim
 
 When a connection closes, moonpool models two distinct TCP behaviors:
 
-**Graceful close** implements TCP half-close semantics. The closing side marks its send direction as closed and puts a FIN on the wire behind every byte still queued or in flight, so it lands after all of them and is held by a partition with them. The remote side continues reading buffered data normally and sees EOF only after the FIN arrives. This models a clean `shutdown(SHUT_WR)` followed by `close()`.
+**Graceful close** implements TCP half-close semantics. The closing side marks its send direction as closed and puts a FIN on the wire behind every byte still queued or in flight, so it lands after all of them and is held by a partition with them. The remote side continues reading buffered data normally and sees EOF only after the FIN arrives. What the closing side itself never read is discarded and its window returned to the peer's writer, as a kernel frees a closed socket's receive buffer. This models a clean `shutdown(SHUT_WR)` followed by `close()`.
 
-**Abort close** immediately terminates both directions. No FIN, no buffer drain: the send queue and the flight are gone. The remote side gets a connection reset error on its next read or write. This models a crashed process or a force-killed connection.
+**Abort close** immediately terminates both directions. No FIN, no buffer drain: the send queue, the flight, and the unread bytes are gone. The remote side gets a connection reset error on its next read or write, and a writer parked on a full window is woken to that error rather than left waiting on credits nothing can return. This models a crashed process or a force-killed connection.
+
+## Flow control
+
+Each direction of a connection has one **byte window**
+(`NetworkConfiguration::tcp_send_window_bytes`, `SimulationBuilder::tcp_send_window_bytes`,
+64 KiB by default). The window is taken when `poll_write` accepts bytes and
+returned only when the *peer's application reads them*, byte for byte:
+
+```text
+outstanding = queued + in flight + unread at the peer (+ swallowed by a black hole)
+outstanding ≤ window
+available   = window − outstanding
+```
+
+Moving bytes from the send queue onto the wire, or from the wire into the
+peer's receive buffer, releases nothing; they are the same outstanding bytes
+in a different place. A write accepts `min(len, available)` (a short write,
+like `write(2)`) and parks with `Poll::Pending` when `available` is zero; the
+peer's next read wakes it with exactly the bytes it consumed, so a partial
+read of 137 bytes lets the writer send 137 more. A reader that stops reading
+therefore backs its writer up end to end, even after every byte has reached
+the receive buffer, which is the TCP behavior behind "the server kept
+streaming into a client that had stopped consuming" and the pipeline that
+deadlocks on its own replies. A partition returns no credit (delay is not
+consumption), a black hole never returns it, a peer that closes with bytes
+unread returns them, and an abort wakes the parked writer to the error.
+
+Backpressure is entropy-neutral: a `Poll::Pending` on a full window, the
+wake that follows a read, and every move between the three places consume no
+simulation randomness, so a run that blocks and resumes replays draw for
+draw. Congestion control, retransmission, and segment boundaries are out of
+scope: the model is a reliable ordered byte stream with a bounded number of
+bytes outstanding, which is what exposes the distributed-system behaviors a
+simulation is after.
+
+The distinction matters because many protocols depend on reading remaining data after the peer signals shutdown. HTTP/1.1 relies on this for chunked transfer encoding. gRPC uses it for trailing metadata. If your simulation only models abort closes, you will miss bugs in graceful shutdown handling.
 
 ## The Swizzling Insight
 

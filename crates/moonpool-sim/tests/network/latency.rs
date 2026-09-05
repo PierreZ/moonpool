@@ -184,6 +184,7 @@ fn test_custom_latency_configuration() {
             write_latency: uniform(Duration::from_millis(2), Duration::from_millis(2)),
             link_latency: None,
             chaos: ChaosConfiguration::disabled(),
+            ..NetworkConfiguration::default()
         };
 
         let mut sim = SimWorld::new_with_network_config(config);
@@ -229,6 +230,7 @@ fn test_latency_range_sampling() {
             write_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)),
             link_latency: None,
             chaos: ChaosConfiguration::disabled(),
+            ..NetworkConfiguration::default()
         };
 
         let mut execution_times = Vec::new();
@@ -283,6 +285,7 @@ fn test_network_randomization_ranges() {
             write_latency: uniform(Duration::from_micros(500), Duration::from_micros(500)),
             link_latency: None,
             chaos: ChaosConfiguration::disabled(),
+            ..NetworkConfiguration::default()
         };
 
         let mut sim = SimWorld::new_with_network_config(config);

@@ -23,7 +23,7 @@ use super::{
     event::NetworkOperationId,
     state::{
         ClogState, CloseReason, ConnectionFlags, ConnectionState, InFlight, InFlightPayload,
-        NetworkState, PartitionState,
+        NetworkState, PartitionState, SendWindow,
     },
 };
 
@@ -134,17 +134,28 @@ impl NetworkSimulation {
         id
     }
 
+    /// Drain up to `buf.len()` bytes from `connection_id`'s receive buffer.
+    ///
+    /// Exactly the bytes handed to the application are released from the
+    /// peer's send window (see [`SendWindow`]): a partial read returns a
+    /// partial credit, and a writer parked on that window is woken. Draws
+    /// randomness only when data is available and the partial-read fault
+    /// fires; an empty read consumes none.
     pub(crate) fn read(
         &mut self,
         connection_id: ConnectionId,
         buf: &mut [u8],
-    ) -> SimulationResult<usize> {
+    ) -> (SimulationResult<usize>, WakeBatch) {
         let partial_read_max_bytes = self.state.config.chaos.partial_read_max_bytes;
-        let connection = self
-            .state
-            .connections
-            .get_mut(&connection_id)
-            .ok_or_else(|| SimulationError::InvalidState("connection not found".to_string()))?;
+        let mut wakes = WakeBatch::default();
+        let Some(connection) = self.state.connections.get_mut(&connection_id) else {
+            return (
+                Err(SimulationError::InvalidState(
+                    "connection not found".to_string(),
+                )),
+                wakes,
+            );
+        };
         let available = buf.len().min(connection.receive_buffer.len());
         let limit = if available > 0 && crate::buggify!() {
             let max_read = available.min(partial_read_max_bytes);
@@ -159,14 +170,59 @@ impl NetworkSimulation {
         for (slot, byte) in buf.iter_mut().zip(connection.receive_buffer.drain(..limit)) {
             *slot = byte;
         }
-        Ok(limit)
+        if limit > 0
+            && let Some(sender) = connection.paired_connection
+        {
+            self.release_window(sender, limit, &mut wakes);
+        }
+        (Ok(limit), wakes)
     }
 
-    /// Drop everything `id` has on the wire: an abort resets the flight.
+    /// Return `bytes` to `sender`'s window and wake a writer parked on it.
+    fn release_window(&mut self, sender: ConnectionId, bytes: usize, wakes: &mut WakeBatch) {
+        if bytes == 0 {
+            return;
+        }
+        if let Some(sender_state) = self.state.connections.get_mut(&sender) {
+            sender_state.window.release(bytes);
+            Self::take_waiter(&mut self.waiters.send_buffers, sender, wakes);
+        }
+    }
+
+    /// Drop everything still queued locally on `id`, returning its bytes to
+    /// the window: nothing can deliver them any more, so nothing else could
+    /// ever release them.
+    fn discard_send_queue(&mut self, id: ConnectionId) {
+        if let Some(connection) = self.state.connections.get_mut(&id) {
+            let queued = connection.queued_bytes();
+            connection.send_buffer.clear();
+            connection.window.release(queued);
+        }
+    }
+
+    /// Drop what `id` received but never read — its application closed or shut
+    /// its receive side, so nothing will read it now — and return the bytes
+    /// to the peer's window, waking a writer parked on them. The kernel does
+    /// the same: a receive buffer freed by a close was acknowledged already.
+    fn discard_receive_buffer(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
+        let Some(connection) = self.state.connections.get_mut(&id) else {
+            return;
+        };
+        let unread = connection.receive_buffer.len();
+        connection.receive_buffer.clear();
+        if let Some(sender) = connection.paired_connection {
+            self.release_window(sender, unread, wakes);
+        }
+    }
+
+    /// Drop everything `id` has on the wire (an abort resets the flight) and
+    /// return its bytes to the window.
     fn discard_in_flight(&mut self, id: ConnectionId) {
         if let Some(connection) = self.state.connections.get_mut(&id) {
+            let in_flight = connection.in_flight_bytes();
             connection.in_flight.clear();
             connection.in_flight_held_since = None;
+            connection.window.release(in_flight);
         }
     }
 
@@ -188,6 +244,9 @@ impl NetworkSimulation {
             .connections
             .get_mut(&connection_id)
             .ok_or_else(|| SimulationError::InvalidState("connection not found".to_string()))?;
+        // The window is taken here, the moment the application's bytes are
+        // accepted, and given back only by the peer's read.
+        connection.window.acquire(data.len());
         connection.send_buffer.push_back(data);
         let mut actions = NetworkActions::default();
         if !connection.flags.send_in_progress() {
@@ -202,7 +261,7 @@ impl NetworkSimulation {
         client_addr: &str,
         server_addr: &str,
     ) -> (ConnectionId, ConnectionId) {
-        const DEFAULT_SEND_BUFFER_CAPACITY: usize = 64 * 1024;
+        let send_window = self.state.config.tcp_send_window_bytes;
         let client_conn = ConnectionId(self.state.next_connection_id);
         self.state.next_connection_id += 1;
         let server_conn = ConnectionId(self.state.next_connection_id);
@@ -245,7 +304,7 @@ impl NetworkSimulation {
             last_delivery_at: None,
             flags: ConnectionFlags::default(),
             close_reason: CloseReason::None,
-            send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
+            window: SendWindow::new(send_window),
         };
         self.state.connections.insert(
             client_conn,
@@ -601,8 +660,10 @@ impl NetworkSimulation {
             return;
         };
         // The item left a black-holed sender: it was acknowledged into that
-        // side's buffer and is gone. No bytes, no EOF, no wake — the reader
-        // keeps waiting for data that will never come.
+        // side's window and is gone. No bytes, no EOF, no wake, and the
+        // window credit it took is never returned — the reader keeps waiting
+        // for data that will never come, and once the window is full the
+        // writer waits with it.
         if black_holed {
             return;
         }
@@ -617,7 +678,10 @@ impl NetworkSimulation {
                         !connection.flags.is_closed() && !connection.flags.recv_closed()
                     });
                 let Some(receiver) = receiver.filter(|_| receiver_reading) else {
-                    // A closed or receive-shut peer discards what arrives.
+                    // A closed or receive-shut peer discards what arrives and
+                    // acknowledges it, so the writer is not left waiting on
+                    // credits nobody will ever read back.
+                    self.release_window(sender, data.len(), wakes);
                     return;
                 };
                 let delivered = self.maybe_corrupt_data(receiver, &data, now, actions);
@@ -812,8 +876,8 @@ impl NetworkSimulation {
             (connection.flags.is_closed() || connection.flags.send_closed())
                 && !connection.flags.graceful_close_pending()
         }) {
+            self.discard_send_queue(id);
             if let Some(connection) = self.state.connections.get_mut(&id) {
-                connection.send_buffer.clear();
                 connection.flags.set_send_in_progress(false);
                 connection.flags.set_send_stalled(false);
             }
@@ -831,7 +895,7 @@ impl NetworkSimulation {
         if has_queued_bytes && self.state.connection_partition_clear_at(id, now).is_some() {
             self.stall_partitioned_send(id);
         } else {
-            self.handle_normal_send(id, now, actions, wakes);
+            self.handle_normal_send(id, now, actions);
         }
     }
 
@@ -845,9 +909,10 @@ impl NetworkSimulation {
     /// a clogged pair into added delay (`getRecvDelay` clamps to
     /// `clogPairUntil`), and only an explicit disconnect fails the connection.
     ///
-    /// Send-buffer waiters are deliberately left registered: no buffer space is
-    /// released while the stream is stalled, so writers keep seeing
-    /// backpressure until the send actually drains.
+    /// Send-window waiters are deliberately left registered: no window is
+    /// released while the stream is stalled (nothing reaches the peer's
+    /// reader), so writers keep seeing backpressure until the bytes land and
+    /// are read.
     ///
     /// A stalled connection owns no scheduled work. It is re-driven by
     /// [`resume_after_heal`](Self::resume_after_heal) when the partitions
@@ -895,7 +960,6 @@ impl NetworkSimulation {
         id: ConnectionId,
         now: Duration,
         actions: &mut NetworkActions,
-        wakes: &mut WakeBatch,
     ) {
         let Some(snapshot) = self.state.connections.get(&id).map(|connection| {
             (
@@ -924,7 +988,9 @@ impl NetworkSimulation {
             }
             return;
         };
-        Self::take_waiter(&mut self.waiters.send_buffers, id, wakes);
+        // No window is released here: the bytes have only moved from the
+        // queue onto the wire, and they stay charged to the writer until the
+        // peer's application reads them.
         if crate::buggify!() && !data.is_empty() {
             let max_send = data.len().min(partial_max);
             let truncate_to = sim_random_range(0..max_send + 1);
@@ -1084,11 +1150,25 @@ impl NetworkSimulation {
             .is_some_and(|c| c.flags.remote_fin_received())
     }
 
-    pub(crate) fn send_buffer_capacity(&self, id: ConnectionId) -> usize {
+    pub(crate) fn send_window_bytes(&self, id: ConnectionId) -> usize {
         self.state
             .connections
             .get(&id)
-            .map_or(0, |c| c.send_buffer_capacity)
+            .map_or(0, |c| c.window.capacity())
+    }
+
+    pub(crate) fn outstanding_send_bytes(&self, id: ConnectionId) -> usize {
+        self.state
+            .connections
+            .get(&id)
+            .map_or(0, |c| c.window.outstanding())
+    }
+
+    pub(crate) fn available_send_bytes(&self, id: ConnectionId) -> usize {
+        self.state
+            .connections
+            .get(&id)
+            .map_or(0, |c| c.window.available())
     }
 
     pub(crate) fn queued_send_bytes(&self, id: ConnectionId) -> usize {
@@ -1562,7 +1642,9 @@ impl NetworkSimulation {
         let close_send = a > 0.33;
         if close_send && let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_send_closed(true);
-            c.send_buffer.clear();
+        }
+        if close_send {
+            self.discard_send_queue(id);
         }
         if close_recv && let Some(c) = paired.and_then(|peer| self.state.connections.get_mut(&peer))
         {
@@ -1571,9 +1653,11 @@ impl NetworkSimulation {
         let mut wakes = WakeBatch::default();
         if close_send {
             wakes.push(self.waiters.reads.take(&id));
+            Self::take_waiter(&mut self.waiters.send_buffers, id, &mut wakes);
         }
         if close_recv && let Some(peer) = paired {
             wakes.push(self.waiters.reads.take(&peer));
+            self.discard_receive_buffer(peer, &mut wakes);
         }
         let explicit = sim_random_f64() < self.state.config.chaos.random_close_explicit_ratio;
         let mut actions = NetworkActions::default();
@@ -1694,6 +1778,9 @@ impl NetworkSimulation {
             }
         }
         wakes.push(self.waiters.reads.take(&id));
+        // A close frees what this side never read; the peer's writer gets the
+        // window back (and, on its next write, the FIN below).
+        self.discard_receive_buffer(id, &mut wakes);
         // The FIN goes on the wire behind whatever is already in flight; it
         // can never overtake the stream's last bytes.
         if !send_in_progress && queue_empty {
@@ -1716,13 +1803,18 @@ impl NetworkSimulation {
                 c.flags.set_send_in_progress(false);
                 c.flags.set_send_stalled(false);
                 c.flags.set_graceful_close_pending(false);
-                c.send_buffer.clear();
                 c.close_reason = CloseReason::Aborted;
             }
-            // An RST resets both directions: the queue and the flight are gone.
+            // An RST resets both directions: the queue, the flight and the
+            // unread bytes are gone, and every writer parked on the window
+            // wakes to the error.
+            self.discard_send_queue(current);
             self.discard_in_flight(current);
         }
         let mut wakes = WakeBatch::default();
+        for current in [Some(id), paired].into_iter().flatten() {
+            self.discard_receive_buffer(current, &mut wakes);
+        }
         for current in [Some(id), paired].into_iter().flatten() {
             wakes.push(self.waiters.reads.take(&current));
             Self::take_waiter(&mut self.waiters.write_clogs, current, &mut wakes);
@@ -1745,7 +1837,9 @@ impl NetworkSimulation {
             .and_then(|c| c.paired_connection);
         if close_send && let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_send_closed(true);
-            c.send_buffer.clear();
+        }
+        if close_send {
+            self.discard_send_queue(id);
         }
         if close_recv && let Some(c) = paired.and_then(|peer| self.state.connections.get_mut(&peer))
         {
@@ -1754,9 +1848,11 @@ impl NetworkSimulation {
         let mut wakes = WakeBatch::default();
         if close_send {
             wakes.push(self.waiters.reads.take(&id));
+            Self::take_waiter(&mut self.waiters.send_buffers, id, &mut wakes);
         }
         if close_recv && let Some(peer) = paired {
             wakes.push(self.waiters.reads.take(&peer));
+            self.discard_receive_buffer(peer, &mut wakes);
         }
         wakes
     }

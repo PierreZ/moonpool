@@ -256,6 +256,9 @@ pub struct SimulationBuilder {
     network_fault_mask: crate::NetworkFaultMask,
     /// Distance-based link latency, applied to every iteration's network config.
     link_latency: Option<crate::network::LinkLatencyConfig>,
+    /// End-to-end byte window per stream direction, applied to every
+    /// iteration's network config; `None` keeps the default.
+    tcp_send_window_bytes: Option<usize>,
     /// Buggify-driven knob value-perturbation, enabled via [`Chaos::BuggifyKnobs`].
     /// Internal flag (not a public builder method) so the opt-in stays inside the
     /// `enable_chaos`/`Chaos` model.
@@ -311,6 +314,7 @@ impl SimulationBuilder {
             storage_chaos: None,
             network_fault_mask: crate::NetworkFaultMask::all(),
             link_latency: None,
+            tcp_send_window_bytes: None,
             buggify_knobs: false,
             swarm_operations: false,
             check_determinism: false,
@@ -500,6 +504,20 @@ impl SimulationBuilder {
     #[must_use]
     pub fn link_latency(mut self, config: crate::network::LinkLatencyConfig) -> Self {
         self.link_latency = Some(config);
+        self
+    }
+
+    /// Set the end-to-end byte window of every stream direction (see
+    /// [`NetworkConfiguration::tcp_send_window_bytes`](crate::NetworkConfiguration::tcp_send_window_bytes)).
+    ///
+    /// A small window makes a slow reader back its writer up early, which is
+    /// how flow-control bugs (a server that keeps streaming into a client
+    /// that stopped reading, a pipeline that deadlocks on its own replies)
+    /// become reachable in a short run. Deployment shape rather than chaos:
+    /// applied verbatim on every seed and consumes no draws.
+    #[must_use]
+    pub fn tcp_send_window_bytes(mut self, bytes: usize) -> Self {
+        self.tcp_send_window_bytes = Some(bytes);
         self
     }
 
@@ -1092,6 +1110,7 @@ impl SimulationBuilder {
         storage_chaos: Option<ChaosMode>,
         network_fault_mask: crate::NetworkFaultMask,
         link_latency: Option<crate::network::LinkLatencyConfig>,
+        tcp_send_window_bytes: Option<usize>,
         buggify_knobs: bool,
         seed: u64,
     ) -> crate::sim::SimWorld {
@@ -1123,6 +1142,9 @@ impl SimulationBuilder {
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency = link_latency;
+        if let Some(window) = tcp_send_window_bytes {
+            network_config.tcp_send_window_bytes = window;
+        }
         let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
         // Unlike raw `SimWorld` use, a builder campaign has explicit phases.
         // Setup and the post-chaos quiet tail must not inherit the global sleep
@@ -1834,6 +1856,7 @@ impl SimulationBuilder {
             self.storage_chaos,
             self.network_fault_mask,
             self.link_latency.clone(),
+            self.tcp_send_window_bytes,
             self.buggify_knobs,
             seed,
         );
@@ -2225,8 +2248,15 @@ mod tests {
     ) -> (crate::NetworkConfiguration, u64) {
         crate::sim::reset_sim_rng();
         crate::sim::set_sim_seed(seed);
-        let sim =
-            SimulationBuilder::build_sim_for_iteration(Some(mode), None, mask, None, false, seed);
+        let sim = SimulationBuilder::build_sim_for_iteration(
+            Some(mode),
+            None,
+            mask,
+            None,
+            None,
+            false,
+            seed,
+        );
         let config = sim.with_network_config(Clone::clone);
         let draws_consumed = crate::sim::rng_call_count();
         (config, draws_consumed)

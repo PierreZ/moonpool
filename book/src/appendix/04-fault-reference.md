@@ -26,7 +26,7 @@ Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`)
 | Random connection close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
 | Close error surfacing | `random_close_explicit_ratio` | 30% immediate error, 70% silent close | Explicit-error and timeout-based detection |
 | Close cooldown | `random_close_cooldown` | 5s | Prevents cascading failures after a close event |
-| Black hole | `black_hole_probability` | 0% (off) | A direction that accepts every write and delivers nothing, forever: missing request timeouts, keep-alive and heartbeat detection, half-open connections |
+| Black hole | `black_hole_probability` | 0% (off) | A direction that delivers nothing, forever: writes are accepted until the send window fills, then block. Missing request timeouts, keep-alive and heartbeat detection, half-open connections, writers without a deadline |
 | Black hole cooldown | `black_hole_cooldown` | 5s | Spaces out black holes across connections |
 | Connect failure | `connect_failure_mode` | `Probabilistic` (50% refused, 50% hang) | Connection establishment retries, timeout handling |
 | Connect failure probability | `connect_failure_probability` | 50% | Ratio of failed vs hanging connections |

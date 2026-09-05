@@ -15,6 +15,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add one group of server processes (system under test); repeatable, one group per role, each on its own `10.0.{group}.x` range |
 | `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add one group of processes laid out across a datacenter/zone/machine topology (repeatable like `processes`) |
 | `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
+| `tcp_send_window_bytes(bytes)` | `usize` | End-to-end byte window of every stream direction (default 64 KiB); a small window makes a slow reader back its writer up early |
 | `network_fault_mask(mask)` | `NetworkFaultMask` | Suppress selected families after each Random/Swarm network profile is sampled; deterministic and exploration-safe |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
@@ -152,7 +153,8 @@ Bind, connect, and accept use their latency fields as genuinely delayed
 operations. Each call remains pending until its targeted scheduler completion
 fires. Established reads wait on buffered byte delivery or a network waker.
 Write and link latency apply to ordered byte delivery after the stream accepts
-available send-buffer capacity.
+the bytes into its send window (see
+[Flow control](../part3-building/10-network-faults.md#flow-control)).
 
 | Field | Type | Default |
 |-------|------|---------|
@@ -161,6 +163,7 @@ available send-buffer capacity.
 | `connect_latency` | `LatencyDistribution` | `Uniform` 1ms..11ms |
 | `write_latency` | `LatencyDistribution` | `Uniform` 100us..600us |
 | `link_latency` | `Option<LinkLatencyConfig>` | `None` (distance-blind) |
+| `tcp_send_window_bytes` | `usize` | 64 KiB (`DEFAULT_TCP_SEND_WINDOW_BYTES`) |
 | `chaos` | `ChaosConfiguration` | See below |
 
 ### Constructor variants
@@ -286,8 +289,9 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 
 ### Black Hole
 
-A direction that accepts every write and delivers nothing, for the rest of the
-connection's life; see [Black Holes](../part3-building/10-network-faults.md#black-holes).
+A direction that delivers nothing, for the rest of the connection's life: it
+accepts writes until its send window is full, then blocks; see
+[Black Holes](../part3-building/10-network-faults.md#black-holes).
 
 | Field | Type | Default |
 |-------|------|---------|
