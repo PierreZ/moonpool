@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.9.0] - 2026-09-05
+
+### 🚀 Features
+
+- **moonpool**: Metastable gRPC retry-storm example with an ASCII graph ([#193](https://github.com/PierreZ/moonpool/pull/193))
+- **sim**: Report application metrics from a custom registry ([#190](https://github.com/PierreZ/moonpool/pull/190))
+
+### 🚜 Refactor
+
+- Simplify retained crate internals
+- Move rust crates under crates
+
+
 ## [0.8.0] - 2026-07-09
 
 ### 🚀 Features
