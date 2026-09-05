@@ -9,7 +9,11 @@ use super::ConnectionId;
 pub struct NetworkOperationId(pub(crate) u64);
 
 /// A targeted network transition or delivery.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Events carry identities and deadlines only, never payload: the bytes an
+/// event lands live in the engine's per-connection in-flight queue, where a
+/// fault injected after scheduling can still reach them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkEvent {
     /// Wake-up feed used to evaluate network maintenance at the current time.
     Maintenance,
@@ -47,21 +51,21 @@ pub enum NetworkEvent {
         /// Deadline of the receive partition that created this event.
         expected_deadline: Duration,
     },
-    /// Deliver bytes to a connection.
-    DataDelivery {
-        /// Receiving connection.
+    /// An in-flight item (data chunk or FIN) reached its delivery time.
+    ///
+    /// The item itself lives in the sender's in-flight queue, so a fault
+    /// injected after this event was scheduled still decides its fate: the
+    /// event is a wake-up, not the payload. It is a no-op when the item was
+    /// already delivered or re-timed by a partition.
+    Delivery {
+        /// Sending connection whose flight holds the item.
         connection_id: ConnectionId,
-        /// Delivered bytes.
-        data: Vec<u8>,
+        /// Sequence number of the item within that flight.
+        seq: u64,
     },
     /// Process the next buffered send.
     ProcessSendBuffer {
         /// Connection whose next buffered write should run.
-        connection_id: ConnectionId,
-    },
-    /// Deliver a graceful FIN.
-    FinDelivery {
-        /// Connection receiving the FIN.
         connection_id: ConnectionId,
     },
 }

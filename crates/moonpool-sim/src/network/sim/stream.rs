@@ -48,12 +48,13 @@ fn connection_aborted_error() -> io::Error {
 ///                                                        
 /// stream.write_all(data) ──► poll_write(data) ────────► buffer_send(data)
 ///                                                        └─► ProcessSendBuffer event
-///                                                            └─► DataDelivery event
-///                                                                └─► paired connection
-///                                                        
+///                                                            └─► in-flight queue
+///                                                                └─► Delivery event
+///                                                                    └─► peer receive_buffer
+///
 /// stream.read(buf) ◄────── poll_read(buf) ◄──────────── receive_buffer
 ///                          │                           └─► waker registration
-///                          └─► Poll::Pending/Ready     
+///                          └─► Poll::Pending/Ready
 /// ```
 ///
 /// ## TCP Semantics Implemented

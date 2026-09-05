@@ -70,9 +70,10 @@ impl SimWorld {
         client: &str,
         server: &str,
     ) -> (ConnectionId, ConnectionId) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        inner.network.create_connection_pair(client, server, now)
+        self.inner
+            .write()
+            .network
+            .create_connection_pair(client, server)
     }
 
     pub(crate) fn discard_connection_pair(&self, id: ConnectionId) {
@@ -235,7 +236,7 @@ impl SimWorld {
     /// Returns used send-buffer bytes.
     #[must_use]
     pub fn send_buffer_used(&self, id: ConnectionId) -> usize {
-        self.inner.read().network.send_buffer_used(id)
+        self.queued_send_bytes(id)
     }
 
     /// Returns available send-buffer bytes.
@@ -243,6 +244,30 @@ impl SimWorld {
     pub fn available_send_buffer(&self, id: ConnectionId) -> usize {
         self.send_buffer_capacity(id)
             .saturating_sub(self.send_buffer_used(id))
+    }
+
+    /// Bytes `id` has accepted but not yet put on the wire.
+    #[must_use]
+    pub fn queued_send_bytes(&self, id: ConnectionId) -> usize {
+        self.inner.read().network.queued_send_bytes(id)
+    }
+
+    /// Bytes `id` has on the wire: sent, not yet in the peer's receive buffer.
+    #[must_use]
+    pub fn in_flight_bytes(&self, id: ConnectionId) -> usize {
+        self.inner.read().network.in_flight_bytes(id)
+    }
+
+    /// Bytes delivered to `id` that its application has not read yet.
+    #[must_use]
+    pub fn unread_bytes(&self, id: ConnectionId) -> usize {
+        self.inner.read().network.unread_bytes(id)
+    }
+
+    /// Whether a partition is currently freezing what `id` has in flight.
+    #[must_use]
+    pub fn is_in_flight_held(&self, id: ConnectionId) -> bool {
+        self.inner.read().network.is_in_flight_held(id)
     }
 
     pub(crate) fn register_send_buffer_waker(&self, id: ConnectionId, waker: &Waker) -> bool {

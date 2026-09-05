@@ -52,7 +52,7 @@ A cooldown period prevents cascading closes from overwhelming the system. The go
 
 ### Black Holes
 
-A silent close still ends: the peer eventually reads EOF and learns something. A **black hole** never ends. When `black_hole_probability` fires, one direction of a connection (this side's sends, the peer's, or both, the same three-way draw random close makes) starts accepting every write and delivering nothing. The bytes are acknowledged into the sender's buffer and vanish, the peer's reads stay `Pending` with no data and no EOF, and a graceful close from the holed side never arrives either. Both ends see a connection that looks perfectly alive. That is what a peer whose kernel keeps acknowledging into a frozen application looks like, or a middlebox that dropped its connection state, and it is the fault that finds a request without a timeout: nothing errors, nothing closes, and only the caller's own deadline can notice. An application-level timeout, an HTTP/2 keep-alive ping, a heartbeat: whatever detects it in production is what has to detect it here.
+A silent close still ends: the peer eventually reads EOF and learns something. A **black hole** never ends. When `black_hole_probability` fires, one direction of a connection (this side's sends, the peer's, or both, the same three-way draw random close makes) starts accepting every write and delivering nothing. The bytes are acknowledged into the sender's buffer and vanish when they would land, the peer's reads stay `Pending` with no data and no EOF, and a graceful close from the holed side never arrives either. Both ends see a connection that looks perfectly alive. That is what a peer whose kernel keeps acknowledging into a frozen application looks like, or a middlebox that dropped its connection state, and it is the fault that finds a request without a timeout: nothing errors, nothing closes, and only the caller's own deadline can notice. An application-level timeout, an HTTP/2 keep-alive ping, a heartbeat: whatever detects it in production is what has to detect it here.
 
 ```rust
 let mut config = NetworkConfiguration::fast_local();
@@ -139,6 +139,36 @@ framed protocol (h2 on the same connection) would corrupt the frame that follows
 This mirrors FoundationDB's `SimClogging`, where a clogged pair adds delay and
 only an explicit disconnect fails the connection.
 
+The same holds for bytes that are already **on the wire**. A chunk that left
+the send buffer has a delivery time sampled from the write latency, and that
+time was sampled before the partition existed; the partition still decides
+its fate. Every byte moves through four places, in order:
+
+```text
+application write
+    │  poll_write
+local send queue          stalls under a cut
+    │  ProcessSendBuffer samples latency
+in flight                 frozen under a cut, re-timed by the heal
+    │  Delivery event
+peer receive buffer       the peer's now; nothing takes it back
+    │  poll_read
+application read
+```
+
+When a cut lands, every chunk (and any FIN) in flight on the cut direction is
+**frozen** where it is. Its `Delivery` event still fires at the old time and
+does nothing. When every partition blocking the direction has healed, each
+frozen item is re-timed by exactly the time the direction spent cut, so a cut
+of `D` delays every byte it caught by `D`, the stream keeps its order (a chunk
+sent after the heal lands behind the last frozen one), and no randomness is
+drawn: the latencies already sampled are reused. A response written at `t=0`
+with `100ms` of latency does not slip through a partition that starts at
+`t=50ms`; it lands at `100ms + (heal − 50ms)`. Directed, send-wide, and
+receive-wide cuts all freeze the same way, an explicit heal and the
+recovery-mode heal both thaw the same way, and a FIN is an item like any
+other: the peer sees the last bytes and then EOF, never EOF first.
+
 The first three strategies are IP-blind: they pick nodes out of a hat. `IsolateZone` and `IsolateDatacenter` read the [`.cluster()`](09-attrition.md#failure-domains-correlated-reboots) topology instead, so the cut lands exactly where a real one would, on the boundary that shares a switch or a region. Without a topology they fall back to `Random` selection, which keeps them safe to draw for any seed.
 
 The asymmetric pair is worth dwelling on. A node whose sends are blocked still hears every heartbeat from the cluster, so it happily believes it is healthy while everyone else marks it dead. Systems that infer liveness from "I can see you" rather than "you can see me" split brains here. Both arms record their own fault events (`SendPartitionCreated`, `RecvPartitionCreated`) on the timeline, so an invariant can correlate application behavior with the exact one-way cut that caused it.
@@ -156,11 +186,9 @@ The hanging mode is particularly nasty. Code that does not implement connect tim
 
 When a connection closes, moonpool models two distinct TCP behaviors:
 
-**Graceful close** implements TCP half-close semantics. The closing side marks its send direction as closed and schedules a `FinDelivery` event that arrives after all in-flight data has been delivered. The remote side continues reading buffered data normally and sees EOF only after the FIN arrives. This models a clean `shutdown(SHUT_WR)` followed by `close()`.
+**Graceful close** implements TCP half-close semantics. The closing side marks its send direction as closed and puts a FIN on the wire behind every byte still queued or in flight, so it lands after all of them and is held by a partition with them. The remote side continues reading buffered data normally and sees EOF only after the FIN arrives. This models a clean `shutdown(SHUT_WR)` followed by `close()`.
 
-**Abort close** immediately terminates both directions. No FIN, no buffer drain. The remote side gets a connection reset error on its next read or write. This models a crashed process or a force-killed connection.
-
-The distinction matters because many protocols depend on reading remaining data after the peer signals shutdown. HTTP/1.1 relies on this for chunked transfer encoding. gRPC uses it for trailing metadata. If your simulation only models abort closes, you will miss bugs in graceful shutdown handling.
+**Abort close** immediately terminates both directions. No FIN, no buffer drain: the send queue and the flight are gone. The remote side gets a connection reset error on its next read or write. This models a crashed process or a force-killed connection.
 
 ## The Swizzling Insight
 

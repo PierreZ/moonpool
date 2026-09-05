@@ -66,7 +66,7 @@ does **not** own logical time or a private queue.
 
 `SimWorld` coordinates a single `Scheduler<Event>` for timers, network events,
 storage events, and process lifecycle. A network transition returns ordered
-actions such as scheduling a `DataDelivery`, cancelling an operation, or
+actions such as scheduling a `Delivery`, cancelling an operation, or
 recording a fault. The coordinator applies those actions, releases its lock,
 then wakes tasks. Keeping wake calls outside the lock lets a re-entrant waker
 poll network state without deadlocking.

@@ -1,4 +1,28 @@
 //! Mutable state owned by the simulated network engine.
+//!
+//! # Byte lifecycle
+//!
+//! Every byte an application writes to a simulated stream moves through four
+//! places, always in this order and never skipping one:
+//!
+//! ```text
+//! application write
+//!     |  poll_write accepts up to the send buffer's free capacity
+//! local send queue        ConnectionState::send_buffer      (sender side)
+//!     |  ProcessSendBuffer: latency sampled, chunk put on the wire
+//! in flight               ConnectionState::in_flight        (sender side)
+//!     |  Delivery event at deliver_at, unless the direction is held
+//! peer receive buffer     ConnectionState::receive_buffer   (receiver side)
+//!     |  poll_read drains
+//! application read
+//! ```
+//!
+//! A fault is defined for every stage. A partition that cuts the direction
+//! stalls the send queue *and* freezes what is already in flight
+//! ([`ConnectionState::in_flight_held_since`]); a black hole makes in-flight
+//! bytes vanish at the instant they would land; an abort discards the send
+//! queue and the flight and resets the peer. Bytes that reached the receive
+//! buffer are the peer's: nothing on the wire can take them back.
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -26,6 +50,40 @@ pub enum CloseReason {
     Graceful,
     /// Aborted RST close.
     Aborted,
+}
+
+/// One item that has left its sender and not yet reached the peer's receive
+/// buffer: a data chunk or the FIN that ends the stream.
+///
+/// Items are delivered strictly in `seq` order at `deliver_at`, which only
+/// ever moves later (a partition freezes the flight and shifts every item by
+/// the time it stayed cut). The `seq` doubles as the identity a scheduled
+/// [`NetworkEvent::Delivery`](super::NetworkEvent::Delivery) refers to, so a
+/// delivery event that fires for an item already delivered, or re-timed, is a
+/// no-op.
+#[derive(Debug, Clone)]
+pub(crate) struct InFlight {
+    pub(crate) seq: u64,
+    pub(crate) deliver_at: Duration,
+    pub(crate) payload: InFlightPayload,
+}
+
+/// What an in-flight item carries.
+#[derive(Debug, Clone)]
+pub(crate) enum InFlightPayload {
+    /// Ordered stream bytes.
+    Data(Vec<u8>),
+    /// A graceful close; always the last item of a stream.
+    Fin,
+}
+
+impl InFlightPayload {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Data(bytes) => bytes.len(),
+            Self::Fin => 0,
+        }
+    }
 }
 
 /// A directed partition between two IP addresses.
@@ -135,6 +193,10 @@ impl ConnectionFlags {
 }
 
 /// State for one endpoint of a simulated TCP connection.
+///
+/// The sending half (`send_buffer`, `in_flight`, the delivery clock) belongs
+/// to this endpoint and describes the direction `local_ip -> remote_ip`; the
+/// receiving half is `receive_buffer`, filled by the peer's deliveries.
 #[derive(Debug, Clone)]
 pub(crate) struct ConnectionState {
     pub(crate) local_ip: Option<IpAddr>,
@@ -142,12 +204,38 @@ pub(crate) struct ConnectionState {
     pub(crate) peer_address: String,
     pub(crate) receive_buffer: VecDeque<u8>,
     pub(crate) paired_connection: Option<ConnectionId>,
+    /// Chunks accepted from the application and not yet put on the wire.
     pub(crate) send_buffer: VecDeque<Vec<u8>>,
-    pub(crate) next_send_time: Duration,
+    /// Chunks (and at most one trailing FIN) on the wire towards the peer, in
+    /// delivery order.
+    pub(crate) in_flight: VecDeque<InFlight>,
+    /// Set while a partition freezes the flight: the instant it was cut.
+    ///
+    /// A held direction delivers nothing. When every partition blocking it has
+    /// healed, each in-flight item is re-timed by the time the direction spent
+    /// cut, so the cut delays every byte it caught by exactly its own length
+    /// and never reorders the stream.
+    pub(crate) in_flight_held_since: Option<Duration>,
+    /// Next `seq` to hand an in-flight item.
+    pub(crate) next_in_flight_seq: u64,
+    /// Delivery time of the most recent item put on the wire; the next item
+    /// is delivered strictly after it, which is what keeps the stream FIFO.
+    pub(crate) last_delivery_at: Option<Duration>,
     pub(crate) flags: ConnectionFlags,
     pub(crate) close_reason: CloseReason,
     pub(crate) send_buffer_capacity: usize,
-    pub(crate) last_data_delivery_scheduled_at: Option<Duration>,
+}
+
+impl ConnectionState {
+    /// Bytes waiting in the local send queue.
+    pub(crate) fn queued_bytes(&self) -> usize {
+        self.send_buffer.iter().map(Vec::len).sum()
+    }
+
+    /// Bytes on the wire (excluding the FIN, which carries none).
+    pub(crate) fn in_flight_bytes(&self) -> usize {
+        self.in_flight.iter().map(|item| item.payload.len()).sum()
+    }
 }
 
 /// Protocol state owned exclusively by the simulated network engine.
