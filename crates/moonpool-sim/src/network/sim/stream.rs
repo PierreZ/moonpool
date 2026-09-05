@@ -178,7 +178,7 @@ impl SimTcpStream {
         // Phase 7: Check for write clogging
         if sim.is_write_clogged(self.connection_id) {
             // Already clogged, register waker and return Pending
-            if !sim.register_clog_waker(self.connection_id, cx.waker().clone()) {
+            if !sim.register_clog_waker(self.connection_id, cx.waker()) {
                 return Some(Poll::Ready(Err(sim_shutdown_error())));
             }
             return Some(Poll::Pending);
@@ -187,7 +187,7 @@ impl SimTcpStream {
         // Check if this write should be clogged
         if sim.should_clog_write(self.connection_id) {
             sim.clog_write(self.connection_id);
-            if !sim.register_clog_waker(self.connection_id, cx.waker().clone()) {
+            if !sim.register_clog_waker(self.connection_id, cx.waker()) {
                 return Some(Poll::Ready(Err(sim_shutdown_error())));
             }
             return Some(Poll::Pending);
@@ -249,7 +249,7 @@ impl AsyncRead for SimTcpStream {
         // Check for read clogging (symmetric with write clogging)
         if sim.is_read_clogged(self.connection_id) {
             // Already clogged, register waker and return Pending
-            if !sim.register_read_clog_waker(self.connection_id, cx.waker().clone()) {
+            if !sim.register_read_clog_waker(self.connection_id, cx.waker()) {
                 return Poll::Ready(Err(sim_shutdown_error()));
             }
             return Poll::Pending;
@@ -284,7 +284,7 @@ impl AsyncRead for SimTcpStream {
         // Check if this read should be clogged
         if sim.should_clog_read(self.connection_id) {
             sim.clog_read(self.connection_id);
-            if !sim.register_read_clog_waker(self.connection_id, cx.waker().clone()) {
+            if !sim.register_read_clog_waker(self.connection_id, cx.waker()) {
                 return Poll::Ready(Err(sim_shutdown_error()));
             }
             return Poll::Pending;
@@ -332,7 +332,7 @@ impl SimTcpStream {
             "SimTcpStream::poll_read connection_id={} no data, registering waker",
             connection_id.0
         );
-        if !sim.register_read_waker(connection_id, cx.waker().clone()) {
+        if !sim.register_read_waker(connection_id, cx.waker()) {
             return Poll::Ready(Err(sim_shutdown_error()));
         }
 
@@ -407,7 +407,7 @@ impl AsyncWrite for SimTcpStream {
                 self.connection_id.0,
                 buf.len()
             );
-            if !sim.register_send_buffer_waker(self.connection_id, cx.waker().clone()) {
+            if !sim.register_send_buffer_waker(self.connection_id, cx.waker()) {
                 return Poll::Ready(Err(sim_shutdown_error()));
             }
             return Poll::Pending;
@@ -468,7 +468,7 @@ impl AsyncWrite for SimTcpStream {
         // fits and report a short count; only block when there is NO room at all.
         let available = sim.available_send_buffer(self.connection_id);
         if available == 0 {
-            if !sim.register_send_buffer_waker(self.connection_id, cx.waker().clone()) {
+            if !sim.register_send_buffer_waker(self.connection_id, cx.waker()) {
                 return Poll::Ready(Err(sim_shutdown_error()));
             }
             return Poll::Pending;

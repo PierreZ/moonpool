@@ -126,10 +126,6 @@ impl NetworkSimulation {
         self.localities = localities;
     }
 
-    pub(crate) fn locality_for(&self, ip: IpAddr) -> Option<LocalityInfo> {
-        self.localities.get(&ip).cloned()
-    }
-
     pub(crate) fn create_listener(&mut self) -> ListenerId {
         let id = ListenerId(self.state.next_listener_id);
         self.state.next_listener_id += 1;
@@ -149,7 +145,7 @@ impl NetworkSimulation {
             .get_mut(&connection_id)
             .ok_or_else(|| SimulationError::InvalidState("connection not found".to_string()))?;
         let available = buf.len().min(connection.receive_buffer.len());
-        let limit = if available > 0 && !connection.flags.is_stable() && crate::buggify!() {
+        let limit = if available > 0 && crate::buggify!() {
             let max_read = available.min(partial_read_max_bytes);
             if max_read >= 1 {
                 sim_random_range(1..max_read + 1)
@@ -239,7 +235,6 @@ impl NetworkSimulation {
             flags: ConnectionFlags::default(),
             close_reason: CloseReason::None,
             send_buffer_capacity: DEFAULT_SEND_BUFFER_CAPACITY,
-            send_delay: None,
             last_data_delivery_scheduled_at: None,
         };
         self.state.connections.insert(
@@ -274,7 +269,7 @@ impl NetworkSimulation {
             self.state.connections.remove(&current);
             self.state.connection_clogs.remove(&current);
             self.state.read_clogs.remove(&current);
-            wakes.push(self.waiters.reads.remove(&current));
+            wakes.push(self.waiters.reads.take(&current));
             Self::take_waiter(&mut self.waiters.write_clogs, current, &mut wakes);
             Self::take_waiter(&mut self.waiters.read_clogs, current, &mut wakes);
             Self::take_waiter(&mut self.waiters.send_buffers, current, &mut wakes);
@@ -288,7 +283,7 @@ impl NetworkSimulation {
         wakes
     }
 
-    pub(crate) fn register_read(&mut self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_read(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
             .state
             .connections
@@ -297,7 +292,7 @@ impl NetworkSimulation {
         {
             return false;
         }
-        self.waiters.reads.insert(id, waker);
+        self.waiters.reads.register(id, waker);
         true
     }
 
@@ -439,7 +434,7 @@ impl NetworkSimulation {
             NetworkEvent::Maintenance => {}
             NetworkEvent::OperationReady { operation_id } => {
                 self.completed_operations.insert(operation_id);
-                wakes.push(self.operation_waiters.remove(&operation_id));
+                wakes.push(self.operation_waiters.take(&operation_id));
             }
             NetworkEvent::ClogClear {
                 connection_id,
@@ -495,7 +490,7 @@ impl NetworkSimulation {
                 connection_id,
                 data,
             } => {
-                self.handle_data_delivery(connection_id, data, now, &mut actions, &mut wakes);
+                self.handle_data_delivery(connection_id, &data, now, &mut actions, &mut wakes);
             }
             NetworkEvent::ProcessSendBuffer { connection_id } => {
                 self.handle_process_send_buffer(connection_id, now, &mut actions, &mut wakes);
@@ -512,7 +507,7 @@ impl NetworkSimulation {
         id: ConnectionId,
         wakes: &mut WakeBatch,
     ) {
-        wakes.push(registered.remove(&id));
+        wakes.push(registered.take(&id));
     }
 
     fn clear_expired_write_clogs(&mut self, now: Duration, wakes: &mut WakeBatch) {
@@ -531,35 +526,27 @@ impl NetworkSimulation {
     fn handle_data_delivery(
         &mut self,
         id: ConnectionId,
-        data: Vec<u8>,
+        data: &[u8],
         now: Duration,
         actions: &mut NetworkActions,
         wakes: &mut WakeBatch,
     ) {
-        let Some(stable) = self
-            .state
-            .connections
-            .get(&id)
-            .filter(|connection| !connection.flags.is_closed() && !connection.flags.recv_closed())
-            .map(|connection| connection.flags.is_stable())
-        else {
+        if !self.state.connections.get(&id).is_some_and(|connection| {
+            !connection.flags.is_closed() && !connection.flags.recv_closed()
+        }) {
             return;
-        };
+        }
         // The chunk left a black-holed sender: it was acknowledged into that
         // side's buffer and is gone. No bytes, no wake — the reader keeps
         // waiting for data that will never come.
         if self.peer_send_black_holed(id) {
             return;
         }
-        let delivered = if stable {
-            data
-        } else {
-            self.maybe_corrupt_data(id, &data, now, actions)
-        };
+        let delivered = self.maybe_corrupt_data(id, data, now, actions);
         if let Some(connection) = self.state.connections.get_mut(&id) {
             connection.receive_buffer.extend(delivered);
         }
-        wakes.push(self.waiters.reads.remove(&id));
+        wakes.push(self.waiters.reads.take(&id));
     }
 
     fn handle_fin_delivery(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
@@ -572,7 +559,7 @@ impl NetworkSimulation {
             && !connection.flags.is_closed()
         {
             connection.flags.set_remote_fin_received(true);
-            wakes.push(self.waiters.reads.remove(&id));
+            wakes.push(self.waiters.reads.take(&id));
         }
     }
 
@@ -728,16 +715,14 @@ impl NetworkSimulation {
         let Some(snapshot) = self.state.connections.get(&id).map(|connection| {
             (
                 connection.paired_connection,
-                connection.send_delay,
                 connection.next_send_time,
-                connection.flags.is_stable(),
                 connection.local_ip,
                 connection.remote_ip,
             )
         }) else {
             return;
         };
-        let (paired_id, send_delay, next_send_time, stable, local_ip, remote_ip) = snapshot;
+        let (paired_id, next_send_time, local_ip, remote_ip) = snapshot;
         let pair_extra = local_ip
             .zip(remote_ip)
             .and_then(|pair| self.state.pair_latencies.get(&pair).copied())
@@ -761,7 +746,7 @@ impl NetworkSimulation {
             return;
         };
         Self::take_waiter(&mut self.waiters.send_buffers, id, wakes);
-        if !stable && crate::buggify!() && !data.is_empty() {
+        if crate::buggify!() && !data.is_empty() {
             let max_send = data.len().min(partial_max);
             let truncate_to = sim_random_range(0..max_send + 1);
             if truncate_to < data.len() {
@@ -771,7 +756,7 @@ impl NetworkSimulation {
             }
         }
         let base_delay = if connection.send_buffer.is_empty() {
-            send_delay.unwrap_or_else(|| crate::network::sample_latency(&write_latency))
+            crate::network::sample_latency(&write_latency)
         } else {
             Duration::from_nanos(1)
         };
@@ -867,11 +852,11 @@ impl NetworkSimulation {
         waker: &Waker,
     ) -> SimulationResult<bool> {
         if self.failed_operations.remove(&id) {
-            self.operation_waiters.remove(&id);
+            self.operation_waiters.take(&id);
             return Err(SimulationError::SimulationShutdown);
         }
         if self.completed_operations.remove(&id) {
-            self.operation_waiters.remove(&id);
+            self.operation_waiters.take(&id);
             Ok(true)
         } else {
             self.operation_waiters.register(id, waker);
@@ -882,7 +867,7 @@ impl NetworkSimulation {
     pub(crate) fn cancel_operation(&mut self, id: NetworkOperationId) {
         self.completed_operations.remove(&id);
         self.failed_operations.remove(&id);
-        self.operation_waiters.remove(&id);
+        self.operation_waiters.take(&id);
     }
 
     pub(crate) fn fail_operation(&mut self, id: NetworkOperationId) {
@@ -940,7 +925,7 @@ impl NetworkSimulation {
             .map_or(0, |c| c.send_buffer.iter().map(Vec::len).sum())
     }
 
-    pub(crate) fn register_send_buffer(&mut self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_send_buffer(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
             .state
             .connections
@@ -949,12 +934,8 @@ impl NetworkSimulation {
         {
             return false;
         }
-        self.waiters.send_buffers.insert(id, waker);
+        self.waiters.send_buffers.register(id, waker);
         true
-    }
-
-    pub(crate) fn send_delay(&self, id: ConnectionId) -> Option<Duration> {
-        self.state.connections.get(&id).and_then(|c| c.send_delay)
     }
 
     pub(crate) fn pair_latency(&self, src: IpAddr, dst: IpAddr) -> Option<Duration> {
@@ -1015,14 +996,6 @@ impl NetworkSimulation {
     }
 
     pub(crate) fn should_clog_write(&self, id: ConnectionId, now: Duration) -> bool {
-        if self
-            .state
-            .connections
-            .get(&id)
-            .is_some_and(|c| c.flags.is_stable())
-        {
-            return false;
-        }
         if let Some(clog) = self.state.connection_clogs.get(&id) {
             return now < clog.expires_at;
         }
@@ -1057,7 +1030,7 @@ impl NetworkSimulation {
             .is_some_and(|c| now < c.expires_at)
     }
 
-    pub(crate) fn register_write_clog(&mut self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_write_clog(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
             .state
             .connections
@@ -1066,19 +1039,11 @@ impl NetworkSimulation {
         {
             return false;
         }
-        self.waiters.write_clogs.insert(id, waker);
+        self.waiters.write_clogs.register(id, waker);
         true
     }
 
     pub(crate) fn should_clog_read(&self, id: ConnectionId, now: Duration) -> bool {
-        if self
-            .state
-            .connections
-            .get(&id)
-            .is_some_and(|c| c.flags.is_stable())
-        {
-            return false;
-        }
         if let Some(clog) = self.state.read_clogs.get(&id) {
             return now < clog.expires_at;
         }
@@ -1113,7 +1078,7 @@ impl NetworkSimulation {
             .is_some_and(|c| now < c.expires_at)
     }
 
-    pub(crate) fn register_read_clog(&mut self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_read_clog(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
             .state
             .connections
@@ -1122,30 +1087,8 @@ impl NetworkSimulation {
         {
             return false;
         }
-        self.waiters.read_clogs.insert(id, waker);
+        self.waiters.read_clogs.register(id, waker);
         true
-    }
-
-    pub(crate) fn clear_expired_clogs(&mut self, now: Duration) -> WakeBatch {
-        let mut wakes = WakeBatch::default();
-        self.clear_expired_write_clogs(now, &mut wakes);
-        wakes
-    }
-
-    pub(crate) fn mark_stable(&mut self, id: ConnectionId) {
-        let paired = self
-            .state
-            .connections
-            .get(&id)
-            .and_then(|c| c.paired_connection);
-        if let Some(connection) = self.state.connections.get_mut(&id) {
-            connection.flags.set_is_stable(true);
-        }
-        if let Some(paired) = paired
-            && let Some(connection) = self.state.connections.get_mut(&paired)
-        {
-            connection.flags.set_is_stable(true);
-        }
     }
 
     fn randomly_trigger_partitions(&mut self, now: Duration) -> NetworkActions {
@@ -1402,12 +1345,7 @@ impl NetworkSimulation {
         now: Duration,
     ) -> (Option<bool>, NetworkActions, WakeBatch) {
         let config = &self.state.config.chaos;
-        if self
-            .state
-            .connections
-            .get(&id)
-            .is_some_and(|c| c.flags.is_stable())
-            || config.random_close_probability <= 0.0
+        if config.random_close_probability <= 0.0
             || now.saturating_sub(self.state.last_random_close_time) < config.random_close_cooldown
             || !crate::buggify_with_prob!(config.random_close_probability)
         {
@@ -1432,10 +1370,10 @@ impl NetworkSimulation {
         }
         let mut wakes = WakeBatch::default();
         if close_send {
-            wakes.push(self.waiters.reads.remove(&id));
+            wakes.push(self.waiters.reads.take(&id));
         }
         if close_recv && let Some(peer) = paired {
-            wakes.push(self.waiters.reads.remove(&peer));
+            wakes.push(self.waiters.reads.take(&peer));
         }
         let explicit = sim_random_f64() < self.state.config.chaos.random_close_explicit_ratio;
         let mut actions = NetworkActions::default();
@@ -1556,7 +1494,7 @@ impl NetworkSimulation {
                 c.flags.set_graceful_close_pending(true);
             }
         }
-        wakes.push(self.waiters.reads.remove(&id));
+        wakes.push(self.waiters.reads.take(&id));
         if !snapshot.3 && snapshot.4 {
             Self::schedule_fin(snapshot.0, snapshot.5, now, &mut actions);
         }
@@ -1583,7 +1521,7 @@ impl NetworkSimulation {
         }
         let mut wakes = WakeBatch::default();
         for current in [Some(id), paired].into_iter().flatten() {
-            wakes.push(self.waiters.reads.remove(&current));
+            wakes.push(self.waiters.reads.take(&current));
             Self::take_waiter(&mut self.waiters.write_clogs, current, &mut wakes);
             Self::take_waiter(&mut self.waiters.read_clogs, current, &mut wakes);
             Self::take_waiter(&mut self.waiters.send_buffers, current, &mut wakes);
@@ -1612,10 +1550,10 @@ impl NetworkSimulation {
         }
         let mut wakes = WakeBatch::default();
         if close_send {
-            wakes.push(self.waiters.reads.remove(&id));
+            wakes.push(self.waiters.reads.take(&id));
         }
         if close_recv && let Some(peer) = paired {
-            wakes.push(self.waiters.reads.remove(&peer));
+            wakes.push(self.waiters.reads.take(&peer));
         }
         wakes
     }

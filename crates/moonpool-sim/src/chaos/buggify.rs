@@ -21,10 +21,12 @@ pub use moonpool_buggify::buggify_internal;
 /// Installs the simulation's seeded RNG as the buggify random source, then
 /// enables buggify with the given activation probability. Each buggify
 /// location is randomly activated once per run; active locations fire
-/// probabilistically on each call.
-pub fn buggify_init(activation_prob: f64, firing_prob: f64) {
+/// probabilistically on each call at the rate the macro names (25% for
+/// [`buggify!`](crate::buggify), the per-site argument for
+/// [`buggify_with_prob!`](crate::buggify_with_prob)).
+pub fn buggify_init(activation_prob: f64) {
     moonpool_buggify::set_random_source(sim_random_f64);
-    moonpool_buggify::buggify_init(activation_prob, firing_prob);
+    moonpool_buggify::buggify_init(activation_prob);
 }
 
 /// Reset/disable buggify and uninstall the simulation random source.
@@ -90,7 +92,7 @@ mod tests {
     #[test]
     fn test_activation_consistency() {
         set_sim_seed(12345);
-        buggify_init(0.5, 1.0);
+        buggify_init(0.5);
 
         let location = "test_location";
         let first = buggify_internal(1.0, location);
@@ -109,7 +111,7 @@ mod tests {
 
         for run in 0..2 {
             set_sim_seed(SEED);
-            buggify_init(0.5, 0.5);
+            buggify_init(0.5);
 
             let results = if run == 0 {
                 &mut results1
@@ -133,7 +135,7 @@ mod tests {
     fn test_macro_paths_share_state() {
         // The sim re-export and the standalone crate must hit the same state.
         set_sim_seed(4242);
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
         assert_eq!(
             moonpool_buggify::buggify_internal(1.0, "shared_state"),
             buggify_internal(1.0, "shared_state"),
@@ -147,7 +149,7 @@ mod tests {
     fn knob_sequence(seed: u64) -> Vec<u64> {
         reset_sim_rng();
         set_sim_seed(seed);
-        buggify_init(0.8, 0.8);
+        buggify_init(0.8);
         let mut out = Vec::new();
         for i in 0..20 {
             // Distinct call-site identity per index without a real source line.
@@ -194,7 +196,7 @@ mod tests {
     fn test_buggify_knob_spiked_value_in_range() {
         reset_sim_rng();
         set_sim_seed(7);
-        buggify_init(1.0, 1.0); // always active + fire
+        buggify_init(1.0); // always active + fire
         let v = buggify_knob_internal::<u64>(100, 1_000..2_000, "always");
         buggify_reset();
         assert!(

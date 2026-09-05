@@ -134,7 +134,7 @@ The debugging workflow:
 
 ## Stop Conditions
 
-How long should a chaos run last? Any fixed seed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count** — when the run has nothing left to discover. Moonpool exposes three answers via `IterationControl`.
+How long should a chaos run last? Any fixed seed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count** — when the run has nothing left to discover. Moonpool exposes two answers via `IterationControl`.
 
 **`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default, and the one you want most of the time. It stops when every observed `assert_sometimes!` / `assert_reachable!` has fired at least once **and** code coverage has not grown for `plateau_seeds` consecutive seeds. The `max_iterations` field is a safety cap. Under `cargo xtask sim run` the binaries are sancov-instrumented, so the progress signal is **real code coverage** — the count of distinct edges the seeds have exercised. Under plain `cargo nextest run` there is no instrumentation, so it falls back to **assertion coverage** — the set of sometimes/reachable messages that have fired. The report names which signal it used, so the fallback is never silent. This works **with or without** exploration; no fork happens unless you call `.enable_exploration()`.
 
@@ -146,8 +146,6 @@ SimulationBuilder::new()
 ```
 
 **`FixedCount(n)`** is the workhorse for reproducible replay. You commit to running exactly `n` seeds, the duration is bounded, and the report is identical across machines. Reach for this when debugging a specific seed or when budgets must be predictable.
-
-**`TimeLimit(d)`** is the answer when "as much chaos as we have time for" is the right framing. Long-running soak runs and overnight loops use this. The seed count is unbounded but the wall clock is.
 
 `UntilCoverageStable` sets `report.convergence_timeout = true` when the safety cap is hit before the run saturates, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
 

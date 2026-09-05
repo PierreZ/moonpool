@@ -4,7 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use super::builder::IterationControl;
-use super::wall_clock::{self, Instant};
+use super::wall_clock;
 
 /// Tracks iteration limits and produces deterministic seeds.
 pub(crate) struct IterationManager {
@@ -12,7 +12,6 @@ pub(crate) struct IterationManager {
     seeds: Vec<u64>,
     base_seed: u64,
     iteration_count: usize,
-    start_time: Instant,
 }
 
 impl IterationManager {
@@ -23,20 +22,12 @@ impl IterationManager {
             seeds,
             base_seed: wall_clock::default_base_seed(),
             iteration_count: 0,
-            start_time: Instant::now(),
         }
     }
 
     /// Return whether another iteration fits the configured limit.
     pub(crate) fn should_continue(&self) -> bool {
-        match &self.control {
-            IterationControl::FixedCount(count)
-            | IterationControl::UntilCoverageStable {
-                max_iterations: count,
-                ..
-            } => self.iteration_count < *count,
-            IterationControl::TimeLimit(duration) => self.start_time.elapsed() < *duration,
-        }
+        self.iteration_count < self.max_iterations()
     }
 
     /// Produce the current seed and advance the iteration counter.
@@ -58,7 +49,7 @@ impl IterationManager {
         tracing::info!(
             iteration = self.iteration_count,
             seed,
-            limit = self.max_iterations().unwrap_or_default(),
+            limit = self.max_iterations(),
             "starting simulation iteration"
         );
         seed
@@ -81,15 +72,15 @@ impl IterationManager {
         self.iteration_count
     }
 
-    /// Return the fixed iteration limit, if this is not time-based.
-    pub(crate) fn max_iterations(&self) -> Option<usize> {
+    /// Return the iteration ceiling: the fixed count, or the cap under
+    /// coverage-stable control.
+    pub(crate) fn max_iterations(&self) -> usize {
         match &self.control {
             IterationControl::FixedCount(count)
             | IterationControl::UntilCoverageStable {
                 max_iterations: count,
                 ..
-            } => Some(*count),
-            IterationControl::TimeLimit(_) => None,
+            } => *count,
         }
     }
 

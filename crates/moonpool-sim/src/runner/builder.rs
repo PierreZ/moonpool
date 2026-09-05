@@ -19,9 +19,7 @@ use crate::runner::tags::TagDistribution;
 use crate::runner::workload::Workload;
 
 use super::app_metrics::SourceFactory;
-pub use super::config::{
-    Chaos, ChaosMode, ClientId, IterationControl, ProcessCount, WorkloadCount,
-};
+pub use super::config::{Chaos, ChaosMode, IterationControl, ProcessCount, WorkloadCount};
 use super::iteration::IterationManager;
 use super::metrics::{GenerateReportInputs, MetricsCollector};
 use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestrator};
@@ -102,9 +100,7 @@ impl RunState {
     fn new(builder: &SimulationBuilder) -> Self {
         let iteration_manager =
             IterationManager::new(builder.iteration_control.clone(), builder.seeds.clone());
-        let progress_milestone = iteration_manager
-            .max_iterations()
-            .map(|max| std::cmp::max(max / 10, 1));
+        let progress_milestone = std::cmp::max(iteration_manager.max_iterations() / 10, 1);
         let run_id = iteration_manager.run_id();
         Self {
             iteration_manager,
@@ -141,8 +137,8 @@ impl RunState {
 struct RunState {
     iteration_manager: IterationManager,
     metrics_collector: MetricsCollector,
-    /// Iteration interval at which progress is logged (`None` for unbounded runs).
-    progress_milestone: Option<usize>,
+    /// Iteration interval at which progress is logged.
+    progress_milestone: usize,
     /// Map for routing iteration-resolved workloads back to their entry slots,
     /// stashed between [`SimulationBuilder::run_orchestrator_for_iteration`]
     /// and [`SimulationBuilder::handle_orchestration_result`].
@@ -241,11 +237,10 @@ fn process_ip(group: usize, index: usize) -> String {
 /// Internal storage for workload entries in the builder.
 enum WorkloadEntry {
     /// Single instance, reused across iterations (from `.workload()`).
-    Instance(Option<Box<dyn Workload>>, ClientId),
+    Instance(Option<Box<dyn Workload>>),
     /// Factory-based, fresh instances per iteration (from `.workloads()`).
     Factory {
         count: WorkloadCount,
-        client_id: ClientId,
         factory: Box<dyn Fn(usize) -> Box<dyn Workload>>,
     },
 }
@@ -293,8 +288,6 @@ pub struct SimulationBuilder {
     pending_replay: Option<Vec<(u64, u64)>>,
     /// Recipe installed for every iteration (set by [`Self::replay_timeline`]).
     replay_recipe: Option<Vec<(u64, u64)>>,
-    before_iteration_hooks: Vec<Box<dyn FnMut()>>,
-    seed_warning_timeout: Option<Duration>,
     run_time_budget: Duration,
 }
 
@@ -333,8 +326,6 @@ impl SimulationBuilder {
             exploration_config: None,
             pending_replay: None,
             replay_recipe: None,
-            before_iteration_hooks: Vec::new(),
-            seed_warning_timeout: None,
             run_time_budget: super::stall::DEFAULT_RUN_TIME_BUDGET,
         }
     }
@@ -349,10 +340,8 @@ impl SimulationBuilder {
     /// for exploration.
     #[must_use]
     pub fn workload(mut self, w: impl Workload) -> Self {
-        self.entries.push(WorkloadEntry::Instance(
-            Some(Box::new(w)),
-            ClientId::default(),
-        ));
+        self.entries
+            .push(WorkloadEntry::Instance(Some(Box::new(w))));
         self
     }
 
@@ -372,7 +361,6 @@ impl SimulationBuilder {
     pub fn workload_factory(mut self, factory: impl Fn() -> Box<dyn Workload> + 'static) -> Self {
         self.entries.push(WorkloadEntry::Factory {
             count: WorkloadCount::Fixed(1),
-            client_id: ClientId::default(),
             factory: Box::new(move |_| factory()),
         });
         self
@@ -577,24 +565,6 @@ impl SimulationBuilder {
     /// Add built-in attrition for automatic process reboots during the chaos
     /// phase, sampled as written every seed ([`ChaosMode::Random`]).
     ///
-    /// Attrition randomly kills and restarts server processes. It respects
-    /// `max_dead` to limit the number of simultaneously dead processes among
-    /// its victims. Each call adds one independent injector, so a campaign can
-    /// give every process group its own regime — see
-    /// [`Attrition::victims`](crate::Attrition::victims) and
-    /// [`enable_chaos`](Self::enable_chaos).
-    ///
-    /// **Requires** [`.chaos_duration()`](Self::chaos_duration) — attrition injectors
-    /// only run during the chaos phase. Without a chaos duration, the injector
-    /// will not be spawned.
-    ///
-    /// For custom fault injection, use `.fault()` with a [`FaultInjector`] instead.
-    #[must_use]
-    pub fn attrition(mut self, config: Attrition) -> Self {
-        self.attritions.push((config, ChaosMode::Random));
-        self
-    }
-
     /// Add multiple workload instances from a factory.
     ///
     /// The factory receives an instance index (0-based) and must return a fresh
@@ -621,7 +591,6 @@ impl SimulationBuilder {
     ) -> Self {
         self.entries.push(WorkloadEntry::Factory {
             count,
-            client_id: ClientId::default(),
             factory: Box::new(factory),
         });
         self
@@ -828,16 +797,6 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set the wall-clock time threshold for warning about slow seeds.
-    ///
-    /// When a seed takes longer than this duration, a `tracing::warn!` is emitted.
-    /// If not set, no slow-seed warnings are produced.
-    #[must_use]
-    pub fn seed_warning_timeout(mut self, timeout: Duration) -> Self {
-        self.seed_warning_timeout = Some(timeout);
-        self
-    }
-
     /// Set the virtual-time budget for a single run phase.
     ///
     /// If simulated time advances past this bound while one or more workloads
@@ -878,16 +837,6 @@ impl SimulationBuilder {
             plateau_seeds,
             max_iterations,
         };
-        self
-    }
-
-    /// Register a callback invoked at the start of each simulation iteration.
-    ///
-    /// Use this to reset shared state (directories, membership, stores) that
-    /// lives outside the builder and is shared via `Rc` across iterations.
-    #[must_use]
-    pub fn before_iteration(mut self, f: impl FnMut() + 'static) -> Self {
-        self.before_iteration_hooks.push(Box::new(f));
         self
     }
 
@@ -993,10 +942,9 @@ impl SimulationBuilder {
     /// sequential, fork-free exploration. Requires the `exploration` feature.
     ///
     /// Exploration requires factory-created workloads, and factory-created or
-    /// built-in fault injection. Instance workloads, `before_iteration` hooks,
-    /// and custom fault injector instances are rejected because the runner
-    /// cannot reconstruct those values with fresh state for every continuation
-    /// timeline. Custom fault injectors registered through
+    /// built-in fault injection. Instance workloads and custom fault injector
+    /// instances are rejected because the runner cannot reconstruct those
+    /// values with fresh state for every continuation timeline. Custom fault injectors registered through
     /// [`Self::fault_factory`] are supported: a fresh injector is built for
     /// every root and explored timeline (both in-process `workers: 0` and
     /// forked-worker exploration).
@@ -1005,9 +953,8 @@ impl SimulationBuilder {
     ///
     /// Panics when the configuration contains a zero exploration bound. The
     /// simulation also fails fast from [`Self::run`] if exploration is combined
-    /// with instance workloads, `before_iteration` hooks, or custom fault
-    /// injector instances, because those values cannot be reconstructed for
-    /// each continuation timeline. Use [`Self::workload_factory`] or
+    /// with instance workloads or custom fault injector instances, because
+    /// those values cannot be reconstructed for each continuation timeline. Use [`Self::workload_factory`] or
     /// [`Self::workloads`], and [`Self::fault_factory`] or built-in [`Chaos`]
     /// surfaces instead.
     #[cfg(feature = "exploration")]
@@ -1031,26 +978,22 @@ impl SimulationBuilder {
 
         for (entry_idx, entry) in self.entries.iter_mut().enumerate() {
             match entry {
-                WorkloadEntry::Instance(opt, cid) => {
+                WorkloadEntry::Instance(opt) => {
                     if let Some(w) = opt.take() {
                         return_map.push(Some(entry_idx));
                         client_info.push(WorkloadClientInfo {
-                            client_id: cid.resolve(0),
+                            client_id: 0,
                             client_count: 1,
                         });
                         workloads.push(w);
                     }
                 }
-                WorkloadEntry::Factory {
-                    count,
-                    client_id,
-                    factory,
-                } => {
+                WorkloadEntry::Factory { count, factory } => {
                     let n = count.resolve();
                     for i in 0..n {
                         return_map.push(None);
                         client_info.push(WorkloadClientInfo {
-                            client_id: client_id.resolve(i),
+                            client_id: i,
                             client_count: n,
                         });
                         workloads.push(factory(i));
@@ -1074,7 +1017,7 @@ impl SimulationBuilder {
     ) {
         for (w, slot) in workloads.into_iter().zip(return_map) {
             if let Some(entry_idx) = slot
-                && let WorkloadEntry::Instance(opt, _) = &mut self.entries[entry_idx]
+                && let WorkloadEntry::Instance(opt) = &mut self.entries[entry_idx]
             {
                 *opt = Some(w);
             }
@@ -1269,11 +1212,6 @@ impl SimulationBuilder {
              SimulationBuilder::workload"
         );
         assert!(
-            self.before_iteration_hooks.is_empty(),
-            "exploration does not support before_iteration hooks because they cannot be \
-             reconstructed for every timeline; move reset state into a workload factory"
-        );
-        assert!(
             self.fault_injectors.is_empty(),
             "exploration does not support custom fault injector instances because they cannot be \
              reconstructed for every timeline; use SimulationBuilder::fault_factory or built-in \
@@ -1364,33 +1302,11 @@ impl SimulationBuilder {
         false
     }
 
-    /// Emit a `warn!` when an iteration exceeded the configured threshold.
-    fn log_slow_seed(seed: u64, wall_time: Duration, threshold: Option<Duration>) {
-        if let Some(threshold) = threshold
-            && wall_time > threshold
-        {
-            tracing::warn!(
-                seed,
-                wall_time_ms = u64::try_from(wall_time.as_millis()).unwrap_or(u64::MAX),
-                threshold_ms = u64::try_from(threshold.as_millis()).unwrap_or(u64::MAX),
-                "seed took {:.2}s (threshold: {}s)",
-                wall_time.as_secs_f64(),
-                threshold.as_secs(),
-            );
-        }
-    }
-
     /// Emit a milestone `info!` every `progress_milestone` iterations.
-    fn log_progress_milestone(
-        progress_milestone: Option<usize>,
-        iteration_count: usize,
-        max: usize,
-    ) {
-        if let Some(interval) = progress_milestone
-            && iteration_count.is_multiple_of(interval)
-        {
-            let iteration_f64 = u32::try_from(iteration_count).map_or(f64::INFINITY, f64::from);
-            let max_f64 = u32::try_from(max).map_or(f64::INFINITY, f64::from);
+    fn log_progress_milestone(progress_milestone: usize, iteration_count: usize, max: usize) {
+        if iteration_count.is_multiple_of(progress_milestone) {
+            let iteration_f64 = super::report::usize_to_f64(iteration_count);
+            let max_f64 = super::report::usize_to_f64(max);
             let pct = (iteration_f64 / max_f64) * 100.0;
             tracing::info!(
                 iteration = iteration_count,
@@ -1423,7 +1339,7 @@ impl SimulationBuilder {
         crate::sim::set_swarm_op_seed(swarm_operations.then_some(seed));
         crate::chaos::reset_always_violations();
         // Use moderate probabilities: 50% activation rate, 25% firing rate.
-        crate::chaos::buggify_init(0.5, 0.25);
+        crate::chaos::buggify_init(0.5);
     }
 
     /// Resolve the process groups into one `ProcessConfig` for the current
@@ -1634,8 +1550,7 @@ impl SimulationBuilder {
     ///
     /// Panics if a simulation invariant fails, a workload panics, or exploration
     /// is configured with lifecycle state that cannot be reconstructed for each
-    /// timeline (an instance workload, a `before_iteration` hook, or a custom
-    /// fault injector instance). Also panics when a process group draws more
+    /// timeline (an instance workload or a custom fault injector instance). Also panics when a process group draws more
     /// than 255 processes, the most its `10.0.{group}.x` range can address.
     pub fn run(mut self) -> SimulationReport {
         self.validate_exploration_lifecycle();
@@ -1844,10 +1759,6 @@ impl SimulationBuilder {
             crate::chaos::assertions::skip_next_assertion_reset();
         }
 
-        for hook in &mut self.before_iteration_hooks {
-            hook();
-        }
-
         Self::reset_per_iteration_state(seed, self.swarm_operations, obs_handle);
 
         // Timeline replay: stage the recipe so the orchestrator installs its
@@ -1954,10 +1865,7 @@ impl SimulationBuilder {
         iteration_count: usize,
         start_time: Instant,
     ) -> Result<(), Box<SimulationReport>> {
-        let max_iterations = state
-            .iteration_manager
-            .max_iterations()
-            .unwrap_or(iteration_count);
+        let max_iterations = state.iteration_manager.max_iterations();
         let seeds_used_snapshot = state.iteration_manager.seeds_used().to_vec();
         match result {
             Ok(OrchestrateOutput {
@@ -1980,7 +1888,6 @@ impl SimulationBuilder {
                     crate::chaos::has_always_violations(),
                     sim_metrics,
                 );
-                Self::log_slow_seed(seed, wall_time, self.seed_warning_timeout);
                 Self::log_progress_milestone(
                     state.progress_milestone,
                     iteration_count,
@@ -2380,17 +2287,6 @@ mod tests {
     fn exploration_rejects_instance_workloads() {
         SimulationBuilder::new()
             .workload(BasicWorkload)
-            .enable_exploration(test_exploration_config())
-            .validate_exploration_lifecycle();
-    }
-
-    #[cfg(feature = "exploration")]
-    #[test]
-    #[should_panic(expected = "exploration does not support before_iteration hooks")]
-    fn exploration_rejects_before_iteration_hooks() {
-        SimulationBuilder::new()
-            .workload_factory(|| Box::new(BasicWorkload))
-            .before_iteration(|| {})
             .enable_exploration(test_exploration_config())
             .validate_exploration_lifecycle();
     }

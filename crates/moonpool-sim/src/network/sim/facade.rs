@@ -17,12 +17,6 @@ impl SimWorld {
         self.inner.write().network.set_localities(localities);
     }
 
-    /// Returns locality for an IP.
-    #[must_use]
-    pub fn locality_for(&self, ip: IpAddr) -> Option<LocalityInfo> {
-        self.inner.read().network.locality_for(ip)
-    }
-
     /// Borrows the network configuration.
     pub fn with_network_config<F, R>(&self, f: F) -> R
     where
@@ -86,7 +80,7 @@ impl SimWorld {
         wakes.wake();
     }
 
-    pub(crate) fn register_read_waker(&self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_read_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
         self.inner.write().network.register_read(id, waker)
     }
 
@@ -202,7 +196,7 @@ impl SimWorld {
         inner.network.is_write_clogged(id, inner.now())
     }
 
-    pub(crate) fn register_clog_waker(&self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_clog_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
         self.inner.write().network.register_write_clog(id, waker)
     }
 
@@ -228,18 +222,8 @@ impl SimWorld {
         inner.network.is_read_clogged(id, inner.now())
     }
 
-    pub(crate) fn register_read_clog_waker(&self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_read_clog_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
         self.inner.write().network.register_read_clog(id, waker)
-    }
-
-    /// Clears expired write clogs.
-    pub fn clear_expired_clogs(&self) {
-        let wakes = {
-            let mut inner = self.inner.write();
-            let now = inner.now();
-            inner.network.clear_expired_clogs(now)
-        };
-        wakes.wake();
     }
 
     /// Returns send-buffer capacity.
@@ -261,7 +245,7 @@ impl SimWorld {
             .saturating_sub(self.send_buffer_used(id))
     }
 
-    pub(crate) fn register_send_buffer_waker(&self, id: ConnectionId, waker: Waker) -> bool {
+    pub(crate) fn register_send_buffer_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
         self.inner.write().network.register_send_buffer(id, waker)
     }
 
@@ -275,12 +259,6 @@ impl SimWorld {
     #[must_use]
     pub fn connection_base_latency(&self, id: ConnectionId) -> Duration {
         self.inner.write().network.connection_base_latency(id)
-    }
-
-    /// Returns a connection send delay override.
-    #[must_use]
-    pub fn send_delay(&self, id: ConnectionId) -> Option<Duration> {
-        self.inner.read().network.send_delay(id)
     }
 
     /// Returns whether a connection is closed.
@@ -387,11 +365,6 @@ impl SimWorld {
     #[must_use]
     pub fn is_remote_fin_received(&self, id: ConnectionId) -> bool {
         self.inner.read().network.remote_fin_received(id)
-    }
-
-    /// Exempts a connection pair from network chaos.
-    pub fn mark_connection_stable(&self, id: ConnectionId) {
-        self.inner.write().network.mark_stable(id);
     }
 
     /// Creates a directed pair partition.

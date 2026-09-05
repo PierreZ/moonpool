@@ -60,21 +60,6 @@ impl SimNetworkProvider {
     pub fn new(sim: WeakSimWorld, local_ip: IpAddr) -> Self {
         Self { sim, local_ip }
     }
-
-    /// Sleep in simulation time.
-    ///
-    /// This allows workloads to introduce delays for coordination purposes.
-    /// The sleep completes when the simulation processes the corresponding Wake event.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the simulation cannot schedule the sleep event.
-    pub fn sleep(
-        &self,
-        duration: std::time::Duration,
-    ) -> crate::SimulationResult<crate::SleepFuture> {
-        self.sim.sleep(duration)
-    }
 }
 
 impl NetworkProvider for SimNetworkProvider {

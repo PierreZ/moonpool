@@ -151,7 +151,7 @@ Queries are declared before `run()` and their results travel with the report,
 in `SimulationReport::metric_queries`. Nothing reconstructs them afterwards
 from raw snapshots: the runner already knew what mattered.
 
-### The five operations
+### The operations
 
 | Op | What it does |
 |----|--------------|
@@ -348,10 +348,12 @@ pub trait MetricsSource: Send + Sync + 'static {
     fn collect(&self) -> Vec<MetricSample>;
     fn set_clock(&self, clock: Arc<dyn MetricClock>) {}
     fn series(&self) -> BTreeMap<String, Vec<MetricPoint>> { BTreeMap::new() }
+    fn dropped_points(&self) -> u64 { 0 }
 }
 ```
 
 `collect` alone is enough for a scrape-only adapter over any registry. The other
-two are what an adapter implements to deliver an exact time series. An
+three are what an adapter implements to deliver an exact time series
+(`dropped_points` reports how many points a capped series discarded). An
 OpenTelemetry adapter slots in the same way, with no change to the simulation
 runner.

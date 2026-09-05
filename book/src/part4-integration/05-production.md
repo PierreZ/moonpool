@@ -70,6 +70,7 @@ libraries present are the ones tokio itself needs for real sockets and files.
 |---------|----------|-------------|
 | `tokio` | `TokioProviders` | Application code runs on real time, tasks, TCP, randomness, and files |
 | `hyper` | hyper runtime adapters, h2 channel, serve helper | The application uses hyper, axum, or tonic |
+| `prometheus` | `PrometheusSource` and the instrumented handles (`moonpool::prometheus`) | The application keeps a `prometheus::Registry` you want scraped into the simulation report |
 | `sim` | the simulation runtime + explorer | Tests, benchmarks, local dev (default) |
 
 Keep `sim` on as a `dev-dependency` feature and off in your release profile, and

@@ -1,7 +1,6 @@
 //! Public configuration types used by [`super::SimulationBuilder`].
 
 use std::ops::{Range, RangeInclusive};
-use std::time::Duration;
 
 use super::process::Attrition;
 
@@ -10,8 +9,6 @@ use super::process::Attrition;
 pub enum IterationControl {
     /// Run a fixed number of iterations with specific seeds.
     FixedCount(usize),
-    /// Run for a specific duration of wall-clock time.
-    TimeLimit(Duration),
     /// Stop when every observed sometimes/reachable assertion has fired and
     /// code coverage has not grown for several consecutive seeds.
     UntilCoverageStable {
@@ -36,33 +33,6 @@ impl WorkloadCount {
         match self {
             Self::Fixed(count) => *count,
             Self::Random(range) => crate::sim::sim_random_range(range.clone()),
-        }
-    }
-}
-
-/// Strategy for assigning client IDs to workload instances.
-///
-/// The resolved ID is available via
-/// [`SimContext::client_id`](super::SimContext::client_id).
-#[derive(Debug, Clone, PartialEq)]
-pub enum ClientId {
-    /// Sequential IDs beginning at the supplied base.
-    Fixed(usize),
-    /// An independently sampled ID from the half-open range per instance.
-    RandomRange(Range<usize>),
-}
-
-impl Default for ClientId {
-    fn default() -> Self {
-        Self::Fixed(0)
-    }
-}
-
-impl ClientId {
-    pub(super) fn resolve(&self, index: usize) -> usize {
-        match self {
-            Self::Fixed(base) => base + index,
-            Self::RandomRange(range) => crate::sim::sim_random_range(range.clone()),
         }
     }
 }

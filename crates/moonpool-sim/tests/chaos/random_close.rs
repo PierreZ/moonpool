@@ -66,7 +66,7 @@ fn test_random_close_injection_with_high_probability() {
 
     local_runtime.block_on(async move {
         // Enable buggify for chaos testing
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.1; // 10% per I/O operation (very high)
@@ -169,7 +169,7 @@ fn test_random_close_cooldown() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 1.0; // Always trigger (when not in cooldown)
@@ -218,7 +218,7 @@ fn test_random_close_explicit_vs_silent() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.05; // 5% probability
@@ -341,7 +341,7 @@ fn test_random_close_bidirectional_communication() {
         .expect("Failed to build local runtime");
 
     local_runtime.block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.02; // 2% probability

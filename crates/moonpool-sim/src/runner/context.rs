@@ -118,8 +118,8 @@ impl SimContext {
 
     /// Get this workload's client ID.
     ///
-    /// Assigned by the builder's [`ClientId`](crate::ClientId) strategy.
-    /// Defaults to sequential IDs starting from 0 (FDB-style).
+    /// Sequential from 0 among the instances of this workload's builder entry
+    /// (FDB-style); a single `.workload(instance)` is always client 0.
     #[must_use]
     pub fn client_id(&self) -> usize {
         self.topology.client_id

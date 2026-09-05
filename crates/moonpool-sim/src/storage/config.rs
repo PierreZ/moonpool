@@ -620,7 +620,7 @@ mod buggify_knob_tests {
         reset_sim_rng();
         set_sim_seed(seed);
         set_config_seed(seed);
-        buggify_init(0.8, 0.8);
+        buggify_init(0.8);
         let mut config = StorageConfiguration::swarm_for_seed();
         config.apply_buggify_knobs();
         buggify_reset();

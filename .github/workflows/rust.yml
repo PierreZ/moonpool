@@ -56,6 +56,12 @@ jobs:
         run: nix develop --command cargo clippy -p moonpool-sim --no-default-features --all-targets -- --deny warnings
       - name: Tests (no exploration)
         run: nix develop --command cargo nextest run -p moonpool-sim --no-default-features
+      # The workspace-level nextest run unifies features with moonpool-sim,
+      # which turns on `deterministic-select`, so core's tokio-passthrough
+      # `select!` tests (tests/select_passthrough.rs) compile to nothing there.
+      # Building core alone is the only way they run.
+      - name: Tests (moonpool-core select passthrough)
+        run: nix develop --command cargo nextest run -p moonpool-core --features select
       - name: Build for wasm32-unknown-unknown
         run: |
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions

@@ -6,13 +6,13 @@
 use std::io::{IsTerminal, Write};
 
 use moonpool_assertions::AssertKind;
-use moonpool_core::metrics::HistogramValue;
 use moonpool_core::metrics::query::{MetricQueryReport, MetricWindowSummary};
+use moonpool_core::metrics::{HistogramValue, f64_to_u64};
 
 use super::report::{
     AssertionDetail, AssertionStatus, BucketSiteSummary, ExplorationReport, SaturationSignal,
-    SimulationReport, f64_to_u64_saturating, fmt_duration, fmt_num, fmt_sim_ms, format_recipe,
-    kind_label, kind_sort_order,
+    SimulationReport, fmt_duration, fmt_num, fmt_sim_ms, format_recipe, kind_label,
+    kind_sort_order,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,8 +49,9 @@ fn progress_bar(fraction: f64, color: bool) -> String {
     let filled_f = (fraction * f64::from(bar_width_u32))
         .round()
         .clamp(0.0, f64::from(bar_width_u32));
-    // SAFETY: `filled_f` is in `[0, BAR_WIDTH]` and finite.
-    let filled = unsafe { filled_f.to_int_unchecked::<usize>() }.min(BAR_WIDTH);
+    let filled = usize::try_from(f64_to_u64(filled_f))
+        .unwrap_or(usize::MAX)
+        .min(BAR_WIDTH);
     let empty = BAR_WIDTH - filled;
 
     let bar_color = if !color {
@@ -185,7 +186,7 @@ fn write_report_timing(w: &mut impl Write, report: &SimulationReport) {
     let _ = writeln!(
         w,
         "  Events       {} avg",
-        fmt_num(f64_to_u64_saturating(report.average_events_processed())),
+        fmt_num(f64_to_u64(report.average_events_processed().round())),
     );
 }
 
@@ -671,7 +672,7 @@ fn write_query_stats(w: &mut impl Write, window: &MetricWindowSummary, indent: &
 /// counter reads `1,234` rather than `1234.00`.
 fn fmt_metric(v: f64) -> String {
     if v.is_finite() && v.fract() == 0.0 && v.abs() < 1e15 {
-        let magnitude = fmt_num(f64_to_u64_saturating(v.abs()));
+        let magnitude = fmt_num(f64_to_u64(v.abs().round()));
         if v.is_sign_negative() && v != 0.0 {
             format!("-{magnitude}")
         } else {

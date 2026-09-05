@@ -3,7 +3,7 @@
 //! On that target `std::time::Instant::now()` and `SystemTime::now()` compile
 //! but **panic at runtime** ("time not implemented on this platform"). The sim
 //! drives logical time through its own event queue, so these are only used for
-//! harness bookkeeping (report elapsed, `TimeLimit`, the default base seed).
+//! harness bookkeeping (report elapsed times and the default base seed).
 //! Native builds use `std::time` directly with zero overhead; wasm builds get a
 //! zero-duration stub so a single-seed run executes instead of aborting.
 
@@ -14,8 +14,8 @@ use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) use std::time::Instant;
 
-/// wasm stand-in: never advances (`elapsed()` is always `Duration::ZERO`), which
-/// makes `TimeLimit` behave as a single pass and report timings show `0ms`.
+/// wasm stand-in: never advances (`elapsed()` is always `Duration::ZERO`), so
+/// report timings show `0ms`.
 #[cfg(target_family = "wasm")]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Instant(Duration);

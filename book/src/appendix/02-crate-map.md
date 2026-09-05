@@ -15,13 +15,13 @@ usually need.
                          /       |       \
                         v        v        v
              moonpool-core  moonpool-sim  moonpool-hyper  moonpool-prometheus
-                    ^          /     \          |
-                    |         v       v         |
-                    |  moonpool-   moonpool-     |
-                    |  assertions  explorer      |
-                    |                 |          |
-                    |                libc        |
-                    +----------------------------+
+                    ^        /    |    \           |
+                    |       v     v     v          |
+                    |  moonpool- moonpool- moonpool-   |
+                    |  assertions buggify  explorer    |
+                    |                        |         |
+                    |                       libc       |
+                    +----------------------------------+
 
   moonpool-sim-examples  (raw TCP, axum, tonic, topology)
   moonpool-wasm-demo      (browser simulation over raw TCP)
@@ -68,6 +68,17 @@ wants summarized. Both are pure std and wasm-clean. See
 The default table lives on the heap. Explorer workers can overlay a shared
 region so discoveries and watermarks survive process boundaries. The crate is
 also usable without the simulation runner and compiles to wasm.
+
+### moonpool-buggify
+
+**Role**: Standalone `buggify!` / `buggify_with_prob!` fault-injection macros and
+their per-run activation state, with no dependencies.
+
+Buggify is inert by default: outside a simulation every call site evaluates to
+`false`. moonpool-sim installs its seeded random source at the start of each
+run and re-exports the macros, so production and sans-I/O code can depend on
+this crate directly without pulling in the simulation runtime. `buggify_knob!`
+stays in moonpool-sim. The crate compiles to wasm.
 
 ### moonpool-sim
 

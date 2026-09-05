@@ -18,7 +18,7 @@ controller ──fork──▶ worker (slot 0) ── run ONE timeline ──▶
            ◀─waitpid── read journal from the slot, decide, expand
 ```
 
-A worker is forked at a *quiescent point* between runs — never mid-simulation — inherits the whole prepared runner state via copy-on-write, executes exactly one replay-plus-continuation, serializes its discovery journal (and sanitizer-coverage counters) into its `MAP_SHARED` result slot, and `_exit`s with 0 (clean), 42 (simulation failure), or anything else (crash). Workers never fork, never touch the frontier, and never return into controller code — a panic inside a worker is caught and converted into an exit code, so recursion is structurally impossible.
+A worker is forked at a *quiescent point* between runs — never mid-simulation — inherits the whole prepared runner state via copy-on-write, executes exactly one replay-plus-continuation, serializes its discovery journal (and sanitizer-coverage counters) into its `MAP_SHARED` result slot, and `_exit`s with 0 (clean), 42 (simulation failure), or anything else (crash). Workers never fork, never touch the frontier, and never return into controller code. Nothing catches a panic inside a worker: the worker simply dies, and the controller classifies its `waitpid` status — 0 is clean, 42 is a reported simulation failure, any other exit code or a signal is a crash — so a panicking run is retained as a crash reproducer like any other, and recursion is structurally impossible.
 
 Live processes are therefore bounded by `1 + workers` at all times. Reaching a state fifty discoveries deep costs a fifty-segment recipe, not fifty live processes.
 

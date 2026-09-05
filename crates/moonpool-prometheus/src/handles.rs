@@ -13,20 +13,8 @@
 use std::time::Duration;
 
 use moonpool_core::TimeProvider;
-use moonpool_core::metrics::SeriesRecorder;
+use moonpool_core::metrics::{SeriesRecorder, u64_to_f64_exact};
 use prometheus::{Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec};
-
-/// Widen a counter to `f64` for the recorded series.
-///
-/// Split into 32-bit halves rather than cast: `f64` holds every integer below
-/// `2^53` exactly, and going through two `f64::from(u32)` conversions gets
-/// there without a lossy primitive cast. Above `2^53` the result rounds, which
-/// no simulation counter reaches.
-pub(crate) fn counter_as_f64(value: u64) -> f64 {
-    let high = f64::from(u32::try_from(value >> 32).unwrap_or(u32::MAX));
-    let low = f64::from(u32::try_from(value & 0xFFFF_FFFF).unwrap_or(u32::MAX));
-    high * 4_294_967_296.0 + low
-}
 
 /// A monotonically increasing counter that records each increment.
 #[derive(Clone)]
@@ -74,7 +62,7 @@ impl SimCounter {
 
     fn record(&self) {
         self.recorder
-            .record(&self.key, counter_as_f64(self.inner.get()));
+            .record(&self.key, u64_to_f64_exact(self.inner.get()));
     }
 }
 
@@ -460,15 +448,6 @@ fn series_key(name: &str, label_names: &[String], values: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn counter_as_f64_is_exact_across_the_32_bit_boundary() {
-        assert!((counter_as_f64(0) - 0.0).abs() < f64::EPSILON);
-        assert!((counter_as_f64(1) - 1.0).abs() < f64::EPSILON);
-        assert!((counter_as_f64(4_294_967_295) - 4_294_967_295.0).abs() < f64::EPSILON);
-        assert!((counter_as_f64(4_294_967_296) - 4_294_967_296.0).abs() < f64::EPSILON);
-        assert!((counter_as_f64(1_000_000_000_000) - 1_000_000_000_000.0).abs() < f64::EPSILON);
-    }
 
     #[test]
     fn series_key_sorts_labels() {

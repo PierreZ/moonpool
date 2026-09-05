@@ -23,7 +23,7 @@ use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider};
 ///
 /// let sim = SimWorld::new();
 /// let ip: std::net::IpAddr = "10.0.1.1".parse().unwrap();
-/// let providers = SimProviders::new(sim.downgrade(), 42, ip);
+/// let providers = SimProviders::new(sim.downgrade(), ip);
 ///
 /// // Access individual providers
 /// let network = providers.network();
@@ -35,7 +35,9 @@ use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider};
 /// - Uses `SimNetworkProvider` for simulated TCP connections
 /// - Uses `SimTimeProvider` for logical/simulated time
 /// - Uses `SimTaskProvider` for task spawning on the deterministic executor
-/// - Uses `SimRandomProvider` for seeded deterministic randomness
+/// - Uses `SimRandomProvider` for the simulation's seeded thread-local
+///   randomness (seeded once per run by the runner or by `SimWorld`
+///   construction; building a bundle never reseeds it)
 /// - Uses `SimStorageProvider` for simulated file I/O with per-process fault injection
 #[derive(Clone)]
 pub struct SimProviders {
@@ -54,15 +56,14 @@ impl SimProviders {
     /// # Arguments
     ///
     /// * `sim` - Weak reference to the simulation world
-    /// * `seed` - Seed for deterministic random number generation
     /// * `ip` - IP address of the owning process (for per-process storage scoping)
     #[must_use]
-    pub fn new(sim: WeakSimWorld, seed: u64, ip: IpAddr) -> Self {
+    pub fn new(sim: WeakSimWorld, ip: IpAddr) -> Self {
         Self {
             network: SimNetworkProvider::new(sim.clone(), ip),
             time: SimTimeProvider::new(sim.clone()),
             task: SimTaskProvider,
-            random: SimRandomProvider::new(seed),
+            random: SimRandomProvider::new(),
             storage: SimStorageProvider::new(sim.clone(), ip),
             sim,
             ip,

@@ -809,8 +809,7 @@ explicitly start from wall-clock entropy. Always retain `report.seeds_used` and
 `report.seeds_failing` so individual timelines remain reproducible.
 
 Set `.run_time_budget(...)` to catch self-perpetuating simulated-time loops;
-the default is intentionally generous. `.seed_warning_timeout(...)` only warns
-about slow wall-clock seeds and does not alter deterministic behavior.
+the default is intentionally generous.
 
 A strict campaign binary should print the report and fail CI on all of these:
 
@@ -868,8 +867,8 @@ let report = SimulationBuilder::new()
     .run();
 ```
 
-Exploration rejects `.workload(instance)`, `before_iteration` hooks, and custom
-fault-injector instances because they cannot be reconstructed with fresh state.
+Exploration rejects `.workload(instance)` and custom fault-injector instances
+because they cannot be reconstructed with fresh state.
 Use workload factories and built-in `Chaos` surfaces. Increase `workers` only
 in a standalone single-threaded simulation binary after the fork boundary has
 been audited.

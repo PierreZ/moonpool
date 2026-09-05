@@ -30,7 +30,7 @@ The same assertion does both jobs. You write it once, thinking about correctness
 
 After each simulation iteration, the runner checks `has_always_violations()`. If any always-type assertion failed during the iteration, the runner marks that seed as a failure. But the simulation is not interrupted mid-run. The entire iteration completes, accumulating all violations.
 
-When the simulation finishes, `get_assertion_results()` returns an `AssertionStats` for every tracked assertion:
+When the simulation finishes, `assertion_results()` returns an `AssertionStats` for every tracked assertion:
 
 ```rust
 pub struct AssertionStats {

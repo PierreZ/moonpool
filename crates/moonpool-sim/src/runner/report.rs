@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use moonpool_assertions::AssertKind;
 use moonpool_core::metrics::query::MetricQueryReport;
-use moonpool_core::metrics::{HistogramValue, MetricPoint, MetricSample, MetricValue};
+use moonpool_core::metrics::{
+    HistogramValue, MetricPoint, MetricSample, MetricValue, f64_to_u64, u64_to_f64_exact,
+};
 
 use crate::SimulationResult;
 use crate::chaos::AssertionStats;
@@ -112,9 +114,7 @@ impl MetricAggregate {
     #[must_use]
     pub fn mean(&self) -> f64 {
         if self.observations > 0 {
-            // Precision loss acceptable: point counts fit well within 2^52.
-            return self.observation_sum
-                / u32::try_from(self.observations).map_or(f64::INFINITY, f64::from);
+            return self.observation_sum / u64_to_f64_exact(self.observations);
         }
         self.per_seed_mean()
     }
@@ -125,8 +125,7 @@ impl MetricAggregate {
         if self.seeds == 0 {
             0.0
         } else {
-            // Precision loss acceptable: seed counts fit well within 2^52.
-            self.total / u32::try_from(self.seeds).map_or(f64::INFINITY, f64::from)
+            self.total / usize_to_f64(self.seeds)
         }
     }
 
@@ -372,9 +371,8 @@ impl SimulationReport {
         if self.iterations == 0 {
             0.0
         } else {
-            // Precision loss acceptable: simulation counts fit well within 2^52.
-            let successful = u32::try_from(self.successful_runs).map_or(f64::INFINITY, f64::from);
-            let total = u32::try_from(self.iterations).map_or(f64::INFINITY, f64::from);
+            let successful = usize_to_f64(self.successful_runs);
+            let total = usize_to_f64(self.iterations);
             (successful / total) * 100.0
         }
     }
@@ -407,10 +405,8 @@ impl SimulationReport {
         if self.successful_runs == 0 {
             0.0
         } else {
-            // Precision loss acceptable: simulation counts fit within 2^52.
-            let events =
-                u32::try_from(self.metrics.events_processed).map_or(f64::INFINITY, f64::from);
-            let runs = u32::try_from(self.successful_runs).map_or(f64::INFINITY, f64::from);
+            let events = u64_to_f64_exact(self.metrics.events_processed);
+            let runs = usize_to_f64(self.successful_runs);
             events / runs
         }
     }
@@ -428,22 +424,10 @@ impl SimulationReport {
 // Display helpers
 // ---------------------------------------------------------------------------
 
-/// Convert a non-negative finite `f64` to a saturated `u64`.
-///
-/// Returns 0 for NaN / negative values and `u64::MAX` for values that exceed
-/// `u64::MAX`. Smaller magnitudes round to the nearest integer.
-pub(crate) fn f64_to_u64_saturating(v: f64) -> u64 {
-    // `2^64` as an `f64` — values at or above this saturate to `u64::MAX`.
-    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
-    if !v.is_finite() || v <= 0.0 {
-        0
-    } else if v >= TWO_POW_64 {
-        u64::MAX
-    } else {
-        // SAFETY: `v` is finite, non-negative, and strictly below `2^64`;
-        // `to_int_unchecked` is therefore well-defined.
-        unsafe { v.round().to_int_unchecked::<u64>() }
-    }
+/// Widen a count to `f64` through [`u64_to_f64_exact`]: exact for every
+/// count a run can reach, and never an infinity.
+pub(crate) fn usize_to_f64(n: usize) -> f64 {
+    u64_to_f64_exact(u64::try_from(n).unwrap_or(u64::MAX))
 }
 
 /// Format a number with comma separators (e.g., 123456 -> "123,456").
@@ -574,7 +558,7 @@ fn fmt_timing(f: &mut fmt::Formatter<'_>, report: &SimulationReport) -> fmt::Res
     writeln!(
         f,
         "  Avg Events:        {}",
-        fmt_num(f64_to_u64_saturating(report.average_events_processed()))
+        fmt_num(f64_to_u64(report.average_events_processed().round()))
     )
 }
 

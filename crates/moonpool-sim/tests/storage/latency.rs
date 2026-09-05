@@ -485,7 +485,7 @@ fn test_disk_episode_correlated_per_owner() {
         // Machine A stalls on every op, with a long window so the episode stays
         // active across both files. Machine B keeps the off-by-default config.
         let mut sim = SimWorld::new();
-        sim.set_storage_config_for(
+        sim.set_process_storage_config(
             ip_a,
             StorageConfiguration {
                 disk_stall_probability: 1.0,
@@ -572,14 +572,14 @@ fn test_disk_episode_isolated_across_machines() {
         // per-process override that enables stalls.
         let mut sim_a = SimWorld::new();
         sim_a.set_storage_config(StorageConfiguration::fast_local());
-        sim_a.set_storage_config_for(ip_a, stall());
+        sim_a.set_process_storage_config(ip_a, stall());
         let elapsed_a = run_and_measure_time_on(sim_a, ip_a, |p| write_sync_workload(p, 5)).await;
 
         // Same per-process config for A, but the workload runs on B's IP, which
         // resolves to the fast global config (no episodes).
         let mut sim_b = SimWorld::new();
         sim_b.set_storage_config(StorageConfiguration::fast_local());
-        sim_b.set_storage_config_for(ip_a, stall());
+        sim_b.set_process_storage_config(ip_a, stall());
         let elapsed_b = run_and_measure_time_on(sim_b, ip_b, |p| write_sync_workload(p, 5)).await;
 
         assert!(

@@ -233,8 +233,12 @@ fn test_latency_range_sampling() {
 
         let mut execution_times = Vec::new();
 
-        for _run in 0..5 {
-            let mut sim = SimWorld::new_with_network_config(config.clone());
+        // One world per seed: the seeds are determinism inputs, not witnesses.
+        // Every `SimWorld` constructor reseeds the thread-local RNG, so five
+        // worlds built with the same seed would replay the same latency draws
+        // and could never show any jitter at all.
+        for seed in 1..=5 {
+            let mut sim = SimWorld::new_with_network_config_and_seed(config.clone(), seed);
             let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
             simple_network_test(&mut sim, provider, "jitter-test")
@@ -245,11 +249,6 @@ fn test_latency_range_sampling() {
             execution_times.push(sim.current_time());
         }
 
-        // All times should be different due to jitter (with high probability)
-        let first_time = execution_times[0];
-        let all_same = execution_times.iter().all(|&t| t == first_time);
-
-        // Due to random jitter, we expect some variation in latency configuration
         println!("Execution times with jitter: {execution_times:?}");
 
         // Verify all times are positive (configuration is working)
@@ -257,14 +256,13 @@ fn test_latency_range_sampling() {
             assert!(time > Duration::ZERO, "Time should be positive: {time:?}");
         }
 
-        // For Phase 2c, we just verify that latency configuration is working
-        // and producing reasonable results
-
-        if all_same {
-            println!("⚠ All execution times were identical (could happen by chance)");
-        } else {
-            println!("✓ Latency jitter working - execution times vary");
-        }
+        // Four latency draws per run over a 1-6ms range: with five distinct
+        // seeds at least two totals must differ, or jitter is not sampled.
+        let first_time = execution_times[0];
+        assert!(
+            execution_times.iter().any(|&t| t != first_time),
+            "latency jitter produced identical totals across seeds: {execution_times:?}"
+        );
     });
 }
 

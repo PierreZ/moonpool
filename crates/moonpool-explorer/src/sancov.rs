@@ -227,10 +227,8 @@
 //!   │     copy_counters_to_shared()   copy BSS → transfer/pool slot
 //!   │     exit_child()                _exit()
 //!   │
-//!   ├── per-reap:
-//!   │     has_new_sancov_coverage()   bucket + compare against history
-//!   │
-//!   └── cleanup_sancov_shared()      free transfer + history + pool
+//!   └── per-reap:
+//!         has_new_sancov_coverage()   bucket + compare against history
 //! ```
 
 use std::cell::{Cell, RefCell};
@@ -574,37 +572,6 @@ pub fn init_sancov_shared() -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Free sancov shared memory (transfer, history, and pool).
-///
-/// Nulls all pointers after freeing. No-op if not initialized.
-pub fn cleanup_sancov_shared() {
-    SANCOV_TRANSFER.with(|c| c.set(std::ptr::null_mut()));
-    SANCOV_HISTORY.with(|c| c.set(std::ptr::null_mut()));
-    SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
-    SANCOV_POOL_SLOTS.with(|c| c.set(0));
-    SANCOV_REGIONS.with(|regions| drop(regions.borrow_mut().take()));
-    SANCOV_POOL_REGION.with(|pool| drop(pool.borrow_mut().take()));
-}
-
-/// Zero the transfer buffer before forking a child.
-///
-/// No-op when sancov is unavailable or transfer buffer is null.
-pub fn clear_transfer_buffer() {
-    if !sancov_is_available() {
-        return;
-    }
-    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
-    if transfer.is_null() {
-        return;
-    }
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    // Safety: transfer points into the live `SharedMemory` owner and is non-null
-    // (checked above). write_bytes covers exactly its `len` bytes.
-    unsafe {
-        std::ptr::write_bytes(transfer, 0, len);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Child operations
 // ---------------------------------------------------------------------------
@@ -863,20 +830,17 @@ mod tests {
         // These should all be safe no-ops
         copy_counters_to_shared();
         reset_bss_counters();
-        clear_transfer_buffer();
-        cleanup_sancov_shared();
 
         let pool = get_or_init_sancov_pool(4);
         assert!(pool.is_null());
     }
 
     #[test]
-    fn test_init_cleanup_lifecycle() {
-        // When sancov is unavailable, init/cleanup are no-ops
+    fn test_init_lifecycle() {
+        // When sancov is unavailable, init is a no-op
         init_sancov_shared().expect("init should succeed as no-op");
         let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
         assert!(transfer.is_null(), "no buffers allocated without sancov");
-        cleanup_sancov_shared();
     }
 
     #[test]

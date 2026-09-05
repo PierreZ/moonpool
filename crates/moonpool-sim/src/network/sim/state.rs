@@ -42,7 +42,6 @@ impl ConnectionFlags {
     const IS_CLOSED: u16 = 1 << 0;
     const SEND_CLOSED: u16 = 1 << 1;
     const RECV_CLOSED: u16 = 1 << 2;
-    const IS_STABLE: u16 = 1 << 5;
     const GRACEFUL_CLOSE_PENDING: u16 = 1 << 6;
     const REMOTE_FIN_RECEIVED: u16 = 1 << 7;
     const SEND_IN_PROGRESS: u16 = 1 << 8;
@@ -83,14 +82,6 @@ impl ConnectionFlags {
 
     pub(crate) fn set_recv_closed(&mut self, value: bool) {
         self.set_bit(Self::RECV_CLOSED, value);
-    }
-
-    pub(crate) fn is_stable(self) -> bool {
-        self.get(Self::IS_STABLE)
-    }
-
-    pub(crate) fn set_is_stable(&mut self, value: bool) {
-        self.set_bit(Self::IS_STABLE, value);
     }
 
     pub(crate) fn graceful_close_pending(self) -> bool {
@@ -156,7 +147,6 @@ pub(crate) struct ConnectionState {
     pub(crate) flags: ConnectionFlags,
     pub(crate) close_reason: CloseReason,
     pub(crate) send_buffer_capacity: usize,
-    pub(crate) send_delay: Option<Duration>,
     pub(crate) last_data_delivery_scheduled_at: Option<Duration>,
 }
 

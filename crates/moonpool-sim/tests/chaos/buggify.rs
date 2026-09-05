@@ -9,7 +9,7 @@ fn test_buggify_integration() {
     // Test with high probability to ensure we see buggify trigger
     reset_sim_rng();
     set_sim_seed(12345);
-    buggify_init(1.0, 1.0); // 100% activation, 100% firing
+    buggify_init(1.0); // every location active; buggify! fires at its 25%
 
     let mut fired_count = 0;
     let mut total_tests = 0;
@@ -76,7 +76,7 @@ fn test_buggify_determinism() {
     for run in 0..2 {
         reset_sim_rng();
         set_sim_seed(TEST_SEED);
-        buggify_init(0.8, 0.8); // High probability to get some hits
+        buggify_init(0.8); // High probability to get some hits
 
         let results = if run == 0 {
             &mut results1

@@ -77,9 +77,8 @@ The controller expands productive runs once, retains a few semantic-state exempl
 
 This is assertion-guided randomized testing, not exhaustive model checking.
 Exploration requires `.workload_factory()` or `.workloads()` plus built-in
-chaos surfaces; opaque workload instances, `before_iteration` hooks, and custom
-fault-injector instances are rejected because Moonpool cannot reconstruct them
-for every continuation.
+chaos surfaces; opaque workload instances and custom fault-injector instances
+are rejected because Moonpool cannot reconstruct them for every continuation.
 
 ## Documentation
 

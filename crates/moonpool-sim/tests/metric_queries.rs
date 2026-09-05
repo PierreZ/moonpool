@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use moonpool_sim::{
     Max, Mean, MetricPoint, MetricQuery, MetricSample, MetricValue, MetricsSource, Percentile,
     Provenance, SeriesRecorder, SimContext, SimulationBuilder, SimulationReport, SimulationResult,
-    TimeProvider, Workload,
+    TimeProvider, Workload, u64_to_f64_exact,
 };
 
 /// A minimal [`MetricsSource`]: one counter and one latency series, recorded
@@ -39,7 +39,7 @@ impl Counters {
             .total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        let value = u32::try_from(next).map_or(f64::INFINITY, f64::from);
+        let value = u64_to_f64_exact(next);
         self.recorder
             .record(r#"requests_total{operation="write"}"#, value);
     }
@@ -57,7 +57,7 @@ impl MetricsSource for Counters {
         vec![MetricSample::new(
             "requests_total",
             vec![("operation".to_owned(), "write".to_owned())],
-            MetricValue::Counter(u32::try_from(total).map_or(f64::INFINITY, f64::from)),
+            MetricValue::Counter(u64_to_f64_exact(total)),
         )]
     }
 
@@ -87,7 +87,7 @@ impl Workload for MeteredWorkload {
         for i in 0..self.requests {
             ctx.time().sleep(Duration::from_millis(100)).await.ok();
             metrics.request();
-            let index = u32::try_from(i).map_or(f64::INFINITY, f64::from);
+            let index = u64_to_f64_exact(i);
             metrics.latency(0.001 * (index + 1.0));
         }
         Ok(())

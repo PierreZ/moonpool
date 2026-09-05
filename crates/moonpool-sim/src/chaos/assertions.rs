@@ -864,24 +864,6 @@ mod tests {
     }
 
     #[test]
-    fn test_assertion_results_empty() {
-        // When no assertions have been tracked, results should be empty
-        // (assertion table not initialized = empty)
-        let results = assertion_results();
-        // May or may not be empty depending on prior test state,
-        // but should not panic
-        let _ = results;
-    }
-
-    #[test]
-    fn test_validate_contracts_empty() {
-        // Should produce no violations when no assertions tracked
-        let violations = validate_assertion_contracts();
-        // May or may not be empty, but should not panic
-        let _ = violations;
-    }
-
-    #[test]
     fn sometimes_all_contract_requires_every_proposition() {
         moonpool_assertions::init();
         moonpool_assertions::reset();

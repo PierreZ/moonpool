@@ -14,8 +14,8 @@ use super::tags::{ProcessTags, TagRegistry};
 pub struct WorkloadTopology {
     /// The IP address assigned to this workload or process.
     pub my_ip: String,
-    /// This workload's client ID (assigned by the builder's [`ClientId`] strategy).
-    /// For processes, this is the process's index **within its group**.
+    /// This workload's client ID: its index among the instances of its
+    /// builder entry. For processes, the process's index **within its group**.
     pub client_id: usize,
     /// Total number of workload instances sharing this entry (factory count or 1).
     /// For processes, this is the size of the process's group.

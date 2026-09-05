@@ -60,7 +60,6 @@ struct CheckPhaseInputs<'a> {
     client_info: &'a [WorkloadClientInfo],
     topology: &'a TopologyMetadata,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
-    seed: u64,
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
 }
@@ -69,7 +68,6 @@ struct CheckPhaseInputs<'a> {
 struct PhaseEnv<'a, 'pm> {
     sim: &'a mut crate::sim::SimWorld,
     process_manager: &'a mut ProcessManager<'pm>,
-    seed: u64,
     metrics: &'a MetricsHandle,
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
@@ -102,7 +100,6 @@ struct WorkloadContextEnv<'a> {
     topology: &'a TopologyMetadata,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     sim: &'a crate::sim::SimWorld,
-    seed: u64,
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
 }
@@ -188,7 +185,6 @@ struct TopologyMetadata {
 #[derive(Clone, Copy)]
 struct ProcessBootEnv<'a> {
     sim: &'a crate::sim::SimWorld,
-    seed: u64,
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
     metrics: &'a MetricsHandle,
@@ -416,7 +412,6 @@ impl WorkloadOrchestrator {
             &topology.all_entities,
             &ProcessBootEnv {
                 sim,
-                seed,
                 state,
                 obs,
                 metrics,
@@ -432,7 +427,6 @@ impl WorkloadOrchestrator {
             topology,
             shutdown_signal,
             sim,
-            seed,
             state,
             obs,
         })
@@ -444,7 +438,6 @@ impl WorkloadOrchestrator {
             PhaseEnv {
                 sim,
                 process_manager: &mut process_manager,
-                seed,
                 metrics,
                 state,
                 obs,
@@ -494,7 +487,6 @@ impl WorkloadOrchestrator {
             chaos_duration,
             sim,
             process_manager,
-            seed,
             state,
             &chaos_shutdown,
         )
@@ -579,7 +571,6 @@ impl WorkloadOrchestrator {
             client_info,
             topology,
             shutdown_signal,
-            seed,
             state,
             obs,
         })
@@ -613,7 +604,6 @@ impl WorkloadOrchestrator {
             client_info,
             topology,
             shutdown_signal,
-            seed,
             state,
             obs,
         } = inputs;
@@ -624,7 +614,6 @@ impl WorkloadOrchestrator {
             topology,
             shutdown_signal,
             sim,
-            seed,
             state,
             obs,
         })?;
@@ -764,7 +753,6 @@ impl WorkloadOrchestrator {
                 Self::handle_process_events(
                     sim,
                     process_manager,
-                    seed,
                     state,
                     obs,
                     metrics,
@@ -824,7 +812,6 @@ impl WorkloadOrchestrator {
         chaos_duration: Option<Duration>,
         sim: &crate::sim::SimWorld,
         process_manager: &ProcessManager<'_>,
-        seed: u64,
         state: &StateHandle,
         chaos_shutdown: &tokio_util::sync::CancellationToken,
     ) -> Result<(InjectorHandleSlots, Vec<Box<dyn FaultInjector>>), ()> {
@@ -836,7 +823,7 @@ impl WorkloadOrchestrator {
                 let fault_ctx = FaultContext::new(
                     fault_sim,
                     process_manager.process_info(),
-                    crate::SimRandomProvider::new(seed),
+                    crate::SimRandomProvider::new(),
                     sim.time_provider(),
                     state.clone(),
                     chaos_shutdown.clone(),
@@ -889,7 +876,6 @@ impl WorkloadOrchestrator {
     ) -> Result<(ProcessHandleSlots, ProcessTokenSlots), ()> {
         let ProcessBootEnv {
             sim,
-            seed,
             state,
             obs,
             metrics,
@@ -927,7 +913,7 @@ impl WorkloadOrchestrator {
                 group_registry: pc.group_registry.clone(),
                 shutdown_signal: process_token.clone(),
             });
-            let providers = crate::SimProviders::new(sim.downgrade(), seed, ip_addr);
+            let providers = crate::SimProviders::new(sim.downgrade(), ip_addr);
             let ctx = SimContext::new(
                 providers,
                 topology,
@@ -1034,7 +1020,7 @@ impl WorkloadOrchestrator {
                 group_registry: env.topology.group_registry.clone(),
                 shutdown_signal: env.shutdown_signal.clone(),
             });
-            let providers = crate::SimProviders::new(env.sim.downgrade(), env.seed, ip_addr);
+            let providers = crate::SimProviders::new(env.sim.downgrade(), ip_addr);
             let ctx = SimContext::new(
                 providers,
                 topology,
@@ -1166,7 +1152,6 @@ impl WorkloadOrchestrator {
         let PhaseEnv {
             sim,
             process_manager,
-            seed,
             metrics,
             state,
             obs,
@@ -1181,7 +1166,6 @@ impl WorkloadOrchestrator {
                 Self::handle_process_events(
                     sim,
                     process_manager,
-                    seed,
                     state,
                     obs,
                     metrics,
@@ -1332,7 +1316,6 @@ impl WorkloadOrchestrator {
     fn handle_process_events(
         sim: &mut crate::sim::SimWorld,
         process_manager: &mut ProcessManager<'_>,
-        seed: u64,
         state: &StateHandle,
         obs: &SimulationLayerHandle,
         metrics: &MetricsHandle,
@@ -1402,7 +1385,6 @@ impl WorkloadOrchestrator {
                     ip,
                     &RestartEnv {
                         sim: &weak_sim,
-                        seed,
                         state,
                         obs,
                         metrics,

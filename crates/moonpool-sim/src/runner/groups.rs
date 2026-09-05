@@ -64,12 +64,6 @@ impl GroupRegistry {
         self.ip_group.insert(ip, index);
     }
 
-    /// Whether any process has been registered.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.ip_group.is_empty()
-    }
-
     /// All group names, in registration order.
     #[must_use]
     pub fn groups(&self) -> &[String] {
@@ -145,7 +139,6 @@ mod tests {
         assert!(registry.ips_in_group("spare").is_empty());
         assert_eq!(registry.group_for(ip(2, 1)), Some("matchmaker"));
         assert_eq!(registry.group_for(ip(3, 1)), None);
-        assert!(!registry.is_empty());
     }
 
     #[test]

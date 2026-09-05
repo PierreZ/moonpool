@@ -153,7 +153,7 @@ fn an_abort_still_crosses_a_black_hole() {
 #[test]
 fn the_coin_black_holes_a_connection_and_records_it_once() {
     local_runtime().block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.black_hole_probability = 1.0;
         config.chaos.black_hole_cooldown = Duration::ZERO;
@@ -192,7 +192,7 @@ fn the_coin_black_holes_a_connection_and_records_it_once() {
 #[test]
 fn the_family_off_holes_nothing() {
     local_runtime().block_on(async move {
-        buggify_init(1.0, 1.0);
+        buggify_init(1.0);
         let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-off";
