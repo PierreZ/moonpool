@@ -357,8 +357,9 @@ Inside a simulation, each process gets its own lazily created block store:
 - `SimWorld::block_device_provider(ip)` / `SimContext::block_devices()` hand
   out the per-process provider; `SimWorld::block_store(ip)` exposes the store
   for targeted faults, fault records, and crash reports.
-- Store seeds derive as a **pure function** of the iteration seed and the IP,
-  so first use never shifts the counted sim RNG stream or explorer replay.
+- A store holds no randomness of its own: every fault it injects is a draw on
+  the simulation stream at the moment the operation runs, so creating one
+  consumes nothing.
 - Process crashes (`simulate_crash_for_process`, which `Attrition` reboots
   call) resolve every buffered write through the crash model and record a
   `block_device_crash` fault in the timeline; `CrashAndWipe` reboots also

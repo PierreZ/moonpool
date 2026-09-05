@@ -565,6 +565,10 @@ fn test_process_network_guidance_recipe_replays_split_brain() {
             // Factory registration is important for replay: every explored
             // timeline must start with a fresh test driver.
             .workload_factory(|| Box::new(GuidedElectionWorkload))
+            // The default network config carries buggify-gated connect
+            // failures; `nominate` does not retry, and a refused connect would
+            // register as a bug of its own ahead of the planted split brain.
+            .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::ConnectFailure))
             .invariant(OneLeaderPerTerm::new())
     };
 

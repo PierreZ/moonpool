@@ -1,6 +1,6 @@
 //! Fault and crash-model configuration for the simulated block device.
 
-use crate::sim::rng::config_random_bool;
+use crate::sim::rng::sim_random_bool;
 
 /// Configuration of the simulated block device's fault families and
 /// barrier-bounded crash model.
@@ -158,7 +158,7 @@ impl BlockFaultConfig {
 
     /// Apply a per-seed swarm subset: each enabled fault family is
     /// independently kept or zeroed with probability 0.5, drawn from the
-    /// configuration RNG stream (never the counted sim RNG). The barrier
+    /// simulation stream (one draw per family). The barrier
     /// violation family occupies its own swarm slot.
     #[must_use]
     pub fn swarm(mut self) -> Self {
@@ -171,9 +171,9 @@ impl BlockFaultConfig {
             &mut self.persist_failure_probability,
             &mut self.barrier_violation_probability,
         ] {
-            // Always consume exactly one draw per family so the config stream
+            // Always consume exactly one draw per family so the stream
             // stays aligned regardless of which families start enabled.
-            let keep = config_random_bool(0.5);
+            let keep = sim_random_bool(0.5);
             if !keep {
                 *probability = 0.0;
             }

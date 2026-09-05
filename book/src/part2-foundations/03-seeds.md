@@ -20,7 +20,7 @@ let value: f64 = sim_random();  // general-purpose random value
 
 These are **framework-internal** functions used by the simulation engine itself. Your application code should use `providers.random().random()` and `providers.random().random_range()` instead, which route through the same underlying RNG but go through the provider abstraction.
 
-The functions `sim_random()`, `sim_random_range()`, and `sim_random_f64()` all draw from the same thread-local RNG. This means the **order of calls matters**. Adding a new `sim_random()` call anywhere in the simulation shifts every subsequent random value. This is intentional. It means small code changes produce different simulation trajectories, naturally exploring new parts of the state space.
+There is exactly one stream. `sim_random()`, `sim_random_range()`, `sim_random_f64()`, the `RandomProvider` your code sees, the executor's choice of which task to poll next, `select!` branch offsets, the per-seed swarm subsets, buggify activation and firing, and every network, storage and block-device fault coin all draw from the same thread-local RNG. Moonpool keeps no private stream for its own decisions: the framework draws its randomness the way the code it simulates does. This means the **order of calls matters**. Adding a new `sim_random()` call anywhere in the simulation shifts every subsequent random value. This is intentional. It means small code changes produce different simulation trajectories, naturally exploring new parts of the state space.
 
 ## Call Count Tracking
 

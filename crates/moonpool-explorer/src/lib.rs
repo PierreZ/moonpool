@@ -104,8 +104,8 @@
 //!
 //! A failing worker's job recipe is retained verbatim. Replaying it —
 //! same root seed, same breakpoints — reproduces the failing timeline
-//! bit-for-bit, including task scheduling (the executor's RNG is an
-//! uncounted, salted stream derived from the same root seed).
+//! bit-for-bit, including task scheduling: the executor draws its schedule
+//! from the same counted stream the recipe replays.
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]

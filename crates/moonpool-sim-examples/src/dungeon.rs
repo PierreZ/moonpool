@@ -825,10 +825,12 @@ mod tests {
         // The two-draw-per-step discipline must hold whether or not swarm masks
         // the alphabet, so fork-explorer replay (keyed on the SIM_RNG call
         // count) is never perturbed by operation-alphabet swarm.
-        for swarm in [None, Some(7u64), Some(99u64)] {
+        for swarm in [false, true] {
             moonpool_sim::reset_sim_rng();
             moonpool_sim::set_sim_seed(1234);
-            moonpool_sim::set_swarm_op_seed(swarm);
+            if swarm {
+                moonpool_sim::draw_swarm_op_mask();
+            }
             let mut dungeon = Dungeon::new(100, 8);
             let before = moonpool_sim::rng_call_count();
             let _ = dungeon.pick_action_index();
@@ -836,15 +838,15 @@ mod tests {
             assert_eq!(
                 after - before,
                 2,
-                "pick_action_index must consume exactly two SIM_RNG draws (swarm={swarm:?})"
+                "pick_action_index must consume exactly two SIM_RNG draws (swarm={swarm})"
             );
         }
-        moonpool_sim::set_swarm_op_seed(None);
+        moonpool_sim::clear_swarm_op_mask();
     }
 
     #[test]
     fn swarm_off_uses_full_action_alphabet() {
-        moonpool_sim::set_swarm_op_seed(None);
+        moonpool_sim::clear_swarm_op_mask();
         assert_eq!(
             Dungeon::swarm_enabled_actions(),
             (0..NUM_ACTIONS).collect::<Vec<_>>()
@@ -854,13 +856,15 @@ mod tests {
     #[test]
     fn enabled_actions_never_empty() {
         for seed in 0..2000u64 {
-            moonpool_sim::set_swarm_op_seed(Some(seed));
+            moonpool_sim::reset_sim_rng();
+            moonpool_sim::set_sim_seed(seed);
+            moonpool_sim::draw_swarm_op_mask();
             assert!(
                 !Dungeon::swarm_enabled_actions().is_empty(),
                 "empty-mask fallback failed for seed {seed}"
             );
         }
-        moonpool_sim::set_swarm_op_seed(None);
+        moonpool_sim::clear_swarm_op_mask();
     }
 
     #[test]
@@ -869,12 +873,14 @@ mod tests {
         // while keeping a non-move action enabled. Exists across seeds under
         // swarm; impossible when the full alphabet is always on.
         let found = (0..4000u64).any(|seed| {
-            moonpool_sim::set_swarm_op_seed(Some(seed));
+            moonpool_sim::reset_sim_rng();
+            moonpool_sim::set_sim_seed(seed);
+            moonpool_sim::draw_swarm_op_mask();
             let actions = Dungeon::swarm_enabled_actions();
             !actions.iter().any(|&i| i < NUM_MOVE_ACTIONS)
                 && actions.iter().any(|&i| i >= NUM_MOVE_ACTIONS)
         });
         assert!(found, "expected a seed that masks off all movement actions");
-        moonpool_sim::set_swarm_op_seed(None);
+        moonpool_sim::clear_swarm_op_mask();
     }
 }

@@ -118,8 +118,8 @@ The `prob_*` fields are **weights**, not probabilities. They are normalized inte
 
 In `ChaosMode::Swarm`, the recovery range is scaled per seed to 50%-200% of
 its configured values. Clustered campaigns also swarm among topology-backed
-scopes whose groups fit `max_dead`. Both decisions use `CONFIG_RNG`, leaving the
-counted runtime RNG stream unchanged.
+scopes whose groups fit `max_dead`. Both decisions are draws on the simulation
+stream, taken once at build time.
 
 ### AttritionScope
 

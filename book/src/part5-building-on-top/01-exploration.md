@@ -26,7 +26,7 @@ Crucially, the tree of explored timelines is a **logical** structure, not a phys
 151@8837201 -> 80@1293847 -> 42@9918273
 ```
 
-Follow those instructions and you arrive at the exact same timeline, deterministically — task scheduling included, because the executor's scheduling RNG is itself a pure function of the root seed and the replayed prefix.
+Follow those instructions and you arrive at the exact same timeline, deterministically — task scheduling included, because the executor draws its schedule from the same counted stream the recipe replays.
 
 **Discovery** is a globally-new interesting state: the first pass of an `assert_sometimes!`, a new `assert_sometimes_each!` bucket, a watermark or frontier improvement. Discoveries are latched atomically in shared memory, so each fires exactly once across all timelines.
 

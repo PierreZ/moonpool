@@ -1,20 +1,15 @@
 //! Per-process block-store registry owned by `SimWorld`.
 //!
 //! Each process IP gets its own [`SimBlockStore`], created lazily on first
-//! access with a seed derived as a **pure function** of the iteration seed and
-//! the IP (via `splitmix64`) — no RNG stream is consumed, so whether or when a
-//! process first touches a block device can never shift the counted sim RNG
-//! stream or fork-explorer replay.
+//! access. A store holds no randomness of its own: every fault it injects is a
+//! draw on the simulation's one stream at the moment the operation runs, so
+//! creating a store consumes nothing and the per-process split is purely about
+//! which devices belong to which process.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 use super::{BlockFaultConfig, SimBlockStore};
-use crate::sim::rng::splitmix64;
-
-/// Salt mixed into the iteration seed when deriving per-process block store
-/// seeds, decorrelating them from the other salted streams.
-const BLOCK_STORE_SALT: u64 = 0x626C_6F63_6B64_6576; // "blockdev"
 
 /// Lazily created per-process block stores plus the fault configuration new
 /// stores are born with.
@@ -48,12 +43,7 @@ impl BlockDeviceRegistry {
     pub(crate) fn store_for(&mut self, ip: IpAddr) -> SimBlockStore {
         self.stores
             .entry(ip)
-            .or_insert_with(|| {
-                let seed = splitmix64(
-                    crate::sim::rng::current_sim_seed() ^ BLOCK_STORE_SALT ^ ip_seed_component(ip),
-                );
-                SimBlockStore::new(seed, self.config.clone())
-            })
+            .or_insert_with(|| SimBlockStore::new(self.config.clone()))
             .clone()
     }
 
@@ -61,18 +51,5 @@ impl BlockDeviceRegistry {
     /// instantiate stores for processes that never used block devices).
     pub(crate) fn existing_store(&self, ip: IpAddr) -> Option<SimBlockStore> {
         self.stores.get(&ip).cloned()
-    }
-}
-
-/// Fold an IP address into a stable 64-bit seed component.
-fn ip_seed_component(ip: IpAddr) -> u64 {
-    match ip {
-        IpAddr::V4(v4) => u64::from(u32::from(v4)),
-        IpAddr::V6(v6) => {
-            let octets = v6.octets();
-            let low = u64::from_le_bytes(octets[0..8].try_into().expect("8 bytes"));
-            let high = u64::from_le_bytes(octets[8..16].try_into().expect("8 bytes"));
-            splitmix64(low) ^ high
-        }
     }
 }

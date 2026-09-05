@@ -126,7 +126,12 @@ fn until_stalled_drains_every_runnable_task() {
 }
 
 /// Run 16 immediately-ready tasks and record their completion order.
+///
+/// Scheduling draws come from the simulation stream, so the stream is seeded
+/// here exactly as the runner seeds it before creating an executor.
 fn completion_order(seed: u64) -> Vec<u64> {
+    moonpool_sim::reset_sim_rng();
+    moonpool_sim::set_sim_seed(seed);
     let mut executor = Executor::new(seed);
     let log: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
     executor.block_on(async {

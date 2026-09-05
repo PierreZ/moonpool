@@ -64,7 +64,8 @@ The fix is the same too. Instead of running every seed with the whole alphabet, 
 
 ```rust
 // Cache the subset once per run. Each operation is independently ~50% on,
-// a pure function of (seed, op_id), so this is the same answer every time.
+// a bit of a mask the runner drew once at the start of the iteration, so
+// asking consumes nothing and is the same answer every time.
 // Empty-mask fallback: if a seed disables everything, use the full alphabet
 // so the workload always has something to do.
 let enabled: Vec<u8> = (0..NUM_OPS).filter(|&i| swarm_op_enabled(i)).collect();
@@ -77,7 +78,7 @@ let op = enabled[(raw % enabled.len() as u64) as usize];
 
 The remap matters. We draw **once** and fold the result into the subset rather than resampling in a loop until we land on an enabled operation. A resample loop would consume a variable number of `SIM_RNG` values per step, and the fork explorer keys its replay on the in-run RNG call count. Keep the per-step draw count fixed and replay stays exact. When the full alphabet is enabled, `enabled[raw % NUM_OPS] == raw % NUM_OPS`, so a non-swarm run is byte-identical to one with no swarm code at all.
 
-Like the fault-family version, these decisions never touch `SIM_RNG`. `swarm_op_enabled` is a pure hash of the seed and the operation id, so it consumes no randomness, the answer is independent of how often or in what order you ask, and the fault-family `CONFIG_RNG` stream is left untouched. The two swarm axes compose: a seed picks both a fault subset and an operation subset, independently.
+Like the fault-family version, the mask is drawn from the simulation stream: 256 bits, one per `u8` operation id, four draws taken by the runner immediately after seeding and before the fault-family subsets. `swarm_op_enabled` only reads a bit, so querying consumes no randomness and the answer is independent of how often or in what order you ask. The two swarm axes compose: a seed picks both a fault subset and an operation subset.
 
 The payoff is a demonstrator assertion that only the swarm can reach. Emit it on the path where it holds, so it never records a check on the runs where the subset keeps it impossible:
 
