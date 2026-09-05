@@ -19,8 +19,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
-| `fault(f)` | `impl FaultInjector` | Add a custom fault injector instance for the chaos phase (reused across iterations; rejected by exploration) |
-| `fault_factory(f)` | `Fn() -> Box<dyn FaultInjector>` | Add a fault injector rebuilt fresh for every root and explored timeline (exploration-compatible) |
+| `fault_factory(f)` | `Fn() -> Box<dyn FaultInjector>` | Add a custom fault injector for the chaos phase, rebuilt fresh for every root and explored timeline |
 | `chaos_duration(dur)` | `Duration` | Bound the window in which new faults may be injected (see [Chaos duration and recovery mode](#chaos-duration-and-recovery-mode)) |
 | `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
 | `set_debug_seeds(seeds)` | `Vec<u64>` | Use specific seeds for deterministic debugging |

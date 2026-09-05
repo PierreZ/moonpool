@@ -47,25 +47,30 @@ Notice what is missing: there is no runtime to build. `run()` drives each iterat
 The report prints to stderr with `.eprint()`. Here is what a healthy report looks like:
 
 ```
-=== Simulation Report ===
-  Iterations: 100  |  Passed: 100  |  Failed: 0  |  Rate: 100.0%
 
-  Avg Wall Time:     12ms           Total: 1.20s
-  Avg Sim Time:      45.23s
-  Avg Events:        8,432
+━━━ Simulation Report ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  100 iterations   100 passed   0 failed   ✓ 100.0%
 
---- Assertions (4) ---
-  PASS  [always    ]  "read matches model"              12,847 pass  0 fail
-  PASS  [always    ]  "conservation law"                 8,200 pass  0 fail
-  PASS  [sometimes ]  "set_succeeded"                    6,102 / 12,847 (47.5%)
-  PASS  [sometimes ]  "set_failed_network"               412 / 12,847 (3.2%)
+  Wall Time    12ms avg       1.20s total
+  Sim Time     45.23s avg
+  Events       8,432 avg
+
+━━━ Assertions (4) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓  always       "conservation law"  8,200 pass  0 fail
+  ✓  always       "read matches model" 12,847 pass  0 fail
+  ✓  sometimes    "set_failed_network" 412 / 12,847  (3.2%)
+  ✓  sometimes    "set_succeeded"     6,102 / 12,847  (47.5%)
 ```
+
+The same text, coloured when stderr is a terminal, is what `.eprint()`
+prints; `format!("{report}")` gives the plain form.
 
 The critical lines:
 
-- **Rate: 100.0%** means no iteration panicked or returned an error
+- **✓ 100.0%** means no iteration panicked or returned an error
 - **0 fail** on always-assertions means no invariant violations
-- **PASS** on sometimes-assertions means every coverage goal was hit at least once
+- **✓** on sometimes-assertions means every coverage goal was hit at least once (a
+  never-fired one shows as **○**)
 
 ## What Success Means
 
@@ -81,19 +86,24 @@ Both matter. A simulation that never violates invariants but also never exercise
 A failing report shows faulty seeds and violations:
 
 ```
-=== Simulation Report ===
-  Iterations: 100  |  Passed: 98  |  Failed: 2  |  Rate: 98.0%
+
+━━━ Simulation Report ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  100 iterations   98 passed   2 failed   ✗ 98.0%
+
+  Wall Time    12ms avg       1.20s total
+  Sim Time     45.23s avg
+  Events       8,432 avg
 
   Faulty seeds: [7891, 42033]
 
---- Assertions (4) ---
-  FAIL  [always    ]  "read matches model"              12,800 pass  47 fail
-  PASS  [always    ]  "conservation law"                 8,200 pass  0 fail
-  PASS  [sometimes ]  "set_succeeded"                    6,102 / 12,847 (47.5%)
-  PASS  [sometimes ]  "set_failed_network"               412 / 12,847 (3.2%)
+━━━ Assertions (4) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✗  always       "read matches model" 12,800 pass  47 fail
+  ✓  always       "conservation law"  8,200 pass  0 fail
+  ✓  sometimes    "set_failed_network" 412 / 12,847  (3.2%)
+  ✓  sometimes    "set_succeeded"     6,102 / 12,847  (47.5%)
 
---- Assertion Violations ---
-  - Always "read matches model": 47 failures out of 12,847 evaluations
+━━━ Violations ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✗  Always "read matches model": 47 failures out of 12,847 evaluations
 ```
 
 The report tells you:
@@ -177,6 +187,6 @@ Check both `seeds_failing` (iterations that panicked or errored) and `assertion_
 
 Simulation testing is iterative. You write a workload, run it, find a bug, fix the bug, add assertions to prevent regression, run again. Each round makes the system more robust.
 
-The report's assertion table is your scoreboard. When you see all PASS with high hit counts, you know your test is both thorough and correct. When you see MISS on a sometimes-assertion, you know there is a code path your chaos is not reaching. When you see FAIL on an always-assertion, you know there is a real bug to fix.
+The report's assertion table is your scoreboard. When every row shows ✓ with high hit counts, you know your test is both thorough and correct. When a sometimes-assertion shows ○, you know there is a code path your chaos is not reaching. When an always-assertion shows ✗, you know there is a real bug to fix.
 
 This is the rhythm of simulation-driven development: build, test, observe, improve.

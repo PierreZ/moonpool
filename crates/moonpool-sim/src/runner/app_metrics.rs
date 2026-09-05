@@ -12,8 +12,9 @@
 //! `prometheus::Registry` among them) have no reset, so reusing one instance
 //! would make seed 50 report the sum of fifty runs. A fresh
 //! [`MetricsHandle`] is built for every iteration, which is the same reasoning
-//! behind [`fault_factory`](super::builder::SimulationBuilder::fault_factory)
-//! versus [`fault`](super::builder::SimulationBuilder::fault).
+//! behind registering a fault injector through
+//! [`fault_factory`](super::builder::SimulationBuilder::fault_factory) rather
+//! than as an instance.
 //!
 //! Reboots are the other way round: a process that crashes and restarts gets a
 //! fresh [`Process`](super::process::Process) instance but the *same* source,

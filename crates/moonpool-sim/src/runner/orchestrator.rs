@@ -105,7 +105,7 @@ struct WorkloadContextEnv<'a> {
 }
 
 /// Result of a completed fault injector task.
-type InjectorResult = (Box<dyn FaultInjector>, SimulationResult<()>);
+type InjectorResult = SimulationResult<()>;
 
 /// Inputs to [`WorkloadOrchestrator::orchestrate_workloads`].
 pub(crate) struct OrchestrateInputs<'a> {
@@ -142,8 +142,6 @@ pub(crate) struct OrchestrateInputs<'a> {
 pub(crate) struct OrchestrateOutput {
     /// Workloads returned to the caller for reuse.
     pub(crate) workloads: Vec<Box<dyn Workload>>,
-    /// Fault injectors returned to the caller for reuse.
-    pub(crate) fault_injectors: Vec<Box<dyn FaultInjector>>,
     /// Per-workload results from setup + run + check.
     pub(crate) results: Vec<SimulationResult<()>>,
     /// Simulation metrics extracted from `sim`.
@@ -156,7 +154,6 @@ struct FinalizeOrchestration<'a, 'pm> {
     process_manager: &'a mut ProcessManager<'pm>,
     metrics: &'a MetricsHandle,
     returned_workloads: Vec<Box<dyn Workload>>,
-    returned_injectors: Vec<Box<dyn FaultInjector>>,
     results: Vec<SimulationResult<()>>,
     seed: u64,
     state: &'a StateHandle,
@@ -245,7 +242,6 @@ struct ChaosAndRunInputs<'a, 'pm> {
 /// Output of [`WorkloadOrchestrator::do_chaos_and_run_phase`].
 struct ChaosAndRunOutput {
     returned_workloads: Vec<Box<dyn Workload>>,
-    returned_injectors: Vec<Box<dyn FaultInjector>>,
     results: Vec<SimulationResult<()>>,
 }
 
@@ -258,7 +254,8 @@ impl WorkloadOrchestrator {
     /// run concurrently with workloads and stop when the duration elapses.
     /// After all workloads complete, a settle phase drains remaining events.
     ///
-    /// Returns workloads and fault injectors back to the caller for reuse across iterations.
+    /// Returns the workloads back to the caller for reuse across iterations;
+    /// fault injectors are consumed by the run.
     pub(crate) async fn orchestrate_workloads(
         inputs: OrchestrateInputs<'_>,
     ) -> Result<OrchestrateOutput, (Vec<u64>, usize)> {
@@ -311,7 +308,6 @@ impl WorkloadOrchestrator {
                 BootAndSetupOutcome::SetupFailed { workloads, results } => {
                     return Ok(OrchestrateOutput {
                         workloads,
-                        fault_injectors,
                         results,
                         metrics: Self::extract_metrics(&sim, &metrics),
                     });
@@ -320,7 +316,6 @@ impl WorkloadOrchestrator {
 
         let ChaosAndRunOutput {
             returned_workloads,
-            returned_injectors,
             results,
         } = Self::do_chaos_and_run_phase(ChaosAndRunInputs {
             sim: &mut sim,
@@ -344,7 +339,6 @@ impl WorkloadOrchestrator {
             process_manager: &mut process_manager,
             metrics: &metrics,
             returned_workloads,
-            returned_injectors,
             results,
             seed,
             state: &state,
@@ -482,7 +476,7 @@ impl WorkloadOrchestrator {
 
         let chaos_shutdown = tokio_util::sync::CancellationToken::new();
         sim.start_buggified_delay_window(chaos_duration);
-        let (mut injector_handles, parked_injectors) = Self::start_fault_injectors(
+        let mut injector_handles = Self::start_fault_injectors(
             fault_injectors,
             chaos_duration,
             sim,
@@ -514,13 +508,11 @@ impl WorkloadOrchestrator {
         })
         .await?;
 
-        let returned_injectors =
-            Self::collect_injector_results(parked_injectors, injector_handles).await;
+        Self::abort_running_injectors(injector_handles);
         let (returned_workloads, results) =
             Self::collect_workload_results(workload_collected, total_workloads);
         Ok(ChaosAndRunOutput {
             returned_workloads,
-            returned_injectors,
             results,
         })
     }
@@ -535,7 +527,6 @@ impl WorkloadOrchestrator {
             process_manager,
             metrics,
             returned_workloads,
-            returned_injectors,
             results,
             seed,
             state,
@@ -553,7 +544,6 @@ impl WorkloadOrchestrator {
         if let Some(settle_err) = Self::settle_phase(sim) {
             return Ok(OrchestrateOutput {
                 workloads: returned_workloads,
-                fault_injectors: returned_injectors,
                 results: vec![Err(settle_err)],
                 metrics: Self::extract_metrics(sim, metrics),
             });
@@ -582,7 +572,6 @@ impl WorkloadOrchestrator {
 
         Ok(OrchestrateOutput {
             workloads: final_workloads,
-            fault_injectors: returned_injectors,
             results,
             metrics: sim_metrics,
         })
@@ -802,7 +791,7 @@ impl WorkloadOrchestrator {
     }
 
     /// Spawn the fault injectors for the chaos phase. When `chaos_duration`
-    /// is `None`, the injectors are returned in `parked_injectors` instead.
+    /// is `None`, the injectors are dropped unrun.
     ///
     /// # Errors
     ///
@@ -814,31 +803,27 @@ impl WorkloadOrchestrator {
         process_manager: &ProcessManager<'_>,
         state: &StateHandle,
         chaos_shutdown: &tokio_util::sync::CancellationToken,
-    ) -> Result<(InjectorHandleSlots, Vec<Box<dyn FaultInjector>>), ()> {
+    ) -> Result<InjectorHandleSlots, ()> {
         let mut injector_handles: InjectorHandleSlots = Vec::new();
-        let mut parked_injectors: Vec<Box<dyn FaultInjector>> = Vec::new();
-        if chaos_duration.is_some() {
-            for fi in fault_injectors {
-                let fault_sim = sim.downgrade().upgrade().map_err(|_| ())?;
-                let fault_ctx = FaultContext::new(
-                    fault_sim,
-                    process_manager.process_info(),
-                    crate::SimRandomProvider::new(),
-                    sim.time_provider(),
-                    state.clone(),
-                    chaos_shutdown.clone(),
-                );
-                let handle = crate::executor::spawn("fault-injector", async move {
-                    let mut injector = fi;
-                    let result = injector.inject(&fault_ctx).await;
-                    (injector, result)
-                });
-                injector_handles.push(Some(handle));
-            }
-        } else {
-            parked_injectors = fault_injectors;
+        if chaos_duration.is_none() {
+            return Ok(injector_handles);
         }
-        Ok((injector_handles, parked_injectors))
+        for mut injector in fault_injectors {
+            let fault_sim = sim.downgrade().upgrade().map_err(|_| ())?;
+            let fault_ctx = FaultContext::new(
+                fault_sim,
+                process_manager.process_info(),
+                crate::SimRandomProvider::new(),
+                sim.time_provider(),
+                state.clone(),
+                chaos_shutdown.clone(),
+            );
+            let handle = crate::executor::spawn("fault-injector", async move {
+                injector.inject(&fault_ctx).await
+            });
+            injector_handles.push(Some(handle));
+        }
+        Ok(injector_handles)
     }
 
     /// Boot processes and wrap them in a [`ProcessManager`] for lifecycle
@@ -1075,11 +1060,9 @@ impl WorkloadOrchestrator {
         any_finished
     }
 
-    /// Reap any fault-injector handles that have finished, discarding the
-    /// injectors. The remaining live handles are returned in-place.
-    async fn reap_finished_injectors(
-        injector_handles: &mut [Option<crate::executor::JoinHandle<InjectorResult>>],
-    ) {
+    /// Reap any fault-injector handles that have finished, dropping the
+    /// injectors with them. The remaining live handles stay in place.
+    async fn reap_finished_injectors(injector_handles: &mut InjectorHandleSlots) {
         for handle_opt in injector_handles {
             let finished = handle_opt
                 .as_ref()
@@ -1087,7 +1070,7 @@ impl WorkloadOrchestrator {
             if finished {
                 let handle = handle_opt.take().expect("injector handle is finished");
                 match handle.await {
-                    Ok((_injector, _result)) => {
+                    Ok(_result) => {
                         tracing::debug!("Fault injector completed");
                     }
                     Err(_) => {
@@ -1098,24 +1081,12 @@ impl WorkloadOrchestrator {
         }
     }
 
-    /// Collect remaining fault injector results, aborting any handles that
-    /// are still running.
-    async fn collect_injector_results(
-        mut returned: Vec<Box<dyn FaultInjector>>,
-        mut injector_handles: Vec<Option<crate::executor::JoinHandle<InjectorResult>>>,
-    ) -> Vec<Box<dyn FaultInjector>> {
-        for handle_opt in &mut injector_handles {
-            if let Some(handle) = handle_opt.take() {
-                if handle.is_finished() {
-                    if let Ok((injector, _)) = handle.await {
-                        returned.push(injector);
-                    }
-                } else {
-                    handle.abort();
-                }
-            }
+    /// Abort every fault-injector task still running once the run phase is
+    /// over; finished ones were reaped on the loop.
+    fn abort_running_injectors(injector_handles: InjectorHandleSlots) {
+        for handle in injector_handles.into_iter().flatten() {
+            handle.abort();
         }
-        returned
     }
 
     /// Build the final workload return list, substituting `Err` for any

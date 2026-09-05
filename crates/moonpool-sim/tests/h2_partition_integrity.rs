@@ -287,7 +287,7 @@ fn a_partition_never_alters_a_multiplexed_request_body() {
     let report = SimulationBuilder::new()
         .processes(1, || Box::new(EchoProcess))
         .workload(MultiplexedClient)
-        .fault(PartitionFlap)
+        .fault_factory(|| Box::new(PartitionFlap))
         .chaos_duration(Duration::from_secs(30))
         // A healed partition must let the stalled stream continue. A stream
         // stranded by one instead drags the run out by orders of magnitude

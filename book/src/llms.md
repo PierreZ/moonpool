@@ -867,9 +867,9 @@ let report = SimulationBuilder::new()
     .run();
 ```
 
-Exploration rejects `.workload(instance)` and custom fault-injector instances
-because they cannot be reconstructed with fresh state.
-Use workload factories and built-in `Chaos` surfaces. Increase `workers` only
+Exploration rejects `.workload(instance)` because it cannot be reconstructed
+with fresh state. Use workload factories; fault injectors are always
+factory-built (`fault_factory` and the built-in `Chaos` surfaces). Increase `workers` only
 in a standalone single-threaded simulation binary after the fork boundary has
 been audited.
 

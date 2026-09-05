@@ -68,7 +68,8 @@ label naming the node — Prometheus' own label for a scrape target.
 
 The factory also runs afresh every iteration. Most registries have no reset, so
 a reused instance would make seed 50 report the sum of fifty runs. This is the
-same reasoning behind [`fault_factory`](./07-chaos.md) versus `fault`.
+same reason a custom fault injector is registered through
+[`fault_factory`](./09-attrition.md) rather than as an instance.
 
 A **reboot** is the exception: a source is keyed by IP, so a crashed and
 restarted process keeps its counters, exactly as a real node's `/metrics` does

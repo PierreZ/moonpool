@@ -258,7 +258,7 @@ Everything the script reads is per-iteration simulated state, so the crash targe
 
 ### Fault Factories and Exploration
 
-`.fault(injector)` registers one injector *instance* that is reused across iterations — fine for stateless injectors, but exploration rejects it because a mutated instance cannot be rewound for every explored timeline. Register a **factory** instead:
+A custom injector is always registered through a **factory**, never as an instance: a mutated instance could not be rewound for every explored timeline, so the runner rebuilds the injector from the factory for every seed and every continuation.
 
 ```rust
 SimulationBuilder::new()
