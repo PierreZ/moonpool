@@ -4,8 +4,8 @@ description: Reviews a diff or a set of files for violations of moonpool's core 
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
-  - using-providers
-  - using-assertions
+  - changing-providers
+  - changing-assertion-accounting
 ---
 
 You review changes to the moonpool workspace for determinism and repository

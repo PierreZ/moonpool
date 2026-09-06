@@ -1,91 +1,71 @@
 ---
 name: debug-a-seed
-description: Reproduce and root-cause a failing moonpool simulation seed - pin it with set_debug_seeds + set_iterations(1), raise trace_level / init_sim_tracing, read the timeline backwards from the first violation, replay an exploration BugRecipe with replay_timeline, and hunt non-determinism with check_determinism (DeterminismViolation names the first diverging draw). Use when a seed is in seeds_failing, an assertion violation appears in a report, a reproduced seed does not fail, a canary trips, or CI fails on a simulation binary.
+description: Root-cause a failing seed in moonpool's own test suite or example simulations - a red seed in cargo nextest, a seeds_failing entry from cargo xtask sim run, or a determinism-canary trip - by pinning the seed (set_debug_seeds + set_iterations(1)), raising trace_level, reading the timeline backwards from the first violation, replaying an exploration BugRecipe, and bisecting non-determinism with rng_call_count / set_rng_breakpoints. Use whenever CI or a local run reports a failing seed, an assertion violation, or "determinism canary" in this repository.
+argument-hint: [seed] [test or sim binary]
 ---
 
 # Debug a seed
 
-A failing seed is a complete, replayable description of a bug. The job is to
-replay it alone, find the **first** violation, walk the causal chain back to
-the decision that made it possible, fix that decision, and then let the seed
-go. Never "fix" a seed by deleting or weakening the assertion that caught it.
+In this repository a failing seed almost always means the *runtime* changed
+behaviour: a new draw moved the schedule, an engine returned a completion in
+a different order, a waker fired while the world lock was held. The seed is a
+complete replay of that; find the first violation, walk back to the runtime
+decision, fix the runtime. Never delete or weaken the assertion that caught
+it, in a test or in an example.
 
-## 1. Reproduce it alone
+## 1. Reproduce alone
 
-```rust
-moonpool_sim::init_sim_tracing(tracing::Level::DEBUG);   // process-wide subscriber floor
-let report = SimulationBuilder::new()
-    /* identical wiring to the failing run */
-    .set_iterations(1)                                     // IterationControl::FixedCount(1)
-    .set_debug_seeds(vec![17_429_853_261])
-    .trace_level(tracing::level_filters::LevelFilter::TRACE) // what the timeline captures
-    .run();
-report.eprint();
-```
+- **A nextest test**: most tests build their own `SimulationBuilder`; add
+  `.set_iterations(1).set_debug_seeds(vec![seed])` locally (do not commit the
+  pin) and run `nix develop --command cargo nextest run -p moonpool-sim
+  <test_name> --nocapture`. Low-level provider tests seed `SimWorld::new_with_seed(seed)`
+  and drive with the `drive` helper from the root `AGENTS.md`.
+- **An example** (`cargo xtask sim run <name>`): the binaries in
+  `crates/moonpool-sim-examples/src/bin/sim/` set seeds in code, not on the
+  CLI; edit the builder call the same way and rerun through xtask (sancov) or
+  `cargo run --bin` (faster, coverage-blind).
+- **An exploration find**: the report carries `BugRecipe { seed, recipe }`;
+  use `.replay_timeline(seed, recipe)` to reproduce the exact timeline.
+- Raise verbosity with `init_sim_tracing(Level::DEBUG)` and
+  `.trace_level(LevelFilter::TRACE)`; there is no `RUST_LOG` plumbing.
 
-`run()` is synchronous. There is no `RUST_LOG` plumbing and no `--seed`
-flag on `cargo xtask sim run`: verbosity and the seed are set in code, then
-run the binary again (`cargo xtask sim run <name>`, or `cargo run --bin`
-when you do not need sancov).
+## 2. Read the timeline backwards
 
-A failure found by exploration comes with a `BugRecipe { seed, recipe }` in
-`report.exploration`; replay that exact timeline with
-`.replay_timeline(seed, recipe)` instead of the bare seed.
+Start at the first `[ASSERTION FAILED]` (later ones are cascade). The event
+kinds and where they are produced:
 
-## 2. Read the trace backwards
-
-Start at the first `[ASSERTION FAILED]` line (later ones are usually the
-cascade) and walk back. The events that explain most failures:
-
-| Event | Meaning |
+| Event | Producer |
 |---|---|
-| `Timer` | a sleeping task woke; check what it assumed had already happened |
-| `DataDelivery` / `FinDelivery` | bytes or a close arrived on a stream |
-| `ConnectionReady` / `PartitionRestore` | connect completed / a partition healed |
-| `Storage` | a disk op completed, possibly with an injected fault |
-| `ProcessGracefulShutdown` / `ProcessForceKill` / `ProcessRestart` | a reboot step; what state did the factory rebuild from |
-| `sim_fault` (kind = ..) | the injected fault, in the captured timeline with `source = "sim"` |
+| `Timer` | `sim/sleep.rs` via the `Scheduler` |
+| `DataDelivery` / `FinDelivery` / `ConnectionReady` / `PartitionRestore` | `network/sim/engine.rs` |
+| `Storage` completions | `storage/sim/engine.rs` (all ops are `Pending` then an event) |
+| `ProcessGracefulShutdown` / `ProcessForceKill` / `ProcessRestart` | `runner/process_manager.rs` |
+| `sim_fault` (`kind = ..`) | `chaos/fault_events.rs`, merged from `SimWorld::take_faults()` |
 
-Ask, in order: what fact did the code assume, which event should have
-established it, and which fault or ordering meant it never did. The bug is
-almost always in the gap between "I sent it" and "it was durably received".
+Same-time events are FIFO by the scheduler's sequence number; if two
+completions swapped order, look for a changed `schedule_at`/`schedule_after`
+call or a draw inserted before it.
 
-## 3. The seed does not fail on replay
+## 3. The seed does not reproduce
 
-Then something outside the seed influenced the first run. Run the campaign
-under the canary:
+Then a draw left the single stream. Run the canary tests
+(`tests/determinism_canary.rs`, `tests/determinism.rs`) or add
+`.check_determinism()` to the failing builder: the violation names the first
+diverging draw (`DeterminismViolation::Diverged { index, .. }`, or
+`ExtraDraws` / `Unconsumed`). Bisect toward that index with
+`rng_call_count()` and `set_rng_breakpoints`. In the runtime the culprits are:
+a `rand::thread_rng()` or `HashMap` iteration inside an engine, a wall-clock
+read in `runner/wall_clock.rs` leaking into a decision, a thread-local or
+static not reset in `reset_per_iteration_state`, a detached task from a
+previous iteration, or a `select!` not routed through `install_select_offset`.
 
-```rust
-.check_determinism()   // every seed twice; second run must match draw for draw
-```
+## 4. Fix and widen
 
-A mismatch is reported as the always-assertion
-"determinism canary: replay matched the recorded draw sequence" and a
-`DeterminismViolation`: `Diverged { index, expected, actual }` names the
-**first** draw whose fingerprint differs, `ExtraDraws` / `Unconsumed` say the
-replay drew more or fewer times. Bisect toward that draw index with
-`rng_call_count()` / `set_rng_breakpoints`. The usual culprits:
+Fix the runtime, rerun the seed, then the subsystem's test file, then
+`cargo xtask sim run-all` (every example is a regression surface for the
+scheduler), then `/validate`. Cite the seed in the commit; a pinned seed
+stops reproducing the moment the draw schedule moves, which in this
+repository is every runtime change.
 
-- a direct tokio call (`tokio::spawn`, `tokio::time`, `tokio::select!`);
-- `HashMap`/`HashSet` iteration order feeding a decision (use `BTreeMap`);
-- `Instant::now()` / `SystemTime::now()` instead of `time.now()`;
-- `rand::thread_rng()` instead of `ctx.random()` / `sim_random`;
-- a `static` or thread-local that survives from one run to the next;
-- a detached task that outlives its run and gets polled by the next one.
-
-Every random decision in moonpool is one counted stream (`sim/rng.rs`), so
-"same seed, different run" always means a draw came from outside it.
-
-## 4. Fix, then widen
-
-Fix the root cause in the system under test (or in the harness when the
-harness lied). Rerun the seed, then the whole campaign under
-`cargo xtask sim run`, then the nextest suite (`/validate`). Cite the seed in
-the commit message as the evidence it was; do not pin it as a test. Any
-change to the code's draw schedule (a new buggify site, a reordered await)
-makes every old seed name a different run, so a pinned witness stops testing
-what it was written for the moment anything moves.
-
-Book: `book/src/part3-building/20-debugging.md`, `21-reproducing.md`,
-`22-event-trace.md`, `23-pitfalls.md`; sources: `crates/moonpool-sim/src/sim/rng.rs`,
-`tests/determinism_canary.rs`.
+Book: `book/src/part3-building/20-debugging.md` through `23-pitfalls.md`;
+`part2-foundations/03-seeds.md`.
