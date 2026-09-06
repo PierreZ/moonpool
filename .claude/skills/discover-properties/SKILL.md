@@ -1,172 +1,63 @@
 ---
-description: |
-  Systematically find where to place assertions and buggify in moonpool Process/Workload code using 8 attention focuses.
-  TRIGGER when: starting a new simulation, reviewing assertion coverage gaps, adding a new feature that needs property identification, or after debugging a seed failure to prevent similar bugs.
-  DO NOT TRIGGER when: not working on moonpool simulation code.
+name: discover-properties
+description: Systematically find where a moonpool Process, Workload or Invariant needs assertions, coverage claims and buggify sites, using eight attention focuses (state integrity, concurrency, crash recovery, network faults, timing, resource bounds, protocol contracts, lifecycle). Use when starting a new simulation, when asked "what should we assert", when reviewing coverage gaps after a feature lands, or after a seed failure to find the sibling bugs. Fan out with the property-hunter agent for an independent pass per focus.
+argument-hint: [file or module to examine]
 ---
 
-# Discover Properties
+# Discover properties
 
-## When to Use This Skill
+The goal is a list of concrete assertion and injection placements, each with
+a file:line, a macro, a stable message and the bug it would catch. Work one
+focus at a time and do not skip a focus because an earlier pass "covered"
+the area: the value is in the independent angle.
 
-Invoke when:
-- Starting a new simulation and need to decide what properties to assert
-- Reviewing an existing Process/Workload for assertion coverage gaps
-- After adding a new feature and need to identify what could go wrong
-- After debugging a seed failure and want to prevent similar bugs
+## Ensemble mode (preferred when the area is more than one file)
 
-## Quick Reference
+Spawn one `property-hunter` agent per focus with the target path and the
+focus name; each returns placements with a confidence. Then merge: a
+placement found by several focuses is high confidence; one found by a single
+focus is often the most valuable catch; resolve conflicts by asking which
+macro's failure would be a *finding* (`/using-assertions`).
 
-| Focus | Looking for |
-|-------|-------------|
-| State Integrity | In-memory invariants, corruption paths, storage persistence gaps |
-| Concurrency | Races between workloads, interleaving of async ops, shared mutable state |
-| Crash Recovery | State lost on reboot, partial writes, recovery assumptions |
-| Network Faults | Missing error handling, retry without idempotency, stale connections |
-| Timing & Scheduling | Hardcoded timeouts, timer ordering assumptions, clock sensitivity |
-| Resource Boundaries | Unbounded collections, missing backpressure, resource exhaustion |
-| Protocol Contracts | Unenforced API guarantees, masked errors, ordering assumptions |
-| Lifecycle Transitions | Requests before init, in-flight work on shutdown, premature state publish |
+## The eight focuses
 
-## Attention Focuses
+| Focus | Look for |
+|---|---|
+| **State integrity** | write-ordering assumptions a crash can split; monotonic fields (ballots, sequence ids); derived state that can drift from its source; reference model vs actual |
+| **Concurrency** | check-then-act across an `.await`; two workloads on one key; shared state mutated by another task mid-operation |
+| **Crash recovery** | in-memory state that should have gone through `ctx.storage()`; write without `sync_all`; recovery that assumes no torn write; `CrashAndWipe` vs `Crash` |
+| **Network faults** | RPCs without timeout; retries that are not idempotent; stale peer/leader caches after `PartitionRestore`; ordering assumptions between messages; fire-and-forget sends that matter |
+| **Timing & scheduling** | hard-coded timeouts that interact; timer-vs-delivery races; "enough time passed" without a fact; overlapping election/lease windows |
+| **Resource boundaries** | unbounded `Vec`/`VecDeque` under load; missing backpressure; a queue depth that should be a `buggify_knob!` |
+| **Protocol contracts** | guarantees stated in docs but never asserted; responses that mask partial failure; ordering between RPCs; serde-accepted type mismatches |
+| **Lifecycle transitions** | requests before init; listener bound before state loaded; in-flight work dropped on `ctx.shutdown()`; `ctx.state().publish` of a not-yet-valid value |
 
-### 1. State Integrity
+## Output format
 
-Invariants on in-memory state, corruption paths, state that must survive reboots via `StorageProvider`.
-
-**Look for**:
-- Write ordering assumptions (write A before B, but what if crash between them?)
-- State transitions that could be interrupted by process kill
-- Reference model divergence (workload's expected state vs actual process state)
-- Fields that should be monotonically increasing (ballot numbers, sequence IDs)
-- Derived state that could become inconsistent with source data
-
-### 2. Concurrency
-
-Races between workloads hitting the same process, interleaving of async operations, shared mutable state.
-
-**Look for**:
-- Operations that assume sequential execution across `.await` points
-- TOCTOU patterns: check a condition, then mutate based on it, with a yield in between
-- Concurrent access to the same key/resource from multiple workloads
-- `Rc<RefCell<>>` state accessed across await points where another task could mutate it
-
-### 3. Crash Recovery
-
-What happens when a Process is killed (graceful or crash) and restarted from factory.
-
-**Look for**:
-- In-memory state that isn't persisted to `StorageProvider` but should be
-- Partially-written storage operations (write without sync, multi-file updates)
-- Recovery code that assumes clean state (no torn writes, no partial data)
-- Operations interrupted between storage write and `sync_all()`
-- State that the workload expects to survive but lives only in process memory
-
-### 4. Network Faults
-
-Behavior under connection drops, partitions, reordering.
-
-**Look for**:
-- RPC calls without timeout or error handling
-- Retry logic that isn't idempotent (retrying a non-idempotent operation after ambiguous failure)
-- Stale connection state after partition restore (cached peer info, old leader references)
-- Assumptions about message ordering (request A arrives before request B)
-- Fire-and-forget sends where delivery matters
-
-### 5. Timing & Scheduling
-
-Sensitivity to event ordering, timer resolution, simulated clock behavior.
-
-**Look for**:
-- Hardcoded timeout values that interact poorly with other timeouts
-- Operations that assume timers fire in a specific order relative to network events
-- Races between timer expiry and data delivery
-- Logic that depends on "enough time passing" without explicit synchronization
-- Election/lease timeouts that could overlap
-
-### 6. Resource Boundaries
-
-Queue depths, connection limits, storage capacity.
-
-**Look for**:
-- Unbounded `Vec` or `VecDeque` that grow under load (message queues, request buffers)
-- Missing backpressure on incoming requests
-- Operations that assume resources are always available (connections, file handles)
-- Memory growth patterns that only surface under sustained chaos
-
-### 7. Protocol Contracts
-
-API guarantees between Process and Workload, RPC contracts, wire format invariants.
-
-**Look for**:
-- Documented guarantees that aren't enforced with assertions
-- Response codes that mask errors (returning OK when partially failed)
-- Ordering assumptions between RPC calls (create before update)
-- Request/response type mismatches that serde would silently accept
-- Invariants claimed in doc comments but never tested
-
-### 8. Lifecycle Transitions
-
-Process startup, graceful shutdown, reboot sequences.
-
-**Look for**:
-- Requests arriving before initialization completes (listener bound before state loaded)
-- In-flight work dropped during graceful shutdown (cancellation token not checked)
-- State published to `StateRegistry` before it's valid
-- Shutdown ordering dependencies (close connections before flushing storage)
-- Factory assumptions about clean vs dirty process directories after wipe vs crash reboot
-
-## Methodology
-
-### Ensemble Mode (recommended)
-
-When context allows, spawn one sub-agent per attention focus. Each agent examines the user's code through its assigned lens and returns:
-- Suggested assertion placements with exact macro, location (`file:line`), and message
-- Suggested buggify points with injection pattern and probability tier
-- Confidence level (high/medium/low) and supporting evidence
-
-Then synthesize: deduplicate (multiple agents finding the same property = high confidence), preserve unique finds (properties from only one focus are high-value catches), resolve conflicts, organize by file.
-
-### Sequential Mode
-
-Work through focuses as a checklist. Make an explicit pass for each. Do not skip a focus because an earlier pass "already covered" that area — the value is in the independent perspective.
-
-## Output Format
-
-For each discovered property:
+For each property:
 
 ```
-[file_path:line_range] — Description
-
-| Field     | Value                                                    |
-|-----------|----------------------------------------------------------|
-| Macro     | assert_always! / assert_sometimes! / assert_reachable!   |
-| Message   | Unique, descriptive assertion message                    |
-| Rationale | Why this property matters, what bug it catches           |
-| Focus     | Which attention focus(es) surfaced this                  |
+[path:line-range] — one-line description
+Macro:     assert_always! | assert_sometimes! | assert_reachable! | invariant (cross-process)
+Message:   short, stable, no interpolated ids
+Rationale: the bug it catches, in one sentence
+Focus:     which focus(es) surfaced it
 ```
 
-For buggify points:
+For each injection point:
 
 ```
-[file_path:line_range] — Description
-
-| Field       | Value                                                  |
-|-------------|--------------------------------------------------------|
-| Pattern     | Error injection / Delay / Parameter randomization      |
-| Probability | High (5-10%) / Medium (1%) / Low (0.1-0.01%)          |
-| Rationale   | What failure mode this exercises                       |
+[path:line-range] — one-line description
+Pattern:     error injection | delay | knob (default, lo..hi, floor) | alternative path | restart
+Probability: high (5-10%) | medium (1%) | low (0.1-0.01%)
+Rationale:   the failure mode it makes likely
 ```
 
-## Cross-References
+Placement rules: a per-process fact goes in the `Process`, a client-visible
+fact in the `Workload`, a cross-process fact in an `Invariant` over tracing
+events (`/events-and-invariants`); every injection point gets a
+branch-guarded `assert_reachable!` (`/using-buggify`); a `sometimes` names
+an outcome, never a perturbation.
 
-- `using-assertions/SKILL.md` — Macro selection guidance (which assertion type to use)
-- `using-buggify/SKILL.md` — Injection patterns and probability calibration
-- `writing-a-process/SKILL.md` — Process lifecycle and factory patterns
-- `writing-a-workload/SKILL.md` — Workload patterns and reference models
-
-## Book Chapters
-
-- `book/src/part3-building/24-discovering-properties.md` — Full guide: attention focuses, ensemble methodology, worked example
-- `book/src/part3-building/12-assertions.md` — Assertion overview and taxonomy
-- `book/src/part3-building/19-designing-workloads.md` — Invariant patterns for workloads
+Book: `book/src/part3-building/24-discovering-properties.md`,
+`19-designing-workloads.md`.
