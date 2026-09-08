@@ -26,6 +26,15 @@
 //! providers: h2 keepalive pings and timeouts read the provider clock, and
 //! hyper's internal futures are provider tasks. Inside a simulation that makes
 //! connection lifecycles reproducible from a seed, chaos included.
+//!
+//! Two clock reads sit below hyper's `Timer` and are neutralised rather than
+//! routed: the server's automatic `Date` header (disabled, [`H2Server`]) and
+//! h2's expiry of locally reset streams, which is judged on
+//! `std::time::Instant::now()` after one real second by default — the client
+//! sets `reset_stream_duration` to `Duration::MAX` so the count cap alone
+//! bounds them ([`ReconnectingChannel`]). hyper exposes no such knob on the
+//! server side, so a server that resets streams keeps a residual dependence on
+//! wall time there.
 
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]

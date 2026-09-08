@@ -177,6 +177,20 @@ and perturb later simulated network choices. `H2Server` disables the automatic
 header. A production caller using the builder escape hatch can re-enable it, or
 the service can provide a date from an application-controlled clock.
 
+**Reset streams do not expire on the wall clock.** h2 keeps a locally reset
+stream around for a while so late frames for it can be ignored, and it judges
+that expiry on `std::time::Instant::now()` — the one clock hyper's `Timer` does
+not reach — after one real second by default. A simulation that takes longer
+than that in wall time then expires those streams at a simulated instant that
+depends on how fast the machine is, and the client connection's "last stream
+closed" self-wake lands on a different poll from run to run (paros's
+determinism canary caught it as a draw that diverged at the same simulated
+nanosecond with the two fingerprints swapped between processes).
+`ReconnectingChannel` sets `reset_stream_duration` to `Duration::MAX`, so the
+count cap (`max_concurrent_reset_streams`) is the only bound on them, which is
+deterministic. hyper exposes no such knob on the server builder, so a server
+that resets streams keeps a residual dependence on wall time there.
+
 **A connection has to earn its reset.** The failure count that drives the
 backoff clears only once a connection has survived `initial_reconnect_delay`,
 not the moment the handshake completes. Without that rule, a peer that accepts

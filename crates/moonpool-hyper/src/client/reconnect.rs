@@ -629,6 +629,17 @@ where
         shared.providers.task().clone(),
     ));
     builder.timer(HyperTimer::new(shared.providers.time().clone()));
+    // h2 expires locally reset streams on `std::time::Instant::now()` — the
+    // one clock hyper's `Timer` does not reach — after a default of one real
+    // second (`h2::proto::DEFAULT_RESET_STREAM_SECS`). A simulation that runs
+    // longer than that in wall time expires them at a wall-clock-dependent
+    // simulated instant, and the client connection's "last stream closed"
+    // self-wake then lands on a different poll from run to run. An
+    // effectively infinite duration leaves the count cap
+    // (`max_concurrent_reset_streams`) as the only bound, which is
+    // deterministic; the same reasoning disables hyper's `Date` header on
+    // the server side.
+    builder.reset_stream_duration(Duration::MAX);
     if let Some(keep_alive) = &shared.config.keep_alive {
         builder
             .keep_alive_interval(keep_alive.interval)
