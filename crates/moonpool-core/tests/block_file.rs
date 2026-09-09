@@ -36,7 +36,7 @@ fn block_round_trip_on_a_real_file() {
         blocks.grow_to_blocks(2).await.expect("grow failed");
         assert_eq!(blocks.size_in_blocks().await.expect("size"), 8);
 
-        let mut page = blocks.buffer(2);
+        let mut page = blocks.buffer(2).expect("buffer allocation");
         page.as_mut_slice().fill(0x3B);
         blocks
             .write_blocks(3, page.as_slice())
@@ -44,7 +44,7 @@ fn block_round_trip_on_a_real_file() {
             .expect("write");
         blocks.sync().await.expect("sync");
 
-        let mut read = blocks.buffer(2);
+        let mut read = blocks.buffer(2).expect("buffer allocation");
         blocks
             .read_blocks(3, read.as_mut_slice())
             .await
@@ -52,7 +52,7 @@ fn block_round_trip_on_a_real_file() {
         assert_eq!(read.as_slice(), page.as_slice());
 
         // The neighbouring block was never written and must be untouched.
-        let mut neighbour = blocks.buffer(1);
+        let mut neighbour = blocks.buffer(1).expect("buffer allocation");
         blocks
             .read_blocks(5, neighbour.as_mut_slice())
             .await
@@ -76,7 +76,7 @@ fn reading_past_the_end_of_a_real_file_is_unexpected_eof() {
         let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
         blocks.grow_to_blocks(1).await.expect("grow failed");
 
-        let mut buf = blocks.buffer(3);
+        let mut buf = blocks.buffer(3).expect("buffer allocation");
         let error = blocks
             .read_blocks(0, buf.as_mut_slice())
             .await
@@ -108,7 +108,7 @@ fn block_io_works_under_the_direct_io_policy() {
         let direct = file.is_direct_io();
         let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
 
-        let mut page = blocks.buffer(1);
+        let mut page = blocks.buffer(1).expect("buffer allocation");
         page.as_mut_slice().fill(0xD4);
         blocks
             .write_blocks(0, page.as_slice())
@@ -116,7 +116,7 @@ fn block_io_works_under_the_direct_io_policy() {
             .expect("write");
         blocks.sync().await.expect("sync");
 
-        let mut read = blocks.buffer(1);
+        let mut read = blocks.buffer(1).expect("buffer allocation");
         blocks
             .read_blocks(0, read.as_mut_slice())
             .await

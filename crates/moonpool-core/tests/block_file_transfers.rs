@@ -207,7 +207,7 @@ fn a_short_write_is_completed_without_an_invalid_request() {
         let recorder = file.clone();
         let blocks = BlockFile::new(file, 8192).expect("8192 is a multiple of every alignment");
 
-        let mut page = blocks.buffer(1);
+        let mut page = blocks.buffer(1).expect("buffer allocation");
         for (index, byte) in page.as_mut_slice().iter_mut().enumerate() {
             *byte = u8::try_from(index % 251).expect("modulo fits in u8");
         }
@@ -249,7 +249,7 @@ fn a_short_read_is_completed_without_an_invalid_request() {
         let recorder = file.clone();
         let blocks = BlockFile::new(file, 8192).expect("wrap failed");
 
-        let mut page = blocks.buffer(1);
+        let mut page = blocks.buffer(1).expect("buffer allocation");
         blocks
             .read_blocks(0, page.as_mut_slice())
             .await
@@ -277,7 +277,7 @@ fn a_short_transfer_mid_file_resumes_on_an_absolute_boundary() {
         let blocks = BlockFile::new(file, 8192).expect("wrap failed");
         blocks.grow_to_blocks(4).await.expect("grow failed");
 
-        let mut page = blocks.buffer(2);
+        let mut page = blocks.buffer(2).expect("buffer allocation");
         page.as_mut_slice().fill(0x5C);
         blocks
             .write_blocks(2, page.as_slice())
@@ -320,6 +320,62 @@ fn a_misaligned_caller_buffer_is_refused_up_front() {
         assert!(
             recorder.state().requests.is_empty(),
             "the file must never see the request"
+        );
+    });
+}
+
+/// Block arithmetic is checked at every conversion. None of these may wrap:
+/// a wrapped offset addresses the wrong part of the file, and a wrapped
+/// allocation hands back a buffer of the wrong size — both silent in release
+/// builds, where the debug-mode overflow panic does not fire.
+#[test]
+fn block_arithmetic_is_checked_at_every_boundary() {
+    runtime().block_on(async {
+        const BLOCK: usize = 8192;
+        let file = AwkwardFile::new(BLOCK);
+        let recorder = file.clone();
+        let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
+
+        // An allocation whose byte count overflows `usize`.
+        let error = blocks
+            .buffer(usize::MAX)
+            .expect_err("a buffer that cannot fit in memory must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let mut page = blocks.buffer(1).expect("buffer allocation");
+
+        // A block index whose byte offset overflows `u64`.
+        let error = blocks
+            .read_blocks(u64::MAX, page.as_mut_slice())
+            .await
+            .expect_err("an unaddressable block index must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        // An index that *does* fit, naming a range whose end does not: the
+        // second check, which a single multiplication guard would miss.
+        let last = u64::MAX / BLOCK as u64;
+        assert!(last.checked_mul(BLOCK as u64).is_some(), "the offset fits");
+        let error = blocks
+            .read_blocks(last, page.as_mut_slice())
+            .await
+            .expect_err("a transfer running past the address space must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        let error = blocks
+            .write_blocks(last, page.as_slice())
+            .await
+            .expect_err("a transfer running past the address space must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        // Growing past the address space is refused the same way.
+        let error = blocks
+            .grow_to_blocks(u64::MAX)
+            .await
+            .expect_err("an unaddressable length must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        assert!(
+            recorder.state().requests.is_empty(),
+            "no arithmetic failure may reach the file as a request"
         );
     });
 }

@@ -174,14 +174,19 @@ impl AlignedBuf {
     ///
     /// # Panics
     ///
-    /// Panics unless `alignment` is a power of two.
+    /// Panics unless `alignment` is a power of two, or if `len + alignment`
+    /// does not fit in memory — the over-allocation must not wrap to a small
+    /// buffer that would then be sliced out of bounds.
     #[must_use]
     pub fn zeroed(len: usize, alignment: usize) -> Self {
         assert!(
             alignment.is_power_of_two(),
             "alignment {alignment} is not a power of two"
         );
-        let backing = vec![0u8; len + alignment];
+        let backing_len = len
+            .checked_add(alignment)
+            .expect("an aligned buffer of this length does not fit in memory");
+        let backing = vec![0u8; backing_len];
         let offset = backing.as_ptr().align_offset(alignment);
         assert!(
             offset <= alignment,
@@ -198,9 +203,11 @@ impl AlignedBuf {
     ///
     /// # Panics
     ///
-    /// Panics if `len` does not satisfy the constraints' length alignment: a
+    /// Panics if `len` does not satisfy the constraints' length alignment (a
     /// buffer that can never be transferred in one call is a caller bug, not a
-    /// runtime condition.
+    /// runtime condition), or if the allocation does not fit in memory. Block
+    /// callers should reach for [`BlockFile::buffer`](crate::BlockFile::buffer),
+    /// which reports the second case as an error instead.
     #[must_use]
     pub fn for_constraints(len: usize, constraints: IoConstraints) -> Self {
         assert!(

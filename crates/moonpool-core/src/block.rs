@@ -161,9 +161,23 @@ impl<F: StorageFile> BlockFile<F> {
     /// Reuses [`AlignedBuf`] rather than growing a second aligned allocator:
     /// direct I/O needs an aligned buffer, and this is where a block-shaped
     /// caller gets one.
-    #[must_use]
-    pub fn buffer(&self, blocks: usize) -> AlignedBuf {
-        AlignedBuf::for_constraints(blocks * self.block_size, self.constraints())
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] if `blocks` blocks do not fit in
+    /// memory. Returning that beats wrapping to a small allocation, which
+    /// would hand back a buffer of the wrong size in release builds.
+    pub fn buffer(&self, blocks: usize) -> io::Result<AlignedBuf> {
+        let bytes = blocks.checked_mul(self.block_size).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{blocks} blocks of {} bytes do not fit in memory",
+                    self.block_size
+                ),
+            )
+        })?;
+        Ok(AlignedBuf::for_constraints(bytes, self.constraints()))
     }
 
     /// Read whole blocks starting at `block_index` into `buf`.
@@ -379,7 +393,13 @@ impl<F: StorageFile> BlockFile<F> {
         ))
     }
 
-    /// Byte offset of a block-aligned transfer, validating its length.
+    /// Byte offset of a block-aligned transfer, validating its length and
+    /// that the whole range is addressable.
+    ///
+    /// Both ends are checked: a block index can overflow a byte offset on its
+    /// own, and an index that fits can still name a range whose *end* does
+    /// not. Neither may wrap — a wrapped offset addresses the wrong part of
+    /// the file rather than failing.
     fn range(&self, block_index: u64, len: usize) -> io::Result<u64> {
         if len == 0 || !len.is_multiple_of(self.block_size) {
             return Err(io::Error::new(
@@ -390,13 +410,20 @@ impl<F: StorageFile> BlockFile<F> {
                 ),
             ));
         }
-        block_index
+        let start = block_index
             .checked_mul(self.block_size as u64)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("block index {block_index} overflows a byte offset"),
                 )
-            })
+            })?;
+        start.checked_add(len as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a {len}-byte transfer at block {block_index} runs past the end of the address space"),
+            )
+        })?;
+        Ok(start)
     }
 }

@@ -62,12 +62,12 @@ fn blocks_are_addressed_by_index_over_an_open_file() {
             blocks.grow_to_blocks(4).await?;
             assert_eq!(blocks.size_in_blocks().await?, 4);
 
-            let mut page = blocks.buffer(1);
+            let mut page = blocks.buffer(1).expect("buffer allocation");
             page.as_mut_slice().fill(0xC7);
             blocks.write_blocks(2, page.as_slice()).await?;
             blocks.sync().await?;
 
-            let mut read = blocks.buffer(1);
+            let mut read = blocks.buffer(1).expect("buffer allocation");
             blocks.read_blocks(2, read.as_mut_slice()).await?;
             assert!(read.iter().all(|byte| *byte == 0xC7));
             Ok(())
@@ -93,13 +93,13 @@ fn short_transfers_are_looped_over() {
                 .await?;
             let blocks = BlockFile::new(file, BLOCK)?;
 
-            let mut written = blocks.buffer(4);
+            let mut written = blocks.buffer(4).expect("buffer allocation");
             for (index, byte) in written.as_mut_slice().iter_mut().enumerate() {
                 *byte = u8::try_from(index % 251).expect("modulo fits in u8");
             }
             blocks.write_blocks(0, written.as_slice()).await?;
 
-            let mut read = blocks.buffer(4);
+            let mut read = blocks.buffer(4).expect("buffer allocation");
             blocks.read_blocks(0, read.as_mut_slice()).await?;
             assert_eq!(
                 read.as_slice(),
@@ -127,7 +127,7 @@ fn reading_past_the_end_is_unexpected_eof() {
             let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
             blocks.grow_to_blocks(1).await.expect("grow failed");
 
-            let mut buf = blocks.buffer(2);
+            let mut buf = blocks.buffer(2).expect("buffer allocation");
             blocks
                 .read_blocks(0, buf.as_mut_slice())
                 .await
@@ -260,13 +260,13 @@ fn direct_io_blocks_use_aligned_buffers_and_still_need_a_sync() {
             let blocks = BlockFile::new(file, BLOCK)?;
             assert!(blocks.get_ref().is_direct_io());
 
-            let mut page = blocks.buffer(2);
+            let mut page = blocks.buffer(2).expect("buffer allocation");
             page.as_mut_slice().fill(0x5E);
             // The write goes through: an aligned buffer, an aligned offset,
             // an aligned length.
             blocks.write_blocks(0, page.as_slice()).await?;
 
-            let mut read = blocks.buffer(2);
+            let mut read = blocks.buffer(2).expect("buffer allocation");
             blocks.read_blocks(0, read.as_mut_slice()).await?;
             assert!(read.iter().all(|byte| *byte == 0x5E));
 
@@ -290,7 +290,7 @@ fn block_writes_are_visible_through_the_file_apis() {
                 .open("shared.db", OpenOptions::create_write().read(true))
                 .await?;
             let blocks = BlockFile::new(file, BLOCK)?;
-            let mut page = blocks.buffer(1);
+            let mut page = blocks.buffer(1).expect("buffer allocation");
             page.as_mut_slice()[..5].copy_from_slice(b"stamp");
             blocks.write_blocks(1, page.as_slice()).await?;
 
@@ -313,7 +313,7 @@ fn block_writes_are_visible_through_the_file_apis() {
                 .await?;
             writer.seek(SeekFrom::Start(0)).await?;
             writer.write_all(b"header").await?;
-            let mut first = blocks.buffer(1);
+            let mut first = blocks.buffer(1).expect("buffer allocation");
             blocks.read_blocks(0, first.as_mut_slice()).await?;
             assert_eq!(&first.as_slice()[..6], b"header");
             Ok(())
@@ -340,7 +340,7 @@ fn a_block_write_is_not_a_crash_atomicity_unit() {
                     .await
                     .expect("open failed");
                 let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
-                let mut zeroes = blocks.buffer(2);
+                let mut zeroes = blocks.buffer(2).expect("buffer allocation");
                 blocks
                     .write_blocks(0, zeroes.as_slice())
                     .await
@@ -364,7 +364,7 @@ fn a_block_write_is_not_a_crash_atomicity_unit() {
                     .await
                     .expect("open failed");
                 let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
-                let mut buf = blocks.buffer(2);
+                let mut buf = blocks.buffer(2).expect("buffer allocation");
                 if blocks.read_blocks(0, buf.as_mut_slice()).await.is_err() {
                     return false;
                 }
