@@ -3,7 +3,7 @@
 use crate::sim::WeakSimWorld;
 use crate::storage::sim::{HandleId, OperationId, StorageCompletion};
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use moonpool_core::{IoConstraints, StorageFile};
+use moonpool_core::{IoConstraints, StorageFile, stream_io_unsupported};
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,6 +61,16 @@ impl SimStorageFile {
             closed: AtomicBool::new(false),
             pending_read: None,
             pending_write: None,
+        }
+    }
+
+    /// The stream API is unavailable on a file with I/O constraints; see
+    /// [`StorageFile`] for why.
+    fn ensure_stream_io(&self) -> io::Result<()> {
+        if self.constraints.is_unconstrained() {
+            Ok(())
+        } else {
+            Err(stream_io_unsupported())
         }
     }
 
@@ -141,6 +151,7 @@ impl AsyncRead for SimStorageFile {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.ensure_open()?;
+        this.ensure_stream_io()?;
         let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending read operation
@@ -171,7 +182,6 @@ impl AsyncRead for SimStorageFile {
 
         // Get current position
         let position = sim.file_position(this.handle_id)?;
-        this.constraints.check(position, buf)?;
 
         // Get file size to check for EOF
         let file_size = sim.file_size(this.handle_id)?;
@@ -211,6 +221,7 @@ impl AsyncWrite for SimStorageFile {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.ensure_open()?;
+        this.ensure_stream_io()?;
         let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending write operation
@@ -243,7 +254,6 @@ impl AsyncWrite for SimStorageFile {
 
         // Get current position
         let position = sim.file_position(this.handle_id)?;
-        this.constraints.check(position, buf)?;
 
         // Schedule the write operation
         let operation_id = sim.schedule_write(this.handle_id, position, buf.to_vec())?;

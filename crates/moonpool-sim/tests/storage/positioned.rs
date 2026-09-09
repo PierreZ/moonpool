@@ -469,3 +469,73 @@ fn direct_io_policy_does_not_weaken_create_new() {
         );
     });
 }
+
+/// The simulated backend enforces the same stream contract the production one
+/// does: a file with I/O constraints refuses stream reads and writes outright,
+/// rather than accepting the aligned ones and failing the rest.
+#[test]
+fn a_direct_io_file_refuses_stream_io() {
+    local_runtime().block_on(async {
+        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
+            let mut file = provider
+                .open(
+                    "stream.db",
+                    OpenOptions::create_write()
+                        .read(true)
+                        .direct_io(DirectIo::Required),
+                )
+                .await?;
+            let constraints = file.constraints();
+            let mut aligned =
+                AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
+
+            // Aligned or not, the stream API is unavailable: it is the shared
+            // cursor that cannot be kept aligned.
+            assert_eq!(
+                file.write(aligned.as_slice())
+                    .await
+                    .expect_err("stream writes must be refused")
+                    .kind(),
+                std::io::ErrorKind::Unsupported
+            );
+            assert_eq!(
+                file.read(aligned.as_mut_slice())
+                    .await
+                    .expect_err("stream reads must be refused")
+                    .kind(),
+                std::io::ErrorKind::Unsupported
+            );
+
+            // Seeking transfers nothing, so it stays available.
+            assert_eq!(file.seek(SeekFrom::Start(0)).await?, 0);
+
+            // Positioned I/O is what this file is for.
+            assert_eq!(file.write_at(0, aligned.as_slice()).await?, aligned.len());
+            Ok(())
+        })
+        .await;
+        result.expect("direct stream test failed");
+    });
+}
+
+/// And a buffered file keeps ordinary stream semantics.
+#[test]
+fn a_buffered_file_keeps_stream_io() {
+    local_runtime().block_on(async {
+        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
+            let mut file = provider
+                .open("buffered.db", OpenOptions::create_write().read(true))
+                .await?;
+            assert!(file.constraints().is_unconstrained());
+
+            file.write_all(b"streamed").await?;
+            file.seek(SeekFrom::Start(0)).await?;
+            let mut buf = [0u8; 8];
+            file.read_exact(&mut buf).await?;
+            assert_eq!(&buf, b"streamed");
+            Ok(())
+        })
+        .await;
+        result.expect("buffered stream test failed");
+    });
+}

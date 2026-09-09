@@ -213,7 +213,9 @@ journal or pager is written directly against `StorageFile`.
 `read_at`/`write_at` are positioned: they take `&self`, never touch the stream
 cursor, and return the number of bytes moved, so non-overlapping ranges can be
 read and written concurrently and partial transfers stay visible to the
-caller. `BlockFile<F>` wraps one open file to add block arithmetic and the
+caller. On a file with I/O constraints they are the *only* way to transfer:
+the stream half of the trait is refused there, because a shared cursor cannot
+be kept aligned. `BlockFile<F>` wraps one open file to add block arithmetic and the
 loops that turn those partial transfers into whole ones; it holds no path and
 opens nothing.
 

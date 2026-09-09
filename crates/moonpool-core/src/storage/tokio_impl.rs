@@ -8,7 +8,10 @@ use std::task::{Context, Poll};
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
-use super::{AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider};
+use super::{
+    AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider,
+    stream_io_unsupported,
+};
 
 /// Real Tokio storage implementation.
 #[derive(Debug, Clone, Default)]
@@ -485,6 +488,11 @@ impl AsyncRead for TokioStorageFile {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
+        // Refused here rather than left to the kernel's EINVAL, so the
+        // contract is the same one the simulation enforces.
+        if !self.constraints.is_unconstrained() {
+            return Poll::Ready(Err(stream_io_unsupported()));
+        }
         Pin::new(&mut self.inner).poll_read(cx, buf)
     }
 }
@@ -495,6 +503,9 @@ impl AsyncWrite for TokioStorageFile {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if !self.constraints.is_unconstrained() {
+            return Poll::Ready(Err(stream_io_unsupported()));
+        }
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
 

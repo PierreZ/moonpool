@@ -46,6 +46,22 @@ use std::io;
 
 pub use align::{AlignedBuf, IoConstraints};
 pub use options::{DirectIo, OpenOptions};
+
+/// The error a file with I/O constraints returns from the stream API.
+///
+/// Shared so every backend — and every out-of-tree [`StorageFile`] — refuses
+/// it identically, rather than each producing its own wording or, worse,
+/// leaving the kernel to produce one.
+///
+/// See [`StorageFile`] for why the stream API and alignment do not mix.
+#[must_use]
+pub fn stream_io_unsupported() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this file has I/O alignment constraints, which the stream API cannot honour; \
+         use read_at and write_at",
+    )
+}
 #[cfg(feature = "tokio-fs")]
 pub use tokio_impl::{TokioStorageFile, TokioStorageProvider};
 
@@ -118,6 +134,23 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
 /// but only a completed [`sync_all`](Self::sync_all) or
 /// [`sync_data`](Self::sync_data) makes it survive a crash. Nothing else on
 /// this trait implies durability.
+///
+/// ## Stream I/O and alignment do not mix
+///
+/// The [`AsyncRead`] / [`AsyncWrite`] half of this trait is available only on
+/// a file with no I/O constraints. A file that has them — a direct-I/O file —
+/// **must** refuse stream reads and writes with
+/// [`stream_io_unsupported`], because the stream API cannot honour an
+/// alignment: it transfers from wherever the shared cursor happens to be, in
+/// whatever length the caller passed, and a short transfer then leaves the
+/// cursor somewhere no subsequent request may start from. There is no answer
+/// to that within the API's own semantics, so the honest contract is that the
+/// two are mutually exclusive rather than one accidentally working until it
+/// does not.
+///
+/// [`read_at`](Self::read_at) and [`write_at`](Self::write_at) are what such a
+/// file offers instead, and they are what a storage engine wants anyway.
+/// Seeking stays available: it moves a cursor, it does not transfer anything.
 pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static {
     /// Flush this file's data *and* metadata to the device.
     ///

@@ -211,3 +211,92 @@ fn direct_io_constraints_describe_what_the_device_accepts() {
         assert_eq!(read.as_slice(), block.as_slice());
     });
 }
+
+/// The stream API and alignment are mutually exclusive, and a direct-I/O file
+/// says so itself rather than letting the kernel answer with `EINVAL` on some
+/// requests and succeed on others.
+#[test]
+fn a_direct_io_file_refuses_stream_io() {
+    use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("stream.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let mut file = match provider
+            .open(
+                path,
+                OpenOptions::create_write()
+                    .read(true)
+                    .direct_io(DirectIo::Required),
+            )
+            .await
+        {
+            Ok(file) => file,
+            // A filesystem without direct I/O has nothing to say here.
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => return,
+            Err(error) => panic!("open failed: {error}"),
+        };
+
+        let constraints = file.constraints();
+        let mut aligned = AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
+
+        // Even a perfectly aligned buffer is refused: it is the shared cursor
+        // that cannot be kept aligned, not this particular transfer.
+        let error = file
+            .write(aligned.as_slice())
+            .await
+            .expect_err("stream writes must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+
+        let error = file
+            .read(aligned.as_mut_slice())
+            .await
+            .expect_err("stream reads must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+
+        // Seeking moves a cursor; it transfers nothing, so it stays available.
+        assert_eq!(
+            file.seek(std::io::SeekFrom::Start(0))
+                .await
+                .expect("seeking must stay available"),
+            0
+        );
+
+        // And positioned I/O works throughout.
+        assert_eq!(
+            file.write_at(0, aligned.as_slice())
+                .await
+                .expect("positioned writes are what this file is for"),
+            aligned.len()
+        );
+    });
+}
+
+/// A buffered file keeps the ordinary stream semantics; nothing here narrows
+/// what a file without constraints can do.
+#[test]
+fn a_buffered_file_keeps_stream_io() {
+    use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("buffered.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let mut file = provider
+            .open(path, OpenOptions::create_write().read(true))
+            .await
+            .expect("open failed");
+        assert!(file.constraints().is_unconstrained());
+
+        file.write_all(b"streamed").await.expect("write failed");
+        file.seek(std::io::SeekFrom::Start(0)).await.expect("seek");
+        let mut buf = [0u8; 8];
+        file.read_exact(&mut buf).await.expect("read failed");
+        assert_eq!(&buf, b"streamed");
+    });
+}

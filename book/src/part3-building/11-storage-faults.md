@@ -336,6 +336,21 @@ exactly as it earns `EINVAL` from a kernel. `AlignedBuf` is the one
 aligned-buffer facility in moonpool; layers above it reuse it rather than
 growing their own.
 
+The numbers are discovered, not assumed: production asks the kernel
+(`statx(STATX_DIOALIGN)`) for the device's real requirement, falls back to the
+page size as a documented bound where the kernel will not say, and refuses to
+offer direct I/O at all where it can do neither — advertising an alignment
+that turns out to be too weak would hand callers a buffer the device rejects.
+The simulation reports the disk geometry it was configured with.
+
+**The stream API and alignment are mutually exclusive.** A file with I/O
+constraints refuses `AsyncRead` / `AsyncWrite` with `ErrorKind::Unsupported`,
+in both backends, because a shared cursor cannot be kept aligned: a stream
+transfer starts wherever the cursor happens to be, and a short one leaves it
+somewhere no subsequent request may start from. Seeking still works — it moves
+a cursor without transferring anything — and `read_at` / `write_at` are what
+such a file offers instead.
+
 ## File Durability Is Not Directory Durability
 
 ```text

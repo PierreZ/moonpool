@@ -21,7 +21,11 @@
 ///
 /// Direct I/O comes with alignment requirements; read them off the opened file
 /// with [`StorageFile::constraints`](super::StorageFile::constraints) rather
-/// than assuming a value.
+/// than assuming a value. Because those requirements cannot be expressed
+/// through a shared cursor, a direct-I/O file serves
+/// [`read_at`](super::StorageFile::read_at) /
+/// [`write_at`](super::StorageFile::write_at) and refuses the stream API —
+/// see [`StorageFile`](super::StorageFile).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DirectIo {
     /// Ordinary buffered I/O.
