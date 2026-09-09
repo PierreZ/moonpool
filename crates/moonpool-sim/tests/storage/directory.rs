@@ -247,3 +247,62 @@ fn namespace_survives_when_the_family_is_off() {
         assert!(exists);
     });
 }
+
+/// One process's crash resolves one process's namespace. A neighbour's
+/// unsynced directory entry is not made durable by someone else crashing, and
+/// is still at risk when that neighbour crashes in turn.
+#[test]
+fn a_crash_resolves_only_the_crashing_processs_namespace() {
+    local_runtime().block_on(async {
+        let mut sim = losing_sim();
+        let neighbour: IpAddr = "127.0.0.2".parse().expect("valid IP");
+
+        // Both processes create a file; neither syncs its directory.
+        for owner in [test_ip(), neighbour] {
+            let provider = sim.storage_provider(owner);
+            let path = format!("db/{owner}");
+            let handle = tokio::spawn(async move {
+                let file = provider
+                    .open(&path, OpenOptions::create_write())
+                    .await
+                    .expect("open failed");
+                file.sync_all().await.expect("sync failed");
+            });
+            while !handle.is_finished() {
+                while sim.pending_event_count() > 0 {
+                    sim.step();
+                }
+                tokio::task::yield_now().await;
+            }
+            handle.await.expect("task panicked");
+        }
+
+        // Crash only the first process.
+        sim.simulate_crash_for_process(test_ip(), true);
+
+        let exists = |sim: &mut SimWorld, owner: IpAddr, path: String| {
+            let provider = sim.storage_provider(owner);
+            async move { provider.exists(&path).await.expect("exists failed") }
+        };
+
+        let neighbour_path = format!("db/{neighbour}");
+        let mine = run_on(&mut sim, {
+            let path = format!("db/{}", test_ip());
+            move |provider| async move { provider.exists(&path).await.expect("exists failed") }
+        })
+        .await;
+        assert!(!mine, "the crashing process loses its unsynced entry");
+
+        // The neighbour's entry is untouched by someone else's crash...
+        let still_there = exists(&mut sim, neighbour, neighbour_path.clone()).await;
+        assert!(still_there, "a neighbour's namespace is not resolved");
+
+        // ...and is still unsynced, so its own crash still loses it.
+        sim.simulate_crash_for_process(neighbour, true);
+        let after = exists(&mut sim, neighbour, neighbour_path).await;
+        assert!(
+            !after,
+            "the neighbour's entry was never made durable by the other crash"
+        );
+    });
+}

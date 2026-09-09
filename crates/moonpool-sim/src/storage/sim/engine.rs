@@ -446,16 +446,46 @@ impl StorageEngine {
             .state
             .config_for(ip)
             .unsynced_dir_entry_loss_probability;
-        if probability <= 0.0 {
-            self.state.durable_paths = self.state.path_to_file.clone();
-            return;
+        if probability > 0.0 {
+            self.lose_unsynced_entries(ip, probability);
         }
-        let owned = |state: &StorageState, file_id: &FileId| {
-            state
-                .files
-                .get(file_id)
-                .is_some_and(|file| file.owner_ip == ip)
-        };
+
+        // Whatever survived is what is on the disk now — for this process's
+        // files only. Another process's unsynced entries are not made durable
+        // by this crash.
+        let mine = self.files_owned_by(ip);
+        self.state
+            .durable_paths
+            .retain(|_, file_id| !mine.contains(file_id));
+        let surviving: Vec<(String, FileId)> = self
+            .state
+            .path_to_file
+            .iter()
+            .filter(|(_, file_id)| mine.contains(file_id))
+            .map(|(path, file_id)| (path.clone(), *file_id))
+            .collect();
+        for (path, file_id) in surviving {
+            self.state.durable_paths.insert(path, file_id);
+        }
+
+        // Contents no surviving name reaches are gone with the name.
+        let linked: Vec<FileId> = self
+            .state
+            .path_to_file
+            .values()
+            .chain(self.state.durable_paths.values())
+            .copied()
+            .collect();
+        self.state
+            .files
+            .retain(|file_id, file| file.owner_ip != ip || linked.contains(file_id));
+    }
+
+    /// Roll the loss coin for each of this process's unsynced directory
+    /// operations: a name created since the last directory sync may not be
+    /// there, and one deleted or renamed away may still be.
+    fn lose_unsynced_entries(&mut self, ip: IpAddr, probability: f64) {
+        let mine = self.files_owned_by(ip);
         let mut paths: Vec<String> = self
             .state
             .path_to_file
@@ -473,11 +503,11 @@ impl StorageEngine {
                 continue;
             }
             // Only this process's own entries are at risk.
-            let mine = visible
+            if !visible
                 .iter()
                 .chain(durable.iter())
-                .any(|id| owned(&self.state, id));
-            if !mine {
+                .any(|file_id| mine.contains(file_id))
+            {
                 continue;
             }
             if sim_random::<f64>() >= probability {
@@ -494,12 +524,15 @@ impl StorageEngine {
                 None => self.state.path_to_file.remove(&path),
             };
         }
+    }
 
-        let live: Vec<FileId> = self.state.path_to_file.values().copied().collect();
+    /// The files this process owns, in stable order.
+    fn files_owned_by(&self, ip: IpAddr) -> Vec<FileId> {
         self.state
             .files
-            .retain(|file_id, file| file.owner_ip != ip || live.contains(file_id));
-        self.state.durable_paths = self.state.path_to_file.clone();
+            .iter()
+            .filter_map(|(file_id, file)| (file.owner_ip == ip).then_some(*file_id))
+            .collect()
     }
 
     pub(crate) fn schedule_read(
@@ -1258,12 +1291,7 @@ impl StorageEngine {
         self.state.failed_disks.remove(&ip);
         let config = self.state.config_for(ip).clone();
         let armed = self.state.barrier_violation_armed;
-        let file_ids = self
-            .state
-            .files
-            .iter()
-            .filter_map(|(id, file)| (file.owner_ip == ip).then_some(*id))
-            .collect::<Vec<_>>();
+        let file_ids = self.files_owned_by(ip);
         // Resolve each file's unsynced writes through the crash model, in
         // stable file order.
         for file_id in &file_ids {
