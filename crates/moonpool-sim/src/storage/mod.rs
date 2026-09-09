@@ -2,9 +2,13 @@
 //!
 //! This module provides simulated storage that integrates with the
 //! deterministic simulation engine for testing disk I/O patterns and faults.
-
-/// Simulated block device with a barrier-bounded crash model
-pub mod block;
+//!
+//! There is exactly one simulated file implementation ([`image::FileImage`])
+//! and one engine driving it. Every API a caller can reach a file through —
+//! stream I/O, positioned I/O, sync, truncation — lands on those bytes, and
+//! every fault names a file and a flat sector offset inside it. Layers that
+//! give the bytes meaning (a block layer, a pager, a journal) sit above the
+//! file provider and inherit its fault model rather than bringing their own.
 
 /// Storage configuration and settings
 pub mod config;
@@ -21,8 +25,13 @@ pub mod file;
 /// Future types for async storage operations
 pub mod futures;
 
-/// In-memory storage with deterministic fault injection
-pub mod memory;
+/// Observable fault vocabulary: kinds, records, crash reports, the
+/// eligibility mask.
+pub mod faults;
+
+/// The authoritative image of one simulated file: two-image durability, the
+/// barrier-bounded crash model, and deterministic damage.
+pub mod image;
 
 /// Storage provider implementation
 pub mod provider;
@@ -39,13 +48,6 @@ pub(crate) fn sim_shutdown_error() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "simulation shutdown")
 }
 
-// Re-export block device simulation
-pub use block::{
-    BlockCrashOutcome, BlockCrashReport, BlockEligibilityMask, BlockFaultConfig, BlockFaultKind,
-    BlockFaultRecord, BlockSectorResolution, EioTarget, SimBlockDevice, SimBlockDeviceProvider,
-    SimBlockStore,
-};
-
 // Re-export error
 pub use error::StorageError;
 
@@ -58,8 +60,12 @@ pub use events::StorageOperation;
 // Re-export file
 pub use file::SimStorageFile;
 
-// Re-export memory storage
-pub use memory::{InMemoryStorage, SECTOR_SIZE, SectorBitSet};
+// Re-export the file image and the fault vocabulary
+pub use faults::{
+    CrashOutcome, EioTarget, FileCrashReport, SECTOR_SIZE, SectorResolution,
+    StorageEligibilityMask, StorageFaultKind, StorageFaultRecord,
+};
+pub use image::{FileImage, SectorBitSet};
 
 // Re-export provider
 pub use provider::SimStorageProvider;

@@ -1,253 +1,456 @@
-//! Region-based block-device contract with a barrier-bounded crash model.
+//! [`BlockFile`]: a thin block-addressed view of one already-open file.
 //!
-//! [`BlockDevice`] is the narrow storage surface production engines actually
-//! consume (a WAL, an LSM, a B-tree pager): sector-aligned reads and writes
-//! inside named regions, a durability barrier, and grow-only resize. It sits
-//! deliberately *below* [`StorageProvider`](crate::StorageProvider)'s
-//! POSIX-flavored stream API: no seek, no append mode, no auto-extend — and in
-//! exchange it guarantees exactly what an engine needs (atomicity unit,
-//! alignment, reorder window across barriers).
+//! ```text
+//! database / journal / pager
+//!             │
+//!             ▼
+//!       BlockFile<F>
+//!             │
+//!             ▼
+//!        StorageFile
+//!         ╱        ╲
+//!    simulated    real
+//!   file backend  file backend
+//! ```
 //!
-//! The contract clauses documented on [`BlockDevice`] ARE the feature: the
-//! simulation implementation in `moonpool-sim` exists to produce every state
-//! the clauses permit (torn multi-sector writes, reordering across an open
-//! barrier window, lost unsynced sectors), so recovery code that must survive
-//! those states can actually be driven red.
+//! Storage engines address their data in fixed-size blocks: page 7, block 512.
+//! Translating that to byte offsets, and turning the partial transfers a file
+//! is allowed to return into the whole-block transfers an engine needs, is
+//! bookkeeping every such engine would otherwise repeat. That bookkeeping —
+//! and nothing else — is what this type is.
+//!
+//! # What it is not
+//!
+//! `BlockFile` wraps exactly **one already-open file**, and it never touches
+//! the filesystem namespace. It takes no path, stores no path, and cannot
+//! open, create, rename, or delete anything: the caller opens the file and
+//! hands it over.
+//!
+//! ```ignore
+//! let file = provider.open(path, options).await?;
+//! let blocks = BlockFile::new(file, block_size)?;
+//! ```
+//!
+//! There is deliberately no `BlockFile::open`, no `BlockProvider`, and no
+//! block-level equivalent of `sync_dir`: an operation that needs a path is an
+//! operation for [`StorageProvider`](crate::StorageProvider). Nor does a
+//! `BlockFile` represent a directory, several files, a region table, a
+//! manifest, a namespace, or a virtual disk. It is one file, counted in
+//! blocks.
+//!
+//! # What a block is not
+//!
+//! The block size is the *caller's* unit and nothing else:
+//!
+//! - it is **not** the file's I/O alignment ([`IoConstraints`]), though it
+//!   must be a multiple of it — a 16 KiB page on a device that transfers in
+//!   512-byte units is perfectly ordinary;
+//! - it is **not** a crash-atomicity unit. Nothing here makes a block-sized
+//!   write atomic, and the simulator will happily tear one;
+//! - it is **not** durability. `write_blocks` returns when the bytes are
+//!   visible; only [`sync`](BlockFile::sync) makes them durable.
 
-use thiserror::Error;
+use std::io;
 
-/// Size of one device sector in bytes.
+use crate::{AlignedBuf, IoConstraints, StorageFile};
+
+/// A block-addressed view of one open file.
 ///
-/// All offsets and lengths passed to [`BlockDevice::read`],
-/// [`BlockDevice::write`], and [`BlockDevice::grow`] must be multiples of this
-/// value. One sector is also the write atomicity unit — see the contract on
-/// [`BlockDevice`].
-pub const SECTOR_SIZE: usize = 4096;
-
-/// Identifier of one region inside a block device.
+/// `F` is the [`StorageFile`] this borrows its bytes, durability, and
+/// alignment from; `BlockFile` adds block arithmetic and whole-transfer loops
+/// on top and holds no state of its own beyond the block size.
 ///
-/// Regions are identified by their index in the [`RegionSpec`] slice passed to
-/// [`BlockDeviceProvider::create`]: the i-th spec is `RegionId(i)`. The
-/// mapping is part of the device layout and is preserved by
-/// [`BlockDeviceProvider::open`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RegionId(pub u32);
-
-/// Layout description of one region at device-creation time.
-#[derive(Debug, Clone, Copy)]
-pub struct RegionSpec {
-    /// Human-readable region name (e.g. `"wal"`, `"superblock"`). Used for
-    /// diagnostics; region identity at runtime is the [`RegionId`] index.
-    pub name: &'static str,
-    /// Initial region size in bytes. Must be a multiple of [`SECTOR_SIZE`].
-    pub size: u64,
+/// See the [module docs](self) for what this deliberately is not.
+#[derive(Debug)]
+pub struct BlockFile<F> {
+    file: F,
+    block_size: usize,
+    /// The granularity at which a transfer may be resumed: the coarsest of the
+    /// file's three alignments, and `1` on an unconstrained file. See
+    /// [`BlockFile::read_blocks`] for why resuming anywhere else is invalid.
+    transfer_step: usize,
 }
 
-/// Errors returned by [`BlockDevice`] and [`BlockDeviceProvider`] operations.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum BlockError {
-    /// An I/O error (EIO class). This is an *operating condition* — a device
-    /// reporting an error on an operation — and is distinct from a read that
-    /// succeeds but returns corrupt bytes. Callers must handle both.
-    #[error("block device I/O error: {message}")]
-    Io {
-        /// Description of the failure.
-        message: String,
-    },
+impl<F: StorageFile> BlockFile<F> {
+    /// Wrap an already-open file, addressing it in `block_size`-byte blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::InvalidInput`] if `block_size` is zero, or if
+    /// it does not satisfy the file's I/O constraints — a block that cannot be
+    /// transferred in one call is not a block size the file can honour. On a
+    /// buffered file any positive size is accepted.
+    pub fn new(file: F, block_size: usize) -> io::Result<Self> {
+        if block_size == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "block size must be greater than zero",
+            ));
+        }
+        let constraints = file.constraints();
+        if !block_size.is_multiple_of(constraints.length_alignment()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "block size {block_size} is not a multiple of the file's length alignment {}",
+                    constraints.length_alignment()
+                ),
+            ));
+        }
+        let offset_alignment = constraints.offset_alignment();
+        if !(block_size as u64).is_multiple_of(offset_alignment) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "block size {block_size} is not a multiple of the file's offset alignment \
+                     {offset_alignment}, so block boundaries would be unaddressable"
+                ),
+            ));
+        }
+        // All three alignments are powers of two, so the coarsest of them is
+        // their least common multiple: a boundary that satisfies all three at
+        // once. `block_size` is a multiple of each (checked above), so it is a
+        // multiple of the step, and every request the transfer loops issue
+        // starts on a step boundary inside a block-aligned range.
+        let offset_alignment = usize::try_from(constraints.offset_alignment()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the file's offset alignment does not fit in memory",
+            )
+        })?;
+        let transfer_step = offset_alignment
+            .max(constraints.length_alignment())
+            .max(constraints.memory_alignment());
+        Ok(Self {
+            file,
+            block_size,
+            transfer_step,
+        })
+    }
 
-    /// No device exists at the given path.
-    #[error("block device not found: {path}")]
-    NotFound {
-        /// The path that was opened.
-        path: String,
-    },
-
-    /// A device already exists at the given path.
-    #[error("block device already exists: {path}")]
-    AlreadyExists {
-        /// The path that was created.
-        path: String,
-    },
-
-    /// The caller violated the API contract (misaligned offset or length,
-    /// out-of-bounds access, unknown region, shrinking `grow`, ...).
-    #[error("invalid block device argument: {message}")]
-    InvalidArgument {
-        /// Description of the violation.
-        message: String,
-    },
-}
-
-impl BlockError {
-    /// Build an [`BlockError::InvalidArgument`] from anything displayable.
+    /// The block size this view was built with.
     #[must_use]
-    pub fn invalid_argument(message: impl std::fmt::Display) -> Self {
-        Self::InvalidArgument {
-            message: message.to_string(),
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// The alignment the underlying file requires, unchanged.
+    ///
+    /// Reported so a caller can allocate buffers this file will accept without
+    /// reaching past the block layer; see [`buffer`](Self::buffer).
+    #[must_use]
+    pub fn constraints(&self) -> IoConstraints {
+        self.file.constraints()
+    }
+
+    /// The file underneath, for the operations that are not block-shaped.
+    #[must_use]
+    pub fn get_ref(&self) -> &F {
+        &self.file
+    }
+
+    /// Unwrap the file, discarding the block view.
+    #[must_use]
+    pub fn into_inner(self) -> F {
+        self.file
+    }
+
+    /// Allocate a zeroed buffer of `blocks` blocks that satisfies the file's
+    /// memory alignment.
+    ///
+    /// Reuses [`AlignedBuf`] rather than growing a second aligned allocator:
+    /// direct I/O needs an aligned buffer, and this is where a block-shaped
+    /// caller gets one.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] if `blocks` blocks do not fit in
+    /// memory. Returning that beats wrapping to a small allocation, which
+    /// would hand back a buffer of the wrong size in release builds.
+    pub fn buffer(&self, blocks: usize) -> io::Result<AlignedBuf> {
+        let bytes = blocks.checked_mul(self.block_size).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{blocks} blocks of {} bytes do not fit in memory",
+                    self.block_size
+                ),
+            )
+        })?;
+        Ok(AlignedBuf::for_constraints(bytes, self.constraints()))
+    }
+
+    /// Read whole blocks starting at `block_index` into `buf`.
+    ///
+    /// `buf.len()` must be a non-zero multiple of the block size, and `buf`
+    /// must satisfy the file's memory alignment — [`buffer`](Self::buffer)
+    /// returns one that does. Unlike [`StorageFile::read_at`], this fills the
+    /// buffer completely or fails: short reads are looped over, and a range
+    /// that runs past the end of the file is
+    /// [`io::ErrorKind::UnexpectedEof`]. Handling partial transfers is exactly
+    /// the job this layer exists to do.
+    ///
+    /// # Resuming a short read
+    ///
+    /// Every request this issues is valid for the file's constraints, however
+    /// the previous one stopped. A short read may end anywhere the file's
+    /// contract allows — not necessarily on an alignment boundary — so
+    /// resuming at `offset + moved` could ask for a misaligned offset, a
+    /// misaligned length, or a misaligned buffer address, all of which a
+    /// direct-I/O file is entitled to refuse. Instead the next request starts
+    /// at the alignment boundary at or below the frontier and re-reads the few
+    /// bytes in between. On an unconstrained file that boundary *is* the
+    /// frontier, so nothing is ever read twice.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] for a buffer that is not a whole number
+    /// of blocks or does not meet the file's memory alignment,
+    /// [`io::ErrorKind::UnexpectedEof`] if the file ends inside the range,
+    /// [`io::ErrorKind::InvalidData`] if the file's short transfers are finer
+    /// than its own alignment allows a caller to resume from, and any error
+    /// the file itself reports.
+    pub async fn read_blocks(&self, block_index: u64, buf: &mut [u8]) -> io::Result<()> {
+        let start = self.range(block_index, buf.len())?;
+        self.check_buffer(buf)?;
+        let len = buf.len();
+        let mut done = 0;
+        while done < len {
+            // Resume from the step boundary at or below the frontier, not from
+            // the frontier itself. A short transfer may stop anywhere the
+            // file's own contract allows, and continuing from there would ask
+            // for a misaligned offset, a misaligned length, or a misaligned
+            // buffer address — a request the file is entitled to refuse. The
+            // bytes between the boundary and the frontier are simply read
+            // again.
+            let from = self.align_down(done);
+            let moved = self
+                .file
+                .read_at(start + from as u64, &mut buf[from..])
+                .await?;
+            let reached = from + moved;
+            if reached <= done {
+                // The read stalled: either the file ends inside the range, or
+                // its short transfers stop finer than its own alignment lets a
+                // caller resume from. Only its length tells the two apart, and
+                // this is the error path, so the extra query is free.
+                return Err(self.stalled_read_error(block_index, done, len).await);
+            }
+            done = reached;
+        }
+        Ok(())
+    }
+
+    /// Write whole blocks starting at `block_index`.
+    ///
+    /// `buf.len()` must be a non-zero multiple of the block size, and `buf`
+    /// must satisfy the file's memory alignment. Short writes are looped over
+    /// the same way [`read_blocks`](Self::read_blocks) loops over short reads
+    /// — resuming on an alignment boundary and rewriting the bytes in between,
+    /// which is safe because they are the same bytes from the same buffer — so
+    /// on `Ok` every byte has been written. Writing past the end of the file
+    /// extends it.
+    ///
+    /// Completion means the bytes are *visible*, not durable: only a following
+    /// [`sync`](Self::sync) makes them survive a crash, whether or not the
+    /// file was opened for direct I/O.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] for a buffer that is not a whole number
+    /// of blocks or does not meet the file's memory alignment,
+    /// [`io::ErrorKind::WriteZero`] if the file stops accepting bytes,
+    /// [`io::ErrorKind::InvalidData`] if the file's short transfers are finer
+    /// than its own alignment allows a caller to resume from, and any error
+    /// the file itself reports.
+    pub async fn write_blocks(&self, block_index: u64, buf: &[u8]) -> io::Result<()> {
+        let start = self.range(block_index, buf.len())?;
+        self.check_buffer(buf)?;
+        let len = buf.len();
+        let mut done = 0;
+        while done < len {
+            // As in `read_blocks`: resume on a step boundary, rewriting the
+            // bytes between it and the frontier. Rewriting them is safe — they
+            // are the same bytes from the same buffer.
+            let from = self.align_down(done);
+            let moved = self
+                .file
+                .write_at(start + from as u64, &buf[from..])
+                .await?;
+            if moved == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    format!("file accepted only {done} of {len} bytes at block {block_index}"),
+                ));
+            }
+            done = self.advance(done, from, moved, "write")?;
+        }
+        Ok(())
+    }
+
+    /// Make every completed write durable, data and length alike.
+    ///
+    /// # Errors
+    ///
+    /// Any error the file's sync reports.
+    pub async fn sync(&self) -> io::Result<()> {
+        self.file.sync_all().await
+    }
+
+    /// Make completed writes durable without waiting for metadata.
+    ///
+    /// # Errors
+    ///
+    /// Any error the file's sync reports.
+    pub async fn sync_data(&self) -> io::Result<()> {
+        self.file.sync_data().await
+    }
+
+    /// The file's size in whole blocks, rounding a partial trailing block
+    /// down: a block that is not all there is not a block this view can read.
+    ///
+    /// # Errors
+    ///
+    /// Any error the file's size query reports.
+    pub async fn size_in_blocks(&self) -> io::Result<u64> {
+        Ok(self.file.size().await? / self.block_size as u64)
+    }
+
+    /// Grow the file to at least `blocks` blocks, leaving a larger file alone.
+    ///
+    /// This makes the range addressable; it does not allocate physical
+    /// storage, initialize the new bytes, or make the new length durable —
+    /// three separate things, none of which this is. The new blocks read
+    /// whatever the file's backend leaves there, which the simulator makes a
+    /// point of varying.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] if the requested size overflows, and
+    /// any error the file's size query or resize reports.
+    pub async fn grow_to_blocks(&self, blocks: u64) -> io::Result<()> {
+        let wanted = blocks.checked_mul(self.block_size as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "file size overflows u64")
+        })?;
+        if self.file.size().await? >= wanted {
+            return Ok(());
+        }
+        self.file.set_len(wanted).await
+    }
+
+    /// Round a byte count down to a boundary every one of the file's three
+    /// alignments accepts. The identity on an unconstrained file.
+    fn align_down(&self, offset: usize) -> usize {
+        offset & !(self.transfer_step - 1)
+    }
+
+    /// Classify a read that stopped making progress.
+    ///
+    /// A file that simply ends inside the requested range is the ordinary
+    /// case, and reports [`io::ErrorKind::UnexpectedEof`] exactly as a
+    /// zero-length read does. A file long enough to satisfy the range that
+    /// still cannot advance is describing a contract it cannot keep: its short
+    /// transfers stop finer than its own alignment allows the next request to
+    /// resume from, so no caller could ever complete the transfer.
+    async fn stalled_read_error(&self, block_index: u64, done: usize, len: usize) -> io::Error {
+        let start = block_index.saturating_mul(self.block_size as u64);
+        let end = start.saturating_add(len as u64);
+        match self.file.size().await {
+            Ok(size) if size >= end => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a short read left a {len}-byte transfer at block {block_index} stuck at \
+                     {done} bytes, which the file's {}-byte alignment cannot resume past",
+                    self.transfer_step
+                ),
+            ),
+            _ => io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("file ended {done} bytes into a {len}-byte read at block {block_index}"),
+            ),
         }
     }
 
-    /// Build an [`BlockError::Io`] from anything displayable.
-    #[must_use]
-    pub fn io(message: impl std::fmt::Display) -> Self {
-        Self::Io {
-            message: message.to_string(),
+    /// Fold one completed transfer into the frontier.
+    ///
+    /// # Errors
+    ///
+    /// A transfer that delivers nothing past the frontier cannot be continued:
+    /// the next request would start at the same boundary and ask for the same
+    /// bytes, so looping would spin forever. That is a file whose short
+    /// transfers are finer than its own alignment allows a caller to resume
+    /// from, which is a contradiction in its contract rather than a condition
+    /// to retry.
+    fn advance(&self, done: usize, from: usize, moved: usize, verb: &str) -> io::Result<usize> {
+        let reached = from + moved;
+        if reached <= done {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a {moved}-byte short {verb} from offset {from} left the transfer at {done} \
+                     bytes, which the file's {}-byte alignment cannot resume past",
+                    self.transfer_step
+                ),
+            ));
         }
+        Ok(reached)
     }
-}
 
-/// A region-addressed block device with an explicit durability barrier.
-///
-/// # Contract
-///
-/// These clauses are the API. Implementations must uphold them and consumers
-/// may rely on nothing stronger:
-///
-/// - **Atomicity unit is one sector, nothing larger.** A crash may
-///   independently leave each sector of a multi-sector write old, new, or
-///   unreadable. (`NVMe` `AWUPF` formalizes per-sector atomicity; simulation
-///   configurations may additionally model pre-`AWUPF` *shorn* sub-sector tears
-///   as an opt-in, which weakens this clause.)
-/// - **Writes between two [`persist`](Self::persist) calls may reach disk in
-///   any order.** `persist()` orders everything before it against everything
-///   after it. There is no other ordering guarantee.
-/// - **Completion of [`write`](Self::write) implies visibility, not
-///   durability.** A completed write is observable by subsequent reads, but
-///   only a completed `persist()` makes it survive a crash.
-/// - **Never-written sectors read unspecified bytes** — zeros, stale data, or
-///   garbage. Consumers must never infer written-ness from content (SATA `RZAT`
-///   and `NVMe` `DLFEAT` make deterministic zeros a *real* case, so
-///   content-sniffing bugs survive garbage-only testing).
-/// - **[`BlockError::Io`] (EIO) is an operating condition**, distinct from a
-///   successful read of corrupt bytes.
-/// - **A read of a faulted sector returns the same corrupt bytes on retry.**
-///   Corruption is deterministic; retries must not heal.
-/// - **Concurrent overlapping writes to one region are a caller bug** and are
-///   asserted against by implementations.
-/// - **Production implementations use O_DIRECT-style I/O** (no shared page
-///   cache), so that fail-stop after a `persist()` error cannot re-read stale
-///   clean-marked pages (Rebello et al., ATC'20). After a failed `persist()`,
-///   callers must treat the device as failed rather than retry-and-trust.
-pub trait BlockDevice: Send + Sync + 'static {
-    /// Read sectors from a region into `buf`.
+    /// Check the caller's buffer against the file's constraints, before the
+    /// first request rather than inside it.
     ///
-    /// `offset` and `buf.len()` must be multiples of [`SECTOR_SIZE`], and
-    /// `offset + buf.len()` must be within the region.
-    fn read(
-        &self,
-        region: RegionId,
-        offset: u64,
-        buf: &mut [u8],
-    ) -> impl std::future::Future<Output = Result<(), BlockError>> + Send;
-
-    /// Write sectors to a region.
+    /// The length is already known to be a whole number of blocks, and a block
+    /// is a multiple of the length alignment; what remains is the buffer's
+    /// address. [`BlockFile::buffer`] returns one that satisfies it.
     ///
-    /// `offset` and `buf.len()` must be multiples of [`SECTOR_SIZE`], and
-    /// `offset + buf.len()` must be within the region. Atomicity unit is one
-    /// sector, nothing larger. Completion implies visibility, not durability.
-    fn write(
-        &self,
-        region: RegionId,
-        offset: u64,
-        buf: &[u8],
-    ) -> impl std::future::Future<Output = Result<(), BlockError>> + Send;
-
-    /// Durability barrier: on `Ok`, every previously *completed* write (and
-    /// [`grow`](Self::grow)) on this device is durable.
-    fn persist(&self) -> impl std::future::Future<Output = Result<(), BlockError>> + Send;
-
-    /// Grow-only resize of a region to `new_size` bytes (a multiple of
-    /// [`SECTOR_SIZE`], `>=` the current size). The new size is visible
-    /// immediately but durable only after the next [`persist`](Self::persist);
-    /// a crash before that may revert the region to its last durable size.
-    fn grow(
-        &self,
-        region: RegionId,
-        new_size: u64,
-    ) -> impl std::future::Future<Output = Result<(), BlockError>> + Send;
-
-    /// Current (visible) size of a region in bytes.
+    /// # Errors
     ///
-    /// # Panics
-    ///
-    /// May panic if `region` is not a region of this device.
-    fn region_size(&self, region: RegionId) -> u64;
-
-    /// Number of regions in this device's layout.
-    fn region_count(&self) -> u32;
-}
-
-/// Factory for [`BlockDevice`] instances.
-pub trait BlockDeviceProvider: Clone + Send + Sync + 'static {
-    /// The device type produced by this provider.
-    type Device: BlockDevice;
-
-    /// Atomically create a device at `path` with the given region layout.
-    ///
-    /// The device is invisible to [`open`](Self::open) until its first
-    /// successful [`persist`](BlockDevice::persist): after a crash, either the
-    /// whole formatted layout exists or nothing does.
-    fn create(
-        &self,
-        path: &str,
-        regions: &[RegionSpec],
-    ) -> impl std::future::Future<Output = Result<Self::Device, BlockError>> + Send;
-
-    /// Open an existing device at `path`.
-    fn open(
-        &self,
-        path: &str,
-    ) -> impl std::future::Future<Output = Result<Self::Device, BlockError>> + Send;
-}
-
-/// Validate that `offset`/`len` describe a sector-aligned range fully inside a
-/// region of `region_size` bytes.
-///
-/// Shared by implementations so alignment/bounds errors are uniform.
-///
-/// # Errors
-///
-/// Returns [`BlockError::InvalidArgument`] when the range is misaligned or out
-/// of bounds.
-pub fn validate_sector_range(offset: u64, len: usize, region_size: u64) -> Result<(), BlockError> {
-    let sector = SECTOR_SIZE as u64;
-    if !offset.is_multiple_of(sector) {
-        return Err(BlockError::invalid_argument(format!(
-            "offset {offset} is not sector-aligned (sector size {SECTOR_SIZE})"
-        )));
+    /// [`io::ErrorKind::InvalidInput`] naming the alignment the buffer misses.
+    fn check_buffer(&self, buf: &[u8]) -> io::Result<()> {
+        let memory_alignment = self.constraints().memory_alignment();
+        if (buf.as_ptr() as usize).is_multiple_of(memory_alignment) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "this file requires {memory_alignment}-byte aligned buffers; \
+                 use BlockFile::buffer to allocate one"
+            ),
+        ))
     }
-    if !len.is_multiple_of(SECTOR_SIZE) {
-        return Err(BlockError::invalid_argument(format!(
-            "length {len} is not a sector multiple (sector size {SECTOR_SIZE})"
-        )));
-    }
-    let end = offset
-        .checked_add(len as u64)
-        .ok_or_else(|| BlockError::invalid_argument("offset + length overflows u64"))?;
-    if end > region_size {
-        return Err(BlockError::invalid_argument(format!(
-            "range [{offset}, {end}) exceeds region size {region_size}"
-        )));
-    }
-    Ok(())
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sector_range_validation() {
-        let region = 16 * SECTOR_SIZE as u64;
-        assert!(validate_sector_range(0, SECTOR_SIZE, region).is_ok());
-        assert!(validate_sector_range(SECTOR_SIZE as u64, 4 * SECTOR_SIZE, region).is_ok());
-        assert!(validate_sector_range(0, 16 * SECTOR_SIZE, region).is_ok());
-
-        // Misaligned offset and length.
-        assert!(validate_sector_range(1, SECTOR_SIZE, region).is_err());
-        assert!(validate_sector_range(0, SECTOR_SIZE - 1, region).is_err());
-        // Out of bounds and overflow.
-        assert!(validate_sector_range(region, SECTOR_SIZE, region).is_err());
-        assert!(validate_sector_range(u64::MAX - 4095, SECTOR_SIZE, region).is_err());
+    /// Byte offset of a block-aligned transfer, validating its length and
+    /// that the whole range is addressable.
+    ///
+    /// Both ends are checked: a block index can overflow a byte offset on its
+    /// own, and an index that fits can still name a range whose *end* does
+    /// not. Neither may wrap — a wrapped offset addresses the wrong part of
+    /// the file rather than failing.
+    fn range(&self, block_index: u64, len: usize) -> io::Result<u64> {
+        if len == 0 || !len.is_multiple_of(self.block_size) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "transfer of {len} bytes is not a non-zero multiple of the {}-byte block size",
+                    self.block_size
+                ),
+            ));
+        }
+        let start = block_index
+            .checked_mul(self.block_size as u64)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("block index {block_index} overflows a byte offset"),
+                )
+            })?;
+        start.checked_add(len as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("a {len}-byte transfer at block {block_index} runs past the end of the address space"),
+            )
+        })?;
+        Ok(start)
     }
 }

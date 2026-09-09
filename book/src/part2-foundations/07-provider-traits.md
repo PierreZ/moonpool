@@ -172,9 +172,25 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
         from: &str,
         to: &str,
     ) -> impl Future<Output = io::Result<()>> + Send;
+
+    fn sync_dir(&self, path: &str) -> impl Future<Output = io::Result<()>> + Send;
 }
 
 pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static {
+    fn constraints(&self) -> IoConstraints;
+    fn is_direct_io(&self) -> bool;
+
+    fn read_at(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> impl Future<Output = io::Result<usize>> + Send;
+    fn write_at(
+        &self,
+        offset: u64,
+        buf: &[u8],
+    ) -> impl Future<Output = io::Result<usize>> + Send;
+
     fn sync_all(&self) -> impl Future<Output = io::Result<()>> + Send;
     fn sync_data(&self) -> impl Future<Output = io::Result<()>> + Send;
     fn size(&self) -> impl Future<Output = io::Result<u64>> + Send;
@@ -182,14 +198,35 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
 }
 ```
 
-Storage is the newest provider, and the one with the richest fault model. `OpenOptions` mirrors `std::fs::OpenOptions` with `read`, `write`, `create`, `truncate`, and `append` flags.
+Storage is the newest provider, and the one with the richest fault model. The
+split is that the **provider owns the filesystem namespace** — open, exists,
+delete, rename, and the directory sync that makes those durable — while the
+**file owns already-open bytes**.
+
+`OpenOptions` mirrors `std::fs::OpenOptions` with `read`, `write`, `create`,
+`truncate`, and `append`, plus the one thing a database needs that
+`std::fs::OpenOptions` does not name portably: `direct_io(DirectIo)`. That is
+deliberately an option on opening an ordinary file rather than a second
+provider stack — there is no `BlockProvider` and no `DirectIoProvider`, and a
+journal or pager is written directly against `StorageFile`.
+
+`read_at`/`write_at` are positioned: they take `&self`, never touch the stream
+cursor, and return the number of bytes moved, so non-overlapping ranges can be
+read and written concurrently and partial transfers stay visible to the
+caller. On a file with I/O constraints they are the *only* way to transfer:
+the stream half of the trait is refused there, because a shared cursor cannot
+be kept aligned. `BlockFile<F>` wraps one open file to add block arithmetic and the
+loops that turn those partial transfers into whole ones; it holds no path and
+opens nothing.
 
 **Production**: `TokioStorageProvider` wraps `tokio::fs`.
 
 **Simulation**: `StorageEngine` owns an in-memory filesystem with fault
 injection inspired by TigerBeetle and FoundationDB patterns: read and write
-corruption, crash and torn writes, misdirected I/O, sync failures, and
-IOPS/bandwidth timing. Persistent file contents are separate from open-handle
+corruption, EIO, crash and torn writes, misdirected I/O, sync failures, short
+transfers, unsynced directory-entry loss, and IOPS/bandwidth timing. There is
+exactly one simulated file implementation behind every API — a positioned
+write is visible to a stream read, and a block write is visible to both. Persistent file contents are separate from open-handle
 state, so two handles have independent cursors, access options, and pending
 operations. Each delayed operation has an exact ID, explicit pending or
 completed result, and its own waker. Crash and shutdown complete pending work

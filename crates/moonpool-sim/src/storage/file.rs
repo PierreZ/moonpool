@@ -3,13 +3,13 @@
 use crate::sim::WeakSimWorld;
 use crate::storage::sim::{HandleId, OperationId, StorageCompletion};
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use moonpool_core::StorageFile;
+use moonpool_core::{IoConstraints, StorageFile, stream_io_unsupported};
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use super::futures::{SetLenFuture, SyncFuture};
+use super::futures::{ReadAtFuture, SetLenFuture, SyncFuture, WriteAtFuture};
 use super::sim_shutdown_error;
 
 /// Simulated storage file for deterministic testing.
@@ -33,6 +33,11 @@ use super::sim_shutdown_error;
 pub struct SimStorageFile {
     sim: WeakSimWorld,
     handle_id: HandleId,
+    /// Alignment every transfer through this handle must satisfy, fixed when
+    /// the file was opened. `IoConstraints::NONE` for a buffered open.
+    constraints: IoConstraints,
+    /// Whether the open actually got direct (uncached) I/O.
+    direct_io: bool,
     closed: AtomicBool,
     /// Pending read operation: (`op_seq`, offset, len)
     pending_read: Option<(OperationId, u64, usize)>,
@@ -42,13 +47,30 @@ pub struct SimStorageFile {
 
 impl SimStorageFile {
     /// Create a new simulated storage file.
-    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId) -> Self {
+    pub(crate) fn new(
+        sim: WeakSimWorld,
+        handle_id: HandleId,
+        constraints: IoConstraints,
+        direct_io: bool,
+    ) -> Self {
         Self {
             sim,
             handle_id,
+            constraints,
+            direct_io,
             closed: AtomicBool::new(false),
             pending_read: None,
             pending_write: None,
+        }
+    }
+
+    /// The stream API is unavailable on a file with I/O constraints; see
+    /// [`StorageFile`] for why.
+    fn ensure_stream_io(&self) -> io::Result<()> {
+        if self.constraints.is_unconstrained() {
+            Ok(())
+        } else {
+            Err(stream_io_unsupported())
         }
     }
 
@@ -73,6 +95,42 @@ impl StorageFile for SimStorageFile {
         SyncFuture::new(self.sim.clone(), self.handle_id).await
     }
 
+    fn constraints(&self) -> IoConstraints {
+        self.constraints
+    }
+
+    fn is_direct_io(&self) -> bool {
+        self.direct_io
+    }
+
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.ensure_open()?;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.constraints.check(offset, buf)?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+        let size = sim.file_size(self.handle_id)?;
+        if offset >= size {
+            return Ok(0);
+        }
+        let remaining = usize::try_from(size - offset).unwrap_or(usize::MAX);
+        let len = buf.len().min(remaining);
+        let data = ReadAtFuture::new(self.sim.clone(), self.handle_id, offset, len).await?;
+        let read = data.len().min(buf.len());
+        buf[..read].copy_from_slice(&data[..read]);
+        Ok(read)
+    }
+
+    async fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        self.ensure_open()?;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.constraints.check(offset, buf)?;
+        WriteAtFuture::new(self.sim.clone(), self.handle_id, offset, buf.to_vec()).await
+    }
+
     async fn size(&self) -> io::Result<u64> {
         self.ensure_open()?;
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
@@ -93,6 +151,7 @@ impl AsyncRead for SimStorageFile {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.ensure_open()?;
+        this.ensure_stream_io()?;
         let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending read operation
@@ -162,6 +221,7 @@ impl AsyncWrite for SimStorageFile {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.ensure_open()?;
+        this.ensure_stream_io()?;
         let sim = this.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
         // Check for pending write operation
@@ -174,7 +234,10 @@ impl AsyncWrite for SimStorageFile {
                         "write operation returned a non-write completion",
                     )));
                 };
-                debug_assert_eq!(len, bytes_written);
+                debug_assert!(
+                    len <= bytes_written,
+                    "a write completed with more bytes than were submitted"
+                );
                 tracing::trace!(offset, len, "storage write completed");
                 return Poll::Ready(Ok(len));
             }

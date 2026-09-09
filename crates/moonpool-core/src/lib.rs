@@ -47,9 +47,7 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
-pub mod block;
-#[cfg(all(feature = "tokio-fs", unix))]
-mod block_tokio;
+mod block;
 mod error;
 pub mod metrics;
 mod network;
@@ -78,11 +76,8 @@ pub use tokio::select;
 #[doc(hidden)]
 pub use tokio as __tokio;
 
-// Block device contract exports (SECTOR_SIZE stays module-scoped as
-// `block::SECTOR_SIZE` to avoid clashing with other sector constants).
-pub use block::{BlockDevice, BlockDeviceProvider, BlockError, RegionId, RegionSpec};
-#[cfg(all(feature = "tokio-fs", unix))]
-pub use block_tokio::{TokioBlockDevice, TokioBlockDeviceProvider};
+// The block-addressed view of one open file.
+pub use block::BlockFile;
 
 // Error exports
 pub use error::{SimulationError, SimulationResult};
@@ -100,7 +95,10 @@ pub use providers::TokioProviders;
 pub use random::RandomProvider;
 #[cfg(feature = "tokio-random")]
 pub use random::TokioRandomProvider;
-pub use storage::{OpenOptions, StorageFile, StorageProvider};
+pub use storage::{
+    AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider,
+    stream_io_unsupported,
+};
 #[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};
 pub use task::{Detach, JoinError, TaskProvider};
@@ -121,8 +119,8 @@ pub use time::{TimeError, TimeProvider};
 /// ```
 pub mod prelude {
     pub use crate::{
-        BlockDevice, BlockDeviceProvider, NetworkProvider, Providers, RandomProvider,
-        StorageProvider, TaskProvider, TcpListenerTrait, TimeProvider,
+        NetworkProvider, Providers, RandomProvider, StorageProvider, TaskProvider,
+        TcpListenerTrait, TimeProvider,
     };
 
     #[cfg(feature = "tokio-providers")]

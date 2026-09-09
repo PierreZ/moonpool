@@ -3,11 +3,12 @@
 use std::{
     collections::BTreeMap,
     net::IpAddr,
+    ops::Range,
     task::{Poll, Waker},
     time::Duration,
 };
 
-use moonpool_core::OpenOptions;
+use moonpool_core::{DirectIo, IoConstraints, OpenOptions};
 
 use super::{
     DiskDegradationState, DiskEpisodeKind, FileId, HandleId, OperationId, StorageEvent,
@@ -21,8 +22,22 @@ use crate::{
         rng::{sim_random, sim_random_range},
         wakers::{WakeBatch, WakerRegistry},
     },
-    storage::{InMemoryStorage, StorageConfiguration, StorageError, StorageOperation},
+    storage::{
+        EioTarget, FileCrashReport, FileImage, StorageConfiguration, StorageEligibilityMask,
+        StorageError, StorageFaultKind, StorageFaultRecord, StorageOperation, faults::sector_range,
+    },
 };
+
+/// What the disk decided to do with one write.
+#[derive(Debug, Clone, Copy)]
+enum WriteLanding {
+    /// The device refused it.
+    Eio,
+    /// It was acknowledged and the bytes never reached the disk.
+    Phantom,
+    /// It landed at this offset — the requested one, or another entirely.
+    At(u64),
+}
 
 /// One storage event requested at an absolute simulation time.
 #[derive(Debug)]
@@ -139,15 +154,25 @@ impl StorageEngine {
         owner_ip: IpAddr,
     ) -> Result<HandleId, StorageError> {
         let path = path.to_string();
+        let (constraints, direct_io) = self.resolve_direct_io(&options, owner_ip)?;
         if options.is_create_new() && self.state.path_to_file.contains_key(&path) {
             return Err(StorageError::AlreadyExists { path });
+        }
+        // `Required` opens a file that is already there. Refusing to create
+        // one keeps the simulated provider honest about what production does,
+        // and keeps file bootstrap in the caller's protocol where it belongs.
+        if options.requested_direct_io() == DirectIo::Required
+            && !self.state.path_to_file.contains_key(&path)
+            && (options.is_create() || options.is_create_new())
+        {
+            return Err(StorageError::DirectIoCreate { path });
         }
 
         let file_id = if let Some(existing_id) = self.state.path_to_file.get(&path).copied() {
             if options.is_truncate()
                 && let Some(file) = self.state.files.get_mut(&existing_id)
             {
-                file.storage = InMemoryStorage::new(0, sim_random::<u64>());
+                file.image.set_len(0);
             }
             existing_id
         } else {
@@ -156,11 +181,18 @@ impl StorageEngine {
             }
             let file_id = FileId(self.state.next_file_id);
             self.state.next_file_id += 1;
+            let garbage_fill =
+                sim_random::<f64>() < self.state.config_for(owner_ip).garbage_fill_probability;
+            if garbage_fill {
+                assert_reachable!("disk: file fills never-written sectors with garbage");
+            } else {
+                assert_reachable!("disk: file fills never-written sectors with zeros");
+            }
             self.state.files.insert(
                 file_id,
                 FileState {
                     path: path.clone(),
-                    storage: InMemoryStorage::new(initial_size, sim_random::<u64>()),
+                    image: FileImage::new(initial_size, sim_random::<u64>(), garbage_fill),
                     owner_ip,
                 },
             );
@@ -172,16 +204,57 @@ impl StorageEngine {
             self.state
                 .files
                 .get(&file_id)
-                .map_or(0, |file| file.storage.size())
+                .map_or(0, |file| file.image.size())
         } else {
             0
         };
         let handle_id = HandleId(self.state.next_handle_id);
         self.state.next_handle_id += 1;
-        self.state
-            .handles
-            .insert(handle_id, HandleState::new(file_id, position, options));
+        self.state.handles.insert(
+            handle_id,
+            HandleState::new(file_id, position, options, constraints, direct_io),
+        );
         Ok(handle_id)
+    }
+
+    /// Resolve an open's direct-I/O policy against the disk's geometry.
+    ///
+    /// `Required` never silently downgrades: a disk that cannot provide
+    /// uncached I/O fails the open. `Optional` falls back to buffered I/O and
+    /// says so through the handle's reported constraints. Neither draws
+    /// randomness — this is device geometry, not a fault.
+    fn resolve_direct_io(
+        &self,
+        options: &OpenOptions,
+        owner_ip: IpAddr,
+    ) -> Result<(IoConstraints, bool), StorageError> {
+        let config = self.state.config_for(owner_ip);
+        let supported = config.direct_io_supported;
+        let alignment = config.direct_io_alignment;
+        let honored = match options.requested_direct_io() {
+            DirectIo::Disabled => false,
+            DirectIo::Optional => supported,
+            DirectIo::Required if supported => true,
+            DirectIo::Required => return Err(StorageError::DirectIoUnsupported),
+        };
+        Ok(if honored {
+            (IoConstraints::uniform(alignment), true)
+        } else {
+            (IoConstraints::NONE, false)
+        })
+    }
+
+    /// The alignment `handle_id` enforces on every transfer.
+    pub(crate) fn handle_constraints(
+        &self,
+        handle_id: HandleId,
+    ) -> Result<IoConstraints, StorageError> {
+        Ok(self.open_handle(handle_id)?.constraints)
+    }
+
+    /// Whether `handle_id` is doing direct (uncached) I/O.
+    pub(crate) fn handle_is_direct_io(&self, handle_id: HandleId) -> Result<bool, StorageError> {
+        Ok(self.open_handle(handle_id)?.direct_io)
     }
 
     pub(crate) fn file_exists(&self, path: &str) -> bool {
@@ -194,10 +267,25 @@ impl StorageEngine {
                 path: path.to_string(),
             });
         };
-        self.state.files.remove(&file_id);
+        self.drop_file_if_unlinked(file_id);
         let mut actions = StorageActions::default();
         self.invalidate_file_handles(file_id, &mut actions, false);
         Ok(actions)
+    }
+
+    /// Forget a file's contents once no name — visible or durable — reaches
+    /// it any more. A file whose only remaining link is the durable one is
+    /// still on the disk: a crash before the directory sync brings it back.
+    fn drop_file_if_unlinked(&mut self, file_id: FileId) {
+        let linked = self
+            .state
+            .path_to_file
+            .values()
+            .chain(self.state.durable_paths.values())
+            .any(|id| *id == file_id);
+        if !linked {
+            self.state.files.remove(&file_id);
+        }
     }
 
     pub(crate) fn rename_file(
@@ -222,7 +310,7 @@ impl StorageEngine {
         };
         let mut actions = StorageActions::default();
         if let Some(replaced_id) = self.state.path_to_file.remove(to) {
-            self.state.files.remove(&replaced_id);
+            self.drop_file_if_unlinked(replaced_id);
             self.invalidate_file_handles(replaced_id, &mut actions, false);
         }
         if let Some(file) = self.state.files.get_mut(&file_id) {
@@ -232,16 +320,242 @@ impl StorageEngine {
         Ok(actions)
     }
 
+    /// Install the eligibility mask consulted before any random fault damages
+    /// a sector.
+    pub(crate) fn set_eligibility_mask(&mut self, mask: Option<StorageEligibilityMask>) {
+        self.state.eligibility.set(mask);
+    }
+
+    /// Drain the faults injected so far.
+    pub(crate) fn take_fault_records(&mut self) -> Vec<StorageFaultRecord> {
+        std::mem::take(&mut self.state.fault_records)
+    }
+
+    /// Drain the per-file reports of the crashes simulated so far.
+    pub(crate) fn take_crash_reports(&mut self) -> Vec<FileCrashReport> {
+        std::mem::take(&mut self.state.crash_reports)
+    }
+
+    /// Plant a latent read fault on `sectors` of `path`.
+    pub(crate) fn corrupt_file(
+        &mut self,
+        path: &str,
+        sectors: Range<u64>,
+    ) -> Result<(), StorageError> {
+        self.file_mut(path)?.image.corrupt(sectors);
+        Ok(())
+    }
+
+    /// Make reads and/or writes touching `sectors` of `path` fail with EIO.
+    pub(crate) fn fail_file_with_eio(
+        &mut self,
+        path: &str,
+        sectors: Range<u64>,
+        target: EioTarget,
+    ) -> Result<(), StorageError> {
+        self.file_mut(path)?.image.fail_with_eio(sectors, target);
+        Ok(())
+    }
+
+    /// Clear targeted EIO injections on `path`.
+    pub(crate) fn clear_file_eio(
+        &mut self,
+        path: &str,
+        target: EioTarget,
+    ) -> Result<(), StorageError> {
+        self.file_mut(path)?.image.clear_eio(target);
+        Ok(())
+    }
+
+    /// Mutate a durable sector of `path` out of band, bypassing the crash
+    /// model: a deliberate simulator bug, so the crash oracle can be tested.
+    pub(crate) fn corrupt_durable_out_of_band(
+        &mut self,
+        path: &str,
+        sector: u64,
+    ) -> Result<(), StorageError> {
+        self.file_mut(path)?
+            .image
+            .corrupt_committed_out_of_band(sector);
+        Ok(())
+    }
+
+    fn file_mut(&mut self, path: &str) -> Result<&mut FileState, StorageError> {
+        let file_id =
+            self.state
+                .path_to_file
+                .get(path)
+                .copied()
+                .ok_or_else(|| StorageError::NotFound {
+                    path: path.to_string(),
+                })?;
+        self.state
+            .files
+            .get_mut(&file_id)
+            .ok_or(StorageError::MissingFile { file_id })
+    }
+
+    /// Make every directory entry directly under `path` durable.
+    ///
+    /// The simulated namespace is a flat map from path to file, so a
+    /// "directory" is a path prefix: this promotes exactly the entries whose
+    /// parent is `path`, in both directions — names created since the last
+    /// sync become durable, names deleted or renamed away stop being durable.
+    /// A directory with no entries syncs successfully and changes nothing.
+    ///
+    /// Namespace operations complete without a scheduled event, like `delete`
+    /// and `rename`, so this one does too.
+    pub(crate) fn sync_dir(
+        &mut self,
+        path: &str,
+        owner_ip: IpAddr,
+    ) -> Result<StorageActions, StorageError> {
+        let mut actions = StorageActions::default();
+        let probability = self.state.config_for(owner_ip).sync_failure_probability;
+        if probability > 0.0 && sim_random::<f64>() < probability {
+            assert_reachable!("disk: directory sync failed");
+            self.record(path, StorageFaultKind::SyncFailure, None);
+            actions.fault(SimFaultEvent::StorageSyncFault {
+                ip: owner_ip.to_string(),
+                file_id: u64::MAX,
+            });
+            return Err(StorageError::Io {
+                file_id: FileId(u64::MAX),
+                kind: std::io::ErrorKind::Other,
+                message: "directory sync failed (simulated I/O error)".to_string(),
+            });
+        }
+
+        let directory = normalize_directory(path);
+        self.state
+            .durable_paths
+            .retain(|entry, _| parent_directory(entry) != directory);
+        for (entry, file_id) in &self.state.path_to_file {
+            if parent_directory(entry) == directory {
+                self.state.durable_paths.insert(entry.clone(), *file_id);
+            }
+        }
+        Ok(actions)
+    }
+
+    /// Resolve the namespace a crash leaves behind.
+    ///
+    /// Every divergence between the visible namespace and the durable one is
+    /// an unsynced directory operation, and each is resolved independently: a
+    /// name created since the last directory sync may not be there, and a name
+    /// deleted or renamed away since then may still be. Contents are dropped
+    /// once no surviving name reaches them.
+    ///
+    /// The coin is drawn only while `unsynced_dir_entry_loss_probability` is
+    /// positive, so a configuration with the family off consumes no
+    /// randomness — and then the visible namespace survives whole, which is
+    /// what every test that does not care about entry durability expects.
+    fn resolve_namespace_crash(&mut self, ip: IpAddr) {
+        let probability = self
+            .state
+            .config_for(ip)
+            .unsynced_dir_entry_loss_probability;
+        if probability > 0.0 {
+            self.lose_unsynced_entries(ip, probability);
+        }
+
+        // Whatever survived is what is on the disk now — for this process's
+        // files only. Another process's unsynced entries are not made durable
+        // by this crash.
+        let mine = self.files_owned_by(ip);
+        self.state
+            .durable_paths
+            .retain(|_, file_id| !mine.contains(file_id));
+        let surviving: Vec<(String, FileId)> = self
+            .state
+            .path_to_file
+            .iter()
+            .filter(|(_, file_id)| mine.contains(file_id))
+            .map(|(path, file_id)| (path.clone(), *file_id))
+            .collect();
+        for (path, file_id) in surviving {
+            self.state.durable_paths.insert(path, file_id);
+        }
+
+        // Contents no surviving name reaches are gone with the name.
+        let linked: Vec<FileId> = self
+            .state
+            .path_to_file
+            .values()
+            .chain(self.state.durable_paths.values())
+            .copied()
+            .collect();
+        self.state
+            .files
+            .retain(|file_id, file| file.owner_ip != ip || linked.contains(file_id));
+    }
+
+    /// Roll the loss coin for each of this process's unsynced directory
+    /// operations: a name created since the last directory sync may not be
+    /// there, and one deleted or renamed away may still be.
+    fn lose_unsynced_entries(&mut self, ip: IpAddr, probability: f64) {
+        let mine = self.files_owned_by(ip);
+        let mut paths: Vec<String> = self
+            .state
+            .path_to_file
+            .keys()
+            .chain(self.state.durable_paths.keys())
+            .cloned()
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+
+        for path in paths {
+            let visible = self.state.path_to_file.get(&path).copied();
+            let durable = self.state.durable_paths.get(&path).copied();
+            if visible == durable {
+                continue;
+            }
+            // Only this process's own entries are at risk.
+            if !visible
+                .iter()
+                .chain(durable.iter())
+                .any(|file_id| mine.contains(file_id))
+            {
+                continue;
+            }
+            if sim_random::<f64>() >= probability {
+                continue;
+            }
+            assert_reachable!("disk: crash lost an unsynced directory entry");
+            self.state.record_fault(StorageFaultRecord {
+                path: path.clone(),
+                kind: StorageFaultKind::DirEntryLost,
+                sectors: None,
+            });
+            match durable {
+                Some(file_id) => self.state.path_to_file.insert(path, file_id),
+                None => self.state.path_to_file.remove(&path),
+            };
+        }
+    }
+
+    /// The files this process owns, in stable order.
+    fn files_owned_by(&self, ip: IpAddr) -> Vec<FileId> {
+        self.state
+            .files
+            .iter()
+            .filter_map(|(file_id, file)| (file.owner_ip == ip).then_some(*file_id))
+            .collect()
+    }
+
     pub(crate) fn schedule_read(
         &mut self,
         handle_id: HandleId,
         offset: u64,
         len: usize,
+        positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
         self.ensure_readable(handle_id)?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
+        let len = self.shorten_transfer(owner_ip, len);
         let pending = PendingStorageOp {
             handle_id,
             file_id,
@@ -250,6 +564,7 @@ impl StorageEngine {
             len,
             data: None,
             append: false,
+            positioned,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -275,13 +590,16 @@ impl StorageEngine {
         &mut self,
         handle_id: HandleId,
         offset: u64,
-        data: Vec<u8>,
+        mut data: Vec<u8>,
+        positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
         self.ensure_writable(handle_id, "write")?;
         let file_id = self.open_file_id(handle_id)?;
-        let append = self.open_handle(handle_id)?.options.is_append();
+        // Append mode moves the stream cursor, never a positioned write.
+        let append = !positioned && self.open_handle(handle_id)?.options.is_append();
         let owner_ip = self.owner_ip(file_id)?;
+        data.truncate(self.shorten_transfer(owner_ip, data.len()));
         let len = data.len();
         let pending = PendingStorageOp {
             handle_id,
@@ -291,6 +609,7 @@ impl StorageEngine {
             len,
             data: Some(data),
             append,
+            positioned,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -327,6 +646,7 @@ impl StorageEngine {
             len: 0,
             data: None,
             append: false,
+            positioned: false,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -364,6 +684,7 @@ impl StorageEngine {
             len: 0,
             data: None,
             append: false,
+            positioned: false,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -374,6 +695,22 @@ impl StorageEngine {
             StorageOperation::SetLenComplete { new_len },
             now.saturating_add(latency),
         )
+    }
+
+    /// Shorten one transfer to a deterministic prefix, the way a real
+    /// `read`/`write` may move fewer bytes than asked for.
+    ///
+    /// The coin is drawn only while `short_transfer_probability` is positive,
+    /// so a configuration with the family off consumes no randomness. A
+    /// one-byte transfer is left alone: the only shorter transfer is zero,
+    /// which would mean EOF rather than a short read.
+    fn shorten_transfer(&self, owner_ip: IpAddr, len: usize) -> usize {
+        let probability = self.state.config_for(owner_ip).short_transfer_probability;
+        if probability <= 0.0 || len <= 1 || sim_random::<f64>() >= probability {
+            return len;
+        }
+        assert_reachable!("disk: transfer moved fewer bytes than requested");
+        sim_random_range(1..len)
     }
 
     /// Whether `owner_ip`'s disk is failed, drawing the failure coin first if
@@ -488,33 +825,65 @@ impl StorageEngine {
         pending: &PendingStorageOp,
         actions: &mut StorageActions,
     ) -> Result<StorageCompletion, StorageError> {
-        let (owner_ip, file_size, config) = self
+        let (owner_ip, path, file_size, config) = self
             .state
             .files
             .get(&pending.file_id)
             .map(|file| {
                 (
                     file.owner_ip,
-                    file.storage.size(),
+                    file.path.clone(),
+                    file.image.size(),
                     self.state.config_for(file.owner_ip).clone(),
                 )
             })
             .ok_or(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
             })?;
+        let sectors = sector_range(pending.offset, pending.len);
+
+        // EIO: a targeted injection fires unconditionally; the random family
+        // is rolled first, then gated by the eligibility mask, so installing a
+        // mask never shifts the stream.
+        let eio_roll = sim_random::<f64>();
+        let targeted = self
+            .state
+            .files
+            .get(&pending.file_id)
+            .is_some_and(|file| file.image.read_fails(sectors.clone()));
+        let random_hit =
+            config.read_eio_probability > 0.0 && eio_roll < config.read_eio_probability;
+        if targeted || (random_hit && self.state.eligible_range(&path, sectors.clone())) {
+            assert_reachable!("disk fault: read failed with EIO");
+            self.record(&path, StorageFaultKind::EioRead, Some(sectors));
+            actions.fault(SimFaultEvent::StorageReadFault {
+                ip: owner_ip.to_string(),
+                file_id: pending.file_id.0,
+            });
+            return Err(StorageError::Io {
+                file_id: pending.file_id,
+                kind: std::io::ErrorKind::Other,
+                message: "read failed (simulated I/O error)".to_string(),
+            });
+        }
+
+        // Read-time latent corruption: the sector is damaged from now on, and
+        // damaged identically on every retry.
         let mut read_faulted = false;
-        if config.read_fault_probability > 0.0
-            && let Some(file) = self.state.files.get_mut(&pending.file_id)
-        {
-            let offset = usize::try_from(pending.offset).expect("offset fits in usize");
-            let first_sector = offset / crate::storage::SECTOR_SIZE;
-            let end_sector = (offset + pending.len).div_ceil(crate::storage::SECTOR_SIZE);
-            for sector in first_sector..end_sector {
-                if sim_random::<f64>() < config.read_fault_probability {
-                    file.storage.set_fault(sector);
+        if config.read_corruption_probability > 0.0 {
+            for sector in sectors.clone() {
+                let hit = sim_random::<f64>() < config.read_corruption_probability;
+                if hit && self.state.eligible(&path, sector) {
+                    if let Some(file) = self.state.files.get_mut(&pending.file_id) {
+                        file.image.corrupt(sector..sector + 1);
+                    }
                     read_faulted = true;
                 }
             }
+        }
+        if read_faulted {
+            assert_reachable!("disk fault: read planted latent corruption");
+            self.record(&path, StorageFaultKind::ReadCorruption, Some(sectors));
         }
 
         let max_offset = file_size.saturating_sub(pending.len as u64);
@@ -534,6 +903,14 @@ impl StorageEngine {
             };
             misdirected = read_offset != pending.offset;
         }
+        if misdirected {
+            assert_reachable!("disk fault: read served from the wrong offset");
+            self.record(
+                &path,
+                StorageFaultKind::MisdirectedRead,
+                Some(sector_range(read_offset, pending.len)),
+            );
+        }
 
         let mut data = vec![0; pending.len];
         let file =
@@ -543,7 +920,7 @@ impl StorageEngine {
                 .ok_or(StorageError::InvalidFileHandle {
                     handle_id: pending.handle_id,
                 })?;
-        file.storage
+        file.image
             .read(read_offset, &mut data)
             .map_err(|error| StorageError::Io {
                 file_id: pending.file_id,
@@ -560,6 +937,7 @@ impl StorageEngine {
         Ok(StorageCompletion::Read(data))
     }
 
+    /// Where one write actually lands, once the disk has had its say.
     fn complete_write(
         &mut self,
         operation_id: OperationId,
@@ -569,73 +947,200 @@ impl StorageEngine {
         let Some(data) = pending.data else {
             return Err(StorageError::InvalidOperationData { operation_id });
         };
-        let config = self
+        let (owner_ip, path, config) = self
             .state
             .files
             .get(&pending.file_id)
-            .map(|file| self.state.config_for(file.owner_ip).clone())
-            .unwrap_or_default();
-        let Some(file) = self.state.files.get_mut(&pending.file_id) else {
-            return Err(StorageError::InvalidFileHandle {
+            .map(|file| {
+                (
+                    file.owner_ip,
+                    file.path.clone(),
+                    self.state.config_for(file.owner_ip).clone(),
+                )
+            })
+            .ok_or(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
-            });
-        };
+            })?;
+        let file_size = self
+            .state
+            .files
+            .get(&pending.file_id)
+            .map_or(0, |file| file.image.size());
+        // Append mode is the stream cursor's business: a positioned write was
+        // already told exactly where it goes.
         let offset = if pending.append {
-            file.storage.size()
+            file_size
         } else {
             pending.offset
         };
+
+        let landing = self.decide_write_landing(&path, offset, data.len(), file_size, &config);
         let mut fault_kind = None;
-        if sim_random::<f64>() < config.phantom_write_probability {
-            file.storage.record_phantom_write(offset, &data);
-            fault_kind = Some("phantom");
-        } else if sim_random::<f64>() < config.misdirect_write_probability {
-            let max_offset = file.storage.size().saturating_sub(data.len() as u64);
-            let mistaken_offset = if max_offset > 0 {
-                sim_random_range(0..max_offset)
-            } else {
-                0
-            };
-            file.storage
-                .apply_misdirected_write(offset, mistaken_offset, &data)
-                .map_err(|error| StorageError::Io {
+        match landing {
+            WriteLanding::Eio => {
+                self.record(
+                    &path,
+                    StorageFaultKind::EioWrite,
+                    Some(sector_range(offset, data.len())),
+                );
+                actions.fault(SimFaultEvent::StorageWriteFault {
+                    ip: owner_ip.to_string(),
+                    file_id: pending.file_id.0,
+                    write_kind: "eio".to_string(),
+                });
+                return Err(StorageError::Io {
                     file_id: pending.file_id,
-                    kind: error.kind(),
-                    message: error.to_string(),
-                })?;
-            fault_kind = Some("misdirected");
-        } else {
-            file.storage
-                .write(offset, &data, false)
-                .map_err(|error| StorageError::Io {
-                    file_id: pending.file_id,
-                    kind: error.kind(),
-                    message: error.to_string(),
-                })?;
-            if config.write_fault_probability > 0.0 {
-                let offset_usize = usize::try_from(offset).expect("offset fits in usize");
-                let first_sector = offset_usize / crate::storage::SECTOR_SIZE;
-                let end_sector = (offset_usize + data.len()).div_ceil(crate::storage::SECTOR_SIZE);
-                for sector in first_sector..end_sector {
-                    if sim_random::<f64>() < config.write_fault_probability {
-                        file.storage.set_fault(sector);
-                        fault_kind = Some("corruption");
-                    }
+                    kind: std::io::ErrorKind::Other,
+                    message: "write failed (simulated I/O error)".to_string(),
+                });
+            }
+            WriteLanding::Phantom => {
+                // Acknowledged, never applied: the bytes never reach the disk
+                // and a reader keeps seeing the old contents.
+                self.record(
+                    &path,
+                    StorageFaultKind::PhantomWrite,
+                    Some(sector_range(offset, data.len())),
+                );
+                fault_kind = Some("phantom");
+            }
+            WriteLanding::At(landed_at) => {
+                if landed_at != offset {
+                    self.record(
+                        &path,
+                        StorageFaultKind::MisdirectedWrite,
+                        Some(sector_range(landed_at, data.len())),
+                    );
+                    fault_kind = Some("misdirected");
+                }
+                let Some(file) = self.state.files.get_mut(&pending.file_id) else {
+                    return Err(StorageError::InvalidFileHandle {
+                        handle_id: pending.handle_id,
+                    });
+                };
+                file.image.write(landed_at, &data);
+                if self.plant_write_corruption(
+                    pending.file_id,
+                    &path,
+                    landed_at,
+                    data.len(),
+                    &config,
+                ) {
+                    self.record(
+                        &path,
+                        StorageFaultKind::WriteCorruption,
+                        Some(sector_range(landed_at, data.len())),
+                    );
+                    fault_kind = Some("corruption");
                 }
             }
         }
+
         if let Some(write_kind) = fault_kind {
             actions.fault(SimFaultEvent::StorageWriteFault {
-                ip: file.owner_ip.to_string(),
+                ip: owner_ip.to_string(),
                 file_id: pending.file_id.0,
                 write_kind: write_kind.to_string(),
             });
         }
         let len = data.len();
-        if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
+        if !pending.positioned
+            && let Some(handle) = self.state.handles.get_mut(&pending.handle_id)
+        {
             handle.position = offset + len as u64;
         }
         Ok(StorageCompletion::Write { offset, len })
+    }
+
+    /// Decide what the disk does with one write: refuse it, swallow it, or
+    /// land it — here, or somewhere else entirely.
+    ///
+    /// Every roll happens before the eligibility mask is consulted, so
+    /// installing a mask never shifts the random stream.
+    fn decide_write_landing(
+        &mut self,
+        path: &str,
+        offset: u64,
+        len: usize,
+        file_size: u64,
+        config: &StorageConfiguration,
+    ) -> WriteLanding {
+        let sectors = sector_range(offset, len);
+        let eio_roll = sim_random::<f64>();
+        let targeted = self
+            .image_at(path)
+            .is_some_and(|image| image.write_fails(sectors.clone()));
+        let random_eio =
+            config.write_eio_probability > 0.0 && eio_roll < config.write_eio_probability;
+        if targeted || (random_eio && self.state.eligible_range(path, sectors.clone())) {
+            assert_reachable!("disk fault: write failed with EIO");
+            return WriteLanding::Eio;
+        }
+
+        let phantom_roll = sim_random::<f64>();
+        let misdirect_roll = sim_random::<f64>();
+        if config.phantom_write_probability > 0.0
+            && phantom_roll < config.phantom_write_probability
+            && self.state.eligible_range(path, sectors.clone())
+        {
+            assert_reachable!("disk fault: phantom write dropped");
+            return WriteLanding::Phantom;
+        }
+
+        if config.misdirect_write_probability > 0.0
+            && misdirect_roll < config.misdirect_write_probability
+        {
+            let max_offset = file_size.saturating_sub(len as u64);
+            let mistaken = if max_offset > 0 {
+                sim_random_range(0..max_offset)
+            } else {
+                0
+            };
+            let mistaken_sectors = sector_range(mistaken, len);
+            if mistaken != offset
+                && self.state.eligible_range(path, sectors)
+                && self.state.eligible_range(path, mistaken_sectors)
+            {
+                assert_reachable!("disk fault: misdirected write landed elsewhere");
+                return WriteLanding::At(mistaken);
+            }
+        }
+        WriteLanding::At(offset)
+    }
+
+    /// Roll write-time latent corruption over the sectors a write touched.
+    /// Returns whether any sector was damaged.
+    fn plant_write_corruption(
+        &mut self,
+        file_id: FileId,
+        path: &str,
+        offset: u64,
+        len: usize,
+        config: &StorageConfiguration,
+    ) -> bool {
+        if config.write_corruption_probability <= 0.0 {
+            return false;
+        }
+        let mut corrupted = false;
+        for sector in sector_range(offset, len) {
+            let hit = sim_random::<f64>() < config.write_corruption_probability;
+            if hit && self.state.eligible(path, sector) {
+                if let Some(file) = self.state.files.get_mut(&file_id) {
+                    file.image.corrupt(sector..sector + 1);
+                }
+                corrupted = true;
+            }
+        }
+        if corrupted {
+            assert_reachable!("disk fault: write planted latent corruption");
+        }
+        corrupted
+    }
+
+    /// The image behind a path, if the path still names a file.
+    fn image_at(&self, path: &str) -> Option<&FileImage> {
+        let file_id = self.state.path_to_file.get(path)?;
+        self.state.files.get(file_id).map(|file| &file.image)
     }
 
     fn complete_sync(
@@ -643,20 +1148,24 @@ impl StorageEngine {
         pending: &PendingStorageOp,
         actions: &mut StorageActions,
     ) -> Result<(), StorageError> {
-        let probability = self.state.files.get(&pending.file_id).map_or(0.0, |file| {
-            self.state
-                .config_for(file.owner_ip)
-                .sync_failure_probability
-        });
-        if sim_random::<f64>() < probability {
-            let ip = self
-                .state
-                .files
-                .get(&pending.file_id)
-                .map(|file| file.owner_ip.to_string())
-                .unwrap_or_default();
+        let Some((owner_ip, path)) = self
+            .state
+            .files
+            .get(&pending.file_id)
+            .map(|file| (file.owner_ip, file.path.clone()))
+        else {
+            return Err(StorageError::InvalidFileHandle {
+                handle_id: pending.handle_id,
+            });
+        };
+        let config = self.state.config_for(owner_ip).clone();
+        if config.sync_failure_probability > 0.0
+            && sim_random::<f64>() < config.sync_failure_probability
+        {
+            assert_reachable!("disk fault: sync failed");
+            self.record(&path, StorageFaultKind::SyncFailure, None);
             actions.fault(SimFaultEvent::StorageSyncFault {
-                ip,
+                ip: owner_ip.to_string(),
                 file_id: pending.file_id.0,
             });
             return Err(StorageError::Io {
@@ -665,12 +1174,19 @@ impl StorageEngine {
                 message: "sync failed (simulated I/O error)".to_string(),
             });
         }
+
+        // A lying sync reports a sector durable while leaving it volatile;
+        // the crash oracle later reports what that lie cost.
+        self.state.barrier_violation_armed |= config.barrier_violation_probability > 0.0;
+        let eligibility = self.state.eligibility.mask();
+        let eligible =
+            move |sector: u64| eligibility.as_ref().is_none_or(|mask| mask(&path, sector));
         let Some(file) = self.state.files.get_mut(&pending.file_id) else {
             return Err(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
             });
         };
-        file.storage.sync();
+        file.image.sync(&config, &eligible);
         Ok(())
     }
 
@@ -684,8 +1200,17 @@ impl StorageEngine {
                 handle_id: pending.handle_id,
             });
         };
-        file.storage.resize(new_len);
+        file.image.set_len(new_len);
         Ok(())
+    }
+
+    /// Record one injected fault against a path.
+    fn record(&mut self, path: &str, kind: StorageFaultKind, sectors: Option<Range<u64>>) {
+        self.state.record_fault(StorageFaultRecord {
+            path: path.to_string(),
+            kind,
+            sectors,
+        });
     }
 
     pub(crate) fn poll_operation(
@@ -751,7 +1276,7 @@ impl StorageEngine {
         self.state
             .files
             .get(&file_id)
-            .map(|file| file.storage.size())
+            .map(|file| file.image.size())
             .ok_or(StorageError::InvalidFileHandle { handle_id })
     }
 
@@ -773,18 +1298,35 @@ impl StorageEngine {
         // The reboot replaces a failed disk; the operations it parked are
         // failed below with the rest of the process's in-flight I/O.
         self.state.failed_disks.remove(&ip);
-        let probability = self.state.config_for(ip).crash_fault_probability;
-        let file_ids = self
-            .state
-            .files
-            .iter()
-            .filter_map(|(id, file)| (file.owner_ip == ip).then_some(*id))
-            .collect::<Vec<_>>();
+        let config = self.state.config_for(ip).clone();
+        let armed = self.state.barrier_violation_armed;
+        let file_ids = self.files_owned_by(ip);
+        // Resolve each file's unsynced writes through the crash model, in
+        // stable file order.
         for file_id in &file_ids {
-            if let Some(file) = self.state.files.get_mut(file_id) {
-                file.storage.apply_crash(probability);
+            let Some(path) = self.state.files.get(file_id).map(|file| file.path.clone()) else {
+                continue;
+            };
+            let eligibility = self.state.eligibility.mask();
+            let eligible = {
+                let path = path.clone();
+                move |sector: u64| eligibility.as_ref().is_none_or(|mask| mask(&path, sector))
+            };
+            let Some(file) = self.state.files.get_mut(file_id) else {
+                continue;
+            };
+            let report = file.image.crash(&path, &config, armed, &eligible);
+            for sector in &report.lost_synced {
+                self.state.record_fault(StorageFaultRecord {
+                    path: path.clone(),
+                    kind: StorageFaultKind::LostSyncedWrite,
+                    sectors: Some(*sector..*sector + 1),
+                });
             }
+            self.state.crash_reports.push(report);
         }
+
+        self.resolve_namespace_crash(ip);
 
         let mut actions = StorageActions::default();
         let handle_ids = self
@@ -813,6 +1355,8 @@ impl StorageEngine {
         for (file_id, path) in files {
             self.state.files.remove(&file_id);
             self.state.path_to_file.remove(&path);
+            self.state.durable_paths.retain(|_, id| *id != file_id);
+            let _ = path;
             self.invalidate_file_handles(file_id, &mut actions, true);
         }
         actions.fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });
@@ -1046,6 +1590,23 @@ impl StorageEngine {
             _ => steady,
         }
     }
+}
+
+/// The directory part of a path: everything before the last separator, or the
+/// root (an empty string) for a name with no separator at all.
+fn parent_directory(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(index) => &path[..index],
+        None => "",
+    }
+}
+
+/// Normalize a directory path for comparison against [`parent_directory`]:
+/// `"db/"`, `"db"` and (for the root) `"/"`, `"."`, `""` all name the same
+/// directory.
+fn normalize_directory(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed == "." { "" } else { trimmed }
 }
 
 fn saturating_duration_from_secs(seconds: f64) -> Duration {

@@ -1,0 +1,548 @@
+//! Open semantics of the production `StorageProvider`.
+//!
+//! The direct-I/O policy must not change what an open *means*. These tests
+//! pin the boundary: `Optional` may fall back to buffered I/O, and may not
+//! turn any other failure into a success, weaken `create_new`, or create a
+//! file the caller did not ask it to create.
+
+use moonpool_core::{
+    AlignedBuf, DirectIo, OpenOptions, StorageFile, StorageProvider, TokioStorageProvider,
+};
+use tempfile::TempDir;
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build runtime")
+}
+
+/// `create_new` means "fail if it exists" under every direct-I/O policy. The
+/// bug this pins: attempting `O_DIRECT` first, having the kernel create the
+/// file and *then* reject the flag, and retrying without the exclusivity the
+/// caller asked for — which silently opens the existing file instead.
+#[test]
+fn optional_direct_io_does_not_weaken_create_new() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("exclusive.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        // Someone else already owns this name, with contents.
+        let first = provider
+            .open(path, OpenOptions::create_new_write())
+            .await
+            .expect("first create_new must succeed");
+        first.write_at(0, b"original").await.expect("write failed");
+        first.sync_all().await.expect("sync failed");
+        drop(first);
+
+        for policy in [DirectIo::Disabled, DirectIo::Optional, DirectIo::Required] {
+            let error = provider
+                .open(path, OpenOptions::create_new_write().direct_io(policy))
+                .await
+                .err()
+                .map(|error| error.kind());
+            assert!(
+                matches!(
+                    error,
+                    Some(std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::Unsupported)
+                ),
+                "create_new on an existing file must fail under {policy:?}, got {error:?}"
+            );
+        }
+
+        // And the contents are still there: no attempt truncated or replaced
+        // the file it refused to create.
+        let survivor = provider
+            .open(path, OpenOptions::read_only())
+            .await
+            .expect("open failed");
+        let mut buf = [0u8; 8];
+        assert_eq!(survivor.read_at(0, &mut buf).await.expect("read"), 8);
+        assert_eq!(&buf, b"original");
+    });
+}
+
+/// An ordinary open failure stays that failure. `Optional` must not retry its
+/// way into a success, nor create a file for a caller that did not ask for
+/// one.
+#[test]
+fn optional_direct_io_preserves_ordinary_open_failures() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let missing = dir.path().join("nonexistent.db");
+        let missing = missing.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let error = provider
+            .open(
+                missing,
+                OpenOptions::read_only().direct_io(DirectIo::Optional),
+            )
+            .await
+            .expect_err("opening a missing file without create must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            !provider.exists(missing).await.expect("exists failed"),
+            "a failed open must not leave a file behind"
+        );
+
+        // A directory is not a file to write to, under any policy.
+        let as_file = dir.path().to_str().expect("temp path is valid UTF-8");
+        let error = provider
+            .open(
+                as_file,
+                OpenOptions::new().write(true).direct_io(DirectIo::Optional),
+            )
+            .await
+            .expect_err("opening a directory for writing must fail");
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "the directory exists; the failure is about writing to it"
+        );
+    });
+}
+
+/// A truncating open truncates exactly once. If the direct attempt were made
+/// first and then retried, the file would be truncated twice — harmless here,
+/// but the same double-application is what makes `create_new` unsafe.
+#[test]
+fn optional_direct_io_applies_truncation_once() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("truncated.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let seeded = provider
+            .open(path, OpenOptions::create_write())
+            .await
+            .expect("open failed");
+        seeded.write_at(0, &[0xAB; 4096]).await.expect("write");
+        seeded.sync_all().await.expect("sync");
+        drop(seeded);
+
+        let reopened = provider
+            .open(
+                path,
+                OpenOptions::create_write()
+                    .read(true)
+                    .direct_io(DirectIo::Optional),
+            )
+            .await
+            .expect("open failed");
+        assert_eq!(reopened.size().await.expect("size"), 0);
+
+        // The handle is usable whichever way the upgrade went — through a
+        // buffer built for whatever constraints it ended up with.
+        let constraints = reopened.constraints();
+        let block = AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
+        reopened
+            .write_at(0, block.as_slice())
+            .await
+            .expect("write failed");
+    });
+}
+
+/// A direct-I/O file must advertise constraints its own device will honour.
+/// The alignment is discovered, not assumed: this proves the reported values
+/// are actually accepted, which a hard-coded guess cannot.
+#[test]
+fn direct_io_constraints_describe_what_the_device_accepts() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("aligned.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let file = provider
+            .open(
+                path,
+                OpenOptions::create_write()
+                    .read(true)
+                    .direct_io(DirectIo::Optional),
+            )
+            .await
+            .expect("open failed");
+
+        let constraints = file.constraints();
+        if !file.is_direct_io() {
+            assert!(
+                constraints.is_unconstrained(),
+                "a buffered file constrains nothing"
+            );
+            return;
+        }
+
+        for alignment in [
+            constraints.offset_alignment(),
+            constraints.length_alignment() as u64,
+            constraints.memory_alignment() as u64,
+        ] {
+            assert!(
+                alignment.is_power_of_two(),
+                "{alignment} is not a power of two"
+            );
+        }
+
+        // A transfer built to exactly the reported alignment must be accepted
+        // by the device. If the numbers were too weak, this is where the
+        // kernel would return EINVAL.
+        let length = constraints.length_alignment();
+        let mut block = AlignedBuf::for_constraints(length, constraints);
+        block.as_mut_slice().fill(0xE1);
+        assert_eq!(
+            file.write_at(constraints.offset_alignment(), block.as_slice())
+                .await
+                .expect("a transfer at the reported alignment must be accepted"),
+            length
+        );
+
+        let mut read = AlignedBuf::for_constraints(length, constraints);
+        assert_eq!(
+            file.read_at(constraints.offset_alignment(), read.as_mut_slice())
+                .await
+                .expect("read failed"),
+            length
+        );
+        assert_eq!(read.as_slice(), block.as_slice());
+    });
+}
+
+/// The stream API and alignment are mutually exclusive, and a direct-I/O file
+/// says so itself rather than letting the kernel answer with `EINVAL` on some
+/// requests and succeed on others.
+#[test]
+fn a_direct_io_file_refuses_stream_io() {
+    use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("stream.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let mut file = match provider
+            .open(
+                path,
+                OpenOptions::create_write()
+                    .read(true)
+                    .direct_io(DirectIo::Required),
+            )
+            .await
+        {
+            Ok(file) => file,
+            // A filesystem without direct I/O has nothing to say here.
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => return,
+            Err(error) => panic!("open failed: {error}"),
+        };
+
+        let constraints = file.constraints();
+        let mut aligned = AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
+
+        // Even a perfectly aligned buffer is refused: it is the shared cursor
+        // that cannot be kept aligned, not this particular transfer.
+        let error = file
+            .write(aligned.as_slice())
+            .await
+            .expect_err("stream writes must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+
+        let error = file
+            .read(aligned.as_mut_slice())
+            .await
+            .expect_err("stream reads must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+
+        // Seeking moves a cursor; it transfers nothing, so it stays available.
+        assert_eq!(
+            file.seek(std::io::SeekFrom::Start(0))
+                .await
+                .expect("seeking must stay available"),
+            0
+        );
+
+        // And positioned I/O works throughout.
+        assert_eq!(
+            file.write_at(0, aligned.as_slice())
+                .await
+                .expect("positioned writes are what this file is for"),
+            aligned.len()
+        );
+    });
+}
+
+/// A buffered file keeps the ordinary stream semantics; nothing here narrows
+/// what a file without constraints can do.
+#[test]
+fn a_buffered_file_keeps_stream_io() {
+    use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("buffered.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let mut file = provider
+            .open(path, OpenOptions::create_write().read(true))
+            .await
+            .expect("open failed");
+        assert!(file.constraints().is_unconstrained());
+
+        file.write_all(b"streamed").await.expect("write failed");
+        file.seek(std::io::SeekFrom::Start(0)).await.expect("seek");
+        let mut buf = [0u8; 8];
+        file.read_exact(&mut buf).await.expect("read failed");
+        assert_eq!(&buf, b"streamed");
+    });
+}
+
+/// `write_at` is positioned even on a file opened for appending.
+///
+/// The two halves of such a file mean different things: a stream write goes to
+/// the end because that is what append is for, and a positioned write goes
+/// exactly where it is told because that is what `write_at` promises. Sharing
+/// one descriptor between them cannot deliver both — `pwrite` to an
+/// `O_APPEND` descriptor appends and ignores the offset — so this is the test
+/// that the two are actually separate.
+#[test]
+fn positioned_writes_ignore_append_on_a_real_file() {
+    use futures::io::AsyncWriteExt;
+
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("append.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let seed = provider
+            .open(path, OpenOptions::create_write())
+            .await
+            .expect("open failed");
+        seed.write_at(0, b"AAAAAAAA").await.expect("seed write");
+        seed.sync_all().await.expect("sync failed");
+        drop(seed);
+
+        let mut file = provider
+            .open(path, OpenOptions::new().read(true).write(true).append(true))
+            .await
+            .expect("open failed");
+
+        // Positioned: exactly at the offset, overwriting in place.
+        assert_eq!(file.write_at(0, b"BB").await.expect("write_at failed"), 2);
+        let mut buf = [0u8; 8];
+        assert_eq!(file.read_at(0, &mut buf).await.expect("read_at failed"), 8);
+        assert_eq!(
+            &buf, b"BBAAAAAA",
+            "a positioned write on an append file must not append"
+        );
+        assert_eq!(
+            file.size().await.expect("size failed"),
+            8,
+            "and must not extend the file"
+        );
+
+        // Stream: at the end, because that is what append means.
+        file.write_all(b"CC").await.expect("stream write failed");
+        file.flush().await.expect("flush failed");
+
+        let mut all = [0u8; 10];
+        assert_eq!(file.read_at(0, &mut all).await.expect("read_at failed"), 10);
+        assert_eq!(
+            &all, b"BBAAAAAACC",
+            "an ordinary stream write on an append file must append"
+        );
+    });
+}
+
+/// `Required` opens a file that already exists, and applies the lifecycle it
+/// deferred once direct I/O is secured. Runs wherever direct I/O works.
+#[test]
+fn a_required_open_serves_an_existing_file() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let provider = TokioStorageProvider::new();
+        let path = dir.path().join("lifecycle.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+
+        // The bootstrap the provider refuses to do on the caller's behalf.
+        let bootstrap = provider
+            .open(path, OpenOptions::create_new_write())
+            .await
+            .expect("an ordinary create must succeed");
+        bootstrap.sync_all().await.expect("sync failed");
+        drop(bootstrap);
+        provider
+            .sync_dir(dir.path().to_str().expect("utf-8"))
+            .await
+            .expect("sync_dir failed");
+
+        let Ok(opened) = provider
+            .open(
+                path,
+                OpenOptions::read_write().direct_io(DirectIo::Required),
+            )
+            .await
+        else {
+            eprintln!("skipped: direct I/O is unavailable on this filesystem");
+            return;
+        };
+        assert!(
+            opened.is_direct_io(),
+            "Required never returns a buffered file"
+        );
+
+        let constraints = opened.constraints();
+        let mut block = AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
+        block.as_mut_slice().fill(0xD7);
+        opened.write_at(0, block.as_slice()).await.expect("write");
+        opened.sync_all().await.expect("sync");
+        assert_eq!(opened.size().await.expect("size"), block.len() as u64);
+        drop(opened);
+
+        // create_new against the now-existing file: refused, contents intact.
+        let error = provider
+            .open(
+                path,
+                OpenOptions::create_new_write().direct_io(DirectIo::Required),
+            )
+            .await
+            .expect_err("create_new on an existing file must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+
+        let reopened = provider
+            .open(path, OpenOptions::read_only().direct_io(DirectIo::Required))
+            .await
+            .expect("open failed");
+        assert_eq!(
+            reopened.size().await.expect("size"),
+            block.len() as u64,
+            "a refused create_new must not have truncated the file"
+        );
+        drop(reopened);
+
+        // truncate: deferred until after direct I/O is secured, but applied.
+        let truncated = provider
+            .open(
+                path,
+                OpenOptions::create_write()
+                    .read(true)
+                    .direct_io(DirectIo::Required),
+            )
+            .await
+            .expect("open failed");
+        assert_eq!(
+            truncated.size().await.expect("size"),
+            0,
+            "a truncating open must still truncate"
+        );
+    });
+}
+
+/// `Required` never creates a file, whatever the lifecycle flags say.
+///
+/// Creating a file and guaranteeing direct I/O on it are two operations, and
+/// the provider does not pretend they are one: doing that safely would mean
+/// staging an inode elsewhere and publishing the pathname, which is a
+/// namespace protocol belonging to whoever owns the file's format. So the open
+/// is refused with `Unsupported`, and the caller bootstraps in its own order —
+/// which is what the second half of this test does.
+#[test]
+fn a_required_open_never_creates_a_file() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let provider = TokioStorageProvider::new();
+
+        // First, the documented bootstrap — create ordinarily, sync the file
+        // and the directory entry, then require direct I/O of the file that
+        // now exists — which also settles whether this platform has direct I/O
+        // at all. It matters below: a platform without it (macOS) refuses
+        // `Required` before it ever resolves the path, so a missing file is
+        // reported as `Unsupported` rather than as missing.
+        let target = dir.path().join("bootstrap.db");
+        let target = target.to_str().expect("temp path is valid UTF-8");
+        let created = provider
+            .open(target, OpenOptions::create_new_write())
+            .await
+            .expect("the ordinary create must succeed");
+        created.sync_all().await.expect("sync failed");
+        drop(created);
+        provider
+            .sync_dir(dir.path().to_str().expect("utf-8"))
+            .await
+            .expect("sync_dir failed");
+
+        let direct_io_available = match provider
+            .open(
+                target,
+                OpenOptions::read_write().direct_io(DirectIo::Required),
+            )
+            .await
+        {
+            Ok(file) => {
+                assert!(
+                    file.is_direct_io(),
+                    "Required never returns a buffered file"
+                );
+                true
+            }
+            Err(error) => {
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::Unsupported,
+                    "the only reason to fail on a file that exists is that direct I/O is absent"
+                );
+                false
+            }
+        };
+
+        // No create at all: the ordinary answer where the path is reached.
+        let missing = dir.path().join("absent.db");
+        let missing = missing.to_str().expect("temp path is valid UTF-8");
+        let error = provider
+            .open(
+                missing,
+                OpenOptions::read_only().direct_io(DirectIo::Required),
+            )
+            .await
+            .expect_err("a missing file without create must fail");
+        assert_eq!(
+            error.kind(),
+            if direct_io_available {
+                std::io::ErrorKind::NotFound
+            } else {
+                std::io::ErrorKind::Unsupported
+            }
+        );
+        assert!(!provider.exists(missing).await.expect("exists failed"));
+
+        // With create, or create_new: refused, and still nothing created.
+        // `Unsupported` either way — here because the provider will not create
+        // a file for a capability it has not secured, on macOS because it has
+        // no such capability to secure.
+        for options in [
+            OpenOptions::create_write().direct_io(DirectIo::Required),
+            OpenOptions::create_new_write().direct_io(DirectIo::Required),
+        ] {
+            let target = dir.path().join("uncreated.db");
+            let target = target.to_str().expect("temp path is valid UTF-8");
+            let error = provider
+                .open(target, options)
+                .await
+                .expect_err("Required must not create a file");
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::Unsupported,
+                "the refusal is about the requested capability, not the path"
+            );
+            assert!(
+                !provider.exists(target).await.expect("exists failed"),
+                "a refused Required create must not leave a file behind"
+            );
+        }
+    });
+}

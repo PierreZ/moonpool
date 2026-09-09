@@ -93,7 +93,7 @@ fn test_write_sync_crash_recovery() {
 fn test_write_nosync_crash_recovery() {
     local_runtime().block_on(async {
         let mut config = StorageConfiguration::fast_local();
-        config.crash_fault_probability = 1.0; // 100% corruption on crash
+        config.crash_latent_fault_probability = 1.0; // 100% corruption on crash
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);

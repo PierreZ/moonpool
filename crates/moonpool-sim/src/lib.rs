@@ -191,15 +191,9 @@ pub use network::{
 
 // Storage exports
 pub use storage::{
-    InMemoryStorage, SECTOR_SIZE, SectorBitSet, SimStorageProvider, StorageConfiguration,
-    StorageError,
-};
-
-// Block-device simulation exports
-pub use storage::{
-    BlockCrashOutcome, BlockCrashReport, BlockEligibilityMask, BlockFaultConfig, BlockFaultKind,
-    BlockFaultRecord, BlockSectorResolution, EioTarget, SimBlockDevice, SimBlockDeviceProvider,
-    SimBlockStore,
+    CrashOutcome, EioTarget, FileCrashReport, FileImage, SECTOR_SIZE, SectorBitSet,
+    SectorResolution, SimStorageProvider, StorageConfiguration, StorageEligibilityMask,
+    StorageError, StorageFaultKind, StorageFaultRecord,
 };
 
 // Provider exports

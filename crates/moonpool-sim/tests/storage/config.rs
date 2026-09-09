@@ -45,9 +45,9 @@ fn test_fast_local_configuration_values() {
     assert_eq!(config.sync_latency, uniform(one_us, one_us));
 
     // All faults disabled
-    assert_f64_eq(config.read_fault_probability, 0.0);
-    assert_f64_eq(config.write_fault_probability, 0.0);
-    assert_f64_eq(config.crash_fault_probability, 0.0);
+    assert_f64_eq(config.read_corruption_probability, 0.0);
+    assert_f64_eq(config.write_corruption_probability, 0.0);
+    assert_f64_eq(config.crash_latent_fault_probability, 0.0);
     assert_f64_eq(config.misdirect_write_probability, 0.0);
     assert_f64_eq(config.misdirect_read_probability, 0.0);
     assert_f64_eq(config.phantom_write_probability, 0.0);
@@ -78,9 +78,9 @@ fn test_default_configuration_values() {
     );
 
     // All faults disabled by default
-    assert_f64_eq(config.read_fault_probability, 0.0);
-    assert_f64_eq(config.write_fault_probability, 0.0);
-    assert_f64_eq(config.crash_fault_probability, 0.0);
+    assert_f64_eq(config.read_corruption_probability, 0.0);
+    assert_f64_eq(config.write_corruption_probability, 0.0);
+    assert_f64_eq(config.crash_latent_fault_probability, 0.0);
     assert_f64_eq(config.misdirect_write_probability, 0.0);
     assert_f64_eq(config.misdirect_read_probability, 0.0);
     assert_f64_eq(config.phantom_write_probability, 0.0);
@@ -133,12 +133,12 @@ fn test_random_for_seed_determinism() {
             "Sync latency should be deterministic"
         );
         assert_f64_eq(
-            config1.read_fault_probability,
-            config2.read_fault_probability,
+            config1.read_corruption_probability,
+            config2.read_corruption_probability,
         );
         assert_f64_eq(
-            config1.write_fault_probability,
-            config2.write_fault_probability,
+            config1.write_corruption_probability,
+            config2.write_corruption_probability,
         );
     });
 }
@@ -200,14 +200,16 @@ fn test_random_for_seed_value_ranges() {
 
             // Fault probabilities should be very low (0.001% to 0.1%)
             assert!(
-                config.read_fault_probability >= 0.0 && config.read_fault_probability <= 0.001,
+                config.read_corruption_probability >= 0.0
+                    && config.read_corruption_probability <= 0.001,
                 "Read fault prob {} too high",
-                config.read_fault_probability
+                config.read_corruption_probability
             );
             assert!(
-                config.write_fault_probability >= 0.0 && config.write_fault_probability <= 0.001,
+                config.write_corruption_probability >= 0.0
+                    && config.write_corruption_probability <= 0.001,
                 "Write fault prob {} too high",
-                config.write_fault_probability
+                config.write_corruption_probability
             );
         }
     });
@@ -225,8 +227,8 @@ fn test_configuration_clone() {
     assert_eq!(original.write_latency, cloned.write_latency);
     assert_eq!(original.sync_latency, cloned.sync_latency);
     assert_f64_eq(
-        original.read_fault_probability,
-        cloned.read_fault_probability,
+        original.read_corruption_probability,
+        cloned.read_corruption_probability,
     );
 }
 
@@ -239,9 +241,9 @@ fn test_custom_configuration() {
         read_latency: uniform(Duration::from_micros(30), Duration::from_micros(100)),
         write_latency: uniform(Duration::from_micros(50), Duration::from_micros(200)),
         sync_latency: uniform(Duration::from_millis(2), Duration::from_millis(8)),
-        read_fault_probability: 0.01,
-        write_fault_probability: 0.02,
-        crash_fault_probability: 0.001,
+        read_corruption_probability: 0.01,
+        write_corruption_probability: 0.02,
+        crash_latent_fault_probability: 0.001,
         misdirect_write_probability: 0.0005,
         misdirect_read_probability: 0.0005,
         phantom_write_probability: 0.001,
@@ -256,9 +258,9 @@ fn test_custom_configuration() {
         custom.read_latency,
         uniform(Duration::from_micros(30), Duration::from_micros(100))
     );
-    assert_f64_eq(custom.read_fault_probability, 0.01);
-    assert_f64_eq(custom.write_fault_probability, 0.02);
-    assert_f64_eq(custom.crash_fault_probability, 0.001);
+    assert_f64_eq(custom.read_corruption_probability, 0.01);
+    assert_f64_eq(custom.write_corruption_probability, 0.02);
+    assert_f64_eq(custom.crash_latent_fault_probability, 0.001);
 }
 
 /// Test that `set_storage_config` applies to `SimWorld`
@@ -296,9 +298,9 @@ fn test_hdd_like_configuration() {
         read_latency: uniform(Duration::from_millis(5), Duration::from_millis(15)),
         write_latency: uniform(Duration::from_millis(5), Duration::from_millis(15)),
         sync_latency: uniform(Duration::from_millis(10), Duration::from_millis(50)),
-        read_fault_probability: 0.0,
-        write_fault_probability: 0.0,
-        crash_fault_probability: 0.0,
+        read_corruption_probability: 0.0,
+        write_corruption_probability: 0.0,
+        crash_latent_fault_probability: 0.0,
         misdirect_write_probability: 0.0,
         misdirect_read_probability: 0.0,
         phantom_write_probability: 0.0,
@@ -323,9 +325,9 @@ fn test_nvme_like_configuration() {
         read_latency: uniform(Duration::from_micros(10), Duration::from_micros(50)),
         write_latency: uniform(Duration::from_micros(10), Duration::from_micros(50)),
         sync_latency: uniform(Duration::from_micros(100), Duration::from_micros(500)),
-        read_fault_probability: 0.0,
-        write_fault_probability: 0.0,
-        crash_fault_probability: 0.0,
+        read_corruption_probability: 0.0,
+        write_corruption_probability: 0.0,
+        crash_latent_fault_probability: 0.0,
         misdirect_write_probability: 0.0,
         misdirect_read_probability: 0.0,
         phantom_write_probability: 0.0,
@@ -346,29 +348,29 @@ fn test_nvme_like_configuration() {
 fn test_fault_probability_boundaries() {
     // Test with 0% faults
     let no_faults = StorageConfiguration::fast_local();
-    assert_f64_eq(no_faults.read_fault_probability, 0.0);
+    assert_f64_eq(no_faults.read_corruption_probability, 0.0);
 
     // Test with 100% faults (for testing)
     let all_faults = StorageConfiguration {
-        read_fault_probability: 1.0,
-        write_fault_probability: 1.0,
-        crash_fault_probability: 1.0,
+        read_corruption_probability: 1.0,
+        write_corruption_probability: 1.0,
+        crash_latent_fault_probability: 1.0,
         misdirect_write_probability: 1.0,
         misdirect_read_probability: 1.0,
         phantom_write_probability: 1.0,
         sync_failure_probability: 1.0,
         ..StorageConfiguration::fast_local()
     };
-    assert_f64_eq(all_faults.read_fault_probability, 1.0);
+    assert_f64_eq(all_faults.read_corruption_probability, 1.0);
     assert_f64_eq(all_faults.sync_failure_probability, 1.0);
 
     // Test with fractional probabilities
     let partial_faults = StorageConfiguration {
-        read_fault_probability: 0.001,
-        write_fault_probability: 0.0001,
+        read_corruption_probability: 0.001,
+        write_corruption_probability: 0.0001,
         ..StorageConfiguration::fast_local()
     };
-    assert!((partial_faults.read_fault_probability - 0.001).abs() < f64::EPSILON);
+    assert!((partial_faults.read_corruption_probability - 0.001).abs() < f64::EPSILON);
 }
 
 /// Test Debug implementation

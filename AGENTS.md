@@ -131,6 +131,23 @@ Where generics hurt, erase at an application boundary with a narrowly scoped tra
 **NEVER remove assertions that catch bugs** — if an assertion fails, fix the underlying bug. Assertions exist to find real issues; deleting a failing assertion hides the bug.
 **When an assertion catches a bug**: Stop, enter plan mode, and enable deep thinking. Read relevant reference code, trace the full data flow, and understand the root cause before attempting a fix. Do not rush.
 
+## Storage Layering
+One provider, one file abstraction, one simulated file image. `StorageProvider`
+owns the filesystem *namespace* (open, exists, delete, rename, `sync_dir`);
+`StorageFile` owns already-open bytes (stream I/O, positioned `read_at` /
+`write_at`, `sync_all` / `sync_data`, `size` / `set_len`, plus `constraints()`
+and `is_direct_io()`). Database-shaped needs are **options on opening an
+ordinary file** — `OpenOptions::direct_io(DirectIo::{Disabled,Optional,Required})`
+— never a parallel provider stack: there is no `BlockProvider`, no
+`DirectIoProvider`, and no region-addressed device. `BlockFile<F>` wraps exactly
+one already-open file to add block arithmetic and whole-transfer loops; it never
+takes, stores, or resolves a path.
+
+Keep these distinctions: direct I/O is not durability; the caller's block size
+is not the file's I/O alignment and neither is a crash-atomicity unit; growing a
+file is not preallocation; and file durability is not directory-entry
+durability.
+
 ## Storage Testing Patterns
 Storage read, write, sync, and set-length operations return `Poll::Pending` and
 complete through scheduled `StorageEvent`s. Network bind, connect, and accept
@@ -175,10 +192,20 @@ executor.block_on(async move {
 - `executor::until_stalled()` - Let all tasks woken by a step run in orchestrator loops
 
 **Fault coverage** (TigerBeetle + FDB patterns):
-- Read/write corruption, crash/torn writes
-- Misdirected reads/writes, phantom writes
-- Sync failures, uninitialized reads
-- IOPS/bandwidth timing simulation
+- Read/write corruption, EIO on reads and writes (an error is not corrupt bytes)
+- The barrier-bounded crash model: every sector written since the last sync
+  resolves independently (kept old, kept new, lost to the fill pattern, latent
+  fault, shorn), plus clean crashes and correlated rollback
+- The lost-synced-write oracle: a sector a sync reported durable that changes
+  across a crash fails the run, unless the barrier-violation family is armed
+- Misdirected reads/writes, phantom writes, short transfers
+- Sync failures, unsynced directory-entry loss, uninitialized reads
+- IOPS/bandwidth timing simulation, disk stall/throttle episodes, disk failure
+
+Fault coordinates are **file plus flat sector offset** — no region, no sub-file
+namespace. Targeted injections live on `SimWorld` (`corrupt_file`,
+`fail_file_with_eio`, `corrupt_durable_out_of_band`), gated by the
+`(path, sector)` eligibility mask for the random families.
 
 ## Assertions & Buggify
 **Always**: Guard invariants (never fail)

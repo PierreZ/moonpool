@@ -50,9 +50,16 @@ impl StorageProvider for SimStorageProvider {
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
         let sim = self.sim()?;
 
-        let file_id = sim.open_file(path, options, 0, self.owner_ip)?;
+        let handle_id = sim.open_file(path, options, 0, self.owner_ip)?;
+        let constraints = sim.handle_constraints(handle_id)?;
+        let direct_io = sim.handle_is_direct_io(handle_id)?;
 
-        Ok(SimStorageFile::new(self.sim.clone(), file_id))
+        Ok(SimStorageFile::new(
+            self.sim.clone(),
+            handle_id,
+            constraints,
+            direct_io,
+        ))
     }
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
@@ -69,6 +76,12 @@ impl StorageProvider for SimStorageProvider {
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let sim = self.sim()?;
         sim.rename_file(from, to)?;
+        Ok(())
+    }
+
+    async fn sync_dir(&self, path: &str) -> io::Result<()> {
+        let sim = self.sim()?;
+        sim.sync_dir(path, self.owner_ip)?;
         Ok(())
     }
 }

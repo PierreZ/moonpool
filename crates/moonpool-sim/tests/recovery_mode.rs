@@ -30,17 +30,12 @@ use futures::{
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     task::noop_waker,
 };
-use moonpool_core::block::SECTOR_SIZE as BLOCK_SECTOR_SIZE;
-use moonpool_core::{
-    BlockDevice, BlockDeviceProvider, OpenOptions, RegionId, RegionSpec, StorageFile,
-    StorageProvider,
-};
+use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
-    BlockFaultConfig, Event, FaultContext, FaultInjector, LatencyDistribution,
-    NetworkConfiguration, NetworkEvent, NetworkFaultMask, NetworkProvider, PartitionStrategy,
-    Process, SECTOR_SIZE, SimContext, SimWorld, SimulationBuilder, SimulationError,
-    SimulationResult, StorageConfiguration, TcpListenerTrait, TimeProvider, Workload,
-    executor::Executor,
+    Event, FaultContext, FaultInjector, LatencyDistribution, NetworkConfiguration, NetworkEvent,
+    NetworkFaultMask, NetworkProvider, PartitionStrategy, Process, SECTOR_SIZE, SimContext,
+    SimWorld, SimulationBuilder, SimulationError, SimulationResult, StorageConfiguration,
+    TcpListenerTrait, TimeProvider, Workload,
 };
 
 /// How many events a driven future may consume before it is declared stuck.
@@ -339,7 +334,7 @@ fn a_connection_already_closed_stays_closed_through_recovery_mode() {
 #[test]
 fn storage_damage_survives_recovery_mode_while_new_faults_stop() {
     let mut config = StorageConfiguration::fast_local();
-    config.write_fault_probability = 1.0;
+    config.write_corruption_probability = 1.0;
     let mut sim = SimWorld::new_with_seed(20_260_901);
     sim.set_storage_config(config);
     let provider = sim.storage_provider(ip(1));
@@ -463,89 +458,6 @@ fn a_failed_disk_outlives_the_boundary_and_no_other_disk_fails() {
     );
 }
 
-/// The block-device surface has its own fault configuration, held per process
-/// store, so it needs its own half of the transition.
-#[test]
-fn block_device_faults_stop_but_planted_corruption_stays() {
-    let config = BlockFaultConfig {
-        read_corruption_probability: 1.0,
-        ..BlockFaultConfig::default()
-    };
-    let mut sim = SimWorld::new_with_seed(20_260_901);
-    sim.set_block_fault_config(config);
-
-    let provider = sim.block_device_provider(ip(1));
-    let spec = [RegionSpec {
-        name: "data",
-        size: 8 * BLOCK_SECTOR_SIZE as u64,
-    }];
-    let written = vec![0x5A_u8; BLOCK_SECTOR_SIZE];
-
-    let device = Executor::new(20_260_901).block_on(async move {
-        let device = provider.create("db", &spec).await.expect("create");
-        device.persist().await.expect("persist");
-        device
-            .write(RegionId(0), 0, &written)
-            .await
-            .expect("write sector 0");
-        device.persist().await.expect("persist");
-        device
-    });
-
-    let corrupted = Executor::new(20_260_901).block_on({
-        let device = device.clone();
-        async move {
-            let mut buf = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), 0, &mut buf)
-                .await
-                .expect("read sector 0");
-            buf
-        }
-    });
-    assert_ne!(
-        corrupted,
-        vec![0x5A_u8; BLOCK_SECTOR_SIZE],
-        "the chaos phase must actually plant a latent fault"
-    );
-
-    sim.enter_recovery_mode();
-
-    let (after_recovery, fresh_sector) = Executor::new(20_260_901).block_on({
-        let device = device.clone();
-        async move {
-            let mut old = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), 0, &mut old)
-                .await
-                .expect("re-read sector 0");
-
-            let fresh = vec![0xC3_u8; BLOCK_SECTOR_SIZE];
-            device
-                .write(RegionId(0), BLOCK_SECTOR_SIZE as u64, &fresh)
-                .await
-                .expect("write sector 1");
-            device.persist().await.expect("persist");
-            let mut read_back = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), BLOCK_SECTOR_SIZE as u64, &mut read_back)
-                .await
-                .expect("read sector 1");
-            (old, read_back)
-        }
-    });
-
-    assert_eq!(
-        after_recovery, corrupted,
-        "a latent fault already planted stays planted, identically on retry"
-    );
-    assert_eq!(
-        fresh_sector,
-        vec![0xC3_u8; BLOCK_SECTOR_SIZE],
-        "no new block-device corruption may be planted after the boundary"
-    );
-}
-
 // ===========================================================================
 // 3. Finite episodes expire, they are not rewritten
 // ===========================================================================
@@ -659,7 +571,7 @@ fn recovery_mode_keeps_non_chaos_configuration() {
     };
     storage.disk_throttle_iops_multiplier = 9.0;
     storage.disk_throttle_bandwidth_multiplier = 11.0;
-    storage.read_fault_probability = 1.0;
+    storage.read_corruption_probability = 1.0;
     sim.set_storage_config(storage);
 
     sim.enter_recovery_mode();
@@ -715,7 +627,7 @@ fn recovery_mode_keeps_non_chaos_configuration() {
             11.0_f64.to_bits()
         );
         assert_zero(
-            config.read_fault_probability,
+            config.read_corruption_probability,
             "read faults are chaos and must be off",
         );
     });
@@ -823,8 +735,8 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
     sim.enter_recovery_mode();
 
     let mut rearmed = StorageConfiguration::fast_local();
-    rearmed.write_fault_probability = 1.0;
-    rearmed.read_fault_probability = 1.0;
+    rearmed.write_corruption_probability = 1.0;
+    rearmed.read_corruption_probability = 1.0;
     rearmed.phantom_write_probability = 1.0;
     rearmed.disk_stall_probability = 1.0;
     rearmed.disk_failure_probability = 1.0;
@@ -833,11 +745,11 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
 
     sim.with_storage_config(|config| {
         assert_zero(
-            config.write_fault_probability,
+            config.write_corruption_probability,
             "write faults must not be re-armable after the boundary",
         );
         assert_zero(
-            config.read_fault_probability,
+            config.read_corruption_probability,
             "read faults must not be re-armable after the boundary",
         );
         assert_zero(
@@ -899,7 +811,7 @@ fn per_process_storage_setters_cannot_rearm_faults_after_recovery() {
     sim.enter_recovery_mode();
 
     let mut rearmed = StorageConfiguration::fast_local();
-    rearmed.write_fault_probability = 1.0;
+    rearmed.write_corruption_probability = 1.0;
     rearmed.disk_stall_probability = 1.0;
     rearmed.iops = 8765;
     sim.set_process_storage_config(ip(1), rearmed.clone());
@@ -988,54 +900,6 @@ fn set_network_config_cannot_rearm_faults_after_recovery() {
     assert!(
         !sim.is_partitioned(ip(1), ip(2)) && !sim.is_partitioned(ip(2), ip(1)),
         "a re-armed configuration must not partition after the boundary"
-    );
-}
-
-/// Block stores are created lazily, so the registry's default configuration is
-/// what a process touching a device in the quiet tail inherits.
-#[test]
-fn set_block_fault_config_cannot_rearm_faults_after_recovery() {
-    let mut sim = SimWorld::new_with_seed(20_260_901);
-    sim.enter_recovery_mode();
-    // Pinned to 1.0 rather than `BlockFaultConfig::chaos()`: at that profile's
-    // 0.5% the fault would usually miss, and the test would pass whether or not
-    // the guard exists.
-    sim.set_block_fault_config(BlockFaultConfig {
-        read_corruption_probability: 1.0,
-        ..BlockFaultConfig::default()
-    });
-
-    // A store this process has never touched is created from the registry
-    // default *after* the boundary — the exact path the guard protects.
-    let provider = sim.block_device_provider(ip(5));
-    let spec = [RegionSpec {
-        name: "data",
-        size: 8 * BLOCK_SECTOR_SIZE as u64,
-    }];
-    let written = vec![0x6E_u8; BLOCK_SECTOR_SIZE];
-
-    let read_back = Executor::new(20_260_901).block_on({
-        let written = written.clone();
-        async move {
-            let device = provider.create("db", &spec).await.expect("create");
-            device.persist().await.expect("persist");
-            device
-                .write(RegionId(0), 0, &written)
-                .await
-                .expect("write sector 0");
-            device.persist().await.expect("persist");
-            let mut buf = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), 0, &mut buf)
-                .await
-                .expect("read sector 0");
-            buf
-        }
-    });
-
-    assert_eq!(
-        read_back, written,
-        "a store born after the boundary must inherit a fault-free configuration"
     );
 }
 

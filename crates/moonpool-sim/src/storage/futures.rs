@@ -156,3 +156,128 @@ impl Drop for SetLenFuture {
         }
     }
 }
+
+/// Future for one positioned read (`read_at`).
+///
+/// Same schedule → wait → complete pattern as [`SyncFuture`], but the
+/// completion carries bytes and the handle's stream cursor is never touched.
+pub struct ReadAtFuture {
+    sim: WeakSimWorld,
+    handle_id: HandleId,
+    offset: u64,
+    len: usize,
+    pending_op: Cell<Option<OperationId>>,
+}
+
+impl ReadAtFuture {
+    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId, offset: u64, len: usize) -> Self {
+        Self {
+            sim,
+            handle_id,
+            offset,
+            len,
+            pending_op: Cell::new(None),
+        }
+    }
+}
+
+impl Future for ReadAtFuture {
+    type Output = io::Result<Vec<u8>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+
+        if let Some(operation_id) = self.pending_op.get() {
+            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
+                self.pending_op.set(None);
+                return Poll::Ready(match result {
+                    Ok(StorageCompletion::Read(data)) => Ok(data),
+                    Ok(_) => Err(io::Error::other(
+                        "read operation returned a non-read completion",
+                    )),
+                    Err(error) => Err(error.into()),
+                });
+            }
+            return Poll::Pending;
+        }
+
+        let operation_id = sim.schedule_positioned_read(self.handle_id, self.offset, self.len)?;
+        self.pending_op.set(Some(operation_id));
+        let _ = sim.poll_storage_operation(operation_id, cx.waker());
+        Poll::Pending
+    }
+}
+
+impl Drop for ReadAtFuture {
+    fn drop(&mut self) {
+        if let Some(operation_id) = self.pending_op.get()
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            sim.cancel_storage_operation(operation_id);
+        }
+    }
+}
+
+/// Future for one positioned write (`write_at`).
+pub struct WriteAtFuture {
+    sim: WeakSimWorld,
+    handle_id: HandleId,
+    offset: u64,
+    /// Taken on the first poll, when the operation is scheduled.
+    data: Cell<Option<Vec<u8>>>,
+    pending_op: Cell<Option<OperationId>>,
+}
+
+impl WriteAtFuture {
+    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId, offset: u64, data: Vec<u8>) -> Self {
+        Self {
+            sim,
+            handle_id,
+            offset,
+            data: Cell::new(Some(data)),
+            pending_op: Cell::new(None),
+        }
+    }
+}
+
+impl Future for WriteAtFuture {
+    type Output = io::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+
+        if let Some(operation_id) = self.pending_op.get() {
+            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
+                self.pending_op.set(None);
+                return Poll::Ready(match result {
+                    Ok(StorageCompletion::Write { len, .. }) => Ok(len),
+                    Ok(_) => Err(io::Error::other(
+                        "write operation returned a non-write completion",
+                    )),
+                    Err(error) => Err(error.into()),
+                });
+            }
+            return Poll::Pending;
+        }
+
+        let Some(data) = self.data.take() else {
+            return Poll::Ready(Err(io::Error::other(
+                "positioned write polled after completion",
+            )));
+        };
+        let operation_id = sim.schedule_positioned_write(self.handle_id, self.offset, data)?;
+        self.pending_op.set(Some(operation_id));
+        let _ = sim.poll_storage_operation(operation_id, cx.waker());
+        Poll::Pending
+    }
+}
+
+impl Drop for WriteAtFuture {
+    fn drop(&mut self) {
+        if let Some(operation_id) = self.pending_op.get()
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            sim.cancel_storage_operation(operation_id);
+        }
+    }
+}

@@ -58,7 +58,6 @@ pub(crate) struct SimInner {
     pub(crate) network_schedules: BTreeMap<NetworkOperationId, ScheduleId>,
     pub(crate) storage: StorageEngine,
     pub(crate) storage_schedules: BTreeMap<OperationId, ScheduleId>,
-    pub(crate) block: crate::storage::block::registry::BlockDeviceRegistry,
     pub(crate) wakers: Wakers,
     timer_schedules: BTreeMap<u64, ScheduleId>,
     pub(crate) next_task_id: u64,
@@ -92,7 +91,6 @@ impl SimInner {
             network_schedules: BTreeMap::new(),
             storage: StorageEngine::default(),
             storage_schedules: BTreeMap::new(),
-            block: crate::storage::block::registry::BlockDeviceRegistry::default(),
             wakers: Wakers::default(),
             timer_schedules: BTreeMap::new(),
             next_task_id: 0,
@@ -506,10 +504,16 @@ impl SimWorld {
     /// - network: partitions, clogs, bit flips, spontaneous closes, connect
     ///   failures, clock drift, buggified sleep delays, and new per-pair
     ///   latency degradation;
-    /// - storage: read/write/sync/crash faults, misdirected and phantom
-    ///   writes, and new disk stall or throttle episodes;
-    /// - block devices: EIO, read corruption, misdirected and phantom writes,
-    ///   persist failures, and barrier violations.
+    /// - storage: read and write EIO, read- and write-time corruption,
+    ///   misdirected and phantom writes, sync failures, short transfers,
+    ///   unsynced directory-entry loss, lying syncs, and new disk stall or
+    ///   throttle episodes.
+    ///
+    /// The crash *model* is deliberately not among them: how an unsynced
+    /// sector resolves is the disk's physics, not an environment generating
+    /// faults. Recovery mode stops the simulator from generating crashes; one
+    /// that still happens resolves with the same physics it would have had
+    /// before the cutoff.
     ///
     /// # What is healed
     ///
@@ -543,8 +547,7 @@ impl SimWorld {
     /// is made. Every setter that installs a caller-supplied fault
     /// configuration — [`set_network_config`](Self::set_network_config),
     /// [`set_storage_config`](Self::set_storage_config),
-    /// [`set_process_storage_config`](Self::set_process_storage_config),
-    /// [`set_block_fault_config`](Self::set_block_fault_config) — strips the
+    /// [`set_process_storage_config`](Self::set_process_storage_config) — strips the
     /// fault knobs out of what it is handed once recovery mode is on, while
     /// installing the performance half unchanged. Reconfiguring a disk or link
     /// in the quiet tail therefore cannot re-arm chaos.
@@ -552,8 +555,9 @@ impl SimWorld {
     /// The directed fault APIs stay callable after the cutoff: a caller that
     /// reaches for [`partition_pair`](Self::partition_pair),
     /// [`simulate_crash_for_process`](Self::simulate_crash_for_process), or the
-    /// [`SimBlockStore`](crate::SimBlockStore) targeted-fault methods is
-    /// scripting a specific fault by hand rather than asking the simulator to
+    /// targeted storage-fault methods
+    /// ([`corrupt_file`](Self::corrupt_file), [`fail_file_with_eio`](Self::fail_file_with_eio))
+    /// is scripting a specific fault by hand rather than asking the simulator to
     /// generate one, and red tests depend on that still working. Note that a
     /// directed partition already in force is healed like any other at the
     /// cutoff (see *What is healed*); only the API remains available.
@@ -574,7 +578,6 @@ impl SimWorld {
         inner.buggified_delay_window = BuggifiedDelayWindow::Inactive;
         inner.network.disable_fault_injection();
         inner.storage.disable_fault_injection();
-        inner.block.disable_fault_injection();
         let now = inner.now();
         let actions = inner.network.heal_all_partitions(now);
         inner.apply_network(actions);
