@@ -26,6 +26,12 @@ and `SimContext`.
   lands on the same bytes, and a write through one is observable through the
   others. `storage/faults.rs` is the fault vocabulary, addressed by file and
   flat sector offset. Do not add a second byte store for a new API.
+  The simulated provider must never be **more permissive** than the production
+  one: an open the real `StorageProvider` refuses has to be refused here too,
+  or simulated code comes to depend on it and the run stays green until it
+  reaches a real filesystem. `DirectIo::Required` refusing to create a missing
+  file is the current instance; `tests/storage/parity.rs` runs the same
+  scenarios through both backends and asserts they answer alike.
 - Components return ordered scheduling/cancellation effects and `WakeBatch`es
   to the coordinator. Never move component state or wakers back into
   `SimInner`, and never invoke a waker while holding the world lock.
