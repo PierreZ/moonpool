@@ -47,6 +47,7 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+mod block;
 mod error;
 pub mod metrics;
 mod network;
@@ -74,6 +75,9 @@ pub use tokio::select;
 #[cfg(feature = "select")]
 #[doc(hidden)]
 pub use tokio as __tokio;
+
+// The block-addressed view of one open file.
+pub use block::BlockFile;
 
 // Error exports
 pub use error::{SimulationError, SimulationResult};

@@ -8,7 +8,7 @@ use std::task::{Context, Poll};
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
-use super::{DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider};
+use super::{AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider};
 
 /// Alignment assumed for a direct-I/O file.
 ///
@@ -156,7 +156,10 @@ pub struct TokioStorageFile {
 ///
 /// Runs on the blocking pool through a bounce buffer: the caller's slice
 /// cannot be moved into a `'static` blocking closure, so the transfer lands in
-/// an owned buffer that is copied back on completion.
+/// an owned buffer that is copied back on completion. The bounce buffer
+/// carries the file's memory alignment — a direct-I/O transfer through a
+/// byte-aligned `Vec` earns `EINVAL` however carefully the caller aligned the
+/// slice it handed in.
 #[cfg(unix)]
 fn read_at_blocking(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
     std::os::unix::fs::FileExt::read_at(file, buf, offset)
@@ -203,6 +206,14 @@ where
         .map_err(|error| io::Error::other(format!("blocking file I/O task failed: {error}")))?
 }
 
+impl TokioStorageFile {
+    /// A `len`-byte bounce buffer aligned the way this file's transfers must
+    /// be.
+    fn bounce(&self, len: usize) -> AlignedBuf {
+        AlignedBuf::zeroed(len, self.constraints.memory_alignment())
+    }
+}
+
 impl StorageFile for TokioStorageFile {
     async fn sync_all(&self) -> io::Result<()> {
         self.inner.get_ref().sync_all().await
@@ -226,13 +237,13 @@ impl StorageFile for TokioStorageFile {
         }
         self.constraints.check(offset, buf)?;
         let file = Arc::clone(&self.positioned);
-        let mut bounce = vec![0u8; buf.len()];
+        let mut bounce = self.bounce(buf.len());
         let (read, bounce) = run_blocking(move || {
-            let read = read_at_blocking(&file, offset, &mut bounce)?;
+            let read = read_at_blocking(&file, offset, bounce.as_mut_slice())?;
             Ok((read, bounce))
         })
         .await?;
-        buf[..read].copy_from_slice(&bounce[..read]);
+        buf[..read].copy_from_slice(&bounce.as_slice()[..read]);
         Ok(read)
     }
 
@@ -242,8 +253,9 @@ impl StorageFile for TokioStorageFile {
         }
         self.constraints.check(offset, buf)?;
         let file = Arc::clone(&self.positioned);
-        let bounce = buf.to_vec();
-        run_blocking(move || write_at_blocking(&file, offset, &bounce)).await
+        let mut bounce = self.bounce(buf.len());
+        bounce.as_mut_slice().copy_from_slice(buf);
+        run_blocking(move || write_at_blocking(&file, offset, bounce.as_slice())).await
     }
 
     async fn size(&self) -> io::Result<u64> {
