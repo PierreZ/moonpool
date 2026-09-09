@@ -334,7 +334,7 @@ fn a_connection_already_closed_stays_closed_through_recovery_mode() {
 #[test]
 fn storage_damage_survives_recovery_mode_while_new_faults_stop() {
     let mut config = StorageConfiguration::fast_local();
-    config.write_fault_probability = 1.0;
+    config.write_corruption_probability = 1.0;
     let mut sim = SimWorld::new_with_seed(20_260_901);
     sim.set_storage_config(config);
     let provider = sim.storage_provider(ip(1));
@@ -571,7 +571,7 @@ fn recovery_mode_keeps_non_chaos_configuration() {
     };
     storage.disk_throttle_iops_multiplier = 9.0;
     storage.disk_throttle_bandwidth_multiplier = 11.0;
-    storage.read_fault_probability = 1.0;
+    storage.read_corruption_probability = 1.0;
     sim.set_storage_config(storage);
 
     sim.enter_recovery_mode();
@@ -627,7 +627,7 @@ fn recovery_mode_keeps_non_chaos_configuration() {
             11.0_f64.to_bits()
         );
         assert_zero(
-            config.read_fault_probability,
+            config.read_corruption_probability,
             "read faults are chaos and must be off",
         );
     });
@@ -735,8 +735,8 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
     sim.enter_recovery_mode();
 
     let mut rearmed = StorageConfiguration::fast_local();
-    rearmed.write_fault_probability = 1.0;
-    rearmed.read_fault_probability = 1.0;
+    rearmed.write_corruption_probability = 1.0;
+    rearmed.read_corruption_probability = 1.0;
     rearmed.phantom_write_probability = 1.0;
     rearmed.disk_stall_probability = 1.0;
     rearmed.disk_failure_probability = 1.0;
@@ -745,11 +745,11 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
 
     sim.with_storage_config(|config| {
         assert_zero(
-            config.write_fault_probability,
+            config.write_corruption_probability,
             "write faults must not be re-armable after the boundary",
         );
         assert_zero(
-            config.read_fault_probability,
+            config.read_corruption_probability,
             "read faults must not be re-armable after the boundary",
         );
         assert_zero(
@@ -811,7 +811,7 @@ fn per_process_storage_setters_cannot_rearm_faults_after_recovery() {
     sim.enter_recovery_mode();
 
     let mut rearmed = StorageConfiguration::fast_local();
-    rearmed.write_fault_probability = 1.0;
+    rearmed.write_corruption_probability = 1.0;
     rearmed.disk_stall_probability = 1.0;
     rearmed.iops = 8765;
     sim.set_process_storage_config(ip(1), rearmed.clone());

@@ -32,8 +32,8 @@ A write operation stores wrong data. The application writes correct bytes, but w
 
 A read or a write fails outright: the device reports that it could not serve
 the request. This is an *operating condition*, and it is a different thing
-from a read that succeeds and returns corrupt bytes — `read_fault_eio_probability`
-and `write_fault_eio_probability` are separate families from the two above for
+from a read that succeeds and returns corrupt bytes — `read_eio_probability`
+and `write_eio_probability` are separate families from the two above for
 exactly that reason.
 
 **What it tests:** Error paths. Code that treats an error as "corrupt data" —
@@ -237,8 +237,8 @@ Set per-process configuration through `SimWorld`:
 ```rust
 // Give process 10.0.1.2 a degraded disk
 let degraded = StorageConfiguration {
-    read_fault_probability: 0.01,  // 1% read corruption
-    write_fault_probability: 0.005,
+    read_corruption_probability: 0.01,  // 1% read corruption
+    write_corruption_probability: 0.005,
     ..StorageConfiguration::default()
 };
 let degraded_ip = "10.0.1.2".parse().expect("valid process IP");

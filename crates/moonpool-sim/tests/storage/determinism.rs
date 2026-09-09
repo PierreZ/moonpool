@@ -112,7 +112,7 @@ fn test_same_seed_same_corruption() {
 
         // Configure with corruption enabled
         let config = StorageConfiguration {
-            read_fault_probability: 0.5, // High probability for testing
+            read_corruption_probability: 0.5, // High probability for testing
             ..Default::default()
         };
 

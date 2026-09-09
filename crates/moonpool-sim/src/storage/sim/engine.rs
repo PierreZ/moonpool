@@ -843,7 +843,7 @@ impl StorageEngine {
             .get(&pending.file_id)
             .is_some_and(|file| file.image.read_fails(sectors.clone()));
         let random_hit =
-            config.read_fault_eio_probability > 0.0 && eio_roll < config.read_fault_eio_probability;
+            config.read_eio_probability > 0.0 && eio_roll < config.read_eio_probability;
         if targeted || (random_hit && self.state.eligible_range(&path, sectors.clone())) {
             assert_reachable!("disk fault: read failed with EIO");
             self.record(&path, StorageFaultKind::EioRead, Some(sectors));
@@ -861,9 +861,9 @@ impl StorageEngine {
         // Read-time latent corruption: the sector is damaged from now on, and
         // damaged identically on every retry.
         let mut read_faulted = false;
-        if config.read_fault_probability > 0.0 {
+        if config.read_corruption_probability > 0.0 {
             for sector in sectors.clone() {
-                let hit = sim_random::<f64>() < config.read_fault_probability;
+                let hit = sim_random::<f64>() < config.read_corruption_probability;
                 if hit && self.state.eligible(&path, sector) {
                     if let Some(file) = self.state.files.get_mut(&pending.file_id) {
                         file.image.corrupt(sector..sector + 1);
@@ -1061,8 +1061,8 @@ impl StorageEngine {
         let targeted = self
             .image_at(path)
             .is_some_and(|image| image.write_fails(sectors.clone()));
-        let random_eio = config.write_fault_eio_probability > 0.0
-            && eio_roll < config.write_fault_eio_probability;
+        let random_eio =
+            config.write_eio_probability > 0.0 && eio_roll < config.write_eio_probability;
         if targeted || (random_eio && self.state.eligible_range(path, sectors.clone())) {
             assert_reachable!("disk fault: write failed with EIO");
             return WriteLanding::Eio;
@@ -1109,12 +1109,12 @@ impl StorageEngine {
         len: usize,
         config: &StorageConfiguration,
     ) -> bool {
-        if config.write_fault_probability <= 0.0 {
+        if config.write_corruption_probability <= 0.0 {
             return false;
         }
         let mut corrupted = false;
         for sector in sector_range(offset, len) {
-            let hit = sim_random::<f64>() < config.write_fault_probability;
+            let hit = sim_random::<f64>() < config.write_corruption_probability;
             if hit && self.state.eligible(path, sector) {
                 if let Some(file) = self.state.files.get_mut(&file_id) {
                     file.image.corrupt(sector..sector + 1);

@@ -84,10 +84,10 @@ never interpreted as success.
 
 | Fault | Config Field | Default | Real-World Scenario |
 |-------|-------------|---------|---------------------|
-| Read corruption | `read_fault_probability` | 0% | ECC failures, DRAM bit flips, media degradation |
-| Write corruption | `write_fault_probability` | 0% | Bad sectors, controller bugs, disk full |
-| Read EIO | `read_fault_eio_probability` | 0% | The device refusing a read — an error, not corrupt bytes |
-| Write EIO | `write_fault_eio_probability` | 0% | The device refusing a write |
+| Read corruption | `read_corruption_probability` | 0% | ECC failures, DRAM bit flips, media degradation |
+| Write corruption | `write_corruption_probability` | 0% | Bad sectors, controller bugs, disk full |
+| Read EIO | `read_eio_probability` | 0% | The device refusing a read — an error, not corrupt bytes |
+| Write EIO | `write_eio_probability` | 0% | The device refusing a write |
 | Misdirected write | `misdirect_write_probability` | 0% | Firmware bugs, wrong location written |
 | Misdirected read | `misdirect_read_probability` | 0% | Controller errors, wrong location read |
 | Phantom write | `phantom_write_probability` | 0% | Drive lies about durability |

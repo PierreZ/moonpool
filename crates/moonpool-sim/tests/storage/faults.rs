@@ -55,7 +55,7 @@ fn test_read_corruption_fault() {
     local_runtime().block_on(async {
         // Create config with guaranteed read corruption
         let mut config = StorageConfiguration::fast_local();
-        config.read_fault_probability = 1.0; // 100% corruption
+        config.read_corruption_probability = 1.0; // 100% corruption
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
@@ -96,7 +96,7 @@ fn test_write_corruption_fault() {
     local_runtime().block_on(async {
         // Create config with guaranteed write corruption
         let mut config = StorageConfiguration::fast_local();
-        config.write_fault_probability = 1.0; // 100% corruption
+        config.write_corruption_probability = 1.0; // 100% corruption
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
@@ -410,8 +410,8 @@ fn test_mixed_low_fault_probabilities() {
     local_runtime().block_on(async {
         // Realistic fault probabilities - low but non-zero
         let mut config = StorageConfiguration::fast_local();
-        config.read_fault_probability = 0.01; // 1%
-        config.write_fault_probability = 0.01; // 1%
+        config.read_corruption_probability = 0.01; // 1%
+        config.write_corruption_probability = 0.01; // 1%
         config.sync_failure_probability = 0.005; // 0.5%
 
         let mut sim = SimWorld::new();
@@ -501,8 +501,8 @@ fn test_mixed_low_fault_probabilities() {
 fn test_combined_fault_types() {
     local_runtime().block_on(async {
         let mut config = StorageConfiguration::fast_local();
-        config.read_fault_probability = 0.1; // 10%
-        config.write_fault_probability = 0.1; // 10%
+        config.read_corruption_probability = 0.1; // 10%
+        config.write_corruption_probability = 0.1; // 10%
         config.misdirect_read_probability = 0.05; // 5%
         config.misdirect_write_probability = 0.05; // 5%
         config.phantom_write_probability = 0.05; // 5%
@@ -584,7 +584,7 @@ fn test_fault_determinism_same_seed() {
         set_sim_seed(seed);
 
         let mut config = StorageConfiguration::fast_local();
-        config.read_fault_probability = 0.5; // 50% for visibility
+        config.read_corruption_probability = 0.5; // 50% for visibility
 
         let mut sim1 = SimWorld::new();
         sim1.set_storage_config(config.clone());
@@ -688,7 +688,7 @@ fn test_fault_injection_produces_mixed_results() {
         set_sim_seed(12345);
 
         let mut config = StorageConfiguration::fast_local();
-        config.read_fault_probability = 0.5; // 50% read corruption
+        config.read_corruption_probability = 0.5; // 50% read corruption
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
@@ -763,7 +763,7 @@ fn test_corruption_content_deterministic() {
             set_sim_seed(seed);
 
             let mut config = StorageConfiguration::fast_local();
-            config.read_fault_probability = 1.0; // 100% corruption
+            config.read_corruption_probability = 1.0; // 100% corruption
 
             let mut sim = SimWorld::new();
             sim.set_storage_config(config);
@@ -827,7 +827,7 @@ fn test_per_process_storage_config_isolation() {
 
         // IP1: 100% read corruption
         let mut config_ip1 = StorageConfiguration::fast_local();
-        config_ip1.read_fault_probability = 1.0;
+        config_ip1.read_corruption_probability = 1.0;
         sim.set_process_storage_config(ip1, config_ip1);
 
         // IP2: 0% faults (clean reads)
@@ -1224,7 +1224,7 @@ fn test_default_config_fallback() {
 
         // Set global config with 100% read faults — do NOT set per-process config
         let mut config = StorageConfiguration::fast_local();
-        config.read_fault_probability = 1.0;
+        config.read_corruption_probability = 1.0;
         sim.set_storage_config(config);
 
         let provider = sim.storage_provider(ip);
@@ -1370,7 +1370,7 @@ fn test_dynamic_config_change() {
 
         // Now change config to 100% read faults — file is already created
         let mut faulty_config = StorageConfiguration::fast_local();
-        faulty_config.read_fault_probability = 1.0;
+        faulty_config.read_corruption_probability = 1.0;
         sim.set_process_storage_config(ip, faulty_config);
 
         // Read with the new faulty config — should see corruption
