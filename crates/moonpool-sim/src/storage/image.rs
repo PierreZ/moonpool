@@ -745,3 +745,181 @@ fn corrupt_in_place(pristine: &[u8], buf: &mut [u8]) {
     let bit = rng.random_range(0..8u8);
     buf[byte] ^= 1 << bit;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{FileImage, SECTOR_SIZE, SectorBitSet};
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
+    use crate::storage::{EioTarget, StorageConfiguration};
+
+    fn seeded(seed: u64) {
+        reset_sim_rng();
+        set_sim_seed(seed);
+    }
+
+    /// An image with zero fill, so assertions can talk about content.
+    fn image(size: u64) -> FileImage {
+        FileImage::new(size, 0, false)
+    }
+
+    fn always_eligible(_sector: u64) -> bool {
+        true
+    }
+
+    #[test]
+    fn writes_are_visible_before_they_are_durable() {
+        seeded(1);
+        let mut image = image(0);
+        image.write(0, b"hello");
+
+        let mut buf = vec![0u8; 5];
+        image.read(0, &mut buf).expect("read failed");
+        assert_eq!(&buf, b"hello");
+        assert_eq!(image.size(), 5);
+        assert_eq!(image.durable_size(), 0, "the length is not durable yet");
+    }
+
+    #[test]
+    fn a_sync_makes_the_visible_image_durable() {
+        seeded(2);
+        let config = StorageConfiguration::fast_local();
+        let mut image = image(0);
+        image.write(0, b"durable");
+        assert!(image.sync(&config, &always_eligible).is_empty());
+        assert_eq!(image.durable_size(), 7);
+
+        // Nothing dirty, so a crash cannot change anything.
+        let report = image.crash("f", &config, false, &always_eligible);
+        assert!(report.resolutions.is_empty());
+        let mut buf = vec![0u8; 7];
+        image.read(0, &mut buf).expect("read failed");
+        assert_eq!(&buf, b"durable");
+    }
+
+    #[test]
+    fn an_unsynced_write_never_damages_the_synced_bytes_around_it() {
+        let config = StorageConfiguration::fast_local();
+        for seed in 0..64_u64 {
+            seeded(seed);
+            let mut image = image(0);
+            image.write(0, b"SYNCED|");
+            image.sync(&config, &always_eligible);
+            image.write(7, b"UNSYNCED");
+
+            image.crash("f", &config, false, &always_eligible);
+
+            let mut buf = vec![0u8; 7];
+            image.read(0, &mut buf).expect("read failed");
+            assert_eq!(
+                &buf, b"SYNCED|",
+                "seed {seed}: the durable prefix survived the sector's rollback"
+            );
+        }
+    }
+
+    #[test]
+    fn corruption_is_deterministic_and_confined_to_its_sector() {
+        seeded(3);
+        let mut image = image(2 * SECTOR_SIZE as u64);
+        let payload = vec![0xAA; 2 * SECTOR_SIZE];
+        image.write(0, &payload);
+
+        image.corrupt(0..1);
+        let mut first = vec![0u8; 2 * SECTOR_SIZE];
+        image.read(0, &mut first).expect("read failed");
+        let mut second = vec![0u8; 2 * SECTOR_SIZE];
+        image.read(0, &mut second).expect("read failed");
+
+        assert_eq!(first, second, "a retry observes the same damage");
+        assert_ne!(first[..SECTOR_SIZE], payload[..SECTOR_SIZE]);
+        assert_eq!(
+            first[SECTOR_SIZE..],
+            payload[SECTOR_SIZE..],
+            "damage stays in the sector it was planted in"
+        );
+
+        let flipped: u32 = first[..SECTOR_SIZE]
+            .iter()
+            .zip(&payload[..SECTOR_SIZE])
+            .map(|(a, b)| (a ^ b).count_ones())
+            .sum();
+        assert_eq!(flipped, 1, "one bit, as a latent sector fault");
+    }
+
+    #[test]
+    fn rewriting_a_sector_heals_its_damage() {
+        seeded(4);
+        let mut image = image(SECTOR_SIZE as u64);
+        image.write(0, &vec![0x11; SECTOR_SIZE]);
+        image.corrupt(0..1);
+        assert!(image.is_corrupt(0));
+
+        image.write(0, &vec![0x22; SECTOR_SIZE]);
+        assert!(!image.is_corrupt(0), "the damaged bytes are gone");
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        image.read(0, &mut buf).expect("read failed");
+        assert_eq!(buf, vec![0x22; SECTOR_SIZE]);
+    }
+
+    #[test]
+    fn targeted_eio_is_scoped_and_clearable() {
+        seeded(5);
+        let mut image = image(2 * SECTOR_SIZE as u64);
+        image.fail_with_eio(0..1, EioTarget::Read);
+
+        assert!(image.read_fails(0..1));
+        assert!(!image.read_fails(1..2));
+        assert!(
+            !image.write_fails(0..1),
+            "a read injection does not fail writes"
+        );
+
+        image.clear_eio(EioTarget::ReadWrite);
+        assert!(!image.read_fails(0..1));
+    }
+
+    #[test]
+    fn never_written_sectors_read_a_deterministic_fill() {
+        seeded(6);
+        let garbage = FileImage::new(SECTOR_SIZE as u64, 42, true);
+        let mut first = vec![0u8; SECTOR_SIZE];
+        garbage.read(0, &mut first).expect("read failed");
+        let mut second = vec![0u8; SECTOR_SIZE];
+        garbage.read(0, &mut second).expect("read failed");
+        assert_eq!(first, second, "the fill is a pure function of the sector");
+        assert!(
+            first.iter().any(|byte| *byte != 0),
+            "a garbage-filled file does not read as zeros"
+        );
+
+        let zeros = FileImage::new(SECTOR_SIZE as u64, 42, false);
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        zeros.read(0, &mut buf).expect("read failed");
+        assert!(buf.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn reading_past_the_end_is_an_error() {
+        seeded(7);
+        let image = image(64);
+        let mut buf = vec![0u8; 100];
+        assert!(image.read(0, &mut buf).is_err());
+    }
+
+    #[test]
+    fn a_bitset_tracks_ranges_and_ignores_out_of_range_sectors() {
+        let mut bits = SectorBitSet::new(100);
+        assert!(!bits.any_in(0..100));
+        bits.set(50);
+        assert!(bits.is_set(50));
+        assert!(bits.any_in(40..60));
+        assert!(!bits.any_in(0..50));
+        // Out of range is a no-op in both directions rather than a panic:
+        // a file shrinks while injections still name its old sectors.
+        bits.set(1_000);
+        assert!(!bits.is_set(1_000));
+        bits.clear_all();
+        assert!(!bits.any_in(0..100));
+        assert_eq!(bits.len(), 100);
+    }
+}

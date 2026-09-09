@@ -10,6 +10,8 @@ mod concurrent;
 mod config;
 #[path = "storage/crash_api.rs"]
 mod crash_api;
+#[path = "storage/crash_model.rs"]
+mod crash_model;
 #[path = "storage/determinism.rs"]
 mod determinism;
 #[path = "storage/directory.rs"]
