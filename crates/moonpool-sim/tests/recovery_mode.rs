@@ -30,17 +30,12 @@ use futures::{
     io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
     task::noop_waker,
 };
-use moonpool_core::block::SECTOR_SIZE as BLOCK_SECTOR_SIZE;
-use moonpool_core::{
-    BlockDevice, BlockDeviceProvider, OpenOptions, RegionId, RegionSpec, StorageFile,
-    StorageProvider,
-};
+use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
-    BlockFaultConfig, Event, FaultContext, FaultInjector, LatencyDistribution,
-    NetworkConfiguration, NetworkEvent, NetworkFaultMask, NetworkProvider, PartitionStrategy,
-    Process, SECTOR_SIZE, SimContext, SimWorld, SimulationBuilder, SimulationError,
-    SimulationResult, StorageConfiguration, TcpListenerTrait, TimeProvider, Workload,
-    executor::Executor,
+    Event, FaultContext, FaultInjector, LatencyDistribution, NetworkConfiguration, NetworkEvent,
+    NetworkFaultMask, NetworkProvider, PartitionStrategy, Process, SECTOR_SIZE, SimContext,
+    SimWorld, SimulationBuilder, SimulationError, SimulationResult, StorageConfiguration,
+    TcpListenerTrait, TimeProvider, Workload,
 };
 
 /// How many events a driven future may consume before it is declared stuck.
@@ -460,89 +455,6 @@ fn a_failed_disk_outlives_the_boundary_and_no_other_disk_fails() {
     assert!(
         !sim.is_disk_failed(ip(2)),
         "no disk may fail after the recovery boundary"
-    );
-}
-
-/// The block-device surface has its own fault configuration, held per process
-/// store, so it needs its own half of the transition.
-#[test]
-fn block_device_faults_stop_but_planted_corruption_stays() {
-    let config = BlockFaultConfig {
-        read_corruption_probability: 1.0,
-        ..BlockFaultConfig::default()
-    };
-    let mut sim = SimWorld::new_with_seed(20_260_901);
-    sim.set_block_fault_config(config);
-
-    let provider = sim.block_device_provider(ip(1));
-    let spec = [RegionSpec {
-        name: "data",
-        size: 8 * BLOCK_SECTOR_SIZE as u64,
-    }];
-    let written = vec![0x5A_u8; BLOCK_SECTOR_SIZE];
-
-    let device = Executor::new(20_260_901).block_on(async move {
-        let device = provider.create("db", &spec).await.expect("create");
-        device.persist().await.expect("persist");
-        device
-            .write(RegionId(0), 0, &written)
-            .await
-            .expect("write sector 0");
-        device.persist().await.expect("persist");
-        device
-    });
-
-    let corrupted = Executor::new(20_260_901).block_on({
-        let device = device.clone();
-        async move {
-            let mut buf = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), 0, &mut buf)
-                .await
-                .expect("read sector 0");
-            buf
-        }
-    });
-    assert_ne!(
-        corrupted,
-        vec![0x5A_u8; BLOCK_SECTOR_SIZE],
-        "the chaos phase must actually plant a latent fault"
-    );
-
-    sim.enter_recovery_mode();
-
-    let (after_recovery, fresh_sector) = Executor::new(20_260_901).block_on({
-        let device = device.clone();
-        async move {
-            let mut old = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), 0, &mut old)
-                .await
-                .expect("re-read sector 0");
-
-            let fresh = vec![0xC3_u8; BLOCK_SECTOR_SIZE];
-            device
-                .write(RegionId(0), BLOCK_SECTOR_SIZE as u64, &fresh)
-                .await
-                .expect("write sector 1");
-            device.persist().await.expect("persist");
-            let mut read_back = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), BLOCK_SECTOR_SIZE as u64, &mut read_back)
-                .await
-                .expect("read sector 1");
-            (old, read_back)
-        }
-    });
-
-    assert_eq!(
-        after_recovery, corrupted,
-        "a latent fault already planted stays planted, identically on retry"
-    );
-    assert_eq!(
-        fresh_sector,
-        vec![0xC3_u8; BLOCK_SECTOR_SIZE],
-        "no new block-device corruption may be planted after the boundary"
     );
 }
 
@@ -988,54 +900,6 @@ fn set_network_config_cannot_rearm_faults_after_recovery() {
     assert!(
         !sim.is_partitioned(ip(1), ip(2)) && !sim.is_partitioned(ip(2), ip(1)),
         "a re-armed configuration must not partition after the boundary"
-    );
-}
-
-/// Block stores are created lazily, so the registry's default configuration is
-/// what a process touching a device in the quiet tail inherits.
-#[test]
-fn set_block_fault_config_cannot_rearm_faults_after_recovery() {
-    let mut sim = SimWorld::new_with_seed(20_260_901);
-    sim.enter_recovery_mode();
-    // Pinned to 1.0 rather than `BlockFaultConfig::chaos()`: at that profile's
-    // 0.5% the fault would usually miss, and the test would pass whether or not
-    // the guard exists.
-    sim.set_block_fault_config(BlockFaultConfig {
-        read_corruption_probability: 1.0,
-        ..BlockFaultConfig::default()
-    });
-
-    // A store this process has never touched is created from the registry
-    // default *after* the boundary — the exact path the guard protects.
-    let provider = sim.block_device_provider(ip(5));
-    let spec = [RegionSpec {
-        name: "data",
-        size: 8 * BLOCK_SECTOR_SIZE as u64,
-    }];
-    let written = vec![0x6E_u8; BLOCK_SECTOR_SIZE];
-
-    let read_back = Executor::new(20_260_901).block_on({
-        let written = written.clone();
-        async move {
-            let device = provider.create("db", &spec).await.expect("create");
-            device.persist().await.expect("persist");
-            device
-                .write(RegionId(0), 0, &written)
-                .await
-                .expect("write sector 0");
-            device.persist().await.expect("persist");
-            let mut buf = vec![0_u8; BLOCK_SECTOR_SIZE];
-            device
-                .read(RegionId(0), 0, &mut buf)
-                .await
-                .expect("read sector 0");
-            buf
-        }
-    });
-
-    assert_eq!(
-        read_back, written,
-        "a store born after the boundary must inherit a fault-free configuration"
     );
 }
 

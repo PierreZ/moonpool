@@ -280,33 +280,24 @@ impl SimWorld {
 
     /// Simulate a crash affecting storage for a specific process.
     ///
-    /// Applies crash behavior to both the process's stream files and its
-    /// block devices: every block-device sector written since the last
-    /// `persist()` is resolved through the barrier-bounded crash model.
+    /// Every sector written since the last successful sync resolves through
+    /// the barrier-bounded crash model — kept old, kept new, lost, damaged, or
+    /// shorn — and every unsynced directory entry resolves against the durable
+    /// namespace. What each file's sectors did is available from
+    /// [`take_storage_crash_reports`](Self::take_storage_crash_reports).
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic, or if
-    /// the block-device lost-synced-write oracle detects a simulator bug.
+    /// the lost-synced-write oracle detects a simulator bug.
     #[instrument(skip(self))]
     pub fn simulate_crash_for_process(&self, ip: IpAddr, close_files: bool) {
-        let (wakes, block_store) = {
+        let wakes = {
             let mut inner = self.inner.write();
             let actions = inner.storage.simulate_crash(ip, close_files);
-            let wakes = apply_storage_actions(&mut inner, actions);
-            (wakes, inner.block.existing_store(ip))
+            apply_storage_actions(&mut inner, actions)
         };
         wakes.wake();
-        if let Some(store) = block_store {
-            let reports = store.crash_all();
-            if reports.iter().any(|report| report.existed) {
-                self.inner
-                    .write()
-                    .record_fault(crate::chaos::SimFaultEvent::BlockDeviceCrash {
-                        ip: ip.to_string(),
-                    });
-            }
-        }
     }
 
     /// Fail `ip`'s disk outright: every read, write, sync, or `set_len` issued
@@ -330,80 +321,140 @@ impl SimWorld {
         wakes.wake();
     }
 
-    /// Wipe all persistent storage for a specific process, block devices
-    /// included.
+    /// Wipe all persistent storage for a specific process.
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn wipe_storage_for_process(&self, ip: IpAddr) {
-        let (wakes, block_store) = {
+        let wakes = {
             let mut inner = self.inner.write();
             let actions = inner.storage.wipe_process(ip);
-            let wakes = apply_storage_actions(&mut inner, actions);
-            (wakes, inner.block.existing_store(ip))
+            apply_storage_actions(&mut inner, actions)
         };
         wakes.wake();
-        if let Some(store) = block_store
-            && store.wipe_all() > 0
-        {
-            self.inner
-                .write()
-                .record_fault(crate::chaos::SimFaultEvent::BlockDeviceWipe { ip: ip.to_string() });
-        }
     }
 
-    /// Create a block-device provider scoped to a process IP.
+    /// Install the eligibility mask consulted before any random fault damages
+    /// a sector (see
+    /// [`StorageEligibilityMask`](crate::storage::StorageEligibilityMask)).
     ///
-    /// The per-process store is created lazily with a seed derived as a pure
-    /// function of the iteration seed and the IP, so first use never shifts
-    /// the counted sim RNG stream. Process crashes
-    /// ([`simulate_crash_for_process`](Self::simulate_crash_for_process))
-    /// resolve the store's buffered writes through the barrier-bounded crash
-    /// model; wipes remove its devices.
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn set_storage_eligibility_mask(&self, mask: crate::storage::StorageEligibilityMask) {
+        self.inner.write().storage.set_eligibility_mask(Some(mask));
+    }
+
+    /// Remove the eligibility mask: every sector becomes eligible again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn clear_storage_eligibility_mask(&self) {
+        self.inner.write().storage.set_eligibility_mask(None);
+    }
+
+    /// Drain the storage faults injected so far, oldest first.
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[must_use]
-    pub fn block_device_provider(
+    pub fn take_storage_fault_records(&self) -> Vec<crate::storage::StorageFaultRecord> {
+        self.inner.write().storage.take_fault_records()
+    }
+
+    /// Drain the per-file reports of the crashes simulated so far: how each
+    /// sector dirty at crash time resolved.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn take_storage_crash_reports(&self) -> Vec<crate::storage::FileCrashReport> {
+        self.inner.write().storage.take_crash_reports()
+    }
+
+    /// Plant a latent read fault on `sectors` of `path`: reads return
+    /// deterministically corrupted bytes, identically on every retry, until
+    /// the sectors are rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if no file exists at `path`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn corrupt_file(
         &self,
-        ip: IpAddr,
-    ) -> crate::storage::block::SimBlockDeviceProvider {
-        crate::storage::block::SimBlockDeviceProvider::new(self.block_store(ip))
+        path: &str,
+        sectors: std::ops::Range<u64>,
+    ) -> Result<(), StorageError> {
+        self.inner.write().storage.corrupt_file(path, sectors)
     }
 
-    /// The per-process block store backing
-    /// [`block_device_provider`](Self::block_device_provider): targeted fault
-    /// injection, crash reports, and fault records live here.
+    /// Make reads and/or writes touching `sectors` of `path` fail with an I/O
+    /// error until [`clear_file_eio`](Self::clear_file_eio) is called. An
+    /// error is an operating condition, not corrupt bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if no file exists at `path`.
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
-    #[must_use]
-    pub fn block_store(&self, ip: IpAddr) -> crate::storage::block::SimBlockStore {
-        self.inner.write().block.store_for(ip)
+    pub fn fail_file_with_eio(
+        &self,
+        path: &str,
+        sectors: std::ops::Range<u64>,
+        target: crate::storage::EioTarget,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .write()
+            .storage
+            .fail_file_with_eio(path, sectors, target)
     }
 
-    /// Replace the fault configuration for block stores created after this
-    /// call. The builder applies the per-seed chaos configuration here before
-    /// any process runs.
+    /// Clear targeted EIO injections on `path`.
     ///
-    /// After [`enter_recovery_mode`](Self::enter_recovery_mode) the fault
-    /// probabilities in `config` are stripped before it is installed, so a
-    /// store created in the quiet tail is born fault-free. The crash-shape
-    /// parameters are installed as given.
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if no file exists at `path`.
     ///
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
-    pub fn set_block_fault_config(&self, mut config: crate::storage::block::BlockFaultConfig) {
-        let mut inner = self.inner.write();
-        if inner.recovery_mode() {
-            config.disable_fault_injection();
-        }
-        inner.block.set_config(config);
+    pub fn clear_file_eio(
+        &self,
+        path: &str,
+        target: crate::storage::EioTarget,
+    ) -> Result<(), StorageError> {
+        self.inner.write().storage.clear_file_eio(path, target)
+    }
+
+    /// Mutate a *durable* sector of `path` out of band, bypassing the crash
+    /// model.
+    ///
+    /// A deliberate simulator bug: the next crash of that process must fail
+    /// loudly, because a sector a sync reported durable changed underneath.
+    /// It exists so the lost-synced-write oracle can itself be tested.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if no file exists at `path`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn corrupt_durable_out_of_band(&self, path: &str, sector: u64) -> Result<(), StorageError> {
+        self.inner
+            .write()
+            .storage
+            .corrupt_durable_out_of_band(path, sector)
     }
 
     /// Set storage configuration for a specific process.

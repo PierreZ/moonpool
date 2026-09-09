@@ -314,7 +314,7 @@ fn test_sync_failure_fault() {
 fn test_crash_torn_writes() {
     local_runtime().block_on(async {
         let mut config = StorageConfiguration::fast_local();
-        config.crash_fault_probability = 0.0; // Disable random crashes, we'll trigger manually
+        config.crash_latent_fault_probability = 0.0; // Disable random crashes, we'll trigger manually
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
@@ -1131,7 +1131,7 @@ fn test_per_process_phantom_write_isolation() {
         // IP1: 100% phantom writes
         let mut config_ip1 = StorageConfiguration::fast_local();
         config_ip1.phantom_write_probability = 1.0;
-        config_ip1.crash_fault_probability = 0.0;
+        config_ip1.crash_latent_fault_probability = 0.0;
         sim.set_process_storage_config(ip1, config_ip1);
 
         // IP2: no faults

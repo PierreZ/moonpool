@@ -47,7 +47,7 @@ fn test_fast_local_configuration_values() {
     // All faults disabled
     assert_f64_eq(config.read_fault_probability, 0.0);
     assert_f64_eq(config.write_fault_probability, 0.0);
-    assert_f64_eq(config.crash_fault_probability, 0.0);
+    assert_f64_eq(config.crash_latent_fault_probability, 0.0);
     assert_f64_eq(config.misdirect_write_probability, 0.0);
     assert_f64_eq(config.misdirect_read_probability, 0.0);
     assert_f64_eq(config.phantom_write_probability, 0.0);
@@ -80,7 +80,7 @@ fn test_default_configuration_values() {
     // All faults disabled by default
     assert_f64_eq(config.read_fault_probability, 0.0);
     assert_f64_eq(config.write_fault_probability, 0.0);
-    assert_f64_eq(config.crash_fault_probability, 0.0);
+    assert_f64_eq(config.crash_latent_fault_probability, 0.0);
     assert_f64_eq(config.misdirect_write_probability, 0.0);
     assert_f64_eq(config.misdirect_read_probability, 0.0);
     assert_f64_eq(config.phantom_write_probability, 0.0);
@@ -241,7 +241,7 @@ fn test_custom_configuration() {
         sync_latency: uniform(Duration::from_millis(2), Duration::from_millis(8)),
         read_fault_probability: 0.01,
         write_fault_probability: 0.02,
-        crash_fault_probability: 0.001,
+        crash_latent_fault_probability: 0.001,
         misdirect_write_probability: 0.0005,
         misdirect_read_probability: 0.0005,
         phantom_write_probability: 0.001,
@@ -258,7 +258,7 @@ fn test_custom_configuration() {
     );
     assert_f64_eq(custom.read_fault_probability, 0.01);
     assert_f64_eq(custom.write_fault_probability, 0.02);
-    assert_f64_eq(custom.crash_fault_probability, 0.001);
+    assert_f64_eq(custom.crash_latent_fault_probability, 0.001);
 }
 
 /// Test that `set_storage_config` applies to `SimWorld`
@@ -298,7 +298,7 @@ fn test_hdd_like_configuration() {
         sync_latency: uniform(Duration::from_millis(10), Duration::from_millis(50)),
         read_fault_probability: 0.0,
         write_fault_probability: 0.0,
-        crash_fault_probability: 0.0,
+        crash_latent_fault_probability: 0.0,
         misdirect_write_probability: 0.0,
         misdirect_read_probability: 0.0,
         phantom_write_probability: 0.0,
@@ -325,7 +325,7 @@ fn test_nvme_like_configuration() {
         sync_latency: uniform(Duration::from_micros(100), Duration::from_micros(500)),
         read_fault_probability: 0.0,
         write_fault_probability: 0.0,
-        crash_fault_probability: 0.0,
+        crash_latent_fault_probability: 0.0,
         misdirect_write_probability: 0.0,
         misdirect_read_probability: 0.0,
         phantom_write_probability: 0.0,
@@ -352,7 +352,7 @@ fn test_fault_probability_boundaries() {
     let all_faults = StorageConfiguration {
         read_fault_probability: 1.0,
         write_fault_probability: 1.0,
-        crash_fault_probability: 1.0,
+        crash_latent_fault_probability: 1.0,
         misdirect_write_probability: 1.0,
         misdirect_read_probability: 1.0,
         phantom_write_probability: 1.0,

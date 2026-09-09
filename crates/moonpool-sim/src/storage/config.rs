@@ -18,9 +18,11 @@
 //!
 //! | Fault | Config Field | Default | Real-World Scenario |
 //! |-------|--------------|---------|---------------------|
-//! | Read fault | `read_fault_probability` | 0% | Disk read errors, ECC failures |
+//! | Read EIO | `read_fault_eio_probability` | 0% | The device refusing a read |
+//! | Write EIO | `write_fault_eio_probability` | 0% | The device refusing a write |
+//! | Read fault | `read_fault_probability` | 0% | Latent sector corruption found on read |
 //! | Write fault | `write_fault_probability` | 0% | Write failures, disk full |
-//! | Crash fault | `crash_fault_probability` | 0% | Sudden power loss simulation |
+//! | Crash damage | `crash_lost_probability` / `crash_latent_fault_probability` | 0% | Power loss damaging an unsynced sector |
 //! | Misdirected write | `misdirect_write_probability` | 0% | Write lands at wrong location |
 //! | Misdirected read | `misdirect_read_probability` | 0% | Read returns wrong data |
 //! | Phantom write | `phantom_write_probability` | 0% | Write appears to succeed but doesn't persist |
@@ -140,12 +142,83 @@ pub struct StorageConfiguration {
     /// Simulates write failures due to disk full, bad sectors, or media errors.
     pub write_fault_probability: f64,
 
-    /// Probability of crash fault during operation (0.0 - 1.0).
+    /// Probability that a read fails outright with an I/O error (0.0 - 1.0).
     ///
     /// # Real-World Scenario
-    /// Simulates sudden power loss or system crash during I/O.
-    /// Tests crash consistency and recovery logic.
-    pub crash_fault_probability: f64,
+    /// EIO is an *operating condition* — the device reporting that it could
+    /// not serve the request — and is a different thing from a read that
+    /// succeeds and returns corrupt bytes. Code has to handle both, and
+    /// conflating them hides half the bugs, so they are separate families
+    /// here: this one errors, `read_fault_probability` damages.
+    pub read_fault_eio_probability: f64,
+
+    /// Probability that a write fails outright with an I/O error (0.0 - 1.0).
+    ///
+    /// The write half of [`read_fault_eio_probability`](Self::read_fault_eio_probability):
+    /// the bytes never reach the disk and the caller is told so, as opposed to
+    /// a phantom write, which lies.
+    pub write_fault_eio_probability: f64,
+
+    // =========================================================================
+    // Crash Model
+    // =========================================================================
+    // What a crash *does* to the writes a sync had not yet made durable. These
+    // are not "should a crash happen" knobs — the harness decides that — but
+    // the physics a crash resolves with once one does. Every sector written
+    // since the last sync resolves independently: kept old, kept new, lost,
+    // damaged, or (opt-in) shorn.
+    /// Probability that a crash is fully clean: every unsynced write survives
+    /// intact. `FoundationDB`'s `AsyncFileNonDurable` uses `p = 0.1`.
+    pub clean_crash_probability: f64,
+
+    /// Probability that a (non-clean) crash rolls back a contiguous run of
+    /// sectors together — correlated erase-block damage (Zheng, FAST'13).
+    pub correlated_rollback_probability: f64,
+
+    /// Maximum sector-run length for a correlated rollback.
+    pub correlated_rollback_max_run: u64,
+
+    /// Per-sector probability that an unsynced sector resolves as *lost* on
+    /// crash: it reverts to never-written and reads the file's fill pattern.
+    pub crash_lost_probability: f64,
+
+    /// Per-sector probability that an unsynced sector resolves with a *latent
+    /// read fault* on crash: the new contents land, but reads return
+    /// deterministically corrupted bytes.
+    pub crash_latent_fault_probability: f64,
+
+    /// Per-sector probability that an unsynced sector is *shorn* on crash: a
+    /// sub-sector prefix/suffix mix of old and new bytes.
+    ///
+    /// **Off by default**: enabling it deliberately weakens sector atomicity
+    /// to model pre-`AWUPF` drives and RAID-split shorn writes (Zheng,
+    /// FAST'13).
+    pub shorn_write_probability: f64,
+
+    /// Probability that an unsynced length change (a write past the end, a
+    /// `set_len`) survives a crash. Otherwise the file reverts to its last
+    /// durable length.
+    pub length_survives_crash_probability: f64,
+
+    /// Probability that a file's never-written and lost sectors read
+    /// deterministic garbage rather than zeros, drawn once per file.
+    ///
+    /// Zeros are the dangerous real-world case (SATA `RZAT`, `NVMe` `DLFEAT`,
+    /// unwritten extents): code that infers "never written" from "reads as
+    /// zero" is wrong, and only a fill that is sometimes zero and sometimes
+    /// garbage catches it.
+    pub garbage_fill_probability: f64,
+
+    /// Per-sector probability that a sync *lies*: it reports a sector durable
+    /// while leaving it volatile, so a later crash loses or reorders a synced
+    /// write (the fsyncgate class; Zheng's unserializable writes).
+    ///
+    /// **Off by default**, and it changes what the simulator considers a bug:
+    /// with the family armed, a sector that changed across a crash after being
+    /// reported durable is reported as a
+    /// [`StorageFaultKind::LostSyncedWrite`](crate::storage::StorageFaultKind::LostSyncedWrite)
+    /// instead of failing the run as a simulator bug.
+    pub barrier_violation_probability: f64,
 
     /// Probability of write landing at wrong location (0.0 - 1.0).
     ///
@@ -314,7 +387,6 @@ impl Default for StorageConfiguration {
             // Fault probabilities - disabled by default for predictable behavior
             read_fault_probability: 0.0,
             write_fault_probability: 0.0,
-            crash_fault_probability: 0.0,
             misdirect_write_probability: 0.0,
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
@@ -323,6 +395,17 @@ impl Default for StorageConfiguration {
             direct_io_alignment: 4096,
             direct_io_supported: true,
             short_transfer_probability: 0.0,
+            read_fault_eio_probability: 0.0,
+            write_fault_eio_probability: 0.0,
+            clean_crash_probability: 0.1,
+            correlated_rollback_probability: 0.25,
+            correlated_rollback_max_run: 8,
+            crash_lost_probability: 0.0,
+            crash_latent_fault_probability: 0.0,
+            shorn_write_probability: 0.0,
+            length_survives_crash_probability: 0.5,
+            garbage_fill_probability: 1.0,
+            barrier_violation_probability: 0.0,
 
             // Dynamic disk degradation - disabled by default (no-op multipliers)
             disk_stall_probability: 0.0,
@@ -375,7 +458,17 @@ impl StorageConfiguration {
             // Low fault probabilities for chaos testing (0.001% to 0.1%)
             read_fault_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
             write_fault_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
-            crash_fault_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
+            read_fault_eio_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
+            write_fault_eio_probability: f64::from(sim_random_range(0..100)) / 100_000.0,
+            clean_crash_probability: 0.1,
+            correlated_rollback_probability: 0.25,
+            correlated_rollback_max_run: 8,
+            crash_lost_probability: f64::from(sim_random_range(0..1000)) / 10_000.0,
+            crash_latent_fault_probability: f64::from(sim_random_range(0..500)) / 10_000.0,
+            shorn_write_probability: 0.0,
+            length_survives_crash_probability: 0.5,
+            garbage_fill_probability: 0.5,
+            barrier_violation_probability: 0.0,
             misdirect_write_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
             misdirect_read_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
             phantom_write_probability: f64::from(sim_random_range(0..20)) / 100_000.0,
@@ -432,7 +525,8 @@ impl StorageConfiguration {
             self.write_fault_probability = 0.0;
         }
         if !sim_random_bool(0.5) {
-            self.crash_fault_probability = 0.0;
+            self.crash_lost_probability = 0.0;
+            self.crash_latent_fault_probability = 0.0;
         }
         if !sim_random_bool(0.5) {
             self.misdirect_read_probability = 0.0;
@@ -461,6 +555,12 @@ impl StorageConfiguration {
         }
         if !sim_random_bool(0.5) {
             self.unsynced_dir_entry_loss_probability = 0.0;
+        }
+        if !sim_random_bool(0.5) {
+            self.read_fault_eio_probability = 0.0;
+        }
+        if !sim_random_bool(0.5) {
+            self.write_fault_eio_probability = 0.0;
         }
     }
 
@@ -517,7 +617,9 @@ impl StorageConfiguration {
     pub fn disable_fault_injection(&mut self) {
         self.read_fault_probability = 0.0;
         self.write_fault_probability = 0.0;
-        self.crash_fault_probability = 0.0;
+        self.barrier_violation_probability = 0.0;
+        self.read_fault_eio_probability = 0.0;
+        self.write_fault_eio_probability = 0.0;
         self.misdirect_write_probability = 0.0;
         self.misdirect_read_probability = 0.0;
         self.phantom_write_probability = 0.0;
@@ -550,7 +652,6 @@ impl StorageConfiguration {
             // All faults disabled
             read_fault_probability: 0.0,
             write_fault_probability: 0.0,
-            crash_fault_probability: 0.0,
             misdirect_write_probability: 0.0,
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
@@ -559,6 +660,20 @@ impl StorageConfiguration {
             direct_io_alignment: 4096,
             direct_io_supported: true,
             short_transfer_probability: 0.0,
+            read_fault_eio_probability: 0.0,
+            write_fault_eio_probability: 0.0,
+
+            // Crashes still resolve unsynced writes, but never damage a
+            // sector: it lands old or new and nothing else.
+            clean_crash_probability: 0.1,
+            correlated_rollback_probability: 0.25,
+            correlated_rollback_max_run: 8,
+            crash_lost_probability: 0.0,
+            crash_latent_fault_probability: 0.0,
+            shorn_write_probability: 0.0,
+            length_survives_crash_probability: 0.5,
+            garbage_fill_probability: 1.0,
+            barrier_violation_probability: 0.0,
 
             // Disk degradation disabled (no-op multipliers)
             disk_stall_probability: 0.0,
@@ -584,7 +699,7 @@ mod swarm_tests {
         [
             config.read_fault_probability > 0.0,
             config.write_fault_probability > 0.0,
-            config.crash_fault_probability > 0.0,
+            config.crash_lost_probability > 0.0 || config.crash_latent_fault_probability > 0.0,
             config.misdirect_read_probability > 0.0,
             config.misdirect_write_probability > 0.0,
             config.phantom_write_probability > 0.0,
@@ -594,6 +709,8 @@ mod swarm_tests {
             config.disk_failure_probability > 0.0,
             config.short_transfer_probability > 0.0,
             config.unsynced_dir_entry_loss_probability > 0.0,
+            config.read_fault_eio_probability > 0.0,
+            config.write_fault_eio_probability > 0.0,
         ]
     }
 
@@ -606,7 +723,7 @@ mod swarm_tests {
     const REACHABILITY_SEEDS: u64 = 1 << (FAMILY_COUNT + 3);
 
     /// Number of fault families the swarm mask covers.
-    const FAMILY_COUNT: u32 = 12;
+    const FAMILY_COUNT: u32 = 14;
 
     /// Build a swarm config the way the runner does: the stream seeded per iteration.
     fn swarm_for(seed: u64) -> StorageConfiguration {
@@ -666,7 +783,8 @@ mod swarm_tests {
         let config = swarm_for(seed);
         assert_zero(config.read_fault_probability);
         assert_zero(config.write_fault_probability);
-        assert_zero(config.crash_fault_probability);
+        assert_zero(config.crash_lost_probability);
+        assert_zero(config.crash_latent_fault_probability);
         assert_zero(config.misdirect_read_probability);
         assert_zero(config.misdirect_write_probability);
         assert_zero(config.phantom_write_probability);
@@ -676,6 +794,8 @@ mod swarm_tests {
         assert_zero(config.disk_failure_probability);
         assert_zero(config.short_transfer_probability);
         assert_zero(config.unsynced_dir_entry_loss_probability);
+        assert_zero(config.read_fault_eio_probability);
+        assert_zero(config.write_fault_eio_probability);
     }
 
     #[test]

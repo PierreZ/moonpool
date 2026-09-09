@@ -123,7 +123,7 @@ fn test_simulate_crash_synced_data_survives() {
 fn test_simulate_crash_unsynced_data_behavior() {
     local_runtime().block_on(async {
         let mut config = StorageConfiguration::fast_local();
-        config.crash_fault_probability = 1.0; // 100% crash corruption
+        config.crash_latent_fault_probability = 1.0; // 100% crash corruption
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
@@ -349,7 +349,7 @@ fn test_simulate_crash_multiple_files() {
 fn test_simulate_crash_during_write() {
     local_runtime().block_on(async {
         let mut config = StorageConfiguration::fast_local();
-        config.crash_fault_probability = 1.0;
+        config.crash_latent_fault_probability = 1.0;
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
@@ -396,12 +396,12 @@ fn test_simulate_crash_during_write() {
     });
 }
 
-/// Test that `crash_fault_probability=0.0` means no corruption
+/// Test that `crash_latent_fault_probability=0.0` means no corruption
 #[test]
 fn test_simulate_crash_zero_corruption_probability() {
     local_runtime().block_on(async {
         let mut config = StorageConfiguration::fast_local();
-        config.crash_fault_probability = 0.0; // No corruption
+        config.crash_latent_fault_probability = 0.0; // No corruption
 
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);

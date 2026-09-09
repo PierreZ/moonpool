@@ -9,7 +9,9 @@ use std::{
 use moonpool_core::{IoConstraints, OpenOptions};
 
 use super::OperationId;
-use crate::storage::{InMemoryStorage, StorageConfiguration};
+use crate::storage::{
+    FileCrashReport, FileImage, StorageConfiguration, StorageFaultRecord, faults::EligibilitySlot,
+};
 
 /// Unique identifier for persistent simulated file contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -40,7 +42,7 @@ pub struct DiskDegradationState {
 #[derive(Debug)]
 pub(crate) struct FileState {
     pub(crate) path: String,
-    pub(crate) storage: InMemoryStorage,
+    pub(crate) image: FileImage,
     pub(crate) owner_ip: IpAddr,
 }
 
@@ -122,6 +124,19 @@ pub(crate) struct StorageState {
     /// different things.
     pub(crate) durable_paths: BTreeMap<String, FileId>,
     pub(crate) pending_ops: BTreeMap<OperationId, PendingStorageOp>,
+    /// Consulted before any random fault damages a sector (see
+    /// [`StorageEligibilityMask`]).
+    pub(crate) eligibility: EligibilitySlot,
+    /// Every fault the disk has injected, oldest first, drained by the caller.
+    pub(crate) fault_records: Vec<StorageFaultRecord>,
+    /// What each simulated crash did, per file, drained by the caller.
+    pub(crate) crash_reports: Vec<FileCrashReport>,
+    /// Whether the barrier-violation family was ever armed.
+    ///
+    /// Latched rather than read back off the configuration, so disabling fault
+    /// injection cannot turn a sector a pre-cutoff sync already lied about
+    /// into an impossible-state panic in the crash oracle.
+    pub(crate) barrier_violation_armed: bool,
 }
 
 impl StorageState {
@@ -139,10 +154,31 @@ impl StorageState {
             path_to_file: BTreeMap::new(),
             durable_paths: BTreeMap::new(),
             pending_ops: BTreeMap::new(),
+            eligibility: EligibilitySlot::default(),
+            fault_records: Vec::new(),
+            crash_reports: Vec::new(),
+            barrier_violation_armed: false,
         }
     }
 
     pub(crate) fn config_for(&self, ip: IpAddr) -> &StorageConfiguration {
         self.per_process_configs.get(&ip).unwrap_or(&self.config)
+    }
+
+    /// Record one injected fault for the caller to inspect.
+    pub(crate) fn record_fault(&mut self, record: StorageFaultRecord) {
+        self.fault_records.push(record);
+    }
+
+    /// Whether a random fault may damage this sector.
+    pub(crate) fn eligible(&self, path: &str, sector: u64) -> bool {
+        self.eligibility.allows(path, sector)
+    }
+
+    /// Whether a random fault may damage every sector in the range.
+    pub(crate) fn eligible_range(&self, path: &str, sectors: std::ops::Range<u64>) -> bool {
+        sectors
+            .into_iter()
+            .all(|sector| self.eligible(path, sector))
     }
 }
