@@ -236,10 +236,25 @@ impl StorageEngine {
                 path: path.to_string(),
             });
         };
-        self.state.files.remove(&file_id);
+        self.drop_file_if_unlinked(file_id);
         let mut actions = StorageActions::default();
         self.invalidate_file_handles(file_id, &mut actions, false);
         Ok(actions)
+    }
+
+    /// Forget a file's contents once no name — visible or durable — reaches
+    /// it any more. A file whose only remaining link is the durable one is
+    /// still on the disk: a crash before the directory sync brings it back.
+    fn drop_file_if_unlinked(&mut self, file_id: FileId) {
+        let linked = self
+            .state
+            .path_to_file
+            .values()
+            .chain(self.state.durable_paths.values())
+            .any(|id| *id == file_id);
+        if !linked {
+            self.state.files.remove(&file_id);
+        }
     }
 
     pub(crate) fn rename_file(
@@ -264,7 +279,7 @@ impl StorageEngine {
         };
         let mut actions = StorageActions::default();
         if let Some(replaced_id) = self.state.path_to_file.remove(to) {
-            self.state.files.remove(&replaced_id);
+            self.drop_file_if_unlinked(replaced_id);
             self.invalidate_file_handles(replaced_id, &mut actions, false);
         }
         if let Some(file) = self.state.files.get_mut(&file_id) {
@@ -272,6 +287,116 @@ impl StorageEngine {
         }
         self.state.path_to_file.insert(to.to_string(), file_id);
         Ok(actions)
+    }
+
+    /// Make every directory entry directly under `path` durable.
+    ///
+    /// The simulated namespace is a flat map from path to file, so a
+    /// "directory" is a path prefix: this promotes exactly the entries whose
+    /// parent is `path`, in both directions — names created since the last
+    /// sync become durable, names deleted or renamed away stop being durable.
+    /// A directory with no entries syncs successfully and changes nothing.
+    ///
+    /// Namespace operations complete without a scheduled event, like `delete`
+    /// and `rename`, so this one does too.
+    pub(crate) fn sync_dir(
+        &mut self,
+        path: &str,
+        owner_ip: IpAddr,
+    ) -> Result<StorageActions, StorageError> {
+        let mut actions = StorageActions::default();
+        let probability = self.state.config_for(owner_ip).sync_failure_probability;
+        if probability > 0.0 && sim_random::<f64>() < probability {
+            assert_reachable!("disk: directory sync failed");
+            actions.fault(SimFaultEvent::StorageSyncFault {
+                ip: owner_ip.to_string(),
+                file_id: u64::MAX,
+            });
+            return Err(StorageError::Io {
+                file_id: FileId(u64::MAX),
+                kind: std::io::ErrorKind::Other,
+                message: "directory sync failed (simulated I/O error)".to_string(),
+            });
+        }
+
+        let directory = normalize_directory(path);
+        self.state
+            .durable_paths
+            .retain(|entry, _| parent_directory(entry) != directory);
+        for (entry, file_id) in &self.state.path_to_file {
+            if parent_directory(entry) == directory {
+                self.state.durable_paths.insert(entry.clone(), *file_id);
+            }
+        }
+        Ok(actions)
+    }
+
+    /// Resolve the namespace a crash leaves behind.
+    ///
+    /// Every divergence between the visible namespace and the durable one is
+    /// an unsynced directory operation, and each is resolved independently: a
+    /// name created since the last directory sync may not be there, and a name
+    /// deleted or renamed away since then may still be. Contents are dropped
+    /// once no surviving name reaches them.
+    ///
+    /// The coin is drawn only while `unsynced_dir_entry_loss_probability` is
+    /// positive, so a configuration with the family off consumes no
+    /// randomness — and then the visible namespace survives whole, which is
+    /// what every test that does not care about entry durability expects.
+    fn resolve_namespace_crash(&mut self, ip: IpAddr) {
+        let probability = self
+            .state
+            .config_for(ip)
+            .unsynced_dir_entry_loss_probability;
+        if probability <= 0.0 {
+            self.state.durable_paths = self.state.path_to_file.clone();
+            return;
+        }
+        let owned = |state: &StorageState, file_id: &FileId| {
+            state
+                .files
+                .get(file_id)
+                .is_some_and(|file| file.owner_ip == ip)
+        };
+        let mut paths: Vec<String> = self
+            .state
+            .path_to_file
+            .keys()
+            .chain(self.state.durable_paths.keys())
+            .cloned()
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+
+        for path in paths {
+            let visible = self.state.path_to_file.get(&path).copied();
+            let durable = self.state.durable_paths.get(&path).copied();
+            if visible == durable {
+                continue;
+            }
+            // Only this process's own entries are at risk.
+            let mine = visible
+                .iter()
+                .chain(durable.iter())
+                .any(|id| owned(&self.state, id));
+            if !mine {
+                continue;
+            }
+            if sim_random::<f64>() >= probability {
+                continue;
+            }
+            assert_reachable!("disk: crash lost an unsynced directory entry");
+            match durable {
+                Some(file_id) => self.state.path_to_file.insert(path, file_id),
+                None => self.state.path_to_file.remove(&path),
+            };
+        }
+
+        let live: Vec<FileId> = self.state.path_to_file.values().copied().collect();
+        self.state
+            .files
+            .retain(|file_id, file| file.owner_ip != ip || live.contains(file_id));
+        self.state.durable_paths = self.state.path_to_file.clone();
     }
 
     pub(crate) fn schedule_read(
@@ -855,6 +980,8 @@ impl StorageEngine {
             }
         }
 
+        self.resolve_namespace_crash(ip);
+
         let mut actions = StorageActions::default();
         let handle_ids = self
             .state
@@ -882,6 +1009,8 @@ impl StorageEngine {
         for (file_id, path) in files {
             self.state.files.remove(&file_id);
             self.state.path_to_file.remove(&path);
+            self.state.durable_paths.retain(|_, id| *id != file_id);
+            let _ = path;
             self.invalidate_file_handles(file_id, &mut actions, true);
         }
         actions.fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });
@@ -1115,6 +1244,23 @@ impl StorageEngine {
             _ => steady,
         }
     }
+}
+
+/// The directory part of a path: everything before the last separator, or the
+/// root (an empty string) for a name with no separator at all.
+fn parent_directory(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(index) => &path[..index],
+        None => "",
+    }
+}
+
+/// Normalize a directory path for comparison against [`parent_directory`]:
+/// `"db/"`, `"db"` and (for the root) `"/"`, `"."`, `""` all name the same
+/// directory.
+fn normalize_directory(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed == "." { "" } else { trimmed }
 }
 
 fn saturating_duration_from_secs(seconds: f64) -> Duration {

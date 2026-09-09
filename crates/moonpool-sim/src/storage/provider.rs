@@ -78,4 +78,10 @@ impl StorageProvider for SimStorageProvider {
         sim.rename_file(from, to)?;
         Ok(())
     }
+
+    async fn sync_dir(&self, path: &str) -> io::Result<()> {
+        let sim = self.sim()?;
+        sim.sync_dir(path, self.owner_ip)?;
+        Ok(())
+    }
 }

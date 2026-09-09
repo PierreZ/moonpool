@@ -85,6 +85,29 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
         from: &str,
         to: &str,
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
+    /// Make the *directory entries* under `path` durable.
+    ///
+    /// File durability and directory-entry durability are two different
+    /// things, and this is the second one. Syncing a file makes its bytes and
+    /// its length survive a crash; it says nothing about whether the *name*
+    /// pointing at it does. After
+    ///
+    /// ```text
+    /// open("db/wal", create)   // creates a directory entry
+    /// write(..)                // fills the file
+    /// sync_all(file)           // the bytes are durable
+    /// ```
+    ///
+    /// a crash may still leave no `db/wal` at all: the entry that names it was
+    /// never synced. The engines that get this right (`SQLite`, `PostgreSQL`,
+    /// `LMDB`, …) follow a create, a delete, or a rename with a directory
+    /// sync, and this is the call that expresses it.
+    ///
+    /// It lives on the provider, not on [`StorageFile`], because it concerns
+    /// the filesystem namespace rather than the contents of an already-open
+    /// file — the same reason `rename` and `delete` live here.
+    fn sync_dir(&self, path: &str) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }
 
 /// Trait for file handles that support async read/write/seek operations.

@@ -12,6 +12,8 @@ mod config;
 mod crash_api;
 #[path = "storage/determinism.rs"]
 mod determinism;
+#[path = "storage/directory.rs"]
+mod directory;
 #[path = "storage/disk_failure.rs"]
 mod disk_failure;
 #[path = "storage/faults.rs"]

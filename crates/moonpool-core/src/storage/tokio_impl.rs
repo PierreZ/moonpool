@@ -61,6 +61,27 @@ impl StorageProvider for TokioStorageProvider {
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         tokio::fs::rename(from, to).await
     }
+
+    async fn sync_dir(&self, path: &str) -> io::Result<()> {
+        sync_dir_impl(path).await
+    }
+}
+
+/// Fsync a directory so its entries survive a crash.
+///
+/// On unix this is `open(dir, O_RDONLY)` + `fsync`, the portable idiom.
+#[cfg(unix)]
+async fn sync_dir_impl(path: &str) -> io::Result<()> {
+    let path = path.to_string();
+    run_blocking(move || std::fs::File::open(&path)?.sync_all()).await
+}
+
+/// Windows has no directory handle to fsync: metadata operations on NTFS are
+/// journaled, and the ordering guarantee this call buys on unix comes for
+/// free. Succeeds without doing anything.
+#[cfg(not(unix))]
+async fn sync_dir_impl(_path: &str) -> io::Result<()> {
+    Ok(())
 }
 
 /// Build the tokio open options for `options`, optionally adding `O_DIRECT`.

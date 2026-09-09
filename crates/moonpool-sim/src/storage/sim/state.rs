@@ -113,7 +113,14 @@ pub(crate) struct StorageState {
     pub(crate) failed_disks: BTreeSet<IpAddr>,
     pub(crate) files: BTreeMap<FileId, FileState>,
     pub(crate) handles: BTreeMap<HandleId, HandleState>,
+    /// The namespace as it is now.
     pub(crate) path_to_file: BTreeMap<String, FileId>,
+    /// The namespace as it would survive a crash: entries promoted here by a
+    /// directory sync. A create, delete, or rename changes `path_to_file`
+    /// immediately and reaches this map only when the directory holding it is
+    /// synced — file data durability and directory-entry durability are two
+    /// different things.
+    pub(crate) durable_paths: BTreeMap<String, FileId>,
     pub(crate) pending_ops: BTreeMap<OperationId, PendingStorageOp>,
 }
 
@@ -130,6 +137,7 @@ impl StorageState {
             files: BTreeMap::new(),
             handles: BTreeMap::new(),
             path_to_file: BTreeMap::new(),
+            durable_paths: BTreeMap::new(),
             pending_ops: BTreeMap::new(),
         }
     }

@@ -200,6 +200,23 @@ pub struct StorageConfiguration {
     /// [`DirectIo::Required`](moonpool_core::DirectIo::Required) open fails.
     pub direct_io_supported: bool,
 
+    /// Probability that one unsynced directory entry does not survive a crash
+    /// (0.0 - 1.0).
+    ///
+    /// # Real-World Scenario
+    /// A create, delete, or rename changes the directory immediately but is
+    /// only durable once the directory itself is synced
+    /// ([`StorageProvider::sync_dir`](moonpool_core::StorageProvider::sync_dir)).
+    /// A crash before that may leave a freshly created file nameless, or bring
+    /// a deleted one back, however thoroughly the file's *contents* were
+    /// synced. This is the fault that catches an engine which fsyncs its
+    /// journal and forgets the directory holding it.
+    ///
+    /// The coin is drawn once per divergence between the visible namespace and
+    /// the durable one, at crash time. While `0.0` (the default) a crash draws
+    /// nothing here and the whole visible namespace survives.
+    pub unsynced_dir_entry_loss_probability: f64,
+
     /// Per-operation probability that a read or write moves *fewer* bytes than
     /// asked for (0.0 - 1.0).
     ///
@@ -302,6 +319,7 @@ impl Default for StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            unsynced_dir_entry_loss_probability: 0.0,
             direct_io_alignment: 4096,
             direct_io_supported: true,
             short_transfer_probability: 0.0,
@@ -362,6 +380,7 @@ impl StorageConfiguration {
             misdirect_read_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
             phantom_write_probability: f64::from(sim_random_range(0..20)) / 100_000.0,
             sync_failure_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
+            unsynced_dir_entry_loss_probability: f64::from(sim_random_range(0..500)) / 100_000.0,
             direct_io_alignment: 4096,
             direct_io_supported: true,
             short_transfer_probability: f64::from(sim_random_range(0..200)) / 100_000.0,
@@ -440,6 +459,9 @@ impl StorageConfiguration {
         if !sim_random_bool(0.5) {
             self.short_transfer_probability = 0.0;
         }
+        if !sim_random_bool(0.5) {
+            self.unsynced_dir_entry_loss_probability = 0.0;
+        }
     }
 
     /// Spike selected disk knob *magnitudes* under buggify (FDB's
@@ -501,6 +523,7 @@ impl StorageConfiguration {
         self.phantom_write_probability = 0.0;
         self.sync_failure_probability = 0.0;
         self.short_transfer_probability = 0.0;
+        self.unsynced_dir_entry_loss_probability = 0.0;
         self.disk_stall_probability = 0.0;
         self.disk_throttle_probability = 0.0;
         self.disk_failure_probability = 0.0;
@@ -532,6 +555,7 @@ impl StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            unsynced_dir_entry_loss_probability: 0.0,
             direct_io_alignment: 4096,
             direct_io_supported: true,
             short_transfer_probability: 0.0,
@@ -556,7 +580,7 @@ mod swarm_tests {
     use crate::sim::rng::{reset_sim_rng, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
-    fn enabled_families(config: &StorageConfiguration) -> [bool; 11] {
+    fn enabled_families(config: &StorageConfiguration) -> [bool; FAMILY_COUNT as usize] {
         [
             config.read_fault_probability > 0.0,
             config.write_fault_probability > 0.0,
@@ -569,8 +593,20 @@ mod swarm_tests {
             config.disk_throttle_probability > 0.0,
             config.disk_failure_probability > 0.0,
             config.short_transfer_probability > 0.0,
+            config.unsynced_dir_entry_loss_probability > 0.0,
         ]
     }
+
+    /// How many seeds the reachability tests scan.
+    ///
+    /// The all-off subset needs every family's coin to come up off at once, so
+    /// the seeds needed grow as `2^families`. Scale the scan with the family
+    /// count rather than pinning a number that silently stops covering the
+    /// case as families are added.
+    const REACHABILITY_SEEDS: u64 = 1 << (FAMILY_COUNT + 3);
+
+    /// Number of fault families the swarm mask covers.
+    const FAMILY_COUNT: u32 = 12;
 
     /// Build a swarm config the way the runner does: the stream seeded per iteration.
     fn swarm_for(seed: u64) -> StorageConfiguration {
@@ -596,7 +632,7 @@ mod swarm_tests {
         let mut saw_all_off = false;
         let mut saw_mixed = false;
 
-        for seed in 0..1000_u64 {
+        for seed in 0..REACHABILITY_SEEDS {
             let families = enabled_families(&swarm_for(seed));
             let on = families.iter().filter(|&&e| e).count();
             if on == 0 {
@@ -612,17 +648,20 @@ mod swarm_tests {
 
         assert!(
             saw_all_off,
-            "no seed in 0..1000 produced the all-off subset"
+            "no seed below {REACHABILITY_SEEDS} produced the all-off subset"
         );
-        assert!(saw_mixed, "no seed in 0..1000 produced a mixed subset");
+        assert!(
+            saw_mixed,
+            "no seed below {REACHABILITY_SEEDS} produced a mixed subset"
+        );
     }
 
     #[test]
     fn swarm_all_off_seed_has_zero_fault_probabilities() {
         // Find a seed whose subset is entirely off, then assert every family is inert.
-        let seed = (0..1000_u64)
+        let seed = (0..REACHABILITY_SEEDS)
             .find(|&s| enabled_families(&swarm_for(s)).iter().all(|&e| !e))
-            .expect("expected an all-off seed within 0..1000");
+            .expect("expected an all-off seed within the scanned range");
 
         let config = swarm_for(seed);
         assert_zero(config.read_fault_probability);
@@ -636,6 +675,7 @@ mod swarm_tests {
         assert_zero(config.disk_throttle_probability);
         assert_zero(config.disk_failure_probability);
         assert_zero(config.short_transfer_probability);
+        assert_zero(config.unsynced_dir_entry_loss_probability);
     }
 
     #[test]
