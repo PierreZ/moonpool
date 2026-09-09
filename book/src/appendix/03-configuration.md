@@ -85,8 +85,8 @@ family and heals the partitions the simulator is holding.
 | At the cutoff | |
 |---|---|
 | Stopped | Network: partitions, clogs, bit flips, spontaneous closes, black holes, connect failures, clock drift, buggified sleep delays, new per-pair latency degradation |
-| Stopped | Storage: read/write/sync/crash faults, misdirected and phantom writes, new disk stall and throttle episodes, new disk failures |
-| Stopped | Block devices: EIO, read corruption, misdirected and phantom writes, persist failures, barrier violations |
+| Stopped | Storage: read and write EIO, read- and write-time corruption, misdirected and phantom writes, sync failures, short transfers, unsynced directory-entry loss, lying syncs, new disk stall and throttle episodes, new disk failures |
+| Unchanged | The crash *model* — how an unsynced sector resolves is the disk's physics, not an environment generating faults. Recovery mode stops the simulator from generating crashes; one that still happens resolves the way it always would |
 | Stopped | Fault injectors, including built-in attrition |
 | Healed | Every partition in force — directed pair cuts and asymmetric send-side / receive-side blocks alike |
 | Preserved | Corrupted sectors, lost/misdirected/phantom writes already applied, connections already closed or black-holed, processes already killed, a disk that already failed (and the operations it parked), application state, the fixed extra latency a slow link already sampled |

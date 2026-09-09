@@ -86,18 +86,59 @@ never interpreted as success.
 |-------|-------------|---------|---------------------|
 | Read corruption | `read_fault_probability` | 0% | ECC failures, DRAM bit flips, media degradation |
 | Write corruption | `write_fault_probability` | 0% | Bad sectors, controller bugs, disk full |
-| Crash fault (torn writes) | `crash_fault_probability` | 0% | Power loss mid-I/O, crash consistency |
-| Misdirected write | `misdirect_write_probability` | 0% | Firmware bugs, wrong block written |
-| Misdirected read | `misdirect_read_probability` | 0% | Controller errors, wrong block read |
+| Read EIO | `read_fault_eio_probability` | 0% | The device refusing a read — an error, not corrupt bytes |
+| Write EIO | `write_fault_eio_probability` | 0% | The device refusing a write |
+| Misdirected write | `misdirect_write_probability` | 0% | Firmware bugs, wrong location written |
+| Misdirected read | `misdirect_read_probability` | 0% | Controller errors, wrong location read |
 | Phantom write | `phantom_write_probability` | 0% | Drive lies about durability |
 | Sync failure | `sync_failure_probability` | 0% | fsync fails, disk full |
+| Short transfer | `short_transfer_probability` | 0% | `read`/`write` moving a prefix and returning the count |
+| Lost directory entry | `unsynced_dir_entry_loss_probability` | 0% | A create, delete, or rename that no `sync_dir` made durable |
+
+### The Crash Model
+
+What a crash *does* to writes a sync had not yet made durable. Not "should a
+crash happen" — the harness decides that — but the physics one resolves with.
+Every sector written since the last sync resolves independently.
+
+| Parameter | Config Field | Default | Effect |
+|-----------|-------------|---------|--------|
+| Clean crash | `clean_crash_probability` | 10% | Every unsynced write survives intact (FDB's number) |
+| Correlated rollback | `correlated_rollback_probability` / `correlated_rollback_max_run` | 25%, 8 | A contiguous sector run rolls back together (erase-block damage) |
+| Lost sector | `crash_lost_probability` | 0% | The sector reverts to never-written and reads the fill pattern |
+| Latent fault | `crash_latent_fault_probability` | 0% | The new bytes land, but reads return deterministic damage |
+| Shorn write | `shorn_write_probability` | 0% | A sub-sector mix of old and new bytes (weakens sector atomicity) |
+| Length change | `length_survives_crash_probability` | 50% | Whether an unsynced `set_len` or extension survives |
+| Fill pattern | `garbage_fill_probability` | 100% (50% under `random_for_seed`) | Whether never-written and lost sectors read garbage rather than zeros |
+| Barrier violation | `barrier_violation_probability` | 0% | A sync *lies*: it reports a sector durable and leaves it volatile |
+
+A sector with no other outcome lands old or new with equal probability. Every
+synced sector is stamped with a CRC of what the caller was told is durable; a
+stamp that no longer matches after a crash fails the run as a simulator bug,
+unless the barrier-violation family is armed, in which case it is reported as
+a `LostSyncedWrite`.
+
+### Targeted Storage Faults
+
+Directed injections, for red tests that need a specific fault rather than a
+sampled one. Coordinates are a file path and a flat sector range.
+
+| Method | Description |
+|--------|-------------|
+| `SimWorld::corrupt_file(path, sectors)` | Plant a latent read fault: deterministic damage until the sectors are rewritten |
+| `SimWorld::fail_file_with_eio(path, sectors, target)` | Fail reads and/or writes touching the sectors |
+| `SimWorld::clear_file_eio(path, target)` | Clear the above |
+| `SimWorld::corrupt_durable_out_of_band(path, sector)` | Mutate a durable sector behind the crash model — a deliberate simulator bug, for testing the oracle |
+| `SimWorld::set_storage_eligibility_mask(mask)` | `(path, sector) -> bool`, consulted before any random fault damages a sector |
+| `SimWorld::take_storage_fault_records()` | Drain the faults injected so far |
+| `SimWorld::take_storage_crash_reports()` | Drain what each crash did, per file and per sector |
 
 ### Per-Process Storage Operations
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
 | `SimWorld::set_process_storage_config(ip, config)` | `IpAddr`, `StorageConfiguration` | Set per-process fault config (overrides global) |
-| `SimWorld::simulate_crash_for_process(ip, close_files)` | `IpAddr`, `bool` | Simulate power loss: torn writes, optional file close |
+| `SimWorld::simulate_crash_for_process(ip, close_files)` | `IpAddr`, `bool` | Simulate power loss: resolve every unsynced sector and directory entry, optional file close |
 | `SimWorld::wipe_storage_for_process(ip)` | `IpAddr` | Delete all storage owned by the process |
 | `SimWorld::storage_provider(ip)` | `IpAddr` | Create a `SimStorageProvider` scoped to this process |
 

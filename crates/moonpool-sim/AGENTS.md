@@ -21,7 +21,11 @@ and `SimContext`.
 - `storage/` — `StorageEngine` owns files, independent open handles, disk
   configs and degradation episodes, exact pending/completed operations, faults
   and storage wakers. Read/write/sync/set_len return `Pending` and complete
-  through scheduled `StorageEvent`s.
+  through scheduled `StorageEvent`s. There is exactly **one** simulated file
+  implementation (`storage/image.rs`): every API — stream, positioned, block —
+  lands on the same bytes, and a write through one is observable through the
+  others. `storage/faults.rs` is the fault vocabulary, addressed by file and
+  flat sector offset. Do not add a second byte store for a new API.
 - Components return ordered scheduling/cancellation effects and `WakeBatch`es
   to the coordinator. Never move component state or wakers back into
   `SimInner`, and never invoke a waker while holding the world lock.

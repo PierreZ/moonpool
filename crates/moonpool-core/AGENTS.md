@@ -21,6 +21,11 @@ browser demo and the no-default-features simulation use.
   `select_support.rs`. A new feature must keep the all-off build wasm-clean and
   the lean production tree (`moonpool --no-default-features --features tokio`)
   free of sim, explorer, hyper and prometheus (CI checks both).
+- **One storage stack.** Database-oriented file needs (positioned I/O, uncached
+  I/O, alignment, directory durability) are methods and options on
+  `StorageProvider`/`StorageFile`/`OpenOptions`, never a parallel provider.
+  `BlockFile<F>` is a thin view over one already-open file and must never gain
+  a path, a provider, or a namespace.
 - `time.now()` is the scheduling clock and `time.timer()` the application
   clock that clock-skew faults drift; keep both, and document which one a new
   API reads.

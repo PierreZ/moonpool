@@ -12,7 +12,9 @@ Moonpool's storage fault injection is modeled on TigerBeetle's fault taxonomy. T
 
 ## The Fault Taxonomy
 
-Moonpool's `StorageConfiguration` controls seven types of storage faults:
+Moonpool's `StorageConfiguration` controls the fault families below. All are
+off by default, and a family whose probability is zero draws no randomness at
+all, so a run with faults disabled stays byte-for-byte deterministic.
 
 ### Read Corruption
 
@@ -26,11 +28,35 @@ A write operation stores wrong data. The application writes correct bytes, but w
 
 **What it tests:** Read-after-write verification and end-to-end checksums. Systems that compute checksums before writing and verify after reading will detect write corruption. Systems that do not will store garbage.
 
+### I/O Errors
+
+A read or a write fails outright: the device reports that it could not serve
+the request. This is an *operating condition*, and it is a different thing
+from a read that succeeds and returns corrupt bytes — `read_fault_eio_probability`
+and `write_fault_eio_probability` are separate families from the two above for
+exactly that reason.
+
+**What it tests:** Error paths. Code that treats an error as "corrupt data" —
+or worse, ignores the result — is wrong on real disks, and both halves have to
+be driven.
+
 ### Crash Faults (Torn Writes)
 
-The system crashes mid-write. Some bytes are written, others are not. This models power failures, kernel panics, and OOM kills during I/O.
+The system crashes mid-write. Some sectors are written, others are not. This models power failures, kernel panics, and OOM kills during I/O.
 
-**What it tests:** Write-ahead logging, atomic write protocols, and crash recovery. Any system that performs multi-step writes without a journal or atomic commit is vulnerable to torn writes.
+**What it tests:** Write-ahead logging, atomic write protocols, and crash recovery. Any system that performs multi-step writes without a journal or atomic commit is vulnerable to torn writes. See *The Barrier-Bounded Crash Model* below for the shapes a crash can leave behind.
+
+### Short Transfers
+
+A read or write moves fewer bytes than asked for and returns the count. This is ordinary POSIX behaviour that callers routinely forget.
+
+**What it tests:** Whether a caller loops. Code that treats a `read_at` return value as "all of it" silently drops data, which `short_transfer_probability` makes happen on demand.
+
+### Lost Directory Entries
+
+A create, delete, or rename that was never followed by a directory sync does not survive a crash — however thoroughly the file's contents were synced.
+
+**What it tests:** Whether an engine syncs the directory holding its files, not just the files. See *File Durability Is Not Directory Durability* below.
 
 ### Misdirected Writes
 
@@ -263,108 +289,177 @@ let storage_config = StorageConfiguration::fast_local();
 
 The fault probabilities in `random_for_seed()` are intentionally low (0.001% to 0.1%). Storage faults at higher rates would prevent the system from making progress. The goal is a steady trickle of faults that occasionally exercises corruption detection and recovery, not a deluge that makes every I/O fail.
 
-## The BlockDevice Contract
+## Positioned I/O, Direct I/O, and Alignment
 
-The file API above is deliberately POSIX-flavored, which puts it at the wrong
-altitude for a storage *engine*: a WAL, an LSM, or a B-tree pager must
-carefully avoid relying on stream semantics (seek, append, auto-extend) while
-getting no guarantee it actually needs (atomicity unit, alignment, reorder
-window). For that, moonpool-core provides a second, narrower surface:
-`BlockDevice` — sector-aligned reads and writes inside named regions, one
-explicit durability barrier, and grow-only resize. It is implemented twice:
-`TokioBlockDeviceProvider` for production and the simulated provider below, so
-the same engine code runs under both ("test the code you ship").
+A journal or a pager does not want a seek cursor. It wants to read page 7 and
+write page 12, possibly at the same time, from several tasks, without any of
+them disturbing the others' idea of "where I am".
 
-```rust,ignore
-use moonpool_core::{BlockDevice, BlockDeviceProvider, RegionId, RegionSpec};
-use moonpool_sim::{BlockFaultConfig, SimBlockDeviceProvider, SimBlockStore};
+`StorageFile::read_at(offset, buf)` and `write_at(offset, buf)` are that
+primitive. They take `&self`, address the offset literally, and never touch
+the stream cursor, so non-overlapping ranges of one file can be read and
+written concurrently. They are `read` and `write`, not `read_exact` and
+`write_all`: both return the number of bytes moved, and a read returns 0 at
+end of file. `short_transfer_probability` makes the simulator move a non-empty
+prefix instead of the whole buffer, deterministically, so a caller that
+assumes a full transfer can be driven red.
 
-let store = SimBlockStore::new(seed, BlockFaultConfig::default());
-let provider = SimBlockDeviceProvider::new(store.clone());
+Everything a database needs from an open is on `OpenOptions`, not on a second
+provider:
 
-let device = provider
-    .create("db", &[
-        RegionSpec { name: "wal", size: 1024 * 4096 },
-        RegionSpec { name: "superblock", size: 4096 },
-    ])
+```rust
+let file = provider
+    .open(
+        "db/pages",
+        OpenOptions::read_write().direct_io(DirectIo::Required),
+    )
     .await?;
-device.write(RegionId(0), 0, &entry).await?;   // visible, not durable
-device.persist().await?;                        // durability barrier
 ```
 
-The contract clauses documented on the trait ARE the feature:
+- `DirectIo::Disabled` is ordinary buffered I/O.
+- `DirectIo::Optional` asks for uncached I/O and accepts a documented fallback
+  where the filesystem refuses it; `file.is_direct_io()` says which one you
+  got.
+- `DirectIo::Required` fails the open rather than downgrading silently.
 
-- **Atomicity unit is one sector (4096 bytes), nothing larger.** A crash may
-  independently leave each sector of a multi-sector write old, new, or
-  unreadable.
-- **Writes between two `persist()` calls may reach disk in any order.** Only
-  the barrier orders writes.
-- **Completion of `write()` implies visibility, not durability.**
-- **Never-written sectors read unspecified bytes** — zeros, stale data, or
-  garbage. Never infer written-ness from content.
-- **EIO is an operating condition**, distinct from a successful read of
-  corrupt bytes; corrupt reads are deterministic and retries never heal.
-- `create()` is atomic: the device is invisible to `open()` until its first
-  `persist()`.
+Direct I/O is **not durability**. An uncached write is still only visible
+until a `sync_all()` / `sync_data()` makes it durable, exactly like a buffered
+one. What it does buy is that a read comes from the device rather than from a
+page the kernel may have marked clean after a failed flush (Rebello, ATC'20).
 
-### Barrier-Bounded Crash Model
+`file.constraints()` reports what the open demands, as three independent
+numbers — offset alignment, length alignment, and memory alignment — because a
+device may constrain them differently. None of them is your block or page
+size, and none is a crash-atomicity unit. Every transfer is checked against
+them, so a misaligned direct-I/O call fails with `InvalidInput` in simulation
+exactly as it earns `EINVAL` from a kernel. `AlignedBuf` is the one
+aligned-buffer facility in moonpool; layers above it reuse it rather than
+growing their own.
 
-`SimBlockStore::crash_device()` resolves every sector written since the last
-successful `persist()` **independently**: kept old, kept new, lost (reverts to
-the fill pattern — zeros or garbage, chosen per seed), or left with a latent
-read fault. An occasional fully-clean crash (10%, FDB's number) and an
-occasional correlated rollback of a contiguous sector run (erase-block damage)
-round out the shapes. This is what makes "persist-record landed while its
-entry is partial" — the case CTRL-style journal recovery exists to survive —
-actually reachable in simulation.
+## File Durability Is Not Directory Durability
 
-Fault families (EIO on read/write, read-time corruption, misdirected writes
-contained within a region, phantom writes, persist failures) are gated by both
-the `BlockFaultConfig` probabilities (per-seed swarm via
-`BlockFaultConfig::swarm()`) and a caller-provided eligibility mask
-`(path, region, sector) -> bool`, so a replication-aware harness can enforce
-"never fault all copies of one record" without moonpool knowing what a replica
-is. Directed red tests use the targeted API: `corrupt()`, `fail_with_eio()`,
-`wipe_device()`.
+```text
+open("db/wal", create)   // creates a directory entry
+write(..)                // fills the file
+sync_all(file)           // the bytes are durable
+```
+
+After that sequence a crash may leave no `db/wal` at all. The bytes were made
+durable; the *name* that reaches them was not. Engines that get this right
+(SQLite, PostgreSQL, LMDB) follow every create, delete, and rename with a
+directory sync, and `StorageProvider::sync_dir(path)` is that call. It lives
+on the provider, beside `rename` and `delete`, because it concerns the
+filesystem namespace rather than the contents of an open file.
+
+The simulator keeps two namespaces: the visible one, which a create, delete,
+or rename changes immediately, and the durable one, which only `sync_dir`
+promotes into. On a crash each divergence between them resolves independently
+under `unsynced_dir_entry_loss_probability`: a created name may not be there,
+a deleted one may be back. The family is off by default and draws no
+randomness while off, so a crash keeps the namespace it had unless a test asks
+otherwise.
+
+## The Barrier-Bounded Crash Model
+
+A sync is the only barrier a file has, and everything written since the last
+one is up for grabs.
+
+Every simulated file keeps two images: the **durable** bytes as of its last
+successful sync, and the **visible** bytes reads observe. A write dirties
+sectors in the visible image; a sync commits them. On a crash each dirty
+sector resolves **independently**:
+
+| Outcome | What the sector holds afterwards |
+|---------|----------------------------------|
+| `KeptOld` | Its last durable contents — the unsynced write is gone. |
+| `KeptNew` | The unsynced write, intact. |
+| `Lost` | The file's fill pattern: it reverts to never-written. |
+| `LatentFault` | The new bytes, but reads return deterministic damage. |
+| `Shorn` | A sub-sector mix of old and new bytes (opt-in). |
+
+An occasional fully clean crash (`clean_crash_probability`, 10% — FDB's
+number) and an occasional correlated rollback of a contiguous run
+(erase-block damage, Zheng FAST'13) round out the shapes, and an unsynced
+length change resolves the same way. This is what makes "the later record
+landed while the earlier one is partial" — the case journal recovery exists to
+survive — actually reachable.
+
+Two properties are worth stating plainly, because code hides behind their
+opposites:
+
+- **A lost sector reads the fill pattern, which is zeros on some files and
+  garbage on others** (`garbage_fill_probability`, drawn per file). Zeros are
+  the dangerous real case (SATA `RZAT`, `NVMe` `DLFEAT`, unwritten extents),
+  so recovery code that infers "never written" from "reads as zero" has to be
+  driven red on both.
+- **Damage is deterministic.** A corrupted sector returns the same wrong bytes
+  on every read; a retry never heals it.
 
 ### The Lost-Synced-Write Oracle
 
-At every `persist()`, each synced sector is stamped with a CRC of the content
-the caller was told is durable. After a crash, a stamped sector that no longer
-matches is a **simulator bug** and fails loudly — unless the opt-in
-barrier-violation family is armed (`barrier_violation_probability > 0`), in
-which case `persist()` occasionally *lies* about a sector and the oracle flips
-to must-detect mode, reporting the loss as an expected `LostSyncedWrite` fault
-event. Downstream consumers use that family to prove cluster-level recovery
-heals a single lying disk (the fsyncgate class of failures).
+At every sync, each committed sector is stamped with a CRC of the content the
+caller was told is durable (FoundationDB's `AsyncFileWriteChecker` pattern).
+After a crash, a stamped sector that no longer matches is a **simulator bug**
+and fails the run loudly — unless the opt-in barrier-violation family is armed
+(`barrier_violation_probability > 0`), in which case a sync occasionally
+*lies* about a sector and the oracle flips to must-detect mode, reporting the
+loss as an expected `LostSyncedWrite`. That family is how a consumer proves
+cluster-level recovery heals a single lying disk (the fsyncgate class).
 
-### Production Implementation
+### Aiming Faults
 
-`TokioBlockDeviceProvider` (moonpool-core, `tokio-fs` feature, unix) lays a
-device out as a directory of preallocated region files plus a manifest, doing
-positioned I/O on the blocking pool through sector-aligned bounce buffers,
-with `O_DIRECT` where the platform and filesystem support it. `create()`
-builds the layout in a `<path>.staging` directory that the first `persist()`
-syncs and renames into place (then fsyncs the parent), so atomic create holds
-on real disks too. A failed `persist()` **fail-stops** the device — every
-subsequent operation returns an error — because after a lying flush the page
-cache can serve stale clean-marked pages (Rebello, ATC'20).
+Random fault families are gated by a caller-provided eligibility mask,
+`(path, sector) -> bool`, so a replication-aware harness can enforce "never
+damage all copies of one record" without moonpool knowing what a replica is
+(TigerBeetle's `ClusterFaultAtlas` pattern). Rolls happen *before* the mask is
+consulted, so installing one never shifts the random stream.
 
-### Simulation Wiring
+Directed tests reach for the targeted API on `SimWorld` instead:
+`corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,
+`clear_file_eio`, and — to test the oracle itself —
+`corrupt_durable_out_of_band`. What each crash did is available from
+`take_storage_crash_reports()`, and every fault injected from
+`take_storage_fault_records()`.
 
-Inside a simulation, each process gets its own lazily created block store:
+Fault coordinates are **file plus flat sector offset**. There is no region and
+no sub-file namespace: what the bytes at an offset mean belongs to the format
+written on top.
 
-- `SimWorld::block_device_provider(ip)` / `SimContext::block_devices()` hand
-  out the per-process provider; `SimWorld::block_store(ip)` exposes the store
-  for targeted faults, fault records, and crash reports.
-- A store holds no randomness of its own: every fault it injects is a draw on
-  the simulation stream at the moment the operation runs, so creating one
-  consumes nothing.
-- Process crashes (`simulate_crash_for_process`, which `Attrition` reboots
-  call) resolve every buffered write through the crash model and record a
-  `block_device_crash` fault in the timeline; `CrashAndWipe` reboots also
-  erase the process's devices (`block_device_wipe`).
-- `Chaos::Storage(mode)` covers block devices too: `Random` enables every
-  default-on fault family (`BlockFaultConfig::chaos()`), `Swarm` additionally
-  keeps a per-seed subset. The barrier-bounded crash model itself is always
-  armed — it only acts when a process actually crashes.
+## Blocks Are a View, Not a Device
+
+Storage engines address data in fixed-size blocks. `BlockFile<F>` is that
+arithmetic, and only that arithmetic:
+
+```rust
+let file = provider.open(path, options).await?;
+let blocks = BlockFile::new(file, 4096)?;
+
+blocks.grow_to_blocks(1024).await?;
+let mut page = blocks.buffer(1);     // aligned for this file
+blocks.write_blocks(7, page.as_slice()).await?;
+blocks.sync().await?;
+```
+
+`read_blocks` fills its buffer completely or fails `UnexpectedEof`, and
+`write_blocks` writes every byte or fails — looping over the partial transfers
+the file below is allowed to return is the job this layer exists to do.
+
+What it deliberately is not:
+
+- It **wraps one already-open file**. It takes no path, stores no path, and
+  cannot open, create, rename, or delete anything. There is no
+  `BlockFile::open` and no `BlockProvider`: an operation that needs a path is
+  an operation for `StorageProvider`.
+- It is not a directory, several files, a region table, a manifest, a
+  namespace, or a virtual disk. A database's logical zones — journal,
+  superblock, pages — are byte offsets in one file. The file API does not grow
+  a `superblock-file` because the format has a superblock.
+- The block size is the *caller's* unit. It must be a multiple of the file's
+  I/O alignment, and it is neither that alignment nor a crash-atomicity unit:
+  a two-block write tears across a crash like any other.
+- It is not durability. `write_blocks` returns when bytes are visible; `sync`
+  is what makes them durable.
+
+Because it is generic over `StorageFile`, there is one block layer over two
+backends — the simulated file and the real one — rather than a production
+block device and a separate simulated one.
