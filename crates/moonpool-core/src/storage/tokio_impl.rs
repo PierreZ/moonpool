@@ -339,42 +339,6 @@ fn existing_options(options: &OpenOptions) -> OpenOptions {
         .append(options.is_append())
 }
 
-/// An inode that exists and holds direct I/O, but is not yet reachable by any
-/// name the caller asked for.
-///
-/// Staging is what makes a failed `Required` create harmless: everything that
-/// can go wrong — the filesystem refusing `O_DIRECT`, the alignment being
-/// undescribable — goes wrong here, before the requested pathname has been
-/// touched at all. Publication is a single `linkat`, which never replaces an
-/// existing name.
-struct StagedFile {
-    file: tokio::fs::File,
-    /// `Some` only when the staging fell back to a named temporary. An
-    /// `O_TMPFILE` inode has no name, so there is nothing to clean up and
-    /// nothing to leak if the process dies here.
-    temp: Option<std::path::PathBuf>,
-}
-
-impl Drop for StagedFile {
-    fn drop(&mut self) {
-        // A blocking unlink, deliberately: it is one syscall on a name only
-        // this call knows, and losing it would leak the temporary.
-        if let Some(temp) = &self.temp {
-            let _ = std::fs::remove_file(temp);
-        }
-    }
-}
-
-/// How many unique temporary names to try before giving up. A collision means
-/// another process guessed this process's id and counter, which does not
-/// repeat.
-const STAGING_NAME_ATTEMPTS: usize = 4;
-
-/// How many times a plain `create` may lose the race to another process
-/// before the open gives up. Losing repeatedly means somebody is creating and
-/// removing the path in a loop, which is not a condition to keep retrying.
-const CREATE_RACE_ATTEMPTS: usize = 4;
-
 /// Options for the direct-I/O *upgrade* of a file that is already open: the
 /// same access, none of the lifecycle.
 ///
@@ -455,245 +419,64 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
     }
 }
 
-/// Create an inode with direct I/O that no name yet refers to.
+/// Open with mandatory direct I/O.
 ///
-/// Prefers `O_TMPFILE`, which produces an inode with no name at all: if
-/// anything below fails, there is nothing to clean up and nothing to leak.
-/// Where the filesystem has no `O_TMPFILE`, a uniquely named temporary in the
-/// same directory stands in — its name is known only to this call, so removing
-/// it can never touch anything else.
+/// `Required` means exactly one thing: *if this file can be opened for direct
+/// I/O with the requested access, return a direct-I/O file; otherwise fail.*
+/// It never falls back to buffered I/O, and it never creates a file.
 ///
-/// # Errors
+/// # An existing file
 ///
-/// Reports `Unsupported` when the filesystem cannot provide direct I/O. The
-/// two causes are told apart by retrying without `O_DIRECT`: if that works,
-/// `O_TMPFILE` was fine and direct I/O is what is missing.
-async fn stage_direct_file(directory: &std::path::Path, path: &str) -> io::Result<StagedFile> {
-    if descriptor_paths_available() {
-        let anonymous = OpenOptions::new().read(true).write(true);
-        match tmpfile_options(&anonymous, true).open(directory).await {
-            Ok(file) => return Ok(StagedFile { file, temp: None }),
-            Err(error) => {
-                // Was it `O_DIRECT` or `O_TMPFILE` that the filesystem
-                // refused? Only the same open without `O_DIRECT` can say.
-                if tmpfile_options(&anonymous, false)
-                    .open(directory)
-                    .await
-                    .is_ok()
-                {
-                    return Err(unsupported_direct_io(path, &error));
-                }
-            }
-        }
-    }
-
-    let staging = OpenOptions::new().read(true).write(true).create_new(true);
-    let mut last = None;
-    for _ in 0..STAGING_NAME_ATTEMPTS {
-        let temp = directory.join(staging_name());
-        match open_options(&staging, true).open(&temp).await {
-            Ok(file) => {
-                return Ok(StagedFile {
-                    file,
-                    temp: Some(temp),
-                });
-            }
-            Err(error) if is_direct_io_unsupported(&error) => {
-                // The kernel may have created it before rejecting the flag.
-                // Safe to remove: this name is this call's alone and was never
-                // published.
-                let _ = tokio::fs::remove_file(&temp).await;
-                return Err(unsupported_direct_io(path, &error));
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => last = Some(error),
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not find an unused staging name",
-        )
-    }))
-}
-
-/// A staging name only this call knows.
-fn staging_name() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!(".moonpool-staging-{}-{seq}", std::process::id())
-}
-
-/// Options for an `O_TMPFILE` open of a *directory*, which yields an unnamed
-/// inode on its filesystem.
-fn tmpfile_options(options: &OpenOptions, direct: bool) -> tokio::fs::OpenOptions {
-    let mut builder = open_options(options, direct);
-    #[cfg(target_os = "linux")]
-    builder.custom_flags(libc::O_TMPFILE | if direct { libc::O_DIRECT } else { 0 });
-    builder
-}
-
-/// Give the staged inode the name the caller asked for.
+/// 1. Open it **as it already is** — the caller's access, `O_DIRECT`, and no
+///    lifecycle flags whatever.
+/// 2. Discover and validate the alignment direct I/O needs.
+/// 3. Only then apply `truncate`, through the descriptor.
 ///
-/// `linkat` creates a name for an existing inode and **fails with `EEXIST`
-/// rather than replacing** one that is already there, which is what makes
-/// publication safe against a concurrent winner. Nothing is ever unlinked at
-/// the requested path.
-fn publish(staged: &StagedFile, path: &str) -> io::Result<()> {
-    let source = match &staged.temp {
-        Some(temp) => temp.clone(),
-        None => descriptor_path(&staged.file, path),
-    };
-    link_at(&source, std::path::Path::new(path))
-}
-
-/// The handle the caller asked for, on the inode this call staged.
+/// The order is deliberate: the capability check comes first so that a
+/// refusal cannot have modified the file. Whether a given kernel would have
+/// truncated anyway is not something to depend on — measured on Linux 6.18,
+/// `O_TRUNC | O_DIRECT` against a filesystem that refuses `O_DIRECT` leaves
+/// the contents intact, but `O_CREAT | O_DIRECT` leaves the file behind (see
+/// below), so the ordering of lifecycle against capability is a kernel detail
+/// and not a contract.
 ///
-/// Addressed through the staged descriptor (or the staging name), never
-/// through the published path: the inode is what was created and validated,
-/// whatever the name may refer to by now.
-async fn reopen_staged(staged: &StagedFile, options: &OpenOptions) -> io::Result<tokio::fs::File> {
-    let source = match &staged.temp {
-        Some(temp) => temp.clone(),
-        None => descriptor_path(&staged.file, ""),
-    };
-    open_options(&existing_options(options), true)
-        .open(&source)
-        .await
-}
-
-/// `linkat(AT_FDCWD, source, AT_FDCWD, target, AT_SYMLINK_FOLLOW)`.
+/// # A missing file
 ///
-/// `AT_SYMLINK_FOLLOW` is what lets an `O_TMPFILE` inode be published through
-/// its `/proc/self/fd` entry, the documented unprivileged route.
-#[cfg(unix)]
-fn link_at(source: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let source = CString::new(source.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
-    let target = CString::new(target.as_os_str().as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
-    // SAFETY: both arguments are valid NUL-terminated C strings that outlive
-    // the call, and the flags are the documented ones for linking through a
-    // `/proc/self/fd` entry.
-    let result = unsafe {
-        libc::linkat(
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::AT_SYMLINK_FOLLOW,
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-#[cfg(not(unix))]
-fn link_at(source: &std::path::Path, target: &std::path::Path) -> io::Result<()> {
-    std::fs::hard_link(source, target)
-}
-
-/// The directory that will hold `path`, which is where staging has to happen
-/// so that publication is a link within one filesystem.
-fn parent_directory(path: &str) -> std::path::PathBuf {
-    let parent = std::path::Path::new(path).parent();
-    match parent {
-        Some(directory) if !directory.as_os_str().is_empty() => directory.to_path_buf(),
-        _ => std::path::PathBuf::from("."),
-    }
-}
-
-/// Open with mandatory direct I/O, without applying the open's lifecycle
-/// before direct I/O is actually secured.
+/// Refused with [`io::ErrorKind::Unsupported`]. Creating a file *and*
+/// guaranteeing direct I/O on it is not one filesystem operation, and the
+/// provider does not invent one. The native open makes that concrete: a
+/// refused `O_CREAT | O_DIRECT` still leaves the created file behind, because
+/// the file is created during path resolution and `O_DIRECT` is rejected
+/// afterwards. Cleaning that up safely is a namespace protocol — stage an
+/// inode elsewhere, publish the name — not a file open. Whoever owns the
+/// file's format owns that protocol, and only they know whether the name has
+/// to be durable, what a half-created file means, and how recovery finds it.
 ///
-/// `Required` cannot fall back, so it used to pass the lifecycle flags and
-/// `O_DIRECT` to one open — and Linux applies `O_CREAT` and `O_TRUNC` *before*
-/// it rejects `O_DIRECT`. A refused open therefore left a file behind, or
-/// destroyed the contents of one that already existed, and then reported
-/// failure. The caller was told nothing happened; something had.
+/// The caller bootstraps instead, deliberately and in its own order:
 ///
-/// So the lifecycle is applied only once direct I/O is in hand:
+/// 1. create the file with an ordinary open,
+/// 2. `sync_all` it, and `sync_dir` its parent if the name has to survive a
+///    crash,
+/// 3. reopen it with `DirectIo::Required`,
+/// 4. format and recover.
 ///
-/// 1. Open the file **as it already is** — the caller's access, `O_DIRECT`,
-///    and no lifecycle flags whatever. A rejection here cannot create or
-///    truncate anything, so `Unsupported` leaves the filesystem untouched.
-///    Truncation happens afterwards, through the descriptor, once the
-///    constraints are known.
-/// 2. If the file does not exist and the caller asked for it, the inode is
-///    created and validated **before it has the caller's name**
-///    ([`stage_direct_file`]), and only then linked into place
-///    ([`publish`]). Everything that can fail, fails while the requested
-///    pathname is still untouched.
-///
-/// # Why creation cannot be rolled back instead
-///
-/// Creating the final name and removing it on failure looks equivalent and is
-/// not. An exclusive create proves the inode was this call's *at the moment it
-/// was created*; it proves nothing about what the name refers to a moment
-/// later. Between the failed open and the cleanup, another process may unlink
-/// the name and create its own file there — and the rollback would delete
-/// **that** file. Publishing last removes the window: there is no cleanup to
-/// race, because the name is only ever created, never removed.
-///
-/// Direct I/O is still mandatory: no path here returns a buffered file.
+/// A journal or pager does all four anyway; the provider would only be
+/// guessing at steps 2 and 4 on its behalf.
 async fn open_required(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> {
-    let mut last_race = None;
-    for _ in 0..CREATE_RACE_ATTEMPTS {
-        // 1. The file as it already is: no create, no create_new, no truncate.
-        match open_options(&existing_options(options), true)
-            .open(path)
-            .await
+    match open_options(&existing_options(options), true)
+        .open(path)
+        .await
+    {
+        Ok(file) => finish_existing(file, options).await,
+        Err(error) if is_direct_io_unsupported(&error) => Err(unsupported_direct_io(path, &error)),
+        Err(error)
+            if error.kind() == io::ErrorKind::NotFound
+                && (options.is_create() || options.is_create_new()) =>
         {
-            Ok(file) => return finish_existing(file, options).await,
-            Err(error) if is_direct_io_unsupported(&error) => {
-                return Err(unsupported_direct_io(path, &error));
-            }
-            Err(error)
-                if error.kind() == io::ErrorKind::NotFound
-                    && (options.is_create() || options.is_create_new()) => {}
-            Err(error) => return Err(error),
+            Err(creation_needs_a_bootstrap(path))
         }
-
-        // 2. It does not exist and the caller wants it created. The inode is
-        //    created and validated *unpublished*, so every way this can fail
-        //    leaves the requested pathname exactly as it was.
-        let staged = stage_direct_file(&parent_directory(path), path).await?;
-        let Some(constraints) = direct_io_constraints(&staged.file) else {
-            return Err(undescribable_direct_io(path));
-        };
-
-        // Publication is a link, which never replaces a name that is already
-        // there. Nothing at the requested path is ever unlinked.
-        match publish(&staged, path) {
-            Ok(()) => {
-                let file = reopen_staged(&staged, options).await?;
-                return Ok(OpenedFile::direct(file, constraints));
-            }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if options.is_create_new() {
-                    return Err(error);
-                }
-                // Somebody else won the name. A plain `create` means "open
-                // what is there", never "replace it": round again and take
-                // the existing-file path. The staged inode is dropped, and
-                // with it any trace of this attempt.
-                last_race = Some(error);
-            }
-            Err(error) => return Err(error),
-        }
+        Err(error) => Err(error),
     }
-    Err(last_race.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("'{path}' kept being created and removed while opening it"),
-        )
-    }))
 }
 
 /// Finish a `Required` open of a file that already existed: refuse it if the
@@ -721,6 +504,19 @@ fn unsupported_direct_io(path: &str, error: &io::Error) -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
         format!("direct I/O is not supported for '{path}': {error}"),
+    )
+}
+
+/// `Required` was asked to create a file. See [`open_required`] for why the
+/// provider refuses rather than doing it.
+fn creation_needs_a_bootstrap(path: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "'{path}' does not exist: direct I/O cannot be required of a file this open would \
+             have to create. Create it with an ordinary open, sync it (and its directory, if \
+             the name must be durable), then reopen it with DirectIo::Required."
+        ),
     )
 }
 
@@ -916,10 +712,7 @@ impl AsyncSeek for TokioStorageFile {
 mod tests {
     #[cfg(target_os = "linux")]
     use super::descriptor_path;
-    use super::{
-        OpenOptions, existing_options, is_direct_io_unsupported, parent_directory, staging_name,
-        upgrade_options,
-    };
+    use super::{OpenOptions, existing_options, is_direct_io_unsupported, upgrade_options};
     use std::io;
 
     /// Only the two codes that mean "this filesystem cannot do direct I/O"
@@ -1035,31 +828,6 @@ mod tests {
         assert!(!existing.is_create());
         assert!(!existing.is_create_new());
         assert!(!existing.is_truncate());
-    }
-
-    /// Staging names are unique per call, so the only path-based removal in
-    /// the creation protocol touches a name nothing else can be holding.
-    #[test]
-    fn staging_names_are_unique() {
-        let names: std::collections::BTreeSet<String> = (0..64).map(|_| staging_name()).collect();
-        assert_eq!(names.len(), 64, "every staging name must be its own");
-        assert!(
-            names
-                .iter()
-                .all(|name| name.starts_with(".moonpool-staging-"))
-        );
-    }
-
-    /// Staging happens in the directory that will hold the file, so that
-    /// publishing it is a link within one filesystem.
-    #[test]
-    fn staging_happens_beside_the_target() {
-        assert_eq!(
-            parent_directory("/tmp/db/wal"),
-            std::path::Path::new("/tmp/db")
-        );
-        assert_eq!(parent_directory("wal"), std::path::Path::new("."));
-        assert_eq!(parent_directory(""), std::path::Path::new("."));
     }
 
     /// The upgrade reopens the file the descriptor holds, not the name it was

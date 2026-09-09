@@ -48,6 +48,26 @@ where
 }
 
 /// The ownership boundary: the caller opens a file, the block layer wraps it.
+/// Open `path` for direct I/O the way a journal or pager does.
+///
+/// `DirectIo::Required` opens a file that already exists — it never creates
+/// one, because creating a file and guaranteeing direct I/O on it are two
+/// operations and publishing a pathname is the caller's protocol. So the file
+/// is bootstrapped with an ordinary open first, then reopened with the
+/// capability required.
+async fn open_direct<P: StorageProvider>(
+    provider: &P,
+    path: &str,
+    options: OpenOptions,
+) -> std::io::Result<P::File> {
+    let created = provider.open(path, OpenOptions::create_write()).await?;
+    created.sync_all().await?;
+    drop(created);
+    provider
+        .open(path, options.direct_io(DirectIo::Required))
+        .await
+}
+
 #[test]
 fn blocks_are_addressed_by_index_over_an_open_file() {
     local_runtime().block_on(async {
@@ -191,13 +211,7 @@ fn the_block_size_must_fit_the_files_alignment() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
         run_on(&mut sim, |provider| async move {
-            let direct = provider
-                .open(
-                    "direct.db",
-                    OpenOptions::create_write()
-                        .read(true)
-                        .direct_io(DirectIo::Required),
-                )
+            let direct = open_direct(&provider, "direct.db", OpenOptions::read_write())
                 .await
                 .expect("open failed");
             let alignment = direct.constraints().length_alignment();
@@ -206,13 +220,7 @@ fn the_block_size_must_fit_the_files_alignment() {
             let big = BlockFile::new(direct, alignment * 4).expect("a multiple is fine");
             assert_eq!(big.block_size(), alignment * 4);
 
-            let direct = provider
-                .open(
-                    "direct2.db",
-                    OpenOptions::create_write()
-                        .read(true)
-                        .direct_io(DirectIo::Required),
-                )
+            let direct = open_direct(&provider, "direct2.db", OpenOptions::read_write())
                 .await
                 .expect("open failed");
             assert_eq!(
@@ -249,14 +257,7 @@ fn direct_io_blocks_use_aligned_buffers_and_still_need_a_sync() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
         let result: std::io::Result<()> = run_on(&mut sim, |provider| async move {
-            let file = provider
-                .open(
-                    "engine.db",
-                    OpenOptions::create_write()
-                        .read(true)
-                        .direct_io(DirectIo::Required),
-                )
-                .await?;
+            let file = open_direct(&provider, "engine.db", OpenOptions::read_write()).await?;
             let blocks = BlockFile::new(file, BLOCK)?;
             assert!(blocks.get_ref().is_direct_io());
 
@@ -398,13 +399,7 @@ fn a_short_file_reports_eof_even_when_the_read_stalls() {
     local_runtime().block_on(async {
         let mut sim = fast_sim();
         let kind = run_on(&mut sim, |provider| async move {
-            let file = provider
-                .open(
-                    "ragged.db",
-                    OpenOptions::create_write()
-                        .read(true)
-                        .direct_io(DirectIo::Required),
-                )
+            let file = open_direct(&provider, "ragged.db", OpenOptions::read_write())
                 .await
                 .expect("open failed");
             // A length that is not a multiple of the device's transfer unit,

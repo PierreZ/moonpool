@@ -320,7 +320,34 @@ let file = provider
 - `DirectIo::Optional` asks for uncached I/O and accepts a documented fallback
   where the filesystem refuses it; `file.is_direct_io()` says which one you
   got.
-- `DirectIo::Required` fails the open rather than downgrading silently.
+- `DirectIo::Required` fails the open rather than downgrading silently, and
+  opens a file that already exists — it never creates one.
+
+That last rule is a deliberate boundary, and the native open shows why. A
+refused `O_CREAT | O_DIRECT` still leaves the file behind: the file is created
+during path resolution and `O_DIRECT` is rejected afterwards. Cleaning that up
+is a namespace protocol — stage an inode elsewhere, publish the name — not a
+file open, and it is not the provider's to run on your behalf. Whoever owns the file's format
+owns that protocol, because only they know whether the name has to be durable,
+what a half-created file means, and how recovery finds one. So a journal
+bootstraps its own file, in the order its recovery expects:
+
+```rust
+// 1. create it with an ordinary open, 2. make the file and its name durable
+let created = provider.open("db/wal", OpenOptions::create_new_write()).await?;
+created.sync_all().await?;
+drop(created);
+provider.sync_dir("db").await?;
+
+// 3. now require the capability of the file that exists, 4. format and recover
+let wal = provider
+    .open("db/wal", OpenOptions::read_write().direct_io(DirectIo::Required))
+    .await?;
+```
+
+A `Required` open of an existing file *does* honour `truncate`, and applies it
+only after direct I/O is secured, so a refused capability check cannot have
+modified the file.
 
 Direct I/O is **not durability**. An uncached write is still only visible
 until a `sync_all()` / `sync_data()` makes it durable, exactly like a buffered

@@ -41,6 +41,24 @@ pub enum DirectIo {
     /// [`io::ErrorKind::Unsupported`](std::io::ErrorKind::Unsupported).
     ///
     /// Never silently downgraded.
+    ///
+    /// It opens an **existing** file. A `Required` open that would have to
+    /// create the file is refused, `create` and `create_new` notwithstanding:
+    /// creating a file and guaranteeing direct I/O on it are two operations,
+    /// and making them look like one would mean the provider publishing a
+    /// pathname on the caller's behalf — a namespace protocol that belongs to
+    /// whoever owns the file's format. A journal or pager bootstraps its file
+    /// itself, in the order its recovery expects:
+    ///
+    /// 1. create it with an ordinary open,
+    /// 2. [`sync_all`](super::StorageFile::sync_all) it, and
+    ///    [`sync_dir`](super::StorageProvider::sync_dir) its parent if the
+    ///    name has to survive a crash,
+    /// 3. reopen it with `Required`,
+    /// 4. format and recover.
+    ///
+    /// Truncation is honored, and is applied only *after* direct I/O is
+    /// secured, so a refused capability check cannot have modified the file.
     Required,
 }
 

@@ -260,20 +260,33 @@ fn positioned_writes_ignore_append_mode() {
     });
 }
 
+/// Open `path` for direct I/O the way a journal or pager does.
+///
+/// `DirectIo::Required` opens a file that already exists — it never creates
+/// one, because creating a file and guaranteeing direct I/O on it are two
+/// operations and publishing a pathname is the caller's protocol. So the file
+/// is bootstrapped with an ordinary open first, then reopened with the
+/// capability required.
+async fn open_direct<P: StorageProvider>(
+    provider: &P,
+    path: &str,
+    options: OpenOptions,
+) -> std::io::Result<P::File> {
+    let created = provider.open(path, OpenOptions::create_write()).await?;
+    created.sync_all().await?;
+    drop(created);
+    provider
+        .open(path, options.direct_io(DirectIo::Required))
+        .await
+}
+
 /// Direct I/O is a property of the *open*, and it constrains offsets,
 /// transfer lengths, and buffer addresses independently.
 #[test]
 fn direct_io_validates_alignment() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let file = provider
-                .open(
-                    "direct.db",
-                    OpenOptions::create_write()
-                        .read(true)
-                        .direct_io(DirectIo::Required),
-                )
-                .await?;
+            let file = open_direct(&provider, "direct.db", OpenOptions::read_write()).await?;
             assert!(file.is_direct_io());
             let constraints = file.constraints();
             assert_eq!(constraints.offset_alignment(), 4096);
@@ -388,14 +401,7 @@ fn direct_io_writes_still_need_a_sync() {
         let mut sim = fast_sim();
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let file = provider
-                .open(
-                    "durability.db",
-                    OpenOptions::create_write()
-                        .read(true)
-                        .direct_io(DirectIo::Required),
-                )
-                .await?;
+            let file = open_direct(&provider, "durability.db", OpenOptions::read_write()).await?;
             let constraints = file.constraints();
             let mut block = AlignedBuf::for_constraints(4096, constraints);
             block.as_mut_slice().fill(0x5A);
@@ -477,14 +483,7 @@ fn direct_io_policy_does_not_weaken_create_new() {
 fn a_direct_io_file_refuses_stream_io() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut file = provider
-                .open(
-                    "stream.db",
-                    OpenOptions::create_write()
-                        .read(true)
-                        .direct_io(DirectIo::Required),
-                )
-                .await?;
+            let mut file = open_direct(&provider, "stream.db", OpenOptions::read_write()).await?;
             let constraints = file.constraints();
             let mut aligned =
                 AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
@@ -537,6 +536,64 @@ fn a_buffered_file_keeps_stream_io() {
         })
         .await;
         result.expect("buffered stream test failed");
+    });
+}
+
+/// `Required` never creates a file in the simulator either — on a disk that
+/// *does* support direct I/O, so the refusal is about the contract and not
+/// about the device.
+///
+/// Mirroring production here is the point: if the simulator let a caller
+/// create a file with `Required`, simulated database code would come to depend
+/// on an open the real provider refuses.
+#[test]
+fn a_required_open_never_creates_a_file() {
+    local_runtime().block_on(async {
+        let outcome = run_storage_test(fast_sim(), |provider| async move {
+            let mut refusals = Vec::new();
+            for options in [
+                OpenOptions::create_write().direct_io(DirectIo::Required),
+                OpenOptions::create_new_write().direct_io(DirectIo::Required),
+            ] {
+                refusals.push(
+                    provider
+                        .open("bootstrap.db", options)
+                        .await
+                        .err()
+                        .map(|error| error.kind()),
+                );
+            }
+            let leaked = provider.exists("bootstrap.db").await?;
+
+            // Without create at all, the ordinary answer.
+            let missing = provider
+                .open(
+                    "bootstrap.db",
+                    OpenOptions::read_only().direct_io(DirectIo::Required),
+                )
+                .await
+                .err()
+                .map(|error| error.kind());
+
+            // The documented bootstrap, which does work.
+            let file = open_direct(&provider, "bootstrap.db", OpenOptions::read_write()).await?;
+            let direct = file.is_direct_io();
+            Ok::<_, std::io::Error>((refusals, leaked, missing, direct))
+        })
+        .await
+        .expect("simulated open sequence failed");
+
+        assert_eq!(
+            outcome.0,
+            vec![
+                Some(std::io::ErrorKind::Unsupported),
+                Some(std::io::ErrorKind::Unsupported)
+            ],
+            "Required must refuse to create, whatever the lifecycle flags say"
+        );
+        assert!(!outcome.1, "a refused Required create must create nothing");
+        assert_eq!(outcome.2, Some(std::io::ErrorKind::NotFound));
+        assert!(outcome.3, "the bootstrapped file is opened for direct I/O");
     });
 }
 

@@ -48,6 +48,21 @@ pub enum StorageError {
     #[error("direct I/O is not supported by this disk")]
     DirectIoUnsupported,
 
+    /// A `DirectIo::Required` open would have had to create the file.
+    ///
+    /// `Required` opens an existing file; bootstrapping one is the caller's
+    /// protocol, not the provider's. Mirrors the production provider so
+    /// simulated code cannot rely on an open production refuses.
+    #[error(
+        "'{path}' does not exist: direct I/O cannot be required of a file this open would have \
+         to create. Create it with an ordinary open, sync it (and its directory, if the name \
+         must be durable), then reopen it with DirectIo::Required."
+    )]
+    DirectIoCreate {
+        /// The path the open would have created.
+        path: String,
+    },
+
     /// Persistent contents disappeared while a handle was still live.
     #[error("file no longer exists: {file_id:?}")]
     MissingFile {
@@ -118,7 +133,9 @@ impl From<StorageError> for io::Error {
             StorageError::InvalidOperation { .. } | StorageError::InvalidOperationData { .. } => {
                 io::ErrorKind::InvalidInput
             }
-            StorageError::DirectIoUnsupported => io::ErrorKind::Unsupported,
+            StorageError::DirectIoUnsupported | StorageError::DirectIoCreate { .. } => {
+                io::ErrorKind::Unsupported
+            }
             StorageError::OperationInterrupted { .. } => io::ErrorKind::Interrupted,
             StorageError::SimulationShutdown { .. } => io::ErrorKind::BrokenPipe,
             StorageError::ScheduleFailed { .. } => io::ErrorKind::Other,

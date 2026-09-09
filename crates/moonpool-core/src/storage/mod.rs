@@ -82,7 +82,17 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
     /// database file is an ordinary file opened differently, never a different
     /// kind of file. An open that asks for
     /// [`DirectIo::Required`](crate::DirectIo::Required) and cannot get it
-    /// fails rather than quietly returning a buffered file.
+    /// fails rather than quietly returning a buffered file, and — since it
+    /// opens an existing file — is refused outright when the file is missing.
+    ///
+    /// The open is one filesystem operation with the platform's own
+    /// semantics. It is not a transaction: the provider does not stage a file
+    /// elsewhere and publish it, does not roll back a partly-applied
+    /// lifecycle, and offers no atomicity across the combination of `create`,
+    /// `truncate` and a capability the filesystem may refuse. File
+    /// creation and publication protocols belong to the database or journal
+    /// that owns the file's format — it knows what a half-created file means
+    /// and how recovery finds one; the provider does not.
     fn open(
         &self,
         path: &str,

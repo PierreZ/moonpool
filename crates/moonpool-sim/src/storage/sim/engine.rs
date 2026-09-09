@@ -158,6 +158,15 @@ impl StorageEngine {
         if options.is_create_new() && self.state.path_to_file.contains_key(&path) {
             return Err(StorageError::AlreadyExists { path });
         }
+        // `Required` opens a file that is already there. Refusing to create
+        // one keeps the simulated provider honest about what production does,
+        // and keeps file bootstrap in the caller's protocol where it belongs.
+        if options.requested_direct_io() == DirectIo::Required
+            && !self.state.path_to_file.contains_key(&path)
+            && (options.is_create() || options.is_create_new())
+        {
+            return Err(StorageError::DirectIoCreate { path });
+        }
 
         let file_id = if let Some(existing_id) = self.state.path_to_file.get(&path).copied() {
             if options.is_truncate()
