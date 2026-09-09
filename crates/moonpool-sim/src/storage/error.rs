@@ -44,6 +44,10 @@ pub enum StorageError {
         operation: &'static str,
     },
 
+    /// An open asked for direct I/O the disk cannot provide.
+    #[error("direct I/O is not supported by this disk")]
+    DirectIoUnsupported,
+
     /// Persistent contents disappeared while a handle was still live.
     #[error("file no longer exists: {file_id:?}")]
     MissingFile {
@@ -114,6 +118,7 @@ impl From<StorageError> for io::Error {
             StorageError::InvalidOperation { .. } | StorageError::InvalidOperationData { .. } => {
                 io::ErrorKind::InvalidInput
             }
+            StorageError::DirectIoUnsupported => io::ErrorKind::Unsupported,
             StorageError::OperationInterrupted { .. } => io::ErrorKind::Interrupted,
             StorageError::SimulationShutdown { .. } => io::ErrorKind::BrokenPipe,
             StorageError::ScheduleFailed { .. } => io::ErrorKind::Other,

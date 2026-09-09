@@ -8,7 +8,14 @@ use std::task::{Context, Poll};
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
-use super::{OpenOptions, StorageFile, StorageProvider};
+use super::{DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider};
+
+/// Alignment assumed for a direct-I/O file.
+///
+/// A conservative superset: 4 KiB satisfies both 512-byte and 4 KiB logical
+/// block sizes, so a transfer legal here is legal on either device. Querying
+/// the device for a smaller value would only *widen* what callers may do.
+const DIRECT_IO_ALIGNMENT: usize = 4096;
 
 /// Real Tokio storage implementation.
 #[derive(Debug, Clone, Default)]
@@ -26,15 +33,7 @@ impl StorageProvider for TokioStorageProvider {
     type File = TokioStorageFile;
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
-        let file = tokio::fs::OpenOptions::new()
-            .read(options.is_read())
-            .write(options.is_write())
-            .create(options.is_create())
-            .create_new(options.is_create_new())
-            .truncate(options.is_truncate())
-            .append(options.is_append())
-            .open(path)
-            .await?;
+        let (file, direct) = open_file(path, &options).await?;
         // A second descriptor onto the same open file description, used for
         // positioned I/O: `read_at`/`write_at` must not disturb the stream
         // cursor, and the OS positioned calls need a blocking `std::fs::File`.
@@ -42,6 +41,12 @@ impl StorageProvider for TokioStorageProvider {
         Ok(TokioStorageFile {
             inner: file.compat(),
             positioned: Arc::new(positioned),
+            constraints: if direct {
+                IoConstraints::uniform(DIRECT_IO_ALIGNMENT)
+            } else {
+                IoConstraints::NONE
+            },
+            direct,
         })
     }
 
@@ -55,6 +60,55 @@ impl StorageProvider for TokioStorageProvider {
 
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         tokio::fs::rename(from, to).await
+    }
+}
+
+/// Build the tokio open options for `options`, optionally adding `O_DIRECT`.
+fn open_options(options: &OpenOptions, direct: bool) -> tokio::fs::OpenOptions {
+    let mut builder = tokio::fs::OpenOptions::new();
+    builder
+        .read(options.is_read())
+        .write(options.is_write())
+        .create(options.is_create())
+        .create_new(options.is_create_new())
+        .truncate(options.is_truncate())
+        .append(options.is_append());
+    #[cfg(target_os = "linux")]
+    if direct {
+        builder.custom_flags(libc::O_DIRECT);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = direct;
+    builder
+}
+
+/// Whether this build can ask the kernel for uncached I/O at all.
+const DIRECT_IO_SUPPORTED: bool = cfg!(target_os = "linux");
+
+/// Open `path`, honoring the requested direct-I/O policy.
+///
+/// Returns the file and whether direct I/O was actually achieved. `Optional`
+/// falls back to a buffered open when the filesystem rejects the flag (tmpfs
+/// and several network filesystems do); `Required` never falls back.
+///
+/// A `create_new` open that fell back would fail with `AlreadyExists`, since
+/// the rejected attempt may still have created the file — so the fallback
+/// retries without the exclusivity that the first attempt already satisfied.
+async fn open_file(path: &str, options: &OpenOptions) -> io::Result<(tokio::fs::File, bool)> {
+    match options.requested_direct_io() {
+        DirectIo::Disabled => Ok((open_options(options, false).open(path).await?, false)),
+        DirectIo::Required if !DIRECT_IO_SUPPORTED => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "direct I/O is not supported on this platform",
+        )),
+        DirectIo::Required => Ok((open_options(options, true).open(path).await?, true)),
+        DirectIo::Optional => {
+            if DIRECT_IO_SUPPORTED && let Ok(file) = open_options(options, true).open(path).await {
+                return Ok((file, true));
+            }
+            let fallback = options.clone().create_new(false);
+            Ok((open_options(&fallback, false).open(path).await?, false))
+        }
     }
 }
 
@@ -73,6 +127,8 @@ pub struct TokioStorageFile {
     /// description (and therefore the file's contents and open flags) with
     /// `inner`, but positioned calls use neither descriptor's cursor.
     positioned: Arc<std::fs::File>,
+    constraints: IoConstraints,
+    direct: bool,
 }
 
 /// One positioned read against the OS.
@@ -135,10 +191,19 @@ impl StorageFile for TokioStorageFile {
         self.inner.get_ref().sync_data().await
     }
 
+    fn constraints(&self) -> IoConstraints {
+        self.constraints
+    }
+
+    fn is_direct_io(&self) -> bool {
+        self.direct
+    }
+
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
+        self.constraints.check(offset, buf)?;
         let file = Arc::clone(&self.positioned);
         let mut bounce = vec![0u8; buf.len()];
         let (read, bounce) = run_blocking(move || {
@@ -154,6 +219,7 @@ impl StorageFile for TokioStorageFile {
         if buf.is_empty() {
             return Ok(0);
         }
+        self.constraints.check(offset, buf)?;
         let file = Arc::clone(&self.positioned);
         let bounce = buf.to_vec();
         run_blocking(move || write_at_blocking(&file, offset, &bounce)).await

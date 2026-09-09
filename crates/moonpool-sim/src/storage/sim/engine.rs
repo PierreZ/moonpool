@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use moonpool_core::OpenOptions;
+use moonpool_core::{DirectIo, IoConstraints, OpenOptions};
 
 use super::{
     DiskDegradationState, DiskEpisodeKind, FileId, HandleId, OperationId, StorageEvent,
@@ -139,6 +139,7 @@ impl StorageEngine {
         owner_ip: IpAddr,
     ) -> Result<HandleId, StorageError> {
         let path = path.to_string();
+        let (constraints, direct_io) = self.resolve_direct_io(&options, owner_ip)?;
         if options.is_create_new() && self.state.path_to_file.contains_key(&path) {
             return Err(StorageError::AlreadyExists { path });
         }
@@ -178,10 +179,51 @@ impl StorageEngine {
         };
         let handle_id = HandleId(self.state.next_handle_id);
         self.state.next_handle_id += 1;
-        self.state
-            .handles
-            .insert(handle_id, HandleState::new(file_id, position, options));
+        self.state.handles.insert(
+            handle_id,
+            HandleState::new(file_id, position, options, constraints, direct_io),
+        );
         Ok(handle_id)
+    }
+
+    /// Resolve an open's direct-I/O policy against the disk's geometry.
+    ///
+    /// `Required` never silently downgrades: a disk that cannot provide
+    /// uncached I/O fails the open. `Optional` falls back to buffered I/O and
+    /// says so through the handle's reported constraints. Neither draws
+    /// randomness — this is device geometry, not a fault.
+    fn resolve_direct_io(
+        &self,
+        options: &OpenOptions,
+        owner_ip: IpAddr,
+    ) -> Result<(IoConstraints, bool), StorageError> {
+        let config = self.state.config_for(owner_ip);
+        let supported = config.direct_io_supported;
+        let alignment = config.direct_io_alignment;
+        let honored = match options.requested_direct_io() {
+            DirectIo::Disabled => false,
+            DirectIo::Optional => supported,
+            DirectIo::Required if supported => true,
+            DirectIo::Required => return Err(StorageError::DirectIoUnsupported),
+        };
+        Ok(if honored {
+            (IoConstraints::uniform(alignment), true)
+        } else {
+            (IoConstraints::NONE, false)
+        })
+    }
+
+    /// The alignment `handle_id` enforces on every transfer.
+    pub(crate) fn handle_constraints(
+        &self,
+        handle_id: HandleId,
+    ) -> Result<IoConstraints, StorageError> {
+        Ok(self.open_handle(handle_id)?.constraints)
+    }
+
+    /// Whether `handle_id` is doing direct (uncached) I/O.
+    pub(crate) fn handle_is_direct_io(&self, handle_id: HandleId) -> Result<bool, StorageError> {
+        Ok(self.open_handle(handle_id)?.direct_io)
     }
 
     pub(crate) fn file_exists(&self, path: &str) -> bool {

@@ -7,6 +7,39 @@
 //! provider stack: a journal opens an ordinary file, it does not open a
 //! "journal device".
 
+/// Whether an open should use direct (uncached) I/O.
+///
+/// Direct I/O bypasses the operating system's page cache, which is what a
+/// database wants when it manages its own buffer pool: a read returns what the
+/// device holds rather than what the kernel remembers, so a failed sync cannot
+/// be papered over by re-reading a clean-marked page.
+///
+/// It is **not** durability. A direct write is still only visible until a
+/// [`sync_all`](super::StorageFile::sync_all) /
+/// [`sync_data`](super::StorageFile::sync_data) makes it durable, exactly as a
+/// buffered one is.
+///
+/// Direct I/O comes with alignment requirements; read them off the opened file
+/// with [`StorageFile::constraints`](super::StorageFile::constraints) rather
+/// than assuming a value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DirectIo {
+    /// Ordinary buffered I/O.
+    #[default]
+    Disabled,
+    /// Ask for direct I/O, and accept buffered I/O where the platform or
+    /// filesystem will not provide it (tmpfs, for instance).
+    ///
+    /// The open succeeds either way; ask the opened file which it got with
+    /// [`StorageFile::is_direct_io`](super::StorageFile::is_direct_io).
+    Optional,
+    /// Require direct I/O: if it cannot be honored, the open **fails** with
+    /// [`io::ErrorKind::Unsupported`](std::io::ErrorKind::Unsupported).
+    ///
+    /// Never silently downgraded.
+    Required,
+}
+
 /// Options for opening a file.
 ///
 /// A value-consuming builder, matching moonpool's provider conventions: each
@@ -26,6 +59,8 @@
 pub struct OpenOptions {
     /// Bit-packed flags. See the `FLAG_*` constants on this type.
     flags: u8,
+    /// Direct-I/O policy for this open.
+    direct_io: DirectIo,
 }
 
 impl OpenOptions {
@@ -40,6 +75,19 @@ impl OpenOptions {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the direct-I/O policy (see [`DirectIo`]).
+    #[must_use]
+    pub fn direct_io(mut self, policy: DirectIo) -> Self {
+        self.direct_io = policy;
+        self
+    }
+
+    /// The direct-I/O policy this open requests.
+    #[must_use]
+    pub fn requested_direct_io(&self) -> DirectIo {
+        self.direct_io
     }
 
     fn set_flag(mut self, flag: u8, value: bool) -> Self {
@@ -146,7 +194,7 @@ impl OpenOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::OpenOptions;
+    use super::{DirectIo, OpenOptions};
 
     #[test]
     fn flags_round_trip() {
@@ -170,5 +218,16 @@ mod tests {
         );
         assert!(OpenOptions::create_write().is_truncate());
         assert!(OpenOptions::create_new_write().is_create_new());
+    }
+
+    #[test]
+    fn direct_io_is_off_unless_asked_for() {
+        assert_eq!(OpenOptions::new().requested_direct_io(), DirectIo::Disabled);
+        assert_eq!(
+            OpenOptions::read_write()
+                .direct_io(DirectIo::Required)
+                .requested_direct_io(),
+            DirectIo::Required
+        );
     }
 }

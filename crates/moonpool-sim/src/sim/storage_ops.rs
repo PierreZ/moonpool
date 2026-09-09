@@ -90,6 +90,17 @@ impl SimWorld {
             .open_file(path, options, initial_size, owner_ip)
     }
 
+    pub(crate) fn handle_constraints(
+        &self,
+        handle_id: HandleId,
+    ) -> Result<moonpool_core::IoConstraints, StorageError> {
+        self.inner.read().storage.handle_constraints(handle_id)
+    }
+
+    pub(crate) fn handle_is_direct_io(&self, handle_id: HandleId) -> Result<bool, StorageError> {
+        self.inner.read().storage.handle_is_direct_io(handle_id)
+    }
+
     pub(crate) fn file_exists(&self, path: &str) -> bool {
         self.inner.read().storage.file_exists(path)
     }

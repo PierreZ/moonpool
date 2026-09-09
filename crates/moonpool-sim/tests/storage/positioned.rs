@@ -5,7 +5,7 @@
 //! cursor and no pretence of being `read_exact`/`write_all`.
 
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{AlignedBuf, DirectIo, OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
 use std::net::IpAddr;
@@ -257,5 +257,162 @@ fn positioned_writes_ignore_append_mode() {
         })
         .await;
         result.expect("append test failed");
+    });
+}
+
+/// Direct I/O is a property of the *open*, and it constrains offsets,
+/// transfer lengths, and buffer addresses independently.
+#[test]
+fn direct_io_validates_alignment() {
+    local_runtime().block_on(async {
+        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
+            let file = provider
+                .open(
+                    "direct.db",
+                    OpenOptions::create_write()
+                        .read(true)
+                        .direct_io(DirectIo::Required),
+                )
+                .await?;
+            assert!(file.is_direct_io());
+            let constraints = file.constraints();
+            assert_eq!(constraints.offset_alignment(), 4096);
+            assert!(!constraints.is_unconstrained());
+
+            let block = constraints.offset_alignment();
+            let mut aligned = AlignedBuf::for_constraints(4096, constraints);
+            aligned.as_mut_slice().fill(0xAB);
+            assert_eq!(file.write_at(block, aligned.as_slice()).await?, 4096);
+
+            // Misaligned offset, misaligned length, misaligned memory: three
+            // separate rejections, all InvalidInput.
+            let misaligned_offset = file.write_at(block + 1, aligned.as_slice()).await;
+            assert_eq!(
+                misaligned_offset.expect_err("misaligned offset").kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+
+            let short = vec![0u8; 100];
+            assert_eq!(
+                file.write_at(block, &short)
+                    .await
+                    .expect_err("short")
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+
+            let unaligned_memory = &aligned.as_slice()[8..8 + 4088];
+            assert_eq!(
+                file.write_at(block, unaligned_memory)
+                    .await
+                    .expect_err("unaligned memory")
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+
+            // An aligned read gets the aligned bytes back.
+            let mut read_buf = AlignedBuf::for_constraints(4096, constraints);
+            assert_eq!(file.read_at(block, read_buf.as_mut_slice()).await?, 4096);
+            assert!(read_buf.iter().all(|byte| *byte == 0xAB));
+            Ok(())
+        })
+        .await;
+        result.expect("direct I/O test failed");
+    });
+}
+
+/// `DirectIo::Required` fails the open on a disk that cannot provide it, and
+/// is never silently downgraded.
+#[test]
+fn direct_io_required_fails_when_unsupported() {
+    local_runtime().block_on(async {
+        let mut config = StorageConfiguration::fast_local();
+        config.direct_io_supported = false;
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+
+        let error = run_storage_test(sim, |provider| async move {
+            provider
+                .open(
+                    "no-direct.db",
+                    OpenOptions::create_write().direct_io(DirectIo::Required),
+                )
+                .await
+                .err()
+                .map(|error| error.kind())
+        })
+        .await;
+
+        assert_eq!(
+            error,
+            Some(std::io::ErrorKind::Unsupported),
+            "a required direct-I/O open must fail rather than downgrade"
+        );
+    });
+}
+
+/// `DirectIo::Optional` falls back to buffered I/O, and says so.
+#[test]
+fn direct_io_optional_falls_back() {
+    local_runtime().block_on(async {
+        let mut config = StorageConfiguration::fast_local();
+        config.direct_io_supported = false;
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+
+        let result: std::io::Result<()> = run_storage_test(sim, |provider| async move {
+            let file = provider
+                .open(
+                    "fallback.db",
+                    OpenOptions::create_write()
+                        .read(true)
+                        .direct_io(DirectIo::Optional),
+                )
+                .await?;
+            assert!(!file.is_direct_io(), "the fallback is buffered I/O");
+            assert!(file.constraints().is_unconstrained());
+
+            // A buffered file takes any offset and any length.
+            assert_eq!(file.write_at(3, b"seven!!").await?, 7);
+            Ok(())
+        })
+        .await;
+        result.expect("fallback test failed");
+    });
+}
+
+/// Direct I/O is not durability: an uncached write still needs a sync.
+#[test]
+fn direct_io_writes_still_need_a_sync() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let file = provider
+                .open(
+                    "durability.db",
+                    OpenOptions::create_write()
+                        .read(true)
+                        .direct_io(DirectIo::Required),
+                )
+                .await?;
+            let constraints = file.constraints();
+            let mut block = AlignedBuf::for_constraints(4096, constraints);
+            block.as_mut_slice().fill(0x5A);
+            file.write_at(0, block.as_slice()).await?;
+            // Deliberately no sync: the bytes are visible, not durable.
+            let mut check = AlignedBuf::for_constraints(4096, constraints);
+            assert_eq!(file.read_at(0, check.as_mut_slice()).await?, 4096);
+            assert!(check.iter().all(|byte| *byte == 0x5A));
+            Ok::<_, std::io::Error>(())
+        });
+
+        while !handle.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        handle.await.expect("task panicked").expect("write failed");
     });
 }

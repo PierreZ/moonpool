@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use moonpool_core::OpenOptions;
+use moonpool_core::{IoConstraints, OpenOptions};
 
 use super::OperationId;
 use crate::storage::{InMemoryStorage, StorageConfiguration};
@@ -49,16 +49,28 @@ pub(crate) struct HandleState {
     pub(crate) file_id: FileId,
     pub(crate) position: u64,
     pub(crate) options: OpenOptions,
+    /// Alignment this handle enforces, fixed when the file was opened.
+    pub(crate) constraints: IoConstraints,
+    /// Whether the open actually got direct I/O.
+    pub(crate) direct_io: bool,
     pub(crate) pending_ops: BTreeSet<OperationId>,
     pub(crate) is_closed: bool,
 }
 
 impl HandleState {
-    pub(crate) fn new(file_id: FileId, position: u64, options: OpenOptions) -> Self {
+    pub(crate) fn new(
+        file_id: FileId,
+        position: u64,
+        options: OpenOptions,
+        constraints: IoConstraints,
+        direct_io: bool,
+    ) -> Self {
         Self {
             file_id,
             position,
             options,
+            constraints,
+            direct_io,
             pending_ops: BTreeSet::new(),
             is_closed: false,
         }

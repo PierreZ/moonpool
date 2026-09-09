@@ -3,7 +3,7 @@
 use crate::sim::WeakSimWorld;
 use crate::storage::sim::{HandleId, OperationId, StorageCompletion};
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use moonpool_core::StorageFile;
+use moonpool_core::{IoConstraints, StorageFile};
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +33,11 @@ use super::sim_shutdown_error;
 pub struct SimStorageFile {
     sim: WeakSimWorld,
     handle_id: HandleId,
+    /// Alignment every transfer through this handle must satisfy, fixed when
+    /// the file was opened. `IoConstraints::NONE` for a buffered open.
+    constraints: IoConstraints,
+    /// Whether the open actually got direct (uncached) I/O.
+    direct_io: bool,
     closed: AtomicBool,
     /// Pending read operation: (`op_seq`, offset, len)
     pending_read: Option<(OperationId, u64, usize)>,
@@ -42,10 +47,17 @@ pub struct SimStorageFile {
 
 impl SimStorageFile {
     /// Create a new simulated storage file.
-    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId) -> Self {
+    pub(crate) fn new(
+        sim: WeakSimWorld,
+        handle_id: HandleId,
+        constraints: IoConstraints,
+        direct_io: bool,
+    ) -> Self {
         Self {
             sim,
             handle_id,
+            constraints,
+            direct_io,
             closed: AtomicBool::new(false),
             pending_read: None,
             pending_write: None,
@@ -73,11 +85,20 @@ impl StorageFile for SimStorageFile {
         SyncFuture::new(self.sim.clone(), self.handle_id).await
     }
 
+    fn constraints(&self) -> IoConstraints {
+        self.constraints
+    }
+
+    fn is_direct_io(&self) -> bool {
+        self.direct_io
+    }
+
     async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         self.ensure_open()?;
         if buf.is_empty() {
             return Ok(0);
         }
+        self.constraints.check(offset, buf)?;
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
         let size = sim.file_size(self.handle_id)?;
         if offset >= size {
@@ -96,6 +117,7 @@ impl StorageFile for SimStorageFile {
         if buf.is_empty() {
             return Ok(0);
         }
+        self.constraints.check(offset, buf)?;
         WriteAtFuture::new(self.sim.clone(), self.handle_id, offset, buf.to_vec()).await
     }
 
@@ -149,6 +171,7 @@ impl AsyncRead for SimStorageFile {
 
         // Get current position
         let position = sim.file_position(this.handle_id)?;
+        this.constraints.check(position, buf)?;
 
         // Get file size to check for EOF
         let file_size = sim.file_size(this.handle_id)?;
@@ -220,6 +243,7 @@ impl AsyncWrite for SimStorageFile {
 
         // Get current position
         let position = sim.file_position(this.handle_id)?;
+        this.constraints.check(position, buf)?;
 
         // Schedule the write operation
         let operation_id = sim.schedule_write(this.handle_id, position, buf.to_vec())?;

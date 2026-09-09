@@ -36,6 +36,7 @@
 //! [`AsyncWrite`]: futures::io::AsyncWrite
 //! [`AsyncSeek`]: futures::io::AsyncSeek
 
+mod align;
 mod options;
 #[cfg(feature = "tokio-fs")]
 mod tokio_impl;
@@ -43,7 +44,8 @@ mod tokio_impl;
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use std::io;
 
-pub use options::OpenOptions;
+pub use align::{AlignedBuf, IoConstraints};
+pub use options::{DirectIo, OpenOptions};
 #[cfg(feature = "tokio-fs")]
 pub use tokio_impl::{TokioStorageFile, TokioStorageProvider};
 
@@ -59,6 +61,12 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
     type File: StorageFile + 'static;
 
     /// Open a file with the given options.
+    ///
+    /// The options decide the file's properties, direct I/O included: a
+    /// database file is an ordinary file opened differently, never a different
+    /// kind of file. An open that asks for
+    /// [`DirectIo::Required`](crate::DirectIo::Required) and cannot get it
+    /// fails rather than quietly returning a buffered file.
     fn open(
         &self,
         path: &str,
@@ -102,6 +110,21 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     /// The cheaper barrier, for the common case where the caller already knows
     /// the file is large enough and only needs the bytes to land.
     fn sync_data(&self) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
+    /// The alignment this file requires of offsets, transfer lengths, and
+    /// buffer addresses.
+    ///
+    /// [`IoConstraints::NONE`] for an ordinary buffered file; a direct-I/O
+    /// file reports what the device demands. Cheap: the constraints are fixed
+    /// when the file is opened.
+    fn constraints(&self) -> IoConstraints;
+
+    /// Whether this file is actually doing direct (uncached) I/O.
+    ///
+    /// Answers what the open *achieved*, not what it asked for — the
+    /// difference that matters after
+    /// [`DirectIo::Optional`](crate::DirectIo::Optional) fell back.
+    fn is_direct_io(&self) -> bool;
 
     /// Read into `buf` starting at `offset`, without touching the stream
     /// cursor.

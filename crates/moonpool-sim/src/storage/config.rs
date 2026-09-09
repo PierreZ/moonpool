@@ -177,6 +177,29 @@ pub struct StorageConfiguration {
     /// Tests error handling in durability-critical code paths.
     pub sync_failure_probability: f64,
 
+    // =========================================================================
+    // Device Geometry
+    // =========================================================================
+    /// Alignment a direct-I/O file on this disk demands of offsets, transfer
+    /// lengths, and buffer addresses.
+    ///
+    /// Reported to callers through
+    /// [`StorageFile::constraints`](moonpool_core::StorageFile::constraints)
+    /// and enforced on every transfer, so code that would earn `EINVAL` from a
+    /// real `O_DIRECT` file earns it here. Must be a power of two. This is a
+    /// *device* property: it is not the caller's block or page size, and it
+    /// says nothing about crash atomicity.
+    pub direct_io_alignment: usize,
+
+    /// Whether this disk can provide direct I/O at all.
+    ///
+    /// `false` models a filesystem that refuses `O_DIRECT` (tmpfs, several
+    /// network filesystems): a
+    /// [`DirectIo::Optional`](moonpool_core::DirectIo::Optional) open falls
+    /// back to buffered I/O and a
+    /// [`DirectIo::Required`](moonpool_core::DirectIo::Required) open fails.
+    pub direct_io_supported: bool,
+
     /// Per-operation probability that a read or write moves *fewer* bytes than
     /// asked for (0.0 - 1.0).
     ///
@@ -279,6 +302,8 @@ impl Default for StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            direct_io_alignment: 4096,
+            direct_io_supported: true,
             short_transfer_probability: 0.0,
 
             // Dynamic disk degradation - disabled by default (no-op multipliers)
@@ -337,6 +362,8 @@ impl StorageConfiguration {
             misdirect_read_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
             phantom_write_probability: f64::from(sim_random_range(0..20)) / 100_000.0,
             sync_failure_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
+            direct_io_alignment: 4096,
+            direct_io_supported: true,
             short_transfer_probability: f64::from(sim_random_range(0..200)) / 100_000.0,
 
             // Low-rate disk-degradation episodes (drawn after the faults so the
@@ -505,6 +532,8 @@ impl StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            direct_io_alignment: 4096,
+            direct_io_supported: true,
             short_transfer_probability: 0.0,
 
             // Disk degradation disabled (no-op multipliers)
