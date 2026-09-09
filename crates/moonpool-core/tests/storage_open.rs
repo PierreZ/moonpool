@@ -457,8 +457,50 @@ fn a_required_open_never_creates_a_file() {
         let dir = TempDir::new().expect("temp dir");
         let provider = TokioStorageProvider::new();
 
-        // No create at all: the ordinary answer, and nothing brought into
-        // existence.
+        // First, the documented bootstrap — create ordinarily, sync the file
+        // and the directory entry, then require direct I/O of the file that
+        // now exists — which also settles whether this platform has direct I/O
+        // at all. It matters below: a platform without it (macOS) refuses
+        // `Required` before it ever resolves the path, so a missing file is
+        // reported as `Unsupported` rather than as missing.
+        let target = dir.path().join("bootstrap.db");
+        let target = target.to_str().expect("temp path is valid UTF-8");
+        let created = provider
+            .open(target, OpenOptions::create_new_write())
+            .await
+            .expect("the ordinary create must succeed");
+        created.sync_all().await.expect("sync failed");
+        drop(created);
+        provider
+            .sync_dir(dir.path().to_str().expect("utf-8"))
+            .await
+            .expect("sync_dir failed");
+
+        let direct_io_available = match provider
+            .open(
+                target,
+                OpenOptions::read_write().direct_io(DirectIo::Required),
+            )
+            .await
+        {
+            Ok(file) => {
+                assert!(
+                    file.is_direct_io(),
+                    "Required never returns a buffered file"
+                );
+                true
+            }
+            Err(error) => {
+                assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::Unsupported,
+                    "the only reason to fail on a file that exists is that direct I/O is absent"
+                );
+                false
+            }
+        };
+
+        // No create at all: the ordinary answer where the path is reached.
         let missing = dir.path().join("absent.db");
         let missing = missing.to_str().expect("temp path is valid UTF-8");
         let error = provider
@@ -468,15 +510,25 @@ fn a_required_open_never_creates_a_file() {
             )
             .await
             .expect_err("a missing file without create must fail");
-        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            error.kind(),
+            if direct_io_available {
+                std::io::ErrorKind::NotFound
+            } else {
+                std::io::ErrorKind::Unsupported
+            }
+        );
         assert!(!provider.exists(missing).await.expect("exists failed"));
 
         // With create, or create_new: refused, and still nothing created.
+        // `Unsupported` either way — here because the provider will not create
+        // a file for a capability it has not secured, on macOS because it has
+        // no such capability to secure.
         for options in [
             OpenOptions::create_write().direct_io(DirectIo::Required),
             OpenOptions::create_new_write().direct_io(DirectIo::Required),
         ] {
-            let target = dir.path().join("bootstrap.db");
+            let target = dir.path().join("uncreated.db");
             let target = target.to_str().expect("temp path is valid UTF-8");
             let error = provider
                 .open(target, options)
@@ -491,37 +543,6 @@ fn a_required_open_never_creates_a_file() {
                 !provider.exists(target).await.expect("exists failed"),
                 "a refused Required create must not leave a file behind"
             );
-        }
-
-        // The documented bootstrap: create ordinarily, sync the file and the
-        // directory entry, then require direct I/O of the file that now
-        // exists.
-        let target = dir.path().join("bootstrap.db");
-        let target = target.to_str().expect("temp path is valid UTF-8");
-        let created = provider
-            .open(target, OpenOptions::create_new_write())
-            .await
-            .expect("the ordinary create must succeed");
-        created.sync_all().await.expect("sync failed");
-        drop(created);
-        provider
-            .sync_dir(dir.path().to_str().expect("utf-8"))
-            .await
-            .expect("sync_dir failed");
-
-        match provider
-            .open(
-                target,
-                OpenOptions::read_write().direct_io(DirectIo::Required),
-            )
-            .await
-        {
-            Ok(file) => assert!(file.is_direct_io()),
-            Err(error) => assert_eq!(
-                error.kind(),
-                std::io::ErrorKind::Unsupported,
-                "the only remaining reason to fail is that this filesystem has no direct I/O"
-            ),
         }
     });
 }

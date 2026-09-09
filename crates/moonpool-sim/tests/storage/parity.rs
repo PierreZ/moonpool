@@ -61,6 +61,22 @@ enum Observation {
     Exists(bool),
 }
 
+/// What a step *allowed*, which is the whole of the one-sided invariant.
+///
+/// The error kind is deliberately not part of this. Where the platform has no
+/// direct I/O at all, `Required` is refused before the path is ever resolved,
+/// so a missing file is reported as `Unsupported`; where it does, the path is
+/// resolved first and a missing file is reported as missing. Both refuse, and
+/// which reason surfaces first is a property of the platform rather than of
+/// the contract.
+fn permitted(observation: Observation) -> bool {
+    match observation {
+        Observation::Opened { .. } => true,
+        Observation::Refused(_) => false,
+        Observation::Exists(exists) => exists,
+    }
+}
+
 fn observe<F: StorageFile>(result: std::io::Result<F>) -> Observation {
     match result {
         Ok(file) => Observation::Opened {
@@ -79,7 +95,7 @@ fn observe<F: StorageFile>(result: std::io::Result<F>) -> Observation {
 async fn required_contract<P: StorageProvider>(
     provider: P,
     prefix: String,
-) -> std::io::Result<Vec<(&'static str, Observation)>> {
+) -> std::io::Result<Log> {
     let mut log = Vec::new();
 
     // The bootstrap `Required` will not do for you: an ordinary create, made
@@ -171,17 +187,113 @@ async fn required_contract<P: StorageProvider>(
     Ok(log)
 }
 
-fn observation_of(log: &[(&'static str, Observation)], label: &str) -> Observation {
+fn observation_of(log: &Log, label: &str) -> Observation {
     log.iter().find(|(name, _)| *name == label).map_or_else(
         || panic!("no step labelled {label:?}"),
         |(_, observation)| *observation,
     )
 }
 
-/// The same five scenarios against both providers, which must answer alike.
+type Log = Vec<(&'static str, Observation)>;
+
+/// The invariant, in the form that holds everywhere: the simulator allowed
+/// exactly what production allowed. Nothing opened that production refused,
+/// and nothing exists that production did not create.
+fn assert_same_permissiveness(production: &Log, simulated: &Log) {
+    let allowed = |log: &Log| {
+        log.iter()
+            .map(|(label, observation)| (*label, permitted(*observation)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        allowed(production),
+        allowed(simulated),
+        "the simulated provider must allow exactly what production allows"
+    );
+}
+
+/// Equally platform-independent, and what stops both backends from being wrong
+/// in the same way: a refused open creates nothing, an existing file is never
+/// taken by `create_new`, and `Required` never hands back a buffered file.
+fn assert_structural_claims(backend: &str, log: &Log) {
+    for label in [
+        "missing without create + Required: exists after",
+        "missing + create + Required: exists after",
+        "missing + create_new + Required: exists after",
+    ] {
+        assert_eq!(
+            observation_of(log, label),
+            Observation::Exists(false),
+            "{backend}: a refused Required open must create nothing, at {label:?}"
+        );
+    }
+    assert!(
+        !matches!(
+            observation_of(log, "existing + create_new + Required"),
+            Observation::Opened { .. }
+        ),
+        "{backend}: create_new must not succeed against a file that exists"
+    );
+    assert!(
+        log.iter()
+            .all(|(_, observation)| !matches!(observation, Observation::Opened { direct: false })),
+        "{backend}: Required must never hand back a buffered file"
+    );
+}
+
+/// Nothing here can be opened, so every scenario collapses onto the one
+/// refusal — and both backends must collapse the same way.
+fn assert_without_direct_io(backend: &str, log: &Log) {
+    for (label, observation) in log {
+        if matches!(observation, Observation::Exists(_)) {
+            continue;
+        }
+        assert_eq!(
+            *observation,
+            Observation::Refused(std::io::ErrorKind::Unsupported),
+            "{backend}: without direct I/O every Required open is Unsupported, at {label:?}"
+        );
+    }
+}
+
+/// With direct I/O the contract is fully discriminating, and these are its own
+/// error kinds.
+fn assert_with_direct_io(backend: &str, log: &Log) {
+    for (label, expected) in [
+        (
+            "missing without create + Required",
+            Observation::Refused(std::io::ErrorKind::NotFound),
+        ),
+        (
+            "missing + create + Required",
+            Observation::Refused(std::io::ErrorKind::Unsupported),
+        ),
+        (
+            "missing + create_new + Required",
+            Observation::Refused(std::io::ErrorKind::Unsupported),
+        ),
+        (
+            "existing + create_new + Required",
+            Observation::Refused(std::io::ErrorKind::AlreadyExists),
+        ),
+    ] {
+        assert_eq!(
+            observation_of(log, label),
+            expected,
+            "{backend} diverged from the contract at {label:?}"
+        );
+    }
+}
+
+/// The same five scenarios against both providers, which must not diverge.
 ///
-/// The equality assertion is the invariant; the named expectations below it
-/// are what stops both backends being wrong in the same way.
+/// What is asserted is layered, because only some of it is platform-
+/// independent. Always: the simulator allowed exactly what production allowed,
+/// and nothing that must be refused created a file. Where the platform has
+/// direct I/O, the contract is fully discriminating and the two backends must
+/// agree down to the error kind; where it has none — macOS — every `Required`
+/// open is `Unsupported` on both, and the create contract is out of reach
+/// there because there is no capability to secure.
 #[test]
 fn the_simulator_answers_the_required_contract_exactly_as_production_does() {
     local_runtime().block_on(async {
@@ -191,15 +303,18 @@ fn the_simulator_answers_the_required_contract_exactly_as_production_does() {
             .await
             .expect("the production scenarios must run");
 
-        // Match the simulated disk to what this filesystem can actually do, so
-        // a mismatch is a divergence of contract and not one of hardware. The
-        // scenarios that matter — the ones that must be refused — are refused
-        // either way.
-        let mut config = StorageConfiguration::fast_local();
-        config.direct_io_supported = matches!(
+        // Whether this build and this filesystem can do direct I/O at all.
+        // macOS cannot, and refuses `Required` before it ever resolves the
+        // path, which changes which refusal surfaces first.
+        let direct_io_available = matches!(
             observation_of(&production, "existing + Required"),
             Observation::Opened { direct: true }
         );
+
+        // Match the simulated disk to what production could actually do, so a
+        // divergence is one of contract and not of hardware.
+        let mut config = StorageConfiguration::fast_local();
+        config.direct_io_supported = direct_io_available;
         let mut sim = SimWorld::new();
         sim.set_storage_config(config);
 
@@ -208,62 +323,21 @@ fn the_simulator_answers_the_required_contract_exactly_as_production_does() {
                 .await
                 .expect("the simulated scenarios must run");
 
-        assert_eq!(
-            production, simulated,
-            "the simulated provider must answer the Required contract exactly as production does"
-        );
-
-        for (label, expected) in [
-            (
-                "missing without create + Required",
-                Observation::Refused(std::io::ErrorKind::NotFound),
-            ),
-            (
-                "missing without create + Required: exists after",
-                Observation::Exists(false),
-            ),
-            (
-                "missing + create + Required",
-                Observation::Refused(std::io::ErrorKind::Unsupported),
-            ),
-            (
-                "missing + create + Required: exists after",
-                Observation::Exists(false),
-            ),
-            (
-                "missing + create_new + Required",
-                Observation::Refused(std::io::ErrorKind::Unsupported),
-            ),
-            (
-                "missing + create_new + Required: exists after",
-                Observation::Exists(false),
-            ),
-        ] {
-            for (backend, log) in [("production", &production), ("simulation", &simulated)] {
-                assert_eq!(
-                    observation_of(log, label),
-                    expected,
-                    "{backend} diverged from the contract at {label:?}"
-                );
+        assert_same_permissiveness(&production, &simulated);
+        for (backend, log) in [("production", &production), ("simulation", &simulated)] {
+            assert_structural_claims(backend, log);
+            if direct_io_available {
+                assert_with_direct_io(backend, log);
+            } else {
+                assert_without_direct_io(backend, log);
             }
         }
 
-        // Two claims that hold whatever this filesystem supports, and that no
-        // amount of agreement between the backends can excuse.
-        for (backend, log) in [("production", &production), ("simulation", &simulated)] {
-            assert!(
-                !matches!(
-                    observation_of(log, "existing + create_new + Required"),
-                    Observation::Opened { .. }
-                ),
-                "{backend}: create_new must not succeed against a file that exists"
-            );
-            assert!(
-                log.iter().all(|(_, observation)| !matches!(
-                    observation,
-                    Observation::Opened { direct: false }
-                )),
-                "{backend}: Required must never hand back a buffered file"
+        if direct_io_available {
+            assert_eq!(
+                production, simulated,
+                "the simulated provider must answer the Required contract exactly as production \
+                 does"
             );
         }
     });
