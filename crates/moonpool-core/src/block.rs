@@ -65,6 +65,10 @@ use crate::{AlignedBuf, IoConstraints, StorageFile};
 pub struct BlockFile<F> {
     file: F,
     block_size: usize,
+    /// The granularity at which a transfer may be resumed: the coarsest of the
+    /// file's three alignments, and `1` on an unconstrained file. See
+    /// [`BlockFile::read_blocks`] for why resuming anywhere else is invalid.
+    transfer_step: usize,
 }
 
 impl<F: StorageFile> BlockFile<F> {
@@ -103,7 +107,25 @@ impl<F: StorageFile> BlockFile<F> {
                 ),
             ));
         }
-        Ok(Self { file, block_size })
+        // All three alignments are powers of two, so the coarsest of them is
+        // their least common multiple: a boundary that satisfies all three at
+        // once. `block_size` is a multiple of each (checked above), so it is a
+        // multiple of the step, and every request the transfer loops issue
+        // starts on a step boundary inside a block-aligned range.
+        let offset_alignment = usize::try_from(constraints.offset_alignment()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the file's offset alignment does not fit in memory",
+            )
+        })?;
+        let transfer_step = offset_alignment
+            .max(constraints.length_alignment())
+            .max(constraints.memory_alignment());
+        Ok(Self {
+            file,
+            block_size,
+            transfer_step,
+        })
     }
 
     /// The block size this view was built with.
@@ -146,43 +168,74 @@ impl<F: StorageFile> BlockFile<F> {
 
     /// Read whole blocks starting at `block_index` into `buf`.
     ///
-    /// `buf.len()` must be a non-zero multiple of the block size. Unlike
-    /// [`StorageFile::read_at`], this fills the buffer completely or fails:
-    /// short reads are looped over, and a range that runs past the end of the
-    /// file is [`io::ErrorKind::UnexpectedEof`]. Handling partial transfers is
-    /// exactly the job this layer exists to do.
+    /// `buf.len()` must be a non-zero multiple of the block size, and `buf`
+    /// must satisfy the file's memory alignment — [`buffer`](Self::buffer)
+    /// returns one that does. Unlike [`StorageFile::read_at`], this fills the
+    /// buffer completely or fails: short reads are looped over, and a range
+    /// that runs past the end of the file is
+    /// [`io::ErrorKind::UnexpectedEof`]. Handling partial transfers is exactly
+    /// the job this layer exists to do.
+    ///
+    /// # Resuming a short read
+    ///
+    /// Every request this issues is valid for the file's constraints, however
+    /// the previous one stopped. A short read may end anywhere the file's
+    /// contract allows — not necessarily on an alignment boundary — so
+    /// resuming at `offset + moved` could ask for a misaligned offset, a
+    /// misaligned length, or a misaligned buffer address, all of which a
+    /// direct-I/O file is entitled to refuse. Instead the next request starts
+    /// at the alignment boundary at or below the frontier and re-reads the few
+    /// bytes in between. On an unconstrained file that boundary *is* the
+    /// frontier, so nothing is ever read twice.
     ///
     /// # Errors
     ///
     /// [`io::ErrorKind::InvalidInput`] for a buffer that is not a whole number
-    /// of blocks, [`io::ErrorKind::UnexpectedEof`] if the file ends inside the
-    /// range, and any error the file itself reports.
+    /// of blocks or does not meet the file's memory alignment,
+    /// [`io::ErrorKind::UnexpectedEof`] if the file ends inside the range,
+    /// [`io::ErrorKind::InvalidData`] if the file's short transfers are finer
+    /// than its own alignment allows a caller to resume from, and any error
+    /// the file itself reports.
     pub async fn read_blocks(&self, block_index: u64, buf: &mut [u8]) -> io::Result<()> {
-        let mut offset = self.range(block_index, buf.len())?;
-        let mut read = 0;
-        while read < buf.len() {
-            let moved = self.file.read_at(offset, &mut buf[read..]).await?;
+        let start = self.range(block_index, buf.len())?;
+        self.check_buffer(buf)?;
+        let len = buf.len();
+        let mut done = 0;
+        while done < len {
+            // Resume from the step boundary at or below the frontier, not from
+            // the frontier itself. A short transfer may stop anywhere the
+            // file's own contract allows, and continuing from there would ask
+            // for a misaligned offset, a misaligned length, or a misaligned
+            // buffer address — a request the file is entitled to refuse. The
+            // bytes between the boundary and the frontier are simply read
+            // again.
+            let from = self.align_down(done);
+            let moved = self
+                .file
+                .read_at(start + from as u64, &mut buf[from..])
+                .await?;
             if moved == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     format!(
-                        "file ended {} bytes into a {}-byte read at block {block_index}",
-                        read,
-                        buf.len()
+                        "file ended {done} bytes into a {len}-byte read at block {block_index}"
                     ),
                 ));
             }
-            read += moved;
-            offset += moved as u64;
+            done = self.advance(done, from, moved, "read")?;
         }
         Ok(())
     }
 
     /// Write whole blocks starting at `block_index`.
     ///
-    /// `buf.len()` must be a non-zero multiple of the block size. Short writes
-    /// are looped over, so on `Ok` every byte has been written. Writing past
-    /// the end of the file extends it.
+    /// `buf.len()` must be a non-zero multiple of the block size, and `buf`
+    /// must satisfy the file's memory alignment. Short writes are looped over
+    /// the same way [`read_blocks`](Self::read_blocks) loops over short reads
+    /// — resuming on an alignment boundary and rewriting the bytes in between,
+    /// which is safe because they are the same bytes from the same buffer — so
+    /// on `Ok` every byte has been written. Writing past the end of the file
+    /// extends it.
     ///
     /// Completion means the bytes are *visible*, not durable: only a following
     /// [`sync`](Self::sync) makes them survive a crash, whether or not the
@@ -191,25 +244,32 @@ impl<F: StorageFile> BlockFile<F> {
     /// # Errors
     ///
     /// [`io::ErrorKind::InvalidInput`] for a buffer that is not a whole number
-    /// of blocks, [`io::ErrorKind::WriteZero`] if the file stops accepting
-    /// bytes, and any error the file itself reports.
+    /// of blocks or does not meet the file's memory alignment,
+    /// [`io::ErrorKind::WriteZero`] if the file stops accepting bytes,
+    /// [`io::ErrorKind::InvalidData`] if the file's short transfers are finer
+    /// than its own alignment allows a caller to resume from, and any error
+    /// the file itself reports.
     pub async fn write_blocks(&self, block_index: u64, buf: &[u8]) -> io::Result<()> {
-        let mut offset = self.range(block_index, buf.len())?;
-        let mut written = 0;
-        while written < buf.len() {
-            let moved = self.file.write_at(offset, &buf[written..]).await?;
+        let start = self.range(block_index, buf.len())?;
+        self.check_buffer(buf)?;
+        let len = buf.len();
+        let mut done = 0;
+        while done < len {
+            // As in `read_blocks`: resume on a step boundary, rewriting the
+            // bytes between it and the frontier. Rewriting them is safe — they
+            // are the same bytes from the same buffer.
+            let from = self.align_down(done);
+            let moved = self
+                .file
+                .write_at(start + from as u64, &buf[from..])
+                .await?;
             if moved == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
-                    format!(
-                        "file accepted only {} of {} bytes at block {block_index}",
-                        written,
-                        buf.len()
-                    ),
+                    format!("file accepted only {done} of {len} bytes at block {block_index}"),
                 ));
             }
-            written += moved;
-            offset += moved as u64;
+            done = self.advance(done, from, moved, "write")?;
         }
         Ok(())
     }
@@ -262,6 +322,61 @@ impl<F: StorageFile> BlockFile<F> {
             return Ok(());
         }
         self.file.set_len(wanted).await
+    }
+
+    /// Round a byte count down to a boundary every one of the file's three
+    /// alignments accepts. The identity on an unconstrained file.
+    fn align_down(&self, offset: usize) -> usize {
+        offset & !(self.transfer_step - 1)
+    }
+
+    /// Fold one completed transfer into the frontier.
+    ///
+    /// # Errors
+    ///
+    /// A transfer that delivers nothing past the frontier cannot be continued:
+    /// the next request would start at the same boundary and ask for the same
+    /// bytes, so looping would spin forever. That is a file whose short
+    /// transfers are finer than its own alignment allows a caller to resume
+    /// from, which is a contradiction in its contract rather than a condition
+    /// to retry.
+    fn advance(&self, done: usize, from: usize, moved: usize, verb: &str) -> io::Result<usize> {
+        let reached = from + moved;
+        if reached <= done {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a {moved}-byte short {verb} from offset {from} left the transfer at {done} \
+                     bytes, which the file's {}-byte alignment cannot resume past",
+                    self.transfer_step
+                ),
+            ));
+        }
+        Ok(reached)
+    }
+
+    /// Check the caller's buffer against the file's constraints, before the
+    /// first request rather than inside it.
+    ///
+    /// The length is already known to be a whole number of blocks, and a block
+    /// is a multiple of the length alignment; what remains is the buffer's
+    /// address. [`BlockFile::buffer`] returns one that satisfies it.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] naming the alignment the buffer misses.
+    fn check_buffer(&self, buf: &[u8]) -> io::Result<()> {
+        let memory_alignment = self.constraints().memory_alignment();
+        if (buf.as_ptr() as usize).is_multiple_of(memory_alignment) {
+            return Ok(());
+        }
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "this file requires {memory_alignment}-byte aligned buffers; \
+                 use BlockFile::buffer to allocate one"
+            ),
+        ))
     }
 
     /// Byte offset of a block-aligned transfer, validating its length.
