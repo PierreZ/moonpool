@@ -137,9 +137,11 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     /// The alignment this file requires of offsets, transfer lengths, and
     /// buffer addresses.
     ///
-    /// [`IoConstraints::NONE`] for an ordinary buffered file; a direct-I/O
-    /// file reports what the device demands. Cheap: the constraints are fixed
-    /// when the file is opened.
+    /// [`IoConstraints::NONE`] for an ordinary buffered file. For a direct-I/O
+    /// file it is what this backend requires of the caller — never less than
+    /// the device needs, and possibly more where the backend cannot discover
+    /// the device's exact requirement. See [`IoConstraints`] for what that
+    /// promises. Cheap: the constraints are fixed when the file is opened.
     fn constraints(&self) -> IoConstraints;
 
     /// Whether this file is actually doing direct (uncached) I/O.

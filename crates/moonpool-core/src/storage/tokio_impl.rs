@@ -10,13 +10,6 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 use super::{AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider};
 
-/// Alignment assumed for a direct-I/O file.
-///
-/// A conservative superset: 4 KiB satisfies both 512-byte and 4 KiB logical
-/// block sizes, so a transfer legal here is legal on either device. Querying
-/// the device for a smaller value would only *widen* what callers may do.
-const DIRECT_IO_ALIGNMENT: usize = 4096;
-
 /// Real Tokio storage implementation.
 #[derive(Debug, Clone, Default)]
 pub struct TokioStorageProvider;
@@ -33,20 +26,16 @@ impl StorageProvider for TokioStorageProvider {
     type File = TokioStorageFile;
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
-        let (file, direct) = open_file(path, &options).await?;
+        let opened = open_file(path, &options).await?;
         // A second descriptor onto the same open file description, used for
         // positioned I/O: `read_at`/`write_at` must not disturb the stream
         // cursor, and the OS positioned calls need a blocking `std::fs::File`.
-        let positioned = file.try_clone().await?.into_std().await;
+        let positioned = opened.file.try_clone().await?.into_std().await;
         Ok(TokioStorageFile {
-            inner: file.compat(),
+            inner: opened.file.compat(),
             positioned: Arc::new(positioned),
-            constraints: if direct {
-                IoConstraints::uniform(DIRECT_IO_ALIGNMENT)
-            } else {
-                IoConstraints::NONE
-            },
-            direct,
+            constraints: opened.constraints,
+            direct: opened.direct,
         })
     }
 
@@ -126,6 +115,143 @@ fn is_direct_io_unsupported(error: &io::Error) -> bool {
     }
 }
 
+/// A file the provider has opened, with the I/O constraints it came with.
+struct OpenedFile {
+    file: tokio::fs::File,
+    /// What this open requires of callers: [`IoConstraints::NONE`] for a
+    /// buffered file, the device's discovered requirement for a direct one.
+    constraints: IoConstraints,
+    /// Whether the open actually got uncached I/O.
+    direct: bool,
+}
+
+impl OpenedFile {
+    fn buffered(file: tokio::fs::File) -> Self {
+        Self {
+            file,
+            constraints: IoConstraints::NONE,
+            direct: false,
+        }
+    }
+
+    fn direct(file: tokio::fs::File, constraints: IoConstraints) -> Self {
+        Self {
+            file,
+            constraints,
+            direct: true,
+        }
+    }
+}
+
+/// What the kernel will say about a file's direct-I/O alignment.
+enum ReportedAlignment {
+    /// The kernel described this file's actual requirement.
+    Known(IoConstraints),
+    /// The kernel says this file cannot do direct I/O at all.
+    Refused,
+    /// The kernel would not say — an older kernel, or a libc without the
+    /// query. The caller falls back to a bound.
+    Unknown,
+}
+
+/// `STATX_DIOALIGN`, which `libc` does not export.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const STATX_DIOALIGN: libc::c_uint = 0x0000_2000;
+
+/// Ask the kernel what alignment direct I/O on this file actually requires.
+///
+/// `statx(STATX_DIOALIGN)` (Linux 5.19+) reports the device's real
+/// requirement: `stx_dio_mem_align` for the caller's buffer address, and
+/// `stx_dio_offset_align` for both file offsets and transfer lengths. Zeroes
+/// mean the file cannot do direct I/O at all.
+///
+/// This is a metadata query on an already-open descriptor, not I/O, so it does
+/// not go to the blocking pool.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn reported_alignment(file: &tokio::fs::File) -> ReportedAlignment {
+    use std::os::fd::AsRawFd as _;
+
+    // SAFETY: `statx` fills a caller-allocated `struct statx`; the value is
+    // zeroed first so every field is initialized whatever the kernel writes.
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: the descriptor is open for the duration of the call, the path is
+    // an empty C string paired with `AT_EMPTY_PATH` (the documented way to
+    // stat a descriptor), and `stx` is a valid, correctly sized output buffer.
+    let result = unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            STATX_DIOALIGN,
+            &raw mut stx,
+        )
+    };
+    if result != 0 || stx.stx_mask & STATX_DIOALIGN == 0 {
+        return ReportedAlignment::Unknown;
+    }
+    if stx.stx_dio_mem_align == 0 || stx.stx_dio_offset_align == 0 {
+        return ReportedAlignment::Refused;
+    }
+    let Ok(memory) = usize::try_from(stx.stx_dio_mem_align) else {
+        return ReportedAlignment::Unknown;
+    };
+    let Ok(length) = usize::try_from(stx.stx_dio_offset_align) else {
+        return ReportedAlignment::Unknown;
+    };
+    let offset = u64::from(stx.stx_dio_offset_align);
+    if !memory.is_power_of_two() || !length.is_power_of_two() {
+        // Nothing in the contract can be built on a non-power-of-two
+        // alignment; treat it as if the kernel had said nothing.
+        return ReportedAlignment::Unknown;
+    }
+    ReportedAlignment::Known(IoConstraints::new(offset, length, memory))
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn reported_alignment(_file: &tokio::fs::File) -> ReportedAlignment {
+    ReportedAlignment::Unknown
+}
+
+/// An alignment guaranteed to satisfy this system's direct I/O, for kernels
+/// that will not report the real one.
+///
+/// The page size is that bound on Linux. Direct-I/O alignment derives from the
+/// underlying device's logical block size, and the block layer refuses a
+/// logical block size larger than a page; the kernels that lifted that
+/// restriction are also the kernels that report `STATX_DIOALIGN`, which is
+/// preferred whenever it is available. So the page size is never too small,
+/// and being larger than the device needs only narrows what callers may do —
+/// which is the direction [`IoConstraints`] is allowed to err in.
+#[cfg(unix)]
+fn bounded_alignment() -> Option<IoConstraints> {
+    // SAFETY: `sysconf` reads a system parameter and has no preconditions.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    let page_size = usize::try_from(page_size).ok()?;
+    if page_size == 0 || !page_size.is_power_of_two() {
+        return None;
+    }
+    Some(IoConstraints::uniform(page_size))
+}
+
+#[cfg(not(unix))]
+fn bounded_alignment() -> Option<IoConstraints> {
+    None
+}
+
+/// The constraints a direct-I/O open must advertise, or `None` if this file
+/// cannot do direct I/O or nothing can bound what it would require.
+///
+/// Advertising constraints that are too weak would hand the caller an aligned
+/// buffer the device then rejects, so "we do not know" is answered by not
+/// offering direct I/O rather than by guessing.
+fn direct_io_constraints(file: &tokio::fs::File) -> Option<IoConstraints> {
+    match reported_alignment(file) {
+        ReportedAlignment::Known(constraints) => Some(constraints),
+        ReportedAlignment::Refused => None,
+        ReportedAlignment::Unknown => bounded_alignment(),
+    }
+}
+
 /// Options for the direct-I/O *upgrade* of a file that is already open: the
 /// same access, none of the lifecycle.
 ///
@@ -160,34 +286,58 @@ fn upgrade_options(options: &OpenOptions) -> OpenOptions {
 ///
 /// Only [`is_direct_io_unsupported`] failures of the upgrade are absorbed;
 /// every other error is returned, so `Optional` never hides a real problem.
-async fn open_file(path: &str, options: &OpenOptions) -> io::Result<(tokio::fs::File, bool)> {
+async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> {
     match options.requested_direct_io() {
-        DirectIo::Disabled => Ok((open_options(options, false).open(path).await?, false)),
+        DirectIo::Disabled => Ok(OpenedFile::buffered(
+            open_options(options, false).open(path).await?,
+        )),
         DirectIo::Required if !DIRECT_IO_SUPPORTED => Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "direct I/O is not supported on this platform",
         )),
-        DirectIo::Required => match open_options(options, true).open(path).await {
-            Ok(file) => Ok((file, true)),
-            // Never downgraded: the caller asked for uncached I/O, and it is
-            // not available for this file.
-            Err(error) if is_direct_io_unsupported(&error) => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("direct I/O is not supported for '{path}': {error}"),
-            )),
-            Err(error) => Err(error),
-        },
+        DirectIo::Required => {
+            let file = match open_options(options, true).open(path).await {
+                Ok(file) => file,
+                // Never downgraded: the caller asked for uncached I/O, and it
+                // is not available for this file.
+                Err(error) if is_direct_io_unsupported(&error) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!("direct I/O is not supported for '{path}': {error}"),
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
+            match direct_io_constraints(&file) {
+                Some(constraints) => Ok(OpenedFile::direct(file, constraints)),
+                // Better to fail than to advertise constraints that might not
+                // be enough: a caller that trusted them would be handed a
+                // buffer the device rejects.
+                None => Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("cannot determine the alignment direct I/O requires for '{path}'"),
+                )),
+            }
+        }
         DirectIo::Optional => {
             let buffered = open_options(options, false).open(path).await?;
             if !DIRECT_IO_SUPPORTED {
-                return Ok((buffered, false));
+                return Ok(OpenedFile::buffered(buffered));
             }
             match open_options(&upgrade_options(options), true)
                 .open(path)
                 .await
             {
-                Ok(direct) => Ok((direct, true)),
-                Err(error) if is_direct_io_unsupported(&error) => Ok((buffered, false)),
+                Ok(direct) => match direct_io_constraints(&direct) {
+                    Some(constraints) => Ok(OpenedFile::direct(direct, constraints)),
+                    // Uncached I/O whose requirements cannot be described is
+                    // worse than buffered I/O that needs none: keep the handle
+                    // that is already open.
+                    None => Ok(OpenedFile::buffered(buffered)),
+                },
+                Err(error) if is_direct_io_unsupported(&error) => {
+                    Ok(OpenedFile::buffered(buffered))
+                }
                 Err(error) => Err(error),
             }
         }

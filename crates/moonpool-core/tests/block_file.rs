@@ -123,10 +123,19 @@ fn block_io_works_under_the_direct_io_policy() {
             .expect("read");
         assert_eq!(read.as_slice(), page.as_slice());
 
+        let constraints = blocks.constraints();
         if direct {
-            assert_eq!(blocks.constraints().memory_alignment(), BLOCK);
+            // The device's requirement, whatever it is — not the block size.
+            // A 4 KiB page over 512-byte transfers is the ordinary case, and
+            // asserting equality here would be asserting the two are the same
+            // concept.
+            assert!(constraints.memory_alignment().is_power_of_two());
+            assert!(
+                BLOCK.is_multiple_of(constraints.length_alignment()),
+                "a block must be a whole number of transfer units"
+            );
         } else {
-            assert!(blocks.constraints().is_unconstrained());
+            assert!(constraints.is_unconstrained());
         }
     });
 }

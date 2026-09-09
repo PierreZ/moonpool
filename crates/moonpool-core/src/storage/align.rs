@@ -22,6 +22,29 @@ use std::ops::{Deref, DerefMut};
 ///
 /// Obtained from [`StorageFile::constraints`](super::StorageFile::constraints).
 /// Every value is a power of two, and `1` means "no constraint".
+///
+/// # What these numbers promise
+///
+/// They are **what this backend requires of you**, and satisfying them is
+/// always enough for the transfer to be accepted. They are not a description
+/// of the hardware: a backend is allowed to demand more than its device does,
+/// and will when it cannot discover the device's real requirement. What it may
+/// never do is report less, because a caller that satisfied the reported
+/// alignment would then have its transfer rejected.
+///
+/// The production backend asks the kernel (`statx(STATX_DIOALIGN)`) and
+/// reports the device's actual requirement where that answer is available;
+/// otherwise it reports a documented bound that is never too small. Where it
+/// can do neither, it refuses to offer direct I/O at all rather than
+/// advertise an alignment it cannot stand behind. The simulated backend
+/// reports the disk geometry it was configured with, which it knows exactly.
+///
+/// The three values are kept separate because a device may constrain them
+/// differently — a 512-byte buffer alignment alongside a 4 KiB offset
+/// alignment is an ordinary combination — and because collapsing them into one
+/// number is how a caller ends up believing its block size, its transfer
+/// alignment and its crash-atomicity unit are the same thing. They are three
+/// unrelated properties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IoConstraints {
     offset: u64,

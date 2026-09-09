@@ -146,3 +146,68 @@ fn optional_direct_io_applies_truncation_once() {
             .expect("write failed");
     });
 }
+
+/// A direct-I/O file must advertise constraints its own device will honour.
+/// The alignment is discovered, not assumed: this proves the reported values
+/// are actually accepted, which a hard-coded guess cannot.
+#[test]
+fn direct_io_constraints_describe_what_the_device_accepts() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("aligned.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let file = provider
+            .open(
+                path,
+                OpenOptions::create_write()
+                    .read(true)
+                    .direct_io(DirectIo::Optional),
+            )
+            .await
+            .expect("open failed");
+
+        let constraints = file.constraints();
+        if !file.is_direct_io() {
+            assert!(
+                constraints.is_unconstrained(),
+                "a buffered file constrains nothing"
+            );
+            return;
+        }
+
+        for alignment in [
+            constraints.offset_alignment(),
+            constraints.length_alignment() as u64,
+            constraints.memory_alignment() as u64,
+        ] {
+            assert!(
+                alignment.is_power_of_two(),
+                "{alignment} is not a power of two"
+            );
+        }
+
+        // A transfer built to exactly the reported alignment must be accepted
+        // by the device. If the numbers were too weak, this is where the
+        // kernel would return EINVAL.
+        let length = constraints.length_alignment();
+        let mut block = AlignedBuf::for_constraints(length, constraints);
+        block.as_mut_slice().fill(0xE1);
+        assert_eq!(
+            file.write_at(constraints.offset_alignment(), block.as_slice())
+                .await
+                .expect("a transfer at the reported alignment must be accepted"),
+            length
+        );
+
+        let mut read = AlignedBuf::for_constraints(length, constraints);
+        assert_eq!(
+            file.read_at(constraints.offset_alignment(), read.as_mut_slice())
+                .await
+                .expect("read failed"),
+            length
+        );
+        assert_eq!(read.as_slice(), block.as_slice());
+    });
+}
