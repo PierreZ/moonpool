@@ -5,6 +5,10 @@
 //! turn any other failure into a success, weaken `create_new`, or create a
 //! file the caller did not ask it to create.
 
+use std::os::unix::fs::MetadataExt as _;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
 use moonpool_core::{
     AlignedBuf, DirectIo, OpenOptions, StorageFile, StorageProvider, TokioStorageProvider,
 };
@@ -540,4 +544,281 @@ fn a_successful_required_open_still_applies_the_lifecycle() {
             "a truncating open must still truncate"
         );
     });
+}
+
+/// A failed `Required` create must not create the target name at all — which
+/// is the only way it can be guaranteed never to remove somebody else's.
+///
+/// A rollback cannot give that guarantee: an exclusive create proves the inode
+/// was ours when it was made, not that the name still refers to it when the
+/// cleanup runs, so a concurrent unlink-and-recreate turns the rollback into a
+/// deletion of another process's file. This is the deterministic half of the
+/// evidence — the containing directory must come back **unmodified**, meaning
+/// no entry was ever added or removed. A create-then-unlink leaves two
+/// modifications behind and fails here.
+#[test]
+fn a_failed_required_create_never_touches_the_directory() {
+    let Some(dir) = directory_refusing_direct_io() else {
+        eprintln!(
+            "skipped: no filesystem here refuses O_DIRECT; \
+             set MOONPOOL_NO_DIRECT_IO_DIR to a ramfs mount to run it"
+        );
+        return;
+    };
+
+    let scratch = dir.join(format!("untouched-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir(&scratch).expect("create scratch dir failed");
+    // A bystander, so the directory is not trivially empty.
+    std::fs::write(scratch.join("bystander"), b"UNRELATED").expect("seed write failed");
+
+    let before = std::fs::metadata(&scratch)
+        .expect("stat failed")
+        .modified()
+        .expect("mtime unavailable");
+    // Directory timestamps have finite resolution; make sure any modification
+    // the open makes lands strictly after the snapshot.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    runtime().block_on(async {
+        let provider = TokioStorageProvider::new();
+        let target = scratch.join("wanted.db");
+        let target = target.to_str().expect("path is valid UTF-8");
+
+        for options in [
+            OpenOptions::create_new_write().direct_io(DirectIo::Required),
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .direct_io(DirectIo::Required),
+        ] {
+            let error = provider
+                .open(target, options)
+                .await
+                .expect_err("direct I/O is unavailable here");
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        }
+    });
+
+    let after = std::fs::metadata(&scratch)
+        .expect("stat failed")
+        .modified()
+        .expect("mtime unavailable");
+    let entries: Vec<_> = std::fs::read_dir(&scratch)
+        .expect("read_dir failed")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert_eq!(
+        entries.len(),
+        1,
+        "the directory must hold only the bystander, found {entries:?}"
+    );
+    assert_eq!(
+        before, after,
+        "a failed create modified the directory: it created a name, \
+         and a name it created is a name it has to remove"
+    );
+}
+
+/// The racing half of the same evidence: a competitor that takes the contested
+/// name over and installs its own file must never find that file removed by
+/// somebody else.
+///
+/// This is the reviewer's sequence directly — B unlinks the name, B creates
+/// its own file, and a rollback in flight then deletes it. The assertion is
+/// one-sided: it can only fire if the bug is present.
+#[test]
+fn a_failed_required_create_never_removes_another_processs_file() {
+    let Some(dir) = directory_refusing_direct_io() else {
+        eprintln!("skipped: no filesystem here refuses O_DIRECT");
+        return;
+    };
+
+    let contested = dir.join(format!("contested-{}", std::process::id()));
+    let _ = std::fs::remove_file(&contested);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stolen = Arc::new(AtomicUsize::new(0));
+    let installed = Arc::new(AtomicUsize::new(0));
+
+    // One competitor, behaving like the review's process B: take the name
+    // over, install its own file, and check that nothing else removes it.
+    // Exactly one, so that anything happening to its file is the opener's
+    // doing and not another competitor's.
+    let competitor = {
+        let contested = contested.clone();
+        let stop = Arc::clone(&stop);
+        let stolen = Arc::clone(&stolen);
+        let installed = Arc::clone(&installed);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                // B unlinks whatever is at the name, then installs its own.
+                let _ = std::fs::remove_file(&contested);
+                let Ok(_) = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&contested)
+                else {
+                    continue;
+                };
+                let Ok(mine) = std::fs::metadata(&contested) else {
+                    stolen.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                };
+                installed.fetch_add(1, Ordering::Relaxed);
+
+                std::thread::yield_now();
+
+                match std::fs::metadata(&contested) {
+                    // Gone, and this thread did not remove it.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        stolen.fetch_add(1, Ordering::Relaxed);
+                    }
+                    // Still there, but no longer the same file.
+                    Ok(now) if now.ino() != mine.ino() => {
+                        stolen.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+        })
+    };
+
+    runtime().block_on(async {
+        let provider = TokioStorageProvider::new();
+        let contested = contested.to_str().expect("path is valid UTF-8");
+        for _ in 0..4_000 {
+            // Direct I/O is unavailable here, so every one of these fails.
+            // What matters is what the failure leaves behind.
+            let _ = provider
+                .open(
+                    contested,
+                    OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .direct_io(DirectIo::Required),
+                )
+                .await;
+        }
+    });
+
+    stop.store(true, Ordering::Relaxed);
+    competitor.join().expect("competitor thread panicked");
+    let _ = std::fs::remove_file(&contested);
+
+    assert!(
+        installed.load(Ordering::Relaxed) > 0,
+        "the competitor never installed a file, so nothing was tested"
+    );
+    assert_eq!(
+        stolen.load(Ordering::Relaxed),
+        0,
+        "a failed Required create removed or replaced a file it did not create"
+    );
+}
+
+/// A `Required` create must not replace a file another process installed at
+/// the target path, and `create_new` must report that it lost the name.
+///
+/// Publication is a link, which fails rather than replacing, so the winner's
+/// file survives untouched either way — `create_new` refuses, and a plain
+/// `create` opens what is there.
+#[test]
+fn required_create_never_replaces_a_concurrent_winner() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("contested.db");
+        let path_str = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        // The winner is already there, with contents.
+        std::fs::write(&path, b"WINNER").expect("seed write failed");
+
+        let refused = provider
+            .open(
+                path_str,
+                OpenOptions::create_new_write().direct_io(DirectIo::Required),
+            )
+            .await
+            .err()
+            .map(|error| error.kind());
+        assert!(
+            matches!(
+                refused,
+                Some(std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::Unsupported)
+            ),
+            "create_new must lose to the file that is already there, got {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read failed"),
+            b"WINNER",
+            "create_new must not have replaced or truncated the winner"
+        );
+
+        // A plain create opens what is there rather than replacing it.
+        match provider
+            .open(
+                path_str,
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .direct_io(DirectIo::Required),
+            )
+            .await
+        {
+            Ok(_) | Err(_) => {}
+        }
+        assert_eq!(
+            std::fs::read(&path).expect("read failed"),
+            b"WINNER",
+            "a plain create must open the existing file, never overwrite it"
+        );
+    });
+}
+
+/// A failed `Required` create leaves nothing behind — neither the target name
+/// nor a staging file.
+#[test]
+fn a_failed_required_create_leaks_no_staging_file() {
+    let Some(dir) = directory_refusing_direct_io() else {
+        eprintln!("skipped: no filesystem here refuses O_DIRECT");
+        return;
+    };
+
+    let scratch = dir.join(format!("staging-scratch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir(&scratch).expect("create scratch dir failed");
+
+    runtime().block_on(async {
+        let provider = TokioStorageProvider::new();
+        let target = scratch.join("wanted.db");
+        let target = target.to_str().expect("path is valid UTF-8");
+
+        for _ in 0..16 {
+            let error = provider
+                .open(
+                    target,
+                    OpenOptions::create_new_write().direct_io(DirectIo::Required),
+                )
+                .await
+                .expect_err("direct I/O is unavailable here");
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        }
+    });
+
+    let leftovers: Vec<_> = std::fs::read_dir(&scratch)
+        .expect("read_dir failed")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name())
+        .collect();
+    let _ = std::fs::remove_dir_all(&scratch);
+
+    assert!(
+        leftovers.is_empty(),
+        "a failed create left files behind: {leftovers:?}"
+    );
 }
