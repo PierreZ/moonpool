@@ -228,15 +228,15 @@ impl<F: StorageFile> BlockFile<F> {
                 .file
                 .read_at(start + from as u64, &mut buf[from..])
                 .await?;
-            if moved == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    format!(
-                        "file ended {done} bytes into a {len}-byte read at block {block_index}"
-                    ),
-                ));
+            let reached = from + moved;
+            if reached <= done {
+                // The read stalled: either the file ends inside the range, or
+                // its short transfers stop finer than its own alignment lets a
+                // caller resume from. Only its length tells the two apart, and
+                // this is the error path, so the extra query is free.
+                return Err(self.stalled_read_error(block_index, done, len).await);
             }
-            done = self.advance(done, from, moved, "read")?;
+            done = reached;
         }
         Ok(())
     }
@@ -342,6 +342,33 @@ impl<F: StorageFile> BlockFile<F> {
     /// alignments accepts. The identity on an unconstrained file.
     fn align_down(&self, offset: usize) -> usize {
         offset & !(self.transfer_step - 1)
+    }
+
+    /// Classify a read that stopped making progress.
+    ///
+    /// A file that simply ends inside the requested range is the ordinary
+    /// case, and reports [`io::ErrorKind::UnexpectedEof`] exactly as a
+    /// zero-length read does. A file long enough to satisfy the range that
+    /// still cannot advance is describing a contract it cannot keep: its short
+    /// transfers stop finer than its own alignment allows the next request to
+    /// resume from, so no caller could ever complete the transfer.
+    async fn stalled_read_error(&self, block_index: u64, done: usize, len: usize) -> io::Error {
+        let start = block_index.saturating_mul(self.block_size as u64);
+        let end = start.saturating_add(len as u64);
+        match self.file.size().await {
+            Ok(size) if size >= end => io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a short read left a {len}-byte transfer at block {block_index} stuck at \
+                     {done} bytes, which the file's {}-byte alignment cannot resume past",
+                    self.transfer_step
+                ),
+            ),
+            _ => io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!("file ended {done} bytes into a {len}-byte read at block {block_index}"),
+            ),
+        }
     }
 
     /// Fold one completed transfer into the frontier.

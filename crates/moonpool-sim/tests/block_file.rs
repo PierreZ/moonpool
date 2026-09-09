@@ -387,3 +387,44 @@ fn a_block_write_is_not_a_crash_atomicity_unit() {
         "a multi-block write must be able to tear across a crash"
     );
 }
+
+/// A direct-I/O file whose length is not a whole number of transfer units
+/// still reports a range running past its end as `UnexpectedEof`, not as a
+/// stalled transfer. The read stops short of the frontier's alignment
+/// boundary, which is the same shape a broken backend produces — the file's
+/// length is what tells them apart.
+#[test]
+fn a_short_file_reports_eof_even_when_the_read_stalls() {
+    local_runtime().block_on(async {
+        let mut sim = fast_sim();
+        let kind = run_on(&mut sim, |provider| async move {
+            let file = provider
+                .open(
+                    "ragged.db",
+                    OpenOptions::create_write()
+                        .read(true)
+                        .direct_io(DirectIo::Required),
+                )
+                .await
+                .expect("open failed");
+            // A length that is not a multiple of the device's transfer unit,
+            // so the read that reaches the end stops mid-unit.
+            file.set_len(5000).await.expect("set_len failed");
+
+            let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
+            let mut buf = blocks.buffer(2).expect("buffer allocation");
+            blocks
+                .read_blocks(0, buf.as_mut_slice())
+                .await
+                .expect_err("a range past the end must fail")
+                .kind()
+        })
+        .await;
+
+        assert_eq!(
+            kind,
+            std::io::ErrorKind::UnexpectedEof,
+            "the file simply ends inside the range"
+        );
+    });
+}
