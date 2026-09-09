@@ -82,6 +82,9 @@ pub(crate) struct PendingStorageOp {
     pub(crate) len: usize,
     pub(crate) data: Option<Vec<u8>>,
     pub(crate) append: bool,
+    /// A positioned operation (`read_at` / `write_at`): it addresses `offset`
+    /// literally and never moves the handle's stream cursor.
+    pub(crate) positioned: bool,
 }
 
 /// Mutable storage data owned by [`super::StorageEngine`].

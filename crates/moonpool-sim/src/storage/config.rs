@@ -177,6 +177,20 @@ pub struct StorageConfiguration {
     /// Tests error handling in durability-critical code paths.
     pub sync_failure_probability: f64,
 
+    /// Per-operation probability that a read or write moves *fewer* bytes than
+    /// asked for (0.0 - 1.0).
+    ///
+    /// # Real-World Scenario
+    /// `read(2)` and `write(2)` are allowed to transfer a prefix and return
+    /// the count; so are their positioned forms. Callers that treat a
+    /// `read_at`/`write_at` return value as "all of it" are wrong on real
+    /// systems, and this knob makes them wrong here too, deterministically.
+    ///
+    /// A transfer is shortened to a non-empty prefix, never to zero: zero
+    /// bytes means end of file for a read, and the caller would be right to
+    /// stop. While `0.0` (the default) no operation draws from the RNG stream.
+    pub short_transfer_probability: f64,
+
     // =========================================================================
     // Dynamic Disk Degradation Episodes
     // =========================================================================
@@ -265,6 +279,7 @@ impl Default for StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            short_transfer_probability: 0.0,
 
             // Dynamic disk degradation - disabled by default (no-op multipliers)
             disk_stall_probability: 0.0,
@@ -322,6 +337,7 @@ impl StorageConfiguration {
             misdirect_read_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
             phantom_write_probability: f64::from(sim_random_range(0..20)) / 100_000.0,
             sync_failure_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
+            short_transfer_probability: f64::from(sim_random_range(0..200)) / 100_000.0,
 
             // Low-rate disk-degradation episodes (drawn after the faults so the
             // existing per-field RNG sub-sequence is unchanged).
@@ -394,6 +410,9 @@ impl StorageConfiguration {
         if !sim_random_bool(0.5) {
             self.disk_failure_probability = 0.0;
         }
+        if !sim_random_bool(0.5) {
+            self.short_transfer_probability = 0.0;
+        }
     }
 
     /// Spike selected disk knob *magnitudes* under buggify (FDB's
@@ -454,6 +473,7 @@ impl StorageConfiguration {
         self.misdirect_read_probability = 0.0;
         self.phantom_write_probability = 0.0;
         self.sync_failure_probability = 0.0;
+        self.short_transfer_probability = 0.0;
         self.disk_stall_probability = 0.0;
         self.disk_throttle_probability = 0.0;
         self.disk_failure_probability = 0.0;
@@ -485,6 +505,7 @@ impl StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            short_transfer_probability: 0.0,
 
             // Disk degradation disabled (no-op multipliers)
             disk_stall_probability: 0.0,
@@ -506,7 +527,7 @@ mod swarm_tests {
     use crate::sim::rng::{reset_sim_rng, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
-    fn enabled_families(config: &StorageConfiguration) -> [bool; 10] {
+    fn enabled_families(config: &StorageConfiguration) -> [bool; 11] {
         [
             config.read_fault_probability > 0.0,
             config.write_fault_probability > 0.0,
@@ -518,6 +539,7 @@ mod swarm_tests {
             config.disk_stall_probability > 0.0,
             config.disk_throttle_probability > 0.0,
             config.disk_failure_probability > 0.0,
+            config.short_transfer_probability > 0.0,
         ]
     }
 
@@ -584,6 +606,7 @@ mod swarm_tests {
         assert_zero(config.disk_stall_probability);
         assert_zero(config.disk_throttle_probability);
         assert_zero(config.disk_failure_probability);
+        assert_zero(config.short_transfer_probability);
     }
 
     #[test]

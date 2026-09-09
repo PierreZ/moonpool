@@ -118,9 +118,32 @@ impl SimWorld {
         offset: u64,
         len: usize,
     ) -> Result<OperationId, StorageError> {
+        self.schedule_read_inner(handle_id, offset, len, false)
+    }
+
+    /// Schedule a positioned read: it addresses `offset` literally and leaves
+    /// the handle's stream cursor alone.
+    pub(crate) fn schedule_positioned_read(
+        &self,
+        handle_id: HandleId,
+        offset: u64,
+        len: usize,
+    ) -> Result<OperationId, StorageError> {
+        self.schedule_read_inner(handle_id, offset, len, true)
+    }
+
+    fn schedule_read_inner(
+        &self,
+        handle_id: HandleId,
+        offset: u64,
+        len: usize,
+        positioned: bool,
+    ) -> Result<OperationId, StorageError> {
         let mut inner = self.inner.write();
         let now = inner.now();
-        let (operation_id, actions) = inner.storage.schedule_read(handle_id, offset, len, now)?;
+        let (operation_id, actions) = inner
+            .storage
+            .schedule_read(handle_id, offset, len, positioned, now)?;
         let wakes = apply_storage_actions(&mut inner, actions);
         drop(inner);
         wakes.wake();
@@ -133,9 +156,32 @@ impl SimWorld {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<OperationId, StorageError> {
+        self.schedule_write_inner(handle_id, offset, data, false)
+    }
+
+    /// Schedule a positioned write: it lands at `offset` whatever the handle's
+    /// append flag says, and leaves the stream cursor alone.
+    pub(crate) fn schedule_positioned_write(
+        &self,
+        handle_id: HandleId,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<OperationId, StorageError> {
+        self.schedule_write_inner(handle_id, offset, data, true)
+    }
+
+    fn schedule_write_inner(
+        &self,
+        handle_id: HandleId,
+        offset: u64,
+        data: Vec<u8>,
+        positioned: bool,
+    ) -> Result<OperationId, StorageError> {
         let mut inner = self.inner.write();
         let now = inner.now();
-        let (operation_id, actions) = inner.storage.schedule_write(handle_id, offset, data, now)?;
+        let (operation_id, actions) = inner
+            .storage
+            .schedule_write(handle_id, offset, data, positioned, now)?;
         let wakes = apply_storage_actions(&mut inner, actions);
         drop(inner);
         wakes.wake();

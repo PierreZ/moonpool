@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use super::futures::{SetLenFuture, SyncFuture};
+use super::futures::{ReadAtFuture, SetLenFuture, SyncFuture, WriteAtFuture};
 use super::sim_shutdown_error;
 
 /// Simulated storage file for deterministic testing.
@@ -71,6 +71,32 @@ impl StorageFile for SimStorageFile {
         // Simulation treats sync_all and sync_data identically
         self.ensure_open()?;
         SyncFuture::new(self.sim.clone(), self.handle_id).await
+    }
+
+    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        self.ensure_open()?;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+        let size = sim.file_size(self.handle_id)?;
+        if offset >= size {
+            return Ok(0);
+        }
+        let remaining = usize::try_from(size - offset).unwrap_or(usize::MAX);
+        let len = buf.len().min(remaining);
+        let data = ReadAtFuture::new(self.sim.clone(), self.handle_id, offset, len).await?;
+        let read = data.len().min(buf.len());
+        buf[..read].copy_from_slice(&data[..read]);
+        Ok(read)
+    }
+
+    async fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        self.ensure_open()?;
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        WriteAtFuture::new(self.sim.clone(), self.handle_id, offset, buf.to_vec()).await
     }
 
     async fn size(&self) -> io::Result<u64> {
@@ -174,7 +200,10 @@ impl AsyncWrite for SimStorageFile {
                         "write operation returned a non-write completion",
                     )));
                 };
-                debug_assert_eq!(len, bytes_written);
+                debug_assert!(
+                    len <= bytes_written,
+                    "a write completed with more bytes than were submitted"
+                );
                 tracing::trace!(offset, len, "storage write completed");
                 return Poll::Ready(Ok(len));
             }

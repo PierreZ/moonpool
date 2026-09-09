@@ -20,6 +20,8 @@ mod faults;
 mod latency;
 #[path = "storage/performance.rs"]
 mod performance;
+#[path = "storage/positioned.rs"]
+mod positioned;
 #[path = "storage/recovery.rs"]
 mod recovery;
 // Exercises TokioStorageProvider — only available with the tokio-providers feature.

@@ -103,6 +103,39 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     /// the file is large enough and only needs the bytes to land.
     fn sync_data(&self) -> impl std::future::Future<Output = io::Result<()>> + Send;
 
+    /// Read into `buf` starting at `offset`, without touching the stream
+    /// cursor.
+    ///
+    /// Returns the number of bytes read, which may be **fewer** than
+    /// `buf.len()`: this is `read`, not `read_exact`. A return of `0` means
+    /// end of file. Positioned reads take `&self`, so non-overlapping ranges
+    /// of one file may be read concurrently, and they observe the same bytes
+    /// stream reads do.
+    ///
+    /// A caller that needs the whole range must loop, or use a layer that
+    /// loops for it (see [`BlockFile`](crate::BlockFile)).
+    fn read_at(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> impl std::future::Future<Output = io::Result<usize>> + Send;
+
+    /// Write `buf` starting at `offset`, without touching the stream cursor.
+    ///
+    /// Returns the number of bytes written, which may be **fewer** than
+    /// `buf.len()`: this is `write`, not `write_all`. Writing past the end of
+    /// the file extends it. Append mode does not apply — a positioned write
+    /// goes exactly where it is told.
+    ///
+    /// Completion means the bytes are *visible*, not durable; only a
+    /// subsequent [`sync_all`](Self::sync_all) / [`sync_data`](Self::sync_data)
+    /// makes them survive a crash.
+    fn write_at(
+        &self,
+        offset: u64,
+        buf: &[u8],
+    ) -> impl std::future::Future<Output = io::Result<usize>> + Send;
+
     /// Get the current size of the file in bytes.
     fn size(&self) -> impl std::future::Future<Output = io::Result<u64>> + Send;
 

@@ -237,11 +237,13 @@ impl StorageEngine {
         handle_id: HandleId,
         offset: u64,
         len: usize,
+        positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
         self.ensure_readable(handle_id)?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
+        let len = self.shorten_transfer(owner_ip, len);
         let pending = PendingStorageOp {
             handle_id,
             file_id,
@@ -250,6 +252,7 @@ impl StorageEngine {
             len,
             data: None,
             append: false,
+            positioned,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -275,13 +278,16 @@ impl StorageEngine {
         &mut self,
         handle_id: HandleId,
         offset: u64,
-        data: Vec<u8>,
+        mut data: Vec<u8>,
+        positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
         self.ensure_writable(handle_id, "write")?;
         let file_id = self.open_file_id(handle_id)?;
-        let append = self.open_handle(handle_id)?.options.is_append();
+        // Append mode moves the stream cursor, never a positioned write.
+        let append = !positioned && self.open_handle(handle_id)?.options.is_append();
         let owner_ip = self.owner_ip(file_id)?;
+        data.truncate(self.shorten_transfer(owner_ip, data.len()));
         let len = data.len();
         let pending = PendingStorageOp {
             handle_id,
@@ -291,6 +297,7 @@ impl StorageEngine {
             len,
             data: Some(data),
             append,
+            positioned,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -327,6 +334,7 @@ impl StorageEngine {
             len: 0,
             data: None,
             append: false,
+            positioned: false,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -364,6 +372,7 @@ impl StorageEngine {
             len: 0,
             data: None,
             append: false,
+            positioned: false,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -374,6 +383,22 @@ impl StorageEngine {
             StorageOperation::SetLenComplete { new_len },
             now.saturating_add(latency),
         )
+    }
+
+    /// Shorten one transfer to a deterministic prefix, the way a real
+    /// `read`/`write` may move fewer bytes than asked for.
+    ///
+    /// The coin is drawn only while `short_transfer_probability` is positive,
+    /// so a configuration with the family off consumes no randomness. A
+    /// one-byte transfer is left alone: the only shorter transfer is zero,
+    /// which would mean EOF rather than a short read.
+    fn shorten_transfer(&self, owner_ip: IpAddr, len: usize) -> usize {
+        let probability = self.state.config_for(owner_ip).short_transfer_probability;
+        if probability <= 0.0 || len <= 1 || sim_random::<f64>() >= probability {
+            return len;
+        }
+        assert_reachable!("disk: transfer moved fewer bytes than requested");
+        sim_random_range(1..len)
     }
 
     /// Whether `owner_ip`'s disk is failed, drawing the failure coin first if
@@ -632,7 +657,9 @@ impl StorageEngine {
             });
         }
         let len = data.len();
-        if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
+        if !pending.positioned
+            && let Some(handle) = self.state.handles.get_mut(&pending.handle_id)
+        {
             handle.position = offset + len as u64;
         }
         Ok(StorageCompletion::Write { offset, len })

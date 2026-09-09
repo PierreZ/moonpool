@@ -441,3 +441,47 @@ fn test_tokio_provider_generic_trait_usage() {
         assert_eq!(&result, data);
     });
 }
+
+/// The production provider's positioned I/O: real `pread`/`pwrite`, sharing
+/// the file with the stream API and leaving its cursor alone.
+#[test]
+fn test_tokio_provider_positioned_io() {
+    local_runtime().block_on(async move {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let file_path = temp_dir.path().join("positioned.db");
+        let file_path_str = file_path.to_str().expect("temp path is valid UTF-8");
+
+        let provider = TokioStorageProvider::new();
+        let mut file = provider
+            .open(file_path_str, OpenOptions::create_write().read(true))
+            .await
+            .expect("open failed");
+
+        file.write_all(b"0123456789").await.expect("write failed");
+        let cursor = file.seek(SeekFrom::Start(4)).await.expect("seek failed");
+        assert_eq!(cursor, 4);
+
+        assert_eq!(
+            file.write_at(2, b"AB").await.expect("write_at failed"),
+            2,
+            "a positioned write of two bytes moves two bytes"
+        );
+
+        let mut buf = [0u8; 4];
+        assert_eq!(file.read_at(0, &mut buf).await.expect("read_at failed"), 4);
+        assert_eq!(&buf, b"01AB");
+
+        assert_eq!(
+            file.seek(SeekFrom::Current(0)).await.expect("seek failed"),
+            4,
+            "positioned I/O moved the stream cursor"
+        );
+
+        // Reading past the end is EOF, not an error.
+        let mut past = [0u8; 8];
+        assert_eq!(
+            file.read_at(64, &mut past).await.expect("read_at failed"),
+            0
+        );
+    });
+}
