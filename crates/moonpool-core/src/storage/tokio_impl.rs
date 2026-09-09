@@ -255,6 +255,47 @@ fn direct_io_constraints(file: &tokio::fs::File) -> Option<IoConstraints> {
     }
 }
 
+/// The path that reopens *this exact file*, rather than whatever the original
+/// path happens to name by the time the upgrade runs.
+///
+/// `/proc/self/fd/N` is a magic symlink to the file a descriptor holds, so
+/// reopening through it cannot pick up a different file. Reopening by name
+/// could: a concurrent rename between the two opens would hand back somebody
+/// else's file, and `create_new`'s guarantee — that the caller holds the file
+/// it exclusively created — would last only until someone renamed over the
+/// name.
+#[cfg(target_os = "linux")]
+fn descriptor_path(file: &tokio::fs::File, _path: &str) -> std::path::PathBuf {
+    use std::os::fd::AsRawFd as _;
+    std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
+}
+
+/// Unreachable in practice: the upgrade only runs where direct I/O is
+/// supported, which is Linux only. Present so the branch compiles elsewhere.
+#[cfg(not(target_os = "linux"))]
+fn descriptor_path(_file: &tokio::fs::File, path: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(path)
+}
+
+/// Whether the direct-I/O upgrade could not be *attempted* at all: no `/proc`
+/// to address the descriptor through, or the file unlinked out from under it.
+///
+/// This is not the caller's open failing — that one has already succeeded, and
+/// the file it produced is exactly what was asked for. It is the optional
+/// upgrade being unavailable, which is the same answer as the filesystem
+/// refusing `O_DIRECT`: keep the buffered handle. Anything else (a descriptor
+/// limit, say) is a real problem and is propagated.
+#[cfg(unix)]
+fn is_upgrade_unreachable(error: &io::Error) -> bool {
+    let code = error.raw_os_error();
+    code == Some(libc::ENOENT) || code == Some(libc::ENOSYS) || code == Some(libc::EACCES)
+}
+
+#[cfg(not(unix))]
+fn is_upgrade_unreachable(_error: &io::Error) -> bool {
+    false
+}
+
 /// Options for the direct-I/O *upgrade* of a file that is already open: the
 /// same access, none of the lifecycle.
 ///
@@ -280,6 +321,10 @@ fn upgrade_options(options: &OpenOptions) -> OpenOptions {
 /// I/O is then attempted as an **upgrade**: a second open of the file that now
 /// exists, with no lifecycle flags of its own, which therefore cannot create,
 /// truncate, or clobber anything.
+///
+/// The upgrade addresses the file by *descriptor* (see [`descriptor_path`]),
+/// not by name, so it cannot reopen a different file that a concurrent rename
+/// put at the path in the meantime.
 ///
 /// The alternative — attempt `O_DIRECT` first and retry buffered on failure —
 /// cannot be made correct. Linux creates the file *before* rejecting
@@ -327,8 +372,12 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
             if !DIRECT_IO_SUPPORTED {
                 return Ok(OpenedFile::buffered(buffered));
             }
+            // Addressed by descriptor, not by name: the upgrade must reopen
+            // the file whose lifecycle was just applied, not whatever the path
+            // names now.
+            let upgrade = descriptor_path(&buffered, path);
             match open_options(&upgrade_options(options), true)
-                .open(path)
+                .open(&upgrade)
                 .await
             {
                 Ok(direct) => match direct_io_constraints(&direct) {
@@ -338,7 +387,9 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
                     // that is already open.
                     None => Ok(OpenedFile::buffered(buffered)),
                 },
-                Err(error) if is_direct_io_unsupported(&error) => {
+                Err(error)
+                    if is_direct_io_unsupported(&error) || is_upgrade_unreachable(&error) =>
+                {
                     Ok(OpenedFile::buffered(buffered))
                 }
                 Err(error) => Err(error),
@@ -530,6 +581,8 @@ impl AsyncSeek for TokioStorageFile {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::descriptor_path;
     use super::{OpenOptions, is_direct_io_unsupported, upgrade_options};
     use std::io;
 
@@ -568,6 +621,49 @@ mod tests {
 
         // An error with no OS code behind it says nothing about direct I/O.
         assert!(!is_direct_io_unsupported(&io::Error::other("synthetic")));
+    }
+
+    /// The upgrade reopens the file the descriptor holds, not the name it was
+    /// opened under. Renaming the name away leaves the descriptor path
+    /// resolving to the same file, which is what stops a concurrent rename
+    /// from substituting a different one for the file `create_new` just
+    /// exclusively created.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_upgrade_addresses_the_file_not_the_name() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build runtime");
+        runtime.block_on(async {
+            let dir = tempfile::TempDir::new().expect("temp dir");
+            let original = dir.path().join("original");
+            let renamed = dir.path().join("renamed");
+
+            let file = tokio::fs::File::create(&original)
+                .await
+                .expect("create failed");
+            let inode = file.metadata().await.expect("metadata failed").ino();
+
+            // Somebody moves the name out from under us.
+            std::fs::rename(&original, &renamed).expect("rename failed");
+            assert!(
+                std::fs::metadata(&original).is_err(),
+                "the original name no longer resolves"
+            );
+
+            // The descriptor path still reaches the file it always held.
+            let through_descriptor = descriptor_path(&file, "unused");
+            let reached = std::fs::metadata(&through_descriptor)
+                .expect("the descriptor path must still resolve");
+            assert_eq!(
+                reached.ino(),
+                inode,
+                "the upgrade must reopen the same file, not whatever the name points at"
+            );
+        });
     }
 
     /// The upgrade open carries the access the caller asked for and none of
