@@ -539,3 +539,68 @@ fn a_buffered_file_keeps_stream_io() {
         result.expect("buffered stream test failed");
     });
 }
+
+/// A refused `Required` open applies no lifecycle in the simulator either.
+///
+/// The production backend has to work for this: Linux applies `O_CREAT` and
+/// `O_TRUNC` before rejecting `O_DIRECT`, so it defers the lifecycle until
+/// direct I/O is secured. The simulator decides direct I/O before it touches
+/// the namespace at all, which reaches the same contract from the other side —
+/// and this pins it there, so neither backend can drift.
+#[test]
+fn a_refused_required_open_applies_no_lifecycle() {
+    local_runtime().block_on(async {
+        let mut config = StorageConfiguration::fast_local();
+        config.direct_io_supported = false;
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+
+        let outcome = run_storage_test(sim, |provider| async move {
+            // A file the caller wants created: the refusal must leave nothing.
+            let created = provider
+                .open(
+                    "required-create.db",
+                    OpenOptions::create_new_write().direct_io(DirectIo::Required),
+                )
+                .await
+                .err()
+                .map(|error| error.kind());
+            let leaked = provider.exists("required-create.db").await?;
+
+            // A file the caller wants truncated: the refusal must leave its
+            // contents alone.
+            let seed = provider
+                .open("required-truncate.db", OpenOptions::create_write())
+                .await?;
+            seed.write_at(0, b"PRECIOUS").await?;
+            seed.sync_all().await?;
+            drop(seed);
+
+            let truncating = provider
+                .open(
+                    "required-truncate.db",
+                    OpenOptions::create_write().direct_io(DirectIo::Required),
+                )
+                .await
+                .err()
+                .map(|error| error.kind());
+
+            let survivor = provider
+                .open("required-truncate.db", OpenOptions::read_only())
+                .await?;
+            let mut buf = vec![0u8; 8];
+            let read = survivor.read_at(0, &mut buf).await?;
+            Ok::<_, std::io::Error>((created, leaked, truncating, buf[..read].to_vec()))
+        })
+        .await
+        .expect("simulated open sequence failed");
+
+        assert_eq!(outcome.0, Some(std::io::ErrorKind::Unsupported));
+        assert!(!outcome.1, "a refused create must not leave a file behind");
+        assert_eq!(outcome.2, Some(std::io::ErrorKind::Unsupported));
+        assert_eq!(
+            outcome.3, b"PRECIOUS",
+            "a refused truncating open must not destroy the contents"
+        );
+    });
+}

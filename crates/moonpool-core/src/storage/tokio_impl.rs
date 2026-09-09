@@ -331,6 +331,34 @@ fn is_upgrade_unreachable(_error: &io::Error) -> bool {
     false
 }
 
+/// The caller's access with **no lifecycle at all**: the shape that opens a
+/// file which already exists without being able to create or truncate one.
+fn existing_options(options: &OpenOptions) -> OpenOptions {
+    OpenOptions::new()
+        .read(options.is_read())
+        .write(options.is_write())
+        .append(options.is_append())
+}
+
+/// The caller's access plus an **exclusive** create, whatever the caller asked
+/// for.
+///
+/// `create_new` even when the caller only said `create`, so that a failure
+/// afterwards can only ever remove a file this call itself brought into
+/// existence. A losing race reports `AlreadyExists`, which the caller's own
+/// `create` turns back into "open the existing file".
+///
+/// No truncate: a file that has just been created exclusively is already
+/// empty.
+fn exclusive_create_options(options: &OpenOptions) -> OpenOptions {
+    existing_options(options).create_new(true)
+}
+
+/// How many times a plain `create` may lose the race to another process
+/// before the open gives up. Losing repeatedly means somebody is creating and
+/// removing the path in a loop, which is not a condition to keep retrying.
+const CREATE_RACE_ATTEMPTS: usize = 4;
+
 /// Options for the direct-I/O *upgrade* of a file that is already open: the
 /// same access, none of the lifecycle.
 ///
@@ -378,30 +406,7 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
             io::ErrorKind::Unsupported,
             "direct I/O is not supported on this platform",
         )),
-        DirectIo::Required => {
-            let file = match open_options(options, true).open(path).await {
-                Ok(file) => file,
-                // Never downgraded: the caller asked for uncached I/O, and it
-                // is not available for this file.
-                Err(error) if is_direct_io_unsupported(&error) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        format!("direct I/O is not supported for '{path}': {error}"),
-                    ));
-                }
-                Err(error) => return Err(error),
-            };
-            match direct_io_constraints(&file) {
-                Some(constraints) => Ok(OpenedFile::direct(file, constraints)),
-                // Better to fail than to advertise constraints that might not
-                // be enough: a caller that trusted them would be handed a
-                // buffer the device rejects.
-                None => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!("cannot determine the alignment direct I/O requires for '{path}'"),
-                )),
-            }
-        }
+        DirectIo::Required => open_required(path, options).await,
         DirectIo::Optional => {
             let buffered = open_options(options, false).open(path).await?;
             if !DIRECT_IO_SUPPORTED {
@@ -431,6 +436,120 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
             }
         }
     }
+}
+
+/// Open with mandatory direct I/O, without applying the open's lifecycle
+/// before direct I/O is actually secured.
+///
+/// `Required` cannot fall back, so it used to pass the lifecycle flags and
+/// `O_DIRECT` to one open — and Linux applies `O_CREAT` and `O_TRUNC` *before*
+/// it rejects `O_DIRECT`. A refused open therefore left a file behind, or
+/// destroyed the contents of one that already existed, and then reported
+/// failure. The caller was told nothing happened; something had.
+///
+/// So the lifecycle is applied only once direct I/O is in hand:
+///
+/// 1. Open the file **as it already is** — the caller's access, `O_DIRECT`,
+///    and no lifecycle flags whatever. A rejection here cannot create or
+///    truncate anything, so `Unsupported` leaves the filesystem untouched.
+///    Truncation happens afterwards, through the descriptor, once the
+///    constraints are known.
+/// 2. If the file does not exist and the caller asked for it, create it
+///    **exclusively** — even for a plain `create` — so that a subsequent
+///    `O_DIRECT` rejection can only ever remove a file this call created.
+///
+/// Direct I/O is still mandatory: no path here returns a buffered file.
+async fn open_required(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> {
+    let mut last_race = None;
+    for _ in 0..CREATE_RACE_ATTEMPTS {
+        // 1. The file as it already is: no create, no create_new, no truncate.
+        match open_options(&existing_options(options), true)
+            .open(path)
+            .await
+        {
+            Ok(file) => return finish_existing(file, options).await,
+            Err(error) if is_direct_io_unsupported(&error) => {
+                return Err(unsupported_direct_io(path, &error));
+            }
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    && (options.is_create() || options.is_create_new()) => {}
+            Err(error) => return Err(error),
+        }
+
+        // 2. It does not exist and the caller wants it created.
+        match open_options(&exclusive_create_options(options), true)
+            .open(path)
+            .await
+        {
+            Ok(file) => {
+                let Some(constraints) = direct_io_constraints(&file) else {
+                    // Ours and nobody else's: removing it restores the state a
+                    // failed open has to leave behind.
+                    drop(file);
+                    let _ = tokio::fs::remove_file(path).await;
+                    return Err(undescribable_direct_io(path));
+                };
+                return Ok(OpenedFile::direct(file, constraints));
+            }
+            Err(error) if is_direct_io_unsupported(&error) => {
+                // Linux creates the file before rejecting `O_DIRECT`. The
+                // exclusive create means it can only be ours.
+                let _ = tokio::fs::remove_file(path).await;
+                return Err(unsupported_direct_io(path, &error));
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if options.is_create_new() {
+                    return Err(error);
+                }
+                // Somebody created it between the two steps; a plain `create`
+                // means "open it, then".
+                last_race = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_race.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("'{path}' kept being created and removed while opening it"),
+        )
+    }))
+}
+
+/// Finish a `Required` open of a file that already existed: refuse it if the
+/// caller demanded exclusivity, then apply the truncation the open flags were
+/// not allowed to carry.
+async fn finish_existing(file: tokio::fs::File, options: &OpenOptions) -> io::Result<OpenedFile> {
+    if options.is_create_new() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the file already exists",
+        ));
+    }
+    let Some(constraints) = direct_io_constraints(&file) else {
+        // Reported before anything is truncated: the file is exactly as the
+        // caller left it.
+        return Err(undescribable_direct_io("the opened file"));
+    };
+    if options.is_truncate() {
+        file.set_len(0).await?;
+    }
+    Ok(OpenedFile::direct(file, constraints))
+}
+
+fn unsupported_direct_io(path: &str, error: &io::Error) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("direct I/O is not supported for '{path}': {error}"),
+    )
+}
+
+fn undescribable_direct_io(path: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("cannot determine the alignment direct I/O requires for '{path}'"),
+    )
 }
 
 /// Wrapper for Tokio File to implement our trait.
@@ -618,7 +737,10 @@ impl AsyncSeek for TokioStorageFile {
 mod tests {
     #[cfg(target_os = "linux")]
     use super::descriptor_path;
-    use super::{OpenOptions, is_direct_io_unsupported, upgrade_options};
+    use super::{
+        OpenOptions, exclusive_create_options, existing_options, is_direct_io_unsupported,
+        upgrade_options,
+    };
     use std::io;
 
     /// Only the two codes that mean "this filesystem cannot do direct I/O"
@@ -656,6 +778,45 @@ mod tests {
 
         // An error with no OS code behind it says nothing about direct I/O.
         assert!(!is_direct_io_unsupported(&io::Error::other("synthetic")));
+    }
+
+    /// `Required` opens the existing file with no lifecycle flags at all, so
+    /// a rejected `O_DIRECT` cannot create or truncate anything on the way
+    /// out. Truncation is applied afterwards, through the descriptor.
+    #[test]
+    fn the_existing_open_carries_no_lifecycle() {
+        let requested = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .append(true)
+            .create(true)
+            .create_new(true)
+            .truncate(true);
+        let existing = existing_options(&requested);
+
+        assert!(existing.is_read());
+        assert!(existing.is_write());
+        assert!(existing.is_append());
+        assert!(!existing.is_create());
+        assert!(!existing.is_create_new());
+        assert!(!existing.is_truncate());
+    }
+
+    /// `Required` creates exclusively even when the caller only asked for
+    /// `create`, so the rollback after a rejected `O_DIRECT` can only ever
+    /// remove a file this call itself created — never one that was already
+    /// there, or one another process created in between.
+    #[test]
+    fn the_create_open_is_always_exclusive() {
+        let plain_create = OpenOptions::new().write(true).create(true);
+        let exclusive = exclusive_create_options(&plain_create);
+
+        assert!(exclusive.is_create_new(), "always exclusive");
+        assert!(exclusive.is_write());
+        assert!(
+            !exclusive.is_truncate(),
+            "a file created exclusively is already empty"
+        );
     }
 
     /// The upgrade reopens the file the descriptor holds, not the name it was

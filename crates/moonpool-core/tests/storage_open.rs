@@ -358,3 +358,186 @@ fn positioned_writes_ignore_append_on_a_real_file() {
         );
     });
 }
+
+/// A directory whose filesystem refuses `O_DIRECT`, if this machine has one.
+///
+/// `MOONPOOL_NO_DIRECT_IO_DIR` names it explicitly; otherwise any `ramfs`
+/// mount will do, since ramfs has no direct-I/O path at all. Most machines
+/// have neither, so the assertions that need one are reported as skipped
+/// rather than silently passing.
+fn directory_refusing_direct_io() -> Option<std::path::PathBuf> {
+    if let Ok(configured) = std::env::var("MOONPOOL_NO_DIRECT_IO_DIR") {
+        return Some(std::path::PathBuf::from(configured));
+    }
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    mounts.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let _device = fields.next()?;
+        let mount = fields.next()?;
+        let kind = fields.next()?;
+        (kind == "ramfs").then(|| std::path::PathBuf::from(mount))
+    })
+}
+
+/// A failed `Required` open must leave the filesystem exactly as it found it.
+///
+/// Linux applies `O_CREAT` and `O_TRUNC` *before* it rejects `O_DIRECT`, so an
+/// open that carried both in one call created a file, or emptied one, and then
+/// reported failure. `Required` cannot fall back, so the lifecycle has to wait
+/// until direct I/O is actually in hand.
+#[test]
+fn a_refused_required_open_applies_no_lifecycle() {
+    let Some(dir) = directory_refusing_direct_io() else {
+        eprintln!(
+            "skipped: no filesystem here refuses O_DIRECT; \
+             set MOONPOOL_NO_DIRECT_IO_DIR to a ramfs mount to run it"
+        );
+        return;
+    };
+
+    runtime().block_on(async {
+        let provider = TokioStorageProvider::new();
+        let unique = std::process::id();
+
+        // create_new: the file must not be left behind.
+        let created = dir.join(format!("required-create-new-{unique}"));
+        let created = created.to_str().expect("path is valid UTF-8");
+        let _ = std::fs::remove_file(created);
+        let error = provider
+            .open(
+                created,
+                OpenOptions::create_new_write().direct_io(DirectIo::Required),
+            )
+            .await
+            .expect_err("direct I/O is unavailable here, so the open must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(
+            !provider.exists(created).await.expect("exists failed"),
+            "a refused create_new must not leave a file behind"
+        );
+
+        // plain create: likewise.
+        let error = provider
+            .open(
+                created,
+                OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .direct_io(DirectIo::Required),
+            )
+            .await
+            .expect_err("the open must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(
+            !provider.exists(created).await.expect("exists failed"),
+            "a refused create must not leave a file behind"
+        );
+
+        // truncate: the previous contents must survive.
+        let existing = dir.join(format!("required-truncate-{unique}"));
+        let existing_str = existing.to_str().expect("path is valid UTF-8");
+        std::fs::write(&existing, b"PRECIOUS").expect("seed write failed");
+
+        let error = provider
+            .open(
+                existing_str,
+                OpenOptions::create_write().direct_io(DirectIo::Required),
+            )
+            .await
+            .expect_err("the open must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            std::fs::read(&existing).expect("read failed"),
+            b"PRECIOUS",
+            "a refused truncating open must not destroy the contents"
+        );
+
+        let _ = std::fs::remove_file(&existing);
+    });
+}
+
+/// The lifecycle `Required` defers is still applied — in the right order —
+/// once direct I/O is secured. Runs wherever direct I/O works.
+#[test]
+fn a_successful_required_open_still_applies_the_lifecycle() {
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let provider = TokioStorageProvider::new();
+
+        let missing = dir.path().join("absent.db");
+        let missing = missing.to_str().expect("temp path is valid UTF-8");
+
+        // No create: NotFound, and nothing brought into existence.
+        let error = provider
+            .open(
+                missing,
+                OpenOptions::read_only().direct_io(DirectIo::Required),
+            )
+            .await
+            .expect_err("a missing file without create must fail");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::Unsupported
+        ));
+        assert!(!provider.exists(missing).await.expect("exists failed"));
+
+        let path = dir.path().join("lifecycle.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let Ok(created) = provider
+            .open(
+                path,
+                OpenOptions::create_new_write()
+                    .read(true)
+                    .direct_io(DirectIo::Required),
+            )
+            .await
+        else {
+            eprintln!("skipped: direct I/O is unavailable on this filesystem");
+            return;
+        };
+        let constraints = created.constraints();
+        let mut block = AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
+        block.as_mut_slice().fill(0xD7);
+        created.write_at(0, block.as_slice()).await.expect("write");
+        created.sync_all().await.expect("sync");
+        assert_eq!(created.size().await.expect("size"), block.len() as u64);
+        drop(created);
+
+        // create_new against the now-existing file: refused, contents intact.
+        let error = provider
+            .open(
+                path,
+                OpenOptions::create_new_write().direct_io(DirectIo::Required),
+            )
+            .await
+            .expect_err("create_new on an existing file must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+
+        let reopened = provider
+            .open(path, OpenOptions::read_only().direct_io(DirectIo::Required))
+            .await
+            .expect("open failed");
+        assert_eq!(
+            reopened.size().await.expect("size"),
+            block.len() as u64,
+            "a refused create_new must not have truncated the file"
+        );
+        drop(reopened);
+
+        // truncate: deferred until after direct I/O is secured, but applied.
+        let truncated = provider
+            .open(
+                path,
+                OpenOptions::create_write()
+                    .read(true)
+                    .direct_io(DirectIo::Required),
+            )
+            .await
+            .expect("open failed");
+        assert_eq!(
+            truncated.size().await.expect("size"),
+            0,
+            "a truncating open must still truncate"
+        );
+    });
+}
