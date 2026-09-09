@@ -312,22 +312,21 @@ fn descriptor_path(_file: &tokio::fs::File, path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)
 }
 
-/// Whether the direct-I/O upgrade could not be *attempted* at all: no `/proc`
-/// to address the descriptor through, or the file unlinked out from under it.
+/// Whether this system has the descriptor path the `Optional` upgrade
+/// reopens through.
 ///
-/// This is not the caller's open failing — that one has already succeeded, and
-/// the file it produced is exactly what was asked for. It is the optional
-/// upgrade being unavailable, which is the same answer as the filesystem
-/// refusing `O_DIRECT`: keep the buffered handle. Anything else (a descriptor
-/// limit, say) is a real problem and is propagated.
-#[cfg(unix)]
-fn is_upgrade_unreachable(error: &io::Error) -> bool {
-    let code = error.raw_os_error();
-    code == Some(libc::ENOENT) || code == Some(libc::ENOSYS) || code == Some(libc::EACCES)
+/// Checked once, by asking whether `/proc/self/fd` is there at all, rather
+/// than by guessing from an error code afterwards. A machine without it simply
+/// never attempts the upgrade, so no error has to be interpreted as "the
+/// mechanism is missing".
+#[cfg(target_os = "linux")]
+fn descriptor_paths_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| std::fs::metadata("/proc/self/fd").is_ok())
 }
 
-#[cfg(not(unix))]
-fn is_upgrade_unreachable(_error: &io::Error) -> bool {
+#[cfg(not(target_os = "linux"))]
+fn descriptor_paths_available() -> bool {
     false
 }
 
@@ -409,7 +408,7 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
         DirectIo::Required => open_required(path, options).await,
         DirectIo::Optional => {
             let buffered = open_options(options, false).open(path).await?;
-            if !DIRECT_IO_SUPPORTED {
+            if !DIRECT_IO_SUPPORTED || !descriptor_paths_available() {
                 return Ok(OpenedFile::buffered(buffered));
             }
             // Addressed by descriptor, not by name: the upgrade must reopen
@@ -427,9 +426,10 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
                     // that is already open.
                     None => Ok(OpenedFile::buffered(buffered)),
                 },
-                Err(error)
-                    if is_direct_io_unsupported(&error) || is_upgrade_unreachable(&error) =>
-                {
+                // The only absorbed failure is "no direct I/O here". Whether
+                // the mechanism itself exists was settled before the attempt,
+                // so nothing else has to be guessed at from an error code.
+                Err(error) if is_direct_io_unsupported(&error) => {
                     Ok(OpenedFile::buffered(buffered))
                 }
                 Err(error) => Err(error),
@@ -778,6 +778,62 @@ mod tests {
 
         // An error with no OS code behind it says nothing about direct I/O.
         assert!(!is_direct_io_unsupported(&io::Error::other("synthetic")));
+    }
+
+    /// The descriptor path keeps working after the file is unlinked, which is
+    /// why the upgrade needs no "the file is gone" fallback.
+    ///
+    /// `/proc/self/fd/N` resolves to the inode, not to the name, so a
+    /// descriptor whose file has been removed still reopens. That leaves no
+    /// reachable condition under which the upgrade fails for want of a path,
+    /// and therefore nothing beyond "no direct I/O here" for the fallback to
+    /// absorb. Pinned here because the classification depends on it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_descriptor_path_survives_unlinking() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build runtime");
+        runtime.block_on(async {
+            let dir = tempfile::TempDir::new().expect("temp dir");
+            let path = dir.path().join("unlinked");
+
+            let file = tokio::fs::File::create(&path).await.expect("create failed");
+            std::fs::remove_file(&path).expect("unlink failed");
+            assert!(std::fs::metadata(&path).is_err(), "the name is gone");
+
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .open(descriptor_path(&file, "unused"))
+                .await
+                .expect("the descriptor path still reaches the unlinked file");
+        });
+    }
+
+    /// Nothing but "this filesystem cannot do direct I/O" is ever absorbed
+    /// into a buffered fallback. A denial in particular is a real answer about
+    /// this process's rights, and swallowing it would let a security policy
+    /// silently downgrade a caller.
+    #[cfg(unix)]
+    #[test]
+    fn no_other_failure_is_turned_into_a_fallback() {
+        for code in [
+            libc::EACCES,
+            libc::EPERM,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EIO,
+            libc::EROFS,
+            libc::ENOENT,
+            libc::ENOSYS,
+        ] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                !is_direct_io_unsupported(&error),
+                "{error} must be reported, not turned into a buffered fallback"
+            );
+        }
     }
 
     /// `Required` opens the existing file with no lifecycle flags at all, so
