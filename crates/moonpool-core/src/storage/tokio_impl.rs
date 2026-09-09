@@ -30,10 +30,7 @@ impl StorageProvider for TokioStorageProvider {
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
         let opened = open_file(path, &options).await?;
-        // A second descriptor onto the same open file description, used for
-        // positioned I/O: `read_at`/`write_at` must not disturb the stream
-        // cursor, and the OS positioned calls need a blocking `std::fs::File`.
-        let positioned = opened.file.try_clone().await?.into_std().await;
+        let positioned = positioned_descriptor(&opened, path, &options).await?;
         Ok(TokioStorageFile {
             inner: opened.file.compat(),
             positioned: Arc::new(positioned),
@@ -253,6 +250,44 @@ fn direct_io_constraints(file: &tokio::fs::File) -> Option<IoConstraints> {
         ReportedAlignment::Refused => None,
         ReportedAlignment::Unknown => bounded_alignment(),
     }
+}
+
+/// The descriptor positioned I/O runs on.
+///
+/// `read_at`/`write_at` must not disturb the stream cursor, and the OS
+/// positioned calls need a blocking `std::fs::File`, so they get a descriptor
+/// of their own.
+///
+/// # Why an append file cannot simply clone
+///
+/// `try_clone` is `dup`, which shares the *open file description* and
+/// therefore its status flags — `O_APPEND` among them. On Linux a `pwrite` to
+/// an `O_APPEND` descriptor ignores the supplied offset and appends, so a
+/// cloned descriptor would make `write_at` do the one thing its contract says
+/// it never does. Clearing the flag is not an option either: `F_SETFL` acts on
+/// the shared description, so it would disable append for the stream writes
+/// that asked for it.
+///
+/// An append file therefore gets a genuinely separate open, without
+/// `O_APPEND`, addressed by descriptor so it is unambiguously the same file.
+/// Without append the clone carries identical flags and is exactly
+/// equivalent, so it is kept — one fewer open, and no dependency on the
+/// descriptor path.
+async fn positioned_descriptor(
+    opened: &OpenedFile,
+    path: &str,
+    options: &OpenOptions,
+) -> io::Result<std::fs::File> {
+    if !options.is_append() {
+        return Ok(opened.file.try_clone().await?.into_std().await);
+    }
+    // Append implies write access; the read side is carried over as asked for,
+    // so a file opened without read still refuses `read_at`.
+    let positioned = OpenOptions::new().read(options.is_read()).write(true);
+    let reopened = open_options(&positioned, opened.direct)
+        .open(descriptor_path(&opened.file, path))
+        .await?;
+    Ok(reopened.into_std().await)
 }
 
 /// The path that reopens *this exact file*, rather than whatever the original

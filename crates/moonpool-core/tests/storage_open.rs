@@ -300,3 +300,61 @@ fn a_buffered_file_keeps_stream_io() {
         assert_eq!(&buf, b"streamed");
     });
 }
+
+/// `write_at` is positioned even on a file opened for appending.
+///
+/// The two halves of such a file mean different things: a stream write goes to
+/// the end because that is what append is for, and a positioned write goes
+/// exactly where it is told because that is what `write_at` promises. Sharing
+/// one descriptor between them cannot deliver both — `pwrite` to an
+/// `O_APPEND` descriptor appends and ignores the offset — so this is the test
+/// that the two are actually separate.
+#[test]
+fn positioned_writes_ignore_append_on_a_real_file() {
+    use futures::io::AsyncWriteExt;
+
+    runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("append.db");
+        let path = path.to_str().expect("temp path is valid UTF-8");
+        let provider = TokioStorageProvider::new();
+
+        let seed = provider
+            .open(path, OpenOptions::create_write())
+            .await
+            .expect("open failed");
+        seed.write_at(0, b"AAAAAAAA").await.expect("seed write");
+        seed.sync_all().await.expect("sync failed");
+        drop(seed);
+
+        let mut file = provider
+            .open(path, OpenOptions::new().read(true).write(true).append(true))
+            .await
+            .expect("open failed");
+
+        // Positioned: exactly at the offset, overwriting in place.
+        assert_eq!(file.write_at(0, b"BB").await.expect("write_at failed"), 2);
+        let mut buf = [0u8; 8];
+        assert_eq!(file.read_at(0, &mut buf).await.expect("read_at failed"), 8);
+        assert_eq!(
+            &buf, b"BBAAAAAA",
+            "a positioned write on an append file must not append"
+        );
+        assert_eq!(
+            file.size().await.expect("size failed"),
+            8,
+            "and must not extend the file"
+        );
+
+        // Stream: at the end, because that is what append means.
+        file.write_all(b"CC").await.expect("stream write failed");
+        file.flush().await.expect("flush failed");
+
+        let mut all = [0u8; 10];
+        assert_eq!(file.read_at(0, &mut all).await.expect("read_at failed"), 10);
+        assert_eq!(
+            &all, b"BBAAAAAACC",
+            "an ordinary stream write on an append file must append"
+        );
+    });
+}
