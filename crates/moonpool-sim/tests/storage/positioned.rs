@@ -416,3 +416,56 @@ fn direct_io_writes_still_need_a_sync() {
         handle.await.expect("task panicked").expect("write failed");
     });
 }
+
+/// The simulated provider decides direct I/O before it touches the namespace,
+/// so an open that must fail fails for its own reason — the production
+/// provider's `create_new` guarantee, on the other side of the seam.
+#[test]
+fn direct_io_policy_does_not_weaken_create_new() {
+    local_runtime().block_on(async {
+        let mut config = StorageConfiguration::fast_local();
+        // The interesting case is the disk that cannot do direct I/O at all:
+        // an `Optional` open must still fail `create_new` rather than falling
+        // back onto the existing file.
+        config.direct_io_supported = false;
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+
+        let kinds = run_storage_test(sim, |provider| async move {
+            provider
+                .open("exclusive.db", OpenOptions::create_new_write())
+                .await
+                .expect("first create_new must succeed");
+
+            let optional = provider
+                .open(
+                    "exclusive.db",
+                    OpenOptions::create_new_write().direct_io(DirectIo::Optional),
+                )
+                .await
+                .err()
+                .map(|error| error.kind());
+            let required = provider
+                .open(
+                    "exclusive.db",
+                    OpenOptions::create_new_write().direct_io(DirectIo::Required),
+                )
+                .await
+                .err()
+                .map(|error| error.kind());
+            (optional, required)
+        })
+        .await;
+
+        assert_eq!(
+            kinds.0,
+            Some(std::io::ErrorKind::AlreadyExists),
+            "an Optional open must not fall back onto an existing file"
+        );
+        assert_eq!(
+            kinds.1,
+            Some(std::io::ErrorKind::Unsupported),
+            "a Required open on a disk without direct I/O fails for that reason"
+        );
+    });
+}

@@ -106,15 +106,60 @@ fn open_options(options: &OpenOptions, direct: bool) -> tokio::fs::OpenOptions {
 /// Whether this build can ask the kernel for uncached I/O at all.
 const DIRECT_IO_SUPPORTED: bool = cfg!(target_os = "linux");
 
+/// Whether an open failure means *direct I/O is unavailable here*, as opposed
+/// to the open failing on its own merits.
+///
+/// Linux rejects `O_DIRECT` on a filesystem that cannot provide it with
+/// `EINVAL`; some stacked filesystems answer `EOPNOTSUPP`. Every other error —
+/// `EACCES`, `EEXIST`, `ENOENT`, `EMFILE`, `EROFS`, … — is a real failure of
+/// the open and must reach the caller unchanged, because falling back to a
+/// buffered open would turn it into a success with different semantics.
+fn is_direct_io_unsupported(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        let code = error.raw_os_error();
+        code == Some(libc::EINVAL) || code == Some(libc::EOPNOTSUPP)
+    }
+    #[cfg(not(unix))]
+    {
+        error.kind() == io::ErrorKind::Unsupported
+    }
+}
+
+/// Options for the direct-I/O *upgrade* of a file that is already open: the
+/// same access, none of the lifecycle.
+///
+/// `create`, `create_new` and `truncate` are deliberately dropped. The
+/// buffered open has already applied them exactly once, and repeating them
+/// could clobber the file it just created or fail against its own work.
+fn upgrade_options(options: &OpenOptions) -> OpenOptions {
+    OpenOptions::new()
+        .read(options.is_read())
+        .write(options.is_write())
+        .append(options.is_append())
+}
+
 /// Open `path`, honoring the requested direct-I/O policy.
 ///
-/// Returns the file and whether direct I/O was actually achieved. `Optional`
-/// falls back to a buffered open when the filesystem rejects the flag (tmpfs
-/// and several network filesystems do); `Required` never falls back.
+/// Returns the file and whether direct I/O was actually achieved.
 ///
-/// A `create_new` open that fell back would fail with `AlreadyExists`, since
-/// the rejected attempt may still have created the file — so the fallback
-/// retries without the exclusivity that the first attempt already satisfied.
+/// # How `Optional` avoids changing what the open means
+///
+/// The file's *lifecycle* — `create`, `create_new`, `truncate` — happens exactly
+/// once, through a single buffered open carrying the caller's options
+/// verbatim, and that open alone decides whether the call succeeds. Direct
+/// I/O is then attempted as an **upgrade**: a second open of the file that now
+/// exists, with no lifecycle flags of its own, which therefore cannot create,
+/// truncate, or clobber anything.
+///
+/// The alternative — attempt `O_DIRECT` first and retry buffered on failure —
+/// cannot be made correct. Linux creates the file *before* rejecting
+/// `O_DIRECT`, so a failed `create_new` attempt leaves the file behind and the
+/// retry then either fails `AlreadyExists` against its own work or has to drop
+/// the exclusivity the caller asked for. Neither is `create_new`.
+///
+/// Only [`is_direct_io_unsupported`] failures of the upgrade are absorbed;
+/// every other error is returned, so `Optional` never hides a real problem.
 async fn open_file(path: &str, options: &OpenOptions) -> io::Result<(tokio::fs::File, bool)> {
     match options.requested_direct_io() {
         DirectIo::Disabled => Ok((open_options(options, false).open(path).await?, false)),
@@ -122,13 +167,29 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<(tokio::fs::
             io::ErrorKind::Unsupported,
             "direct I/O is not supported on this platform",
         )),
-        DirectIo::Required => Ok((open_options(options, true).open(path).await?, true)),
+        DirectIo::Required => match open_options(options, true).open(path).await {
+            Ok(file) => Ok((file, true)),
+            // Never downgraded: the caller asked for uncached I/O, and it is
+            // not available for this file.
+            Err(error) if is_direct_io_unsupported(&error) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("direct I/O is not supported for '{path}': {error}"),
+            )),
+            Err(error) => Err(error),
+        },
         DirectIo::Optional => {
-            if DIRECT_IO_SUPPORTED && let Ok(file) = open_options(options, true).open(path).await {
-                return Ok((file, true));
+            let buffered = open_options(options, false).open(path).await?;
+            if !DIRECT_IO_SUPPORTED {
+                return Ok((buffered, false));
             }
-            let fallback = options.clone().create_new(false);
-            Ok((open_options(&fallback, false).open(path).await?, false))
+            match open_options(&upgrade_options(options), true)
+                .open(path)
+                .await
+            {
+                Ok(direct) => Ok((direct, true)),
+                Err(error) if is_direct_io_unsupported(&error) => Ok((buffered, false)),
+                Err(error) => Err(error),
+            }
         }
     }
 }
@@ -303,5 +364,70 @@ impl AsyncSeek for TokioStorageFile {
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
         Pin::new(&mut self.inner).poll_seek(cx, pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenOptions, is_direct_io_unsupported, upgrade_options};
+    use std::io;
+
+    /// Only the two codes that mean "this filesystem cannot do direct I/O"
+    /// may be absorbed into a buffered fallback. Everything else is a real
+    /// failure of the open.
+    #[cfg(unix)]
+    #[test]
+    fn only_unsupported_errors_are_absorbed() {
+        assert!(is_direct_io_unsupported(&io::Error::from_raw_os_error(
+            libc::EINVAL
+        )));
+        assert!(is_direct_io_unsupported(&io::Error::from_raw_os_error(
+            libc::EOPNOTSUPP
+        )));
+
+        for code in [
+            libc::EACCES,
+            libc::EPERM,
+            libc::EEXIST,
+            libc::ENOENT,
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EROFS,
+            libc::EISDIR,
+            libc::ENOSPC,
+            libc::ELOOP,
+            libc::ENAMETOOLONG,
+        ] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(
+                !is_direct_io_unsupported(&error),
+                "{error} must not be turned into a buffered fallback"
+            );
+        }
+
+        // An error with no OS code behind it says nothing about direct I/O.
+        assert!(!is_direct_io_unsupported(&io::Error::other("synthetic")));
+    }
+
+    /// The upgrade open carries the access the caller asked for and none of
+    /// the lifecycle: repeating `create_new` or `truncate` against the file
+    /// the buffered open just made is exactly the bug this avoids.
+    #[test]
+    fn the_upgrade_open_drops_every_lifecycle_flag() {
+        let requested = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .create_new(true)
+            .truncate(true)
+            .append(true);
+        let upgrade = upgrade_options(&requested);
+
+        assert!(upgrade.is_read());
+        assert!(upgrade.is_write());
+        assert!(upgrade.is_append());
+        assert!(!upgrade.is_create());
+        assert!(!upgrade.is_create_new());
+        assert!(!upgrade.is_truncate());
     }
 }
