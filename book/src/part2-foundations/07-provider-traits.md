@@ -206,7 +206,11 @@ delete, rename, and the directory sync that makes those durable — while the
 before it keeps reading and writing the same bytes, exactly as on Unix, and
 the bytes are freed only when the last name and the last handle are both
 gone. Log rotation and atomic replacement lean on that in production, and
-the simulator holds to it too.
+the simulator holds to it too. And the namespace is **per process**: a
+provider is created for one process IP, so two processes opening `data.db`
+open two files on two disks, one node's `delete` or `rename` never reaches
+another's, and a `sync_dir` commits only the syncing node's directory
+entries, as it would on two machines.
 
 `OpenOptions` mirrors `std::fs::OpenOptions` with `read`, `write`, `create`,
 `truncate`, and `append`, plus the one thing a database needs that

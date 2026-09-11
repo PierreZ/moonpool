@@ -64,18 +64,18 @@ impl StorageProvider for SimStorageProvider {
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
         let sim = self.sim()?;
-        Ok(sim.file_exists(path))
+        Ok(sim.file_exists(self.owner_ip, path))
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
         let sim = self.sim()?;
-        sim.delete_file(path)?;
+        sim.delete_file(self.owner_ip, path)?;
         Ok(())
     }
 
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let sim = self.sim()?;
-        sim.rename_file(from, to)?;
+        sim.rename_file(self.owner_ip, from, to)?;
         Ok(())
     }
 
