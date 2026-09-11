@@ -18,9 +18,10 @@
 //! before the operating system sees it, and the simulator used to honor the
 //! truncation on the way to a successful open.
 
-use futures::io::AsyncWriteExt;
+use futures::io::{AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{DirectIo, OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
+use std::io::SeekFrom;
 use std::net::IpAddr;
 use tempfile::TempDir;
 
@@ -453,6 +454,90 @@ fn the_simulator_refuses_the_open_flags_production_refuses() {
                     "contradictory flags are InvalidInput, at {:?}",
                     step.label
                 );
+            }
+        }
+    });
+}
+
+/// What one seek answered, and where the cursor stood afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SeekStep {
+    label: &'static str,
+    result: Result<u64, std::io::ErrorKind>,
+    position_after: u64,
+}
+
+/// Seeks that land before byte zero, with a legal control between them,
+/// against a file of [`SEED_BYTES`].
+async fn seek_contract<P: StorageProvider>(
+    provider: P,
+    prefix: String,
+) -> std::io::Result<Vec<SeekStep>> {
+    let path = format!("{prefix}seek.db");
+    let mut file = provider
+        .open(&path, OpenOptions::create_new_write())
+        .await?;
+    file.write_all(SEED_BYTES).await?;
+    file.sync_all().await?;
+    drop(file);
+
+    let mut file = provider.open(&path, OpenOptions::read_only()).await?;
+    // Only seeks *before byte zero* are asked of both backends: how far past
+    // the end a file may be positioned is the filesystem's ceiling, not the
+    // contract's (ext4 refuses an offset past its maximum file size where
+    // others accept it), so overflow stays a simulator-only refusal.
+    let seeks: [(&'static str, SeekFrom); 5] = [
+        ("start 5", SeekFrom::Start(5)),
+        ("current -10 from 5", SeekFrom::Current(-10)),
+        ("end -3", SeekFrom::End(-3)),
+        ("end -100", SeekFrom::End(-100)),
+        ("current +3 from 9", SeekFrom::Current(3)),
+    ];
+    let mut log = Vec::with_capacity(seeks.len());
+    for (label, pos) in seeks {
+        let result = file.seek(pos).await.map_err(|e| e.kind());
+        let position_after = file.stream_position().await?;
+        log.push(SeekStep {
+            label,
+            result,
+            position_after,
+        });
+    }
+    Ok(log)
+}
+
+/// `lseek` refuses a negative or overflowing result with `EINVAL` and leaves
+/// the cursor alone. The simulator used to clamp the target to zero and
+/// report success, so a seek arithmetic bug stayed invisible until the
+/// production filesystem.
+#[test]
+fn the_simulator_refuses_the_seeks_production_refuses() {
+    local_runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let prefix = format!("{}/", dir.path().to_str().expect("temp path is UTF-8"));
+        let production = seek_contract(TokioStorageProvider::new(), prefix)
+            .await
+            .expect("the production scenarios must run");
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let simulated = run_storage_test(sim, |provider| seek_contract(provider, String::new()))
+            .await
+            .expect("the simulated scenarios must run");
+
+        assert_eq!(
+            production, simulated,
+            "the simulated provider must refuse exactly the seeks production refuses"
+        );
+        for step in &production {
+            match step.label {
+                "current -10 from 5" | "end -100" => assert_eq!(
+                    step.result,
+                    Err(std::io::ErrorKind::InvalidInput),
+                    "at {:?}",
+                    step.label
+                ),
+                _ => assert_eq!(step.result, Ok(step.position_after), "at {:?}", step.label),
             }
         }
     });
