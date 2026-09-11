@@ -22,6 +22,8 @@ mod disk_failure;
 mod faults;
 #[path = "storage/latency.rs"]
 mod latency;
+#[path = "storage/namespaces.rs"]
+mod namespaces;
 #[path = "storage/performance.rs"]
 mod performance;
 #[path = "storage/positioned.rs"]

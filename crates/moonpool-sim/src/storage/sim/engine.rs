@@ -10,6 +10,8 @@ use std::{
 
 use moonpool_core::{DirectIo, IoConstraints, OpenOptions};
 
+use super::state::Name;
+
 use super::{
     DiskDegradationState, DiskEpisodeKind, FileId, HandleId, OperationId, StorageEvent,
     state::{FileState, HandleState, PendingOpType, PendingStorageOp, StorageState},
@@ -154,6 +156,7 @@ impl StorageEngine {
         owner_ip: IpAddr,
     ) -> Result<HandleId, StorageError> {
         let path = path.to_string();
+        let name = (owner_ip, path.clone());
         // Contradictory flags are refused before anything else, as `std` does:
         // a read-only `truncate` must not reach the branch below that would
         // honor the truncation on a file it then had no right to write.
@@ -163,20 +166,20 @@ impl StorageEngine {
                 reason: error.to_string(),
             })?;
         let (constraints, direct_io) = self.resolve_direct_io(&options, owner_ip)?;
-        if options.is_create_new() && self.state.path_to_file.contains_key(&path) {
+        if options.is_create_new() && self.state.path_to_file.contains_key(&name) {
             return Err(StorageError::AlreadyExists { path });
         }
         // `Required` opens a file that is already there. Refusing to create
         // one keeps the simulated provider honest about what production does,
         // and keeps file bootstrap in the caller's protocol where it belongs.
         if options.requested_direct_io() == DirectIo::Required
-            && !self.state.path_to_file.contains_key(&path)
+            && !self.state.path_to_file.contains_key(&name)
             && (options.is_create() || options.is_create_new())
         {
             return Err(StorageError::DirectIoCreate { path });
         }
 
-        let file_id = if let Some(existing_id) = self.state.path_to_file.get(&path).copied() {
+        let file_id = if let Some(existing_id) = self.state.path_to_file.get(&name).copied() {
             if options.is_truncate()
                 && let Some(file) = self.state.files.get_mut(&existing_id)
             {
@@ -204,7 +207,7 @@ impl StorageEngine {
                     owner_ip,
                 },
             );
-            self.state.path_to_file.insert(path, file_id);
+            self.state.path_to_file.insert(name, file_id);
             file_id
         };
 
@@ -265,8 +268,10 @@ impl StorageEngine {
         Ok(self.open_handle(handle_id)?.direct_io)
     }
 
-    pub(crate) fn file_exists(&self, path: &str) -> bool {
-        self.state.path_to_file.contains_key(path)
+    pub(crate) fn file_exists(&self, owner_ip: IpAddr, path: &str) -> bool {
+        self.state
+            .path_to_file
+            .contains_key(&(owner_ip, path.to_string()))
     }
 
     /// Remove a name from the namespace — `unlink(2)`.
@@ -276,8 +281,16 @@ impl StorageEngine {
     /// on the production (Unix) backend, and the image is freed only when its
     /// last name and its last handle are both gone. Log rotation, compaction
     /// and atomic replacement depend on exactly that.
-    pub(crate) fn delete_file(&mut self, path: &str) -> Result<StorageActions, StorageError> {
-        let Some(file_id) = self.state.path_to_file.remove(path) else {
+    pub(crate) fn delete_file(
+        &mut self,
+        owner_ip: IpAddr,
+        path: &str,
+    ) -> Result<StorageActions, StorageError> {
+        let Some(file_id) = self
+            .state
+            .path_to_file
+            .remove(&(owner_ip, path.to_string()))
+        else {
             return Err(StorageError::NotFound {
                 path: path.to_string(),
             });
@@ -311,33 +324,36 @@ impl StorageEngine {
 
     pub(crate) fn rename_file(
         &mut self,
+        owner_ip: IpAddr,
         from: &str,
         to: &str,
     ) -> Result<StorageActions, StorageError> {
+        let from_name = (owner_ip, from.to_string());
         if from == to {
             return self
                 .state
                 .path_to_file
-                .contains_key(from)
+                .contains_key(&from_name)
                 .then(StorageActions::default)
                 .ok_or_else(|| StorageError::NotFound {
                     path: from.to_string(),
                 });
         }
-        let Some(file_id) = self.state.path_to_file.remove(from) else {
+        let Some(file_id) = self.state.path_to_file.remove(&from_name) else {
             return Err(StorageError::NotFound {
                 path: from.to_string(),
             });
         };
+        let to_name = (owner_ip, to.to_string());
         // The replaced file loses its name, nothing more: handles opened on
         // it before the rename keep its image, as `rename(2)` guarantees.
-        if let Some(replaced_id) = self.state.path_to_file.remove(to) {
+        if let Some(replaced_id) = self.state.path_to_file.remove(&to_name) {
             self.drop_file_if_unlinked(replaced_id);
         }
         if let Some(file) = self.state.files.get_mut(&file_id) {
             file.path = to.to_string();
         }
-        self.state.path_to_file.insert(to.to_string(), file_id);
+        self.state.path_to_file.insert(to_name, file_id);
         Ok(StorageActions::default())
     }
 
@@ -363,7 +379,9 @@ impl StorageEngine {
         path: &str,
         sectors: Range<u64>,
     ) -> Result<(), StorageError> {
-        self.file_mut(path)?.image.corrupt(sectors);
+        for file in self.files_named(path)? {
+            file.image.corrupt(sectors.clone());
+        }
         Ok(())
     }
 
@@ -374,7 +392,9 @@ impl StorageEngine {
         sectors: Range<u64>,
         target: EioTarget,
     ) -> Result<(), StorageError> {
-        self.file_mut(path)?.image.fail_with_eio(sectors, target);
+        for file in self.files_named(path)? {
+            file.image.fail_with_eio(sectors.clone(), target);
+        }
         Ok(())
     }
 
@@ -384,7 +404,9 @@ impl StorageEngine {
         path: &str,
         target: EioTarget,
     ) -> Result<(), StorageError> {
-        self.file_mut(path)?.image.clear_eio(target);
+        for file in self.files_named(path)? {
+            file.image.clear_eio(target);
+        }
         Ok(())
     }
 
@@ -395,25 +417,37 @@ impl StorageEngine {
         path: &str,
         sector: u64,
     ) -> Result<(), StorageError> {
-        self.file_mut(path)?
-            .image
-            .corrupt_committed_out_of_band(sector);
+        for file in self.files_named(path)? {
+            file.image.corrupt_committed_out_of_band(sector);
+        }
         Ok(())
     }
 
-    fn file_mut(&mut self, path: &str) -> Result<&mut FileState, StorageError> {
-        let file_id =
-            self.state
-                .path_to_file
-                .get(path)
-                .copied()
-                .ok_or_else(|| StorageError::NotFound {
-                    path: path.to_string(),
-                })?;
-        self.state
+    /// Every file currently named `path`, on whichever process's disk: a
+    /// targeted injection is addressed by file and sector, and a path names
+    /// one file per process that has it.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::NotFound`] when no process has a file at `path`.
+    fn files_named(&mut self, path: &str) -> Result<Vec<&mut FileState>, StorageError> {
+        let file_ids: Vec<FileId> = self
+            .state
+            .path_to_file
+            .iter()
+            .filter_map(|((_, name), file_id)| (name == path).then_some(*file_id))
+            .collect();
+        if file_ids.is_empty() {
+            return Err(StorageError::NotFound {
+                path: path.to_string(),
+            });
+        }
+        Ok(self
+            .state
             .files
-            .get_mut(&file_id)
-            .ok_or(StorageError::MissingFile { file_id })
+            .iter_mut()
+            .filter_map(|(file_id, file)| file_ids.contains(file_id).then_some(file))
+            .collect())
     }
 
     /// Make every directory entry directly under `path` durable.
@@ -447,13 +481,17 @@ impl StorageEngine {
             });
         }
 
+        // One process's directory sync commits that process's entries and
+        // nobody else's: another disk's metadata is not made durable by it.
         let directory = normalize_directory(path);
         self.state
             .durable_paths
-            .retain(|entry, _| parent_directory(entry) != directory);
-        for (entry, file_id) in &self.state.path_to_file {
-            if parent_directory(entry) == directory {
-                self.state.durable_paths.insert(entry.clone(), *file_id);
+            .retain(|(owner, entry), _| *owner != owner_ip || parent_directory(entry) != directory);
+        for ((owner, entry), file_id) in &self.state.path_to_file {
+            if *owner == owner_ip && parent_directory(entry) == directory {
+                self.state
+                    .durable_paths
+                    .insert((*owner, entry.clone()), *file_id);
             }
         }
         Ok(actions)
@@ -487,15 +525,15 @@ impl StorageEngine {
         self.state
             .durable_paths
             .retain(|_, file_id| !mine.contains(file_id));
-        let surviving: Vec<(String, FileId)> = self
+        let surviving: Vec<(Name, FileId)> = self
             .state
             .path_to_file
             .iter()
             .filter(|(_, file_id)| mine.contains(file_id))
-            .map(|(path, file_id)| (path.clone(), *file_id))
+            .map(|(name, file_id)| (name.clone(), *file_id))
             .collect();
-        for (path, file_id) in surviving {
-            self.state.durable_paths.insert(path, file_id);
+        for (name, file_id) in surviving {
+            self.state.durable_paths.insert(name, file_id);
         }
 
         // Contents no surviving name reaches are gone with the name.
@@ -515,29 +553,22 @@ impl StorageEngine {
     /// operations: a name created since the last directory sync may not be
     /// there, and one deleted or renamed away may still be.
     fn lose_unsynced_entries(&mut self, ip: IpAddr, probability: f64) {
-        let mine = self.files_owned_by(ip);
-        let mut paths: Vec<String> = self
+        // Only this process's own namespace is at risk.
+        let mut names: Vec<Name> = self
             .state
             .path_to_file
             .keys()
             .chain(self.state.durable_paths.keys())
+            .filter(|(owner, _)| *owner == ip)
             .cloned()
             .collect();
-        paths.sort_unstable();
-        paths.dedup();
+        names.sort_unstable();
+        names.dedup();
 
-        for path in paths {
-            let visible = self.state.path_to_file.get(&path).copied();
-            let durable = self.state.durable_paths.get(&path).copied();
+        for name in names {
+            let visible = self.state.path_to_file.get(&name).copied();
+            let durable = self.state.durable_paths.get(&name).copied();
             if visible == durable {
-                continue;
-            }
-            // Only this process's own entries are at risk.
-            if !visible
-                .iter()
-                .chain(durable.iter())
-                .any(|file_id| mine.contains(file_id))
-            {
                 continue;
             }
             if sim_random::<f64>() >= probability {
@@ -545,13 +576,13 @@ impl StorageEngine {
             }
             assert_reachable!("disk: crash lost an unsynced directory entry");
             self.state.record_fault(StorageFaultRecord {
-                path: path.clone(),
+                path: name.1.clone(),
                 kind: StorageFaultKind::DirEntryLost,
                 sectors: None,
             });
             match durable {
-                Some(file_id) => self.state.path_to_file.insert(path, file_id),
-                None => self.state.path_to_file.remove(&path),
+                Some(file_id) => self.state.path_to_file.insert(name, file_id),
+                None => self.state.path_to_file.remove(&name),
             };
         }
     }
@@ -968,7 +999,7 @@ impl StorageEngine {
         let Some(data) = pending.data else {
             return Err(StorageError::InvalidOperationData { operation_id });
         };
-        let (owner_ip, path, config) = self
+        let (owner_ip, path, config, file_size) = self
             .state
             .files
             .get(&pending.file_id)
@@ -977,16 +1008,12 @@ impl StorageEngine {
                     file.owner_ip,
                     file.path.clone(),
                     self.state.config_for(file.owner_ip).clone(),
+                    file.image.size(),
                 )
             })
             .ok_or(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
             })?;
-        let file_size = self
-            .state
-            .files
-            .get(&pending.file_id)
-            .map_or(0, |file| file.image.size());
         // Append mode is the stream cursor's business: a positioned write was
         // already told exactly where it goes.
         let offset = if pending.append {
@@ -995,7 +1022,8 @@ impl StorageEngine {
             pending.offset
         };
 
-        let landing = self.decide_write_landing(&path, offset, data.len(), file_size, &config);
+        let landing =
+            self.decide_write_landing(pending.file_id, offset, data.len(), file_size, &config);
         let mut fault_kind = None;
         match landing {
             WriteLanding::Eio => {
@@ -1080,7 +1108,7 @@ impl StorageEngine {
     /// installing a mask never shifts the random stream.
     fn decide_write_landing(
         &mut self,
-        path: &str,
+        file_id: FileId,
         offset: u64,
         len: usize,
         file_size: u64,
@@ -1088,9 +1116,11 @@ impl StorageEngine {
     ) -> WriteLanding {
         let sectors = sector_range(offset, len);
         let eio_roll = sim_random::<f64>();
-        let targeted = self
-            .image_at(path)
-            .is_some_and(|image| image.write_fails(sectors.clone()));
+        let (targeted, path) = self.state.files.get(&file_id).map_or_else(
+            || (false, String::new()),
+            |file| (file.image.write_fails(sectors.clone()), file.path.clone()),
+        );
+        let path = path.as_str();
         let random_eio =
             config.write_eio_probability > 0.0 && eio_roll < config.write_eio_probability;
         if targeted || (random_eio && self.state.eligible_range(path, sectors.clone())) {
@@ -1156,12 +1186,6 @@ impl StorageEngine {
             assert_reachable!("disk fault: write planted latent corruption");
         }
         corrupted
-    }
-
-    /// The image behind a path, if the path still names a file.
-    fn image_at(&self, path: &str) -> Option<&FileImage> {
-        let file_id = self.state.path_to_file.get(path)?;
-        self.state.files.get(file_id).map(|file| &file.image)
     }
 
     fn complete_sync(
@@ -1384,9 +1408,8 @@ impl StorageEngine {
         let mut actions = StorageActions::default();
         for (file_id, path) in files {
             self.state.files.remove(&file_id);
-            self.state.path_to_file.remove(&path);
+            self.state.path_to_file.remove(&(ip, path));
             self.state.durable_paths.retain(|_, id| *id != file_id);
-            let _ = path;
             self.invalidate_file_handles(file_id, &mut actions);
         }
         actions.fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });

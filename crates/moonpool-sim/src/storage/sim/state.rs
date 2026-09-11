@@ -101,6 +101,9 @@ pub(crate) struct PendingStorageOp {
     pub(crate) positioned: bool,
 }
 
+/// A name in a process's namespace: the owning process and the path.
+pub(crate) type Name = (IpAddr, String);
+
 /// Mutable storage data owned by [`super::StorageEngine`].
 #[derive(Debug)]
 pub(crate) struct StorageState {
@@ -115,14 +118,16 @@ pub(crate) struct StorageState {
     pub(crate) failed_disks: BTreeSet<IpAddr>,
     pub(crate) files: BTreeMap<FileId, FileState>,
     pub(crate) handles: BTreeMap<HandleId, HandleState>,
-    /// The namespace as it is now.
-    pub(crate) path_to_file: BTreeMap<String, FileId>,
+    /// The namespace as it is now, one per process: a name is a path *on a
+    /// process's disk*, so two processes resolving the same relative path
+    /// reach two files, as two machines would.
+    pub(crate) path_to_file: BTreeMap<Name, FileId>,
     /// The namespace as it would survive a crash: entries promoted here by a
     /// directory sync. A create, delete, or rename changes `path_to_file`
     /// immediately and reaches this map only when the directory holding it is
     /// synced — file data durability and directory-entry durability are two
     /// different things.
-    pub(crate) durable_paths: BTreeMap<String, FileId>,
+    pub(crate) durable_paths: BTreeMap<Name, FileId>,
     pub(crate) pending_ops: BTreeMap<OperationId, PendingStorageOp>,
     /// Consulted before any random fault damages a sector (see
     /// [`StorageEligibilityMask`]).
