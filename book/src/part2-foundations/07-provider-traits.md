@@ -208,7 +208,13 @@ delete, rename, and the directory sync that makes those durable — while the
 `std::fs::OpenOptions` does not name portably: `direct_io(DirectIo)`. That is
 deliberately an option on opening an ordinary file rather than a second
 provider stack — there is no `BlockProvider` and no `DirectIoProvider`, and a
-journal or pager is written directly against `StorageFile`.
+journal or pager is written directly against `StorageFile`. The flags obey
+`std`'s rules too, on both backends: `truncate`, `create` and `create_new`
+need `write` or `append`, `append` and `truncate` contradict each other, and a
+combination `std` refuses with `InvalidInput` (`OpenOptions::validate`) is
+refused by the simulator before it touches the file, so a read-only
+`truncate` destroys nothing in simulation that it would not destroy in
+production.
 
 `read_at`/`write_at` are positioned: they take `&self`, never touch the stream
 cursor, and return the number of bytes moved, so non-overlapping ranges can be

@@ -12,7 +12,13 @@
 //! behind a real `O_DIRECT` open, the simulator settles the capability before
 //! it touches its namespace at all. So the scenarios below are written once
 //! and run against both.
+//!
+//! The flag rules are the second such gap: `std` refuses a contradictory
+//! `OpenOptions` (a read-only `truncate`, a `create` without write access)
+//! before the operating system sees it, and the simulator used to honor the
+//! truncation on the way to a successful open.
 
+use futures::io::AsyncWriteExt;
 use moonpool_core::{DirectIo, OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::net::IpAddr;
@@ -339,6 +345,115 @@ fn the_simulator_answers_the_required_contract_exactly_as_production_does() {
                 "the simulated provider must answer the Required contract exactly as production \
                  does"
             );
+        }
+    });
+}
+
+/// One entry of the flag contract: what the open answered, and what the file
+/// held afterwards, so a refusal that nonetheless truncated is caught.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FlagStep {
+    label: &'static str,
+    observation: Observation,
+    size_after: u64,
+}
+
+const SEED_BYTES: &[u8] = b"twelve bytes";
+
+/// Every `OpenOptions` shape `std` refuses as contradictory, plus a legal
+/// control at each end, run against a file whose bytes must survive the
+/// refusals.
+async fn flag_contract<P: StorageProvider>(
+    provider: P,
+    prefix: String,
+) -> std::io::Result<Vec<FlagStep>> {
+    let path = format!("{prefix}flags.db");
+    let mut seed = provider
+        .open(&path, OpenOptions::create_new_write())
+        .await?;
+    seed.write_all(SEED_BYTES).await?;
+    seed.sync_all().await?;
+    drop(seed);
+
+    let shapes: [(&'static str, OpenOptions); 7] = [
+        ("read-only", OpenOptions::read_only()),
+        (
+            "read-only + truncate",
+            OpenOptions::read_only().truncate(true),
+        ),
+        ("read-only + create", OpenOptions::read_only().create(true)),
+        (
+            "read-only + create_new",
+            OpenOptions::read_only().create_new(true),
+        ),
+        ("no access mode", OpenOptions::new()),
+        (
+            "append + truncate",
+            OpenOptions::new().append(true).truncate(true),
+        ),
+        ("read-write", OpenOptions::read_write()),
+    ];
+
+    let mut log = Vec::with_capacity(shapes.len());
+    for (label, options) in shapes {
+        let observation = observe(provider.open(&path, options).await);
+        let probe = provider.open(&path, OpenOptions::read_only()).await?;
+        let size_after = probe.size().await?;
+        drop(probe);
+        log.push(FlagStep {
+            label,
+            observation,
+            size_after,
+        });
+    }
+    Ok(log)
+}
+
+/// The flag rules are `std`'s and platform-independent, so here the two
+/// backends must agree exactly: the same shapes refused, with the same error
+/// kind, and the seeded bytes intact after every one of them.
+#[test]
+fn the_simulator_refuses_the_open_flags_production_refuses() {
+    local_runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let prefix = format!("{}/", dir.path().to_str().expect("temp path is UTF-8"));
+        let production = flag_contract(TokioStorageProvider::new(), prefix)
+            .await
+            .expect("the production scenarios must run");
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let simulated = run_storage_test(sim, |provider| flag_contract(provider, String::new()))
+            .await
+            .expect("the simulated scenarios must run");
+
+        assert_eq!(
+            production, simulated,
+            "the simulated provider must refuse exactly the open flags production refuses"
+        );
+        for step in &production {
+            assert_eq!(
+                step.size_after,
+                SEED_BYTES.len() as u64,
+                "a refused open must not truncate, at {:?}",
+                step.label
+            );
+            let legal = matches!(step.label, "read-only" | "read-write");
+            assert_eq!(
+                permitted(step.observation),
+                legal,
+                "unexpected verdict at {:?}: {:?}",
+                step.label,
+                step.observation
+            );
+            if !legal {
+                assert_eq!(
+                    step.observation,
+                    Observation::Refused(std::io::ErrorKind::InvalidInput),
+                    "contradictory flags are InvalidInput, at {:?}",
+                    step.label
+                );
+            }
         }
     });
 }

@@ -45,7 +45,7 @@ use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use std::io;
 
 pub use align::{AlignedBuf, IoConstraints};
-pub use options::{DirectIo, OpenOptions};
+pub use options::{DirectIo, InvalidOpenOptions, OpenOptions};
 
 /// The error a file with I/O constraints returns from the stream API.
 ///
