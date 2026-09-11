@@ -553,7 +553,7 @@ impl WorkloadOrchestrator {
         Self::pump_observability(sim, obs);
 
         // === 7. CHECK PHASE (executor spawn + cooperative stepping) ===
-        let final_workloads = Self::do_check_phase(CheckPhaseInputs {
+        let (final_workloads, check_results) = Self::do_check_phase(CheckPhaseInputs {
             sim,
             metrics,
             workloads: returned_workloads,
@@ -566,6 +566,11 @@ impl WorkloadOrchestrator {
         })
         .await
         .map_err(|()| (vec![seed], 1usize))?;
+        // A `check()` verdict is part of the iteration's result: a workload
+        // whose `run()` succeeded but whose final validation returned `Err`
+        // (or panicked) fails the seed exactly as a failing `run()` does.
+        let mut results = results;
+        results.extend(check_results);
         // Scraped last, after `check()` has run: a workload that drives its
         // final requests from `check()` still has them counted.
         let sim_metrics = Self::extract_metrics(sim, metrics);
@@ -579,12 +584,14 @@ impl WorkloadOrchestrator {
 
     /// Run the entire check phase: build per-workload contexts, spawn
     /// `check()` futures, drive the cooperative loop, and collect the
-    /// resulting workloads.
+    /// resulting workloads beside each one's `check()` verdict.
     ///
     /// # Errors
     ///
     /// Returns `Err(())` if a workload IP fails to parse.
-    async fn do_check_phase(inputs: CheckPhaseInputs<'_>) -> Result<Vec<Box<dyn Workload>>, ()> {
+    async fn do_check_phase(
+        inputs: CheckPhaseInputs<'_>,
+    ) -> Result<(Vec<Box<dyn Workload>>, Vec<SimulationResult<()>>), ()> {
         let CheckPhaseInputs {
             sim,
             metrics,
@@ -925,13 +932,16 @@ impl WorkloadOrchestrator {
     }
 
     /// Spawn the check phase tasks, drive them cooperatively, and collect
-    /// the resulting workloads.
+    /// the resulting workloads beside one `check()` result per workload.
+    ///
+    /// A `check()` that panics yields no workload (the task owned it) and an
+    /// `Err` in its place, so the verdict is never lost with the instance.
     async fn run_check_phase(
         sim: &mut crate::sim::SimWorld,
         workloads: Vec<Box<dyn Workload>>,
         contexts: Vec<SimContext>,
         obs: &SimulationLayerHandle,
-    ) -> Vec<Box<dyn Workload>> {
+    ) -> (Vec<Box<dyn Workload>>, Vec<SimulationResult<()>>) {
         let mut check_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let ip = ctx.my_ip().to_string();
@@ -943,7 +953,7 @@ impl WorkloadOrchestrator {
                     if let Err(ref e) = result {
                         tracing::error!("Workload '{}' check failed: {}", w.name(), e);
                     }
-                    w
+                    (w, result)
                 }
                 .instrument(tracing::info_span!("workload", ip = %ip)),
             );
@@ -968,15 +978,19 @@ impl WorkloadOrchestrator {
 
         // Collect check results.
         let mut final_workloads = Vec::with_capacity(check_handles.len());
+        let mut check_results = Vec::with_capacity(check_handles.len());
         for handle in check_handles {
-            match handle.await {
-                Ok(w) => final_workloads.push(w),
-                Err(_) => {
-                    tracing::error!("Check task panicked");
-                }
+            if let Ok((w, result)) = handle.await {
+                final_workloads.push(w);
+                check_results.push(result);
+            } else {
+                tracing::error!("Check task panicked");
+                check_results.push(Err(crate::SimulationError::InvalidState(
+                    "Check task panicked".to_string(),
+                )));
             }
         }
-        final_workloads
+        (final_workloads, check_results)
     }
 
     /// Build per-workload [`SimContext`]s for the run/check phases.
