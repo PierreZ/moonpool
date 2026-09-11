@@ -44,6 +44,18 @@ pub enum StorageError {
         operation: &'static str,
     },
 
+    /// The open's flags contradict each other (a read-only truncate, a
+    /// create without write access, an append that truncates).
+    ///
+    /// Refused before the namespace is touched, exactly as `std` refuses it
+    /// before reaching the operating system, so the simulator never honors an
+    /// open production rejects — nor destroys bytes on the way.
+    #[error("invalid open options: {reason}")]
+    InvalidOpenOptions {
+        /// Which rule the flags broke.
+        reason: String,
+    },
+
     /// An open asked for direct I/O the disk cannot provide.
     #[error("direct I/O is not supported by this disk")]
     DirectIoUnsupported,
@@ -130,9 +142,9 @@ impl From<StorageError> for io::Error {
                 io::ErrorKind::BrokenPipe
             }
             StorageError::PermissionDenied { .. } => io::ErrorKind::PermissionDenied,
-            StorageError::InvalidOperation { .. } | StorageError::InvalidOperationData { .. } => {
-                io::ErrorKind::InvalidInput
-            }
+            StorageError::InvalidOperation { .. }
+            | StorageError::InvalidOperationData { .. }
+            | StorageError::InvalidOpenOptions { .. } => io::ErrorKind::InvalidInput,
             StorageError::DirectIoUnsupported | StorageError::DirectIoCreate { .. } => {
                 io::ErrorKind::Unsupported
             }

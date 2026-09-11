@@ -154,6 +154,14 @@ impl StorageEngine {
         owner_ip: IpAddr,
     ) -> Result<HandleId, StorageError> {
         let path = path.to_string();
+        // Contradictory flags are refused before anything else, as `std` does:
+        // a read-only `truncate` must not reach the branch below that would
+        // honor the truncation on a file it then had no right to write.
+        options
+            .validate()
+            .map_err(|error| StorageError::InvalidOpenOptions {
+                reason: error.to_string(),
+            })?;
         let (constraints, direct_io) = self.resolve_direct_io(&options, owner_ip)?;
         if options.is_create_new() && self.state.path_to_file.contains_key(&path) {
             return Err(StorageError::AlreadyExists { path });

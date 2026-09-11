@@ -96,8 +96,8 @@ pub use random::RandomProvider;
 #[cfg(feature = "tokio-random")]
 pub use random::TokioRandomProvider;
 pub use storage::{
-    AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider,
-    stream_io_unsupported,
+    AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, OpenOptions, StorageFile,
+    StorageProvider, stream_io_unsupported,
 };
 #[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};

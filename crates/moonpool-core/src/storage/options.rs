@@ -185,6 +185,70 @@ flag_getters! {
     is_append => FLAG_APPEND,
 }
 
+/// An [`OpenOptions`] whose flags contradict each other.
+///
+/// Converts into an [`io::Error`](std::io::Error) of kind
+/// [`InvalidInput`](std::io::ErrorKind::InvalidInput), which is what the
+/// operating system answers such an open with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidOpenOptions(&'static str);
+
+impl std::fmt::Display for InvalidOpenOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for InvalidOpenOptions {}
+
+impl From<InvalidOpenOptions> for std::io::Error {
+    fn from(error: InvalidOpenOptions) -> Self {
+        Self::new(std::io::ErrorKind::InvalidInput, error)
+    }
+}
+
+impl OpenOptions {
+    /// Check that the flags make sense together, the way `std::fs::OpenOptions`
+    /// does before it ever reaches the operating system.
+    ///
+    /// The rules, which every provider must refuse alike so that simulated
+    /// code cannot depend on an open production rejects:
+    ///
+    /// - one of `read`, `write` or `append` must be set;
+    /// - `truncate`, `create` and `create_new` need `write` or `append`;
+    /// - `append` and `truncate` contradict each other, unless `create_new`
+    ///   makes the truncation moot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidOpenOptions`] naming the contradiction.
+    pub fn validate(&self) -> Result<(), InvalidOpenOptions> {
+        if !self.is_read() && !self.is_write() && !self.is_append() {
+            return Err(InvalidOpenOptions(
+                "open options must set at least one of read, write or append",
+            ));
+        }
+        if !self.is_write() && !self.is_append() {
+            if self.is_truncate() {
+                return Err(InvalidOpenOptions(
+                    "truncate requires write access: a read-only open cannot truncate",
+                ));
+            }
+            if self.is_create() || self.is_create_new() {
+                return Err(InvalidOpenOptions(
+                    "create and create_new require write or append access",
+                ));
+            }
+        }
+        if self.is_append() && self.is_truncate() && !self.is_create_new() {
+            return Err(InvalidOpenOptions(
+                "append and truncate contradict each other",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl OpenOptions {
     /// Create options for read-only access.
     #[must_use]
@@ -217,6 +281,46 @@ impl OpenOptions {
 #[cfg(test)]
 mod tests {
     use super::{DirectIo, OpenOptions};
+
+    #[test]
+    fn validate_accepts_the_shapes_std_accepts() {
+        for options in [
+            OpenOptions::read_only(),
+            OpenOptions::read_write(),
+            OpenOptions::create_write(),
+            OpenOptions::create_new_write(),
+            OpenOptions::new().append(true),
+            OpenOptions::new().append(true).create(true),
+            OpenOptions::new()
+                .append(true)
+                .truncate(true)
+                .create_new(true),
+            OpenOptions::new().read(true).append(true),
+        ] {
+            assert_eq!(options.validate(), Ok(()), "{options:?}");
+        }
+    }
+
+    #[test]
+    fn validate_refuses_the_shapes_std_refuses() {
+        for options in [
+            OpenOptions::new(),
+            OpenOptions::new().truncate(true),
+            OpenOptions::read_only().truncate(true),
+            OpenOptions::read_only().create(true),
+            OpenOptions::read_only().create_new(true),
+            OpenOptions::new().append(true).truncate(true),
+            OpenOptions::new().write(true).append(true).truncate(true),
+        ] {
+            let error = options.validate().expect_err("must be refused");
+            let io_error: std::io::Error = error.into();
+            assert_eq!(
+                io_error.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "{options:?}"
+            );
+        }
+    }
 
     #[test]
     fn flags_round_trip() {
