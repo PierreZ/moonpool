@@ -269,6 +269,13 @@ impl StorageEngine {
         self.state.path_to_file.contains_key(path)
     }
 
+    /// Remove a name from the namespace — `unlink(2)`.
+    ///
+    /// A namespace operation never reaches already-open bytes: a handle
+    /// opened before the unlink keeps reading and writing the same image, as
+    /// on the production (Unix) backend, and the image is freed only when its
+    /// last name and its last handle are both gone. Log rotation, compaction
+    /// and atomic replacement depend on exactly that.
     pub(crate) fn delete_file(&mut self, path: &str) -> Result<StorageActions, StorageError> {
         let Some(file_id) = self.state.path_to_file.remove(path) else {
             return Err(StorageError::NotFound {
@@ -276,22 +283,28 @@ impl StorageEngine {
             });
         };
         self.drop_file_if_unlinked(file_id);
-        let mut actions = StorageActions::default();
-        self.invalidate_file_handles(file_id, &mut actions, false);
-        Ok(actions)
+        Ok(StorageActions::default())
     }
 
-    /// Forget a file's contents once no name — visible or durable — reaches
-    /// it any more. A file whose only remaining link is the durable one is
-    /// still on the disk: a crash before the directory sync brings it back.
+    /// Forget a file's contents once nothing reaches it any more: no name,
+    /// visible or durable, and no open handle. A file whose only remaining
+    /// link is the durable one is still on the disk: a crash before the
+    /// directory sync brings it back. A file whose only remaining link is an
+    /// open handle is an unlinked-but-open file, freed when that handle
+    /// closes.
     fn drop_file_if_unlinked(&mut self, file_id: FileId) {
-        let linked = self
+        let named = self
             .state
             .path_to_file
             .values()
             .chain(self.state.durable_paths.values())
             .any(|id| *id == file_id);
-        if !linked {
+        let open = self
+            .state
+            .handles
+            .values()
+            .any(|handle| handle.file_id == file_id && !handle.is_closed);
+        if !named && !open {
             self.state.files.remove(&file_id);
         }
     }
@@ -316,16 +329,16 @@ impl StorageEngine {
                 path: from.to_string(),
             });
         };
-        let mut actions = StorageActions::default();
+        // The replaced file loses its name, nothing more: handles opened on
+        // it before the rename keep its image, as `rename(2)` guarantees.
         if let Some(replaced_id) = self.state.path_to_file.remove(to) {
             self.drop_file_if_unlinked(replaced_id);
-            self.invalidate_file_handles(replaced_id, &mut actions, false);
         }
         if let Some(file) = self.state.files.get_mut(&file_id) {
             file.path = to.to_string();
         }
         self.state.path_to_file.insert(to.to_string(), file_id);
-        Ok(actions)
+        Ok(StorageActions::default())
     }
 
     /// Install the eligibility mask consulted before any random fault damages
@@ -1299,6 +1312,8 @@ impl StorageEngine {
             actions.cancel(operation_id);
             actions.wakes.push(self.wakers.take(&operation_id));
         }
+        // The last handle on an unlinked file frees its image.
+        self.drop_file_if_unlinked(handle.file_id);
         actions
     }
 
@@ -1346,6 +1361,13 @@ impl StorageEngine {
         for handle_id in handle_ids {
             self.fail_handle_operations(handle_id, &mut actions, close_files);
         }
+        // A crash closes every handle the process held, so an unlinked file
+        // it was still reading is gone with it.
+        if close_files {
+            for file_id in file_ids {
+                self.drop_file_if_unlinked(file_id);
+            }
+        }
         actions.fault(SimFaultEvent::StorageCrash { ip: ip.to_string() });
         actions
     }
@@ -1365,7 +1387,7 @@ impl StorageEngine {
             self.state.path_to_file.remove(&path);
             self.state.durable_paths.retain(|_, id| *id != file_id);
             let _ = path;
-            self.invalidate_file_handles(file_id, &mut actions, true);
+            self.invalidate_file_handles(file_id, &mut actions);
         }
         actions.fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });
         actions
@@ -1429,12 +1451,9 @@ impl StorageEngine {
         }
     }
 
-    fn invalidate_file_handles(
-        &mut self,
-        file_id: FileId,
-        actions: &mut StorageActions,
-        remove_handles: bool,
-    ) {
+    /// Destroy every handle on `file_id`: the file's bytes are gone (a
+    /// wipe), so no handle can keep reaching them.
+    fn invalidate_file_handles(&mut self, file_id: FileId, actions: &mut StorageActions) {
         let handle_ids = self
             .state
             .handles
@@ -1443,9 +1462,7 @@ impl StorageEngine {
             .collect::<Vec<_>>();
         for handle_id in handle_ids {
             self.fail_handle_operations(handle_id, actions, true);
-            if remove_handles {
-                self.state.handles.remove(&handle_id);
-            }
+            self.state.handles.remove(&handle_id);
         }
     }
 
