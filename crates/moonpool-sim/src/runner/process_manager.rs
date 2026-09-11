@@ -1,8 +1,11 @@
 //! Process lifecycle state for simulation runs.
 
+use std::any::Any;
 use std::collections::BTreeSet;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
+use futures::FutureExt as _;
 use tracing::Instrument as _;
 
 use crate::chaos::state_handle::StateHandle;
@@ -59,6 +62,73 @@ pub(crate) struct RestartEnv<'a> {
     pub(crate) shutdown_signal: &'a tokio_util::sync::CancellationToken,
 }
 
+/// A panic that killed a process task: which process, and what it said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessPanic {
+    /// The process's IP, as the topology names it.
+    pub(crate) ip: String,
+    /// The panic payload, when it was a string; a placeholder otherwise.
+    pub(crate) message: String,
+}
+
+/// The panics recorded across every process task of one iteration, shared
+/// between the boot-time spawns and the restarts the manager performs.
+pub(crate) type ProcessPanics = Arc<Mutex<Vec<ProcessPanic>>>;
+
+/// The text of a panic payload, for the failure it becomes.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
+/// Spawn `process` as its own task, inside the `process` span the
+/// observability layer attributes events by.
+///
+/// A panic in [`Process::run`] is caught *here*, at the one place that knows
+/// which process it was, and recorded in `panics`; the seed then fails at the
+/// end of the iteration ([`ProcessManager::take_panics`]). Nothing else
+/// observes a process task's outcome — the manager aborts handles without
+/// awaiting them — so without this a panicking process was simply a process
+/// that stopped, and a run whose workloads did not notice reported success.
+/// An ordinary `Err` from `run` is still an exit, not a failure: a process may
+/// legitimately stop.
+pub(crate) fn spawn_process(
+    mut process: Box<dyn Process>,
+    ctx: SimContext,
+    ip: &str,
+    panics: &ProcessPanics,
+) -> crate::executor::JoinHandle<()> {
+    let ip = ip.to_string();
+    let span_ip = ip.clone();
+    let panics = Arc::clone(panics);
+    crate::executor::spawn(
+        &format!("process@{span_ip}"),
+        async move {
+            let outcome = AssertUnwindSafe(process.run(&ctx)).catch_unwind().await;
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, %ip, "process exited");
+                }
+                Err(payload) => {
+                    let message = panic_message(payload.as_ref());
+                    tracing::error!(%ip, %message, "process panicked");
+                    panics
+                        .lock()
+                        .expect("Mutex poisoned: prior task panicked")
+                        .push(ProcessPanic { ip, message });
+                }
+            }
+        }
+        .instrument(tracing::info_span!("process", ip = %span_ip)),
+    )
+}
+
 /// Owns running process tasks and their restart state.
 pub(crate) struct ProcessManager<'a> {
     /// Per-process factories, parallel to `ips` (empty without processes).
@@ -74,6 +144,8 @@ pub(crate) struct ProcessManager<'a> {
     /// with every [`FaultContext`](crate::FaultContext) so injectors can
     /// budget their kills per victim pool.
     dead: DeadSet,
+    /// Every panic a process task of this iteration died of.
+    panics: ProcessPanics,
 }
 
 impl<'a> ProcessManager<'a> {
@@ -88,6 +160,7 @@ impl<'a> ProcessManager<'a> {
             group_registry: GroupRegistry::default(),
             all_entities: Vec::new(),
             dead: Arc::new(Mutex::new(BTreeSet::new())),
+            panics: Arc::default(),
         }
     }
 
@@ -96,6 +169,7 @@ impl<'a> ProcessManager<'a> {
         handles: Vec<Option<crate::executor::JoinHandle<()>>>,
         process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
         all_entities: Vec<(String, String)>,
+        panics: ProcessPanics,
     ) -> Self {
         let ProcessConfig {
             factories,
@@ -115,7 +189,18 @@ impl<'a> ProcessManager<'a> {
             group_registry,
             all_entities,
             dead: Arc::new(Mutex::new(BTreeSet::new())),
+            panics,
         }
+    }
+
+    /// Take the panics recorded so far, leaving the ledger empty.
+    pub(crate) fn take_panics(&self) -> Vec<ProcessPanic> {
+        std::mem::take(
+            &mut *self
+                .panics
+                .lock()
+                .expect("Mutex poisoned: prior task panicked"),
+        )
     }
 
     /// Snapshot the process metadata needed by a fault injector.
@@ -195,7 +280,7 @@ impl<'a> ProcessManager<'a> {
 
         let process_token = shutdown_signal.child_token();
         self.process_tokens[index] = Some(process_token.clone());
-        let mut process = factory();
+        let process = factory();
         // A process is numbered within its own group, exactly as on first boot.
         let (client_id, client_count) = self
             .group_registry
@@ -221,16 +306,7 @@ impl<'a> ProcessManager<'a> {
             obs.clone(),
             metrics.clone(),
         );
-        let log_ip = ip_string.clone();
-        let handle = crate::executor::spawn(
-            &format!("process@{ip_string}"),
-            async move {
-                if let Err(error) = process.run(&ctx).await {
-                    tracing::debug!(%error, ip = %log_ip, "restarted process exited");
-                }
-            }
-            .instrument(tracing::info_span!("process", ip = %ip_string)),
-        );
+        let handle = spawn_process(process, ctx, &ip_string, &self.panics);
         self.handles[index] = Some(handle);
         self.dead
             .lock()

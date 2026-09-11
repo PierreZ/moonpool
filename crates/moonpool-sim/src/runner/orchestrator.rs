@@ -22,7 +22,9 @@ use crate::runner::workload::Workload;
 use crate::sim::ProcessKillKind;
 use crate::{SimulationResult, assert_reachable};
 
-use super::process_manager::{ProcessConfig, ProcessManager, RestartEnv};
+use super::process_manager::{
+    ProcessConfig, ProcessManager, ProcessPanics, RestartEnv, spawn_process,
+};
 use super::report::SimulationMetrics;
 use super::stall::{RunStallGuard, StallOutcome};
 
@@ -539,6 +541,16 @@ impl WorkloadOrchestrator {
 
         // === 5. ABORT ALL PROCESSES ===
         process_manager.abort_all();
+        // A process that panicked is a failed run, whether or not a workload
+        // noticed the dead server: the panic was recorded where it happened
+        // (`spawn_process`), and here it becomes part of the seed's verdict.
+        let mut results = results;
+        for panic in process_manager.take_panics() {
+            results.push(Err(crate::SimulationError::InvalidState(format!(
+                "process at {} panicked: {}",
+                panic.ip, panic.message
+            ))));
+        }
 
         // === 6. SETTLE ===
         if let Some(settle_err) = Self::settle_phase(sim) {
@@ -569,7 +581,6 @@ impl WorkloadOrchestrator {
         // A `check()` verdict is part of the iteration's result: a workload
         // whose `run()` succeeded but whose final validation returned `Err`
         // (or panicked) fails the seed exactly as a failing `run()` does.
-        let mut results = results;
         results.extend(check_results);
         // Scraped last, after `check()` has run: a workload that drives its
         // final requests from `check()` still has them counted.
@@ -844,12 +855,17 @@ impl WorkloadOrchestrator {
         all_entities: &[(String, String)],
         env: &ProcessBootEnv<'_>,
     ) -> Result<ProcessManager<'pm>, ()> {
+        let panics = ProcessPanics::default();
         let (process_handles, process_tokens) =
-            Self::boot_processes(process_config.as_ref(), all_entities, env)?;
+            Self::boot_processes(process_config.as_ref(), all_entities, env, &panics)?;
         Ok(match process_config {
-            Some(pc) => {
-                ProcessManager::new(pc, process_handles, process_tokens, all_entities.to_vec())
-            }
+            Some(pc) => ProcessManager::new(
+                pc,
+                process_handles,
+                process_tokens,
+                all_entities.to_vec(),
+                panics,
+            ),
             None => ProcessManager::empty(),
         })
     }
@@ -865,6 +881,7 @@ impl WorkloadOrchestrator {
         process_config: Option<&ProcessConfig<'_>>,
         all_entities: &[(String, String)],
         env: &ProcessBootEnv<'_>,
+        panics: &ProcessPanics,
     ) -> Result<(ProcessHandleSlots, ProcessTokenSlots), ()> {
         let ProcessBootEnv {
             sim,
@@ -879,7 +896,7 @@ impl WorkloadOrchestrator {
             return Ok((process_handles, process_tokens));
         };
         for (i, ip) in pc.ips.iter().enumerate() {
-            let mut process = (pc.factories[i])();
+            let process = (pc.factories[i])();
             let ip_addr: std::net::IpAddr = ip.parse().map_err(|_| ())?;
             // A process is numbered within its own group, so a role can index
             // its instances without knowing what the other groups drew.
@@ -913,17 +930,7 @@ impl WorkloadOrchestrator {
                 obs.clone(),
                 metrics.clone(),
             );
-            let ip_for_log = ip.clone();
-            let span_ip = ip.clone();
-            let handle = crate::executor::spawn(
-                &format!("process@{span_ip}"),
-                async move {
-                    if let Err(e) = process.run(&ctx).await {
-                        tracing::debug!("Process at {} exited: {}", ip_for_log, e);
-                    }
-                }
-                .instrument(tracing::info_span!("process", ip = %span_ip)),
-            );
+            let handle = spawn_process(process, ctx, ip, panics);
             process_handles.push(Some(handle));
             process_tokens.push(Some(process_token));
             tracing::debug!("Booted process {} at {}", i, ip);
