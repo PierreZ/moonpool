@@ -530,12 +530,16 @@ impl AsyncWrite for SimTcpStream {
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
         let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
 
-        // Close the connection in the simulation when close is called
+        // `AsyncWrite::close` is a *write* shutdown, as the production
+        // provider's compat wrapper maps it onto tokio's `poll_shutdown`
+        // (`shutdown(SHUT_WR)`): the FIN goes out behind the queued bytes and
+        // the read half stays open, so an EOF-delimited request still gets
+        // its reply. Dropping the stream is what closes the connection.
         tracing::debug!(
-            "SimTcpStream::poll_close closing connection {}",
+            "SimTcpStream::poll_close shutting down the send side of connection {}",
             self.connection_id.0
         );
-        sim.close_connection(self.connection_id);
+        sim.shutdown_send(self.connection_id);
 
         Poll::Ready(Ok(()))
     }

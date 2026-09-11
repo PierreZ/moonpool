@@ -188,6 +188,8 @@ When a connection closes, moonpool models two distinct TCP behaviors:
 
 **Graceful close** implements TCP half-close semantics. The closing side marks its send direction as closed and puts a FIN on the wire behind every byte still queued or in flight, so it lands after all of them and is held by a partition with them. The remote side continues reading buffered data normally and sees EOF only after the FIN arrives. What the closing side itself never read is discarded and its window returned to the peer's writer, as a kernel frees a closed socket's receive buffer. This models a clean `shutdown(SHUT_WR)` followed by `close()`.
 
+**Write shutdown** is what `AsyncWrite::close` does, on both backends: the production provider's compat wrapper maps it onto tokio's `poll_shutdown`, that is `shutdown(SHUT_WR)`, and the simulated stream does the same. The FIN goes out behind the queued bytes and further writes fail with `BrokenPipe`, but the read half stays open and nothing is discarded, so the reply to an EOF-delimited request still lands and is still readable. Dropping the stream is what closes the connection, and a drop after a shutdown adds the receive half without sending a second FIN.
+
 **Abort close** immediately terminates both directions. No FIN, no buffer drain: the send queue, the flight, and the unread bytes are gone. The remote side gets a connection reset error on its next read or write, and a writer parked on a full window is woken to that error rather than left waiting on credits nothing can return. This models a crashed process or a force-killed connection.
 
 ## Flow control

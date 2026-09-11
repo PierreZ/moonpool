@@ -2,6 +2,8 @@
 //!
 //! Contains tests for network simulation and configuration.
 
+#[path = "network/half_close.rs"]
+mod half_close;
 #[path = "network/in_flight.rs"]
 mod in_flight;
 #[path = "network/latency.rs"]
