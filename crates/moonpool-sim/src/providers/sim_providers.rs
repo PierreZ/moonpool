@@ -60,10 +60,22 @@ impl SimProviders {
         Self {
             network: SimNetworkProvider::new(sim.clone(), ip),
             time: SimTimeProvider::new(sim.clone()),
-            task: SimTaskProvider,
+            task: SimTaskProvider::default(),
             random: SimRandomProvider::new(),
             storage: SimStorageProvider::new(sim, ip),
         }
+    }
+
+    /// Bind every task spawned through this bundle's task provider to
+    /// `scope`: cancelling it drops them all, descendants included.
+    ///
+    /// The runner gives each process boot its own scope and cancels it when
+    /// the process is killed, so a crash ends the process's background work
+    /// along with its root future. Workloads get no scope.
+    #[must_use]
+    pub(crate) fn with_task_scope(mut self, scope: tokio_util::sync::CancellationToken) -> Self {
+        self.task = SimTaskProvider::scoped(scope);
+        self
     }
 }
 
