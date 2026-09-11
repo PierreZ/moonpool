@@ -24,7 +24,7 @@ server = ["hyper/server", "hyper/http2"]
 [dependencies]
 # Only the provider traits: this crate is generic over them and brings no
 # production providers of its own.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", default-features = false }
 
 futures = "0.3"
 # http/http-body types come through hyper's own re-exports so the versions stay
@@ -41,10 +41,10 @@ http-body-util = "0.1"
 # The production providers, so the tests can instantiate the channels with a
 # concrete Providers bundle: that is what proves hyper's sealed
 # Http2ClientConnExec bound is satisfiable through our generics.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", features = ["tokio-providers"] }
 # The deterministic executor and simulated providers exercise cancellation of
 # channel-owned tasks without relying on wall-clock timing.
-moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", default-features = false }
+moonpool-sim = { path = "../moonpool-sim", version = "0.9.0", default-features = false }
 # A runtime for the tests that need one: hyper's h2 handshake spawns an internal
 # task, so obtaining a real SendRequest takes a live executor.
 tokio = { version = "1", features = ["rt", "macros", "time"] }

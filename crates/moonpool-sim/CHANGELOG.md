@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-11
+
+### 🚀 Features
+
+- **storage**: Rebuild block I/O as a thin layer over the file provider ([#211](https://github.com/PierreZ/moonpool/pull/211))
+- **moonpool-sim**: In-flight faults and end-to-end TCP flow control ([#202](https://github.com/PierreZ/moonpool/pull/202))
+- **moonpool-sim**: Faults that never answer — failed disks and black-holed connections ([#199](https://github.com/PierreZ/moonpool/pull/199))
+- **moonpool-sim**: Independent process groups and role-aware attrition ([#197](https://github.com/PierreZ/moonpool/pull/197))
+- **moonpool-sim**: Floor the simulation subscriber at INFO, configurable via `trace_level` ([#195](https://github.com/PierreZ/moonpool/pull/195))
+- **moonpool-sim**: Bound every fault source with chaos_duration ([#194](https://github.com/PierreZ/moonpool/pull/194))
+- **core**: Typed metric query and reporting layer ([#191](https://github.com/PierreZ/moonpool/pull/191))
+- **sim**: Report application metrics from a custom registry ([#190](https://github.com/PierreZ/moonpool/pull/190))
+- Standalone moonpool-buggify crate + exploration-compatible scripted lifecycle faults (#165, #182) ([#188](https://github.com/PierreZ/moonpool/pull/188))
+- **storage**: BlockDevice — region-based block contract with a barrier-bounded crash model ([#185](https://github.com/PierreZ/moonpool/pull/185))
+- **moonpool-sim**: Add deterministic network fault mask ([#175](https://github.com/PierreZ/moonpool/pull/175))
+- **explorer**: Strengthen semantic guidance ([#168](https://github.com/PierreZ/moonpool/pull/168))
+
+### 🐛 Bug Fixes
+
+- **moonpool-sim**: Own endpoints — refuse unbound connects, reject double binds ([#240](https://github.com/PierreZ/moonpool/pull/240))
+- **moonpool-sim**: Give each process its own file namespace ([#239](https://github.com/PierreZ/moonpool/pull/239))
+- **moonpool-sim**: Keep open files alive across unlink and rename-over ([#238](https://github.com/PierreZ/moonpool/pull/238))
+- **moonpool-sim**: Make AsyncWrite::close a write shutdown, not a close ([#237](https://github.com/PierreZ/moonpool/pull/237))
+- **moonpool-sim**: Kill a process's spawned tasks when the process is killed ([#236](https://github.com/PierreZ/moonpool/pull/236))
+- **moonpool-sim**: Run provider-spawned tasks inside the spawner's span ([#235](https://github.com/PierreZ/moonpool/pull/235))
+- **moonpool-sim**: Fail the seed when a process panics ([#234](https://github.com/PierreZ/moonpool/pull/234))
+- **moonpool-sim**: Refuse a seek before byte zero instead of clamping ([#233](https://github.com/PierreZ/moonpool/pull/233))
+- **moonpool-sim**: Refuse the open flags std refuses instead of truncating ([#232](https://github.com/PierreZ/moonpool/pull/232))
+- **moonpool-sim**: Count a failing Workload::check() as a failed run ([#231](https://github.com/PierreZ/moonpool/pull/231))
+- **moonpool-sim**: Stall partitioned sends instead of dropping them ([#187](https://github.com/PierreZ/moonpool/pull/187))
+- **moonpool-sim**: Kill the process task when a crash reboot starts ([#186](https://github.com/PierreZ/moonpool/pull/186))
+- **moonpool-assertions**: Report slot table overflow ([#180](https://github.com/PierreZ/moonpool/pull/180))
+- **moonpool-sim**: Bound chaos delays and swarm attrition ([#178](https://github.com/PierreZ/moonpool/pull/178))
+- Make multi-channel gRPC replay deterministic ([#173](https://github.com/PierreZ/moonpool/pull/173))
+- **moonpool-sim**: Make replay lifecycle ordering deterministic ([#172](https://github.com/PierreZ/moonpool/pull/172))
+- **explorer**: Enforce reproducible exploration lifecycles
+
+### 📚 Documentation
+
+- Rebuild the Claude Code skills and agents for moonpool development ([#207](https://github.com/PierreZ/moonpool/pull/207))
+
+### 🚜 Refactor
+
+- Delete dead surface, stop the RNG rewind on restart, make numeric casts safe ([#200](https://github.com/PierreZ/moonpool/pull/200))
+- **moonpool-sim**: Isolate resource engines
+- **moonpool-sim**: Centralize event scheduling
+- Move rust crates under crates
+
+### 📦 Other
+
+- One shared random stream, plus a madsim-style determinism canary ([#201](https://github.com/PierreZ/moonpool/pull/201))
+
+
 ## [0.8.0] - 2026-07-09
 
 ### 🚀 Features
