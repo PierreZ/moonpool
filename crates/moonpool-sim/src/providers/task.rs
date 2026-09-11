@@ -3,6 +3,7 @@
 use std::future::Future;
 
 use moonpool_core::TaskProvider;
+use tracing::Instrument as _;
 
 /// Task provider that spawns onto the [deterministic
 /// executor](crate::executor) driving the current simulation iteration.
@@ -12,6 +13,16 @@ use moonpool_core::TaskProvider;
 /// [`Executor::block_on`](crate::executor::Executor::block_on): scheduling
 /// order is a seeded-random, fully reproducible function of the iteration
 /// seed.
+///
+/// # Attribution
+///
+/// A spawned task runs inside the span that was current when it was spawned,
+/// as `tokio::spawn` does. That span is (or descends from) the `process` /
+/// `workload` span the orchestrator wraps around each actor, which is how
+/// the observability layer attributes an event to its actor: an event emitted
+/// from a background request handler reaches the invariant timeline exactly
+/// as one emitted from the actor's root future does, rather than being
+/// dropped for lacking a source.
 ///
 /// # Panics
 ///
@@ -29,8 +40,9 @@ impl TaskProvider for SimTaskProvider {
     {
         // No lifecycle-trace wrapper (unlike TokioTaskProvider, where the
         // name would otherwise be lost): the executor stores the name in
-        // TaskMeta and traces every poll of the task with it.
-        crate::executor::spawn(name, future)
+        // TaskMeta and traces every poll of the task with it. The child does
+        // inherit the spawner's span, so its events keep their actor.
+        crate::executor::spawn(name, future.instrument(tracing::Span::current()))
     }
 
     async fn yield_now(&self) {
