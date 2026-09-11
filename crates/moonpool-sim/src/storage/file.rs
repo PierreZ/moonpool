@@ -303,22 +303,27 @@ impl AsyncSeek for SimStorageFile {
         let current_position = sim.file_position(self.handle_id)?;
         let file_size = sim.file_size(self.handle_id)?;
 
-        let target = match pos {
-            SeekFrom::Start(p) => p,
-            SeekFrom::End(offset) => {
-                if offset >= 0 {
-                    file_size.saturating_add(offset.unsigned_abs())
-                } else {
-                    file_size.saturating_sub(offset.unsigned_abs())
-                }
-            }
-            SeekFrom::Current(offset) => {
-                if offset >= 0 {
-                    current_position.saturating_add(offset.unsigned_abs())
-                } else {
-                    current_position.saturating_sub(offset.unsigned_abs())
-                }
-            }
+        // A seek that would land before byte zero, or past what an offset can
+        // hold, is refused with the position left where it was — what
+        // `lseek` answers with `EINVAL`. Clamping to zero instead would let an
+        // offset arithmetic bug stay hidden in simulation and surface only on
+        // the production filesystem, or quietly move later I/O to the wrong
+        // place.
+        let (base, offset) = match pos {
+            SeekFrom::Start(p) => (p, 0),
+            SeekFrom::End(offset) => (file_size, offset),
+            SeekFrom::Current(offset) => (current_position, offset),
+        };
+        let target = if offset >= 0 {
+            base.checked_add(offset.unsigned_abs())
+        } else {
+            base.checked_sub(offset.unsigned_abs())
+        };
+        let Some(target) = target else {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid seek to a negative or overflowing position",
+            )));
         };
 
         sim.set_file_position(self.handle_id, target)?;
