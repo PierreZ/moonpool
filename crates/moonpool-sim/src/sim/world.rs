@@ -861,8 +861,12 @@ mod tests {
             sim.poll_accept("reserved", waiter_id, waiter.clone()),
             Ok(None)
         ));
+        let owner: std::net::IpAddr = "127.0.0.1".parse().expect("valid IP");
+        let _listener = sim
+            .bind_listener("reserved", owner)
+            .expect("the address is free");
         let (_, server) = sim.create_connection_pair("127.0.0.1:1", "127.0.0.1:2");
-        sim.store_pending_connection("reserved", server);
+        assert!(sim.store_pending_connection("reserved", server));
 
         sim.schedule_event(Event::Shutdown, Duration::ZERO);
         assert!(!sim.step());
@@ -891,8 +895,12 @@ mod tests {
             sim.poll_accept("fifo", second, waiter.clone()),
             Ok(None)
         ));
+        let owner: std::net::IpAddr = "127.0.0.1".parse().expect("valid IP");
+        let _listener = sim
+            .bind_listener("fifo", owner)
+            .expect("the address is free");
         let (_, server) = sim.create_connection_pair("127.0.0.1:1", "127.0.0.1:2");
-        sim.store_pending_connection("fifo", server);
+        assert!(sim.store_pending_connection("fifo", server));
 
         sim.cancel_accept("fifo", first);
 

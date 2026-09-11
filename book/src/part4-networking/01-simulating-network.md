@@ -71,6 +71,14 @@ recording a fault. The coordinator applies those actions, releases its lock,
 then wakes tasks. Keeping wake calls outside the lock lets a re-entrant waker
 poll network state without deadlocking.
 
+Endpoints are owned. A `bind` holds its address until the listener is
+dropped or its process is killed, so a second `bind` of a live address fails
+with `AddrInUse`, and a `connect` is refused with `ConnectionRefused` when
+nothing is listening at the address by the time the connection arrives. The
+address-in-use and connection-refused paths of startup, shutdown and
+misconfiguration therefore happen in simulation exactly as they do against
+the kernel. Port zero is ephemeral, as everywhere: such binds never collide.
+
 Delayed bind and connect futures are cancellation-safe. Accept reserves one
 backlogged connection while its latency elapses, and dropping the future
 returns that reservation to the front of the backlog. Shutdown fails delayed

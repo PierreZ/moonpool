@@ -22,8 +22,8 @@ use super::{
     ConnectionId, ListenerId, NetworkEvent,
     event::NetworkOperationId,
     state::{
-        ClogState, CloseReason, ConnectionFlags, ConnectionState, InFlight, InFlightPayload,
-        NetworkState, PartitionState, SendWindow,
+        BoundListener, ClogState, CloseReason, ConnectionFlags, ConnectionState, InFlight,
+        InFlightPayload, NetworkState, PartitionState, SendWindow,
     },
 };
 
@@ -127,11 +127,73 @@ impl NetworkSimulation {
         self.localities = localities;
     }
 
-    pub(crate) fn create_listener(&mut self) -> ListenerId {
+    /// Bind `addr` for `owner`, or `None` when a live listener already holds
+    /// it (`AddrInUse`). A port-zero address is ephemeral on every runtime and
+    /// never conflicts: each such bind gets its own listener.
+    pub(crate) fn bind_listener(&mut self, addr: &str, owner: IpAddr) -> Option<ListenerId> {
+        if !addr.ends_with(":0") && self.state.bound.contains_key(addr) {
+            return None;
+        }
         let id = ListenerId(self.state.next_listener_id);
         self.state.next_listener_id += 1;
-        self.state.listeners.insert(id);
-        id
+        self.state
+            .bound
+            .insert(addr.to_string(), BoundListener { id, owner });
+        Some(id)
+    }
+
+    /// Release the address `id` holds, if it still holds it (a later bind may
+    /// have taken the address after a shutdown cleared the registry).
+    /// Connections that arrived and were never accepted are reset: nobody will
+    /// ever accept them.
+    pub(crate) fn unbind_listener(&mut self, id: ListenerId) -> WakeBatch {
+        let Some(addr) = self
+            .state
+            .bound
+            .iter()
+            .find_map(|(addr, bound)| (bound.id == id).then(|| addr.clone()))
+        else {
+            return WakeBatch::default();
+        };
+        self.state.bound.remove(&addr);
+        self.abort_backlog(&addr)
+    }
+
+    /// Release every listener `ip` owns: what a crash does to a process's
+    /// sockets.
+    pub(crate) fn unbind_listeners_for_ip(&mut self, ip: IpAddr) -> WakeBatch {
+        let ids: Vec<ListenerId> = self
+            .state
+            .bound
+            .values()
+            .filter(|bound| bound.owner == ip)
+            .map(|bound| bound.id)
+            .collect();
+        let mut wakes = WakeBatch::default();
+        for id in ids {
+            wakes.append(self.unbind_listener(id));
+        }
+        wakes
+    }
+
+    /// Whether a live listener holds `addr`.
+    pub(crate) fn is_bound(&self, addr: &str) -> bool {
+        self.state.bound.contains_key(addr)
+    }
+
+    /// Reset the connections queued on `addr` that no accept ever took.
+    fn abort_backlog(&mut self, addr: &str) -> WakeBatch {
+        let queued: Vec<ConnectionId> = self
+            .state
+            .pending_connections
+            .remove(addr)
+            .map(Vec::from)
+            .unwrap_or_default();
+        let mut wakes = WakeBatch::default();
+        for id in queued {
+            wakes.append(self.close_aborted(id));
+        }
+        wakes
     }
 
     /// Drain up to `buf.len()` bytes from `connection_id`'s receive buffer.
@@ -410,7 +472,20 @@ impl NetworkSimulation {
         WakeBatch::default()
     }
 
-    pub(crate) fn store_pending(&mut self, addr: &str, connection_id: ConnectionId) -> WakeBatch {
+    /// Publish an arriving connection to the listener on `addr`, or `None`
+    /// when nobody is listening there: the connection is refused.
+    pub(crate) fn store_pending(
+        &mut self,
+        addr: &str,
+        connection_id: ConnectionId,
+    ) -> Option<WakeBatch> {
+        if !self.is_bound(addr) {
+            return None;
+        }
+        Some(self.publish_pending(addr, connection_id))
+    }
+
+    fn publish_pending(&mut self, addr: &str, connection_id: ConnectionId) -> WakeBatch {
         if let Some((waiter_id, waker)) = self.take_next_accept(addr) {
             self.accept_reservations.insert(
                 waiter_id,
@@ -1057,6 +1132,9 @@ impl NetworkSimulation {
             wakes.extend([reservation.waker]);
         }
         self.state.pending_connections.clear();
+        // The world is over: every listener is dead, and a listener bound
+        // after the shutdown must not collide with a leftover of it.
+        self.state.bound.clear();
         let connections = self.state.connections.keys().copied().collect::<Vec<_>>();
         for connection in connections {
             wakes.append(self.close_aborted(connection));

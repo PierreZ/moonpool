@@ -25,7 +25,7 @@
 //! buffer are the peer's: nothing on the wire can take them back.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     net::IpAddr,
     time::Duration,
 };
@@ -325,13 +325,23 @@ impl SendWindow {
 }
 
 /// Protocol state owned exclusively by the simulated network engine.
+/// A live listener on one address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BoundListener {
+    pub(crate) id: ListenerId,
+    pub(crate) owner: IpAddr,
+}
+
 #[derive(Debug)]
 pub(crate) struct NetworkState {
     pub(crate) next_connection_id: u64,
     pub(crate) next_listener_id: u64,
     pub(crate) config: NetworkConfiguration,
     pub(crate) connections: BTreeMap<ConnectionId, ConnectionState>,
-    pub(crate) listeners: BTreeSet<ListenerId>,
+    /// The bound endpoints: which listener owns each address, and which
+    /// process owns the listener. A `connect` to an address absent here is
+    /// refused, a `bind` to one present fails with `AddrInUse`.
+    pub(crate) bound: BTreeMap<String, BoundListener>,
     pub(crate) pending_connections: BTreeMap<String, VecDeque<ConnectionId>>,
     pub(crate) connection_clogs: BTreeMap<ConnectionId, ClogState>,
     pub(crate) read_clogs: BTreeMap<ConnectionId, ClogState>,
@@ -350,7 +360,7 @@ impl NetworkState {
             next_listener_id: 0,
             config,
             connections: BTreeMap::new(),
-            listeners: BTreeSet::new(),
+            bound: BTreeMap::new(),
             pending_connections: BTreeMap::new(),
             connection_clogs: BTreeMap::new(),
             read_clogs: BTreeMap::new(),

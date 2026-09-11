@@ -1,4 +1,7 @@
-use super::{AcceptWaiterId, CloseReason, NetworkDelay, types::ConnectionId};
+use super::{
+    AcceptWaiterId, CloseReason, NetworkDelay,
+    types::{ConnectionId, ListenerId},
+};
 use crate::{TcpListenerTrait, WeakSimWorld};
 use futures::io::{AsyncRead, AsyncWrite};
 use std::{
@@ -637,12 +640,27 @@ impl Drop for AcceptFuture {
 pub struct SimTcpListener {
     sim: WeakSimWorld,
     local_addr: String,
+    id: ListenerId,
 }
 
 impl SimTcpListener {
     /// Create a new simulated TCP listener
-    pub(crate) fn new(sim: WeakSimWorld, local_addr: String) -> Self {
-        Self { sim, local_addr }
+    pub(crate) fn new(sim: WeakSimWorld, local_addr: String, id: ListenerId) -> Self {
+        Self {
+            sim,
+            local_addr,
+            id,
+        }
+    }
+}
+
+impl Drop for SimTcpListener {
+    fn drop(&mut self) {
+        // Dropping the socket releases the address: later binds succeed and
+        // later connects are refused, as with a real listener.
+        if let Ok(sim) = self.sim.upgrade() {
+            sim.unbind_listener(self.id);
+        }
     }
 }
 

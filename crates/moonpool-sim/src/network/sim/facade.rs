@@ -41,8 +41,15 @@ impl SimWorld {
         inner.apply_network(actions);
     }
 
-    pub(crate) fn create_listener(&self) -> ListenerId {
-        self.inner.write().network.create_listener()
+    /// Bind `addr` for the process at `owner`; `None` when it is in use.
+    pub(crate) fn bind_listener(&self, addr: &str, owner: IpAddr) -> Option<ListenerId> {
+        self.inner.write().network.bind_listener(addr, owner)
+    }
+
+    /// Release the address a dropped listener held.
+    pub(crate) fn unbind_listener(&self, id: ListenerId) {
+        let wakes = self.inner.write().network.unbind_listener(id);
+        wakes.wake();
     }
 
     pub(crate) fn read_from_connection(
@@ -115,9 +122,17 @@ impl SimWorld {
         wakes.wake();
     }
 
-    pub(crate) fn store_pending_connection(&self, addr: &str, id: ConnectionId) {
+    /// Publish an arriving connection to the listener on `addr`. Returns
+    /// `false`, publishing nothing, when nobody is listening there.
+    pub(crate) fn store_pending_connection(&self, addr: &str, id: ConnectionId) -> bool {
         let wakes = self.inner.write().network.store_pending(addr, id);
-        wakes.wake();
+        match wakes {
+            Some(wakes) => {
+                wakes.wake();
+                true
+            }
+            None => false,
+        }
     }
 
     pub(crate) fn return_pending_connection(&self, addr: &str, id: ConnectionId) {
@@ -461,6 +476,9 @@ impl SimWorld {
             for id in ids {
                 wakes.append(inner.network.close_aborted(id));
             }
+            // A dead process listens on nothing: its addresses are free and
+            // a connect to them is refused until something binds them again.
+            wakes.append(inner.network.unbind_listeners_for_ip(ip));
             wakes
         };
         wakes.wake();
