@@ -18,7 +18,7 @@ pub trait Process: Send + Sync + 'static {
 
 Two methods. `name()` identifies this process type for reporting. `run()` is where your server logic lives. All Process impls are **`Send + Sync + 'static`**, which makes them composable with `tokio::spawn` and `Arc`-based shared state like `Arc<RwLock<…>>` or `DashMap`. The runtime itself is still single-thread for determinism, but your code reads like ordinary tokio code.
 
-When `run()` returns `Ok(())`, the process has exited voluntarily. When the simulation kills the process, the future is cancelled and `run()` never returns at all.
+When `run()` returns `Ok(())` or an `Err`, the process has exited voluntarily. When the simulation kills the process, the future is cancelled and `run()` never returns at all. When `run()` **panics**, the seed fails: the panic is caught and recorded against the process's IP, and the iteration is reported as failed even if every workload returned `Ok`, so an assertion firing inside a server (or one of its dependencies) never disappears from the report.
 
 ## The Factory Pattern
 
