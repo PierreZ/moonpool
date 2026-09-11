@@ -55,6 +55,9 @@ pub trait Workload: Send + Sync + 'static {
     /// Check phase: validate correctness after quiescence.
     ///
     /// Called after all runs complete and pending events drain.
+    /// Its verdict is part of the iteration's result: an `Err` (or a panic)
+    /// fails the seed exactly as a failing `run()` does, even when every
+    /// `run()` returned `Ok`.
     /// Default implementation is a no-op.
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
         Ok(())

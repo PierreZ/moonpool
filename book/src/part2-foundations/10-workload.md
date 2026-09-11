@@ -81,7 +81,7 @@ async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
 
 `check()` runs **sequentially** after all workloads finish and all pending events drain. The system is quiescent. No more messages in flight, no more timeouts pending.
 
-Use check for final state validation. Did the conservation law hold? Are all balances non-negative? Did every committed write survive?
+Use check for final state validation. Did the conservation law hold? Are all balances non-negative? Did every committed write survive? The verdict counts: a `check()` that returns `Err` (or panics) fails the seed exactly as a failing `run()` does, even when every `run()` returned `Ok`.
 
 ```rust
 async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
