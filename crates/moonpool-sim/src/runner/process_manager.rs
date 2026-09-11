@@ -86,8 +86,28 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
     }
 }
 
+/// One boot of a process: its root task, and the scope every task it spawns
+/// through its provider is bound to.
+///
+/// Killing the boot is both halves: abort the root and cancel the scope, so
+/// the descendants a crash would otherwise leave running die with it.
+pub(crate) struct ProcessBoot {
+    handle: crate::executor::JoinHandle<()>,
+    scope: tokio_util::sync::CancellationToken,
+}
+
+impl ProcessBoot {
+    /// Stop the boot: the root task now, its spawned tasks before their next
+    /// poll.
+    fn kill(self) {
+        self.handle.abort();
+        self.scope.cancel();
+    }
+}
+
 /// Spawn `process` as its own task, inside the `process` span the
-/// observability layer attributes events by.
+/// observability layer attributes events by, with `scope` as the boot's
+/// task scope (the one its `ctx` providers were built with).
 ///
 /// A panic in [`Process::run`] is caught *here*, at the one place that knows
 /// which process it was, and recorded in `panics`; the seed then fails at the
@@ -102,11 +122,12 @@ pub(crate) fn spawn_process(
     ctx: SimContext,
     ip: &str,
     panics: &ProcessPanics,
-) -> crate::executor::JoinHandle<()> {
+    scope: tokio_util::sync::CancellationToken,
+) -> ProcessBoot {
     let ip = ip.to_string();
     let span_ip = ip.clone();
     let panics = Arc::clone(panics);
-    crate::executor::spawn(
+    let handle = crate::executor::spawn(
         &format!("process@{span_ip}"),
         async move {
             let outcome = AssertUnwindSafe(process.run(&ctx)).catch_unwind().await;
@@ -126,14 +147,15 @@ pub(crate) fn spawn_process(
             }
         }
         .instrument(tracing::info_span!("process", ip = %span_ip)),
-    )
+    );
+    ProcessBoot { handle, scope }
 }
 
 /// Owns running process tasks and their restart state.
 pub(crate) struct ProcessManager<'a> {
     /// Per-process factories, parallel to `ips` (empty without processes).
     factories: Vec<ProcessFactory<'a>>,
-    handles: Vec<Option<crate::executor::JoinHandle<()>>>,
+    handles: Vec<Option<ProcessBoot>>,
     process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
     ips: Vec<String>,
     tag_registry: TagRegistry,
@@ -166,7 +188,7 @@ impl<'a> ProcessManager<'a> {
 
     pub(crate) fn new(
         config: ProcessConfig<'a>,
-        handles: Vec<Option<crate::executor::JoinHandle<()>>>,
+        handles: Vec<Option<ProcessBoot>>,
         process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
         all_entities: Vec<(String, String)>,
         panics: ProcessPanics,
@@ -249,8 +271,8 @@ impl<'a> ProcessManager<'a> {
             tracing::warn!(%ip, "ProcessForceKill for unknown IP");
             return;
         };
-        if let Some(handle) = self.handles[index].take() {
-            handle.abort();
+        if let Some(boot) = self.handles[index].take() {
+            boot.kill();
             tracing::info!(%ip, index, "force-killed process");
         }
         self.process_tokens[index] = None;
@@ -274,11 +296,12 @@ impl<'a> ProcessManager<'a> {
             return;
         };
 
-        if let Some(handle) = self.handles[index].take() {
-            handle.abort();
+        if let Some(boot) = self.handles[index].take() {
+            boot.kill();
         }
 
         let process_token = shutdown_signal.child_token();
+        let scope = tokio_util::sync::CancellationToken::new();
         self.process_tokens[index] = Some(process_token.clone());
         let process = factory();
         // A process is numbered within its own group, exactly as on first boot.
@@ -300,14 +323,14 @@ impl<'a> ProcessManager<'a> {
             shutdown_signal: process_token,
         });
         let ctx = SimContext::new(
-            crate::SimProviders::new(sim.clone(), ip),
+            crate::SimProviders::new(sim.clone(), ip).with_task_scope(scope.clone()),
             topology,
             state.clone(),
             obs.clone(),
             metrics.clone(),
         );
-        let handle = spawn_process(process, ctx, &ip_string, &self.panics);
-        self.handles[index] = Some(handle);
+        let boot = spawn_process(process, ctx, &ip_string, &self.panics, scope);
+        self.handles[index] = Some(boot);
         self.dead
             .lock()
             .expect("Mutex poisoned: prior task panicked")
@@ -317,9 +340,9 @@ impl<'a> ProcessManager<'a> {
     }
 
     pub(crate) fn abort_all(&mut self) {
-        for handle in &mut self.handles {
-            if let Some(handle) = handle.take() {
-                handle.abort();
+        for boot in &mut self.handles {
+            if let Some(boot) = boot.take() {
+                boot.kill();
             }
         }
     }

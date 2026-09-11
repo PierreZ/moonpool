@@ -23,7 +23,7 @@ use crate::sim::ProcessKillKind;
 use crate::{SimulationResult, assert_reachable};
 
 use super::process_manager::{
-    ProcessConfig, ProcessManager, ProcessPanics, RestartEnv, spawn_process,
+    ProcessBoot, ProcessConfig, ProcessManager, ProcessPanics, RestartEnv, spawn_process,
 };
 use super::report::SimulationMetrics;
 use super::stall::{RunStallGuard, StallOutcome};
@@ -41,8 +41,8 @@ type SetupTaskOutput = (Box<dyn Workload>, SimContext, SimulationResult<()>);
 /// Handle to a spawned `setup()` task.
 type SetupHandle = crate::executor::JoinHandle<SetupTaskOutput>;
 
-/// Per-process join handles (in option slots so they can be drained).
-type ProcessHandleSlots = Vec<Option<crate::executor::JoinHandle<()>>>;
+/// Per-process boots (in option slots so they can be drained).
+type ProcessHandleSlots = Vec<Option<ProcessBoot>>;
 
 /// Per-process cancellation tokens (in option slots so they can be drained).
 type ProcessTokenSlots = Vec<Option<tokio_util::sync::CancellationToken>>;
@@ -922,7 +922,9 @@ impl WorkloadOrchestrator {
                 group_registry: pc.group_registry.clone(),
                 shutdown_signal: process_token.clone(),
             });
-            let providers = crate::SimProviders::new(sim.downgrade(), ip_addr);
+            let scope = tokio_util::sync::CancellationToken::new();
+            let providers =
+                crate::SimProviders::new(sim.downgrade(), ip_addr).with_task_scope(scope.clone());
             let ctx = SimContext::new(
                 providers,
                 topology,
@@ -930,8 +932,8 @@ impl WorkloadOrchestrator {
                 obs.clone(),
                 metrics.clone(),
             );
-            let handle = spawn_process(process, ctx, ip, panics);
-            process_handles.push(Some(handle));
+            let boot = spawn_process(process, ctx, ip, panics, scope);
+            process_handles.push(Some(boot));
             process_tokens.push(Some(process_token));
             tracing::debug!("Booted process {} at {}", i, ip);
         }
