@@ -81,9 +81,16 @@ impl NetworkProvider for SimNetworkProvider {
             .map_err(io::Error::other)?
             .await
             .map_err(io::Error::other)?;
-        sim.create_listener();
+        // One live listener per address, as the operating system enforces:
+        // a second bind fails with `AddrInUse` until the first is dropped.
+        let id = sim.bind_listener(addr, self.local_ip).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("address already in use: {addr}"),
+            )
+        })?;
 
-        let listener = SimTcpListener::new(self.sim.clone(), addr.to_string());
+        let listener = SimTcpListener::new(self.sim.clone(), addr.to_string(), id);
         Ok(listener)
     }
 
@@ -163,8 +170,17 @@ impl NetworkProvider for SimNetworkProvider {
             .await
             .map_err(io::Error::other)?;
 
-        // Only publish the server endpoint after connection establishment.
-        sim.store_pending_connection(addr, server_id);
+        // Only publish the server endpoint after connection establishment —
+        // and only to a live listener. Nobody listening when the connection
+        // arrives is a refused connection: the pair is discarded (the guard
+        // stays armed) and the caller gets what the kernel would answer.
+        if !sim.store_pending_connection(addr, server_id) {
+            tracing::debug!(addr = %addr, "connection refused: nothing is listening");
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("connection refused: nothing is listening on {addr}"),
+            ));
+        }
         pending_pair.disarm();
 
         let stream = SimTcpStream::new(self.sim.clone(), client_id);
