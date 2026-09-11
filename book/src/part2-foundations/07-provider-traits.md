@@ -201,7 +201,12 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
 Storage is the newest provider, and the one with the richest fault model. The
 split is that the **provider owns the filesystem namespace** — open, exists,
 delete, rename, and the directory sync that makes those durable — while the
-**file owns already-open bytes**.
+**file owns already-open bytes**. The two never cross: a `delete`, or a
+`rename` over a name, removes the name and nothing else, so a file opened
+before it keeps reading and writing the same bytes, exactly as on Unix, and
+the bytes are freed only when the last name and the last handle are both
+gone. Log rotation and atomic replacement lean on that in production, and
+the simulator holds to it too.
 
 `OpenOptions` mirrors `std::fs::OpenOptions` with `read`, `write`, `create`,
 `truncate`, and `append`, plus the one thing a database needs that

@@ -542,3 +542,151 @@ fn the_simulator_refuses_the_seeks_production_refuses() {
         }
     });
 }
+
+/// One step of the open-file contract: what a read through a handle, or a
+/// namespace query, answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NameStep {
+    label: &'static str,
+    outcome: Result<Vec<u8>, std::io::ErrorKind>,
+}
+
+async fn read_all<F: StorageFile>(file: &F, len: usize) -> Result<Vec<u8>, std::io::ErrorKind> {
+    let mut bytes = vec![0_u8; len];
+    let mut read = 0;
+    while read < len {
+        match file.read_at(read as u64, &mut bytes[read..]).await {
+            Ok(0) => break,
+            Ok(n) => read += n,
+            Err(error) => return Err(error.kind()),
+        }
+    }
+    bytes.truncate(read);
+    Ok(bytes)
+}
+
+/// Unlink and rename-over with handles held open: the handles keep the old
+/// image, the names answer for the new one.
+async fn open_file_contract<P: StorageProvider>(
+    provider: P,
+    prefix: String,
+) -> std::io::Result<Vec<NameStep>> {
+    let mut log = Vec::new();
+    let mut step = |label: &'static str, outcome: Result<Vec<u8>, std::io::ErrorKind>| {
+        log.push(NameStep { label, outcome });
+    };
+    let exists = |present: bool| Ok(vec![u8::from(present)]);
+
+    // unlink: the open handle outlives the name.
+    let alpha = format!("{prefix}alpha.db");
+    let mut writer = provider
+        .open(&alpha, OpenOptions::create_new_write())
+        .await?;
+    writer.write_all(b"alpha-bytes").await?;
+    writer.sync_all().await?;
+    drop(writer);
+    let held = provider.open(&alpha, OpenOptions::read_write()).await?;
+    provider.delete(&alpha).await?;
+    step(
+        "alpha exists after unlink",
+        exists(provider.exists(&alpha).await?),
+    );
+    step("held handle reads after unlink", read_all(&held, 64).await);
+    step(
+        "held handle writes after unlink",
+        held.write_at(0, b"ALPHA")
+            .await
+            .map(|n| vec![u8::try_from(n).unwrap_or(u8::MAX)])
+            .map_err(|e| e.kind()),
+    );
+    step("held handle reads its write", read_all(&held, 64).await);
+    drop(held);
+    step(
+        "alpha exists once the handle is gone",
+        exists(provider.exists(&alpha).await?),
+    );
+
+    // rename over: the handle on the replaced file keeps the replaced image.
+    let bravo = format!("{prefix}bravo.db");
+    let charlie = format!("{prefix}charlie.db");
+    let mut writer = provider
+        .open(&bravo, OpenOptions::create_new_write())
+        .await?;
+    writer.write_all(b"bravo-bytes").await?;
+    writer.sync_all().await?;
+    drop(writer);
+    let mut writer = provider
+        .open(&charlie, OpenOptions::create_new_write())
+        .await?;
+    writer.write_all(b"charlie").await?;
+    writer.sync_all().await?;
+    drop(writer);
+    let old = provider.open(&bravo, OpenOptions::read_only()).await?;
+    provider.rename(&charlie, &bravo).await?;
+    step(
+        "charlie exists after rename",
+        exists(provider.exists(&charlie).await?),
+    );
+    step(
+        "old handle reads the replaced image",
+        read_all(&old, 64).await,
+    );
+    let new = provider.open(&bravo, OpenOptions::read_only()).await?;
+    step("the name reads the new image", read_all(&new, 64).await);
+    drop(old);
+    drop(new);
+    step("bravo still exists", exists(provider.exists(&bravo).await?));
+    Ok(log)
+}
+
+/// `unlink(2)` and `rename(2)` are namespace operations and never reach an
+/// open file; the simulator used to invalidate every handle on the way.
+#[test]
+fn the_simulator_keeps_open_files_alive_across_unlink_and_rename() {
+    local_runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let prefix = format!("{}/", dir.path().to_str().expect("temp path is UTF-8"));
+        let production = open_file_contract(TokioStorageProvider::new(), prefix)
+            .await
+            .expect("the production scenarios must run");
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let simulated =
+            run_storage_test(sim, |provider| open_file_contract(provider, String::new()))
+                .await
+                .expect("the simulated scenarios must run");
+
+        assert_eq!(
+            production, simulated,
+            "an open file must outlive its name on both backends alike"
+        );
+        let outcome = |label: &str| {
+            production
+                .iter()
+                .find(|step| step.label == label)
+                .map_or_else(
+                    || panic!("no step labelled {label:?}"),
+                    |step| step.outcome.clone(),
+                )
+        };
+        assert_eq!(
+            outcome("held handle reads after unlink"),
+            Ok(b"alpha-bytes".to_vec())
+        );
+        assert_eq!(
+            outcome("held handle reads its write"),
+            Ok(b"ALPHA-bytes".to_vec())
+        );
+        assert_eq!(
+            outcome("old handle reads the replaced image"),
+            Ok(b"bravo-bytes".to_vec())
+        );
+        assert_eq!(
+            outcome("the name reads the new image"),
+            Ok(b"charlie".to_vec())
+        );
+        assert_eq!(outcome("alpha exists after unlink"), Ok(vec![0]));
+        assert_eq!(outcome("charlie exists after rename"), Ok(vec![0]));
+    });
+}

@@ -333,12 +333,14 @@ fn deleted_path_can_be_reused_as_rename_target() {
     });
 }
 
+/// `rename(2)` over an existing name replaces the name only: a handle opened
+/// on the replaced file keeps its image, as on the production backend.
 #[test]
-fn rename_replaces_existing_target_and_invalidates_its_handles() {
+fn rename_replaces_existing_target_and_keeps_its_open_handles() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
             let mut old_target = provider
-                .open("target.txt", OpenOptions::create_write())
+                .open("target.txt", OpenOptions::create_write().read(true))
                 .await?;
             old_target.write_all(b"old").await?;
             old_target.sync_all().await?;
@@ -351,11 +353,15 @@ fn rename_replaces_existing_target_and_invalidates_its_handles() {
             drop(source);
 
             provider.rename("source.txt", "target.txt").await?;
-            let error = old_target
-                .size()
-                .await
-                .expect_err("replaced handle must close");
-            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            assert_eq!(
+                old_target.size().await?,
+                3,
+                "the replaced file's handle still reaches its image"
+            );
+            old_target.seek(SeekFrom::Start(0)).await?;
+            let mut old_contents = Vec::new();
+            old_target.read_to_end(&mut old_contents).await?;
+            assert_eq!(old_contents, b"old");
 
             let mut target = provider
                 .open("target.txt", OpenOptions::read_only())
