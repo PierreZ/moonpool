@@ -318,6 +318,19 @@ impl SimWorld {
         wakes.wake();
     }
 
+    /// Shuts down the send direction of a connection (`shutdown(SHUT_WR)`):
+    /// a FIN behind the queued bytes, the receive direction left open.
+    pub fn shutdown_send(&self, id: ConnectionId) {
+        let wakes = {
+            let mut inner = self.inner.write();
+            let now = inner.now();
+            let (actions, wakes) = inner.network.shutdown_send(id, now);
+            inner.apply_network(actions);
+            wakes
+        };
+        wakes.wake();
+    }
+
     /// Aborts a connection with RST semantics.
     pub fn close_connection_abort(&self, id: ConnectionId) {
         let wakes = self.inner.write().network.close_aborted(id);

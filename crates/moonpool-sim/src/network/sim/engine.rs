@@ -1748,6 +1748,55 @@ impl NetworkSimulation {
             .is_some_and(|connection| connection.flags.send_black_holed())
     }
 
+    /// Shut down the send direction only — `shutdown(SHUT_WR)`.
+    ///
+    /// The FIN goes on the wire behind every byte still queued or in flight
+    /// and further writes fail with `BrokenPipe`; the receive direction is
+    /// untouched, so what the peer sends after seeing EOF (the reply of an
+    /// EOF-delimited request/response protocol) still lands and is still
+    /// readable. Nothing is discarded. Returns without effect once the send
+    /// side is already shut or the connection closed.
+    pub(crate) fn shutdown_send(
+        &mut self,
+        id: ConnectionId,
+        now: Duration,
+    ) -> (NetworkActions, WakeBatch) {
+        let mut actions = NetworkActions::default();
+        let mut wakes = WakeBatch::default();
+        let Some((send_closed, is_closed, send_in_progress, queue_empty)) = self.close_snapshot(id)
+        else {
+            return (actions, wakes);
+        };
+        if send_closed || is_closed {
+            return (actions, wakes);
+        }
+        if let Some(c) = self.state.connections.get_mut(&id) {
+            c.flags.set_send_closed(true);
+            if send_in_progress || !queue_empty {
+                c.flags.set_graceful_close_pending(true);
+            }
+        }
+        // A writer parked on the window must wake to the shut send side.
+        Self::take_waiter(&mut self.waiters.send_buffers, id, &mut wakes);
+        if !send_in_progress && queue_empty {
+            self.put_fin_in_flight(id, now, &mut actions);
+        }
+        (actions, wakes)
+    }
+
+    /// `(send_closed, is_closed, send_in_progress, send queue empty)`, or
+    /// `None` for an unknown connection.
+    fn close_snapshot(&self, id: ConnectionId) -> Option<(bool, bool, bool, bool)> {
+        self.state.connections.get(&id).map(|c| {
+            (
+                c.flags.send_closed(),
+                c.flags.is_closed(),
+                c.flags.send_in_progress(),
+                c.send_buffer.is_empty(),
+            )
+        })
+    }
+
     pub(crate) fn close_graceful(
         &mut self,
         id: ConnectionId,
@@ -1755,25 +1804,22 @@ impl NetworkSimulation {
     ) -> (NetworkActions, WakeBatch) {
         let mut actions = NetworkActions::default();
         let mut wakes = WakeBatch::default();
-        let Some(snapshot) = self.state.connections.get(&id).map(|c| {
-            (
-                c.flags.send_closed(),
-                c.flags.is_closed(),
-                c.flags.send_in_progress(),
-                c.send_buffer.is_empty(),
-            )
-        }) else {
+        let Some((send_closed, is_closed, send_in_progress, queue_empty)) = self.close_snapshot(id)
+        else {
             return (actions, wakes);
         };
-        let (send_closed, is_closed, send_in_progress, queue_empty) = snapshot;
-        if send_closed || is_closed {
+        if is_closed {
             return (actions, wakes);
         }
+        // A send side already shut (`shutdown_send`) has its FIN on the wire
+        // or pending behind the queue; the close adds the receive half and
+        // must not send a second FIN.
+        let fin_sent = send_closed;
         if let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_is_closed(true);
             c.flags.set_send_closed(true);
             c.close_reason = CloseReason::Graceful;
-            if send_in_progress || !queue_empty {
+            if !fin_sent && (send_in_progress || !queue_empty) {
                 c.flags.set_graceful_close_pending(true);
             }
         }
@@ -1783,7 +1829,7 @@ impl NetworkSimulation {
         self.discard_receive_buffer(id, &mut wakes);
         // The FIN goes on the wire behind whatever is already in flight; it
         // can never overtake the stream's last bytes.
-        if !send_in_progress && queue_empty {
+        if !fin_sent && !send_in_progress && queue_empty {
             self.put_fin_in_flight(id, now, &mut actions);
         }
         (actions, wakes)

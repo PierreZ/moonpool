@@ -304,18 +304,20 @@ fn an_abort_wakes_a_writer_parked_on_the_window() {
 }
 
 /// A peer that closes with the window's bytes unread frees them: the writer
-/// is woken and, on its next write, told the stream is gone.
+/// is woken and, on its next write, told the stream is gone. The close is
+/// the drop of the stream; `AsyncWrite::close` is only a write shutdown and
+/// frees nothing the peer has not read.
 #[test]
 fn a_peer_close_with_unread_bytes_frees_the_window() {
     const WINDOW: usize = 1024;
-    let (mut sim, mut client, mut server) = connected(config(WINDOW, Duration::from_micros(1)));
+    let (mut sim, mut client, server) = connected(config(WINDOW, Duration::from_micros(1)));
     assert_eq!(fill_window(&mut client, 4096), WINDOW);
     sim.run_until_empty();
     assert_eq!(sim.unread_bytes(server.connection_id()), WINDOW);
     let (wake_count, waker) = counting_waker();
     assert!(poll_write_with(&mut client, b"x", &waker).is_pending());
 
-    assert!(matches!(poll_close_once(&mut server), Poll::Ready(Ok(()))));
+    drop(server);
 
     assert_eq!(
         wake_count.0.load(Ordering::Relaxed),
