@@ -28,7 +28,7 @@ Three rules:
 
 That's the whole convention. Sim time is stamped automatically from the simulation clock, so do not include a `time_ms` field.
 
-**Where does the source come from?** The orchestrator wraps every process and workload task in a tracing span carrying its `ip` (`info_span!("process", ip = %ip)`). When an event fires inside that task, the capture layer walks the span scope and attributes the event to the nearest enclosing actor. In production the same role is played by host or pod attributes on your trace resource. Events emitted outside any actor span (runtime internals, the orchestrator itself) are not captured.
+**Where does the source come from?** The orchestrator wraps every process and workload task in a tracing span carrying its `ip` (`info_span!("process", ip = %ip)`). When an event fires inside that task, the capture layer walks the span scope and attributes the event to the nearest enclosing actor. A task spawned through `ctx.task().spawn_task()` runs inside the span that was current when it was spawned, exactly as `tokio::spawn` does, so a background request handler's events carry the same `ip` as the actor that spawned it, however deep the spawning goes. In production the same role is played by host or pod attributes on your trace resource. Events emitted outside any actor span (runtime internals, the orchestrator itself) are not captured.
 
 Each captured event is a `TraceEvent`:
 
