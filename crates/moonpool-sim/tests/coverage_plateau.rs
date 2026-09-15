@@ -52,6 +52,23 @@ impl Workload for RareGateWorkload {
     }
 }
 
+/// A numeric coverage gate that never succeeds beside an ordinary gate that
+/// always does. Numeric coverage must prevent early convergence too.
+struct NeverHitNumericGate;
+
+#[async_trait]
+impl Workload for NeverHitNumericGate {
+    fn name(&self) -> &'static str {
+        "numeric_client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        moonpool_sim::assert_sometimes!(true, "boolean gate");
+        moonpool_sim::assert_sometimes_greater_than!(0, 1, "numeric gate");
+        Ok(())
+    }
+}
+
 /// With no exploration enabled, saturation should still fire because the
 /// assertion table is initialised unconditionally.
 #[test]
@@ -132,5 +149,24 @@ fn test_plateau_requires_all_sometimes() {
     assert!(
         rare_hit,
         "expected the rare gate to have fired before stopping"
+    );
+}
+
+#[test]
+fn numeric_sometimes_prevents_early_convergence() {
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .until_coverage_stable(2, 5)
+            .workload(NeverHitNumericGate),
+    );
+
+    assert_eq!(report.iterations, 5, "report: {report:?}");
+    assert!(report.convergence_timeout, "report: {report:?}");
+    assert!(
+        report
+            .coverage_violations
+            .iter()
+            .any(|violation| violation.contains("numeric gate")),
+        "report: {report:?}"
     );
 }

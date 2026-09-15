@@ -1488,6 +1488,7 @@ impl SimulationBuilder {
                 && matches!(
                     kind,
                     moonpool_assertions::AssertKind::Sometimes
+                        | moonpool_assertions::AssertKind::NumericSometimes
                         | moonpool_assertions::AssertKind::Reachable
                         | moonpool_assertions::AssertKind::BooleanSometimesAll
                 )
@@ -1520,6 +1521,7 @@ impl SimulationBuilder {
                     matches!(
                         k,
                         moonpool_assertions::AssertKind::Sometimes
+                            | moonpool_assertions::AssertKind::NumericSometimes
                             | moonpool_assertions::AssertKind::Reachable
                             | moonpool_assertions::AssertKind::BooleanSometimesAll
                     )
