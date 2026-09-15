@@ -128,6 +128,10 @@ pub(crate) struct StorageState {
     /// synced — file data durability and directory-entry durability are two
     /// different things.
     pub(crate) durable_paths: BTreeMap<Name, FileId>,
+    /// Visible directories, excluding the implicit relative and absolute roots.
+    pub(crate) directories: BTreeSet<Name>,
+    /// Directory entries made durable by syncing their parent directory.
+    pub(crate) durable_directories: BTreeSet<Name>,
     pub(crate) pending_ops: BTreeMap<OperationId, PendingStorageOp>,
     /// Consulted before any random fault damages a sector (see
     /// [`StorageEligibilityMask`]).
@@ -158,6 +162,8 @@ impl StorageState {
             handles: BTreeMap::new(),
             path_to_file: BTreeMap::new(),
             durable_paths: BTreeMap::new(),
+            directories: BTreeSet::new(),
+            durable_directories: BTreeSet::new(),
             pending_ops: BTreeMap::new(),
             eligibility: EligibilitySlot::default(),
             fault_records: Vec::new(),

@@ -121,6 +121,42 @@ fn each_process_resolves_a_path_on_its_own_disk() {
     });
 }
 
+#[test]
+fn directories_are_process_local_and_removed_by_a_storage_wipe() {
+    local_runtime().block_on(async {
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        run_as(&mut sim, node_a(), |provider| async move {
+            provider.create_dir_all("db/nested").await
+        })
+        .await
+        .expect("A creates its directories");
+
+        let b = run_as(&mut sim, node_b(), |provider| async move {
+            let absent = !provider.exists("db").await?;
+            let open_failed = provider
+                .open("db/wal", OpenOptions::create_write())
+                .await
+                .is_err();
+            Ok::<_, std::io::Error>((absent, open_failed))
+        })
+        .await
+        .expect("B checks its separate disk");
+        assert_eq!(b, (true, true));
+
+        sim.wipe_storage_for_process(node_a());
+        let a = run_as(&mut sim, node_a(), |provider| async move {
+            Ok::<_, std::io::Error>((
+                provider.exists("db").await?,
+                provider.exists("db/nested").await?,
+            ))
+        })
+        .await
+        .expect("A checks wiped directories");
+        assert_eq!(a, (false, false));
+    });
+}
+
 /// A's directory sync commits A's entries only: B's unsynced entry is still
 /// lost when B crashes.
 #[test]
@@ -130,6 +166,8 @@ fn a_directory_sync_commits_only_the_syncing_processs_entries() {
 
         for ip in [node_a(), node_b()] {
             run_as(&mut sim, ip, |provider| async move {
+                provider.create_dir_all("db").await?;
+                provider.sync_dir(".").await?;
                 write_file(&provider, "db/wal", b"entries").await
             })
             .await

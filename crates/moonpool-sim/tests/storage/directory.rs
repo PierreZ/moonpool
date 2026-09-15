@@ -7,7 +7,7 @@
 use futures::io::AsyncWriteExt;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
-    CrashOutcome, SimStorageProvider, SimWorld, StorageConfiguration, executor::Executor,
+    CrashOutcome, EioTarget, SimStorageProvider, SimWorld, StorageConfiguration, executor::Executor,
 };
 use std::future::Future;
 use std::net::IpAddr;
@@ -111,6 +111,8 @@ fn file_sync_does_not_make_the_directory_entry_durable() {
         let mut sim = losing_sim();
 
         run_on(&mut sim, |provider| async move {
+            provider.create_dir_all("db").await.expect("create db");
+            provider.sync_dir(".").await.expect("durable db");
             let mut file = provider
                 .open("db/wal", OpenOptions::create_write())
                 .await
@@ -142,6 +144,8 @@ fn a_synced_directory_entry_survives() {
         let mut sim = losing_sim();
 
         run_on(&mut sim, |provider| async move {
+            provider.create_dir_all("db").await.expect("create db");
+            provider.sync_dir(".").await.expect("durable db");
             let mut file = provider
                 .open("db/wal", OpenOptions::create_write())
                 .await
@@ -163,6 +167,213 @@ fn a_synced_directory_entry_survives() {
     });
 }
 
+/// Syncing entries inside a new directory does not sync the new directory's
+/// own name in its parent. A crash can lose the directory and its files.
+#[test]
+fn syncing_new_directory_without_parent_does_not_save_its_file() {
+    let mut sim = losing_sim();
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        provider.create_dir_all("db").await.expect("create db");
+        let file = provider
+            .open("db/wal", OpenOptions::create_write())
+            .await
+            .expect("create wal");
+        file.write_at(0, b"committed").await.expect("write wal");
+        file.sync_all().await.expect("sync bytes");
+        provider.sync_dir("db").await.expect("sync wal name");
+        // No sync_dir("."): the new db name is still unsynced.
+    });
+    sim.simulate_crash_for_process(test_ip(), true);
+
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        assert!(!provider.exists("db").await.expect("db exists"));
+        assert!(!provider.exists("db/wal").await.expect("wal exists"));
+    });
+    assert_eq!(sim.take_storage_crash_reports().len(), 1);
+}
+
+/// Even a durable child entry cannot outlive an unsynced parent name.
+#[test]
+fn durable_nested_child_is_pruned_when_parent_directory_is_lost() {
+    let mut sim = losing_sim();
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        provider
+            .create_dir_all("db/nested")
+            .await
+            .expect("create dirs");
+        provider.sync_dir("db").await.expect("sync nested name");
+        let file = provider
+            .open("db/nested/wal", OpenOptions::create_write())
+            .await
+            .expect("create wal");
+        file.sync_all().await.expect("sync bytes");
+        provider.sync_dir("db/nested").await.expect("sync wal name");
+    });
+    sim.simulate_crash_for_process(test_ip(), true);
+
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        for path in ["db", "db/nested", "db/nested/wal"] {
+            assert!(
+                !provider.exists(path).await.expect("exists"),
+                "{path} survived"
+            );
+        }
+    });
+}
+
+#[test]
+fn syncing_each_parent_makes_nested_directory_and_file_survive() {
+    let mut sim = losing_sim();
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        provider
+            .create_dir_all("db/nested")
+            .await
+            .expect("create dirs");
+        provider.sync_dir(".").await.expect("sync db name");
+        provider.sync_dir("db").await.expect("sync nested name");
+        let file = provider
+            .open("db/nested/wal", OpenOptions::create_write())
+            .await
+            .expect("create wal");
+        file.sync_all().await.expect("sync bytes");
+        provider.sync_dir("db/nested").await.expect("sync wal name");
+    });
+    sim.simulate_crash_for_process(test_ip(), true);
+
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        for path in ["db", "db/nested", "db/nested/wal"] {
+            assert!(
+                provider.exists(path).await.expect("exists"),
+                "{path} was lost"
+            );
+        }
+    });
+}
+
+#[test]
+fn targeted_faults_resolve_directory_aliases() {
+    let mut sim = SimWorld::new();
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        provider.create_dir_all("db").await.expect("create db");
+        let file = provider
+            .open("db/wal", OpenOptions::create_write())
+            .await
+            .expect("create wal");
+        file.write_at(0, b"seed").await.expect("seed wal");
+    });
+    sim.fail_file_with_eio("./db/../db/wal", 0..1, EioTarget::Write)
+        .expect("alias targets wal");
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        let file = provider
+            .open("./db/wal", OpenOptions::read_write())
+            .await
+            .expect("open alias");
+        assert!(file.write_at(0, b"changed").await.is_err());
+    });
+}
+
+#[test]
+fn relative_and_absolute_roots_have_distinct_namespaces() {
+    let mut sim = SimWorld::new();
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        provider.create_dir_all("db").await.expect("relative db");
+        provider.create_dir_all("/db").await.expect("absolute db");
+        let relative = provider
+            .open("db/wal", OpenOptions::create_new_write())
+            .await
+            .expect("relative wal");
+        let absolute = provider
+            .open("/db/wal", OpenOptions::create_new_write())
+            .await
+            .expect("absolute wal");
+        relative
+            .write_at(0, b"relative")
+            .await
+            .expect("relative bytes");
+        absolute
+            .write_at(0, b"absolute")
+            .await
+            .expect("absolute bytes");
+        assert_eq!(relative.size().await.expect("relative size"), 8);
+        assert_eq!(absolute.size().await.expect("absolute size"), 8);
+    });
+}
+
+#[test]
+fn directory_rename_is_rejected_without_moving_its_children() {
+    let mut sim = SimWorld::new();
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        provider.create_dir_all("db").await.expect("create db");
+        let file = provider
+            .open("db/wal", OpenOptions::create_write())
+            .await
+            .expect("create wal");
+        drop(file);
+        assert!(provider.rename("db", "renamed").await.is_err());
+        assert!(provider.exists("db/wal").await.expect("wal exists"));
+        assert!(!provider.exists("renamed").await.expect("renamed exists"));
+    });
+}
+
+/// Replacing a durable file name with an unsynced directory must choose one
+/// complete entry type per crash, never an invisible file behind a directory.
+#[test]
+fn file_to_directory_replacement_crash_keeps_one_entry_type() {
+    let mut seen_file = false;
+    let mut seen_directory = false;
+    for seed in 0..64 {
+        let mut config = StorageConfiguration::fast_local();
+        config.unsynced_dir_entry_loss_probability = 0.5;
+        let mut sim = SimWorld::new_with_seed(seed);
+        sim.set_storage_config(config);
+        let provider = sim.storage_provider(test_ip());
+        drive_on(&mut sim, async move {
+            let file = provider
+                .open("x", OpenOptions::create_write())
+                .await
+                .expect("create x file");
+            file.write_at(0, b"file").await.expect("write x file");
+            file.sync_all().await.expect("sync x bytes");
+            provider.sync_dir(".").await.expect("sync x name");
+            drop(file);
+            provider.delete("x").await.expect("unlink x file");
+            provider
+                .create_dir_all("x")
+                .await
+                .expect("replace with x dir");
+        });
+        sim.simulate_crash_for_process(test_ip(), true);
+
+        let provider = sim.storage_provider(test_ip());
+        let (file, directory) = drive_on(&mut sim, async move {
+            (
+                provider.open("x", OpenOptions::read_only()).await.is_ok(),
+                provider.sync_dir("x").await.is_ok(),
+            )
+        });
+        assert_ne!(file, directory, "seed {seed} left conflicting entry types");
+        seen_file |= file;
+        seen_directory |= directory;
+    }
+    assert!(
+        seen_file && seen_directory,
+        "replacement sweep missed an outcome"
+    );
+}
+
 /// A delete is a directory operation too: unsynced, the crash brings the name
 /// back; synced, it stays gone.
 #[test]
@@ -172,6 +383,8 @@ fn delete_durability_needs_the_directory_sync() {
             let mut sim = losing_sim();
 
             run_on(&mut sim, |provider| async move {
+                provider.create_dir_all("db").await.expect("create db");
+                provider.sync_dir(".").await.expect("durable db");
                 let file = provider
                     .open("db/stale", OpenOptions::create_write())
                     .await
@@ -210,6 +423,8 @@ fn rename_durability_needs_the_directory_sync() {
         let mut sim = losing_sim();
 
         run_on(&mut sim, |provider| async move {
+            provider.create_dir_all("db").await.expect("create db");
+            provider.sync_dir(".").await.expect("durable db");
             let mut file = provider
                 .open("db/manifest.tmp", OpenOptions::create_write())
                 .await
@@ -372,6 +587,13 @@ fn sync_dir_is_scoped_to_one_directory() {
         let mut sim = losing_sim();
 
         run_on(&mut sim, |provider| async move {
+            for directory in ["a", "b"] {
+                provider
+                    .create_dir_all(directory)
+                    .await
+                    .expect("create dir");
+            }
+            provider.sync_dir(".").await.expect("durable dirs");
             for path in ["a/one", "b/two"] {
                 let file = provider
                     .open(path, OpenOptions::create_write())
@@ -407,6 +629,7 @@ fn namespace_survives_when_the_family_is_off() {
         sim.set_storage_config(StorageConfiguration::fast_local());
 
         run_on(&mut sim, |provider| async move {
+            provider.create_dir_all("db").await.expect("create db");
             let file = provider
                 .open("db/wal", OpenOptions::create_write())
                 .await
@@ -440,6 +663,8 @@ fn a_crash_resolves_only_the_crashing_processs_namespace() {
             let provider = sim.storage_provider(owner);
             let path = format!("db/{owner}");
             let handle = tokio::spawn(async move {
+                provider.create_dir_all("db").await.expect("create db");
+                provider.sync_dir(".").await.expect("durable db");
                 let file = provider
                     .open(&path, OpenOptions::create_write())
                     .await

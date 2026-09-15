@@ -101,8 +101,17 @@ impl SimWorld {
         self.inner.read().storage.handle_is_direct_io(handle_id)
     }
 
-    pub(crate) fn file_exists(&self, owner_ip: IpAddr, path: &str) -> bool {
+    pub(crate) fn file_exists(&self, owner_ip: IpAddr, path: &str) -> Result<bool, StorageError> {
         self.inner.read().storage.file_exists(owner_ip, path)
+    }
+
+    pub(crate) fn create_dir_all(&self, path: &str, owner_ip: IpAddr) -> Result<(), StorageError> {
+        let mut inner = self.inner.write();
+        let actions = inner.storage.create_dir_all(path, owner_ip)?;
+        let wakes = apply_storage_actions(&mut inner, actions);
+        drop(inner);
+        wakes.wake();
+        Ok(())
     }
 
     pub(crate) fn delete_file(&self, owner_ip: IpAddr, path: &str) -> Result<(), StorageError> {

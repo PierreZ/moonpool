@@ -334,6 +334,8 @@ bootstraps its own file, in the order its recovery expects:
 
 ```rust
 // 1. create it with an ordinary open, 2. make the file and its name durable
+provider.create_dir_all("db").await?;
+provider.sync_dir(".").await?; // durable name for the db directory
 let created = provider.open("db/wal", OpenOptions::create_new_write()).await?;
 created.sync_all().await?;
 drop(created);
@@ -381,6 +383,8 @@ such a file offers instead.
 ## File Durability Is Not Directory Durability
 
 ```text
+create_dir_all("db")   // makes the directory visible
+sync_dir(".")          // makes the db name durable
 open("db/wal", create)   // creates a directory entry
 write(..)                // fills the file
 sync_all(file)           // the bytes are durable
@@ -395,11 +399,20 @@ filesystem namespace rather than the contents of an open file.
 
 The simulator keeps two namespaces: the visible one, which a create, delete,
 or rename changes immediately, and the durable one, which only `sync_dir`
-promotes into. On a crash each divergence between them resolves independently
+promotes into. `create_dir_all` creates visible directories, but each new
+directory's name becomes durable only when its parent is synced. Syncing
+`db` can save `db/wal`, but cannot save the new `db` name without syncing `.`.
+No file or child directory survives if its parent name disappears on a crash.
+On a crash each divergence between the visible and durable names resolves independently
 under `unsynced_dir_entry_loss_probability`: a created name may not be there,
 a deleted one may be back. The family is off by default and draws no
 randomness while off, so a crash keeps the namespace it had unless a test asks
 otherwise.
+
+The virtual relative root `.` and absolute root `/` are distinct, with no
+host filesystem behind either. Paths normalize aliases such as `./db/wal`,
+but every directory component is checked before `..` is folded: an open of
+`missing/../wal` still fails because `missing` is not a directory.
 
 When an unsynced rename rolls back, the recovered name is also the file's
 fault coordinate for that crash and later I/O. Independent name outcomes can

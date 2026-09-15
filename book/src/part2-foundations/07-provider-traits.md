@@ -181,6 +181,8 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
         to: &str,
     ) -> impl Future<Output = io::Result<()>> + Send;
 
+    fn create_dir_all(&self, path: &str) -> impl Future<Output = io::Result<()>> + Send;
+
     fn sync_dir(&self, path: &str) -> impl Future<Output = io::Result<()>> + Send;
 }
 

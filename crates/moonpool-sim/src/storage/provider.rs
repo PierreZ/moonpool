@@ -5,6 +5,7 @@ use crate::sim::WeakSimWorld;
 use moonpool_core::{OpenOptions, StorageProvider};
 use std::io;
 use std::net::IpAddr;
+use tracing::instrument;
 
 /// Simulated storage provider for deterministic testing.
 ///
@@ -64,7 +65,7 @@ impl StorageProvider for SimStorageProvider {
 
     async fn exists(&self, path: &str) -> io::Result<bool> {
         let sim = self.sim()?;
-        Ok(sim.file_exists(self.owner_ip, path))
+        Ok(sim.file_exists(self.owner_ip, path)?)
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
@@ -76,6 +77,13 @@ impl StorageProvider for SimStorageProvider {
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let sim = self.sim()?;
         sim.rename_file(self.owner_ip, from, to)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self))]
+    async fn create_dir_all(&self, path: &str) -> io::Result<()> {
+        let sim = self.sim()?;
+        sim.create_dir_all(path, self.owner_ip)?;
         Ok(())
     }
 

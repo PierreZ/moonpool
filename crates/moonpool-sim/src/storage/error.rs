@@ -21,6 +21,27 @@ pub enum StorageError {
         path: String,
     },
 
+    /// A path component that must be a directory is a regular file.
+    #[error("not a directory: {path}")]
+    NotADirectory {
+        /// The offending component.
+        path: String,
+    },
+
+    /// A file operation was attempted on a directory.
+    #[error("is a directory: {path}")]
+    IsADirectory {
+        /// The directory path.
+        path: String,
+    },
+
+    /// The path contains bytes the production filesystem rejects.
+    #[error("invalid path: {path}")]
+    InvalidPath {
+        /// The invalid path.
+        path: String,
+    },
+
     /// File handle is no longer valid (file was deleted or never opened).
     #[error("invalid file handle: {handle_id:?}")]
     InvalidFileHandle {
@@ -138,13 +159,16 @@ impl From<StorageError> for io::Error {
                 io::ErrorKind::NotFound
             }
             StorageError::AlreadyExists { .. } => io::ErrorKind::AlreadyExists,
+            StorageError::NotADirectory { .. } => io::ErrorKind::NotADirectory,
+            StorageError::IsADirectory { .. } => io::ErrorKind::IsADirectory,
             StorageError::InvalidFileHandle { .. } | StorageError::FileClosed { .. } => {
                 io::ErrorKind::BrokenPipe
             }
             StorageError::PermissionDenied { .. } => io::ErrorKind::PermissionDenied,
             StorageError::InvalidOperation { .. }
             | StorageError::InvalidOperationData { .. }
-            | StorageError::InvalidOpenOptions { .. } => io::ErrorKind::InvalidInput,
+            | StorageError::InvalidOpenOptions { .. }
+            | StorageError::InvalidPath { .. } => io::ErrorKind::InvalidInput,
             StorageError::DirectIoUnsupported | StorageError::DirectIoCreate { .. } => {
                 io::ErrorKind::Unsupported
             }
