@@ -7,17 +7,47 @@
 use crate::fixtures::Fixtures;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{NetworkProvider, Providers, TcpListenerTrait};
+use std::net::SocketAddr;
 
-/// Assert the [`NetworkProvider`] binds, connects, echoes bytes, and reports EOF.
+/// Assert the [`NetworkProvider`] binds usable ephemeral listeners, connects,
+/// echoes bytes, reports EOF, and refuses an unbound target.
 ///
-/// Written single-task (connect before accept) so it also drives the sim event
-/// loop correctly when the sim runner is added later.
+/// Written single-task (connect before accept) so it drives the simulation
+/// event loop correctly.
 pub(crate) async fn network_contract<P: Providers, F: Fixtures>(p: &P, fixtures: &F) {
     let net = p.network();
 
     let listener = net.bind(&fixtures.bind_addr()).await.expect("bind failed");
     let local = listener.local_addr().expect("local_addr failed");
     assert!(!local.is_empty(), "local_addr() must be non-empty");
+    let local_socket: SocketAddr = local.parse().expect("local_addr must be a socket address");
+    assert_ne!(
+        local_socket.port(),
+        0,
+        "port-zero bind must resolve a usable port"
+    );
+
+    let second_listener = net
+        .bind(&fixtures.bind_addr())
+        .await
+        .expect("second port-zero bind failed");
+    let second_local = second_listener
+        .local_addr()
+        .expect("second local_addr failed");
+    let second_socket: SocketAddr = second_local
+        .parse()
+        .expect("second local_addr must be a socket address");
+    assert_ne!(
+        second_socket.port(),
+        0,
+        "second port-zero bind must resolve a usable port"
+    );
+    assert_ne!(
+        local_socket.port(),
+        second_socket.port(),
+        "concurrent port-zero listeners must have distinct ports"
+    );
+    drop(second_listener);
 
     // Connect before accept: the handshake completes via the listen backlog,
     // and (in sim) the pending connection is queued before accept polls.
