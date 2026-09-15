@@ -83,14 +83,11 @@ impl NetworkProvider for SimNetworkProvider {
             .map_err(io::Error::other)?;
         // One live listener per address, as the operating system enforces:
         // a second bind fails with `AddrInUse` until the first is dropped.
-        let id = sim.bind_listener(addr, self.local_ip).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!("address already in use: {addr}"),
-            )
-        })?;
+        let (id, resolved) = sim
+            .bind_listener(addr, self.local_ip)
+            .map_err(|kind| io::Error::new(kind, format!("cannot bind {addr}: {kind}")))?;
 
-        let listener = SimTcpListener::new(self.sim.clone(), addr.to_string(), id);
+        let listener = SimTcpListener::new(self.sim.clone(), resolved, id);
         Ok(listener)
     }
 

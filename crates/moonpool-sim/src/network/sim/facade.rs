@@ -1,6 +1,6 @@
 //! Thin locked facade over the scheduler-independent network engine.
 
-use std::{collections::BTreeMap, net::IpAddr, task::Waker, time::Duration};
+use std::{collections::BTreeMap, io, net::IpAddr, task::Waker, time::Duration};
 
 use crate::{
     LocalityInfo, NetworkConfiguration, SimulationError, SimulationResult,
@@ -41,8 +41,12 @@ impl SimWorld {
         inner.apply_network(actions);
     }
 
-    /// Bind `addr` for the process at `owner`; `None` when it is in use.
-    pub(crate) fn bind_listener(&self, addr: &str, owner: IpAddr) -> Option<ListenerId> {
+    /// Bind `addr` for the process at `owner`, returning its resolved address.
+    pub(crate) fn bind_listener(
+        &self,
+        addr: &str,
+        owner: IpAddr,
+    ) -> Result<(ListenerId, String), io::ErrorKind> {
         self.inner.write().network.bind_listener(addr, owner)
     }
 

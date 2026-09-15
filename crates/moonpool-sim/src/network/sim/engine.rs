@@ -2,7 +2,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    net::IpAddr,
+    io,
+    net::{IpAddr, SocketAddr},
     task::Waker,
     time::Duration,
 };
@@ -127,19 +128,42 @@ impl NetworkSimulation {
         self.localities = localities;
     }
 
-    /// Bind `addr` for `owner`, or `None` when a live listener already holds
-    /// it (`AddrInUse`). A port-zero address is ephemeral on every runtime and
-    /// never conflicts: each such bind gets its own listener.
-    pub(crate) fn bind_listener(&mut self, addr: &str, owner: IpAddr) -> Option<ListenerId> {
-        if !addr.ends_with(":0") && self.state.bound.contains_key(addr) {
-            return None;
+    /// Bind `addr` for `owner`, resolving a numeric socket address's port zero
+    /// to a free ephemeral port. Other addresses remain opaque logical names.
+    pub(crate) fn bind_listener(
+        &mut self,
+        addr: &str,
+        owner: IpAddr,
+    ) -> Result<(ListenerId, String), io::ErrorKind> {
+        let resolved = match addr.parse::<SocketAddr>() {
+            Ok(socket) if socket.port() == 0 => self.allocate_ephemeral_addr(socket)?,
+            _ => addr.to_string(),
+        };
+        if self.state.bound.contains_key(&resolved) {
+            return Err(io::ErrorKind::AddrInUse);
         }
         let id = ListenerId(self.state.next_listener_id);
         self.state.next_listener_id += 1;
         self.state
             .bound
-            .insert(addr.to_string(), BoundListener { id, owner });
-        Some(id)
+            .insert(resolved.clone(), BoundListener { id, owner });
+        Ok((id, resolved))
+    }
+
+    /// Scan the IANA dynamic-port range once, starting at the deterministic
+    /// cursor. A live explicit bind in that range also occupies its port.
+    fn allocate_ephemeral_addr(&mut self, socket: SocketAddr) -> Result<String, io::ErrorKind> {
+        const START: u16 = 49_152;
+        const COUNT: usize = u16::MAX as usize - START as usize + 1;
+        for _ in 0..COUNT {
+            let port = self.state.next_ephemeral_port;
+            self.state.next_ephemeral_port = if port == u16::MAX { START } else { port + 1 };
+            let candidate = SocketAddr::new(socket.ip(), port).to_string();
+            if !self.state.bound.contains_key(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        Err(io::ErrorKind::AddrNotAvailable)
     }
 
     /// Release the address `id` holds, if it still holds it (a later bind may
@@ -1989,5 +2013,30 @@ impl NetworkSimulation {
                 (c.local_ip == Some(ip) || c.remote_ip == Some(ip)).then_some(*id)
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NetworkSimulation;
+    use crate::network::NetworkConfiguration;
+    use std::{
+        io,
+        net::{IpAddr, Ipv4Addr},
+    };
+
+    #[test]
+    fn port_zero_exhaustion_is_an_error_instead_of_reusing_a_live_port() {
+        let mut network = NetworkSimulation::new(NetworkConfiguration::fast_local());
+        let owner = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        for _ in 49_152..=u16::MAX {
+            network
+                .bind_listener("127.0.0.1:0", owner)
+                .expect("a free dynamic port remains");
+        }
+        assert!(matches!(
+            network.bind_listener("127.0.0.1:0", owner),
+            Err(io::ErrorKind::AddrNotAvailable)
+        ));
     }
 }

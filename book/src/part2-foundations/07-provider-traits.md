@@ -93,6 +93,10 @@ faults, pending operation results, and network wakers. Bind, connect, and accept
 park until their scheduled latency expires. Established streams use in-memory
 buffers with deterministic delivery delays, TCP half-close simulation, and
 fault injection such as connection drops, partitions, and corruption.
+For numeric socket addresses, binding port zero assigns a distinct dynamic port;
+`listener.local_addr()` returns that resolved address for clients to connect to.
+Opaque logical addresses, such as the process IP alone, remain valid in the
+simulated provider.
 
 ## TaskProvider
 
