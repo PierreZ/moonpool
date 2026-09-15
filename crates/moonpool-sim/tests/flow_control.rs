@@ -303,12 +303,11 @@ fn an_abort_wakes_a_writer_parked_on_the_window() {
     );
 }
 
-/// A peer that closes with the window's bytes unread frees them: the writer
-/// is woken and, on its next write, told the stream is gone. The close is
-/// the drop of the stream; `AsyncWrite::close` is only a write shutdown and
-/// frees nothing the peer has not read.
+/// A peer that drops a stream with unread bytes resets it. The window's
+/// credits are freed and a parked writer wakes to the reset; write shutdown
+/// alone does not discard the peer's unread bytes.
 #[test]
-fn a_peer_close_with_unread_bytes_frees_the_window() {
+fn a_peer_drop_with_unread_bytes_resets_and_frees_the_window() {
     const WINDOW: usize = 1024;
     let (mut sim, mut client, server) = connected(config(WINDOW, Duration::from_micros(1)));
     assert_eq!(fill_window(&mut client, 4096), WINDOW);
@@ -325,22 +324,26 @@ fn a_peer_close_with_unread_bytes_frees_the_window() {
         "the writer is woken"
     );
     assert_eq!(sim.outstanding_send_bytes(client.connection_id()), 0);
-    assert_eq!(
-        poll_write_once(&mut client, b"after-close").map(|result| result.expect("write")),
-        Poll::Ready(11),
-        "writes into a closed peer are accepted, as before, and discarded"
+    assert!(
+        matches!(
+            poll_write_once(&mut client, b"after-close"),
+            Poll::Ready(Err(_))
+        ),
+        "writes after a reset must fail"
     );
     sim.run_until_empty();
     assert_eq!(
         sim.outstanding_send_bytes(client.connection_id()),
         0,
-        "what a closed peer discards on arrival is released too"
+        "a reset cannot retain window credits"
     );
     let mut byte = [0_u8; 1];
     assert_eq!(
-        drive(&mut sim, client.read(&mut byte)).expect("read"),
-        0,
-        "the FIN arrives"
+        drive(&mut sim, client.read(&mut byte))
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::ConnectionReset),
+        "the reset replaces the FIN"
     );
 }
 
