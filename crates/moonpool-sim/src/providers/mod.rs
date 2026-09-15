@@ -11,4 +11,5 @@ mod time;
 pub use random::SimRandomProvider;
 pub use sim_providers::SimProviders;
 pub use task::SimTaskProvider;
+pub(crate) use task::{TaskPanicReporter, TaskPanicTracker};
 pub use time::SimTimeProvider;

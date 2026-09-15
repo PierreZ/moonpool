@@ -11,6 +11,7 @@ use tracing::instrument;
 
 use crate::SimulationError;
 use crate::observability::{Invariant, SimulationLayer, SimulationLayerHandle, TraceQuery};
+use crate::providers::TaskPanicTracker;
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::{LocalityConfig, MachineRegistry};
@@ -1077,7 +1078,9 @@ impl SimulationBuilder {
         // leaked past the settle phase, so no state crosses into the next seed
         // (the same contract dropping the per-iteration tokio runtime gave).
         let mut executor = crate::executor::Executor::new(seed);
-        executor.block_on(async move {
+        let task_panics = TaskPanicTracker::default();
+        let tracker = task_panics.clone();
+        let outcome = executor.block_on(async move {
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
                 workloads,
                 fault_injectors,
@@ -1091,8 +1094,24 @@ impl SimulationBuilder {
                 metrics_factory,
                 iteration_count,
                 run_time_budget,
+                task_panics: tracker,
             })
             .await
+        });
+        drop(executor);
+
+        let panics = task_panics.take();
+        if panics.is_empty() {
+            return outcome;
+        }
+        outcome.map(|mut output| {
+            output.results.extend(panics.into_iter().map(|panic| {
+                Err(SimulationError::InvalidState(format!(
+                    "{} task '{}' panicked: {}",
+                    panic.actor, panic.task, panic.message
+                )))
+            }));
+            output
         })
     }
 

@@ -10,6 +10,7 @@ use tracing::Instrument as _;
 
 use crate::chaos::state_handle::StateHandle;
 use crate::observability::SimulationLayerHandle;
+use crate::providers::TaskPanicTracker;
 use crate::runner::app_metrics::MetricsHandle;
 use crate::runner::context::SimContext;
 use crate::runner::fault_injector::{DeadSet, ProcessInfo};
@@ -168,6 +169,8 @@ pub(crate) struct ProcessManager<'a> {
     dead: DeadSet,
     /// Every panic a process task of this iteration died of.
     panics: ProcessPanics,
+    /// Records panics from detached tasks spawned by process providers.
+    task_panics: TaskPanicTracker,
 }
 
 impl<'a> ProcessManager<'a> {
@@ -183,6 +186,7 @@ impl<'a> ProcessManager<'a> {
             all_entities: Vec::new(),
             dead: Arc::new(Mutex::new(BTreeSet::new())),
             panics: Arc::default(),
+            task_panics: TaskPanicTracker::default(),
         }
     }
 
@@ -192,6 +196,7 @@ impl<'a> ProcessManager<'a> {
         process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
         all_entities: Vec<(String, String)>,
         panics: ProcessPanics,
+        task_panics: TaskPanicTracker,
     ) -> Self {
         let ProcessConfig {
             factories,
@@ -212,6 +217,7 @@ impl<'a> ProcessManager<'a> {
             all_entities,
             dead: Arc::new(Mutex::new(BTreeSet::new())),
             panics,
+            task_panics,
         }
     }
 
@@ -323,7 +329,11 @@ impl<'a> ProcessManager<'a> {
             shutdown_signal: process_token,
         });
         let ctx = SimContext::new(
-            crate::SimProviders::new(sim.clone(), ip).with_task_scope(scope.clone()),
+            crate::SimProviders::new(sim.clone(), ip)
+                .with_task_scope(scope.clone())
+                .with_task_panic_reporter(
+                    self.task_panics.reporter(format!("process@{ip_string}")),
+                ),
             topology,
             state.clone(),
             obs.clone(),

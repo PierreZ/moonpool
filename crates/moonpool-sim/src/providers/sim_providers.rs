@@ -8,7 +8,7 @@ use crate::network::SimNetworkProvider;
 use crate::sim::WeakSimWorld;
 use crate::storage::SimStorageProvider;
 
-use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider};
+use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider, TaskPanicReporter};
 
 /// Simulation providers bundle for deterministic testing.
 ///
@@ -74,7 +74,14 @@ impl SimProviders {
     /// along with its root future. Workloads get no scope.
     #[must_use]
     pub(crate) fn with_task_scope(mut self, scope: tokio_util::sync::CancellationToken) -> Self {
-        self.task = SimTaskProvider::scoped(scope);
+        self.task = self.task.with_scope(scope);
+        self
+    }
+
+    /// Record panics from detached provider-spawned tasks for this actor.
+    #[must_use]
+    pub(crate) fn with_task_panic_reporter(mut self, reporter: TaskPanicReporter) -> Self {
+        self.task = self.task.with_panic_reporter(reporter);
         self
     }
 }

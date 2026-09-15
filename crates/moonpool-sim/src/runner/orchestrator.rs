@@ -3,13 +3,16 @@
 //! This module provides utilities for orchestrating workload execution
 //! and managing simulation iterations.
 
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
+use futures::FutureExt as _;
 use tracing::Instrument as _;
 
 use crate::chaos::fault_events::SimFaultEvent;
 use crate::chaos::state_handle::StateHandle;
 use crate::observability::SimulationLayerHandle;
+use crate::providers::TaskPanicTracker;
 use crate::runner::app_metrics::{MetricsHandle, SourceFactory};
 use crate::runner::builder::WorkloadClientInfo;
 use crate::runner::context::SimContext;
@@ -64,6 +67,7 @@ struct CheckPhaseInputs<'a> {
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
+    task_panics: &'a TaskPanicTracker,
 }
 
 /// Shared inputs threaded through a phase that drives the cooperative loop.
@@ -104,6 +108,7 @@ struct WorkloadContextEnv<'a> {
     sim: &'a crate::sim::SimWorld,
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
+    task_panics: &'a TaskPanicTracker,
 }
 
 /// Result of a completed fault injector task.
@@ -138,6 +143,8 @@ pub(crate) struct OrchestrateInputs<'a> {
     /// this bound while workloads are still running, the run is declared a
     /// deadlock. See [`DEFAULT_RUN_TIME_BUDGET`].
     pub(crate) run_time_budget: Duration,
+    /// Per-iteration accounting for detached task panics.
+    pub(crate) task_panics: TaskPanicTracker,
 }
 
 /// Successful output of [`WorkloadOrchestrator::orchestrate_workloads`].
@@ -164,6 +171,7 @@ struct FinalizeOrchestration<'a, 'pm> {
     workload_info: &'a [(String, String)],
     client_info: &'a [WorkloadClientInfo],
     topology: &'a TopologyMetadata,
+    task_panics: &'a TaskPanicTracker,
 }
 
 /// Topology metadata derived from a workload/process configuration: the
@@ -188,6 +196,7 @@ struct ProcessBootEnv<'a> {
     obs: &'a SimulationLayerHandle,
     metrics: &'a MetricsHandle,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
+    task_panics: &'a TaskPanicTracker,
 }
 
 /// Inputs to [`WorkloadOrchestrator::boot_and_setup`].
@@ -203,6 +212,7 @@ struct BootAndSetupInputs<'a, 'pm> {
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
+    task_panics: &'a TaskPanicTracker,
 }
 
 /// Result of [`WorkloadOrchestrator::boot_and_setup`]: continue running or
@@ -239,6 +249,7 @@ struct ChaosAndRunInputs<'a, 'pm> {
     seed: u64,
     iteration_count: usize,
     run_time_budget: Duration,
+    task_panics: &'a TaskPanicTracker,
 }
 
 /// Output of [`WorkloadOrchestrator::do_chaos_and_run_phase`].
@@ -274,6 +285,7 @@ impl WorkloadOrchestrator {
             metrics_factory,
             iteration_count,
             run_time_budget,
+            task_panics,
         } = inputs;
 
         Self::log_orchestration_start(&workloads, &fault_injectors, process_config.as_ref());
@@ -299,6 +311,7 @@ impl WorkloadOrchestrator {
                 state: &state,
                 obs: &obs,
                 shutdown_signal: &shutdown_signal,
+                task_panics: &task_panics,
             })
             .await?
             {
@@ -333,6 +346,7 @@ impl WorkloadOrchestrator {
             seed,
             iteration_count,
             run_time_budget,
+            task_panics: &task_panics,
         })
         .await?;
 
@@ -349,6 +363,7 @@ impl WorkloadOrchestrator {
             workload_info,
             client_info,
             topology: &topology,
+            task_panics: &task_panics,
         })
         .await
     }
@@ -401,6 +416,7 @@ impl WorkloadOrchestrator {
             state,
             obs,
             shutdown_signal,
+            task_panics,
         } = inputs;
 
         let mut process_manager = Self::boot_and_wrap_process_manager(
@@ -412,6 +428,7 @@ impl WorkloadOrchestrator {
                 obs,
                 metrics,
                 shutdown_signal,
+                task_panics,
             },
         )
         .map_err(|()| (vec![seed], 1usize))?;
@@ -425,6 +442,7 @@ impl WorkloadOrchestrator {
             sim,
             state,
             obs,
+            task_panics,
         })
         .map_err(|()| (vec![seed], 1usize))?;
 
@@ -471,6 +489,7 @@ impl WorkloadOrchestrator {
             state,
             obs,
             shutdown_signal,
+            task_panics,
             seed,
             iteration_count,
             run_time_budget,
@@ -485,6 +504,7 @@ impl WorkloadOrchestrator {
             process_manager,
             state,
             &chaos_shutdown,
+            task_panics,
         )
         .map_err(|()| (vec![seed], 1usize))?;
 
@@ -537,6 +557,7 @@ impl WorkloadOrchestrator {
             workload_info,
             client_info,
             topology,
+            task_panics,
         } = inputs;
 
         // === 5. ABORT ALL PROCESSES ===
@@ -575,6 +596,7 @@ impl WorkloadOrchestrator {
             shutdown_signal,
             state,
             obs,
+            task_panics,
         })
         .await
         .map_err(|()| (vec![seed], 1usize))?;
@@ -613,6 +635,7 @@ impl WorkloadOrchestrator {
             shutdown_signal,
             state,
             obs,
+            task_panics,
         } = inputs;
         let check_contexts = Self::build_workload_contexts(&WorkloadContextEnv {
             metrics,
@@ -623,6 +646,7 @@ impl WorkloadOrchestrator {
             sim,
             state,
             obs,
+            task_panics,
         })?;
         Ok(Self::run_check_phase(sim, workloads, check_contexts, obs).await)
     }
@@ -821,6 +845,7 @@ impl WorkloadOrchestrator {
         process_manager: &ProcessManager<'_>,
         state: &StateHandle,
         chaos_shutdown: &tokio_util::sync::CancellationToken,
+        task_panics: &TaskPanicTracker,
     ) -> Result<InjectorHandleSlots, ()> {
         let mut injector_handles: InjectorHandleSlots = Vec::new();
         if chaos_duration.is_none() {
@@ -836,8 +861,18 @@ impl WorkloadOrchestrator {
                 state.clone(),
                 chaos_shutdown.clone(),
             );
+            let reporter = task_panics.reporter("fault-injector");
             let handle = crate::executor::spawn("fault-injector", async move {
-                injector.inject(&fault_ctx).await
+                match AssertUnwindSafe(injector.inject(&fault_ctx))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        reporter.record("root", payload.as_ref());
+                        Ok(())
+                    }
+                }
             });
             injector_handles.push(Some(handle));
         }
@@ -865,6 +900,7 @@ impl WorkloadOrchestrator {
                 process_tokens,
                 all_entities.to_vec(),
                 panics,
+                env.task_panics.clone(),
             ),
             None => ProcessManager::empty(),
         })
@@ -889,6 +925,7 @@ impl WorkloadOrchestrator {
             obs,
             metrics,
             shutdown_signal,
+            task_panics,
         } = *env;
         let mut process_handles: ProcessHandleSlots = Vec::new();
         let mut process_tokens: ProcessTokenSlots = Vec::new();
@@ -923,8 +960,9 @@ impl WorkloadOrchestrator {
                 shutdown_signal: process_token.clone(),
             });
             let scope = tokio_util::sync::CancellationToken::new();
-            let providers =
-                crate::SimProviders::new(sim.downgrade(), ip_addr).with_task_scope(scope.clone());
+            let providers = crate::SimProviders::new(sim.downgrade(), ip_addr)
+                .with_task_scope(scope.clone())
+                .with_task_panic_reporter(task_panics.reporter(format!("process@{ip}")));
             let ctx = SimContext::new(
                 providers,
                 topology,
@@ -1028,7 +1066,8 @@ impl WorkloadOrchestrator {
                 group_registry: env.topology.group_registry.clone(),
                 shutdown_signal: env.shutdown_signal.clone(),
             });
-            let providers = crate::SimProviders::new(env.sim.downgrade(), ip_addr);
+            let providers = crate::SimProviders::new(env.sim.downgrade(), ip_addr)
+                .with_task_panic_reporter(env.task_panics.reporter(format!("workload@{ip}")));
             let ctx = SimContext::new(
                 providers,
                 topology,
