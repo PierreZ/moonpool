@@ -93,6 +93,19 @@ faults, pending operation results, and network wakers. Bind, connect, and accept
 park until their scheduled latency expires. Established streams use in-memory
 buffers with deterministic delivery delays, TCP half-close simulation, and
 fault injection such as connection drops, partitions, and corruption.
+For numeric socket addresses, binding port zero assigns a distinct dynamic port;
+`listener.local_addr()` returns that resolved address for clients to connect to.
+Opaque logical addresses, such as the process IP alone, remain valid in the
+simulated provider.
+Dropping a stream with unread received bytes resets the peer, as TCP does when
+the application discards acknowledged data. A drained stream closes gracefully;
+`AsyncWrite::close` shuts down only the write half so the stream can still read
+a reply.
+Each simulated listener has a bounded accept backlog (128 unaccepted
+connections by default). A full backlog parks new connects in FIFO order until
+an accept returns a stream; a delayed accept's reservation still occupies a
+slot. [`SimulationBuilder::accept_backlog_capacity`](../part3-building/10-network-faults.md#accept-backlog)
+sets the capacity for each run.
 
 ## TaskProvider
 
@@ -172,6 +185,8 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
         from: &str,
         to: &str,
     ) -> impl Future<Output = io::Result<()>> + Send;
+
+    fn create_dir_all(&self, path: &str) -> impl Future<Output = io::Result<()>> + Send;
 
     fn sync_dir(&self, path: &str) -> impl Future<Output = io::Result<()>> + Send;
 }

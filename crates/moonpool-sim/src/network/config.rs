@@ -732,12 +732,23 @@ pub struct NetworkConfiguration {
     /// choice for a test that wants backpressure to bite early.
     pub tcp_send_window_bytes: usize,
 
+    /// Maximum handshaked but unaccepted connections per listener.
+    ///
+    /// Pending connections and connections reserved by an `accept()` still
+    /// waiting on its latency both occupy a slot. When all slots are occupied,
+    /// new `connect()` calls wait until an accept completes or the listener
+    /// disappears. Must be greater than zero. Default 128.
+    pub accept_backlog_capacity: usize,
+
     /// Chaos injection configuration
     pub chaos: ChaosConfiguration,
 }
 
 /// Default [`NetworkConfiguration::tcp_send_window_bytes`]: 64 KiB.
 pub const DEFAULT_TCP_SEND_WINDOW_BYTES: usize = 64 * 1024;
+
+/// Default number of unaccepted TCP connections held by one listener.
+pub const DEFAULT_ACCEPT_BACKLOG_CAPACITY: usize = 128;
 
 impl Default for NetworkConfiguration {
     fn default() -> Self {
@@ -761,6 +772,7 @@ impl Default for NetworkConfiguration {
             // Realism knob, opt-in: distance-blind by default.
             link_latency: None,
             tcp_send_window_bytes: DEFAULT_TCP_SEND_WINDOW_BYTES,
+            accept_backlog_capacity: DEFAULT_ACCEPT_BACKLOG_CAPACITY,
             chaos: ChaosConfiguration::default(),
         }
     }
@@ -970,6 +982,7 @@ impl NetworkConfiguration {
             // The window is a deployment property too: keep it fixed so a
             // seed's draw schedule is not spent on it.
             tcp_send_window_bytes: DEFAULT_TCP_SEND_WINDOW_BYTES,
+            accept_backlog_capacity: DEFAULT_ACCEPT_BACKLOG_CAPACITY,
             chaos: ChaosConfiguration::random_for_seed(),
         }
     }
@@ -1000,6 +1013,7 @@ impl NetworkConfiguration {
             write_latency: uniform(one_us, one_us),
             link_latency: None,
             tcp_send_window_bytes: DEFAULT_TCP_SEND_WINDOW_BYTES,
+            accept_backlog_capacity: DEFAULT_ACCEPT_BACKLOG_CAPACITY,
             chaos: ChaosConfiguration::disabled(),
         }
     }

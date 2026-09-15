@@ -336,6 +336,7 @@ pub(crate) struct BoundListener {
 pub(crate) struct NetworkState {
     pub(crate) next_connection_id: u64,
     pub(crate) next_listener_id: u64,
+    pub(crate) next_ephemeral_port: u16,
     pub(crate) config: NetworkConfiguration,
     pub(crate) connections: BTreeMap<ConnectionId, ConnectionState>,
     /// The bound endpoints: which listener owns each address, and which
@@ -358,6 +359,7 @@ impl NetworkState {
         Self {
             next_connection_id: 0,
             next_listener_id: 0,
+            next_ephemeral_port: 49_152,
             config,
             connections: BTreeMap::new(),
             bound: BTreeMap::new(),

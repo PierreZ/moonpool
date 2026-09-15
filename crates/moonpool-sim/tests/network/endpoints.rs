@@ -92,13 +92,50 @@ fn a_second_bind_of_a_live_address_is_in_use_until_the_first_is_dropped() {
     );
 }
 
-/// Port zero is ephemeral: every bind gets its own listener.
+/// Port zero resolves to distinct usable listeners, not two aliases of `:0`.
 #[test]
-fn port_zero_binds_never_collide() {
+fn port_zero_binds_get_distinct_ports_and_serve_independently() {
     let mut sim = world();
     let server = sim.network_provider(server_ip());
-    let _one = drive(&mut sim, server.bind("10.0.1.2:0")).expect("first ephemeral bind");
-    let _two = drive(&mut sim, server.bind("10.0.1.2:0")).expect("second ephemeral bind");
+    let client = sim.network_provider(client_ip());
+    let one = drive(&mut sim, server.bind("10.0.1.2:0")).expect("first ephemeral bind");
+    let two = drive(&mut sim, server.bind("10.0.1.2:0")).expect("second ephemeral bind");
+    let one_addr = one.local_addr().expect("first local address");
+    let two_addr = two.local_addr().expect("second local address");
+    let one_socket: std::net::SocketAddr = one_addr.parse().expect("first socket address");
+    let two_socket: std::net::SocketAddr = two_addr.parse().expect("second socket address");
+    assert_ne!(one_socket.port(), 0);
+    assert_ne!(two_socket.port(), 0);
+    assert_ne!(one_socket, two_socket);
+
+    let mut first_client = drive(&mut sim, client.connect(&one_addr)).expect("connect first");
+    let mut second_client = drive(&mut sim, client.connect(&two_addr)).expect("connect second");
+    let (mut first_server, _) = drive(&mut sim, one.accept()).expect("accept first");
+    let (mut second_server, _) = drive(&mut sim, two.accept()).expect("accept second");
+    drive(&mut sim, first_client.write_all(b"one")).expect("write first");
+    drive(&mut sim, second_client.write_all(b"two")).expect("write second");
+    let mut first_bytes = [0_u8; 3];
+    let mut second_bytes = [0_u8; 3];
+    drive(&mut sim, first_server.read_exact(&mut first_bytes)).expect("read first");
+    drive(&mut sim, second_server.read_exact(&mut second_bytes)).expect("read second");
+    assert_eq!(&first_bytes, b"one");
+    assert_eq!(&second_bytes, b"two");
+}
+
+#[test]
+fn port_zero_skips_a_live_explicit_bind_in_the_dynamic_range() {
+    let mut sim = world();
+    let server = sim.network_provider(server_ip());
+    let explicit = drive(&mut sim, server.bind("10.0.1.2:49152")).expect("explicit bind");
+    let ephemeral = drive(&mut sim, server.bind("10.0.1.2:0")).expect("ephemeral bind");
+    assert_eq!(
+        explicit.local_addr().expect("explicit address"),
+        "10.0.1.2:49152"
+    );
+    assert_eq!(
+        ephemeral.local_addr().expect("ephemeral address"),
+        "10.0.1.2:49153"
+    );
 }
 
 /// The whole life of an endpoint: bound, serving, dropped, refusing.

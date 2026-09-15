@@ -146,7 +146,7 @@ The debugging workflow:
 
 How long should a chaos run last? Any fixed seed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count** — when the run has nothing left to discover. Moonpool exposes two answers via `IterationControl`.
 
-**`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default, and the one you want most of the time. It stops when every observed `assert_sometimes!` / `assert_reachable!` has fired at least once **and** code coverage has not grown for `plateau_seeds` consecutive seeds. The `max_iterations` field is a safety cap. Under `cargo xtask sim run` the binaries are sancov-instrumented, so the progress signal is **real code coverage** — the count of distinct edges the seeds have exercised. Under plain `cargo nextest run` there is no instrumentation, so it falls back to **assertion coverage** — the set of sometimes/reachable messages that have fired. The report names which signal it used, so the fallback is never silent. This works **with or without** exploration; no fork happens unless you call `.enable_exploration()`.
+**`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default, and the one you want most of the time. It stops when every observed `assert_sometimes!`, numeric sometimes assertion, or `assert_reachable!` has fired at least once **and** code coverage has not grown for `plateau_seeds` consecutive seeds. The `max_iterations` field is a safety cap. Under `cargo xtask sim run` the binaries are sancov-instrumented, so the progress signal is **real code coverage**, the count of distinct edges the seeds have exercised. Under plain `cargo nextest run` there is no instrumentation, so it falls back to **assertion coverage**, the set of sometimes, numeric-sometimes, and reachable messages that have fired. The report names which signal it used, so the fallback is never silent. This works **with or without** exploration; no fork happens unless you call `.enable_exploration()`.
 
 ```rust
 SimulationBuilder::new()
@@ -158,6 +158,17 @@ SimulationBuilder::new()
 **`FixedCount(n)`** is the workhorse for reproducible replay. You commit to running exactly `n` seeds, the duration is bounded, and the report is identical across machines. Reach for this when debugging a specific seed or when budgets must be predictable.
 
 `UntilCoverageStable` sets `report.convergence_timeout = true` when the safety cap is hit before the run saturates, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
+
+Each workload phase also has a generous virtual-time budget. It bounds a
+setup, run, or final check that keeps rearming timers without completing. The
+runner first requests shutdown, then rejects a phase that still cannot finish,
+so a stuck precondition cannot leave CI waiting forever.
+
+If a setup, run, or check task panics or is cancelled before it returns its
+owned workload, Moonpool stops the campaign. Reusing the surviving workloads
+on a later seed would leave the workload set incomplete and can assign an
+instance another workload's identity. An ordinary error returned from a
+workload preserves its instance, so later seeds continue normally.
 
 ## cargo nextest vs cargo xtask sim
 

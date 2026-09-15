@@ -1,11 +1,11 @@
 //! Per-runtime environmental fixtures for the conformance contracts.
 //!
 //! The contract bodies are identical across providers; the only things that
-//! genuinely differ between a real Tokio runtime and (later) the simulation are
+//! genuinely differ between a real Tokio runtime and the simulation are
 //! network addressing and storage paths. `Fixtures` captures exactly that seam
-//! so the same contract can run against both. Today only [`TokioFixtures`]
-//! exists; a `SimFixtures` drops in when the sim runner is added.
+//! so the same contract can run against both.
 
+#[cfg(feature = "tokio-providers")]
 use tempfile::TempDir;
 
 /// Environmental knobs a contract needs that differ per runtime.
@@ -19,6 +19,7 @@ pub(crate) trait Fixtures {
 
     /// A filesystem path for a logical file name. Tokio places it under a
     /// private `TempDir` so tests stay isolated and self-cleaning.
+    #[cfg(feature = "tokio-providers")]
     fn path(&self, name: &str) -> String;
 
     /// An address that nobody is listening on, where `connect()` must fail.
@@ -28,10 +29,12 @@ pub(crate) trait Fixtures {
 }
 
 /// Fixtures for the real Tokio runtime: loopback sockets + a temp directory.
+#[cfg(feature = "tokio-providers")]
 pub(crate) struct TokioFixtures {
     dir: TempDir,
 }
 
+#[cfg(feature = "tokio-providers")]
 impl TokioFixtures {
     pub(crate) fn new() -> Self {
         Self {
@@ -40,6 +43,7 @@ impl TokioFixtures {
     }
 }
 
+#[cfg(feature = "tokio-providers")]
 impl Fixtures for TokioFixtures {
     fn bind_addr(&self) -> String {
         "127.0.0.1:0".to_string()
@@ -49,6 +53,7 @@ impl Fixtures for TokioFixtures {
         listener_local_addr.to_string()
     }
 
+    #[cfg(feature = "tokio-providers")]
     fn path(&self, name: &str) -> String {
         self.dir
             .path()
@@ -61,5 +66,33 @@ impl Fixtures for TokioFixtures {
     fn unbound_addr(&self) -> Option<String> {
         // Port 1 on loopback is privileged and unbound: connect is refused fast.
         Some("127.0.0.1:1".to_string())
+    }
+}
+
+/// Fixtures for the deterministic simulator: a process-local logical address.
+pub(crate) struct SimFixtures;
+
+impl SimFixtures {
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+}
+
+impl Fixtures for SimFixtures {
+    fn bind_addr(&self) -> String {
+        "10.0.1.1:0".to_string()
+    }
+
+    fn connect_addr(&self, listener_local_addr: &str) -> String {
+        listener_local_addr.to_string()
+    }
+
+    #[cfg(feature = "tokio-providers")]
+    fn path(&self, name: &str) -> String {
+        name.to_string()
+    }
+
+    fn unbound_addr(&self) -> Option<String> {
+        Some("10.0.1.1:1".to_string())
     }
 }

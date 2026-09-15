@@ -41,6 +41,15 @@ enum WriteLanding {
     At(u64),
 }
 
+/// The complete type at one namespace name. A crash resolves a name as one
+/// entry, so a file and directory can never both occupy it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamespaceEntry {
+    Missing,
+    File(FileId),
+    Directory,
+}
+
 /// One storage event requested at an absolute simulation time.
 #[derive(Debug)]
 pub(crate) struct ScheduledStorageEvent {
@@ -155,8 +164,6 @@ impl StorageEngine {
         initial_size: u64,
         owner_ip: IpAddr,
     ) -> Result<HandleId, StorageError> {
-        let path = path.to_string();
-        let name = (owner_ip, path.clone());
         // Contradictory flags are refused before anything else, as `std` does:
         // a read-only `truncate` must not reach the branch below that would
         // honor the truncation on a file it then had no right to write.
@@ -166,6 +173,15 @@ impl StorageEngine {
                 reason: error.to_string(),
             })?;
         let (constraints, direct_io) = self.resolve_direct_io(&options, owner_ip)?;
+        let (path, _) = self.resolve_path(owner_ip, path, false)?;
+        if self.is_directory(owner_ip, &path) {
+            return Err(if options.is_create_new() {
+                StorageError::AlreadyExists { path }
+            } else {
+                StorageError::IsADirectory { path }
+            });
+        }
+        let name = (owner_ip, path.clone());
         if options.is_create_new() && self.state.path_to_file.contains_key(&name) {
             return Err(StorageError::AlreadyExists { path });
         }
@@ -255,6 +271,117 @@ impl StorageEngine {
         })
     }
 
+    /// Resolve a path against one process's virtual filesystem. The relative
+    /// root (`.`) and absolute root (`/`) are separate and have no host path.
+    /// Intermediate components are checked before `..` is folded, so a name
+    /// cannot skip a missing directory or pass through a regular file.
+    fn resolve_path(
+        &self,
+        owner_ip: IpAddr,
+        raw: &str,
+        create_dirs: bool,
+    ) -> Result<(String, Vec<String>), StorageError> {
+        if raw.contains('\0') {
+            return Err(StorageError::InvalidPath {
+                path: raw.to_string(),
+            });
+        }
+        if raw.is_empty() {
+            if create_dirs {
+                return Ok((".".to_string(), Vec::new()));
+            }
+            return Err(StorageError::NotFound {
+                path: raw.to_string(),
+            });
+        }
+        let mut current = if raw.starts_with('/') {
+            "/".to_string()
+        } else {
+            ".".to_string()
+        };
+        let components: Vec<&str> = raw.split('/').filter(|part| !part.is_empty()).collect();
+        let mut missing = Vec::new();
+        for (index, component) in components.iter().enumerate() {
+            let last = index + 1 == components.len();
+            match *component {
+                "." => {
+                    if last && !create_dirs {
+                        self.require_directory(owner_ip, &current)?;
+                    }
+                }
+                ".." => {
+                    if current == "." {
+                        return Err(StorageError::NotFound {
+                            path: raw.to_string(),
+                        });
+                    }
+                    if current != "/" {
+                        current = parent_directory(&current).to_string();
+                    }
+                }
+                name => {
+                    let next = if current == "." {
+                        name.to_string()
+                    } else if current == "/" {
+                        format!("/{name}")
+                    } else {
+                        format!("{current}/{name}")
+                    };
+                    if create_dirs {
+                        if self
+                            .state
+                            .path_to_file
+                            .contains_key(&(owner_ip, next.clone()))
+                        {
+                            return Err(if last {
+                                StorageError::AlreadyExists { path: next }
+                            } else {
+                                StorageError::NotADirectory { path: next }
+                            });
+                        }
+                        if !self.is_directory(owner_ip, &next) && !missing.contains(&next) {
+                            missing.push(next.clone());
+                        }
+                    } else if !last {
+                        self.require_directory(owner_ip, &next)?;
+                    }
+                    current = next;
+                }
+            }
+        }
+        if raw.ends_with('/') && !create_dirs {
+            self.require_directory(owner_ip, &current)?;
+        }
+        Ok((current, missing))
+    }
+
+    fn is_directory(&self, owner_ip: IpAddr, path: &str) -> bool {
+        path == "."
+            || path == "/"
+            || self
+                .state
+                .directories
+                .contains(&(owner_ip, path.to_string()))
+    }
+
+    fn require_directory(&self, owner_ip: IpAddr, path: &str) -> Result<(), StorageError> {
+        if self.is_directory(owner_ip, path) {
+            Ok(())
+        } else if self
+            .state
+            .path_to_file
+            .contains_key(&(owner_ip, path.to_string()))
+        {
+            Err(StorageError::NotADirectory {
+                path: path.to_string(),
+            })
+        } else {
+            Err(StorageError::NotFound {
+                path: path.to_string(),
+            })
+        }
+    }
+
     /// The alignment `handle_id` enforces on every transfer.
     pub(crate) fn handle_constraints(
         &self,
@@ -268,10 +395,27 @@ impl StorageEngine {
         Ok(self.open_handle(handle_id)?.direct_io)
     }
 
-    pub(crate) fn file_exists(&self, owner_ip: IpAddr, path: &str) -> bool {
-        self.state
-            .path_to_file
-            .contains_key(&(owner_ip, path.to_string()))
+    pub(crate) fn file_exists(&self, owner_ip: IpAddr, path: &str) -> Result<bool, StorageError> {
+        let (path, _) = match self.resolve_path(owner_ip, path, false) {
+            Ok(resolved) => resolved,
+            Err(StorageError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        Ok(self.is_directory(owner_ip, &path)
+            || self.state.path_to_file.contains_key(&(owner_ip, path)))
+    }
+
+    /// Create missing directory entries in this process's namespace.
+    pub(crate) fn create_dir_all(
+        &mut self,
+        path: &str,
+        owner_ip: IpAddr,
+    ) -> Result<StorageActions, StorageError> {
+        let (_, missing) = self.resolve_path(owner_ip, path, true)?;
+        for directory in missing {
+            self.state.directories.insert((owner_ip, directory));
+        }
+        Ok(StorageActions::default())
     }
 
     /// Remove a name from the namespace — `unlink(2)`.
@@ -286,14 +430,12 @@ impl StorageEngine {
         owner_ip: IpAddr,
         path: &str,
     ) -> Result<StorageActions, StorageError> {
-        let Some(file_id) = self
-            .state
-            .path_to_file
-            .remove(&(owner_ip, path.to_string()))
-        else {
-            return Err(StorageError::NotFound {
-                path: path.to_string(),
-            });
+        let (path, _) = self.resolve_path(owner_ip, path, false)?;
+        if self.is_directory(owner_ip, &path) {
+            return Err(StorageError::IsADirectory { path });
+        }
+        let Some(file_id) = self.state.path_to_file.remove(&(owner_ip, path.clone())) else {
+            return Err(StorageError::NotFound { path });
         };
         self.drop_file_if_unlinked(file_id);
         Ok(StorageActions::default())
@@ -328,30 +470,34 @@ impl StorageEngine {
         from: &str,
         to: &str,
     ) -> Result<StorageActions, StorageError> {
-        let from_name = (owner_ip, from.to_string());
+        let (from, _) = self.resolve_path(owner_ip, from, false)?;
+        let (to, _) = self.resolve_path(owner_ip, to, false)?;
+        if self.is_directory(owner_ip, &from) {
+            return Err(StorageError::IsADirectory { path: from });
+        }
+        if self.is_directory(owner_ip, &to) {
+            return Err(StorageError::IsADirectory { path: to });
+        }
+        let from_name = (owner_ip, from.clone());
         if from == to {
             return self
                 .state
                 .path_to_file
                 .contains_key(&from_name)
                 .then(StorageActions::default)
-                .ok_or_else(|| StorageError::NotFound {
-                    path: from.to_string(),
-                });
+                .ok_or(StorageError::NotFound { path: from });
         }
         let Some(file_id) = self.state.path_to_file.remove(&from_name) else {
-            return Err(StorageError::NotFound {
-                path: from.to_string(),
-            });
+            return Err(StorageError::NotFound { path: from });
         };
-        let to_name = (owner_ip, to.to_string());
+        let to_name = (owner_ip, to.clone());
         // The replaced file loses its name, nothing more: handles opened on
         // it before the rename keep its image, as `rename(2)` guarantees.
         if let Some(replaced_id) = self.state.path_to_file.remove(&to_name) {
             self.drop_file_if_unlinked(replaced_id);
         }
         if let Some(file) = self.state.files.get_mut(&file_id) {
-            file.path = to.to_string();
+            file.path = to;
         }
         self.state.path_to_file.insert(to_name, file_id);
         Ok(StorageActions::default())
@@ -435,7 +581,11 @@ impl StorageEngine {
             .state
             .path_to_file
             .iter()
-            .filter_map(|((_, name), file_id)| (name == path).then_some(*file_id))
+            .filter_map(|((owner, name), file_id)| {
+                self.resolve_path(*owner, path, false)
+                    .ok()
+                    .and_then(|(resolved, _)| (name == &resolved).then_some(*file_id))
+            })
             .collect();
         if file_ids.is_empty() {
             return Err(StorageError::NotFound {
@@ -452,11 +602,9 @@ impl StorageEngine {
 
     /// Make every directory entry directly under `path` durable.
     ///
-    /// The simulated namespace is a flat map from path to file, so a
-    /// "directory" is a path prefix: this promotes exactly the entries whose
-    /// parent is `path`, in both directions — names created since the last
-    /// sync become durable, names deleted or renamed away stop being durable.
-    /// A directory with no entries syncs successfully and changes nothing.
+    /// This promotes exactly the file and directory entries whose parent is
+    /// `path`, in both directions: names created since the last sync become
+    /// durable, names deleted or renamed away stop being durable.
     ///
     /// Namespace operations complete without a scheduled event, like `delete`
     /// and `rename`, so this one does too.
@@ -464,26 +612,35 @@ impl StorageEngine {
         &mut self,
         path: &str,
         owner_ip: IpAddr,
-    ) -> Result<StorageActions, StorageError> {
+    ) -> (Result<(), StorageError>, StorageActions) {
         let mut actions = StorageActions::default();
+        let directory = match self.resolve_path(owner_ip, path, false) {
+            Ok((directory, _)) => directory,
+            Err(error) => return (Err(error), actions),
+        };
+        if let Err(error) = self.require_directory(owner_ip, &directory) {
+            return (Err(error), actions);
+        }
         let probability = self.state.config_for(owner_ip).sync_failure_probability;
         if probability > 0.0 && sim_random::<f64>() < probability {
             assert_reachable!("disk: directory sync failed");
-            self.record(path, StorageFaultKind::SyncFailure, None);
+            self.record(&directory, StorageFaultKind::SyncFailure, None);
             actions.fault(SimFaultEvent::StorageSyncFault {
                 ip: owner_ip.to_string(),
                 file_id: u64::MAX,
             });
-            return Err(StorageError::Io {
-                file_id: FileId(u64::MAX),
-                kind: std::io::ErrorKind::Other,
-                message: "directory sync failed (simulated I/O error)".to_string(),
-            });
+            return (
+                Err(StorageError::Io {
+                    file_id: FileId(u64::MAX),
+                    kind: std::io::ErrorKind::Other,
+                    message: "directory sync failed (simulated I/O error)".to_string(),
+                }),
+                actions,
+            );
         }
 
         // One process's directory sync commits that process's entries and
         // nobody else's: another disk's metadata is not made durable by it.
-        let directory = normalize_directory(path);
         self.state
             .durable_paths
             .retain(|(owner, entry), _| *owner != owner_ip || parent_directory(entry) != directory);
@@ -494,7 +651,17 @@ impl StorageEngine {
                     .insert((*owner, entry.clone()), *file_id);
             }
         }
-        Ok(actions)
+        self.state
+            .durable_directories
+            .retain(|(owner, entry)| *owner != owner_ip || parent_directory(entry) != directory);
+        for (owner, entry) in &self.state.directories {
+            if *owner == owner_ip && parent_directory(entry) == directory {
+                self.state
+                    .durable_directories
+                    .insert((*owner, entry.clone()));
+            }
+        }
+        (Ok(()), actions)
     }
 
     /// Resolve the namespace a crash leaves behind.
@@ -515,8 +682,12 @@ impl StorageEngine {
             .config_for(ip)
             .unsynced_dir_entry_loss_probability;
         if probability > 0.0 {
-            self.lose_unsynced_entries(ip, probability);
+            self.resolve_unsynced_entries(ip, probability);
         }
+
+        self.prune_entries_without_parents(ip);
+
+        self.refresh_file_paths(ip);
 
         // Whatever survived is what is on the disk now — for this process's
         // files only. Another process's unsynced entries are not made durable
@@ -535,7 +706,124 @@ impl StorageEngine {
         for (name, file_id) in surviving {
             self.state.durable_paths.insert(name, file_id);
         }
+        self.state
+            .durable_directories
+            .retain(|(owner, _)| *owner != ip);
+        self.state.durable_directories.extend(
+            self.state
+                .directories
+                .iter()
+                .filter(|(owner, _)| *owner == ip)
+                .cloned(),
+        );
+    }
 
+    /// Resolve each unsynced name as one complete entry type. A file replaced
+    /// by a directory can roll back to the file or keep the directory, but a
+    /// crash cannot leave both at that name.
+    fn resolve_unsynced_entries(&mut self, ip: IpAddr, probability: f64) {
+        let mut names: Vec<Name> = self
+            .state
+            .directories
+            .iter()
+            .chain(self.state.durable_directories.iter())
+            .chain(self.state.path_to_file.keys())
+            .chain(self.state.durable_paths.keys())
+            .filter(|(owner, _)| *owner == ip)
+            .cloned()
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        for name in names {
+            let visible = self.namespace_entry(&name, false);
+            let durable = self.namespace_entry(&name, true);
+            if visible == durable || sim_random::<f64>() >= probability {
+                continue;
+            }
+            assert_reachable!("disk: crash lost an unsynced directory entry");
+            self.state.record_fault(StorageFaultRecord {
+                path: name.1.clone(),
+                kind: StorageFaultKind::DirEntryLost,
+                sectors: None,
+            });
+            self.state.path_to_file.remove(&name);
+            self.state.directories.remove(&name);
+            match durable {
+                NamespaceEntry::File(file_id) => {
+                    self.state.path_to_file.insert(name, file_id);
+                }
+                NamespaceEntry::Directory => {
+                    self.state.directories.insert(name);
+                }
+                NamespaceEntry::Missing => {}
+            }
+        }
+    }
+
+    fn namespace_entry(&self, name: &Name, durable: bool) -> NamespaceEntry {
+        let (files, directories) = if durable {
+            (&self.state.durable_paths, &self.state.durable_directories)
+        } else {
+            (&self.state.path_to_file, &self.state.directories)
+        };
+        if let Some(file_id) = files.get(name) {
+            NamespaceEntry::File(*file_id)
+        } else if directories.contains(name) {
+            NamespaceEntry::Directory
+        } else {
+            NamespaceEntry::Missing
+        }
+    }
+
+    /// A synced child entry cannot survive when its parent directory's own
+    /// name was lost. Prune directories from the top down, then file names.
+    fn prune_entries_without_parents(&mut self, ip: IpAddr) {
+        let names: Vec<Name> = self
+            .state
+            .directories
+            .iter()
+            .filter(|(owner, _)| *owner == ip)
+            .cloned()
+            .collect();
+        for name in names {
+            if !self.is_directory(ip, parent_directory(&name.1)) {
+                self.state.directories.remove(&name);
+            }
+        }
+        let orphaned: Vec<Name> = self
+            .state
+            .path_to_file
+            .keys()
+            .filter(|(owner, path)| *owner == ip && !self.is_directory(ip, parent_directory(path)))
+            .cloned()
+            .collect();
+        for name in orphaned {
+            self.state.path_to_file.remove(&name);
+        }
+    }
+
+    /// Give each surviving image a stable fault coordinate after namespace
+    /// rollback. Rare per-name outcomes can leave old and new rename aliases
+    /// pointing to one image; the first surviving name in lexical order wins.
+    /// An image with no surviving name keeps its last coordinate until the
+    /// crash oracle has examined its bytes and it is discarded.
+    fn refresh_file_paths(&mut self, ip: IpAddr) {
+        let mut canonical = BTreeMap::<FileId, String>::new();
+        for ((owner, path), file_id) in &self.state.path_to_file {
+            if *owner == ip {
+                canonical.entry(*file_id).or_insert_with(|| path.clone());
+            }
+        }
+        for (file_id, path) in canonical {
+            if let Some(file) = self.state.files.get_mut(&file_id) {
+                file.path = path;
+            }
+        }
+    }
+
+    /// Forget this process's images after the byte-crash oracle has checked
+    /// even those whose last name was lost in the namespace crash.
+    fn collect_unreachable_files(&mut self, ip: IpAddr) {
         // Contents no surviving name reaches are gone with the name.
         let linked: Vec<FileId> = self
             .state
@@ -547,44 +835,6 @@ impl StorageEngine {
         self.state
             .files
             .retain(|file_id, file| file.owner_ip != ip || linked.contains(file_id));
-    }
-
-    /// Roll the loss coin for each of this process's unsynced directory
-    /// operations: a name created since the last directory sync may not be
-    /// there, and one deleted or renamed away may still be.
-    fn lose_unsynced_entries(&mut self, ip: IpAddr, probability: f64) {
-        // Only this process's own namespace is at risk.
-        let mut names: Vec<Name> = self
-            .state
-            .path_to_file
-            .keys()
-            .chain(self.state.durable_paths.keys())
-            .filter(|(owner, _)| *owner == ip)
-            .cloned()
-            .collect();
-        names.sort_unstable();
-        names.dedup();
-
-        for name in names {
-            let visible = self.state.path_to_file.get(&name).copied();
-            let durable = self.state.durable_paths.get(&name).copied();
-            if visible == durable {
-                continue;
-            }
-            if sim_random::<f64>() >= probability {
-                continue;
-            }
-            assert_reachable!("disk: crash lost an unsynced directory entry");
-            self.state.record_fault(StorageFaultRecord {
-                path: name.1.clone(),
-                kind: StorageFaultKind::DirEntryLost,
-                sectors: None,
-            });
-            match durable {
-                Some(file_id) => self.state.path_to_file.insert(name, file_id),
-                None => self.state.path_to_file.remove(&name),
-            };
-        }
     }
 
     /// The files this process owns, in stable order.
@@ -1348,6 +1598,10 @@ impl StorageEngine {
         let config = self.state.config_for(ip).clone();
         let armed = self.state.barrier_violation_armed;
         let file_ids = self.files_owned_by(ip);
+        // First decide which names survive so the same crash's fault mask and
+        // reports use the name that actually remains on this process's disk.
+        // Keep every original image until the byte-crash oracle has checked it.
+        self.resolve_namespace_crash(ip);
         // Resolve each file's unsynced writes through the crash model, in
         // stable file order.
         for file_id in &file_ids {
@@ -1373,7 +1627,7 @@ impl StorageEngine {
             self.state.crash_reports.push(report);
         }
 
-        self.resolve_namespace_crash(ip);
+        self.collect_unreachable_files(ip);
 
         let mut actions = StorageActions::default();
         let handle_ids = self
@@ -1403,13 +1657,19 @@ impl StorageEngine {
             .files
             .iter()
             .filter(|(_, file)| file.owner_ip == ip)
-            .map(|(id, file)| (*id, file.path.clone()))
+            .map(|(id, _)| *id)
             .collect::<Vec<_>>();
         let mut actions = StorageActions::default();
-        for (file_id, path) in files {
+        self.state.path_to_file.retain(|(owner, _), _| *owner != ip);
+        self.state
+            .durable_paths
+            .retain(|(owner, _), _| *owner != ip);
+        self.state.directories.retain(|(owner, _)| *owner != ip);
+        self.state
+            .durable_directories
+            .retain(|(owner, _)| *owner != ip);
+        for file_id in files {
             self.state.files.remove(&file_id);
-            self.state.path_to_file.remove(&(ip, path));
-            self.state.durable_paths.retain(|_, id| *id != file_id);
             self.invalidate_file_handles(file_id, &mut actions);
         }
         actions.fault(SimFaultEvent::StorageWipe { ip: ip.to_string() });
@@ -1640,21 +1900,14 @@ impl StorageEngine {
     }
 }
 
-/// The directory part of a path: everything before the last separator, or the
-/// root (an empty string) for a name with no separator at all.
+/// The directory part of a canonical path, with distinct relative and
+/// absolute roots.
 fn parent_directory(path: &str) -> &str {
     match path.rfind('/') {
+        Some(0) => "/",
         Some(index) => &path[..index],
-        None => "",
+        None => ".",
     }
-}
-
-/// Normalize a directory path for comparison against [`parent_directory`]:
-/// `"db/"`, `"db"` and (for the root) `"/"`, `"."`, `""` all name the same
-/// directory.
-fn normalize_directory(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    if trimmed == "." { "" } else { trimmed }
 }
 
 fn saturating_duration_from_secs(seconds: f64) -> Duration {

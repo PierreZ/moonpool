@@ -286,6 +286,26 @@ impl SimulationLayerHandle {
         );
     }
 
+    /// Preserve a runner-detected task panic after actor tasks have settled.
+    /// This uses the same injected-event boundary as simulated faults because
+    /// no actor span remains active when the runner drains panic records.
+    pub(crate) fn record_task_panic(&self, actor: &str, task: &str, panic: &str) {
+        let mut fields = BTreeMap::new();
+        fields.insert("actor".to_owned(), FieldValue::Str(actor.to_owned()));
+        fields.insert("task".to_owned(), FieldValue::Str(task.to_owned()));
+        fields.insert("panic".to_owned(), FieldValue::Str(panic.to_owned()));
+        let mut store = self.events.lock();
+        let time_ms = store.last_sim_time_ms;
+        store.push(
+            time_ms,
+            "sim".to_owned(),
+            "moonpool_sim::runner".to_owned(),
+            tracing::Level::ERROR,
+            "unobserved_task_panic".to_owned(),
+            fields,
+        );
+    }
+
     /// Run all registered invariants against the captured events at the
     /// current sim time. Called by the orchestrator after each step.
     pub fn run_invariants(&self) {

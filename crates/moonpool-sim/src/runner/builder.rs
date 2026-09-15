@@ -11,6 +11,7 @@ use tracing::instrument;
 
 use crate::SimulationError;
 use crate::observability::{Invariant, SimulationLayer, SimulationLayerHandle, TraceQuery};
+use crate::providers::TaskPanicTracker;
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::{LocalityConfig, MachineRegistry};
@@ -259,6 +260,8 @@ pub struct SimulationBuilder {
     /// End-to-end byte window per stream direction, applied to every
     /// iteration's network config; `None` keeps the default.
     tcp_send_window_bytes: Option<usize>,
+    /// Maximum unaccepted connections per listener; `None` keeps the default.
+    accept_backlog_capacity: Option<usize>,
     /// Buggify-driven knob value-perturbation, enabled via [`Chaos::BuggifyKnobs`].
     /// Internal flag (not a public builder method) so the opt-in stays inside the
     /// `enable_chaos`/`Chaos` model.
@@ -315,6 +318,7 @@ impl SimulationBuilder {
             network_fault_mask: crate::NetworkFaultMask::all(),
             link_latency: None,
             tcp_send_window_bytes: None,
+            accept_backlog_capacity: None,
             buggify_knobs: false,
             swarm_operations: false,
             check_determinism: false,
@@ -518,6 +522,19 @@ impl SimulationBuilder {
     #[must_use]
     pub fn tcp_send_window_bytes(mut self, bytes: usize) -> Self {
         self.tcp_send_window_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the maximum unaccepted TCP connections per listener for every seed.
+    ///
+    /// A full listener backlog makes `connect()` wait until an `accept()`
+    /// returns a connection. This deployment-shape setting consumes no RNG
+    /// draws. `capacity` must be greater than zero.
+    #[must_use]
+    #[instrument(skip(self))]
+    pub fn accept_backlog_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "accept backlog capacity must be positive");
+        self.accept_backlog_capacity = Some(capacity);
         self
     }
 
@@ -801,12 +818,13 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set the virtual-time budget for a single run phase.
+    /// Set the virtual-time budget for each workload phase.
     ///
     /// If simulated time advances past this bound while one or more workloads
-    /// are still running, the orchestrator first triggers a graceful shutdown
-    /// and — if simulated time keeps climbing by another full budget while
-    /// workloads remain — declares the run deadlocked.
+    /// are still running, the orchestrator requests shutdown. If the phase
+    /// still cannot finish, it declares the seed deadlocked. Setup and final
+    /// checks use the same guard, so a hung precondition or validation cannot
+    /// keep a seed alive forever.
     ///
     /// This is a deterministic safety net for a *self-perpetuating timer*: a
     /// detached task (e.g. a reconnect / keepalive loop) that re-arms a
@@ -1077,7 +1095,10 @@ impl SimulationBuilder {
         // leaked past the settle phase, so no state crosses into the next seed
         // (the same contract dropping the per-iteration tokio runtime gave).
         let mut executor = crate::executor::Executor::new(seed);
-        executor.block_on(async move {
+        let task_panics = TaskPanicTracker::default();
+        let tracker = task_panics.clone();
+        let diagnostics = obs_handle.clone();
+        let outcome = executor.block_on(async move {
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
                 workloads,
                 fault_injectors,
@@ -1091,8 +1112,39 @@ impl SimulationBuilder {
                 metrics_factory,
                 iteration_count,
                 run_time_budget,
+                task_panics: tracker,
             })
             .await
+        });
+        drop(executor);
+
+        let panics = task_panics.take();
+        for panic in &panics {
+            tracing::error!(
+                target: "moonpool_sim::runner",
+                actor = %panic.actor,
+                task = %panic.task,
+                panic = %panic.message,
+                "unobserved_task_panic"
+            );
+            diagnostics.record_task_panic(&panic.actor, &panic.task, &panic.message);
+        }
+        // A fatal outcome can skip the orchestrator's usual final step pass.
+        // Let invariants see post-teardown diagnostics before the report is made.
+        if outcome.is_err() || !panics.is_empty() {
+            diagnostics.run_invariants();
+        }
+        if panics.is_empty() {
+            return outcome;
+        }
+        outcome.map(|mut output| {
+            output.results.extend(panics.into_iter().map(|panic| {
+                Err(SimulationError::InvalidState(format!(
+                    "{} task '{}' panicked: {}",
+                    panic.actor, panic.task, panic.message
+                )))
+            }));
+            output
         })
     }
 
@@ -1110,7 +1162,7 @@ impl SimulationBuilder {
         storage_chaos: Option<ChaosMode>,
         network_fault_mask: crate::NetworkFaultMask,
         link_latency: Option<crate::network::LinkLatencyConfig>,
-        tcp_send_window_bytes: Option<usize>,
+        tcp_limits: (Option<usize>, Option<usize>),
         buggify_knobs: bool,
         seed: u64,
     ) -> crate::sim::SimWorld {
@@ -1142,8 +1194,11 @@ impl SimulationBuilder {
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency = link_latency;
-        if let Some(window) = tcp_send_window_bytes {
+        if let Some(window) = tcp_limits.0 {
             network_config.tcp_send_window_bytes = window;
+        }
+        if let Some(capacity) = tcp_limits.1 {
+            network_config.accept_backlog_capacity = capacity;
         }
         let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
         // Unlike raw `SimWorld` use, a builder campaign has explicit phases.
@@ -1467,6 +1522,7 @@ impl SimulationBuilder {
                 && matches!(
                     kind,
                     moonpool_assertions::AssertKind::Sometimes
+                        | moonpool_assertions::AssertKind::NumericSometimes
                         | moonpool_assertions::AssertKind::Reachable
                         | moonpool_assertions::AssertKind::BooleanSometimesAll
                 )
@@ -1499,6 +1555,7 @@ impl SimulationBuilder {
                     matches!(
                         k,
                         moonpool_assertions::AssertKind::Sometimes
+                            | moonpool_assertions::AssertKind::NumericSometimes
                             | moonpool_assertions::AssertKind::Reachable
                             | moonpool_assertions::AssertKind::BooleanSometimesAll
                     )
@@ -1845,7 +1902,7 @@ impl SimulationBuilder {
             self.storage_chaos,
             self.network_fault_mask,
             self.link_latency.clone(),
-            self.tcp_send_window_bytes,
+            (self.tcp_send_window_bytes, self.accept_backlog_capacity),
             self.buggify_knobs,
             seed,
         );
@@ -2242,13 +2299,35 @@ mod tests {
             None,
             mask,
             None,
-            None,
+            (None, None),
             false,
             seed,
         );
         let config = sim.with_network_config(Clone::clone);
         let draws_consumed = crate::sim::rng_call_count();
         (config, draws_consumed)
+    }
+
+    #[test]
+    fn accept_backlog_builder_override_reaches_world_without_changing_send_window() {
+        let builder = SimulationBuilder::new().accept_backlog_capacity(3);
+        let default_window = crate::NetworkConfiguration::default().tcp_send_window_bytes;
+        let sim = SimulationBuilder::build_sim_for_iteration(
+            builder.network_chaos,
+            builder.storage_chaos,
+            builder.network_fault_mask,
+            builder.link_latency.clone(),
+            (
+                builder.tcp_send_window_bytes,
+                builder.accept_backlog_capacity,
+            ),
+            builder.buggify_knobs,
+            20_260_915,
+        );
+        sim.with_network_config(|config| {
+            assert_eq!(config.accept_backlog_capacity, 3);
+            assert_eq!(config.tcp_send_window_bytes, default_window);
+        });
     }
 
     #[test]

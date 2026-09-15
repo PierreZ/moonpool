@@ -2,6 +2,8 @@
 //!
 //! Contains tests for network simulation and configuration.
 
+#[path = "network/backlog.rs"]
+mod backlog;
 #[path = "network/endpoints.rs"]
 mod endpoints;
 #[path = "network/half_close.rs"]

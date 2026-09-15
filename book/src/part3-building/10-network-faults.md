@@ -182,11 +182,27 @@ Connection establishment can fail in two modes, following FoundationDB's `SIM_CO
 
 The hanging mode is particularly nasty. Code that does not implement connect timeouts will block forever, which is exactly the kind of bug simulation should find.
 
+### Accept backlog
+
+Each listener holds at most 128 unaccepted connections by default
+(`NetworkConfiguration::accept_backlog_capacity`). The builder's
+`.accept_backlog_capacity(n)` sets that capacity for every seed; `n` must be
+positive. A full backlog parks `connect()` calls in FIFO order. Each resumes
+only after an `accept()` has returned a stream, including its configured accept
+latency. An endpoint reserved by an accept still occupies its slot, and
+canceling that accept returns the endpoint to the backlog without freeing the
+slot. Canceling a parked connect discards its unpublished connection pair.
+Aborting a parked connect's pair wakes it to an error before it can publish.
+Resetting an unaccepted endpoint frees its slot immediately and fails any
+accept that reserved it. Dropping a listener aborts its backlog and fails its
+parked connects and accepts, even if a new listener later binds the same
+address.
+
 ## Graceful vs Abort Disconnect
 
 When a connection closes, moonpool models two distinct TCP behaviors:
 
-**Graceful close** implements TCP half-close semantics. The closing side marks its send direction as closed and puts a FIN on the wire behind every byte still queued or in flight, so it lands after all of them and is held by a partition with them. The remote side continues reading buffered data normally and sees EOF only after the FIN arrives. What the closing side itself never read is discarded and its window returned to the peer's writer, as a kernel frees a closed socket's receive buffer. This models a clean `shutdown(SHUT_WR)` followed by `close()`.
+**Graceful close** implements TCP half-close semantics. The closing side marks its send direction as closed and puts a FIN on the wire behind every byte still queued or in flight, so it lands after all of them and is held by a partition with them. The remote side continues reading buffered data normally and sees EOF only after the FIN arrives. A drained stream drop closes gracefully; dropping a stream with unread received bytes aborts instead, because the application discarded data the peer had sent.
 
 **Write shutdown** is what `AsyncWrite::close` does, on both backends: the production provider's compat wrapper maps it onto tokio's `poll_shutdown`, that is `shutdown(SHUT_WR)`, and the simulated stream does the same. The FIN goes out behind the queued bytes and further writes fail with `BrokenPipe`, but the read half stays open and nothing is discarded, so the reply to an EOF-delimited request still lands and is still readable. Dropping the stream is what closes the connection, and a drop after a shutdown adds the receive half without sending a second FIN.
 

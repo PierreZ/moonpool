@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
+use tracing::instrument;
 
 use super::{
     AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider,
@@ -51,6 +52,11 @@ impl StorageProvider for TokioStorageProvider {
         tokio::fs::rename(from, to).await
     }
 
+    #[instrument(skip(self))]
+    async fn create_dir_all(&self, path: &str) -> io::Result<()> {
+        tokio::fs::create_dir_all(path).await
+    }
+
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
         sync_dir_impl(path).await
     }
@@ -62,14 +68,30 @@ impl StorageProvider for TokioStorageProvider {
 #[cfg(unix)]
 async fn sync_dir_impl(path: &str) -> io::Result<()> {
     let path = path.to_string();
-    run_blocking(move || std::fs::File::open(&path)?.sync_all()).await
+    run_blocking(move || {
+        let directory = std::fs::File::open(&path)?;
+        if !directory.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "sync_dir requires a directory",
+            ));
+        }
+        directory.sync_all()
+    })
+    .await
 }
 
 /// Windows has no directory handle to fsync: metadata operations on NTFS are
 /// journaled, and the ordering guarantee this call buys on unix comes for
-/// free. Succeeds without doing anything.
+/// free. Validates the directory, then succeeds without flushing it.
 #[cfg(not(unix))]
-async fn sync_dir_impl(_path: &str) -> io::Result<()> {
+async fn sync_dir_impl(path: &str) -> io::Result<()> {
+    if !tokio::fs::metadata(path).await?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "sync_dir requires a directory",
+        ));
+    }
     Ok(())
 }
 

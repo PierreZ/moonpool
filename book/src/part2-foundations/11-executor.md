@@ -121,6 +121,29 @@ Spawned futures stay `Send + 'static`, exactly as before: execution is one
 OS thread, but the bounds let application code use `Arc<RwLock<...>>`,
 `DashMap`, and friends without contortion.
 
+The raw executor keeps panic isolation deliberately narrow. A detached task
+spawned with `executor::spawn` records its panic in its own `JoinHandle`, so a
+low-level driver can decide how to recover. Tasks spawned through an actor's
+`ctx.task().spawn_task()` carry a different contract: the simulation runner
+records an unobserved child panic with its process or workload identity and
+marks that seed as failed. If the caller awaits the handle and handles
+`Err(JoinError::Panicked)`, the panic is observed and the seed can recover.
+Dropping or detaching the handle leaves the panic unobserved, even if the task
+already finished. Dropping a task during process shutdown or executor teardown
+remains cancellation, not a panic.
+
+The runner also records each unobserved panic as an `unobserved_task_panic`
+event with `actor`, `task`, and `panic` fields. It runs invariants once more
+after task teardown, so those diagnostics remain visible even when setup or
+check stalls and orchestration returns early.
+
+`time.sleep(Duration::ZERO)` still schedules a real same-time timer, preserving
+the scheduler's FIFO ordering for a burst of immediate work. The runner allows
+that fan-out, then requests shutdown after a generous fixed count of events
+that keep rearming at the same logical instant. If the tasks ignore shutdown,
+the next stagnant burst fails the seed. Time advancing or a task completing
+resets the count, so ordinary cleanup and long timer-driven runs keep working.
+
 Two behaviors are deliberately **better** than tokio's:
 
 - A genuine deadlock (driver not woken, nothing runnable) panics with the

@@ -10,7 +10,9 @@ mod stream;
 mod types;
 
 pub(crate) use delay::NetworkDelay;
-pub(crate) use engine::{AcceptWaiterId, NetworkActions, NetworkSimulation};
+pub(crate) use engine::{
+    AcceptWaiterId, ConnectWaiterId, NetworkActions, NetworkSimulation, PendingPublish,
+};
 pub use event::{NetworkEvent, NetworkOperationId};
 pub use provider::SimNetworkProvider;
 pub use state::CloseReason;

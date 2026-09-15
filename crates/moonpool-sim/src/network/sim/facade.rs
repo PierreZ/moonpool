@@ -1,12 +1,12 @@
 //! Thin locked facade over the scheduler-independent network engine.
 
-use std::{collections::BTreeMap, net::IpAddr, task::Waker, time::Duration};
+use std::{collections::BTreeMap, io, net::IpAddr, task::Waker, time::Duration};
 
 use crate::{
     LocalityInfo, NetworkConfiguration, SimulationError, SimulationResult,
     network::sim::{
-        AcceptWaiterId, CloseReason, ConnectionId, ListenerId, NetworkDelay, NetworkEvent,
-        NetworkOperationId,
+        AcceptWaiterId, CloseReason, ConnectWaiterId, ConnectionId, ListenerId, NetworkDelay,
+        NetworkEvent, NetworkOperationId, PendingPublish,
     },
     sim::{Event, ScheduleId, SimWorld, wakers::WakeBatch},
 };
@@ -32,17 +32,25 @@ impl SimWorld {
     /// no-new-faults promise survives a later reconfiguration. Latency
     /// distributions and link shaping are installed as given.
     pub fn set_network_config(&mut self, mut config: NetworkConfiguration) {
-        let mut inner = self.inner.write();
-        if inner.recovery_mode() {
-            config.disable_fault_injection();
-        }
-        let now = inner.now();
-        let actions = inner.network.set_config(config, now);
-        inner.apply_network(actions);
+        let wakes = {
+            let mut inner = self.inner.write();
+            if inner.recovery_mode() {
+                config.disable_fault_injection();
+            }
+            let now = inner.now();
+            let (actions, wakes) = inner.network.set_config(config, now);
+            inner.apply_network(actions);
+            wakes
+        };
+        wakes.wake();
     }
 
-    /// Bind `addr` for the process at `owner`; `None` when it is in use.
-    pub(crate) fn bind_listener(&self, addr: &str, owner: IpAddr) -> Option<ListenerId> {
+    /// Bind `addr` for the process at `owner`, returning its resolved address.
+    pub(crate) fn bind_listener(
+        &self,
+        addr: &str,
+        owner: IpAddr,
+    ) -> Result<(ListenerId, String), io::ErrorKind> {
         self.inner.write().network.bind_listener(addr, owner)
     }
 
@@ -50,6 +58,10 @@ impl SimWorld {
     pub(crate) fn unbind_listener(&self, id: ListenerId) {
         let wakes = self.inner.write().network.unbind_listener(id);
         wakes.wake();
+    }
+
+    pub(crate) fn listener_matches(&self, addr: &str, id: ListenerId) -> bool {
+        self.inner.read().network.listener_matches(addr, id)
     }
 
     pub(crate) fn read_from_connection(
@@ -122,8 +134,54 @@ impl SimWorld {
         wakes.wake();
     }
 
+    pub(crate) fn complete_accept(&self, id: AcceptWaiterId) {
+        let wakes = self.inner.write().network.complete_accept(id);
+        wakes.wake();
+    }
+
+    pub(crate) fn refresh_accept_reservation_waker(&self, id: AcceptWaiterId, waker: Waker) {
+        self.inner
+            .write()
+            .network
+            .refresh_accept_reservation_waker(id, waker);
+    }
+
+    pub(crate) fn allocate_connect_waiter(&self) -> SimulationResult<ConnectWaiterId> {
+        self.inner
+            .write()
+            .network
+            .allocate_connect_waiter()
+            .ok_or_else(|| {
+                SimulationError::InvalidState(
+                    "connect waiter identifier space exhausted".to_string(),
+                )
+            })
+    }
+
+    pub(crate) fn poll_store_pending_connection(
+        &self,
+        addr: &str,
+        connection_id: ConnectionId,
+        id: ConnectWaiterId,
+        context_waker: Waker,
+    ) -> PendingPublish {
+        let (status, wakes) =
+            self.inner
+                .write()
+                .network
+                .poll_store_pending(addr, connection_id, id, context_waker);
+        wakes.wake();
+        status
+    }
+
+    pub(crate) fn cancel_connect_waiter(&self, addr: &str, id: ConnectWaiterId) {
+        let wakes = self.inner.write().network.cancel_connect_waiter(addr, id);
+        wakes.wake();
+    }
+
     /// Publish an arriving connection to the listener on `addr`. Returns
     /// `false`, publishing nothing, when nobody is listening there.
+    #[cfg(test)]
     pub(crate) fn store_pending_connection(&self, addr: &str, id: ConnectionId) -> bool {
         let wakes = self.inner.write().network.store_pending(addr, id);
         match wakes {
@@ -133,15 +191,6 @@ impl SimWorld {
             }
             None => false,
         }
-    }
-
-    pub(crate) fn return_pending_connection(&self, addr: &str, id: ConnectionId) {
-        let wakes = self
-            .inner
-            .write()
-            .network
-            .return_pending_connection(addr, id);
-        wakes.wake();
     }
 
     pub(crate) fn connection_peer_address(&self, id: ConnectionId) -> Option<String> {

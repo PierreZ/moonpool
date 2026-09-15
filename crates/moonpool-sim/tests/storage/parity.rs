@@ -459,6 +459,227 @@ fn the_simulator_refuses_the_open_flags_production_refuses() {
     });
 }
 
+/// The result of a namespace operation, ignoring platform-specific text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathOutcome {
+    Applied(Result<(), std::io::ErrorKind>),
+    Exists(Result<bool, std::io::ErrorKind>),
+}
+
+fn applied<T>(result: std::io::Result<T>) -> PathOutcome {
+    PathOutcome::Applied(result.map(|_| ()).map_err(|error| error.kind()))
+}
+
+fn existence(result: std::io::Result<bool>) -> PathOutcome {
+    PathOutcome::Exists(result.map_err(|error| error.kind()))
+}
+
+/// Resolve the same parent, alias, collision, and empty-path cases on both
+/// backends. Every rejection is followed by an existence or size probe so a
+/// refused operation that mutated the namespace is visible.
+async fn path_contract<P: StorageProvider>(
+    provider: P,
+    prefix: String,
+) -> std::io::Result<Vec<(&'static str, PathOutcome)>> {
+    let path = |name: &str| format!("{prefix}{name}");
+    let mut log = Vec::new();
+    let file = provider
+        .open(&path("seed"), OpenOptions::create_new_write())
+        .await?;
+    file.write_at(0, SEED_BYTES).await?;
+    drop(file);
+
+    log.push((
+        "dot alias open",
+        applied(
+            provider
+                .open(&path("./seed"), OpenOptions::read_only())
+                .await,
+        ),
+    ));
+    log.push((
+        "dot alias exists",
+        existence(provider.exists(&path("./seed")).await),
+    ));
+    log.push((
+        "missing parent open",
+        applied(
+            provider
+                .open(&path("missing/child"), OpenOptions::create_write())
+                .await,
+        ),
+    ));
+    log.push((
+        "missing parent still absent",
+        existence(provider.exists(&path("missing")).await),
+    ));
+    log.push((
+        "missing parent sync",
+        applied(provider.sync_dir(&path("missing")).await),
+    ));
+    log.push((
+        "missing before dotdot",
+        applied(
+            provider
+                .open(&path("missing/../seed"), OpenOptions::read_only())
+                .await,
+        ),
+    ));
+    log.push((
+        "missing before dotdot exists",
+        existence(provider.exists(&path("missing/../seed")).await),
+    ));
+
+    log.push((
+        "mkdir nested",
+        applied(provider.create_dir_all(&path("db/nested")).await),
+    ));
+    log.push((
+        "mkdir idempotent",
+        applied(provider.create_dir_all(&path("db/nested")).await),
+    ));
+    log.push((
+        "directory exists",
+        existence(provider.exists(&path("db")).await),
+    ));
+    log.push((
+        "nested directory exists",
+        existence(provider.exists(&path("db/nested")).await),
+    ));
+    log.push((
+        "dot directory sync",
+        applied(provider.sync_dir(&path("./db")).await),
+    ));
+    log.push((
+        "rename dot alias",
+        applied(provider.rename(&path("./seed"), &path("renamed")).await),
+    ));
+    log.push((
+        "rename back dot alias",
+        applied(provider.rename(&path("./renamed"), &path("seed")).await),
+    ));
+    log.push((
+        "directory before dotdot alias",
+        applied(
+            provider
+                .open(&path("db/../seed"), OpenOptions::read_only())
+                .await,
+        ),
+    ));
+    log.push((
+        "open directory exclusive",
+        applied(
+            provider
+                .open(&path("db"), OpenOptions::create_new_write())
+                .await,
+        ),
+    ));
+    let delete_error = provider
+        .delete(&path("db"))
+        .await
+        .expect_err("directory deletion must fail");
+    // macOS reports PermissionDenied, while Linux reports IsADirectory.
+    // Both reject this file-only operation.
+    assert!(
+        matches!(
+            delete_error.kind(),
+            std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied
+        ),
+        "unexpected directory deletion error: {delete_error}"
+    );
+    log.push((
+        "delete directory",
+        PathOutcome::Applied(Err(std::io::ErrorKind::IsADirectory)),
+    ));
+    assert!(provider.exists(&path("db")).await?, "directory survived");
+    assert!(
+        provider.exists(&path("db/nested")).await?,
+        "nested directory survived"
+    );
+
+    let regular = provider
+        .open(&path("regular"), OpenOptions::create_new_write())
+        .await?;
+    drop(regular);
+    log.push((
+        "sync regular file",
+        applied(provider.sync_dir(&path("regular")).await),
+    ));
+    let trash = provider
+        .open(&path("trash"), OpenOptions::create_new_write())
+        .await?;
+    drop(trash);
+    log.push((
+        "delete dot alias",
+        applied(provider.delete(&path("./trash")).await),
+    ));
+    log.push((
+        "deleted alias absent",
+        existence(provider.exists(&path("trash")).await),
+    ));
+    log.push((
+        "file as parent open",
+        applied(
+            provider
+                .open(&path("regular/child"), OpenOptions::create_write())
+                .await,
+        ),
+    ));
+    log.push((
+        "file as parent exists",
+        existence(provider.exists(&path("regular/child")).await),
+    ));
+    log.push((
+        "file as parent mkdir",
+        applied(provider.create_dir_all(&path("regular/child")).await),
+    ));
+    log.push((
+        "file before dotdot",
+        applied(
+            provider
+                .open(&path("regular/../seed"), OpenOptions::read_only())
+                .await,
+        ),
+    ));
+
+    log.push((
+        "empty open",
+        applied(provider.open("", OpenOptions::create_write()).await),
+    ));
+    log.push(("empty sync", applied(provider.sync_dir("").await)));
+    log.push(("empty mkdir", applied(provider.create_dir_all("").await)));
+    log.push((
+        "NUL open",
+        applied(
+            provider
+                .open("bad\0name", OpenOptions::create_write())
+                .await,
+        ),
+    ));
+    log.push((
+        "seed still exists",
+        existence(provider.exists(&path("seed")).await),
+    ));
+    Ok(log)
+}
+
+#[test]
+fn simulated_paths_match_tokio_namespace_behavior() {
+    local_runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let prefix = format!("{}/", dir.path().to_str().expect("temp path is UTF-8"));
+        let production = path_contract(TokioStorageProvider::new(), prefix)
+            .await
+            .expect("production path scenario");
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let simulated = run_storage_test(sim, |provider| path_contract(provider, String::new()))
+            .await
+            .expect("simulated path scenario");
+        assert_eq!(production, simulated, "path behavior must match Tokio");
+    });
+}
+
 /// What one seek answered, and where the cursor stood afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SeekStep {

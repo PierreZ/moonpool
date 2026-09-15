@@ -213,14 +213,18 @@ impl SimTcpStream {
 
 impl Drop for SimTcpStream {
     fn drop(&mut self) {
-        // Close the connection in the simulation when the stream is dropped
-        // This matches real TCP behavior where dropping a socket always closes it
         if let Ok(sim) = self.sim.upgrade() {
             tracing::debug!(
                 "SimTcpStream dropping, closing connection {}",
                 self.connection_id.0
             );
-            sim.close_connection(self.connection_id);
+            // A socket closed with unread received bytes sends RST because
+            // those acknowledged bytes were lost to the application.
+            if sim.has_readable_data(self.connection_id) {
+                sim.close_connection_abort(self.connection_id);
+            } else {
+                sim.close_connection(self.connection_id);
+            }
         }
     }
 }
@@ -552,6 +556,7 @@ impl AsyncWrite for SimTcpStream {
 pub struct AcceptFuture {
     sim: WeakSimWorld,
     local_addr: String,
+    listener_id: ListenerId,
     reserved: Option<ConnectionId>,
     delay: Option<NetworkDelay>,
     waiter_id: Option<AcceptWaiterId>,
@@ -564,6 +569,12 @@ impl Future for AcceptFuture {
         let Ok(sim) = self.sim.upgrade() else {
             return Poll::Ready(Err(sim_shutdown_error()));
         };
+        if !sim.listener_matches(&self.local_addr, self.listener_id) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "listener closed before accept completed",
+            )));
+        }
         if self.waiter_id.is_none() {
             let id = match sim.allocate_accept_waiter() {
                 Ok(id) => id,
@@ -586,13 +597,21 @@ impl Future for AcceptFuture {
             });
             let operation = match sim.network_delay(delay) {
                 Ok(operation) => operation,
-                Err(error) => {
-                    sim.return_pending_connection(&self.local_addr, connection_id);
-                    return Poll::Ready(Err(io::Error::other(error)));
-                }
+                Err(error) => return Poll::Ready(Err(io::Error::other(error))),
             };
             self.reserved = Some(connection_id);
             self.delay = Some(operation);
+        }
+
+        if let Some(waiter_id) = self.waiter_id {
+            sim.refresh_accept_reservation_waker(waiter_id, cx.waker().clone());
+        }
+
+        if self.reserved.is_some_and(|id| sim.is_connection_closed(id)) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "pending connection aborted before accept completed",
+            )));
         }
 
         let Some(delay) = self.delay.as_mut() else {
@@ -607,6 +626,16 @@ impl Future for AcceptFuture {
         let Some(connection_id) = self.reserved.take() else {
             return Poll::Ready(Err(io::Error::other("accept reservation missing")));
         };
+        if sim.is_connection_closed(connection_id) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "listener or pending connection closed before accept completed",
+            )));
+        }
+        let Some(waiter_id) = self.waiter_id else {
+            return Poll::Ready(Err(io::Error::other("accept waiter missing")));
+        };
+        sim.complete_accept(waiter_id);
 
         // FDB Pattern (sim2.actor.cpp:1149-1175):
         // Return the synthesized ephemeral peer address, not the client's real address.
@@ -623,15 +652,10 @@ impl Future for AcceptFuture {
 impl Drop for AcceptFuture {
     fn drop(&mut self) {
         self.delay.take();
-        if let Ok(sim) = self.sim.upgrade() {
-            if let Some(connection_id) = self.reserved.take()
-                && !sim.is_connection_closed(connection_id)
-            {
-                sim.return_pending_connection(&self.local_addr, connection_id);
-            }
-            if let Some(waiter_id) = self.waiter_id.take() {
-                sim.cancel_accept(&self.local_addr, waiter_id);
-            }
+        if let Ok(sim) = self.sim.upgrade()
+            && let Some(waiter_id) = self.waiter_id.take()
+        {
+            sim.cancel_accept(&self.local_addr, waiter_id);
         }
     }
 }
@@ -672,6 +696,7 @@ impl TcpListenerTrait for SimTcpListener {
         AcceptFuture {
             sim: self.sim.clone(),
             local_addr: self.local_addr.clone(),
+            listener_id: self.id,
             reserved: None,
             delay: None,
             waiter_id: None,

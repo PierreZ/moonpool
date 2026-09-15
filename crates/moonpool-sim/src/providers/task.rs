@@ -1,9 +1,14 @@
 //! Task provider backed by the moonpool deterministic executor.
 
+use std::any::Any;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use futures::FutureExt as _;
 use moonpool_core::TaskProvider;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tracing::Instrument as _;
@@ -46,12 +51,20 @@ use tracing::Instrument as _;
 #[derive(Clone, Debug, Default)]
 pub struct SimTaskProvider {
     scope: Option<CancellationToken>,
+    panic_reporter: Option<TaskPanicReporter>,
 }
 
 impl SimTaskProvider {
-    /// A provider whose spawned tasks live no longer than `scope`.
-    pub(crate) fn scoped(scope: CancellationToken) -> Self {
-        Self { scope: Some(scope) }
+    /// Bind spawned tasks to a process-lifetime cancellation scope.
+    pub(crate) fn with_scope(mut self, scope: CancellationToken) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    /// Attach the per-iteration panic reporter used by the simulation runner.
+    pub(crate) fn with_panic_reporter(mut self, panic_reporter: TaskPanicReporter) -> Self {
+        self.panic_reporter = Some(panic_reporter);
+        self
     }
 }
 
@@ -67,15 +80,137 @@ impl TaskProvider for SimTaskProvider {
         // TaskMeta and traces every poll of the task with it. The child does
         // inherit the spawner's span, so its events keep their actor.
         let future = future.instrument(tracing::Span::current());
-        match &self.scope {
+        let (future, observed) = match &self.panic_reporter {
+            Some(reporter) => {
+                let observed = Arc::new(AtomicBool::new(false));
+                (
+                    reporter.catch_task_panic(name, future, Arc::clone(&observed)),
+                    Some(observed),
+                )
+            }
+            None => (
+                Box::pin(future) as Pin<Box<dyn Future<Output = ()> + Send>>,
+                None,
+            ),
+        };
+        let handle = match &self.scope {
             Some(scope) => crate::executor::spawn(name, Scoped::new(scope.clone(), future)),
             None => crate::executor::spawn(name, future),
+        };
+        match observed {
+            Some(observed) => handle.with_panic_acknowledgment(observed),
+            None => handle,
         }
     }
 
     async fn yield_now(&self) {
         crate::executor::yield_now().await;
     }
+}
+
+/// Per-iteration collection of panics from detached provider-spawned tasks.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TaskPanicTracker {
+    panics: Arc<Mutex<Vec<TaskPanicRecord>>>,
+}
+
+#[derive(Debug)]
+struct TaskPanicRecord {
+    panic: TaskPanic,
+    observed: Arc<AtomicBool>,
+}
+
+impl TaskPanicTracker {
+    /// Create a reporter that labels every panic with its owning actor.
+    pub(crate) fn reporter(&self, actor: impl Into<String>) -> TaskPanicReporter {
+        TaskPanicReporter {
+            tracker: self.clone(),
+            actor: actor.into(),
+        }
+    }
+
+    /// Drain all panics observed during this iteration.
+    pub(crate) fn take(&self) -> Vec<TaskPanic> {
+        let records = std::mem::take(
+            &mut *self
+                .panics
+                .lock()
+                .expect("Mutex poisoned: prior task panicked"),
+        );
+        records
+            .into_iter()
+            .filter_map(|record| (!record.observed.load(Ordering::Acquire)).then_some(record.panic))
+            .collect()
+    }
+}
+
+/// Records panics for one process, workload, or fault injector.
+#[derive(Clone, Debug)]
+pub(crate) struct TaskPanicReporter {
+    tracker: TaskPanicTracker,
+    actor: String,
+}
+
+impl TaskPanicReporter {
+    /// Catch and record a task panic while retaining the task's normal `()` output.
+    fn catch_task_panic<F>(
+        &self,
+        task: &str,
+        future: F,
+        observed: Arc<AtomicBool>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let reporter = self.clone();
+        let task = task.to_string();
+        Box::pin(async move {
+            if let Err(payload) = AssertUnwindSafe(future).catch_unwind().await {
+                reporter.record_with_observer(task, payload.as_ref(), observed);
+                std::panic::resume_unwind(payload);
+            }
+        })
+    }
+
+    /// Record a panic that occurred in this actor's named task.
+    pub(crate) fn record(&self, task: impl Into<String>, payload: &(dyn Any + Send)) {
+        self.record_with_observer(task, payload, Arc::new(AtomicBool::new(false)));
+    }
+
+    fn record_with_observer(
+        &self,
+        task: impl Into<String>,
+        payload: &(dyn Any + Send),
+        observed: Arc<AtomicBool>,
+    ) {
+        let message = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+        self.tracker
+            .panics
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .push(TaskPanicRecord {
+                panic: TaskPanic {
+                    actor: self.actor.clone(),
+                    task: task.into(),
+                    message,
+                },
+                observed,
+            });
+    }
+}
+
+/// A detached task panic and the actor that spawned it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TaskPanic {
+    pub(crate) actor: String,
+    pub(crate) task: String,
+    pub(crate) message: String,
 }
 
 /// A task future bound to a process boot: completes, dropping the inner

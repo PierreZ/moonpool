@@ -99,7 +99,7 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
         options: OpenOptions,
     ) -> impl std::future::Future<Output = io::Result<Self::File>> + Send;
 
-    /// Check if a file exists at the given path.
+    /// Check if a file or directory exists at the given path.
     fn exists(&self, path: &str) -> impl std::future::Future<Output = io::Result<bool>> + Send;
 
     /// Delete a file at the given path.
@@ -112,7 +112,19 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
         to: &str,
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;
 
+    /// Create `path` and any missing parent directories.
+    ///
+    /// Creating a directory makes its name visible, but does not make that
+    /// name durable. Sync its parent with [`sync_dir`](Self::sync_dir) when it
+    /// must survive a crash.
+    fn create_dir_all(
+        &self,
+        path: &str,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
     /// Make the *directory entries* under `path` durable.
+    ///
+    /// `path` must name an existing directory.
     ///
     /// File durability and directory-entry durability are two different
     /// things, and this is the second one. Syncing a file makes its bytes and
@@ -120,6 +132,8 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
     /// pointing at it does. After
     ///
     /// ```text
+    /// create_dir_all("db")   // makes db visible
+    /// sync_dir(".")          // makes the db name durable
     /// open("db/wal", create)   // creates a directory entry
     /// write(..)                // fills the file
     /// sync_all(file)           // the bytes are durable

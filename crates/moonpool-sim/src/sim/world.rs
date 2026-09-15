@@ -911,6 +911,25 @@ mod tests {
     }
 
     #[test]
+    fn direct_pending_publication_obeys_backlog_capacity() {
+        let mut config = NetworkConfiguration::fast_local();
+        config.accept_backlog_capacity = 1;
+        let sim = SimWorld::new_with_network_config(config);
+        let owner: std::net::IpAddr = "127.0.0.1".parse().expect("valid IP");
+        let _listener = sim
+            .bind_listener("bounded", owner)
+            .expect("bind logical address");
+        let (_, first_server) = sim.create_connection_pair("127.0.0.1:1", "127.0.0.1:2");
+        let (_, second_server) = sim.create_connection_pair("127.0.0.1:3", "127.0.0.1:4");
+        assert!(sim.store_pending_connection("bounded", first_server));
+        assert!(
+            !sim.store_pending_connection("bounded", second_server),
+            "direct callers cannot overfill the listener"
+        );
+        sim.discard_connection_pair(second_server);
+    }
+
+    #[test]
     fn cancelling_connect_discards_its_preallocated_pair() {
         let mut config = NetworkConfiguration::fast_local();
         config.connect_latency = LatencyDistribution::Uniform {
