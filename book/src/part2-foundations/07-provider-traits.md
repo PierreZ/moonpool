@@ -101,6 +101,11 @@ Dropping a stream with unread received bytes resets the peer, as TCP does when
 the application discards acknowledged data. A drained stream closes gracefully;
 `AsyncWrite::close` shuts down only the write half so the stream can still read
 a reply.
+Each simulated listener has a bounded accept backlog (128 unaccepted
+connections by default). A full backlog parks new connects in FIFO order until
+an accept returns a stream; a delayed accept's reservation still occupies a
+slot. [`SimulationBuilder::accept_backlog_capacity`](../part3-building/10-network-faults.md#accept-backlog)
+sets the capacity for each run.
 
 ## TaskProvider
 

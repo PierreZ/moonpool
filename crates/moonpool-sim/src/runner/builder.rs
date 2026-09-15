@@ -260,6 +260,8 @@ pub struct SimulationBuilder {
     /// End-to-end byte window per stream direction, applied to every
     /// iteration's network config; `None` keeps the default.
     tcp_send_window_bytes: Option<usize>,
+    /// Maximum unaccepted connections per listener; `None` keeps the default.
+    accept_backlog_capacity: Option<usize>,
     /// Buggify-driven knob value-perturbation, enabled via [`Chaos::BuggifyKnobs`].
     /// Internal flag (not a public builder method) so the opt-in stays inside the
     /// `enable_chaos`/`Chaos` model.
@@ -316,6 +318,7 @@ impl SimulationBuilder {
             network_fault_mask: crate::NetworkFaultMask::all(),
             link_latency: None,
             tcp_send_window_bytes: None,
+            accept_backlog_capacity: None,
             buggify_knobs: false,
             swarm_operations: false,
             check_determinism: false,
@@ -519,6 +522,19 @@ impl SimulationBuilder {
     #[must_use]
     pub fn tcp_send_window_bytes(mut self, bytes: usize) -> Self {
         self.tcp_send_window_bytes = Some(bytes);
+        self
+    }
+
+    /// Set the maximum unaccepted TCP connections per listener for every seed.
+    ///
+    /// A full listener backlog makes `connect()` wait until an `accept()`
+    /// returns a connection. This deployment-shape setting consumes no RNG
+    /// draws. `capacity` must be greater than zero.
+    #[must_use]
+    #[instrument(skip(self))]
+    pub fn accept_backlog_capacity(mut self, capacity: usize) -> Self {
+        assert!(capacity > 0, "accept backlog capacity must be positive");
+        self.accept_backlog_capacity = Some(capacity);
         self
     }
 
@@ -1131,7 +1147,7 @@ impl SimulationBuilder {
         storage_chaos: Option<ChaosMode>,
         network_fault_mask: crate::NetworkFaultMask,
         link_latency: Option<crate::network::LinkLatencyConfig>,
-        tcp_send_window_bytes: Option<usize>,
+        tcp_limits: (Option<usize>, Option<usize>),
         buggify_knobs: bool,
         seed: u64,
     ) -> crate::sim::SimWorld {
@@ -1163,8 +1179,11 @@ impl SimulationBuilder {
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency = link_latency;
-        if let Some(window) = tcp_send_window_bytes {
+        if let Some(window) = tcp_limits.0 {
             network_config.tcp_send_window_bytes = window;
+        }
+        if let Some(capacity) = tcp_limits.1 {
+            network_config.accept_backlog_capacity = capacity;
         }
         let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
         // Unlike raw `SimWorld` use, a builder campaign has explicit phases.
@@ -1868,7 +1887,7 @@ impl SimulationBuilder {
             self.storage_chaos,
             self.network_fault_mask,
             self.link_latency.clone(),
-            self.tcp_send_window_bytes,
+            (self.tcp_send_window_bytes, self.accept_backlog_capacity),
             self.buggify_knobs,
             seed,
         );
@@ -2265,7 +2284,7 @@ mod tests {
             None,
             mask,
             None,
-            None,
+            (None, None),
             false,
             seed,
         );

@@ -31,6 +31,7 @@ use super::{
 #[derive(Debug, Default)]
 struct NetworkWaiters {
     accepts: BTreeMap<String, BTreeMap<AcceptWaiterId, Waker>>,
+    connects: BTreeMap<String, BTreeMap<ConnectWaiterId, ConnectWaiter>>,
     reads: WakerRegistry<ConnectionId>,
     write_clogs: WakerRegistry<ConnectionId>,
     read_clogs: WakerRegistry<ConnectionId>,
@@ -40,9 +41,28 @@ struct NetworkWaiters {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct AcceptWaiterId(u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ConnectWaiterId(u64);
+
+#[derive(Debug)]
+struct ConnectWaiter {
+    listener_id: ListenerId,
+    connection_id: ConnectionId,
+    waker: Waker,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingPublish {
+    Published,
+    Full,
+    Unbound,
+    Aborted,
+}
+
 #[derive(Debug)]
 struct AcceptReservation {
     addr: String,
+    listener_id: ListenerId,
     connection_id: ConnectionId,
     waker: Waker,
 }
@@ -77,15 +97,21 @@ pub(crate) struct NetworkSimulation {
     last_bit_flip_time: Duration,
     next_operation_id: u64,
     next_accept_waiter_id: u64,
+    next_connect_waiter_id: u64,
     completed_operations: BTreeSet<NetworkOperationId>,
     failed_operations: BTreeSet<NetworkOperationId>,
-    failed_accepts: BTreeSet<AcceptWaiterId>,
+    failed_accepts: BTreeMap<AcceptWaiterId, SimulationError>,
+    failed_connects: BTreeSet<ConnectWaiterId>,
     accept_reservations: BTreeMap<AcceptWaiterId, AcceptReservation>,
     operation_waiters: WakerRegistry<NetworkOperationId>,
 }
 
 impl NetworkSimulation {
     pub(crate) fn new(config: NetworkConfiguration) -> Self {
+        assert!(
+            config.accept_backlog_capacity > 0,
+            "accept backlog capacity must be positive"
+        );
         Self {
             state: NetworkState::new(config),
             waiters: NetworkWaiters::default(),
@@ -93,9 +119,11 @@ impl NetworkSimulation {
             last_bit_flip_time: Duration::ZERO,
             next_operation_id: 0,
             next_accept_waiter_id: 0,
+            next_connect_waiter_id: 0,
             completed_operations: BTreeSet::new(),
             failed_operations: BTreeSet::new(),
-            failed_accepts: BTreeSet::new(),
+            failed_accepts: BTreeMap::new(),
+            failed_connects: BTreeSet::new(),
             accept_reservations: BTreeMap::new(),
             operation_waiters: WakerRegistry::default(),
         }
@@ -114,14 +142,27 @@ impl NetworkSimulation {
         &mut self,
         config: NetworkConfiguration,
         now: Duration,
-    ) -> NetworkActions {
+    ) -> (NetworkActions, WakeBatch) {
+        assert!(
+            config.accept_backlog_capacity > 0,
+            "accept backlog capacity must be positive"
+        );
         let schedule_maintenance = config.chaos.partition_probability > 0.0;
+        let backlog_grew =
+            config.accept_backlog_capacity > self.state.config.accept_backlog_capacity;
         self.state.config = config;
         let mut actions = NetworkActions::default();
         if schedule_maintenance {
             actions.schedule_at(now, NetworkEvent::Maintenance);
         }
-        actions
+        let mut wakes = WakeBatch::default();
+        if backlog_grew {
+            let addresses: Vec<String> = self.waiters.connects.keys().cloned().collect();
+            for addr in addresses {
+                self.wake_first_connect_if_room(&addr, &mut wakes);
+            }
+        }
+        (actions, wakes)
     }
 
     pub(crate) fn set_localities(&mut self, localities: BTreeMap<IpAddr, LocalityInfo>) {
@@ -205,15 +246,53 @@ impl NetworkSimulation {
         self.state.bound.contains_key(addr)
     }
 
-    /// Reset the connections queued on `addr` that no accept ever took.
+    pub(crate) fn listener_matches(&self, addr: &str, id: ListenerId) -> bool {
+        self.state
+            .bound
+            .get(addr)
+            .is_some_and(|bound| bound.id == id)
+    }
+
+    /// Reset all unaccepted endpoints and wake every waiter tied to this
+    /// listener generation. A later bind at the same address starts fresh.
     fn abort_backlog(&mut self, addr: &str) -> WakeBatch {
-        let queued: Vec<ConnectionId> = self
+        let mut queued: Vec<ConnectionId> = self
             .state
             .pending_connections
             .remove(addr)
             .map(Vec::from)
             .unwrap_or_default();
         let mut wakes = WakeBatch::default();
+        let reserved_ids: Vec<AcceptWaiterId> = self
+            .accept_reservations
+            .iter()
+            .filter_map(|(id, reservation)| (reservation.addr == addr).then_some(*id))
+            .collect();
+        for id in reserved_ids {
+            if let Some(reservation) = self.accept_reservations.remove(&id) {
+                queued.push(reservation.connection_id);
+                self.failed_accepts.insert(
+                    id,
+                    SimulationError::InvalidState("listener closed".to_string()),
+                );
+                wakes.extend([reservation.waker]);
+            }
+        }
+        if let Some(waiters) = self.waiters.accepts.remove(addr) {
+            for (id, waker) in waiters {
+                self.failed_accepts.insert(
+                    id,
+                    SimulationError::InvalidState("listener closed".to_string()),
+                );
+                wakes.extend([waker]);
+            }
+        }
+        if let Some(waiters) = self.waiters.connects.remove(addr) {
+            for (id, waiter) in waiters {
+                self.failed_connects.insert(id);
+                wakes.extend([waiter.waker]);
+            }
+        }
         for id in queued {
             wakes.append(self.close_aborted(id));
         }
@@ -457,19 +536,127 @@ impl NetworkSimulation {
         Some(id)
     }
 
+    pub(crate) fn allocate_connect_waiter(&mut self) -> Option<ConnectWaiterId> {
+        let id = ConnectWaiterId(self.next_connect_waiter_id);
+        self.next_connect_waiter_id = self.next_connect_waiter_id.checked_add(1)?;
+        Some(id)
+    }
+
+    /// Publish the connection when a slot is open and every older parked
+    /// connect has gone first. Otherwise retain its waker until accept frees
+    /// a slot or the listener goes away.
+    pub(crate) fn poll_store_pending(
+        &mut self,
+        addr: &str,
+        connection_id: ConnectionId,
+        id: ConnectWaiterId,
+        context_waker: Waker,
+    ) -> (PendingPublish, WakeBatch) {
+        let mut wakes = WakeBatch::default();
+        if self.failed_connects.remove(&id) {
+            return (PendingPublish::Unbound, wakes);
+        }
+        if self.is_closed(connection_id) {
+            wakes.append(self.cancel_connect_waiter(addr, id));
+            return (PendingPublish::Aborted, wakes);
+        }
+        let Some(listener_id) = self.state.bound.get(addr).map(|bound| bound.id) else {
+            return (PendingPublish::Unbound, wakes);
+        };
+        if self
+            .waiters
+            .connects
+            .get(addr)
+            .and_then(|waiters| waiters.get(&id))
+            .is_some_and(|waiter| waiter.listener_id != listener_id)
+        {
+            wakes.append(self.cancel_connect_waiter(addr, id));
+            return (PendingPublish::Unbound, wakes);
+        }
+        let first = self
+            .waiters
+            .connects
+            .get(addr)
+            .and_then(|waiters| waiters.keys().next().copied());
+        if self.has_backlog_room(addr) && first.is_none_or(|first| first == id) {
+            self.remove_connect_waiter(addr, id);
+            wakes.append(self.publish_pending(addr, listener_id, connection_id));
+            self.wake_first_connect_if_room(addr, &mut wakes);
+            return (PendingPublish::Published, wakes);
+        }
+        let waiters = self.waiters.connects.entry(addr.to_string()).or_default();
+        if !waiters
+            .get(&id)
+            .is_some_and(|waiter| waiter.waker.will_wake(&context_waker))
+        {
+            waiters.insert(
+                id,
+                ConnectWaiter {
+                    listener_id,
+                    connection_id,
+                    waker: context_waker,
+                },
+            );
+        }
+        self.wake_first_connect_if_room(addr, &mut wakes);
+        (PendingPublish::Full, wakes)
+    }
+
+    fn remove_connect_waiter(&mut self, addr: &str, id: ConnectWaiterId) -> bool {
+        let removed = self
+            .waiters
+            .connects
+            .get_mut(addr)
+            .and_then(|waiters| waiters.remove(&id))
+            .is_some();
+        if self
+            .waiters
+            .connects
+            .get(addr)
+            .is_some_and(BTreeMap::is_empty)
+        {
+            self.waiters.connects.remove(addr);
+        }
+        removed
+    }
+
+    pub(crate) fn cancel_connect_waiter(&mut self, addr: &str, id: ConnectWaiterId) -> WakeBatch {
+        self.failed_connects.remove(&id);
+        let removed = self.remove_connect_waiter(addr, id);
+        let mut wakes = WakeBatch::default();
+        if removed {
+            self.wake_first_connect_if_room(addr, &mut wakes);
+        }
+        wakes
+    }
+
     pub(crate) fn poll_accept(
         &mut self,
         addr: &str,
         id: AcceptWaiterId,
         waker: Waker,
     ) -> SimulationResult<Option<ConnectionId>> {
-        if self.failed_accepts.remove(&id) {
-            return Err(SimulationError::SimulationShutdown);
+        if let Some(error) = self.failed_accepts.remove(&id) {
+            return Err(error);
         }
-        if let Some(reservation) = self.accept_reservations.remove(&id) {
+        if let Some(reservation) = self.accept_reservations.get(&id) {
             return Ok(Some(reservation.connection_id));
         }
         if let Some(connection_id) = self.pending_connection(addr) {
+            let Some(listener_id) = self.state.bound.get(addr).map(|bound| bound.id) else {
+                return Err(SimulationError::InvalidState(
+                    "reserved connection has no listener".to_string(),
+                ));
+            };
+            self.accept_reservations.insert(
+                id,
+                AcceptReservation {
+                    addr: addr.to_string(),
+                    listener_id,
+                    connection_id,
+                    waker,
+                },
+            );
             return Ok(Some(connection_id));
         }
         let waiters = self.waiters.accepts.entry(addr.to_string()).or_default();
@@ -482,6 +669,23 @@ impl NetworkSimulation {
         Ok(None)
     }
 
+    /// Release a backlog slot only when the delayed accept actually returns.
+    pub(crate) fn complete_accept(&mut self, id: AcceptWaiterId) -> WakeBatch {
+        let mut wakes = WakeBatch::default();
+        if let Some(reservation) = self.accept_reservations.remove(&id) {
+            self.wake_first_connect_if_room(&reservation.addr, &mut wakes);
+        }
+        wakes
+    }
+
+    pub(crate) fn refresh_accept_reservation_waker(&mut self, id: AcceptWaiterId, waker: Waker) {
+        if let Some(reservation) = self.accept_reservations.get_mut(&id)
+            && !reservation.waker.will_wake(&waker)
+        {
+            reservation.waker = waker;
+        }
+    }
+
     pub(crate) fn cancel_accept(&mut self, addr: &str, id: AcceptWaiterId) -> WakeBatch {
         self.failed_accepts.remove(&id);
         if let Some(waiters) = self.waiters.accepts.get_mut(addr) {
@@ -491,30 +695,51 @@ impl NetworkSimulation {
             }
         }
         if let Some(reservation) = self.accept_reservations.remove(&id) {
-            return self.return_pending_connection(&reservation.addr, reservation.connection_id);
+            if self
+                .state
+                .bound
+                .get(&reservation.addr)
+                .is_some_and(|bound| bound.id == reservation.listener_id)
+                && !self.is_closed(reservation.connection_id)
+            {
+                return self
+                    .return_pending_connection(&reservation.addr, reservation.connection_id);
+            }
+            let mut wakes = self.close_aborted(reservation.connection_id);
+            self.wake_first_connect_if_room(&reservation.addr, &mut wakes);
+            return wakes;
         }
         WakeBatch::default()
     }
 
-    /// Publish an arriving connection to the listener on `addr`, or `None`
-    /// when nobody is listening there: the connection is refused.
+    /// Publish an arriving connection only if the listener has room and no
+    /// earlier blocked connect is waiting. Direct low-level callers cannot
+    /// bypass the same capacity/FIFO rule used by `connect()`.
+    #[cfg(test)]
     pub(crate) fn store_pending(
         &mut self,
         addr: &str,
         connection_id: ConnectionId,
     ) -> Option<WakeBatch> {
-        if !self.is_bound(addr) {
+        let listener_id = self.state.bound.get(addr)?.id;
+        if !self.has_backlog_room(addr) || self.waiters.connects.contains_key(addr) {
             return None;
         }
-        Some(self.publish_pending(addr, connection_id))
+        Some(self.publish_pending(addr, listener_id, connection_id))
     }
 
-    fn publish_pending(&mut self, addr: &str, connection_id: ConnectionId) -> WakeBatch {
+    fn publish_pending(
+        &mut self,
+        addr: &str,
+        listener_id: ListenerId,
+        connection_id: ConnectionId,
+    ) -> WakeBatch {
         if let Some((waiter_id, waker)) = self.take_next_accept(addr) {
             self.accept_reservations.insert(
                 waiter_id,
                 AcceptReservation {
                     addr: addr.to_string(),
+                    listener_id,
                     connection_id,
                     waker: waker.clone(),
                 },
@@ -531,6 +756,37 @@ impl NetworkSimulation {
         WakeBatch::default()
     }
 
+    fn backlog_occupancy(&self, addr: &str) -> usize {
+        let queued = self
+            .state
+            .pending_connections
+            .get(addr)
+            .map_or(0, VecDeque::len);
+        let reserved = self
+            .accept_reservations
+            .values()
+            .filter(|reservation| reservation.addr == addr)
+            .count();
+        queued + reserved
+    }
+
+    fn has_backlog_room(&self, addr: &str) -> bool {
+        self.backlog_occupancy(addr) < self.state.config.accept_backlog_capacity
+    }
+
+    fn wake_first_connect_if_room(&self, addr: &str, wakes: &mut WakeBatch) {
+        if self.is_bound(addr)
+            && self.has_backlog_room(addr)
+            && let Some(waiter) = self
+                .waiters
+                .connects
+                .get(addr)
+                .and_then(|waiters| waiters.values().next())
+        {
+            wakes.extend([waiter.waker.clone()]);
+        }
+    }
+
     pub(crate) fn pending_connection(&mut self, addr: &str) -> Option<ConnectionId> {
         let queue = self.state.pending_connections.get_mut(addr)?;
         let result = queue.pop_front();
@@ -541,16 +797,16 @@ impl NetworkSimulation {
         result
     }
 
-    pub(crate) fn return_pending_connection(
-        &mut self,
-        addr: &str,
-        connection_id: ConnectionId,
-    ) -> WakeBatch {
+    fn return_pending_connection(&mut self, addr: &str, connection_id: ConnectionId) -> WakeBatch {
+        let Some(listener_id) = self.state.bound.get(addr).map(|bound| bound.id) else {
+            return self.close_aborted(connection_id);
+        };
         if let Some((waiter_id, waker)) = self.take_next_accept(addr) {
             self.accept_reservations.insert(
                 waiter_id,
                 AcceptReservation {
                     addr: addr.to_string(),
+                    listener_id,
                     connection_id,
                     waker: waker.clone(),
                 },
@@ -1147,13 +1403,21 @@ impl NetworkSimulation {
         let mut wakes = WakeBatch::default();
         for waiters in std::mem::take(&mut self.waiters.accepts).into_values() {
             for (id, waker) in waiters {
-                self.failed_accepts.insert(id);
+                self.failed_accepts
+                    .insert(id, SimulationError::SimulationShutdown);
                 wakes.extend([waker]);
             }
         }
         for (id, reservation) in std::mem::take(&mut self.accept_reservations) {
-            self.failed_accepts.insert(id);
+            self.failed_accepts
+                .insert(id, SimulationError::SimulationShutdown);
             wakes.extend([reservation.waker]);
+        }
+        for waiters in std::mem::take(&mut self.waiters.connects).into_values() {
+            for (id, waiter) in waiters {
+                self.failed_connects.insert(id);
+                wakes.extend([waiter.waker]);
+            }
         }
         self.state.pending_connections.clear();
         // The world is over: every listener is dead, and a listener bound
@@ -1943,6 +2207,7 @@ impl NetworkSimulation {
             .connections
             .get(&id)
             .and_then(|c| c.paired_connection);
+        let mut wakes = self.evict_aborted_from_backlogs(id, paired);
         for current in [Some(id), paired].into_iter().flatten() {
             if let Some(c) = self.state.connections.get_mut(&current) {
                 c.flags.set_is_closed(true);
@@ -1959,7 +2224,6 @@ impl NetworkSimulation {
             self.discard_send_queue(current);
             self.discard_in_flight(current);
         }
-        let mut wakes = WakeBatch::default();
         for current in [Some(id), paired].into_iter().flatten() {
             self.discard_receive_buffer(current, &mut wakes);
         }
@@ -1968,6 +2232,56 @@ impl NetworkSimulation {
             Self::take_waiter(&mut self.waiters.write_clogs, current, &mut wakes);
             Self::take_waiter(&mut self.waiters.read_clogs, current, &mut wakes);
             Self::take_waiter(&mut self.waiters.send_buffers, current, &mut wakes);
+        }
+        wakes
+    }
+
+    /// A reset destroys unaccepted endpoints as well as their stream buffers.
+    /// Remove them before waking parked connects, so an aborted endpoint never
+    /// holds a backlog slot until a later accept happens to poll.
+    fn evict_aborted_from_backlogs(
+        &mut self,
+        id: ConnectionId,
+        paired: Option<ConnectionId>,
+    ) -> WakeBatch {
+        let mut affected = BTreeSet::new();
+        for (addr, queue) in &mut self.state.pending_connections {
+            let old_len = queue.len();
+            queue.retain(|queued| *queued != id && Some(*queued) != paired);
+            if queue.len() != old_len {
+                affected.insert(addr.clone());
+            }
+        }
+        self.state
+            .pending_connections
+            .retain(|_, queue| !queue.is_empty());
+        let reserved_ids: Vec<AcceptWaiterId> = self
+            .accept_reservations
+            .iter()
+            .filter_map(|(waiter_id, reservation)| {
+                (reservation.connection_id == id || Some(reservation.connection_id) == paired)
+                    .then_some(*waiter_id)
+            })
+            .collect();
+        let mut wakes = WakeBatch::default();
+        for waiter_id in reserved_ids {
+            if let Some(reservation) = self.accept_reservations.remove(&waiter_id) {
+                affected.insert(reservation.addr);
+                self.failed_accepts.entry(waiter_id).or_insert_with(|| {
+                    SimulationError::InvalidState("pending connection aborted".to_string())
+                });
+                wakes.extend([reservation.waker]);
+            }
+        }
+        for waiters in self.waiters.connects.values() {
+            for waiter in waiters.values() {
+                if waiter.connection_id == id || Some(waiter.connection_id) == paired {
+                    wakes.extend([waiter.waker.clone()]);
+                }
+            }
+        }
+        for addr in affected {
+            self.wake_first_connect_if_room(&addr, &mut wakes);
         }
         wakes
     }

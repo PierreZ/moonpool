@@ -4,11 +4,14 @@ use crate::WeakSimWorld;
 use crate::buggify;
 use crate::network::ConnectFailureMode;
 use crate::sim::rng::sim_random;
+use std::future::Future;
 use std::io;
 use std::net::IpAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use tracing::instrument;
 
-use super::ConnectionId;
+use super::{ConnectWaiterId, ConnectionId, PendingPublish};
 
 struct PendingConnectionPair {
     sim: WeakSimWorld,
@@ -36,6 +39,50 @@ impl Drop for PendingConnectionPair {
             && let Ok(sim) = self.sim.upgrade()
         {
             sim.discard_connection_pair(self.client);
+        }
+    }
+}
+
+/// Cancellation-safe wait for a live listener's bounded accept backlog.
+struct PendingConnect {
+    sim: WeakSimWorld,
+    addr: String,
+    server: ConnectionId,
+    waiter_id: ConnectWaiterId,
+}
+
+impl Future for PendingConnect {
+    type Output = io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let sim = self
+            .sim
+            .upgrade()
+            .map_err(|_| io::Error::other("simulation shutdown"))?;
+        match sim.poll_store_pending_connection(
+            &self.addr,
+            self.server,
+            self.waiter_id,
+            cx.waker().clone(),
+        ) {
+            PendingPublish::Published => Poll::Ready(Ok(())),
+            PendingPublish::Full => Poll::Pending,
+            PendingPublish::Unbound => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                format!("connection refused: nothing is listening on {}", self.addr),
+            ))),
+            PendingPublish::Aborted => Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "connection aborted while waiting for listener backlog",
+            ))),
+        }
+    }
+}
+
+impl Drop for PendingConnect {
+    fn drop(&mut self) {
+        if let Ok(sim) = self.sim.upgrade() {
+            sim.cancel_connect_waiter(&self.addr, self.waiter_id);
         }
     }
 }
@@ -167,17 +214,17 @@ impl NetworkProvider for SimNetworkProvider {
             .await
             .map_err(io::Error::other)?;
 
-        // Only publish the server endpoint after connection establishment —
-        // and only to a live listener. Nobody listening when the connection
-        // arrives is a refused connection: the pair is discarded (the guard
-        // stays armed) and the caller gets what the kernel would answer.
-        if !sim.store_pending_connection(addr, server_id) {
-            tracing::debug!(addr = %addr, "connection refused: nothing is listening");
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionRefused,
-                format!("connection refused: nothing is listening on {addr}"),
-            ));
+        // A full listener parks the connect until an accept actually returns
+        // and frees a slot. The guard discards the unpublished pair if the
+        // connect is canceled or the listener disappears while it waits.
+        let waiter_id = sim.allocate_connect_waiter().map_err(io::Error::other)?;
+        PendingConnect {
+            sim: self.sim.clone(),
+            addr: addr.to_string(),
+            server: server_id,
+            waiter_id,
         }
+        .await?;
         pending_pair.disarm();
 
         let stream = SimTcpStream::new(self.sim.clone(), client_id);
