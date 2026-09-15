@@ -145,6 +145,80 @@ fn reserved_accept_counts_until_its_delayed_future_returns() {
 }
 
 #[test]
+fn growing_capacity_wakes_multiple_parked_connects_after_queue_and_reservation_fill_it() {
+    let mut sim = world(3);
+    let mut config = sim.with_network_config(Clone::clone);
+    config.accept_latency = LatencyDistribution::Uniform {
+        start: Duration::from_mins(1),
+        end: Duration::from_mins(1),
+    };
+    sim.set_network_config(config);
+    let server = sim.network_provider(ip("10.0.1.2"));
+    let client = sim.network_provider(ip("10.0.1.1"));
+    let listener = drive(&mut sim, server.bind(SERVER)).expect("bind");
+    let first = drive(&mut sim, client.connect(SERVER)).expect("first connect");
+    let second = drive(&mut sim, client.connect(SERVER)).expect("second connect");
+    let third = drive(&mut sim, client.connect(SERVER)).expect("third connect");
+    let mut accepting = pin!(listener.accept());
+    assert!(
+        poll_once(accepting.as_mut()).is_pending(),
+        "first endpoint reserved"
+    );
+    let mut fourth = pin!(client.connect(SERVER));
+    let mut fifth = pin!(client.connect(SERVER));
+    assert!(settle(&mut sim, fourth.as_mut()).is_pending());
+    assert!(settle(&mut sim, fifth.as_mut()).is_pending());
+    assert!(
+        !sim.has_pending_events(),
+        "two queued plus one reserved fill all slots"
+    );
+
+    let fourth_wakes = Arc::new(AtomicUsize::new(0));
+    let fifth_wakes = Arc::new(AtomicUsize::new(0));
+    assert!(poll_with(fourth.as_mut(), &counting_waker(&fourth_wakes)).is_pending());
+    assert!(poll_with(fifth.as_mut(), &counting_waker(&fifth_wakes)).is_pending());
+    let mut expanded = sim.with_network_config(Clone::clone);
+    expanded.accept_backlog_capacity = 5;
+    sim.set_network_config(expanded);
+    assert_eq!(
+        fourth_wakes.load(Ordering::SeqCst),
+        1,
+        "oldest waiter wakes first"
+    );
+    assert_eq!(
+        fifth_wakes.load(Ordering::SeqCst),
+        0,
+        "newer waiter still waits"
+    );
+    assert!(
+        poll_with(fifth.as_mut(), &counting_waker(&fifth_wakes)).is_pending(),
+        "newer waiter cannot overtake"
+    );
+    let Poll::Ready(Ok(fourth)) = poll_once(fourth.as_mut()) else {
+        panic!("capacity growth must publish oldest connect");
+    };
+    assert!(
+        fifth_wakes.load(Ordering::SeqCst) > 0,
+        "first publication wakes next"
+    );
+    let Poll::Ready(Ok(fifth)) = poll_once(fifth.as_mut()) else {
+        panic!("capacity growth must publish next connect");
+    };
+
+    // The raised capacity is now full: four queued endpoints plus the
+    // delayed accept reservation. It frees a slot only when accept returns.
+    let mut sixth = pin!(client.connect(SERVER));
+    assert!(settle(&mut sim, sixth.as_mut()).is_pending());
+    let Poll::Ready(Ok((accepted_first, _))) = poll_once(accepting.as_mut()) else {
+        panic!("reserved accept should return after delay");
+    };
+    let Poll::Ready(Ok(sixth)) = poll_once(sixth.as_mut()) else {
+        panic!("accept return should release the fifth slot");
+    };
+    drop((first, second, third, fourth, fifth, sixth, accepted_first));
+}
+
+#[test]
 fn parked_connects_resume_fifo_and_cancelled_one_leaves_no_endpoint() {
     let mut sim = world(1);
     let server = sim.network_provider(ip("10.0.1.2"));

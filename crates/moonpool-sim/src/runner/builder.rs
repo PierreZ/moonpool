@@ -2294,6 +2294,28 @@ mod tests {
     }
 
     #[test]
+    fn accept_backlog_builder_override_reaches_world_without_changing_send_window() {
+        let builder = SimulationBuilder::new().accept_backlog_capacity(3);
+        let default_window = crate::NetworkConfiguration::default().tcp_send_window_bytes;
+        let sim = SimulationBuilder::build_sim_for_iteration(
+            builder.network_chaos,
+            builder.storage_chaos,
+            builder.network_fault_mask,
+            builder.link_latency.clone(),
+            (
+                builder.tcp_send_window_bytes,
+                builder.accept_backlog_capacity,
+            ),
+            builder.buggify_knobs,
+            20_260_915,
+        );
+        sim.with_network_config(|config| {
+            assert_eq!(config.accept_backlog_capacity, 3);
+            assert_eq!(config.tcp_send_window_bytes, default_window);
+        });
+    }
+
+    #[test]
     fn network_fault_mask_disables_only_bit_flips() {
         let seed = 174;
         let (baseline, _) =
