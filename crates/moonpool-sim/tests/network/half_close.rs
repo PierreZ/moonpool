@@ -156,3 +156,34 @@ fn dropping_after_the_shutdown_closes_the_connection_once() {
         "EOF is sticky, never a second event"
     );
 }
+
+#[test]
+fn dropping_with_unread_received_bytes_resets_the_peer() {
+    let (mut sim, client, mut server) = connected();
+    drive(&mut sim, server.write_all(b"unread")).expect("write accepted");
+    sim.run_until_empty();
+
+    drop(client);
+    let mut byte = [0_u8; 1];
+    let error = match poll_read_once(&mut server, &mut byte) {
+        Poll::Ready(Err(error)) => error,
+        other => panic!("unread-data drop must reset the peer, got {other:?}"),
+    };
+    assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+}
+
+#[test]
+fn dropping_after_received_bytes_are_drained_remains_graceful() {
+    let (mut sim, mut client, mut server) = connected();
+    drive(&mut sim, server.write_all(b"read")).expect("write accepted");
+    let mut bytes = [0_u8; 4];
+    drive(&mut sim, client.read_exact(&mut bytes)).expect("client drains received bytes");
+    assert_eq!(&bytes, b"read");
+
+    drop(client);
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        drive(&mut sim, server.read(&mut byte)).expect("graceful EOF"),
+        0
+    );
+}

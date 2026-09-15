@@ -97,6 +97,10 @@ For numeric socket addresses, binding port zero assigns a distinct dynamic port;
 `listener.local_addr()` returns that resolved address for clients to connect to.
 Opaque logical addresses, such as the process IP alone, remain valid in the
 simulated provider.
+Dropping a stream with unread received bytes resets the peer, as TCP does when
+the application discards acknowledged data. A drained stream closes gracefully;
+`AsyncWrite::close` shuts down only the write half so the stream can still read
+a reply.
 
 ## TaskProvider
 

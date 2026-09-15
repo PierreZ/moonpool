@@ -213,14 +213,18 @@ impl SimTcpStream {
 
 impl Drop for SimTcpStream {
     fn drop(&mut self) {
-        // Close the connection in the simulation when the stream is dropped
-        // This matches real TCP behavior where dropping a socket always closes it
         if let Ok(sim) = self.sim.upgrade() {
             tracing::debug!(
                 "SimTcpStream dropping, closing connection {}",
                 self.connection_id.0
             );
-            sim.close_connection(self.connection_id);
+            // A socket closed with unread received bytes sends RST because
+            // those acknowledged bytes were lost to the application.
+            if sim.has_readable_data(self.connection_id) {
+                sim.close_connection_abort(self.connection_id);
+            } else {
+                sim.close_connection(self.connection_id);
+            }
         }
     }
 }
