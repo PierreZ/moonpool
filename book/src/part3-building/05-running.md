@@ -161,9 +161,14 @@ SimulationBuilder::new()
 
 Each workload phase also has a generous virtual-time budget. It bounds a
 setup, run, or final check that keeps rearming timers without completing. The
-runner first requests shutdown, then fails the seed if simulated time keeps
-advancing for another full budget, so a stuck precondition cannot leave CI
-waiting forever.
+runner first requests shutdown, then rejects a phase that still cannot finish,
+so a stuck precondition cannot leave CI waiting forever.
+
+If a setup, run, or check task panics or is cancelled before it returns its
+owned workload, Moonpool stops the campaign. Reusing the surviving workloads
+on a later seed would leave the workload set incomplete and can assign an
+instance another workload's identity. An ordinary error returned from a
+workload preserves its instance, so later seeds continue normally.
 
 ## cargo nextest vs cargo xtask sim
 

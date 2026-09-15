@@ -821,9 +821,8 @@ impl SimulationBuilder {
     /// Set the virtual-time budget for each workload phase.
     ///
     /// If simulated time advances past this bound while one or more workloads
-    /// are still running, the orchestrator first triggers a graceful shutdown
-    /// and, if simulated time keeps climbing by another full budget while
-    /// workloads remain, declares the phase deadlocked. Setup and final
+    /// are still running, the orchestrator requests shutdown. If the phase
+    /// still cannot finish, it declares the seed deadlocked. Setup and final
     /// checks use the same guard, so a hung precondition or validation cannot
     /// keep a seed alive forever.
     ///
