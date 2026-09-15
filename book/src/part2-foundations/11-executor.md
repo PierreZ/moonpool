@@ -129,6 +129,13 @@ records a detached child panic with its process or workload identity and marks
 that seed as failed. Dropping a task during process shutdown or executor
 teardown remains cancellation, not a panic.
 
+`time.sleep(Duration::ZERO)` still schedules a real same-time timer, preserving
+the scheduler's FIFO ordering for a burst of immediate work. The runner allows
+that fan-out, then requests shutdown after a generous fixed count of events
+that keep rearming at the same logical instant. If the tasks ignore shutdown,
+the next stagnant burst fails the seed. Time advancing or a task completing
+resets the count, so ordinary cleanup and long timer-driven runs keep working.
+
 Two behaviors are deliberately **better** than tokio's:
 
 - A genuine deadlock (driver not woken, nothing runnable) panics with the

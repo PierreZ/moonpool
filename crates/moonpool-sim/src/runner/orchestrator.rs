@@ -711,12 +711,13 @@ impl WorkloadOrchestrator {
         bool,
     ) {
         let setup_handles = Self::spawn_setup_tasks(workloads, contexts);
-        if !Self::cooperative_loop_until_done(env, &setup_handles).await {
+        let stalled = !Self::cooperative_loop_until_done(env, &setup_handles).await;
+        if stalled {
             for handle in &setup_handles {
                 handle.abort();
             }
         }
-        Self::collect_setup_results(setup_handles).await
+        Self::collect_setup_results(setup_handles, stalled).await
     }
 
     /// Spawn each workload's `setup()` future as a tokio task and collect
@@ -869,7 +870,7 @@ impl WorkloadOrchestrator {
                 StallOutcome::Breached => {
                     Self::trigger_shutdown(sim, shutdown_signal);
                     shutdown_triggered = true;
-                    stall_guard.reset_no_progress();
+                    stall_guard.reset_after_shutdown();
                 }
                 StallOutcome::Deadlock => return Err((vec![seed], 1)),
             }
@@ -1068,6 +1069,7 @@ impl WorkloadOrchestrator {
         let mut stall_guard =
             RunStallGuard::new(sim.current_time(), run_time_budget, seed, iteration_count);
         let mut shutdown_triggered = false;
+        let mut stalled = false;
 
         // Cooperative loop for check.
         loop {
@@ -1098,9 +1100,10 @@ impl WorkloadOrchestrator {
                 StallOutcome::Breached => {
                     Self::trigger_shutdown(sim, shutdown_signal);
                     shutdown_triggered = true;
-                    stall_guard.reset_no_progress();
+                    stall_guard.reset_after_shutdown();
                 }
                 StallOutcome::Deadlock => {
+                    stalled = true;
                     for handle in &check_handles {
                         handle.abort();
                     }
@@ -1119,9 +1122,14 @@ impl WorkloadOrchestrator {
                 final_workloads.push(w);
                 check_results.push(result);
             } else {
-                tracing::error!("Check task panicked");
+                let message = if stalled {
+                    "Check phase stalled"
+                } else {
+                    "Check task panicked"
+                };
+                tracing::error!(message);
                 check_results.push(Err(crate::SimulationError::InvalidState(
-                    "Check task panicked".to_string(),
+                    message.to_string(),
                 )));
             }
         }
@@ -1321,7 +1329,7 @@ impl WorkloadOrchestrator {
                 StallOutcome::Breached => {
                     Self::trigger_shutdown(sim, shutdown_signal);
                     shutdown_triggered = true;
-                    stall_guard.reset_no_progress();
+                    stall_guard.reset_after_shutdown();
                 }
                 StallOutcome::Deadlock => {
                     Self::pump_observability(sim, obs);
@@ -1335,6 +1343,7 @@ impl WorkloadOrchestrator {
     /// Collect results from spawned `setup()` tasks.
     async fn collect_setup_results(
         setup_handles: Vec<SetupHandle>,
+        stalled: bool,
     ) -> (
         Vec<Box<dyn Workload>>,
         Vec<SimContext>,
@@ -1355,10 +1364,15 @@ impl WorkloadOrchestrator {
                 workloads.push(w);
                 contexts.push(ctx);
             } else {
-                tracing::error!("Setup task panicked");
+                let message = if stalled {
+                    "Setup phase stalled"
+                } else {
+                    "Setup task panicked"
+                };
+                tracing::error!(message);
                 setup_failed = true;
                 setup_results.push(Err(crate::SimulationError::InvalidState(
-                    "Setup task panicked".to_string(),
+                    message.to_string(),
                 )));
             }
         }
