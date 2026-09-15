@@ -132,6 +132,11 @@ Dropping or detaching the handle leaves the panic unobserved, even if the task
 already finished. Dropping a task during process shutdown or executor teardown
 remains cancellation, not a panic.
 
+The runner also records each unobserved panic as an `unobserved_task_panic`
+event with `actor`, `task`, and `panic` fields. It runs invariants once more
+after task teardown, so those diagnostics remain visible even when setup or
+check stalls and orchestration returns early.
+
 `time.sleep(Duration::ZERO)` still schedules a real same-time timer, preserving
 the scheduler's FIFO ordering for a burst of immediate work. The runner allows
 that fan-out, then requests shutdown after a generous fixed count of events

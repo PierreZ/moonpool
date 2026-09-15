@@ -1097,6 +1097,7 @@ impl SimulationBuilder {
         let mut executor = crate::executor::Executor::new(seed);
         let task_panics = TaskPanicTracker::default();
         let tracker = task_panics.clone();
+        let diagnostics = obs_handle.clone();
         let outcome = executor.block_on(async move {
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
                 workloads,
@@ -1118,6 +1119,21 @@ impl SimulationBuilder {
         drop(executor);
 
         let panics = task_panics.take();
+        for panic in &panics {
+            tracing::error!(
+                target: "moonpool_sim::runner",
+                actor = %panic.actor,
+                task = %panic.task,
+                panic = %panic.message,
+                "unobserved_task_panic"
+            );
+            diagnostics.record_task_panic(&panic.actor, &panic.task, &panic.message);
+        }
+        // A fatal outcome can skip the orchestrator's usual final step pass.
+        // Let invariants see post-teardown diagnostics before the report is made.
+        if outcome.is_err() || !panics.is_empty() {
+            diagnostics.run_invariants();
+        }
         if panics.is_empty() {
             return outcome;
         }

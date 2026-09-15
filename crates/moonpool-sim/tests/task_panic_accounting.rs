@@ -1,14 +1,96 @@
 //! Detached actor tasks that panic must fail their simulation seed.
 
 use std::future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_core::JoinError;
 use moonpool_sim::{
     FaultContext, FaultInjector, Process, SimContext, SimulationBuilder, SimulationError,
-    SimulationResult, TaskProvider, TimeProvider, Workload,
+    SimulationResult, TaskProvider, TimeProvider, TraceEvent, Workload,
 };
+
+struct StalledSetupAfterChildPanic {
+    actor: Arc<Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl Workload for StalledSetupAfterChildPanic {
+    fn name(&self) -> &'static str {
+        "stalled_setup_after_child_panic"
+    }
+
+    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        *self.actor.lock().expect("actor lock poisoned") =
+            Some(format!("workload@{}", ctx.my_ip()));
+        ctx.task()
+            .spawn_task("stalled-setup-child", async {
+                panic!("stalled setup child panic");
+            })
+            .detach();
+        loop {
+            let _ = ctx.time().sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn fatal_setup_stall_keeps_unobserved_panic_diagnostics() {
+    let actor = Arc::new(Mutex::new(None));
+    let seen = Arc::new(Mutex::new((
+        Vec::<TraceEvent>::new(),
+        Vec::<TraceEvent>::new(),
+        0_usize,
+    )));
+    let seen_invariant = Arc::clone(&seen);
+    let report = SimulationBuilder::new()
+        .workload(StalledSetupAfterChildPanic {
+            actor: Arc::clone(&actor),
+        })
+        .invariant_fn("panic diagnostics", move |q, _| {
+            tracing::info!("unrelated_outside_actor");
+            *seen_invariant.lock().expect("seen lock poisoned") = (
+                q.snapshot("unobserved_task_panic"),
+                q.snapshot("workload_task_lost"),
+                q.len("unrelated_outside_actor"),
+            );
+        })
+        .run_time_budget(Duration::from_secs(1))
+        .set_iterations(1)
+        .set_debug_seeds(vec![12])
+        .run();
+
+    assert_eq!(report.failed_runs, 1, "report: {report:?}");
+    assert_eq!(report.seeds_failing, vec![12], "report: {report:?}");
+    let actor = actor
+        .lock()
+        .expect("actor lock poisoned")
+        .clone()
+        .expect("setup must record its actor");
+    let seen = seen.lock().expect("seen lock poisoned");
+    assert_eq!(
+        seen.2, 0,
+        "unrelated events outside actor spans are dropped"
+    );
+    assert_eq!(seen.0.len(), 1, "the panic should reach the final pass");
+    let event = &seen.0[0];
+    assert_eq!(event.source, "sim");
+    assert_eq!(event.name, "unobserved_task_panic");
+    assert_eq!(event.str("actor"), Some(actor.as_str()));
+    assert_eq!(event.str("task"), Some("stalled-setup-child"));
+    assert_eq!(event.str("panic"), Some("stalled setup child panic"));
+    assert_eq!(seen.1.len(), 1, "the lost workload should be observed");
+    let event = &seen.1[0];
+    assert_eq!(event.source, "10.0.0.1");
+    assert_eq!(event.name, "workload_task_lost");
+    assert_eq!(event.str("phase"), Some("setup"));
+    assert_eq!(event.str("cause"), Some("task was cancelled"));
+}
 
 struct HandledJoinedPanic;
 
