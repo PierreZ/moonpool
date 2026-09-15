@@ -574,10 +574,28 @@ async fn path_contract<P: StorageProvider>(
                 .await,
         ),
     ));
+    let delete_error = provider
+        .delete(&path("db"))
+        .await
+        .expect_err("directory deletion must fail");
+    // macOS reports PermissionDenied, while Linux reports IsADirectory.
+    // Both reject this file-only operation.
+    assert!(
+        matches!(
+            delete_error.kind(),
+            std::io::ErrorKind::IsADirectory | std::io::ErrorKind::PermissionDenied
+        ),
+        "unexpected directory deletion error: {delete_error}"
+    );
     log.push((
         "delete directory",
-        applied(provider.delete(&path("db")).await),
+        PathOutcome::Applied(Err(std::io::ErrorKind::IsADirectory)),
     ));
+    assert!(provider.exists(&path("db")).await?, "directory survived");
+    assert!(
+        provider.exists(&path("db/nested")).await?,
+        "nested directory survived"
+    );
 
     let regular = provider
         .open(&path("regular"), OpenOptions::create_new_write())
