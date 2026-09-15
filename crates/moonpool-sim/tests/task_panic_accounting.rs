@@ -4,10 +4,127 @@ use std::future;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use moonpool_core::JoinError;
 use moonpool_sim::{
-    FaultContext, FaultInjector, Process, SimContext, SimulationBuilder, SimulationResult,
-    TaskProvider, TimeProvider, Workload,
+    FaultContext, FaultInjector, Process, SimContext, SimulationBuilder, SimulationError,
+    SimulationResult, TaskProvider, TimeProvider, Workload,
 };
+
+struct HandledJoinedPanic;
+
+#[async_trait]
+impl Workload for HandledJoinedPanic {
+    fn name(&self) -> &'static str {
+        "handled_joined_panic"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let joined = ctx.task().spawn_task("joined-child", async {
+            panic!("joined child panic");
+        });
+        match joined.await {
+            Err(JoinError::Panicked) => Ok(()),
+            other => Err(SimulationError::InvalidState(format!(
+                "expected a recoverable joined panic, got {other:?}"
+            ))),
+        }
+    }
+}
+
+#[test]
+fn handled_joined_panic_does_not_fail_the_seed() {
+    let report = SimulationBuilder::new()
+        .workload(HandledJoinedPanic)
+        .set_iterations(1)
+        .set_debug_seeds(vec![8])
+        .run();
+    assert_eq!(report.successful_runs, 1, "report: {report:?}");
+    assert_eq!(report.failed_runs, 0, "report: {report:?}");
+}
+
+struct CompletedUnobservedPanic {
+    detach: bool,
+}
+
+#[async_trait]
+impl Workload for CompletedUnobservedPanic {
+    fn name(&self) -> &'static str {
+        "completed_unobserved_panic"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let handle = ctx.task().spawn_task("completed-child", async {
+            panic!("completed child panic");
+        });
+        ctx.task().yield_now().await;
+        if !handle.is_finished() {
+            return Err(SimulationError::InvalidState(
+                "child did not panic before detachment".to_string(),
+            ));
+        }
+        if self.detach {
+            handle.detach();
+        } else {
+            drop(handle);
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn panic_before_explicit_detach_still_fails_the_seed() {
+    let report = SimulationBuilder::new()
+        .workload(CompletedUnobservedPanic { detach: true })
+        .set_iterations(1)
+        .set_debug_seeds(vec![9])
+        .run();
+    assert_eq!(report.successful_runs, 0, "report: {report:?}");
+    assert_eq!(report.failed_runs, 1, "report: {report:?}");
+}
+
+#[test]
+fn panic_before_handle_drop_still_fails_the_seed() {
+    let report = SimulationBuilder::new()
+        .workload(CompletedUnobservedPanic { detach: false })
+        .set_iterations(1)
+        .set_debug_seeds(vec![10])
+        .run();
+    assert_eq!(report.successful_runs, 0, "report: {report:?}");
+    assert_eq!(report.failed_runs, 1, "report: {report:?}");
+}
+
+struct AbortedBeforePanic;
+
+#[async_trait]
+impl Workload for AbortedBeforePanic {
+    fn name(&self) -> &'static str {
+        "aborted_before_panic"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let handle = ctx.task().spawn_task("aborted-child", async {
+            panic!("must never be polled");
+        });
+        handle.abort();
+        match handle.await {
+            Err(JoinError::Cancelled) => Ok(()),
+            other => Err(SimulationError::InvalidState(format!(
+                "expected cancellation before panic, got {other:?}"
+            ))),
+        }
+    }
+}
+
+#[test]
+fn abort_before_child_poll_is_not_a_panic() {
+    let report = SimulationBuilder::new()
+        .workload(AbortedBeforePanic)
+        .set_iterations(1)
+        .set_debug_seeds(vec![11])
+        .run();
+    assert_eq!(report.successful_runs, 1, "report: {report:?}");
+    assert_eq!(report.failed_runs, 0, "report: {report:?}");
+}
 
 struct SetupChildPanic;
 

@@ -125,9 +125,12 @@ The raw executor keeps panic isolation deliberately narrow. A detached task
 spawned with `executor::spawn` records its panic in its own `JoinHandle`, so a
 low-level driver can decide how to recover. Tasks spawned through an actor's
 `ctx.task().spawn_task()` carry a different contract: the simulation runner
-records a detached child panic with its process or workload identity and marks
-that seed as failed. Dropping a task during process shutdown or executor
-teardown remains cancellation, not a panic.
+records an unobserved child panic with its process or workload identity and
+marks that seed as failed. If the caller awaits the handle and handles
+`Err(JoinError::Panicked)`, the panic is observed and the seed can recover.
+Dropping or detaching the handle leaves the panic unobserved, even if the task
+already finished. Dropping a task during process shutdown or executor teardown
+remains cancellation, not a panic.
 
 `time.sleep(Duration::ZERO)` still schedules a real same-time timer, preserving
 the scheduler's FIFO ordering for a burst of immediate work. The runner allows

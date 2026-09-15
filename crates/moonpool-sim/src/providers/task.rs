@@ -4,6 +4,7 @@ use std::any::Any;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -79,13 +80,26 @@ impl TaskProvider for SimTaskProvider {
         // TaskMeta and traces every poll of the task with it. The child does
         // inherit the spawner's span, so its events keep their actor.
         let future = future.instrument(tracing::Span::current());
-        let future = match &self.panic_reporter {
-            Some(reporter) => reporter.catch_task_panic(name, future),
-            None => Box::pin(future),
+        let (future, observed) = match &self.panic_reporter {
+            Some(reporter) => {
+                let observed = Arc::new(AtomicBool::new(false));
+                (
+                    reporter.catch_task_panic(name, future, Arc::clone(&observed)),
+                    Some(observed),
+                )
+            }
+            None => (
+                Box::pin(future) as Pin<Box<dyn Future<Output = ()> + Send>>,
+                None,
+            ),
         };
-        match &self.scope {
+        let handle = match &self.scope {
             Some(scope) => crate::executor::spawn(name, Scoped::new(scope.clone(), future)),
             None => crate::executor::spawn(name, future),
+        };
+        match observed {
+            Some(observed) => handle.with_panic_acknowledgment(observed),
+            None => handle,
         }
     }
 
@@ -97,7 +111,13 @@ impl TaskProvider for SimTaskProvider {
 /// Per-iteration collection of panics from detached provider-spawned tasks.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TaskPanicTracker {
-    panics: Arc<Mutex<Vec<TaskPanic>>>,
+    panics: Arc<Mutex<Vec<TaskPanicRecord>>>,
+}
+
+#[derive(Debug)]
+struct TaskPanicRecord {
+    panic: TaskPanic,
+    observed: Arc<AtomicBool>,
 }
 
 impl TaskPanicTracker {
@@ -111,12 +131,16 @@ impl TaskPanicTracker {
 
     /// Drain all panics observed during this iteration.
     pub(crate) fn take(&self) -> Vec<TaskPanic> {
-        std::mem::take(
+        let records = std::mem::take(
             &mut *self
                 .panics
                 .lock()
                 .expect("Mutex poisoned: prior task panicked"),
-        )
+        );
+        records
+            .into_iter()
+            .filter_map(|record| (!record.observed.load(Ordering::Acquire)).then_some(record.panic))
+            .collect()
     }
 }
 
@@ -129,7 +153,12 @@ pub(crate) struct TaskPanicReporter {
 
 impl TaskPanicReporter {
     /// Catch and record a task panic while retaining the task's normal `()` output.
-    fn catch_task_panic<F>(&self, task: &str, future: F) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    fn catch_task_panic<F>(
+        &self,
+        task: &str,
+        future: F,
+        observed: Arc<AtomicBool>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send>>
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -137,7 +166,7 @@ impl TaskPanicReporter {
         let task = task.to_string();
         Box::pin(async move {
             if let Err(payload) = AssertUnwindSafe(future).catch_unwind().await {
-                reporter.record(task, payload.as_ref());
+                reporter.record_with_observer(task, payload.as_ref(), observed);
                 std::panic::resume_unwind(payload);
             }
         })
@@ -145,6 +174,15 @@ impl TaskPanicReporter {
 
     /// Record a panic that occurred in this actor's named task.
     pub(crate) fn record(&self, task: impl Into<String>, payload: &(dyn Any + Send)) {
+        self.record_with_observer(task, payload, Arc::new(AtomicBool::new(false)));
+    }
+
+    fn record_with_observer(
+        &self,
+        task: impl Into<String>,
+        payload: &(dyn Any + Send),
+        observed: Arc<AtomicBool>,
+    ) {
         let message = if let Some(message) = payload.downcast_ref::<&str>() {
             (*message).to_string()
         } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -156,10 +194,13 @@ impl TaskPanicReporter {
             .panics
             .lock()
             .expect("Mutex poisoned: prior task panicked")
-            .push(TaskPanic {
-                actor: self.actor.clone(),
-                task: task.into(),
-                message,
+            .push(TaskPanicRecord {
+                panic: TaskPanic {
+                    actor: self.actor.clone(),
+                    task: task.into(),
+                    message,
+                },
+                observed,
             });
     }
 }

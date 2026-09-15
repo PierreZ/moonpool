@@ -3,6 +3,8 @@
 use std::any::Any;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use async_task::FallibleTask;
@@ -33,13 +35,23 @@ pub struct JoinHandle<T> {
     /// inner value while the handle satisfies the `Sync` bound that
     /// `TaskProvider::JoinHandle` requires.
     inner: Mutex<Option<FallibleTask<TaskResult<T>, TaskMeta>>>,
+    /// Provider-spawned tasks can acknowledge a panic when their caller
+    /// actually observes `JoinError::Panicked`. Raw executor tasks leave this
+    /// unset, so their public handle behavior stays unchanged.
+    panic_acknowledgment: Option<Arc<AtomicBool>>,
 }
 
 impl<T> JoinHandle<T> {
     pub(crate) fn new(task: FallibleTask<TaskResult<T>, TaskMeta>) -> Self {
         Self {
             inner: Mutex::new(Some(task)),
+            panic_acknowledgment: None,
         }
+    }
+
+    pub(crate) fn with_panic_acknowledgment(mut self, acknowledgment: Arc<AtomicBool>) -> Self {
+        self.panic_acknowledgment = Some(acknowledgment);
+        self
     }
 
     /// Report whether the task has finished running (completed, panicked, or
@@ -99,7 +111,12 @@ impl<T> Future for JoinHandle<T> {
                 // Cancelled elsewhere (executor drop) before completing.
                 Poll::Ready(None) => Poll::Ready(Err(JoinError::Cancelled)),
                 Poll::Ready(Some(Ok(output))) => Poll::Ready(Ok(output)),
-                Poll::Ready(Some(Err(_panic_payload))) => Poll::Ready(Err(JoinError::Panicked)),
+                Poll::Ready(Some(Err(_panic_payload))) => {
+                    if let Some(acknowledgment) = &self.panic_acknowledgment {
+                        acknowledgment.store(true, Ordering::Release);
+                    }
+                    Poll::Ready(Err(JoinError::Panicked))
+                }
             },
         }
     }
