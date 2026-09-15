@@ -6,8 +6,13 @@
 
 use futures::io::AsyncWriteExt;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
+use moonpool_sim::{
+    CrashOutcome, SimStorageProvider, SimWorld, StorageConfiguration, executor::Executor,
+};
+use std::future::Future;
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::task::Poll;
 
 fn test_ip() -> IpAddr {
     "127.0.0.1".parse().expect("valid IP")
@@ -46,6 +51,56 @@ where
         tokio::task::yield_now().await;
     }
     handle.await.expect("task panicked")
+}
+
+/// Drive a low-level provider future and its scheduled storage events on
+/// Moonpool's executor, without a Tokio runtime inside the simulation.
+fn drive_on<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+    let mut executor = Executor::new(7);
+    executor.block_on(async {
+        futures::pin_mut!(future);
+        futures::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+            Poll::Ready(output) => Poll::Ready(output),
+            Poll::Pending if sim.has_pending_events() => {
+                sim.step();
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Pending => Poll::Pending,
+        })
+        .await
+    })
+}
+
+/// A crash profile that makes the fault-coordinate path observable: the first
+/// dirty sector is lost only when its surviving name is admitted by the mask.
+fn masked_rename_sim(seed: u64, dir_loss_probability: f64) -> SimWorld {
+    let mut config = StorageConfiguration::fast_local();
+    config.unsynced_dir_entry_loss_probability = dir_loss_probability;
+    config.clean_crash_probability = 0.0;
+    config.correlated_rollback_probability = 0.0;
+    config.crash_lost_probability = 1.0;
+    config.length_survives_crash_probability = 1.0;
+    let mut sim = SimWorld::new_with_seed(seed);
+    sim.set_storage_config(config);
+    sim.set_storage_eligibility_mask(Arc::new(|path, sector| path == "a-original" && sector == 0));
+    sim
+}
+
+fn make_unsynced_rename(sim: &mut SimWorld) {
+    let provider = sim.storage_provider(test_ip());
+    drive_on(sim, async move {
+        let file = provider
+            .open("a-original", OpenOptions::create_write())
+            .await
+            .expect("create old name");
+        file.write_at(0, b"dirty").await.expect("write old file");
+        provider.sync_dir(".").await.expect("durable old name");
+        provider
+            .rename("a-original", "z-renamed")
+            .await
+            .expect("unsynced rename");
+    });
 }
 
 /// Write and `sync_all` a brand-new file, then crash without syncing the
@@ -184,6 +239,129 @@ fn rename_durability_needs_the_directory_sync() {
 
         assert!(old, "the unsynced rename must roll back to the old name");
         assert!(!new, "the unsynced rename must not be durable");
+    });
+}
+
+/// When a crash rolls a rename back, the original name must govern that
+/// crash's fault mask and reports, and later I/O through the recovered file.
+#[test]
+fn rolled_back_rename_restores_the_original_fault_coordinate() {
+    let mut sim = masked_rename_sim(17, 1.0);
+    make_unsynced_rename(&mut sim);
+    sim.simulate_crash_for_process(test_ip(), true);
+
+    let reports = sim.take_storage_crash_reports();
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].path, "a-original");
+    assert_eq!(reports[0].resolutions[0].outcome, CrashOutcome::Lost);
+
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        assert!(
+            provider
+                .exists("a-original")
+                .await
+                .expect("old name exists")
+        );
+        assert!(!provider.exists("z-renamed").await.expect("new name absent"));
+    });
+
+    let mut config = StorageConfiguration::fast_local();
+    config.write_eio_probability = 1.0;
+    sim.set_storage_config(config);
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        let file = provider
+            .open("a-original", OpenOptions::read_write())
+            .await
+            .expect("reopen recovered file");
+        let error = file.write_at(0, b"later").await.expect_err("masked EIO");
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    });
+}
+
+/// Per-name crash rolls can retain both rename aliases. They must share one
+/// image and use the first surviving name as their fault coordinate.
+#[test]
+fn surviving_rename_aliases_use_the_first_name_for_faults() {
+    let mut found = false;
+    for seed in 0..200_u64 {
+        let mut sim = masked_rename_sim(seed, 0.5);
+        make_unsynced_rename(&mut sim);
+        sim.simulate_crash_for_process(test_ip(), true);
+        let provider = sim.storage_provider(test_ip());
+        let both_survived = drive_on(&mut sim, async move {
+            provider
+                .exists("a-original")
+                .await
+                .expect("old name exists")
+                && provider.exists("z-renamed").await.expect("new name exists")
+        });
+        if !both_survived {
+            continue;
+        }
+        found = true;
+        let reports = sim.take_storage_crash_reports();
+        assert_eq!(reports[0].path, "a-original", "seed {seed}");
+        assert_eq!(
+            reports[0].resolutions[0].outcome,
+            CrashOutcome::Lost,
+            "seed {seed}"
+        );
+
+        let mut config = StorageConfiguration::fast_local();
+        config.write_eio_probability = 1.0;
+        sim.set_storage_config(config);
+        let provider = sim.storage_provider(test_ip());
+        drive_on(&mut sim, async move {
+            for name in ["a-original", "z-renamed"] {
+                let file = provider
+                    .open(name, OpenOptions::read_write())
+                    .await
+                    .expect("reopen alias");
+                file.write_at(0, b"later")
+                    .await
+                    .expect_err("canonical masked EIO");
+            }
+        });
+        break;
+    }
+    assert!(found, "some seed must retain both rename aliases");
+}
+
+/// Losing the only unsynced name must not skip the byte-crash oracle for the
+/// image that existed when the power failure began.
+#[test]
+fn a_lost_new_name_still_gets_a_crash_report() {
+    let mut config = StorageConfiguration::fast_local();
+    config.unsynced_dir_entry_loss_probability = 1.0;
+    config.clean_crash_probability = 0.0;
+    config.length_survives_crash_probability = 1.0;
+    let mut sim = SimWorld::new_with_seed(23);
+    sim.set_storage_config(config);
+
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        let file = provider
+            .open("new-file", OpenOptions::create_write())
+            .await
+            .expect("create unsynced name");
+        file.write_at(0, b"dirty")
+            .await
+            .expect("write unsynced bytes");
+    });
+    sim.simulate_crash_for_process(test_ip(), true);
+
+    let reports = sim.take_storage_crash_reports();
+    assert_eq!(
+        reports.len(),
+        1,
+        "lost name must not bypass the crash oracle"
+    );
+    assert_eq!(reports[0].path, "new-file");
+    let provider = sim.storage_provider(test_ip());
+    drive_on(&mut sim, async move {
+        assert!(!provider.exists("new-file").await.expect("name was lost"));
     });
 }
 

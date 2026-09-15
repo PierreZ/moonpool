@@ -518,6 +518,8 @@ impl StorageEngine {
             self.lose_unsynced_entries(ip, probability);
         }
 
+        self.refresh_file_paths(ip);
+
         // Whatever survived is what is on the disk now — for this process's
         // files only. Another process's unsynced entries are not made durable
         // by this crash.
@@ -535,7 +537,30 @@ impl StorageEngine {
         for (name, file_id) in surviving {
             self.state.durable_paths.insert(name, file_id);
         }
+    }
 
+    /// Give each surviving image a stable fault coordinate after namespace
+    /// rollback. Rare per-name outcomes can leave old and new rename aliases
+    /// pointing to one image; the first surviving name in lexical order wins.
+    /// An image with no surviving name keeps its last coordinate until the
+    /// crash oracle has examined its bytes and it is discarded.
+    fn refresh_file_paths(&mut self, ip: IpAddr) {
+        let mut canonical = BTreeMap::<FileId, String>::new();
+        for ((owner, path), file_id) in &self.state.path_to_file {
+            if *owner == ip {
+                canonical.entry(*file_id).or_insert_with(|| path.clone());
+            }
+        }
+        for (file_id, path) in canonical {
+            if let Some(file) = self.state.files.get_mut(&file_id) {
+                file.path = path;
+            }
+        }
+    }
+
+    /// Forget this process's images after the byte-crash oracle has checked
+    /// even those whose last name was lost in the namespace crash.
+    fn collect_unreachable_files(&mut self, ip: IpAddr) {
         // Contents no surviving name reaches are gone with the name.
         let linked: Vec<FileId> = self
             .state
@@ -1348,6 +1373,10 @@ impl StorageEngine {
         let config = self.state.config_for(ip).clone();
         let armed = self.state.barrier_violation_armed;
         let file_ids = self.files_owned_by(ip);
+        // First decide which names survive so the same crash's fault mask and
+        // reports use the name that actually remains on this process's disk.
+        // Keep every original image until the byte-crash oracle has checked it.
+        self.resolve_namespace_crash(ip);
         // Resolve each file's unsynced writes through the crash model, in
         // stable file order.
         for file_id in &file_ids {
@@ -1373,7 +1402,7 @@ impl StorageEngine {
             self.state.crash_reports.push(report);
         }
 
-        self.resolve_namespace_crash(ip);
+        self.collect_unreachable_files(ip);
 
         let mut actions = StorageActions::default();
         let handle_ids = self

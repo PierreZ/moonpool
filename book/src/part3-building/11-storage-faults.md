@@ -401,6 +401,12 @@ a deleted one may be back. The family is off by default and draws no
 randomness while off, so a crash keeps the namespace it had unless a test asks
 otherwise.
 
+When an unsynced rename rolls back, the recovered name is also the file's
+fault coordinate for that crash and later I/O. Independent name outcomes can
+rarely leave both the old and new names pointing to one image; the simulator
+uses the first surviving name in lexical order for path-based fault masks and
+reports.
+
 ## The Barrier-Bounded Crash Model
 
 A sync is the only barrier a file has, and everything written since the last
