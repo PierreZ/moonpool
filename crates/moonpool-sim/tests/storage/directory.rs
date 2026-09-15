@@ -7,7 +7,8 @@
 use futures::io::AsyncWriteExt;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
-    CrashOutcome, EioTarget, SimStorageProvider, SimWorld, StorageConfiguration, executor::Executor,
+    CrashOutcome, EioTarget, SimFaultEvent, SimStorageProvider, SimWorld, StorageConfiguration,
+    StorageFaultKind, executor::Executor,
 };
 use std::future::Future;
 use std::net::IpAddr;
@@ -372,6 +373,41 @@ fn file_to_directory_replacement_crash_keeps_one_entry_type() {
         seen_file && seen_directory,
         "replacement sweep missed an outcome"
     );
+}
+
+#[test]
+fn failed_directory_sync_reaches_the_simulation_fault_timeline() {
+    let mut config = StorageConfiguration::fast_local();
+    config.sync_failure_probability = 1.0;
+    let mut sim = SimWorld::new();
+    sim.set_storage_config(config);
+    let provider = sim.storage_provider(test_ip());
+    let results = drive_on(&mut sim, async move {
+        (
+            provider.sync_dir("missing").await,
+            provider.sync_dir(".").await,
+        )
+    });
+    assert_eq!(
+        results.0.expect_err("missing dir must fail").kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        results.1.expect_err("injected sync must fail").kind(),
+        std::io::ErrorKind::Other
+    );
+
+    let faults = sim.take_faults();
+    assert_eq!(faults.len(), 1, "only the valid sync gets a fault event");
+    assert!(matches!(
+        &faults[0].event,
+        SimFaultEvent::StorageSyncFault { ip, file_id }
+            if ip == &test_ip().to_string() && *file_id == u64::MAX
+    ));
+    let records = sim.take_storage_fault_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].path, ".");
+    assert_eq!(records[0].kind, StorageFaultKind::SyncFailure);
 }
 
 /// A delete is a directory operation too: unsynced, the crash brings the name

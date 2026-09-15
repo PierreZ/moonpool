@@ -612,10 +612,15 @@ impl StorageEngine {
         &mut self,
         path: &str,
         owner_ip: IpAddr,
-    ) -> Result<StorageActions, StorageError> {
-        let (directory, _) = self.resolve_path(owner_ip, path, false)?;
-        self.require_directory(owner_ip, &directory)?;
+    ) -> (Result<(), StorageError>, StorageActions) {
         let mut actions = StorageActions::default();
+        let directory = match self.resolve_path(owner_ip, path, false) {
+            Ok((directory, _)) => directory,
+            Err(error) => return (Err(error), actions),
+        };
+        if let Err(error) = self.require_directory(owner_ip, &directory) {
+            return (Err(error), actions);
+        }
         let probability = self.state.config_for(owner_ip).sync_failure_probability;
         if probability > 0.0 && sim_random::<f64>() < probability {
             assert_reachable!("disk: directory sync failed");
@@ -624,11 +629,14 @@ impl StorageEngine {
                 ip: owner_ip.to_string(),
                 file_id: u64::MAX,
             });
-            return Err(StorageError::Io {
-                file_id: FileId(u64::MAX),
-                kind: std::io::ErrorKind::Other,
-                message: "directory sync failed (simulated I/O error)".to_string(),
-            });
+            return (
+                Err(StorageError::Io {
+                    file_id: FileId(u64::MAX),
+                    kind: std::io::ErrorKind::Other,
+                    message: "directory sync failed (simulated I/O error)".to_string(),
+                }),
+                actions,
+            );
         }
 
         // One process's directory sync commits that process's entries and
@@ -653,7 +661,7 @@ impl StorageEngine {
                     .insert((*owner, entry.clone()));
             }
         }
-        Ok(actions)
+        (Ok(()), actions)
     }
 
     /// Resolve the namespace a crash leaves behind.

@@ -139,11 +139,11 @@ impl SimWorld {
 
     pub(crate) fn sync_dir(&self, path: &str, owner_ip: IpAddr) -> Result<(), StorageError> {
         let mut inner = self.inner.write();
-        let actions = inner.storage.sync_dir(path, owner_ip)?;
+        let (result, actions) = inner.storage.sync_dir(path, owner_ip);
         let wakes = apply_storage_actions(&mut inner, actions);
         drop(inner);
         wakes.wake();
-        Ok(())
+        result
     }
 
     pub(crate) fn schedule_read(

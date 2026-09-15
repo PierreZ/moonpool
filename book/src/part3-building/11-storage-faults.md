@@ -482,6 +482,10 @@ Directed tests reach for the targeted API on `SimWorld` instead:
 `take_storage_crash_reports()`, and every fault injected from
 `take_storage_fault_records()`.
 
+A failed `sync_dir` reports an I/O error to its caller and emits a
+`storage_sync_fault` event on the simulation fault timeline. An invalid or
+missing directory fails before the sync fault coin is considered.
+
 Fault coordinates are **file plus flat sector offset**. There is no region and
 no sub-file namespace: what the bytes at an offset mean belongs to the format
 written on top.
