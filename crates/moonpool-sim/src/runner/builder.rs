@@ -802,12 +802,14 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set the virtual-time budget for a single run phase.
+    /// Set the virtual-time budget for each workload phase.
     ///
     /// If simulated time advances past this bound while one or more workloads
     /// are still running, the orchestrator first triggers a graceful shutdown
     /// and — if simulated time keeps climbing by another full budget while
-    /// workloads remain — declares the run deadlocked.
+    /// workloads remain — declares the phase deadlocked. Setup and final
+    /// checks use the same guard, so a hung precondition or validation cannot
+    /// keep a seed alive forever.
     ///
     /// This is a deterministic safety net for a *self-perpetuating timer*: a
     /// detached task (e.g. a reconnect / keepalive loop) that re-arms a

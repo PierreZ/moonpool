@@ -68,6 +68,17 @@ struct CheckPhaseInputs<'a> {
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
     task_panics: &'a TaskPanicTracker,
+    seed: u64,
+    iteration_count: usize,
+    run_time_budget: Duration,
+}
+
+/// Inputs used while driving spawned check tasks.
+struct CheckDriver<'a> {
+    shutdown_signal: &'a tokio_util::sync::CancellationToken,
+    seed: u64,
+    iteration_count: usize,
+    run_time_budget: Duration,
 }
 
 /// Shared inputs threaded through a phase that drives the cooperative loop.
@@ -78,6 +89,9 @@ struct PhaseEnv<'a, 'pm> {
     state: &'a StateHandle,
     obs: &'a SimulationLayerHandle,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
+    seed: u64,
+    iteration_count: usize,
+    run_time_budget: Duration,
 }
 
 /// Aggregated borrows needed to drive the run phase.
@@ -172,6 +186,8 @@ struct FinalizeOrchestration<'a, 'pm> {
     client_info: &'a [WorkloadClientInfo],
     topology: &'a TopologyMetadata,
     task_panics: &'a TaskPanicTracker,
+    iteration_count: usize,
+    run_time_budget: Duration,
 }
 
 /// Topology metadata derived from a workload/process configuration: the
@@ -213,6 +229,8 @@ struct BootAndSetupInputs<'a, 'pm> {
     obs: &'a SimulationLayerHandle,
     shutdown_signal: &'a tokio_util::sync::CancellationToken,
     task_panics: &'a TaskPanicTracker,
+    iteration_count: usize,
+    run_time_budget: Duration,
 }
 
 /// Result of [`WorkloadOrchestrator::boot_and_setup`]: continue running or
@@ -312,6 +330,8 @@ impl WorkloadOrchestrator {
                 obs: &obs,
                 shutdown_signal: &shutdown_signal,
                 task_panics: &task_panics,
+                iteration_count,
+                run_time_budget,
             })
             .await?
             {
@@ -364,6 +384,8 @@ impl WorkloadOrchestrator {
             client_info,
             topology: &topology,
             task_panics: &task_panics,
+            iteration_count,
+            run_time_budget,
         })
         .await
     }
@@ -417,6 +439,8 @@ impl WorkloadOrchestrator {
             obs,
             shutdown_signal,
             task_panics,
+            iteration_count,
+            run_time_budget,
         } = inputs;
 
         let mut process_manager = Self::boot_and_wrap_process_manager(
@@ -456,6 +480,9 @@ impl WorkloadOrchestrator {
                 state,
                 obs,
                 shutdown_signal,
+                seed,
+                iteration_count,
+                run_time_budget,
             },
         )
         .await;
@@ -558,6 +585,8 @@ impl WorkloadOrchestrator {
             client_info,
             topology,
             task_panics,
+            iteration_count,
+            run_time_budget,
         } = inputs;
 
         // === 5. ABORT ALL PROCESSES ===
@@ -597,6 +626,9 @@ impl WorkloadOrchestrator {
             state,
             obs,
             task_panics,
+            seed,
+            iteration_count,
+            run_time_budget,
         })
         .await
         .map_err(|()| (vec![seed], 1usize))?;
@@ -636,6 +668,9 @@ impl WorkloadOrchestrator {
             state,
             obs,
             task_panics,
+            seed,
+            iteration_count,
+            run_time_budget,
         } = inputs;
         let check_contexts = Self::build_workload_contexts(&WorkloadContextEnv {
             metrics,
@@ -648,7 +683,19 @@ impl WorkloadOrchestrator {
             obs,
             task_panics,
         })?;
-        Ok(Self::run_check_phase(sim, workloads, check_contexts, obs).await)
+        Ok(Self::run_check_phase(
+            sim,
+            workloads,
+            check_contexts,
+            obs,
+            CheckDriver {
+                shutdown_signal,
+                seed,
+                iteration_count,
+                run_time_budget,
+            },
+        )
+        .await)
     }
 
     /// Run the entire setup phase: spawn `setup()` futures, drive the
@@ -664,7 +711,11 @@ impl WorkloadOrchestrator {
         bool,
     ) {
         let setup_handles = Self::spawn_setup_tasks(workloads, contexts);
-        Self::cooperative_loop_until_done(env, &setup_handles).await;
+        if !Self::cooperative_loop_until_done(env, &setup_handles).await {
+            for handle in &setup_handles {
+                handle.abort();
+            }
+        }
         Self::collect_setup_results(setup_handles).await
     }
 
@@ -988,7 +1039,14 @@ impl WorkloadOrchestrator {
         workloads: Vec<Box<dyn Workload>>,
         contexts: Vec<SimContext>,
         obs: &SimulationLayerHandle,
+        driver: CheckDriver<'_>,
     ) -> (Vec<Box<dyn Workload>>, Vec<SimulationResult<()>>) {
+        let CheckDriver {
+            shutdown_signal,
+            seed,
+            iteration_count,
+            run_time_budget,
+        } = driver;
         let mut check_handles = Vec::with_capacity(workloads.len());
         for (workload, ctx) in workloads.into_iter().zip(contexts) {
             let ip = ctx.my_ip().to_string();
@@ -1007,17 +1065,47 @@ impl WorkloadOrchestrator {
             check_handles.push(handle);
         }
 
+        let mut stall_guard =
+            RunStallGuard::new(sim.current_time(), run_time_budget, seed, iteration_count);
+        let mut shutdown_triggered = false;
+
         // Cooperative loop for check.
         loop {
-            if check_handles
+            let active_checks = check_handles
                 .iter()
-                .all(crate::executor::JoinHandle::is_finished)
-            {
+                .filter(|handle| !handle.is_finished())
+                .count();
+            if active_checks == 0 {
                 break;
             }
+            let initial_event_count = sim.pending_event_count();
             if sim.pending_event_count() > 0 {
                 sim.step();
                 Self::pump_observability(sim, obs);
+            }
+            let current_active = check_handles
+                .iter()
+                .filter(|handle| !handle.is_finished())
+                .count();
+            match stall_guard.evaluate(
+                sim,
+                shutdown_triggered,
+                current_active,
+                active_checks,
+                initial_event_count,
+            ) {
+                StallOutcome::Ok => {}
+                StallOutcome::Breached => {
+                    Self::trigger_shutdown(sim, shutdown_signal);
+                    shutdown_triggered = true;
+                    stall_guard.reset_no_progress();
+                }
+                StallOutcome::Deadlock => {
+                    for handle in &check_handles {
+                        handle.abort();
+                    }
+                    break;
+                }
             }
             crate::executor::until_stalled().await;
         }
@@ -1181,7 +1269,7 @@ impl WorkloadOrchestrator {
     async fn cooperative_loop_until_done<T: 'static>(
         env: PhaseEnv<'_, '_>,
         handles: &[crate::executor::JoinHandle<T>],
-    ) {
+    ) -> bool {
         let PhaseEnv {
             sim,
             process_manager,
@@ -1189,11 +1277,23 @@ impl WorkloadOrchestrator {
             state,
             obs,
             shutdown_signal,
+            seed,
+            iteration_count,
+            run_time_budget,
         } = env;
+        let mut stall_guard =
+            RunStallGuard::new(sim.current_time(), run_time_budget, seed, iteration_count);
+        let mut shutdown_triggered = false;
         loop {
-            if handles.iter().all(crate::executor::JoinHandle::is_finished) {
-                break;
+            let active_handles = handles
+                .iter()
+                .filter(|handle| !handle.is_finished())
+                .count();
+            if active_handles == 0 {
+                Self::pump_observability(sim, obs);
+                return true;
             }
+            let initial_event_count = sim.pending_event_count();
             if sim.pending_event_count() > 0 {
                 sim.step();
                 Self::handle_process_events(
@@ -1206,9 +1306,30 @@ impl WorkloadOrchestrator {
                 );
                 Self::pump_observability(sim, obs);
             }
+            let current_active = handles
+                .iter()
+                .filter(|handle| !handle.is_finished())
+                .count();
+            match stall_guard.evaluate(
+                sim,
+                shutdown_triggered,
+                current_active,
+                active_handles,
+                initial_event_count,
+            ) {
+                StallOutcome::Ok => {}
+                StallOutcome::Breached => {
+                    Self::trigger_shutdown(sim, shutdown_signal);
+                    shutdown_triggered = true;
+                    stall_guard.reset_no_progress();
+                }
+                StallOutcome::Deadlock => {
+                    Self::pump_observability(sim, obs);
+                    return false;
+                }
+            }
             crate::executor::until_stalled().await;
         }
-        Self::pump_observability(sim, obs);
     }
 
     /// Collect results from spawned `setup()` tasks.
