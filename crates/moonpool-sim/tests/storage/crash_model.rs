@@ -8,8 +8,8 @@
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
-    CrashOutcome, EioTarget, SECTOR_SIZE, SimStorageProvider, SimWorld, StorageConfiguration,
-    StorageFaultKind,
+    CrashOutcome, EioTarget, FileCrashReport, SECTOR_SIZE, SimStorageProvider, SimWorld,
+    StorageConfiguration, StorageFaultKind,
 };
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -539,4 +539,256 @@ fn the_same_seed_produces_the_same_post_crash_image() {
         run_once(),
         "the crash model must be a pure function of the seed"
     );
+}
+
+/// The profile the grow tests share: the sector holding the synced tail always
+/// resolves [`CrashOutcome::Lost`], the only outcome that can destroy a durable
+/// prefix, and the caller pins the length outcome.
+fn grow_config(length_survives: f64) -> StorageConfiguration {
+    StorageConfiguration {
+        clean_crash_probability: 0.0,
+        correlated_rollback_probability: 0.0,
+        crash_lost_probability: 1.0,
+        length_survives_crash_probability: length_survives,
+        ..StorageConfiguration::fast_local()
+    }
+}
+
+/// Whether the crash really resolved the file's first sector as lost, so a
+/// surviving prefix means something.
+fn sector_zero_lost(reports: &[FileCrashReport]) -> bool {
+    reports
+        .iter()
+        .flat_map(|report| report.resolutions.iter())
+        .any(|resolution| resolution.sector == 0 && resolution.outcome == CrashOutcome::Lost)
+}
+
+/// Growing a file re-dirties the sector holding the old end of file, because
+/// the rest of it becomes addressable. The bytes a sync already reported
+/// durable are not part of that bargain: when the crash takes the length back,
+/// they are still there.
+#[test]
+fn growing_past_a_synced_tail_sector_keeps_it_durable_when_the_length_reverts() {
+    for seed in 0..16_u64 {
+        local_runtime().block_on(async {
+            let mut sim = sim_with(seed, grow_config(0.0));
+
+            run_on(&mut sim, |provider| async move {
+                let file = provider
+                    .open("grow", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open failed");
+                file.write_at(0, &[0xA7; 100]).await.expect("write");
+                file.sync_all().await.expect("sync");
+                file.set_len(8 * SECTOR).await.expect("set_len");
+            })
+            .await;
+
+            sim.simulate_crash_for_process(test_ip(), true);
+            assert!(
+                sector_zero_lost(&sim.take_storage_crash_reports()),
+                "seed {seed}: the synced tail sector must resolve Lost"
+            );
+
+            let image = run_on(&mut sim, |provider| async move {
+                read_image(&provider, "grow", 8 * SECTOR_SIZE).await
+            })
+            .await;
+
+            assert_eq!(image.len(), 100, "seed {seed}: the grow was rolled back");
+            assert!(
+                image.iter().all(|byte| *byte == 0xA7),
+                "seed {seed}: losing the grown tail must not touch the synced prefix"
+            );
+        });
+    }
+}
+
+/// The same grow with the new length surviving the crash: the synced prefix is
+/// still durable, and nothing is claimed about the bytes the grow added.
+#[test]
+fn growing_past_a_synced_tail_sector_keeps_it_durable_when_the_length_survives() {
+    for seed in 0..16_u64 {
+        local_runtime().block_on(async {
+            let mut sim = sim_with(seed, grow_config(1.0));
+
+            run_on(&mut sim, |provider| async move {
+                let file = provider
+                    .open("grow", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open failed");
+                file.write_at(0, &[0xA7; 100]).await.expect("write");
+                file.sync_all().await.expect("sync");
+                file.set_len(8 * SECTOR).await.expect("set_len");
+            })
+            .await;
+
+            sim.simulate_crash_for_process(test_ip(), true);
+            assert!(
+                sector_zero_lost(&sim.take_storage_crash_reports()),
+                "seed {seed}: the synced tail sector must resolve Lost"
+            );
+
+            let image = run_on(&mut sim, |provider| async move {
+                read_image(&provider, "grow", 8 * SECTOR_SIZE).await
+            })
+            .await;
+
+            assert_eq!(
+                image.len(),
+                8 * SECTOR_SIZE,
+                "seed {seed}: the grow survived"
+            );
+            assert!(
+                image[..100].iter().all(|byte| *byte == 0xA7),
+                "seed {seed}: losing the grown tail must not touch the synced prefix"
+            );
+        });
+    }
+}
+
+/// A write starting at a later sector boundary grows the file the same way, and
+/// the sector it never addressed keeps its durability just as well.
+#[test]
+fn a_write_growing_past_a_synced_tail_sector_keeps_it_durable() {
+    for seed in 0..16_u64 {
+        local_runtime().block_on(async {
+            let mut sim = sim_with(seed, grow_config(0.0));
+
+            run_on(&mut sim, |provider| async move {
+                let file = provider
+                    .open("grow", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open failed");
+                file.write_at(0, &[0xA7; 100]).await.expect("write");
+                file.sync_all().await.expect("sync");
+                // Sector 1 is written, sector 0 is merely made whole.
+                file.write_at(SECTOR, &sectors(1, 0xB2))
+                    .await
+                    .expect("write");
+            })
+            .await;
+
+            sim.simulate_crash_for_process(test_ip(), true);
+            assert!(
+                sector_zero_lost(&sim.take_storage_crash_reports()),
+                "seed {seed}: the synced tail sector must resolve Lost"
+            );
+
+            let image = run_on(&mut sim, |provider| async move {
+                read_image(&provider, "grow", 2 * SECTOR_SIZE).await
+            })
+            .await;
+
+            assert_eq!(image.len(), 100, "seed {seed}: the grow was rolled back");
+            assert!(
+                image.iter().all(|byte| *byte == 0xA7),
+                "seed {seed}: losing the grown tail must not touch the synced prefix"
+            );
+        });
+    }
+}
+
+/// A latent fault damages the whole sector on every read, so a sector carrying
+/// a synced prefix cannot take that shape: it resolves lost instead, and the
+/// prefix reads back clean.
+#[test]
+fn a_latent_fault_on_a_grown_sector_spares_the_durable_prefix() {
+    for seed in 0..16_u64 {
+        local_runtime().block_on(async {
+            let config = StorageConfiguration {
+                crash_lost_probability: 0.0,
+                crash_latent_fault_probability: 1.0,
+                ..grow_config(1.0)
+            };
+            let mut sim = sim_with(seed, config);
+
+            run_on(&mut sim, |provider| async move {
+                let file = provider
+                    .open("grow", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open failed");
+                file.write_at(0, &[0xA7; 100]).await.expect("write");
+                file.sync_all().await.expect("sync");
+                file.set_len(8 * SECTOR).await.expect("set_len");
+            })
+            .await;
+
+            sim.simulate_crash_for_process(test_ip(), true);
+            assert!(
+                sector_zero_lost(&sim.take_storage_crash_reports()),
+                "seed {seed}: a latent fault on a protected sector resolves Lost"
+            );
+
+            let image = run_on(&mut sim, |provider| async move {
+                read_image(&provider, "grow", 100).await
+            })
+            .await;
+
+            assert_eq!(image, vec![0xA7; 100], "seed {seed}: the prefix is intact");
+        });
+    }
+}
+
+/// The oracle keeps watching a synced prefix after the file grows over it: the
+/// sector is longer than its stamp, and the stamped bytes are still held to
+/// what the sync promised.
+#[test]
+#[should_panic(expected = "moonpool sim bug")]
+fn the_oracle_catches_a_durable_prefix_changing_under_a_grown_sector() {
+    local_runtime().block_on(async {
+        let mut sim = sim_with(3, grow_config(1.0));
+
+        run_on(&mut sim, |provider| async move {
+            let file = provider
+                .open("grow", OpenOptions::create_write())
+                .await
+                .expect("open failed");
+            file.write_at(0, &[0x9C; 100]).await.expect("write");
+            file.sync_all().await.expect("sync");
+            file.set_len(8 * SECTOR).await.expect("set_len");
+        })
+        .await;
+
+        sim.corrupt_durable_out_of_band("grow", 0)
+            .expect("out-of-band mutation failed");
+        sim.simulate_crash_for_process(test_ip(), true);
+    });
+}
+
+/// Truncating into a synced sector narrows its stamp to the surviving prefix
+/// rather than dropping it, so growing back over the sector is an ordinary
+/// unsynced write and not a reported simulator bug.
+#[test]
+fn shrinking_then_growing_does_not_trip_the_oracle() {
+    for seed in 0..16_u64 {
+        local_runtime().block_on(async {
+            let config = StorageConfiguration {
+                crash_lost_probability: 0.0,
+                ..grow_config(0.5)
+            };
+            let mut sim = sim_with(seed, config);
+
+            run_on(&mut sim, |provider| async move {
+                let file = provider
+                    .open("trim", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open failed");
+                file.write_at(0, &sectors(1, 0x5A)).await.expect("write");
+                file.sync_all().await.expect("sync");
+                file.set_len(50).await.expect("shrink");
+                file.set_len(8 * SECTOR).await.expect("grow");
+            })
+            .await;
+
+            sim.simulate_crash_for_process(test_ip(), true);
+
+            let image = run_on(&mut sim, |provider| async move {
+                read_image(&provider, "trim", 50).await
+            })
+            .await;
+
+            assert_eq!(image, vec![0x5A; 50], "seed {seed}: the surviving prefix");
+        });
+    }
 }

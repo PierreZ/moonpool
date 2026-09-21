@@ -165,10 +165,13 @@ pub struct FileImage {
     eio_read: SectorBitSet,
     eio_write: SectorBitSet,
     /// Per-sector `(CRC, byte length)` of the content the caller believes
-    /// durable. A stamp exists only for sectors a sync claimed; a write drops
-    /// it. The length is kept because the file's last sector is partial, and a
-    /// sector that shrank away with a surviving truncation must not be
-    /// mistaken for a damaged one.
+    /// durable. A stamp exists only for sectors a sync claimed: a write to the
+    /// sector drops it, a shrink into the sector narrows it to the surviving
+    /// prefix, and a grow past it leaves it untouched. The length is the
+    /// *protected prefix* of the sector rather than the sector's own length:
+    /// the file's last sector is partial, a sector that shrank away with a
+    /// surviving truncation must not be mistaken for a damaged one, and a grow
+    /// can make a stamped sector longer than what was ever claimed durable.
     oracle: BTreeMap<u64, (u32, usize)>,
     fill: FillPattern,
 }
@@ -299,6 +302,7 @@ impl FileImage {
     /// Resize the visible image; the new length is durable only at the next
     /// sync.
     pub fn set_len(&mut self, new_len: u64) {
+        let old_len = self.size();
         let old_sectors = self.sectors();
         self.resize_visible(new_len);
         // Sectors that fell off the end carry nothing forward. The length
@@ -306,6 +310,9 @@ impl FileImage {
         // against the durable length.
         for sector in self.sectors()..old_sectors {
             self.oracle.remove(&sector);
+        }
+        if new_len < old_len {
+            self.narrow_tail_stamp(new_len);
         }
     }
 
@@ -369,13 +376,12 @@ impl FileImage {
         if self.visible.len() != self.committed.len() {
             if sim_random::<f64>() < config.length_survives_crash_probability {
                 assert_reachable!("disk crash: an unsynced length change survived");
-                let grown_from = self.committed_sectors();
+                let old_len = self.committed.len();
                 self.committed.resize(self.visible.len(), 0);
-                for sector in grown_from..self.sectors() {
-                    let range = self.committed_bounds(sector);
-                    let bytes = self.fill.sector(sector);
-                    self.committed[range.clone()].copy_from_slice(&bytes[..range.len()]);
-                }
+                // Everything the file gained reads the fill pattern, the rest
+                // of a partial tail sector included: the durable image must not
+                // invent zeros where the visible one holds garbage.
+                fill_extension(&mut self.committed, old_len, self.fill);
             } else {
                 assert_reachable!("disk crash: an unsynced length change reverted");
                 let durable = self.committed.len();
@@ -405,8 +411,15 @@ impl FileImage {
                 let in_window = window.as_ref().is_some_and(|w| w.contains(&sector));
                 correlated_fired |= in_window;
                 let index = as_index(sector);
-                let outcome =
-                    choose_outcome(config, sector, self.lied.is_set(index), in_window, eligible);
+                let protected = self.protected_prefix(sector) > 0;
+                let outcome = choose_outcome(
+                    config,
+                    sector,
+                    self.lied.is_set(index),
+                    in_window,
+                    protected,
+                    eligible,
+                );
                 self.apply_outcome(sector, outcome);
                 note_outcome_reachable(outcome, self.fill.garbage);
                 report.resolutions.push(SectorResolution {
@@ -488,8 +501,37 @@ impl FileImage {
             .collect()
     }
 
-    fn committed_sectors(&self) -> u64 {
-        (self.committed.len() as u64).div_ceil(SECTOR_SIZE as u64)
+    /// Bytes at the start of `sector` that the last sync reported durable and
+    /// no write has touched since: the prefix a crash must leave alone.
+    ///
+    /// Zero for a sector a sync lied about, since that claim is exactly the one
+    /// the barrier-violation family is armed to break.
+    fn protected_prefix(&self, sector: u64) -> usize {
+        if self.lied.is_set(as_index(sector)) {
+            return 0;
+        }
+        self.oracle.get(&sector).map_or(0, |(_, len)| *len)
+    }
+
+    /// Narrow the durability stamp of the sector a shrink truncated into.
+    ///
+    /// Truncating does not un-sync the bytes before the new end, so the stamp
+    /// keeps watching them instead of being dropped: dropping it would leave a
+    /// synced prefix unguarded as soon as the file grows back over it.
+    fn narrow_tail_stamp(&mut self, new_len: u64) {
+        let sector = new_len / SECTOR_SIZE as u64;
+        let start = as_index(sector.saturating_mul(SECTOR_SIZE as u64));
+        let surviving = as_index(new_len).saturating_sub(start);
+        let Some((_, stamped_len)) = self.oracle.get(&sector).copied() else {
+            return;
+        };
+        if surviving >= stamped_len {
+            // The stamped prefix survived whole; the bytes past it were never
+            // claimed durable in the first place.
+            return;
+        }
+        let crc = crc32c::crc32c(&self.visible[start..start + surviving]);
+        self.oracle.insert(sector, (crc, surviving));
     }
 
     /// Byte range of one sector inside both images: a file's last sector is
@@ -519,19 +561,14 @@ impl FileImage {
         if new_len <= old_len {
             return;
         }
-        for sector in (old_len / SECTOR_SIZE)..new_len.div_ceil(SECTOR_SIZE) {
-            let start = (sector * SECTOR_SIZE).max(old_len);
-            let end = ((sector + 1) * SECTOR_SIZE).min(new_len);
-            if start >= end {
-                continue;
-            }
-            let bytes = self.fill.sector(sector as u64);
-            let offset_in_sector = start - sector * SECTOR_SIZE;
-            self.visible[start..end]
-                .copy_from_slice(&bytes[offset_in_sector..offset_in_sector + (end - start)]);
-            // Newly addressable bytes are not durable until the next sync,
-            // so they resolve through the crash model like any other write.
-            self.dirty.set(sector);
+        fill_extension(&mut self.visible, old_len, self.fill);
+        // Newly addressable bytes are not durable until the next sync, so they
+        // resolve through the crash model like any other write. That dirties
+        // the whole sector holding the old end of file, while the durability
+        // stamp on its synced prefix stays: a grow endangers only the bytes it
+        // added.
+        for sector in super::faults::sector_range(old_len as u64, new_len - old_len) {
+            self.dirty.set(as_index(sector));
         }
     }
 
@@ -570,10 +607,18 @@ impl FileImage {
                 self.faults.set(index);
             }
             CrashOutcome::Lost => {
+                // Only the part of the sector past its protected prefix is
+                // lost: bytes a sync reported durable cannot be un-written by
+                // losing the unsynced tail that grew over them, since no write
+                // ever touched them. `FoundationDB` clips the same way, its
+                // `AsyncFileNonDurable::truncate` starting the modified range
+                // at `min(old_size, new_size)`.
                 let range = self.committed_bounds(sector);
-                if !range.is_empty() {
+                let start = (range.start + self.protected_prefix(sector)).min(range.end);
+                if start < range.end {
                     let bytes = self.fill.sector(sector);
-                    self.committed[range.clone()].copy_from_slice(&bytes[..range.len()]);
+                    self.committed[start..range.end]
+                        .copy_from_slice(&bytes[start - range.start..range.end - range.start]);
                 }
                 self.dirty.clear(index);
                 self.lied.clear(index);
@@ -605,14 +650,18 @@ impl FileImage {
             self.oracle.iter().map(|(s, stamp)| (*s, *stamp)).collect();
         for (sector, (crc, stamped_len)) in stamps {
             let range = self.committed_bounds(sector);
-            if range.len() != stamped_len {
+            if range.len() < stamped_len {
                 // The sector shrank away with a surviving truncation; the
                 // length resolution accounted for it, and comparing a
                 // different number of bytes would be meaningless.
                 self.oracle.remove(&sector);
                 continue;
             }
-            if crc32c::crc32c(&self.committed[range]) == crc {
+            // The sector can be longer than its stamp: a later grow made more
+            // of it addressable. Only the stamped prefix was ever claimed
+            // durable, so only the stamped prefix is held to the claim.
+            let stamped = range.start..range.start + stamped_len;
+            if crc32c::crc32c(&self.committed[stamped]) == crc {
                 continue;
             }
             assert!(
@@ -653,6 +702,24 @@ fn as_index(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
+/// Fill the bytes an image just gained with the file's fill pattern, so a
+/// never-written region reads the same whether it is reached through the
+/// visible image or through the durable one.
+fn fill_extension(image: &mut [u8], old_len: usize, fill: FillPattern) {
+    let new_len = image.len();
+    for sector in (old_len / SECTOR_SIZE)..new_len.div_ceil(SECTOR_SIZE) {
+        let start = (sector * SECTOR_SIZE).max(old_len);
+        let end = ((sector + 1) * SECTOR_SIZE).min(new_len);
+        if start >= end {
+            continue;
+        }
+        let bytes = fill.sector(sector as u64);
+        let offset_in_sector = start - sector * SECTOR_SIZE;
+        image[start..end]
+            .copy_from_slice(&bytes[offset_in_sector..offset_in_sector + (end - start)]);
+    }
+}
+
 /// Byte range of `sector` clamped to an image of `limit` bytes; empty when the
 /// sector lies past the end.
 fn clamp_sector(sector: u64, limit: usize) -> Range<usize> {
@@ -667,12 +734,15 @@ fn clamp_sector(sector: u64, limit: usize) -> Range<usize> {
 ///
 /// Damaging shapes are gated by the eligibility mask: an ineligible sector
 /// falls back to a plain rollback. Sectors a sync lied about always roll back
-/// — the whole point of the lie is that the write was never durable.
+/// — the whole point of the lie is that the write was never durable. A
+/// `protected` sector is one carrying a durability stamp over a prefix of its
+/// bytes, which restricts the shapes it may take.
 fn choose_outcome(
     config: &StorageConfiguration,
     sector: u64,
     lied: bool,
     in_window: bool,
+    protected: bool,
     eligible: &dyn Fn(u64) -> bool,
 ) -> CrashOutcome {
     if in_window || lied {
@@ -694,6 +764,13 @@ fn choose_outcome(
         return damaging(CrashOutcome::Lost);
     }
     if roll < latent_at {
+        // A latent fault damages the *whole* sector on every read (see
+        // `FileImage::read`), which would reach bytes a sync reported durable.
+        // Losing the sector is the nearest shape a real disk offers: its fill
+        // stops at the protected prefix.
+        if protected {
+            return damaging(CrashOutcome::Lost);
+        }
         return damaging(CrashOutcome::LatentFault);
     }
     if roll < shorn_at {

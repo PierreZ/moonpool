@@ -467,6 +467,15 @@ and fails the run loudly — unless the opt-in barrier-violation family is armed
 loss as an expected `LostSyncedWrite`. That family is how a consumer proves
 cluster-level recovery heals a single lying disk (the fsyncgate class).
 
+The stamp covers a *prefix* of the sector, not always the whole of it, because
+a file's last sector is partial. Growing the file past that partial tail, with
+`set_len` or with a write starting further on, makes the rest of the sector
+addressable and unsynced, and leaves the synced prefix alone: only the newly
+addressable bytes can come back lost or damaged. A shrink that lands inside a
+sector narrows the stamp to the bytes that survived rather than dropping it,
+so growing back over them is watched too. After a grow, the oracle holds the
+stamped prefix to what the sync promised and says nothing about the rest.
+
 ### Aiming Faults
 
 Random fault families are gated by a caller-provided eligibility mask,
