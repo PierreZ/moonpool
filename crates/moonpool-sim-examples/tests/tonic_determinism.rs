@@ -11,10 +11,11 @@ use async_trait::async_trait;
 use futures::Stream;
 use moonpool_hyper::{ChannelConfig, ChannelError, H2Server, ReconnectingChannel};
 use moonpool_sim::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, NetworkProvider, Process,
-    SIM_FAULT_EVENT_NAME, SimContext, SimProviders, SimulationBuilder, SimulationError,
-    SimulationResult, TaskProvider, TcpListenerTrait, Workload,
+    AttritionScope, Chaos, ChaosMode, NetworkProvider, Process, SIM_FAULT_EVENT_NAME, SimContext,
+    SimProviders, SimulationBuilder, SimulationError, SimulationResult, TaskProvider,
+    TcpListenerTrait, Workload,
 };
+use moonpool_sim_examples::support::reboot_attrition;
 use moonpool_sim_examples::tonic_grpc::proto::echo_client::EchoClient;
 use moonpool_sim_examples::tonic_grpc::proto::echo_server::{Echo, EchoServer};
 use moonpool_sim_examples::tonic_grpc::proto::{EchoRequest, EchoResponse, EchoStreamRequest};
@@ -273,47 +274,53 @@ impl MultiChannelEchoWorkload {
     }
 }
 
+/// Record every event named in `names`, in emission order, into `trace` each
+/// time the invariant runs, so the last write holds the whole run.
+fn capture_trace(
+    builder: SimulationBuilder,
+    invariant: &str,
+    names: &'static [&'static str],
+    trace: &Arc<Mutex<Vec<TraceEntry>>>,
+) -> SimulationBuilder {
+    let captured = Arc::clone(trace);
+    builder.invariant_fn(invariant, move |query, _| {
+        let mut events = names
+            .iter()
+            .flat_map(|name| query.snapshot(name))
+            .map(|event| {
+                (
+                    event.seq,
+                    event.time_ms,
+                    event.source,
+                    event.name,
+                    format!("{:?}", event.fields),
+                )
+            })
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.0);
+        *captured
+            .lock()
+            .expect("Mutex poisoned: prior test panicked") = events;
+    })
+}
+
+fn take_trace(trace: &Mutex<Vec<TraceEntry>>) -> Vec<TraceEntry> {
+    trace
+        .lock()
+        .expect("Mutex poisoned: prior test panicked")
+        .clone()
+}
+
 fn run_once(seed: u64) -> Vec<TraceEntry> {
     let trace = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&trace);
 
-    let report = SimulationBuilder::new()
+    let builder = SimulationBuilder::new()
         .processes(1, || Box::new(EchoProcess))
-        .workload(EchoWorkload)
-        .invariant_fn("tonic replay trace", move |query, _| {
-            let mut events = EVENT_NAMES
-                .iter()
-                .flat_map(|name| query.snapshot(name))
-                .map(|event| {
-                    (
-                        event.seq,
-                        event.time_ms,
-                        event.source,
-                        event.name,
-                        format!("{:?}", event.fields),
-                    )
-                })
-                .collect::<Vec<_>>();
-            events.sort_by_key(|event| event.0);
-            *captured
-                .lock()
-                .expect("Mutex poisoned: prior test panicked") = events;
-        })
+        .workload(EchoWorkload);
+    let report = capture_trace(builder, "tonic replay trace", EVENT_NAMES, &trace)
         .enable_chaos([
             Chaos::Network(ChaosMode::Random),
-            Chaos::Attrition {
-                config: Attrition {
-                    max_dead: 1,
-                    prob_graceful: 0.3,
-                    prob_crash: 0.5,
-                    prob_wipe: 0.2,
-                    recovery_delay_ms: None,
-                    grace_period_ms: None,
-                    scope: AttritionScope::PerProcess,
-                    victims: AttritionVictims::Any,
-                },
-                mode: ChaosMode::Random,
-            },
+            reboot_attrition(1, AttritionScope::PerProcess),
         ])
         .chaos_duration(Duration::from_secs(10))
         .set_debug_seeds(vec![seed])
@@ -321,53 +328,33 @@ fn run_once(seed: u64) -> Vec<TraceEntry> {
         .run();
     assert_eq!(report.failed_runs, 0, "seed {seed} must succeed");
 
-    let events = trace
-        .lock()
-        .expect("Mutex poisoned: prior test panicked")
-        .clone();
+    let events = take_trace(&trace);
     assert!(!events.is_empty(), "seed {seed} must emit trace events");
     events
 }
 
 fn run_multi_channel_once(seed: u64) -> Vec<TraceEntry> {
     let trace = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&trace);
 
-    let report = SimulationBuilder::new()
+    let builder = SimulationBuilder::new()
         .processes(3, || Box::new(MultiChannelEchoProcess))
-        .workload(MultiChannelEchoWorkload)
-        .invariant_fn("multi-channel tonic replay trace", move |query, _| {
-            let mut events = MULTI_CHANNEL_EVENT_NAMES
-                .iter()
-                .flat_map(|name| query.snapshot(name))
-                .map(|event| {
-                    (
-                        event.seq,
-                        event.time_ms,
-                        event.source,
-                        event.name,
-                        format!("{:?}", event.fields),
-                    )
-                })
-                .collect::<Vec<_>>();
-            events.sort_by_key(|event| event.0);
-            *captured
-                .lock()
-                .expect("Mutex poisoned: prior test panicked") = events;
-        })
-        .set_debug_seeds(vec![seed])
-        .set_iterations(1)
-        .run();
+        .workload(MultiChannelEchoWorkload);
+    let report = capture_trace(
+        builder,
+        "multi-channel tonic replay trace",
+        MULTI_CHANNEL_EVENT_NAMES,
+        &trace,
+    )
+    .set_debug_seeds(vec![seed])
+    .set_iterations(1)
+    .run();
     assert_eq!(
         report.failed_runs, 0,
         "seed {seed} must succeed:\n{report}\n{:?}",
         report.individual_metrics
     );
 
-    let events = trace
-        .lock()
-        .expect("Mutex poisoned: prior test panicked")
-        .clone();
+    let events = take_trace(&trace);
     assert!(
         events
             .iter()

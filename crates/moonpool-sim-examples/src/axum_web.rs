@@ -40,6 +40,8 @@ use moonpool_sim::{
     NetworkProvider, Process, SimContext, SimulationResult, TcpListenerTrait, Workload,
 };
 
+use crate::support::{invalid_state, peer_ip, unless_shutdown};
+
 type HttpSender = hyper::client::conn::http1::SendRequest<Full<Bytes>>;
 
 /// Small request boundary that keeps host, body, and error plumbing in one
@@ -104,10 +106,6 @@ impl HttpClient<'_> {
         serde_json::from_slice(&body)
             .map_err(|error| invalid_state(format!("deserialize response: {error}")))
     }
-}
-
-fn invalid_state(message: String) -> moonpool_sim::SimulationError {
-    moonpool_sim::SimulationError::InvalidState(message)
 }
 
 // ============================================================================
@@ -374,9 +372,7 @@ impl Workload for WebWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let server_ip = ctx.peer("web").ok_or_else(|| {
-            moonpool_sim::SimulationError::InvalidState("web process not found".into())
-        })?;
+        let server_ip = peer_ip(ctx, "web")?;
 
         tracing::info!(%server_ip, "workload starting");
 
@@ -386,13 +382,10 @@ impl Workload for WebWorkload {
         // a chaos-induced connect hang is detected as no-progress).
         for round in 0..5 {
             tracing::info!(round, "starting round");
-            let result = moonpool_sim::select! {
-                biased;
-                result = self.send_round(ctx, &server_ip, round) => result,
-                () = ctx.shutdown().cancelled() => {
-                    tracing::info!(round, "shutdown during round, exiting");
-                    break;
-                }
+            let Some(result) = unless_shutdown(ctx, self.send_round(ctx, &server_ip, round)).await
+            else {
+                tracing::info!(round, "shutdown during round, exiting");
+                break;
             };
             match result {
                 Ok(()) => {
@@ -420,11 +413,10 @@ impl WebWorkload {
         round: u32,
     ) -> SimulationResult<()> {
         tracing::info!(round, "connecting to server");
-        let stream = moonpool_sim::select! {
-            biased;
-            result = ctx.network().connect(server_ip) => result?,
-            () = ctx.shutdown().cancelled() => return Ok(()),
+        let Some(connected) = unless_shutdown(ctx, ctx.network().connect(server_ip)).await else {
+            return Ok(());
         };
+        let stream = connected?;
         tracing::info!(round, "connected, starting handshake");
 
         let io = HyperIo::new(stream).with_vectored_writes(true);

@@ -3,8 +3,6 @@
 //! Runs an axum web service with fault-injectable in-memory store under
 //! deterministic simulation with chaos injection.
 
-use std::process;
-
 fn main() {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
 
@@ -14,14 +12,5 @@ fn main() {
         .set_iterations(50)
         .run();
 
-    report.eprint();
-
-    if !report.seeds_failing.is_empty() {
-        eprintln!(
-            "ERROR: {} seeds failed: {:?}",
-            report.seeds_failing.len(),
-            report.seeds_failing
-        );
-        process::exit(1);
-    }
+    moonpool_sim_examples::support::finish_or_exit_on_failing_seeds(&report);
 }
