@@ -179,14 +179,25 @@ impl FrameDecoder {
             self.failed = Some(FrameError::Empty);
             return Err(FrameError::Empty);
         }
-        let length = length as usize;
-        if pending.len() < HEADER_LEN + length {
+        // Checked: on a 32-bit target a huge configured limit must not wrap.
+        let Some(total) = usize::try_from(length)
+            .ok()
+            .and_then(|length| length.checked_add(HEADER_LEN))
+        else {
+            let error = FrameError::TooLarge {
+                size: u64::from(length),
+                limit: self.max_frame_bytes,
+            };
+            self.failed = Some(error.clone());
+            return Err(error);
+        };
+        if pending.len() < total {
             return Ok(None);
         }
         let mut expected = [0; 8];
         expected.copy_from_slice(&pending[4..HEADER_LEN]);
         let expected = u64::from_le_bytes(expected);
-        let payload = &pending[HEADER_LEN..HEADER_LEN + length];
+        let payload = &pending[HEADER_LEN..total];
         let computed = checksum(length_bytes, payload);
         if computed != expected {
             let error = FrameError::Checksum { expected, computed };
@@ -194,7 +205,7 @@ impl FrameDecoder {
             return Err(error);
         }
         let payload = payload.to_vec();
-        self.start += HEADER_LEN + length;
+        self.start += total;
         if self.start == self.buffer.len() {
             self.buffer.clear();
             self.start = 0;

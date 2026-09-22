@@ -40,7 +40,7 @@ pub(crate) use cursor::{Reader, Writer};
 pub use frame::{FrameDecoder, FrameError, HEADER_LEN, encode_frame};
 pub use schema::{MethodId, RpcMethod, SchemaVersion};
 pub use wire::{
-    EnvelopeError, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, WireError, WireMessage,
-    WireOutcome, decode_message, encode_message, negotiate, reply_envelope_len,
-    request_envelope_len,
+    EnvelopeError, HELLO_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    REJECTION_ENVELOPE_LEN, WireError, WireMessage, WireOutcome, decode_message, encode_message,
+    negotiate, reply_envelope_len, request_envelope_len,
 };

@@ -47,19 +47,12 @@ impl ReplyContext {
     /// Deliver an outcome along the route. Returns whether a live route
     /// accepted it.
     pub(crate) fn deliver(self, outcome: WireOutcome) -> bool {
-        // Local and remote replies obey the same frame limit, so a caller
-        // cannot tell the two routes apart by size.
-        let outcome = match outcome {
-            WireOutcome::Ok { body, .. }
-                if reply_envelope_len(body.len()) as u64 > u64::from(self.max_frame_bytes) =>
-            {
-                WireOutcome::Err(WireError::ReplyTooLarge)
-            }
-            outcome => outcome,
-        };
         let delivered = match self.route {
             ReplyRoute::Local { sink, call_id } => match sink.upgrade() {
                 Some(sink) => {
+                    // Local replies obey the local frame limit, as a remote
+                    // caller with the same limit would.
+                    let outcome = bounded(outcome, self.max_frame_bytes);
                     sink.complete_local(call_id, outcome);
                     true
                 }
@@ -70,8 +63,17 @@ impl ReplyContext {
                 call_id,
             } => match connection.upgrade() {
                 Some(connection) => {
+                    // The session limit is the smaller of ours and the
+                    // peer's: an oversized reply fails its own call with
+                    // ReplyTooLarge and the session stays up.
+                    let limit = connection
+                        .peer_hello()
+                        .map_or(self.max_frame_bytes, |hello| {
+                            hello.max_frame_bytes.min(self.max_frame_bytes)
+                        });
+                    let outcome = bounded(outcome, limit);
                     let payload = encode_message(&WireMessage::Reply { call_id, outcome });
-                    if let Ok(frame) = encode_frame(&payload, self.max_frame_bytes) {
+                    if let Ok(frame) = encode_frame(&payload, limit) {
                         connection.push_control(frame)
                     } else {
                         // Not even a rejection fits the frame limit: close
@@ -90,6 +92,18 @@ impl ReplyContext {
             Counters::bump(&self.counters.replies_dropped);
         }
         delivered
+    }
+}
+
+/// Replace an ok outcome that would not fit `limit` with `ReplyTooLarge`.
+fn bounded(outcome: WireOutcome, limit: u32) -> WireOutcome {
+    match outcome {
+        WireOutcome::Ok { body, .. }
+            if reply_envelope_len(body.len()) as u64 > u64::from(limit) =>
+        {
+            WireOutcome::Err(WireError::ReplyTooLarge)
+        }
+        outcome => outcome,
     }
 }
 
@@ -142,7 +156,7 @@ impl<M: RpcMethod> ReplyHandle<M> {
                 codec: <M::Reply as Wire>::CODEC,
                 body,
             },
-            Err(_) => WireOutcome::Err(WireError::ReplyTooLarge),
+            Err(_) => WireOutcome::Err(WireError::ReplyEncodeFailed),
         };
         context.deliver(outcome)
     }

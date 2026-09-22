@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! kind 0x01 HELLO    magic u32 | min_version u16 | max_version u16
-//!                    | incarnation u128 | features u64
+//!                    | incarnation u128 | features u64 | max_frame_bytes u32
 //! kind 0x02 REQUEST  call_id u64 | incarnation u128 | token.index u64 | token.generation u32
 //!                    | method u32 | schema u16 | codec u16
 //!                    | metadata_len u16 | metadata | body (rest of the frame)
@@ -19,6 +19,9 @@
 //!   peer with no common version is refused. `features` is reserved for
 //!   capabilities negotiated by later packages (TLS, authentication,
 //!   streams); this version sends zero and ignores unknown bits.
+//!   `max_frame_bytes` is the largest frame payload the sender accepts:
+//!   each side sends the peer nothing larger, so an oversized request or
+//!   reply fails its own call instead of tearing the session down.
 //! - REQUEST: `metadata` is a reserved, length-prefixed section for request
 //!   credentials (verified by the security package, #218). This version
 //!   sends it empty and ignores what it receives; it is never passed to a
@@ -28,7 +31,8 @@
 //! `3` method mismatch (detail: registered method), `4` schema mismatch
 //! (detail: registered schema), `5` codec mismatch (detail: registered
 //! codec), `6` malformed request, `7` overloaded, `8` broken promise, `9`
-//! reply too large. Detail is `0` when it carries nothing.
+//! reply too large, `10` reply encoding failed. Detail is `0` when it
+//! carries nothing.
 //!
 //! Changing this layout, adding a kind or a status code requires a new
 //! [`PROTOCOL_VERSION`]; the golden vectors in the tests pin version 1.
@@ -80,6 +84,8 @@ pub enum WireMessage {
         incarnation: Incarnation,
         /// Reserved capability bits; zero in this version.
         features: u64,
+        /// The largest frame payload the sender accepts.
+        max_frame_bytes: u32,
     },
     /// One request attempt for a dynamic endpoint.
     Request {
@@ -151,8 +157,10 @@ pub enum WireError {
     Overloaded,
     /// The handler dropped its reply handle without replying.
     BrokenPromise,
-    /// The handler's reply could not be encoded within the frame limit.
+    /// The handler's reply exceeded the frame limit of the session.
     ReplyTooLarge,
+    /// The handler's reply could not be encoded by its codec.
+    ReplyEncodeFailed,
 }
 
 impl WireError {
@@ -167,6 +175,7 @@ impl WireError {
             Self::Overloaded => (7, 0),
             Self::BrokenPromise => (8, 0),
             Self::ReplyTooLarge => (9, 0),
+            Self::ReplyEncodeFailed => (10, 0),
         }
     }
 
@@ -193,6 +202,7 @@ impl WireError {
             7 => Self::Overloaded,
             8 => Self::BrokenPromise,
             9 => Self::ReplyTooLarge,
+            10 => Self::ReplyEncodeFailed,
             other => return Err(EnvelopeError::UnknownStatus(other)),
         })
     }
@@ -232,13 +242,15 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
             max_version,
             incarnation,
             features,
+            max_frame_bytes,
         } => {
             out.u8(KIND_HELLO)
                 .u32(*magic)
                 .u16(*min_version)
                 .u16(*max_version)
                 .u128(incarnation.get())
-                .u64(*features);
+                .u64(*features)
+                .u32(*max_frame_bytes);
         }
         WireMessage::Request {
             call_id,
@@ -281,6 +293,12 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
     out.0
 }
 
+/// Size of a `Hello` envelope.
+pub const HELLO_ENVELOPE_LEN: usize = 1 + 4 + 2 + 2 + 16 + 8 + 4;
+
+/// Size of a rejection reply envelope (the largest fixed reply layout).
+pub const REJECTION_ENVELOPE_LEN: usize = 1 + 8 + 1 + 8;
+
 /// Size of a request envelope carrying a `body_len`-byte body.
 #[must_use]
 pub const fn request_envelope_len(body_len: usize) -> usize {
@@ -311,6 +329,7 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
                 max_version: input.u16().ok_or_else(truncated)?,
                 incarnation: Incarnation::from_raw(input.u128().ok_or_else(truncated)?),
                 features: input.u64().ok_or_else(truncated)?,
+                max_frame_bytes: input.u32().ok_or_else(truncated)?,
             };
             if !input.is_empty() {
                 return Err(EnvelopeError::TrailingBytes);
@@ -366,9 +385,9 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvelopeError, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, WireError,
-        WireMessage, WireOutcome, decode_message, encode_message, negotiate, reply_envelope_len,
-        request_envelope_len,
+        EnvelopeError, HELLO_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+        WireError, WireMessage, WireOutcome, decode_message, encode_message, negotiate,
+        reply_envelope_len, request_envelope_len,
     };
     use crate::codec::CodecId;
     use crate::endpoint::{EndpointToken, Incarnation};
@@ -394,6 +413,7 @@ mod tests {
             max_version: PROTOCOL_VERSION,
             incarnation: Incarnation::from_raw(1),
             features: 0,
+            max_frame_bytes: 0x0001_0000,
         }
     }
 
@@ -404,7 +424,9 @@ mod tests {
         let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 1, 0, 1, 0, 1];
         expected.extend([0; 15]);
         expected.extend([0; 8]);
+        expected.extend([0, 0, 1, 0]);
         assert_eq!(encode_message(&hello()), expected);
+        assert_eq!(encode_message(&hello()).len(), HELLO_ENVELOPE_LEN);
 
         let mut expected = vec![0x02, 5, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x01];
         expected.extend([0; 14]);
@@ -483,6 +505,7 @@ mod tests {
             WireError::Overloaded,
             WireError::BrokenPromise,
             WireError::ReplyTooLarge,
+            WireError::ReplyEncodeFailed,
         ];
         for error in errors {
             let message = WireMessage::Reply {

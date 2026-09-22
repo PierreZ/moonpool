@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let (driver, rpc) = RpcDriver::client_only(TokioProviders::new(), RpcConfig::default());
+        let (driver, rpc) = RpcDriver::client_only(TokioProviders::new(), RpcConfig::default())?;
         let driver = tokio::spawn(driver.run());
         let echo = ServiceRef::<Echo>::from_bytes(&bytes)?.bind(&rpc);
         println!("calling {}", echo.target().endpoint());

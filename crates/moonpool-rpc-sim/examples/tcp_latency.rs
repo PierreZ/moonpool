@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     let (client_driver, client) =
-        RpcDriver::client_only(TokioProviders::new(), RpcConfig::default());
+        RpcDriver::client_only(TokioProviders::new(), RpcConfig::default())?;
     let client_driver = tokio::spawn(client_driver.run());
     let echo = service.bind(&client);
 

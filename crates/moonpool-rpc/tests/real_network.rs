@@ -102,15 +102,24 @@ fn ping(id: u64) -> Ping {
     }
 }
 
-async fn listen(config: RpcConfig) -> (RpcHandle<TokioProviders>, tokio::task::JoinHandle<()>) {
+async fn listen(
+    config: RpcConfig,
+) -> (
+    RpcHandle<TokioProviders>,
+    tokio::task::JoinHandle<std::io::Error>,
+) {
     let (driver, rpc) = RpcDriver::listen(TokioProviders::new(), "127.0.0.1:0", config)
         .await
         .expect("bind an ephemeral port");
     (rpc, tokio::spawn(driver.run()))
 }
 
-fn client_only() -> (RpcHandle<TokioProviders>, tokio::task::JoinHandle<()>) {
-    let (driver, rpc) = RpcDriver::client_only(TokioProviders::new(), RpcConfig::default());
+fn client_only() -> (
+    RpcHandle<TokioProviders>,
+    tokio::task::JoinHandle<std::io::Error>,
+) {
+    let (driver, rpc) =
+        RpcDriver::client_only(TokioProviders::new(), RpcConfig::default()).expect("valid config");
     (rpc, tokio::spawn(driver.run()))
 }
 
@@ -510,6 +519,7 @@ fn raw_hello(min_version: u16, max_version: u16) -> Vec<u8> {
             max_version,
             incarnation: moonpool_rpc::Incarnation::from_raw(9),
             features: 0,
+            max_frame_bytes: 1024,
         }),
         1024,
     )
@@ -710,7 +720,8 @@ async fn sessions_go_through_the_upgrade_seam() {
         .expect("bind");
         let server_driver = tokio::spawn(server_driver.run());
         let (client_driver, client) =
-            RpcDriver::client_only_with(TokioProviders::new(), RpcConfig::default(), upgrade);
+            RpcDriver::client_only_with(TokioProviders::new(), RpcConfig::default(), upgrade)
+                .expect("valid config");
         let client_driver = tokio::spawn(client_driver.run());
         let (service, mut stream) = server
             .register::<Held>(AccessClass::Public)
@@ -742,4 +753,125 @@ async fn sessions_go_through_the_upgrade_seam() {
         server_driver.abort();
         client_driver.abort();
     }
+}
+
+fn client_with(
+    config: RpcConfig,
+) -> (
+    RpcHandle<TokioProviders>,
+    tokio::task::JoinHandle<std::io::Error>,
+) {
+    let (driver, rpc) =
+        RpcDriver::client_only(TokioProviders::new(), config).expect("valid config");
+    (rpc, tokio::spawn(driver.run()))
+}
+
+fn small_frames() -> RpcConfig {
+    RpcConfig {
+        max_frame_bytes: 256,
+        ..RpcConfig::default()
+    }
+}
+
+/// A request larger than the *server's* announced limit fails its own call
+/// before it is sent; the session and the other calls on it are untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_request_for_the_peer_fails_only_its_own_call() {
+    let (server, server_driver) = listen(small_frames()).await;
+    let (client, client_driver) = client_only();
+    let (service, mut stream) = server
+        .register::<Held>(AccessClass::Public)
+        .expect("register");
+    let held = service.bind(&client);
+
+    // Establish the session, and keep one call in flight across the refusal.
+    let in_flight = tokio::spawn({
+        let held = held.clone();
+        async move { held.try_get_reply(&ping(1)).await }
+    });
+    let first = stream.recv().await.expect("in-flight request arrives");
+
+    let big = Ping {
+        id: 2,
+        text: "x".repeat(1_000),
+    };
+    let refused = held
+        .try_get_reply(&big)
+        .await
+        .expect_err("too large for the peer");
+    assert!(
+        matches!(
+            refused.reason(),
+            ErrorReason::FrameTooLarge { limit: 256, .. }
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(refused.execution(), Execution::NotAdmitted);
+
+    // The in-flight call completes on the same session, and later calls too.
+    assert!(first.reply.send(&Pong {
+        id: 1,
+        text: String::new(),
+    }));
+    assert_eq!(in_flight.await.expect("join").expect("reply").id, 1);
+    let next = tokio::spawn({
+        let held = held.clone();
+        async move { held.try_get_reply(&ping(3)).await }
+    });
+    let incoming = stream.recv().await.expect("next request");
+    assert_eq!(
+        incoming.request.id, 3,
+        "the oversized request never arrived"
+    );
+    assert!(incoming.reply.send(&Pong::default()));
+    assert!(next.await.expect("join").is_ok());
+
+    let stats = client.stats().expect("running");
+    assert_eq!(stats.connections_opened, 1, "the session survived");
+    assert_eq!(server.stats().expect("running").protocol_violations, 0);
+    server_driver.abort();
+    client_driver.abort();
+}
+
+/// A reply larger than the *caller's* announced limit fails that call with
+/// `ReplyTooLarge` (the handler ran); the session stays up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversized_reply_for_the_caller_fails_only_its_own_call() {
+    let (server, server_driver) = listen(RpcConfig::default()).await;
+    let (client, client_driver) = client_with(small_frames());
+    let (service, mut stream) = server
+        .register::<Held>(AccessClass::Public)
+        .expect("register");
+    let held = service.bind(&client);
+
+    let in_flight = tokio::spawn({
+        let held = held.clone();
+        async move { held.try_get_reply(&ping(1)).await }
+    });
+    let big_call = tokio::spawn({
+        let held = held.clone();
+        async move { held.try_get_reply(&ping(2)).await }
+    });
+    let mut first = stream.recv().await.expect("request");
+    let mut second = stream.recv().await.expect("request");
+    if first.request.id != 1 {
+        std::mem::swap(&mut first, &mut second);
+    }
+    assert!(second.reply.send(&Pong {
+        id: 2,
+        text: "y".repeat(1_000),
+    }));
+    let too_large = big_call.await.expect("join").expect_err("reply too large");
+    assert_eq!(too_large.reason(), &ErrorReason::ReplyTooLarge);
+    assert_eq!(too_large.execution(), Execution::Executed);
+
+    assert!(first.reply.send(&Pong {
+        id: 1,
+        text: String::new(),
+    }));
+    assert_eq!(in_flight.await.expect("join").expect("reply").id, 1);
+    assert_eq!(client.stats().expect("running").connections_opened, 1);
+    assert_eq!(client.stats().expect("running").protocol_violations, 0);
+    server_driver.abort();
+    client_driver.abort();
 }

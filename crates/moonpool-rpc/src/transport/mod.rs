@@ -41,20 +41,21 @@ use futures::stream::FuturesUnordered;
 use futures::{AsyncReadExt, StreamExt};
 use moonpool_core::{NetworkProvider, Providers, RandomProvider, TcpListenerTrait, TimeProvider};
 
-use self::connection::{CloseReason, Connection, QueueRefusal, read_loop, write_loop};
+use self::connection::{CloseReason, Connection, PeerHello, QueueRefusal, read_loop, write_loop};
 use self::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
 use crate::ServiceRef;
 use crate::call::client::{CallGuard, CallOwner, ServiceClient};
 use crate::call::receiver::{EndpointOwner, Inbox, RequestStream, endpoint_pair};
 use crate::call::reply::{LocalSink, ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
-use crate::config::RpcConfig;
+use crate::config::{MIN_FRAME_BYTES, RpcConfig};
 use crate::endpoint::registry::{Registry, RegistryError};
 use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation};
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
 use crate::protocol::{
-    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, WireError, WireMessage,
-    WireOutcome, decode_message, encode_frame, encode_message, negotiate, request_envelope_len,
+    HEADER_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, WireError,
+    WireMessage, WireOutcome, decode_message, encode_frame, encode_message, negotiate,
+    request_envelope_len,
 };
 use crate::stats::{Counters, ResourceProbe, RpcStats, TaskGuard};
 
@@ -143,6 +144,7 @@ impl<P: Providers> Shared<P> {
             max_version: PROTOCOL_VERSION,
             incarnation: self.incarnation,
             features: 0,
+            max_frame_bytes: self.config.max_frame_bytes,
         });
         // A handshake is a few dozen bytes and exempt from the configured
         // frame limit, which only bounds what peers may send us.
@@ -364,10 +366,39 @@ impl<P: Providers> Shared<P> {
             .unbounded_send(Command::Accepted(connection, stream));
     }
 
-    fn mark_transmitted(&self, call_id: u64) {
-        if let Some(call) = self.lock().pending.get_mut(&call_id) {
+    /// Decide whether a request frame may leave on `connection`: it must fit
+    /// the peer's announced frame limit. A frame that does not is refused
+    /// for its own call (never sent, so `NotAdmitted`) and the session
+    /// stays up.
+    fn admit_transmit(&self, connection: &Connection, call_id: u64, frame_len: usize) -> bool {
+        let limit = connection
+            .peer_hello()
+            .map_or(self.config.max_frame_bytes, |hello| hello.max_frame_bytes);
+        let size = frame_len.saturating_sub(HEADER_LEN) as u64;
+        let mut state = self.lock();
+        if size > u64::from(limit) {
+            let call = state.pending.remove(&call_id);
+            drop(state);
+            tracing::debug!(
+                call_id,
+                size,
+                limit,
+                "rpc request exceeds the peer's frame limit"
+            );
+            if let Some(call) = call {
+                let _ = call
+                    .sender
+                    .send(Err(RpcError::not_admitted(ErrorReason::FrameTooLarge {
+                        size,
+                        limit,
+                    })));
+            }
+            return false;
+        }
+        if let Some(call) = state.pending.get_mut(&call_id) {
             call.transmitted = true;
         }
+        true
     }
 
     /// Complete a pending call from `origin`.
@@ -414,6 +445,7 @@ impl<P: Providers> Shared<P> {
                 max_version,
                 incarnation,
                 features,
+                max_frame_bytes,
             } => {
                 if established {
                     return Err(CloseReason::Protocol("duplicate handshake".into()));
@@ -430,12 +462,22 @@ impl<P: Providers> Shared<P> {
                          this build {MIN_PROTOCOL_VERSION}..={PROTOCOL_VERSION}"
                     )));
                 };
-                connection.establish();
+                if max_frame_bytes < MIN_FRAME_BYTES {
+                    return Err(CloseReason::Protocol(format!(
+                        "peer frame limit {max_frame_bytes} below {MIN_FRAME_BYTES}"
+                    )));
+                }
+                connection.establish(PeerHello {
+                    incarnation,
+                    version,
+                    max_frame_bytes,
+                });
                 tracing::debug!(
                     peer = %connection.peer(),
                     %incarnation,
                     version,
                     features,
+                    max_frame_bytes,
                     "rpc session established"
                 );
                 Ok(())
@@ -514,6 +556,9 @@ impl<P: Providers> Shared<P> {
                 Counters::bump(&self.counters.protocol_violations);
                 if matches!(reason, CloseReason::Checksum(_)) {
                     Counters::bump(&self.counters.checksum_failures);
+                    if established {
+                        Counters::bump(&self.counters.established_checksum_failures);
+                    }
                 }
                 if matches!(reason, CloseReason::Version(_)) {
                     Counters::bump(&self.counters.version_rejections);
@@ -531,6 +576,9 @@ impl<P: Providers> Shared<P> {
                     "session closed during handshake: {reason:?}"
                 )))
             } else if call.transmitted {
+                if matches!(reason, CloseReason::Checksum(_)) {
+                    Counters::bump(&self.counters.calls_failed_by_corruption);
+                }
                 RpcError::new(ErrorReason::Disconnected, Execution::MaybeExecuted)
             } else {
                 RpcError::not_admitted(ErrorReason::Disconnected)
@@ -731,8 +779,9 @@ impl<P: Providers> RpcDriver<P> {
     ///
     /// # Errors
     ///
-    /// The listener's bind error, or `InvalidData` when the bound address
-    /// is not a resolved `ip:port`.
+    /// `InvalidInput` when the configuration does not validate
+    /// ([`RpcConfig::validate`]), the listener's bind error, or
+    /// `InvalidData` when the bound address is not a resolved `ip:port`.
     pub async fn listen(
         providers: P,
         bind_address: &str,
@@ -743,8 +792,12 @@ impl<P: Providers> RpcDriver<P> {
 
     /// Build a plaintext runtime that only calls others (it cannot
     /// register).
-    #[must_use]
-    pub fn client_only(providers: P, config: RpcConfig) -> (Self, RpcHandle<P>) {
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` when the configuration does not validate
+    /// ([`RpcConfig::validate`]).
+    pub fn client_only(providers: P, config: RpcConfig) -> io::Result<(Self, RpcHandle<P>)> {
         Self::client_only_with(providers, config, Plaintext)
     }
 }
@@ -799,14 +852,16 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
     ///
     /// # Errors
     ///
-    /// The listener's bind error, or `InvalidData` when the bound address
-    /// is not a resolved `ip:port`.
+    /// `InvalidInput` when the configuration does not validate, the
+    /// listener's bind error, or `InvalidData` when the bound address is not
+    /// a resolved `ip:port`.
     pub async fn listen_with(
         providers: P,
         bind_address: &str,
         config: RpcConfig,
         upgrade: U,
     ) -> io::Result<(Self, RpcHandle<P>)> {
+        validated(&config)?;
         let listener = providers.network().bind(bind_address).await?;
         let address = match config.advertised_address {
             Some(advertised) => advertised,
@@ -827,9 +882,17 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
 
     /// Like [`RpcDriver::client_only`], upgrading every session with
     /// `upgrade`.
-    #[must_use]
-    pub fn client_only_with(providers: P, config: RpcConfig, upgrade: U) -> (Self, RpcHandle<P>) {
-        Self::build(providers, config, None, upgrade)
+    ///
+    /// # Errors
+    ///
+    /// `InvalidInput` when the configuration does not validate.
+    pub fn client_only_with(
+        providers: P,
+        config: RpcConfig,
+        upgrade: U,
+    ) -> io::Result<(Self, RpcHandle<P>)> {
+        validated(&config)?;
+        Ok(Self::build(providers, config, None, upgrade))
     }
 
     /// A fresh handle to this runtime.
@@ -840,8 +903,13 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
         }
     }
 
-    /// Drive the runtime. Never completes; drop it to shut down.
-    pub async fn run(self) {
+    /// Drive the runtime; drop it to shut down.
+    ///
+    /// Completes only when the listener fails fatally (see
+    /// [`is_transient_accept_error`]), returning that error; transient accept
+    /// errors are retried with bounded backoff on provider time. A
+    /// client-only runtime never completes.
+    pub async fn run(self) -> io::Error {
         let Self {
             shared,
             mut commands,
@@ -849,10 +917,18 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
             upgrade,
         } = self;
         let mut children: FuturesUnordered<ChildFuture> = FuturesUnordered::new();
-        if let Some(listener) = listener {
-            children.push(Box::pin(accept_loop(Arc::clone(&shared), listener)));
-        }
+        let mut acceptor: Option<Pin<Box<dyn Future<Output = io::Error> + Send>>> =
+            listener.map(|listener| {
+                Box::pin(accept_loop(Arc::clone(&shared), listener))
+                    as Pin<Box<dyn Future<Output = io::Error> + Send>>
+            });
         futures::future::poll_fn(|cx| {
+            if let Some(accepting) = acceptor.as_mut()
+                && let Poll::Ready(error) = accepting.as_mut().poll(cx)
+            {
+                acceptor = None;
+                return Poll::Ready(error);
+            }
             // New work first, so a connection queued by a caller is polled in
             // this same pass.
             while let Poll::Ready(Some(command)) = commands.poll_next_unpin(cx) {
@@ -871,23 +947,66 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
             // Returns Pending once every child is parked (or after its
             // cooperative budget, having scheduled a re-poll).
             while let Poll::Ready(Some(())) = children.poll_next_unpin(cx) {}
-            Poll::<()>::Pending
+            Poll::Pending
         })
-        .await;
+        .await
     }
 }
 
-async fn accept_loop<P: Providers>(shared: Arc<Shared<P>>, listener: Listener<P>) {
+/// Whether an accept error is worth retrying.
+///
+/// Per-connection failures (an aborted or reset handshake), interruptions
+/// and resource exhaustion (`EMFILE`/`ENFILE`/`ENOBUFS`, which std reports as
+/// uncategorised or `OutOfMemory`) pass: the listener itself is fine, and
+/// retrying after a pause is what servers do. A listener that is invalid,
+/// unsupported, denied or otherwise broken in a way that will not heal is
+/// fatal.
+#[must_use]
+pub fn is_transient_accept_error(error: &io::Error) -> bool {
+    !matches!(
+        error.kind(),
+        io::ErrorKind::InvalidInput
+            | io::ErrorKind::InvalidData
+            | io::ErrorKind::Unsupported
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::AddrNotAvailable
+            | io::ErrorKind::AddrInUse
+            | io::ErrorKind::NotFound
+    )
+}
+
+/// First pause after a transient accept error; doubles up to the maximum.
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(5);
+/// Longest pause between accept retries.
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
+
+fn validated(config: &RpcConfig) -> io::Result<()> {
+    config
+        .validate()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+async fn accept_loop<P: Providers>(shared: Arc<Shared<P>>, listener: Listener<P>) -> io::Error {
     let _task = TaskGuard::new(&shared.counters);
+    let mut backoff = ACCEPT_BACKOFF_MIN;
     loop {
         match listener.accept().await {
-            Ok((stream, peer)) => shared.accept(stream, peer),
+            Ok((stream, peer)) => {
+                backoff = ACCEPT_BACKOFF_MIN;
+                shared.accept(stream, peer);
+            }
+            Err(error) if is_transient_accept_error(&error) => {
+                Counters::bump(&shared.counters.accept_errors);
+                tracing::warn!(%error, ?backoff, "rpc accept failed, retrying");
+                // Existing sessions keep running while the listener waits.
+                let _ = shared.time().sleep(backoff).await;
+                backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
+            }
             Err(error) => {
-                // A listener that fails to accept is not retried in a tight
-                // loop: the runtime keeps serving its existing connections
-                // and can still call out.
-                tracing::warn!(%error, "rpc listener failed, no longer accepting");
-                return;
+                Counters::bump(&shared.counters.accept_errors);
+                tracing::error!(%error, "rpc listener failed fatally");
+                return error;
             }
         }
     }
@@ -966,8 +1085,8 @@ where
             shared.on_message(connection, message)
         },
     );
-    let write = write_loop(connection, writer, |call_id| {
-        shared.mark_transmitted(call_id);
+    let write = write_loop(connection, writer, |call_id, frame_len| {
+        shared.admit_transmit(connection, call_id, frame_len)
     });
     let deadline = handshake_deadline(shared, connection, shared.config.handshake_timeout);
     futures::pin_mut!(read, write, deadline);

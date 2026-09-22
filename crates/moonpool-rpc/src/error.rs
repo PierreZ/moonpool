@@ -78,8 +78,11 @@ pub enum ErrorReason {
     /// The server admitted the request, then dropped its reply handle
     /// without replying.
     BrokenPromise,
-    /// The handler replied, but the reply exceeded the frame limit.
+    /// The handler replied, but the reply exceeded the session's frame
+    /// limit (the smaller of the two peers' limits).
     ReplyTooLarge,
+    /// The handler replied, but its codec failed to encode the reply.
+    ReplyEncodeFailed,
     /// A reply arrived but did not decode as the expected reply type.
     MalformedReply(String),
     /// The local RPC runtime is gone (its driver was dropped).
@@ -124,6 +127,7 @@ impl std::fmt::Display for ErrorReason {
             Self::Timeout => f.write_str("deadline passed before an outcome arrived"),
             Self::BrokenPromise => f.write_str("broken promise: the server dropped the reply"),
             Self::ReplyTooLarge => f.write_str("the reply exceeded the frame limit"),
+            Self::ReplyEncodeFailed => f.write_str("the reply could not be encoded"),
             Self::MalformedReply(detail) => write!(f, "malformed reply: {detail}"),
             Self::Shutdown => f.write_str("the RPC runtime has shut down"),
             Self::NotListening => f.write_str("the RPC runtime is not listening"),
@@ -213,6 +217,9 @@ impl RpcError {
             WireError::ReplyTooLarge => {
                 return Self::new(ErrorReason::ReplyTooLarge, Execution::Executed);
             }
+            WireError::ReplyEncodeFailed => {
+                return Self::new(ErrorReason::ReplyEncodeFailed, Execution::Executed);
+            }
         };
         // Every other server-side rejection happens before admission.
         Self::not_admitted(reason)
@@ -263,6 +270,7 @@ mod tests {
             Execution::MaybeExecuted
         );
         assert_eq!(knowledge(WireError::ReplyTooLarge), Execution::Executed);
+        assert_eq!(knowledge(WireError::ReplyEncodeFailed), Execution::Executed);
         let stale = RpcError::from_wire(WireError::StaleIncarnation, called);
         assert!(stale.is_terminal_for_reference());
         assert_eq!(stale.reason(), &ErrorReason::StaleIncarnation);

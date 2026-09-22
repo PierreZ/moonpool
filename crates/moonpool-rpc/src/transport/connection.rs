@@ -53,6 +53,19 @@ struct QueueState {
     closed: bool,
     /// What the upgrade learned about the peer (set before any frame is read).
     peer_context: Option<PeerContext>,
+    /// What the peer's `Hello` announced (set when the session establishes).
+    peer_hello: Option<PeerHello>,
+}
+
+/// What a peer announced in its `Hello`, as accepted by this side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PeerHello {
+    /// The peer runtime's incarnation.
+    pub(crate) incarnation: crate::endpoint::Incarnation,
+    /// The negotiated envelope version.
+    pub(crate) version: u16,
+    /// The largest frame payload the peer accepts.
+    pub(crate) max_frame_bytes: u32,
 }
 
 /// One session's shared half: what callers and responders queue into and
@@ -89,6 +102,7 @@ impl Connection {
                 established: false,
                 closed: false,
                 peer_context: None,
+                peer_hello: None,
             }),
             max_requests,
             // The handshake frame does not count against the reserve.
@@ -158,9 +172,17 @@ impl Connection {
     }
 
     /// The peer's handshake was accepted: requests may flow.
-    pub(crate) fn establish(&self) {
-        self.lock().established = true;
+    pub(crate) fn establish(&self, hello: PeerHello) {
+        let mut queue = self.lock();
+        queue.established = true;
+        queue.peer_hello = Some(hello);
+        drop(queue);
         self.waker.wake();
+    }
+
+    /// What the peer announced, once the session is established.
+    pub(crate) fn peer_hello(&self) -> Option<PeerHello> {
+        self.lock().peer_hello
     }
 
     pub(crate) fn is_established(&self) -> bool {
@@ -233,24 +255,28 @@ impl Drop for Connection {
 
 /// Write queued frames until the connection is closed or a write fails.
 ///
-/// `on_transmit` runs for a request frame before its first byte is written:
-/// from then on the server may execute it.
+/// `admit_transmit` runs for a request frame before its first byte is
+/// written and decides whether it goes out (from then on the server may
+/// execute it); a refused frame is skipped and its call completed by the
+/// callback.
 pub(crate) async fn write_loop<W: AsyncWrite + Unpin>(
     connection: &Connection,
     mut writer: W,
-    on_transmit: impl Fn(u64),
+    admit_transmit: impl Fn(u64, usize) -> bool,
 ) -> CloseReason {
     loop {
         let next = futures::future::poll_fn(|cx| connection.poll_next(cx)).await;
         let Some(outgoing) = next else {
             return CloseReason::Local;
         };
-        if let Some(call_id) = outgoing.call_id {
-            on_transmit(call_id);
-        }
-        if let Err(error) = writer.write_all(&outgoing.bytes).await {
+        let admitted = outgoing
+            .call_id
+            .is_none_or(|call_id| admit_transmit(call_id, outgoing.bytes.len()));
+        if admitted && let Err(error) = writer.write_all(&outgoing.bytes).await {
             return CloseReason::Io(error.to_string());
         }
+        // Flush whenever nothing else is ready, including after a skipped
+        // frame, so earlier writes never sit in a buffer.
         if connection.is_drained()
             && let Err(error) = writer.flush().await
         {

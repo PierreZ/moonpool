@@ -80,10 +80,10 @@ pub(crate) mod transport;
 
 pub use call::{IncomingRequest, ReplyHandle, RequestStream, ServiceClient, ServiceRef};
 pub use codec::{CodecId, DecodeError, EncodeError, Wire};
-pub use config::RpcConfig;
+pub use config::{InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, RpcConfig};
 pub use endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation};
 pub use error::{ErrorReason, Execution, RpcError};
 pub use protocol::{MethodId, RpcMethod, SchemaVersion};
 pub use stats::{ResourceProbe, RpcStats};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
-pub use transport::{RpcDriver, RpcHandle, SessionUpgrade};
+pub use transport::{RpcDriver, RpcHandle, SessionUpgrade, is_transient_accept_error};

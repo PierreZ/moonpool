@@ -42,6 +42,14 @@ pub struct RpcStats {
     pub connections_opened: u64,
     /// Connections refused by the connection budget.
     pub connections_rejected: u64,
+    /// Listener accept errors (transient and fatal).
+    pub accept_errors: u64,
+    /// Checksum mismatches on sessions that had completed their handshake
+    /// (corruption of live traffic, as opposed to a bad opening).
+    pub established_checksum_failures: u64,
+    /// Calls that had begun transmission when this runtime closed their
+    /// session for a checksum mismatch, and so failed as maybe-executed.
+    pub calls_failed_by_corruption: u64,
 }
 
 /// The runtime's counters, shared by everything that updates them.
@@ -61,6 +69,9 @@ pub(crate) struct Counters {
     pub(crate) version_rejections: AtomicU64,
     pub(crate) connections_opened: AtomicU64,
     pub(crate) connections_rejected: AtomicU64,
+    pub(crate) accept_errors: AtomicU64,
+    pub(crate) established_checksum_failures: AtomicU64,
+    pub(crate) calls_failed_by_corruption: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
     pub(crate) live_connections: AtomicUsize,
 }
@@ -90,6 +101,9 @@ impl Counters {
             version_rejections: load(&self.version_rejections),
             connections_opened: load(&self.connections_opened),
             connections_rejected: load(&self.connections_rejected),
+            accept_errors: load(&self.accept_errors),
+            established_checksum_failures: load(&self.established_checksum_failures),
+            calls_failed_by_corruption: load(&self.calls_failed_by_corruption),
         }
     }
 }
