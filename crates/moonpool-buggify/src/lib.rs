@@ -48,9 +48,13 @@ pub type RandomSource = fn() -> f64;
 #[derive(Default)]
 struct State {
     enabled: bool,
-    active_locations: BTreeMap<String, bool>,
+    active_locations: BTreeMap<&'static str, bool>,
     activation_prob: f64,
     random_source: Option<RandomSource>,
+}
+
+fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
+    STATE.with(|state| f(&mut state.borrow_mut()))
 }
 
 /// Install the deterministic random source used for activation and firing draws.
@@ -58,16 +62,12 @@ struct State {
 /// Called by the simulation runtime before [`buggify_init`]. Without an
 /// installed source, buggify stays inert even if enabled.
 pub fn set_random_source(source: RandomSource) {
-    STATE.with(|state| {
-        state.borrow_mut().random_source = Some(source);
-    });
+    with_state(|state| state.random_source = Some(source));
 }
 
 /// Remove the installed random source, returning buggify to its inert state.
 pub fn clear_random_source() {
-    STATE.with(|state| {
-        state.borrow_mut().random_source = None;
-    });
+    with_state(|state| state.random_source = None);
 }
 
 /// Initialize buggify for a simulation run.
@@ -79,8 +79,7 @@ pub fn clear_random_source() {
 /// source must have been installed via [`set_random_source`] for call sites
 /// to fire.
 pub fn buggify_init(activation_prob: f64) {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
+    with_state(|state| {
         state.enabled = true;
         state.active_locations.clear();
         state.activation_prob = activation_prob;
@@ -93,8 +92,7 @@ pub fn buggify_init(activation_prob: f64) {
 /// [`buggify_init`]. The installed random source is left in place; use
 /// [`clear_random_source`] to remove it as well.
 pub fn buggify_reset() {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
+    with_state(|state| {
         state.enabled = false;
         state.active_locations.clear();
         state.activation_prob = 0.0;
@@ -110,23 +108,19 @@ pub fn buggify_reset() {
 /// through an installed [`RandomSource`] is exact.
 #[must_use]
 pub fn buggify_internal(prob: f64, location: &'static str) -> bool {
-    STATE.with(|state| {
-        let mut state = state.borrow_mut();
-
+    with_state(|state| {
         if !state.enabled || prob <= 0.0 {
             return false;
         }
         let Some(random) = state.random_source else {
             return false;
         };
-
-        let location_str = location.to_string();
         let activation_prob = state.activation_prob;
 
         // Decide activation on first encounter
         let is_active = *state
             .active_locations
-            .entry(location_str)
+            .entry(location)
             .or_insert_with(|| random() < activation_prob);
 
         // If active, fire probabilistically
@@ -174,8 +168,16 @@ mod tests {
         f64::from(bits) / 4_294_967_296.0
     }
 
-    fn reset_test_source() {
+    /// Run `f` with the test source installed and buggify enabled at
+    /// `activation_prob`, then disable buggify and remove the source.
+    fn with_test_source<R>(activation_prob: f64, f: impl FnOnce() -> R) -> R {
         TEST_DRAWS.with(|c| c.set(0));
+        set_random_source(test_source);
+        buggify_init(activation_prob);
+        let out = f();
+        buggify_reset();
+        clear_random_source();
+        out
     }
 
     #[test]
@@ -197,75 +199,58 @@ mod tests {
 
     #[test]
     fn activation_decision_is_consistent() {
-        reset_test_source();
-        set_random_source(test_source);
-        buggify_init(0.5);
-
-        let location = "consistent_location";
-        let first = buggify_internal(1.0, location);
-        let second = buggify_internal(1.0, location);
-        // With prob=1.0 the outcome equals the activation decision, which is
-        // made once per location.
-        assert_eq!(first, second);
-        buggify_reset();
-        clear_random_source();
+        with_test_source(0.5, || {
+            let location = "consistent_location";
+            let first = buggify_internal(1.0, location);
+            let second = buggify_internal(1.0, location);
+            // With prob=1.0 the outcome equals the activation decision, which is
+            // made once per location.
+            assert_eq!(first, second);
+        });
     }
 
     #[test]
     fn sequences_replay_deterministically() {
         let run = || {
-            reset_test_source();
-            set_random_source(test_source);
-            buggify_init(0.5);
-            let out: Vec<bool> = (0..5)
-                .map(|i| {
-                    let location = Box::leak(format!("loc_{i}").into_boxed_str());
-                    buggify_internal(0.5, location)
-                })
-                .collect();
-            buggify_reset();
-            clear_random_source();
-            out
+            with_test_source(0.5, || {
+                (0..5)
+                    .map(|i| {
+                        let location = Box::leak(format!("loc_{i}").into_boxed_str());
+                        buggify_internal(0.5, location)
+                    })
+                    .collect::<Vec<bool>>()
+            })
         };
         assert_eq!(run(), run());
     }
 
     #[test]
     fn always_active_always_fires() {
-        reset_test_source();
-        set_random_source(test_source);
-        buggify_init(1.0);
-        let fired = (0..20).any(|_| buggify_internal(1.0, "always"));
+        let fired = with_test_source(1.0, || (0..20).any(|_| buggify_internal(1.0, "always")));
         assert!(fired, "activation 1.0 + prob 1.0 must fire");
-        buggify_reset();
-        clear_random_source();
     }
 
     #[test]
     fn reset_disables_firing() {
-        reset_test_source();
-        set_random_source(test_source);
-        buggify_init(1.0);
-        assert!(buggify_internal(1.0, "reset_case"));
-        buggify_reset();
-        assert!(!buggify_internal(1.0, "reset_case"));
-        clear_random_source();
+        with_test_source(1.0, || {
+            assert!(buggify_internal(1.0, "reset_case"));
+            buggify_reset();
+            assert!(!buggify_internal(1.0, "reset_case"));
+        });
     }
 
     #[test]
     fn macros_share_crate_state() {
-        reset_test_source();
-        set_random_source(test_source);
-        buggify_init(1.0);
-        // buggify! fires at 25% per call; over many calls it must fire.
-        assert!(
-            (0..100).any(|_| crate::buggify!()),
-            "macro must observe enabled state"
-        );
-        assert!(crate::buggify_with_prob!(1.0));
-        buggify_reset();
-        assert!((0..100).all(|_| !crate::buggify!()));
-        assert!(!crate::buggify_with_prob!(1.0));
-        clear_random_source();
+        with_test_source(1.0, || {
+            // buggify! fires at 25% per call; over many calls it must fire.
+            assert!(
+                (0..100).any(|_| crate::buggify!()),
+                "macro must observe enabled state"
+            );
+            assert!(crate::buggify_with_prob!(1.0));
+            buggify_reset();
+            assert!((0..100).all(|_| !crate::buggify!()));
+            assert!(!crate::buggify_with_prob!(1.0));
+        });
     }
 }
