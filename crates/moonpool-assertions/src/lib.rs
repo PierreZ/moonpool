@@ -26,6 +26,7 @@ pub mod buckets;
 pub mod hooks;
 pub mod region;
 pub mod slots;
+mod table;
 
 pub use buckets::{
     EACH_BUCKET_MEM_SIZE, EachBucket, MAX_EACH_BUCKETS, assertion_sometimes_each,
