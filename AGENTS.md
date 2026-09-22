@@ -230,7 +230,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 ## References
 **Read first**: `docs/analysis/foundationdb/layer-1-flow-runtime.md` (before any `actor.cpp` code)
 **Available files in docs/references**:
-- foundationdb/: Buggify.h, FlowTransport.actor.cpp, FlowTransport.h, Net2.actor.cpp, Net2Packet.cpp, Net2Packet.h, Ping.actor.cpp, sim2.actor.cpp
+- foundationdb/: Buggify.h, FlowTransport.cpp, FlowTransport.h, Net2.actor.cpp, Net2Packet.cpp, Net2Packet.h, Ping.actor.cpp, sim2.actor.cpp, and the fdbrpc layer (provenance per file in `docs/references/foundationdb/README.md`)
 - tigerbeetle/: packet_simulator.zig
 
 **IMPORTANT**: Always read FoundationDB's implementation first before making simulation changes.

@@ -6,7 +6,7 @@ Moonpool baseline: `70bc7d6317a76f337cbce0835cf6e63bb4070821`. Primary FDB check
 
 ## Corrections to retained analysis
 
-The retained `docs/references/foundationdb/` sources were enumerated and compared with the current checkout; none of the 27 retained source files was byte-identical to its matched current file. Many current files have moved from `.actor.cpp`/`.actor.h` to coroutine `.cpp`/`.h`; `sim2-file.actor.cpp` has no same-basename current counterpart. Their behavior must not be silently combined across snapshots.
+The retained `docs/references/foundationdb/` sources were enumerated and compared with the current checkout; none of the 27 retained source files was byte-identical to its matched current file. Many current files have moved from `.actor.cpp`/`.actor.h` to coroutine `.cpp`/`.h`; `sim2-file.actor.cpp` has no same-basename current counterpart. The RPC-layer copies (transport, fdbrpc, failure monitor, load balancing, packets, errors) have since been refreshed to this SHA under their current names, and the files this index cites under `fdbrpc/` and `flow/TLSConfig.cpp` were added; `docs/references/foundationdb/README.md` records which local file comes from which snapshot. The simulation and storage copies (`sim2*.actor.cpp`, `Net2.actor.cpp`, `AsyncFile*`, `Buggify.h`, `lost-response.md`, ...) remain older snapshots. Their behavior must not be silently combined across snapshots. The Layer 2/3 analyses have been corrected for the rows below; `lost-response.md` has not.
 
 | Retained statement | Verified current behavior |
 |---|---|

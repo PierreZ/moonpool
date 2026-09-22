@@ -18,10 +18,14 @@ FlowTransport is a "dumb pipe." It knows nothing about RPC semantics, actor type
 application logic. Its job: maintain TCP connections to peers, frame messages on the wire,
 and dispatch incoming bytes to the correct endpoint receiver by UID token lookup.
 
-Source files:
+Source files (local copies in `docs/references/foundationdb/`, FoundationDB
+`c0c44752`; see that directory's `README.md`):
 - `fdbrpc/include/fdbrpc/FlowTransport.h`
-- `fdbrpc/FlowTransport.actor.cpp`
+- `fdbrpc/FlowTransport.cpp` (formerly `FlowTransport.actor.cpp`; now C++20 coroutines)
 - `flow/include/flow/Net2Packet.h`
+
+The code blocks below are simplified sketches. Where an earlier revision of this document
+contradicted the source, the text has been corrected against `c0c44752`.
 
 ---
 
@@ -68,14 +72,21 @@ struct Endpoint {
     NetworkAddressList addresses;
     UID token;
 
-    // Derive related endpoints by offsetting the token
-    Endpoint getAdjustedEndpoint(int index) const {
-        Endpoint e = *this;
-        e.token = UID(token.part[0] + index, token.part[1]);
-        return e;
+    // Derive related endpoints by offsetting the token (FlowTransport.h:85)
+    Endpoint getAdjustedEndpoint(uint32_t index) const {
+        uint32_t newIndex = token.second();
+        newIndex += index;
+        return Endpoint(addresses,
+            UID(token.first() + (uint64_t(index) << 32),
+                (token.second() & 0xffffffff00000000LL) | newIndex));
     }
 };
 ```
+
+The adjustment moves both the high 32 bits of the first word and the low 32 bits (the
+`EndpointMap` slot index) of the second word, so it only resolves because
+`EndpointMap::insert(localAddresses, streams)` registers an interface's streams in
+adjacent slots.
 
 `getAdjustedEndpoint` allows a single `RequestStream` interface to expose multiple
 sub-endpoints (e.g., request + reply) without extra registration.
@@ -87,24 +98,26 @@ sub-endpoints (e.g., request + reply) without extra registration.
 Routes incoming messages by token to the correct `NetworkMessageReceiver`.
 
 ```cpp
-class EndpointMap {
-    std::unordered_map<UID, NetworkMessageReceiver*> dynamicEndpoints;
-    NetworkMessageReceiver* wellKnownEndpoints[WLTOKEN_RESERVED_COUNT];
-
-    NetworkMessageReceiver* get(UID token) {
-        // Fast path: well-known endpoints via direct array index
-        if (token.part[0] == (uint64_t)-1 && token.part[1] < WLTOKEN_RESERVED_COUNT)
-            return wellKnownEndpoints[token.part[1]];
-        // Slow path: hash lookup
-        auto it = dynamicEndpoints.find(token);
-        return it != dynamicEndpoints.end() ? it->second : nullptr;
-    }
+// FlowTransport.cpp:87
+class EndpointMap : NonCopyable {
+    struct Entry {
+        union {
+            uint64_t uid[2];   // priority packed into lower 32 bits; the token's
+                               // lower 32 bits are the index in data[]
+            uint32_t nextFree;
+        };
+        NetworkMessageReceiver* receiver = nullptr;
+    };
+    int wellKnownEndpointCount;
+    std::vector<Entry> data;   // one indexed vector with a free list, no hash map
+    uint32_t firstFree;
 };
 ```
 
-Two tiers:
-- **Well-known endpoints** (array, O(1)): system services like cluster controller, resolver.
-- **Dynamic endpoints** (hash map): per-request reply endpoints, actor registrations.
+There is no hash map. The first `wellKnownEndpointCount` slots of `data` are reserved for
+well-known tokens; dynamic tokens take a free slot, and the slot index is written into the
+token's low 32 bits. `get(token)` indexes `data` directly and then checks the remaining
+token bits against the stored entry, so a stale token for a reused slot is rejected.
 
 ---
 
@@ -188,15 +201,19 @@ struct Peer : NonCopyable {
 
 ### Duplicate connection resolution
 
-When two peers connect simultaneously, the higher `connectionId` wins:
+`connectionId` does **not** decide simultaneous connections (it only pairs a multi-version
+client's two connections). `Peer::onIncomingConnection` (`FlowTransport.cpp:1116`) keeps the
+incoming connection when the remote is not public, when our outgoing connection is idle,
+when the remote's canonical address is larger than ours, or when our last connect attempt
+is older than `ALWAYS_ACCEPT_DELAY`; otherwise it closes the incoming one and keeps its own:
 
 ```cpp
-if (pkt.connectionId > existingPeer->connectionId) {
-    existingPeer->connection->close();
-    existingPeer->connection = newConnection;
-    existingPeer->connectionId = pkt.connectionId;
+if (!destination.isPublic() || outgoingConnectionIdle || destination > compatibleAddr ||
+    (lastConnectTime > 1.0 && now() - lastConnectTime > FLOW_KNOBS->ALWAYS_ACCEPT_DELAY)) {
+    connect.cancel(); prependConnectPacket();
+    connect = connectionKeeper(self, conn, reader);   // keep the new connection
 } else {
-    newConnection->close();
+    reader.cancel(); conn->close();                     // keep our prior connection
 }
 ```
 
@@ -258,18 +275,20 @@ Every message on the wire:
 
 ```
 +-----------------------------------+
-| uint32_t packetLength             |  Total bytes including header
+| uint32_t packetLength             |  Payload bytes only (excludes this header)
 +-----------------------------------+
-| uint32_t checksum                 |  CRC32C of payload
+| uint64_t checksum                 |  XXH3-64 of the payload; omitted on TLS
 +-----------------------------------+
-| UID token (16 bytes)              |  Destination endpoint
+| UID token (16 bytes)              |  Destination endpoint (first payload bytes)
 +-----------------------------------+
 | Serialized message payload        |  FlatBuffers encoding
 +-----------------------------------+
 ```
 
-CRC32C (Castagnoli polynomial) leverages hardware `crc32` instructions. Verified on both
-send (`sendPacket`) and receive (`scanPackets`).
+The checksum is `XXH3_64bits` (not CRC32C), computed in `sendPacket` and verified in
+`scanPackets` (`FlowTransport.cpp:1260`, check at `:1346`). It is only present when the
+connection is not TLS (`checksumEnabled = !peerAddress.isTLS()`), since TLS already
+authenticates the stream.
 
 ### ConnectPacket handshake
 
@@ -281,7 +300,8 @@ struct ConnectPacket {
     uint32_t connectPacketLength;
     ProtocolVersion protocolVersion;   // 64-bit, e.g. 0x0FDB00A400040001
     uint16_t canonicalRemotePort;
-    uint64_t connectionId;            // For duplicate connection resolution
+    uint64_t connectionId;            // Pairs a multi-version client's connections; else 0
+    uint32_t canonicalRemoteIp4;      // + flags / canonicalRemoteIp6 (FlowTransport.cpp:550)
 };
 #pragma pack(pop)
 ```
@@ -340,7 +360,7 @@ Any actor failure tears down all three, and connectionKeeper retries.
 ### connectionReader -- receive path
 
 Reads from the socket, calls `scanPackets()` which:
-1. Validates CRC32C checksum.
+1. Validates the XXH3-64 checksum (non-TLS connections only).
 2. Extracts the 16-byte UID token.
 3. Looks up the receiver in `EndpointMap`.
 4. Calls `receiver->receive(data)`.
@@ -398,34 +418,34 @@ Sequence with default knobs: 50ms, 60ms, 72ms, 86ms, ... capped at 500ms.
 |-----------------------|-------------------------------------------|------------------------------------------|
 | Queue                 | `peer->unsent` (UnsentPacketQueue)        | `peer->reliable` (ReliablePacketList)    |
 | On disconnect         | Discarded                                 | Re-sent after reconnect via `compact()`  |
-| Use case              | Requests (caller retries)                 | Replies (no caller retry path)           |
+| Use case              | `send`/`tryGetReply` requests, all replies | `getReply` requests (at-least-once)      |
 | Ordering              | Preserved within queue                    | Preserved within queue                   |
 
 `sendUnreliable` is the common path. The caller is expected to handle retries (e.g., via
-`retryBrokenPromise`). `sendReliable` is used for `ReplyPromise` responses where the
-receiver has no retry mechanism.
+`retryBrokenPromise`). `sendReliable` backs `RequestStream::getReply`: the *request* is
+retained and re-sent after reconnect until `sendCanceler` cancels it. Replies are **not**
+reliable: `networkSender` (`networksender.h`) sends every `ReplyPromise` value or error
+with `sendUnreliable`.
 
 ---
 
 ## 10. Local vs Remote Routing
 
 ```cpp
-void sendMessage(Endpoint destination, SerializedMessage msg) {
-    if (localAddresses.contains(destination.addresses.address)) {
-        // LOCAL: bypass serialization entirely
-        NetworkMessageReceiver* receiver = endpoints.get(destination.token);
-        if (receiver)
-            receiver->receive(/* direct message */);
-    } else {
-        // REMOTE: serialize, queue for network transmission
-        Reference<Peer> peer = getOrCreatePeer(destination.addresses.address);
-        peer->unsent.push(msg);
-    }
+// FlowTransport.cpp:1949
+static void sendLocal(TransportData* self, ISerializeSource const& what, const Endpoint& destination) {
+    ObjectWriter wr(AssumeVersion(g_network->protocolVersion()));
+    what.serializeObjectWriter(wr);        // local messages ARE serialized
+    // ... copied into an arena and handed to deliver() as a scheduled task
 }
 ```
 
-Local delivery skips serialization, wire framing, and the connection actor pipeline.
-Messages go directly from sender to receiver within the same process address space.
+`sendReliable`/`sendUnreliable` call `sendLocal` when the destination is a local address.
+Local transport delivery skips wire framing, the checksum and the connection actors, but
+**not** serialization: the message is written with `ObjectWriter` and dispatched through the
+same `deliver` path as a remote packet. The one true shortcut is above the transport: a
+`RequestStream` whose queue is local (`!queue->isRemoteEndpoint()`) pushes the typed value
+straight into its queue.
 
 ---
 
@@ -452,7 +472,7 @@ Messages go directly from sender to receiver within the same process address spa
    - Read from connection->read()
    - Call scanPackets() to parse
 8. scanPackets()
-   - Validate CRC32C checksum
+   - Validate XXH3-64 checksum (non-TLS only)
    - Extract endpoint token (UID)
    - Lookup receiver in EndpointMap
    - Call receiver->receive(data)

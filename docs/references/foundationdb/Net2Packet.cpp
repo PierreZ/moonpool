@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -190,7 +190,7 @@ PacketBuffer* ReliablePacketList::compact(PacketBuffer* into, PacketBuffer* end)
 			if (len > into->bytes_unwritten()) {
 				// We have to split this ReliablePacket
 				len = into->bytes_unwritten();
-				ReliablePacket* e = new ReliablePacket;
+				auto* e = new ReliablePacket;
 				e->cont = c->cont;
 				e->buffer = c->buffer;
 				e->buffer->addref();

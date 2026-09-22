@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,17 +26,12 @@
 #include "fdbrpc/Smoother.h"
 #include "flow/Knobs.h"
 #include "flow/ActorCollection.h"
-#include "fdbrpc/TSSComparison.h" // For TSS Metrics
 #include "fdbrpc/FlowTransport.h" // For Endpoint
+#include <type_traits>
 
-struct TSSEndpointData {
-	UID tssId;
-	Endpoint endpoint;
-	Reference<TSSMetrics> metrics;
-
-	TSSEndpointData(UID tssId, Endpoint endpoint, Reference<TSSMetrics> metrics)
-	  : tssId(tssId), endpoint(endpoint), metrics(metrics) {}
-};
+// Models that require specialized load-balancing hooks must opt in beside their declaration.
+template <class Model>
+struct LoadBalanceHooksRequired : std::false_type {};
 
 // The data structure used for the client-side load balancing algorithm to
 // decide which storage server to read data from. Conceptually, it tracks the
@@ -71,85 +66,48 @@ struct QueueData {
 	// to increase the future backoff amount.
 	double increaseBackoffTime;
 
-	// a bit of a hack to store this here, but it's the only centralized place for per-endpoint tracking
-	Optional<TSSEndpointData> tssData;
-
 	QueueData()
 	  : smoothOutstanding(FLOW_KNOBS->QUEUE_MODEL_SMOOTHING_AMOUNT), latency(0.001), penalty(1.0), failedUntil(0),
 	    futureVersionBackoff(FLOW_KNOBS->FUTURE_VERSION_INITIAL_BACKOFF), increaseBackoffTime(0) {}
 };
 
-typedef double TimeEstimate;
+using TimeEstimate = double;
 
 class QueueModel {
 public:
-	// Finishes the request sent to storage server with `id`.
-	//   - latency: the measured client-side latency of the request.
-	//   - penalty: the server side penalty sent along with the response from
-	//              the storage server. Requires >= 1.
-	//   - delta: Update server `id`'s queue model by subtracting this amount.
-	//            This value should be the value returned by `addRequest` below.
-	//   - clean: indicates whether the there was an error or not.
-	// 	 - futureVersion: indicates whether there was "future version" error or
-	//					  not.
-	void endRequest(uint64_t id, double latency, double penalty, double delta, bool clean, bool futureVersion);
-	QueueData const& getMeasurement(uint64_t id);
-
 	// Starts a new request to storage server with `id`. If the storage
 	// server contains a penalty, add it to the queue size, and return the
 	// penalty. The returned penalty should be passed as `delta` to `endRequest`
 	// to make `smoothOutstanding` to reflect the real storage queue size.
 	double addRequest(uint64_t id);
+
+	// Finishes the request sent to storage server with `id`.
+	//   - latency: the measured client-side latency of the request.
+	//   - penalty: the server side penalty sent along with the response from
+	//              the storage server. Requires >= 1.
+	//   - delta: Update server `id`'s queue model by subtracting this amount.
+	//            This value should be the value returned by `addRequest`.
+	//   - clean: indicates whether the there was an error or not.
+	// 	 - futureVersion: indicates whether there was "future version" error or
+	//					  not.
+	void endRequest(uint64_t id, double latency, double penalty, double delta, bool clean, bool futureVersion);
+
+	QueueData const& getMeasurement(uint64_t id);
+
 	double secondMultiplier;
 	double secondBudget;
 	PromiseStream<Future<Void>> addActor;
 	Future<Void> laggingRequests; // requests for which a different recipient already answered
-	PromiseStream<Future<Void>> addTSSActor;
-	Future<Void> tssComparisons; // requests for which a different recipient already answered
 	int laggingRequestCount;
-	int laggingTSSCompareCount;
-
-	// Updates this endpoint data to duplicate requests to the specified TSS endpoint
-	void updateTssEndpoint(uint64_t endpointId, const TSSEndpointData& endpointData);
-
-	// Removes the TSS mapping from this endpoint to stop duplicating requests to a TSS endpoint
-	void removeTssEndpoint(uint64_t endpointId);
-
-	// Retrieves the data for this endpoint's pair TSS endpoint, if present
-	Optional<TSSEndpointData> getTssData(uint64_t endpointId);
 
 	QueueModel() : secondMultiplier(1.0), secondBudget(0), laggingRequestCount(0) {
 		laggingRequests = actorCollection(addActor.getFuture(), &laggingRequestCount);
-		tssComparisons = actorCollection(addTSSActor.getFuture(), &laggingTSSCompareCount);
 	}
 
-	~QueueModel() {
-		laggingRequests.cancel();
-		tssComparisons.cancel();
-	}
+	~QueueModel() { laggingRequests.cancel(); }
 
 private:
 	std::unordered_map<uint64_t, QueueData> data;
 };
-
-/* old queue model
-class QueueModel {
-public:
-    QueueModel() : new_index(0) {
-        total_time[0] = 0;
-        total_time[1] = 0;
-    }
-    void addMeasurement( uint64_t id, QueueDetails qd );
-    TimeEstimate getTimeEstimate( uint64_t id );
-    TimeEstimate getAverageTimeEstimate();
-    QueueDetails getMeasurement( uint64_t id );
-    void expire();
-
-private:
-    std::map<uint64_t, QueueDetails> data[2];
-    double total_time[2];
-    int new_index; // data[new_index] is the new data
-};
-*/
 
 #endif

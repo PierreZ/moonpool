@@ -14,7 +14,7 @@
 |   Locality-aware routing, hedged requests, AtMostOnce     |
 +-----------------------------------------------------------+
 | Layer 2: fdbrpc (RequestStream + ReplyPromise)   <--------+-- THIS FILE
-|   fdbrpc.h, genericactors.actor.h, FailureMonitor.h      |
+|   fdbrpc.h, genericactors.h, FailureMonitor.h            |
 |   4 delivery modes, failure tracking, retry helpers       |
 +-----------------------------------------------------------+
 | Layer 1: FlowTransport                                    |
@@ -29,6 +29,12 @@ It adds **request/response pairing** and **delivery semantics** on top of a dumb
 FlowTransport gives you: `sendReliable(bytes, endpoint)`, `sendUnreliable(bytes, endpoint)`,
 `peer.disconnect` signal, and `IFailureMonitor::notifyDisconnect(addr)`. No message IDs,
 no request/response correlation, no retry logic.
+
+Line citations below refer to the local copies in `docs/references/foundationdb/`, which
+are FoundationDB `c0c44752` (see that directory's `README.md`). At that SHA
+`genericactors.actor.h` became `genericactors.h` and most helpers are C++20 coroutines
+(`co_await`/`co_return`) rather than `ACTOR` functions; the sketches below keep the older
+shape where the behaviour is unchanged.
 
 ---
 
@@ -97,7 +103,7 @@ ReplyPromise<T> = oneshot::Sender<Result<T, Error>> + Endpoint
 ### RequestStream\<T\> (handle to remote inbox)
 
 ```cpp
-// fdbrpc/include/fdbrpc/fdbrpc.h:726-835
+// fdbrpc/include/fdbrpc/fdbrpc.h:731-900
 template<class T>
 class RequestStream {
     NetNotifiedQueue<T>* queue;
@@ -151,12 +157,16 @@ void networkSender(Future<T> input, Endpoint endpoint) {
         FlowTransport::transport().sendUnreliable(
             SerializeSource<ErrorOr<T>>(value), endpoint, false);
     } catch (Error& err) {
+        if (err.code() == error_code_never_reply) return;  // deliberately no reply
         // Including broken_promise -- forward error to remote caller
         FlowTransport::transport().sendUnreliable(
             SerializeSource<ErrorOr<T>>(err), endpoint, false);
     }
 }
 ```
+
+(`networksender.h`: now a coroutine taking `Uncancellable`; a `never_reply` error sends
+nothing.)
 
 ---
 
@@ -210,7 +220,7 @@ All live on `RequestStream<T>` in `fdbrpc/include/fdbrpc/fdbrpc.h`.
 | `getReply()` | At-least-once | sendReliable | Retransmits; server may see duplicates |
 | `getReplyUnlessFailedFor()` | At-least-once + timeout | sendReliable | `request_maybe_delivered` after duration |
 
-### 4a. send() -- fire-and-forget (line 733)
+### 4a. send() -- fire-and-forget (fdbrpc.h:738)
 
 ```cpp
 void send(U&& value) const {
@@ -224,9 +234,9 @@ void send(U&& value) const {
 
 No reply expected. Zero or one delivery. Used for: heartbeats, notifications, triggers.
 
-### 4b. tryGetReply() -- at-most-once (line 785)
+### 4b. tryGetReply() -- at-most-once (fdbrpc.h:813)
 
-Uses `waitValueOrSignal()` (`genericactors.actor.h:362-398`):
+Uses `waitValueOrSignal()` (`genericactors.h:364-411`):
 
 ```cpp
 Future<ErrorOr<REPLY_TYPE(X)>> tryGetReply(const X& value) const {
@@ -234,6 +244,8 @@ Future<ErrorOr<REPLY_TYPE(X)>> tryGetReply(const X& value) const {
         Future<Void> disc = makeDependent<T>(IFailureMonitor::failureMonitor())
             .onDisconnectOrFailure(getEndpoint());
         if (disc.isReady()) {
+            if (IFailureMonitor::failureMonitor().knownUnauthorized(getEndpoint()))
+                return ErrorOr<REPLY_TYPE(X)>(unauthorized_attempt());
             return ErrorOr<REPLY_TYPE(X)>(request_maybe_delivered());
         }
         Reference<Peer> peer = FlowTransport::transport().sendUnreliable(
@@ -249,15 +261,23 @@ Pseudocode for `waitValueOrSignal`:
 
 ```
 select! {
-    reply = reply_future   => Ok(reply)
-    _     = disconnect     => Err(request_maybe_delivered)
-    // broken_promise      => mark endpoint not found, Err(request_maybe_delivered)
+    reply = reply_future      => Ok(reply)
+    _     = disconnect        => Err(unauthorized_attempt if known unauthorized
+                                     else request_maybe_delivered)
+    _     = peer.disconnect   => same as above   // only when a Peer was passed
+    // broken_promise         => mark endpoint not found, keep waiting on the signals
 }
 ```
 
-### 4c. getReply() -- at-least-once (line 752)
+The third arm is new at `c0c44752`: `waitValueOrSignal` now also races the `Peer`'s own
+`disconnect` future (it previously only held the `Peer` alive), so a request whose
+connection drops before the failure monitor reacts no longer hangs. Upstream tests:
+`/fdbrpc/waitValueOrSignal/peerDisconnect`, `/noPeerFallback` and `/retryOnDisconnect` in
+`FlowTests.actor.cpp`.
 
-Uses `sendCanceler()` (`genericactors.actor.h:400-431`):
+### 4c. getReply() -- at-least-once (fdbrpc.h:758)
+
+Uses `sendCanceler()` (`genericactors.h:413-445`):
 
 ```cpp
 Future<REPLY_TYPE(X)> getReply(const X& value) const {
@@ -277,19 +297,22 @@ Pseudocode for `sendCanceler`:
 loop {
     if permanently_failed(endpoint) {
         cancel_reliable(packet);
-        pending!().await;  // will become broken_promise when dropped
+        if known_unauthorized(endpoint) { throw unauthorized_attempt }
+        pending!().await;  // waits until cancelled or the reply errors
     }
     select! {
         reply = reply_future            => { cancel_reliable(packet); return reply }
         _     = failure_state_changed() => continue  // re-check
     }
 }
+// on any error: cancel_reliable(packet) if not yet cancelled;
+//               broken_promise -> endpointNotFound(endpoint); rethrow
 ```
 
 The reliable packet sits in `peer.reliable` queue. If the connection drops and reconnects,
 FlowTransport automatically retransmits it. The server may receive the request multiple times.
 
-### 4d. getReplyUnlessFailedFor() -- at-least-once with timeout (line 860)
+### 4d. getReplyUnlessFailedFor() -- at-least-once with timeout (fdbrpc.h:875)
 
 Combines `getReply()` with failure monitor timeout:
 
@@ -307,7 +330,7 @@ but cannot wait forever if the endpoint dies.
 
 ## 5. FailureMonitor
 
-**Files**: `fdbrpc/include/fdbrpc/FailureMonitor.h`, `FailureMonitor.actor.cpp`
+**Files**: `fdbrpc/include/fdbrpc/FailureMonitor.h`, `FailureMonitor.cpp`
 
 Two-tier tracking -- reactive, not probing:
 
@@ -397,12 +420,15 @@ struct StorageServerInterface {
 };
 ```
 
-`getAdjustedEndpoint(offset)` adds offset to the first part of the UID:
+`getAdjustedEndpoint(index)` (`FlowTransport.h:85`) does **not** simply add to one UID
+word: it adds `index << 32` to the first word and `index` to the low 32 bits of the second
+word, which is the `EndpointMap` slot index. It resolves only because
+`EndpointMap::insert(localAddresses, streams)` registers an interface's streams in adjacent
+slots:
 
 ```
-Base token:              (0x123456789ABCDEF0, 0xFEDCBA9876543210)
-getAdjustedEndpoint(1):  (0x123456789ABCDEF1, 0xFEDCBA9876543210)
-getAdjustedEndpoint(2):  (0x123456789ABCDEF2, 0xFEDCBA9876543210)
+first'  = first + (index << 32)
+second' = (second & 0xffffffff00000000) | (uint32_t(second) + index)
 ```
 
 Saves 14 bytes per additional RequestStream in the interface.
@@ -465,21 +491,20 @@ Workers subscribe to updates and always have current interface information.
 
 ### retryBrokenPromise -- for well-known endpoints
 
-`genericactors.actor.h:39-57`
+`genericactors.h:38-55`
 
 ```cpp
-ACTOR template <class Req, bool P>
+template <class Req, bool P>
 Future<REPLY_TYPE(Req)> retryBrokenPromise(RequestStream<Req, P> to, Req request) {
-    loop {
+    while (true) {
         try {
-            REPLY_TYPE(Req) reply = wait(to.getReply(request));
-            return reply;
+            co_return co_await to.getReply(request);
         } catch (Error& e) {
             if (e.code() != error_code_broken_promise)
                 throw;
-            resetReply(request);
-            wait(delayJittered(FLOW_KNOBS->PREVENT_FAST_SPIN_DELAY));
         }
+        resetReply(request);
+        co_await delayJittered(FLOW_KNOBS->PREVENT_FAST_SPIN_DELAY);
     }
 }
 ```
@@ -523,7 +548,8 @@ Fed by `ModelHolder` which tracks request start/end times.
 
 ### loadBalance() algorithm
 
-`LoadBalance.actor.h:690`:
+`loadBalance` (`LoadBalance.actor.h:750`) is now a thin wrapper that forwards to the
+`loadBalanceImpl` actor (`LoadBalance.actor.h:308`), which holds the algorithm:
 
 ```
 loadBalance(
@@ -552,7 +578,7 @@ loadBalance(
 ### AtMostOnce flag -- the key design decision
 
 ```cpp
-// LoadBalance.actor.h:591-618
+// LoadBalance.actor.h:208-235 (RequestData::checkAndProcessResultImpl)
 bool maybeDelivered = errCode == error_code_broken_promise ||
                       errCode == error_code_request_maybe_delivered;
 if (atMostOnce && maybeDelivered) {
@@ -847,12 +873,12 @@ Are there multiple equivalent servers?
 
 | Component | Path |
 |-----------|------|
-| 4 delivery modes | `fdbrpc/include/fdbrpc/fdbrpc.h:726-826` |
-| waitValueOrSignal | `fdbrpc/include/fdbrpc/genericactors.actor.h:362-398` |
-| sendCanceler | `fdbrpc/include/fdbrpc/genericactors.actor.h:400-431` |
-| retryBrokenPromise | `fdbrpc/include/fdbrpc/genericactors.actor.h:39-57` |
+| 4 delivery modes | `fdbrpc/include/fdbrpc/fdbrpc.h:731-900` |
+| waitValueOrSignal | `fdbrpc/include/fdbrpc/genericactors.h:364-411` |
+| sendCanceler | `fdbrpc/include/fdbrpc/genericactors.h:413-445` |
+| retryBrokenPromise | `fdbrpc/include/fdbrpc/genericactors.h:38-55` |
 | FailureMonitor | `fdbrpc/include/fdbrpc/FailureMonitor.h` |
-| Load balancer | `fdbrpc/include/fdbrpc/LoadBalance.actor.h:583-625` |
+| Load balancer | `fdbrpc/include/fdbrpc/LoadBalance.actor.h:308` (`loadBalanceImpl`), result handling `:200-242` |
 | Error definitions | `flow/include/flow/error_definitions.h` |
 | Worker registration (Strategy 2) | `fdbserver/worker.actor.cpp:615-651` |
 | CC generation dedup (Strategy 2) | `fdbserver/ClusterController.actor.cpp:1290-1352` |
