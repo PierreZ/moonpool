@@ -520,6 +520,7 @@ fn raw_hello(min_version: u16, max_version: u16) -> Vec<u8> {
             incarnation: moonpool_rpc::Incarnation::from_raw(9),
             features: 0,
             max_frame_bytes: 1024,
+            listen: None,
         }),
         1024,
     )
@@ -560,7 +561,10 @@ async fn malformed_oversized_and_corrupt_input_close_the_session_observably() {
     let handler = serve_echo(stream);
     let address = service.endpoint().address().to_string();
 
-    let hello = raw_hello(1, 1);
+    let hello = raw_hello(
+        moonpool_rpc::protocol::MIN_PROTOCOL_VERSION,
+        moonpool_rpc::protocol::PROTOCOL_VERSION,
+    );
     let mut corrupt = hello.clone();
     let last = corrupt.len() - 1;
     corrupt[last] ^= 0x10;

@@ -89,6 +89,14 @@ pub enum ErrorReason {
     Shutdown,
     /// Registration needs a listening runtime.
     NotListening,
+    /// Another live receiver already holds this well-known id.
+    AlreadyRegistered,
+    /// A bootstrap hostname did not resolve; nothing was sent.
+    LookupFailed(String),
+    /// The failure monitor reported the endpoint failed for the caller's
+    /// sustained-failure bound, or failed permanently, before a reply came.
+    /// An observation, not proof that the server is gone.
+    PeerFailed,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -131,6 +139,9 @@ impl std::fmt::Display for ErrorReason {
             Self::MalformedReply(detail) => write!(f, "malformed reply: {detail}"),
             Self::Shutdown => f.write_str("the RPC runtime has shut down"),
             Self::NotListening => f.write_str("the RPC runtime is not listening"),
+            Self::AlreadyRegistered => f.write_str("the well-known id is already registered"),
+            Self::LookupFailed(detail) => write!(f, "lookup failed: {detail}"),
+            Self::PeerFailed => f.write_str("the endpoint was observed failed"),
         }
     }
 }
@@ -178,6 +189,15 @@ impl RpcError {
     #[must_use]
     pub fn execution(&self) -> Execution {
         self.execution
+    }
+
+    /// Weaken the execution knowledge to at least `floor`: a rejection of
+    /// one attempt proves nothing about an earlier attempt that left.
+    pub(crate) fn at_least(mut self, floor: Execution) -> Self {
+        if self.execution == Execution::NotAdmitted && floor != Execution::NotAdmitted {
+            self.execution = floor;
+        }
+        self
     }
 
     /// Whether retrying the same reference cannot succeed.

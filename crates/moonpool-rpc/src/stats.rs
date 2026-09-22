@@ -11,6 +11,10 @@ pub struct RpcStats {
     pub endpoints: usize,
     /// Calls awaiting a reply.
     pub pending_calls: usize,
+    /// Reliable calls whose request is retained for retransmission.
+    pub retained_calls: usize,
+    /// Peer relationships (canonical remote addresses) tracked.
+    pub peers: usize,
     /// Open connections.
     pub connections: usize,
     /// Request attempts started by callers of this runtime.
@@ -50,6 +54,36 @@ pub struct RpcStats {
     /// Calls that had begun transmission when this runtime closed their
     /// session for a checksum mismatch, and so failed as maybe-executed.
     pub calls_failed_by_corruption: u64,
+    /// Reliable calls started (a subset of `calls_started`).
+    pub reliable_calls_started: u64,
+    /// Retained requests queued again on a new connection.
+    pub retransmissions: u64,
+    /// Retained requests released because their endpoint failed for good.
+    pub retention_released_by_failure: u64,
+    /// Calls refused locally because the failure monitor knew the endpoint was gone.
+    pub calls_failed_fast: u64,
+    /// One-way requests handed to a connection or a local receiver.
+    pub one_way_sent: u64,
+    /// One-way requests received from peers.
+    pub one_way_received: u64,
+    /// One-way requests dropped because they exceeded the peer's frame limit.
+    pub one_way_dropped: u64,
+    /// Reply handles finished with an explicit no-reply.
+    pub explicit_no_replies: u64,
+    /// Outbound connection attempts.
+    pub dials: u64,
+    /// Dials that first waited out the peer's reconnect backoff.
+    pub reconnect_waits: u64,
+    /// Accepted sessions adopted as the selected connection to their peer.
+    pub adopted_connections: u64,
+    /// Connections closed by simultaneous-connect resolution or replacement.
+    pub redundant_connections: u64,
+    /// Liveness pings sent.
+    pub pings_sent: u64,
+    /// Connections failed because nothing arrived after a ping.
+    pub ping_timeouts: u64,
+    /// Connections closed for idleness.
+    pub idle_closes: u64,
 }
 
 /// The runtime's counters, shared by everything that updates them.
@@ -72,6 +106,21 @@ pub(crate) struct Counters {
     pub(crate) accept_errors: AtomicU64,
     pub(crate) established_checksum_failures: AtomicU64,
     pub(crate) calls_failed_by_corruption: AtomicU64,
+    pub(crate) reliable_calls_started: AtomicU64,
+    pub(crate) retransmissions: AtomicU64,
+    pub(crate) retention_released_by_failure: AtomicU64,
+    pub(crate) calls_failed_fast: AtomicU64,
+    pub(crate) one_way_sent: AtomicU64,
+    pub(crate) one_way_received: AtomicU64,
+    pub(crate) one_way_dropped: AtomicU64,
+    pub(crate) explicit_no_replies: AtomicU64,
+    pub(crate) dials: AtomicU64,
+    pub(crate) reconnect_waits: AtomicU64,
+    pub(crate) adopted_connections: AtomicU64,
+    pub(crate) redundant_connections: AtomicU64,
+    pub(crate) pings_sent: AtomicU64,
+    pub(crate) ping_timeouts: AtomicU64,
+    pub(crate) idle_closes: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
     pub(crate) live_connections: AtomicUsize,
 }
@@ -81,11 +130,18 @@ impl Counters {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn snapshot(&self, endpoints: usize, pending_calls: usize) -> RpcStats {
+    pub(crate) fn snapshot(
+        &self,
+        endpoints: usize,
+        pending_calls: usize,
+        retained_calls: usize,
+    ) -> RpcStats {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         RpcStats {
             endpoints,
             pending_calls,
+            retained_calls,
+            peers: 0,
             connections: self.live_connections.load(Ordering::Relaxed),
             calls_started: load(&self.calls_started),
             requests_admitted: load(&self.requests_admitted),
@@ -104,6 +160,21 @@ impl Counters {
             accept_errors: load(&self.accept_errors),
             established_checksum_failures: load(&self.established_checksum_failures),
             calls_failed_by_corruption: load(&self.calls_failed_by_corruption),
+            reliable_calls_started: load(&self.reliable_calls_started),
+            retransmissions: load(&self.retransmissions),
+            retention_released_by_failure: load(&self.retention_released_by_failure),
+            calls_failed_fast: load(&self.calls_failed_fast),
+            one_way_sent: load(&self.one_way_sent),
+            one_way_received: load(&self.one_way_received),
+            one_way_dropped: load(&self.one_way_dropped),
+            explicit_no_replies: load(&self.explicit_no_replies),
+            dials: load(&self.dials),
+            reconnect_waits: load(&self.reconnect_waits),
+            adopted_connections: load(&self.adopted_connections),
+            redundant_connections: load(&self.redundant_connections),
+            pings_sent: load(&self.pings_sent),
+            ping_timeouts: load(&self.ping_timeouts),
+            idle_closes: load(&self.idle_closes),
         }
     }
 }
@@ -134,11 +205,29 @@ impl Drop for TaskGuard {
 pub struct ResourceProbe {
     counters: Arc<Counters>,
     alive: Weak<()>,
+    watch: Weak<crate::failure::watch::Watch>,
 }
 
 impl ResourceProbe {
-    pub(crate) fn new(counters: Arc<Counters>, alive: Weak<()>) -> Self {
-        Self { counters, alive }
+    pub(crate) fn new(
+        counters: Arc<Counters>,
+        alive: Weak<()>,
+        watch: Weak<crate::failure::watch::Watch>,
+    ) -> Self {
+        Self {
+            counters,
+            alive,
+            watch,
+        }
+    }
+
+    /// Failure-monitor handles and waits still holding the runtime's change
+    /// latch (the runtime itself holds one while it runs). After shutdown
+    /// every wait resolves with an error at its next poll; a non-zero count
+    /// then only means a caller still owns such a handle or future.
+    #[must_use]
+    pub fn monitor_waiters(&self) -> usize {
+        self.watch.strong_count()
     }
 
     /// Driver-owned child futures (accept loop, connection drivers) that

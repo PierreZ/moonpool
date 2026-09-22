@@ -41,7 +41,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
 # `#[derive(prost::Message)]` in tests expands to `::prost` paths.
 prost = "0.14"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
 
 [lints]
 workspace = true

@@ -5,14 +5,18 @@
 //! incarnation, plus the resolved address that reaches it:
 //!
 //! - the **address** is a resolved `ip:port` ([`SocketAddr`]); hostnames
-//!   belong only to well-known bootstrap endpoints (resolution is #214);
+//!   belong only to well-known bootstrap endpoints (see
+//!   [`BootstrapClient`](crate::BootstrapClient));
 //! - the [`Incarnation`] is 128 bits drawn from the provider's random source
 //!   when a runtime starts (or supplied by the caller), so a restarted
 //!   process at the same `ip:port` is a different incarnation and rejects
 //!   references to its predecessor;
 //! - the [`EndpointToken`] is a 64-bit registry slot plus a checked 32-bit
 //!   generation, so a slot reused after its receiver was dropped never
-//!   answers to the old token (no ABA).
+//!   answers to the old token (no ABA);
+//! - a [`WellKnownId`] token instead names a fixed bootstrap service that
+//!   answers in every incarnation (its admission skips the incarnation
+//!   check), so a reference to it survives the server's restart.
 //!
 //! None of these is a credential. Two independently started runtimes collide
 //! with probability about `n² / 2^129` for `n` live incarnations. Durable
@@ -48,7 +52,41 @@ impl std::fmt::Display for Incarnation {
     }
 }
 
-/// A registry slot and the generation it held when the endpoint registered.
+/// The id of a well-known endpoint: a fixed, application-chosen number that
+/// names the same service in every incarnation of a runtime.
+///
+/// Well-known endpoints are for bootstrap (a coordinator, a directory) and
+/// may come back at the same token after a restart. Everything else should
+/// be a dynamic endpoint, whose reference dies with its incarnation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WellKnownId(u32);
+
+impl WellKnownId {
+    /// Wrap an application-chosen id.
+    #[must_use]
+    pub const fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// The raw id.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for WellKnownId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "wk{}", self.0)
+    }
+}
+
+/// Token indices with this bit set name well-known endpoints; the dynamic
+/// registry never allocates them.
+const WELL_KNOWN_BIT: u64 = 1 << 63;
+
+/// A registry slot and the generation it held when the endpoint registered,
+/// or a [`WellKnownId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EndpointToken {
     index: u64,
@@ -60,6 +98,33 @@ impl EndpointToken {
     #[must_use]
     pub const fn from_parts(index: u64, generation: u32) -> Self {
         Self { index, generation }
+    }
+
+    /// The token of a well-known endpoint (generation zero, top index bit
+    /// set).
+    #[must_use]
+    pub const fn well_known(id: WellKnownId) -> Self {
+        Self {
+            index: WELL_KNOWN_BIT | id.0 as u64,
+            generation: 0,
+        }
+    }
+
+    /// Whether the token names a well-known endpoint.
+    #[must_use]
+    pub const fn is_well_known(self) -> bool {
+        self.index & WELL_KNOWN_BIT != 0
+    }
+
+    /// The well-known id, if the token names one.
+    #[must_use]
+    pub fn well_known_id(self) -> Option<WellKnownId> {
+        if !self.is_well_known() {
+            return None;
+        }
+        u32::try_from(self.index & !WELL_KNOWN_BIT)
+            .ok()
+            .map(WellKnownId)
     }
 
     /// The 64-bit registry slot.
@@ -77,7 +142,10 @@ impl EndpointToken {
 
 impl std::fmt::Display for EndpointToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}#{}", self.index, self.generation)
+        match self.well_known_id() {
+            Some(id) => write!(f, "{id}"),
+            None => write!(f, "{}#{}", self.index, self.generation),
+        }
     }
 }
 

@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{AsyncReadExt, AsyncWriteExt};
-use moonpool_rpc::protocol::{PROTOCOL_MAGIC, WireMessage, encode_frame, encode_message};
+use moonpool_rpc::protocol::{
+    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, WireMessage, encode_frame,
+    encode_message,
+};
 use moonpool_rpc::{
     AccessClass, ErrorReason, Execution, Incarnation, RpcDriver, RpcError, RpcHandle, ServiceRef,
     Wire,
@@ -540,6 +543,7 @@ fn malformed_input(kind: u64, id: u64) -> (&'static str, Vec<u8>) {
                 incarnation: Incarnation::from_raw(u128::from(id)),
                 features: 0,
                 max_frame_bytes: 1024,
+                listen: None,
             }),
             1024,
         )
@@ -547,7 +551,7 @@ fn malformed_input(kind: u64, id: u64) -> (&'static str, Vec<u8>) {
     };
     match kind {
         0 => {
-            let mut corrupt = hello(1, 1);
+            let mut corrupt = hello(MIN_PROTOCOL_VERSION, PROTOCOL_VERSION);
             if let Some(last) = corrupt.last_mut() {
                 *last ^= 0x01;
             }
@@ -559,7 +563,7 @@ fn malformed_input(kind: u64, id: u64) -> (&'static str, Vec<u8>) {
             ("oversized", oversized)
         }
         2 => {
-            let mut garbled = hello(1, 1);
+            let mut garbled = hello(MIN_PROTOCOL_VERSION, PROTOCOL_VERSION);
             garbled.extend(encode_frame(&[0x7F, 1, 2, 3], 1024).unwrap_or_default());
             ("envelope", garbled)
         }

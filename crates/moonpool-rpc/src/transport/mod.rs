@@ -1,67 +1,92 @@
-//! The runtime: owned driver, weak handles, registry, pending calls and
-//! connection management.
+//! The runtime: owned driver, weak handles, registry, peers, pending calls
+//! and the failure monitor.
 //!
 //! # Ownership
 //!
 //! [`RpcDriver`] owns everything: the listener, every connection's I/O, the
-//! endpoint registry and the pending calls (through the one strong reference
-//! to the shared state). [`RpcHandle`], [`ServiceClient`](crate::ServiceClient),
-//! [`RequestStream`](crate::RequestStream) and reply handles only hold weak
-//! references. Driving is the caller's job: poll [`RpcDriver::run`]
-//! alongside the application (inside the process body in a simulation, so a
-//! crash that aborts the process drops the whole tree). No task is spawned:
-//! the accept loop and each connection are child futures the driver polls,
-//! so dropping the driver cancels them before their next poll, closes every
-//! socket, ends every [`RequestStream`](crate::RequestStream), and completes
-//! every pending call with [`ErrorReason::Shutdown`](crate::ErrorReason::Shutdown).
+//! endpoint registry, the peers and the pending calls (through the one
+//! strong reference to the shared state). [`RpcHandle`],
+//! [`ServiceClient`](crate::ServiceClient), [`RequestStream`](crate::RequestStream),
+//! [`FailureMonitor`](crate::FailureMonitor) and reply handles only hold
+//! weak references. Driving is the caller's job: poll [`RpcDriver::run`]
+//! alongside the application (inside the process body in a simulation, so
+//! a crash that aborts the process drops the whole tree). No task is
+//! spawned: the accept loop and each connection are child futures the
+//! driver polls, so dropping the driver cancels them before their next
+//! poll, closes every socket, ends every
+//! [`RequestStream`](crate::RequestStream), completes every pending call
+//! with [`ErrorReason::Shutdown`](crate::ErrorReason::Shutdown) and releases
+//! every failure-monitor waiter.
 //!
-//! # Sessions
+//! # Sessions and peers
 //!
-//! A connection is upgraded ([`Connector`] / [`Acceptor`], [`Plaintext`] by
+//! A connection is upgraded ([`Connector`] / [`Acceptor`], [`Plaintext`](upgrade::Plaintext) by
 //! default) before any frame is exchanged, then both sides send a `Hello`.
 //! Requests are written only after the peer's `Hello` was accepted, so a
 //! session refused at the handshake never carried a request and its calls
 //! fail as [`Execution::NotAdmitted`](crate::Execution::NotAdmitted).
+//!
+//! Calls to a remote address ride that address's **selected connection**
+//! (see [`peer`]). It is dialed on demand, re-dialed with a jittered
+//! backoff after it ends, pinged while it lives and closed once idle. An
+//! accepted session whose `Hello` names a listen address becomes the
+//! selected connection to that address when none exists, so two runtimes
+//! calling each other share one connection; when both dial at once, the
+//! runtime with the larger canonical address keeps the connection it
+//! dialed and both close the other (`FoundationDB`'s
+//! `Peer::onIncomingConnection`).
+//!
+//! # Delivery
+//!
+//! An at-most-once attempt is bound to the connection it was queued on:
+//! when that connection ends, the attempt fails (`NotAdmitted` if its frame
+//! never started to leave, `MaybeExecuted` otherwise). A reliable call
+//! keeps its request in memory while its caller waits, and each time its
+//! connection ends it is queued again on the next one, so the server may
+//! execute it more than once. Unsent bytes belong to a connection;
+//! retained requests belong to the call. Nothing is retained past the
+//! caller: cancellation, a reply, a terminal rejection or shutdown release
+//! it, without retracting bytes already written.
 
+mod calls;
 pub(crate) mod connection;
+mod driver;
+mod handle;
+pub(crate) mod peer;
+mod sessions;
 pub mod upgrade;
 
 use std::collections::BTreeMap;
-use std::future::Future;
-use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
-use std::task::Poll;
-use std::time::Duration;
 
 use futures::channel::{mpsc, oneshot};
-use futures::io::{AsyncRead, AsyncWrite};
-use futures::stream::FuturesUnordered;
-use futures::{AsyncReadExt, StreamExt};
-use moonpool_core::{NetworkProvider, Providers, RandomProvider, TcpListenerTrait, TimeProvider};
+use moonpool_core::{NetworkProvider, Providers, RandomProvider};
 
-use self::connection::{CloseReason, Connection, PeerHello, QueueRefusal, read_loop, write_loop};
-use self::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
+use self::connection::{Connection, Direction};
+use self::peer::Peer;
+use self::upgrade::{Acceptor, Connector, PeerContext};
 use crate::ServiceRef;
-use crate::call::client::{CallGuard, CallOwner, ServiceClient};
 use crate::call::receiver::{EndpointOwner, Inbox, RequestStream, endpoint_pair};
-use crate::call::reply::{LocalSink, ReplyContext, ReplyRoute};
+use crate::call::reply::{ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
-use crate::config::{MIN_FRAME_BYTES, RpcConfig};
+use crate::config::RpcConfig;
 use crate::endpoint::registry::{Registry, RegistryError};
-use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation};
-use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
+use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
+use crate::error::{CallIdentity, ErrorReason, RpcError};
+use crate::failure::watch::Watch;
+use crate::failure::{MonitorState, PermanentFailure};
 use crate::protocol::{
-    HEADER_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, WireError,
-    WireMessage, WireOutcome, decode_message, encode_frame, encode_message, negotiate,
-    request_envelope_len,
+    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, WireError, WireMessage,
+    WireOutcome, encode_frame, encode_message,
 };
-use crate::stats::{Counters, ResourceProbe, RpcStats, TaskGuard};
+use crate::stats::{Counters, RpcStats};
+
+pub use self::driver::{RpcDriver, is_transient_accept_error};
+pub use self::handle::RpcHandle;
 
 type Stream<P> = <<P as Providers>::Network as NetworkProvider>::TcpStream;
 type Listener<P> = <<P as Providers>::Network as NetworkProvider>::TcpListener;
-type ChildFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// A session upgrade usable for both directions of provider `P`'s streams.
 ///
@@ -73,7 +98,8 @@ impl<P: Providers, U> SessionUpgrade<P> for U where U: Connector<Stream<P>> + Ac
 
 /// Work handed to the driver by handles and the accept loop.
 enum Command<P: Providers> {
-    /// Connect, upgrade and drive an outbound connection.
+    /// Wait out the peer's backoff, then connect, upgrade and drive an
+    /// outbound connection.
     Connect(Arc<Connection>, SocketAddr),
     /// Upgrade and drive an accepted connection.
     Accepted(Arc<Connection>, Stream<P>),
@@ -89,11 +115,33 @@ enum Origin {
 /// A reply body and the codec that produced it.
 pub(crate) type ReplyBytes = (CodecId, Vec<u8>);
 
+/// How a call is delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// One attempt, never retransmitted.
+    AtMostOnce,
+    /// Retransmitted on every new connection while the caller waits.
+    Reliable,
+}
+
 struct PendingCall {
     origin: Origin,
+    endpoint: Endpoint,
     identity: CallIdentity,
+    /// The current attempt's frame began to leave this process.
     transmitted: bool,
+    /// An earlier attempt of this (reliable) call began to leave.
+    earlier_transmitted: bool,
+    /// The request body, kept for retransmission (reliable calls only).
+    retained: Option<Vec<u8>>,
     sender: oneshot::Sender<Result<ReplyBytes, RpcError>>,
+}
+
+impl PendingCall {
+    /// Whether any attempt of this call may have reached a handler.
+    fn may_have_executed(&self) -> bool {
+        self.transmitted || self.earlier_transmitted
+    }
 }
 
 struct Registration {
@@ -104,13 +152,16 @@ struct Registration {
 
 struct State {
     registry: Registry<Registration>,
+    well_known: BTreeMap<WellKnownId, Registration>,
     pending: BTreeMap<u64, PendingCall>,
     next_call_id: u64,
-    /// The current outbound connection per address.
-    outbound: BTreeMap<SocketAddr, Arc<Connection>>,
+    /// One relationship per canonical remote address.
+    peers: BTreeMap<SocketAddr, Peer>,
     /// Every open connection by id.
     connections: BTreeMap<u64, Arc<Connection>>,
     next_connection_id: u64,
+    next_ping: u64,
+    monitor: MonitorState,
 }
 
 /// The runtime's shared state; the driver holds the only strong reference.
@@ -122,11 +173,59 @@ pub(crate) struct Shared<P: Providers> {
     state: Mutex<State>,
     commands: mpsc::UnboundedSender<Command<P>>,
     counters: Arc<Counters>,
+    /// Published after every failure-monitor change; closed on drop.
+    watch: Arc<Watch>,
     alive: Arc<()>,
     this: Weak<Shared<P>>,
 }
 
+impl<P: Providers> Drop for Shared<P> {
+    fn drop(&mut self) {
+        // Release every failure-monitor waiter: the runtime is gone.
+        self.watch.close();
+    }
+}
+
 impl<P: Providers> Shared<P> {
+    fn new(
+        providers: P,
+        config: RpcConfig,
+        address: Option<SocketAddr>,
+        commands: mpsc::UnboundedSender<Command<P>>,
+    ) -> Arc<Self> {
+        // Protocol identifiers come from the provider's random source (seeded
+        // in simulation, OS entropy in production) unless the caller supplies
+        // one. Never an authentication.
+        let incarnation = config
+            .incarnation
+            .unwrap_or_else(|| Incarnation::from_raw(providers.random().random::<u128>()));
+        Arc::new_cyclic(|this| Self {
+            providers,
+            state: Mutex::new(State {
+                registry: Registry::new(config.max_endpoints),
+                well_known: BTreeMap::new(),
+                pending: BTreeMap::new(),
+                next_call_id: 0,
+                peers: BTreeMap::new(),
+                connections: BTreeMap::new(),
+                next_connection_id: 0,
+                next_ping: 0,
+                monitor: MonitorState::new(
+                    config.peer.max_failed_endpoints,
+                    config.peer.max_tracked_addresses,
+                ),
+            }),
+            config,
+            incarnation,
+            address,
+            commands,
+            counters: Arc::new(Counters::default()),
+            watch: Arc::new(Watch::default()),
+            alive: Arc::new(()),
+            this: this.clone(),
+        })
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state
             .lock()
@@ -137,6 +236,27 @@ impl<P: Providers> Shared<P> {
         self.providers.time()
     }
 
+    pub(crate) fn random(&self) -> &P::Random {
+        self.providers.random()
+    }
+
+    fn now(&self) -> std::time::Duration {
+        moonpool_core::TimeProvider::now(self.time())
+    }
+
+    pub(crate) fn watch(&self) -> &Arc<Watch> {
+        &self.watch
+    }
+
+    pub(crate) fn read_monitor<T>(&self, read: impl FnOnce(&MonitorState) -> T) -> T {
+        read(&self.lock().monitor)
+    }
+
+    /// A failure-monitor watcher of `address` starts or stops.
+    pub(crate) fn reference(&self, address: SocketAddr, add: bool) {
+        self.lock().monitor.reference(address, add);
+    }
+
     fn hello(&self) -> Vec<u8> {
         let payload = encode_message(&WireMessage::Hello {
             magic: PROTOCOL_MAGIC,
@@ -145,6 +265,7 @@ impl<P: Providers> Shared<P> {
             incarnation: self.incarnation,
             features: 0,
             max_frame_bytes: self.config.max_frame_bytes,
+            listen: self.address,
         });
         // A handshake is a few dozen bytes and exempt from the configured
         // frame limit, which only bounds what peers may send us.
@@ -163,19 +284,34 @@ impl<P: Providers> Shared<P> {
     fn register<M: RpcMethod>(
         &self,
         access: AccessClass,
+        well_known: Option<WellKnownId>,
     ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
         let address = self
             .address
             .ok_or(RpcError::not_admitted(ErrorReason::NotListening))?;
         let (inbox, receiver) = endpoint_pair::<M>(self.config.endpoint_queue_capacity);
-        let token = self
-            .lock()
-            .registry
-            .insert(Registration {
-                inbox,
-                _access: access,
-            })
-            .map_err(|RegistryError::Full| RpcError::not_admitted(ErrorReason::Overloaded))?;
+        let registration = Registration {
+            inbox,
+            _access: access,
+        };
+        let token = {
+            let mut state = self.lock();
+            match well_known {
+                Some(id) => {
+                    if state.well_known.contains_key(&id) {
+                        return Err(RpcError::not_admitted(ErrorReason::AlreadyRegistered));
+                    }
+                    state.well_known.insert(id, registration);
+                    EndpointToken::well_known(id)
+                }
+                None => state
+                    .registry
+                    .insert(registration)
+                    .map_err(|RegistryError::Full| {
+                        RpcError::not_admitted(ErrorReason::Overloaded)
+                    })?,
+            }
+        };
         let endpoint = Endpoint::new(address, self.incarnation, token);
         let owner: Weak<dyn EndpointOwner> = self.this.clone();
         let stream = receiver.bind(ServiceRef::new(endpoint, access), owner);
@@ -189,17 +325,22 @@ impl<P: Providers> Shared<P> {
     fn admit(&self, request: &Admission<'_>, route: ReplyRoute, peer: Option<PeerContext>) {
         let context = self.context(route, peer);
         let token = request.token;
-        let inbox = if request.incarnation == self.incarnation {
-            self.lock()
-                .registry
-                .get(token)
-                .map(|registration| Arc::clone(&registration.inbox))
-        } else {
+        // A well-known endpoint answers in every incarnation; a dynamic one
+        // only in the incarnation that registered it.
+        let wrong_incarnation = !token.is_well_known() && request.incarnation != self.incarnation;
+        let inbox = if wrong_incarnation {
             None
+        } else {
+            let state = self.lock();
+            match token.well_known_id() {
+                Some(id) => state.well_known.get(&id),
+                None => state.registry.get(token),
+            }
+            .map(|registration| Arc::clone(&registration.inbox))
         };
         // Checked in order, all before a single body byte is decoded.
         let rejection = match inbox {
-            _ if request.incarnation != self.incarnation => WireError::StaleIncarnation,
+            _ if wrong_incarnation => WireError::StaleIncarnation,
             None => WireError::EndpointNotFound,
             Some(inbox) => {
                 let (method, schema, codec) = inbox.identity();
@@ -226,124 +367,62 @@ impl<P: Providers> Shared<P> {
         context.deliver(WireOutcome::Err(rejection));
     }
 
-    /// Start one call attempt. The returned receiver completes exactly once.
-    pub(crate) fn start_call(
-        &self,
-        endpoint: &Endpoint,
-        identity: CallIdentity,
-        body: Vec<u8>,
-    ) -> Result<(oneshot::Receiver<Result<ReplyBytes, RpcError>>, CallGuard), RpcError> {
-        let local = self.address == Some(endpoint.address());
-        // Same frame limit on both routes: nothing oversized is admitted.
-        let size = request_envelope_len(body.len()) as u64;
-        if size > u64::from(self.config.max_frame_bytes) {
-            return Err(RpcError::not_admitted(ErrorReason::FrameTooLarge {
-                size,
-                limit: self.config.max_frame_bytes,
-            }));
-        }
-        let overloaded = || RpcError::not_admitted(ErrorReason::Overloaded);
-        let (sender, receiver) = oneshot::channel();
-        let mut state = self.lock();
-        if state.pending.len() >= self.config.max_pending_calls {
-            return Err(overloaded());
-        }
-        let call_id = state.next_call_id;
-        state.next_call_id = call_id.checked_add(1).ok_or_else(overloaded)?;
-        let owner: Weak<dyn CallOwner> = self.this.clone();
-        let guard = CallGuard::new(owner, call_id);
-
-        if local {
-            // Admission below is synchronous: once it returns, the request
-            // either reached a receiver or was refused with an outcome.
-            state.pending.insert(
-                call_id,
-                PendingCall {
-                    origin: Origin::Local,
-                    identity,
-                    transmitted: true,
-                    sender,
-                },
-            );
-            drop(state);
-            Counters::bump(&self.counters.calls_started);
-            let sink: Weak<dyn LocalSink> = self.this.clone();
-            // The same bytes, validation order, admission and frame limit as
-            // the remote path; only the socket is skipped.
-            self.admit(
-                &Admission {
-                    incarnation: endpoint.incarnation(),
-                    token: endpoint.token(),
-                    identity,
-                    body: &body,
-                },
-                ReplyRoute::Local { sink, call_id },
-                None,
-            );
-            return Ok((receiver, guard));
-        }
-
-        let frame = request_frame(
-            call_id,
-            endpoint,
-            identity,
-            body,
-            self.config.max_frame_bytes,
-        )?;
-        let connection = self.connection_for(&mut state, endpoint.address())?;
-        match connection.push_request(frame, call_id) {
-            Ok(()) => {}
-            Err(QueueRefusal::Full) => return Err(overloaded()),
-            Err(QueueRefusal::Closed) => {
-                return Err(RpcError::not_admitted(ErrorReason::Disconnected));
-            }
-        }
-        state.pending.insert(
-            call_id,
-            PendingCall {
-                origin: Origin::Connection(connection.id()),
-                identity,
-                transmitted: false,
-                sender,
-            },
-        );
-        drop(state);
-        Counters::bump(&self.counters.calls_started);
-        Ok((receiver, guard))
-    }
-
-    /// The live outbound connection to `address`, opening one if needed.
-    fn connection_for(
+    /// The live selected connection to `address`, opening one if needed.
+    fn peer_connection(
         &self,
         state: &mut State,
         address: SocketAddr,
     ) -> Result<Arc<Connection>, RpcError> {
-        if let Some(existing) = state.outbound.get(&address)
-            && !existing.is_closed()
-        {
+        if let Some(existing) = state.peers.get(&address).and_then(Peer::live) {
             return Ok(Arc::clone(existing));
         }
         if state.connections.len() >= self.config.max_connections {
             Counters::bump(&self.counters.connections_rejected);
             return Err(RpcError::not_admitted(ErrorReason::Overloaded));
         }
-        let connection = self.new_connection(state, address.to_string());
-        state.outbound.insert(address, Arc::clone(&connection));
-        self.commands
+        if !state.peers.contains_key(&address)
+            && state.peers.len() >= self.config.peer.max_tracked_addresses
+        {
+            let now = self.now();
+            state.peers.retain(|_, peer| !peer.is_forgettable(now));
+        }
+        let connection = self.new_connection(state, address.to_string(), Direction::Outbound);
+        connection.select_for(address);
+        state
+            .peers
+            .entry(address)
+            .or_insert_with(|| Peer::new(&self.config.peer))
+            .current = Some(Arc::clone(&connection));
+        if self
+            .commands
             .unbounded_send(Command::Connect(Arc::clone(&connection), address))
-            .map_err(|_| RpcError::not_admitted(ErrorReason::Shutdown))?;
+            .is_err()
+        {
+            state.connections.remove(&connection.id());
+            let _ = connection.close(connection::CloseReason::Local);
+            return Err(RpcError::not_admitted(ErrorReason::Shutdown));
+        }
         Ok(connection)
     }
 
-    fn new_connection(&self, state: &mut State, peer: String) -> Arc<Connection> {
+    fn new_connection(
+        &self,
+        state: &mut State,
+        peer: String,
+        direction: Direction,
+    ) -> Arc<Connection> {
         let id = state.next_connection_id;
         state.next_connection_id += 1;
         let connection = Arc::new(Connection::new(
             id,
             peer,
+            direction,
             self.hello(),
-            self.config.max_queued_requests,
-            self.config.reserved_control_frames,
+            (
+                self.config.max_queued_requests,
+                self.config.reserved_control_frames,
+            ),
+            self.now(),
             &self.counters,
         ));
         state.connections.insert(id, Arc::clone(&connection));
@@ -358,7 +437,7 @@ impl<P: Providers> Shared<P> {
             tracing::warn!(%peer, "rpc connection budget exhausted, refusing inbound connection");
             return;
         }
-        let connection = self.new_connection(&mut state, peer);
+        let connection = self.new_connection(&mut state, peer, Direction::Inbound);
         drop(state);
         // The receiver lives in the driver that runs this accept loop.
         let _ = self
@@ -366,268 +445,34 @@ impl<P: Providers> Shared<P> {
             .unbounded_send(Command::Accepted(connection, stream));
     }
 
-    /// Decide whether a request frame may leave on `connection`: it must fit
-    /// the peer's announced frame limit. A frame that does not is refused
-    /// for its own call (never sent, so `NotAdmitted`) and the session
-    /// stays up.
-    fn admit_transmit(&self, connection: &Connection, call_id: u64, frame_len: usize) -> bool {
-        let limit = connection
-            .peer_hello()
-            .map_or(self.config.max_frame_bytes, |hello| hello.max_frame_bytes);
-        let size = frame_len.saturating_sub(HEADER_LEN) as u64;
-        let mut state = self.lock();
-        if size > u64::from(limit) {
-            let call = state.pending.remove(&call_id);
-            drop(state);
-            tracing::debug!(
-                call_id,
-                size,
-                limit,
-                "rpc request exceeds the peer's frame limit"
-            );
-            if let Some(call) = call {
-                let _ = call
-                    .sender
-                    .send(Err(RpcError::not_admitted(ErrorReason::FrameTooLarge {
-                        size,
-                        limit,
-                    })));
-            }
-            return false;
-        }
-        if let Some(call) = state.pending.get_mut(&call_id) {
-            call.transmitted = true;
-        }
-        true
-    }
-
-    /// Complete a pending call from `origin`.
-    fn complete(&self, origin: Origin, call_id: u64, outcome: WireOutcome) {
-        let mut state = self.lock();
-        let Some(call) = state.pending.get(&call_id) else {
-            drop(state);
-            Counters::bump(&self.counters.late_replies);
-            tracing::debug!(call_id, "rpc late reply discarded");
-            return;
-        };
-        if call.origin != origin {
-            drop(state);
-            Counters::bump(&self.counters.misrouted_replies);
-            tracing::warn!(
-                call_id,
-                ?origin,
-                "rpc reply arrived on the wrong session, discarded"
-            );
-            return;
-        }
-        let Some(call) = state.pending.remove(&call_id) else {
-            return;
-        };
-        drop(state);
-        let result = match outcome {
-            WireOutcome::Ok { codec, body } => Ok((codec, body)),
-            WireOutcome::Err(error) => Err(RpcError::from_wire(error, call.identity)),
-        };
-        let _ = call.sender.send(result);
-    }
-
-    /// Handle one decoded frame from `connection`.
-    fn on_message(
-        &self,
-        connection: &Arc<Connection>,
-        message: WireMessage,
-    ) -> Result<(), CloseReason> {
-        let established = connection.is_established();
-        match message {
-            WireMessage::Hello {
-                magic,
-                min_version,
-                max_version,
-                incarnation,
-                features,
-                max_frame_bytes,
-            } => {
-                if established {
-                    return Err(CloseReason::Protocol("duplicate handshake".into()));
-                }
-                if magic != PROTOCOL_MAGIC {
-                    return Err(CloseReason::Protocol(format!("bad magic {magic:#x}")));
-                }
-                let Some(version) = negotiate(
-                    (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
-                    (min_version, max_version),
-                ) else {
-                    return Err(CloseReason::Version(format!(
-                        "peer speaks {min_version}..={max_version}, \
-                         this build {MIN_PROTOCOL_VERSION}..={PROTOCOL_VERSION}"
-                    )));
-                };
-                if max_frame_bytes < MIN_FRAME_BYTES {
-                    return Err(CloseReason::Protocol(format!(
-                        "peer frame limit {max_frame_bytes} below {MIN_FRAME_BYTES}"
-                    )));
-                }
-                connection.establish(PeerHello {
-                    incarnation,
-                    version,
-                    max_frame_bytes,
-                });
-                tracing::debug!(
-                    peer = %connection.peer(),
-                    %incarnation,
-                    version,
-                    features,
-                    max_frame_bytes,
-                    "rpc session established"
-                );
-                Ok(())
-            }
-            _ if !established => Err(CloseReason::Protocol("frame before handshake".into())),
-            WireMessage::Request {
-                call_id,
-                incarnation,
-                token,
-                method,
-                schema,
-                codec,
-                // Reserved for request credentials (#218): carried, never
-                // interpreted or handed to user code by this version.
-                metadata: _,
-                body,
-            } => {
-                let route = ReplyRoute::Remote {
-                    connection: Arc::downgrade(connection),
-                    call_id,
-                };
-                self.admit(
-                    &Admission {
-                        incarnation,
-                        token,
-                        identity: CallIdentity {
-                            method,
-                            schema,
-                            codec,
-                        },
-                        body: &body,
-                    },
-                    route,
-                    connection.peer_context(),
-                );
-                Ok(())
-            }
-            WireMessage::Reply { call_id, outcome } => {
-                self.complete(Origin::Connection(connection.id()), call_id, outcome);
-                Ok(())
-            }
-        }
-    }
-
-    /// Tear down a finished connection and fail the calls it carried.
-    fn close_connection(&self, connection: &Arc<Connection>, reason: &CloseReason) {
-        let established = connection.is_established();
-        connection.close();
-        let mut state = self.lock();
-        state.connections.remove(&connection.id());
-        let address = connection.peer().parse::<SocketAddr>().ok();
-        if let Some(address) = address
-            && state
-                .outbound
-                .get(&address)
-                .is_some_and(|current| Arc::ptr_eq(current, connection))
-        {
-            state.outbound.remove(&address);
-        }
-        let origin = Origin::Connection(connection.id());
-        let failed: Vec<u64> = state
-            .pending
-            .iter()
-            .filter(|(_, call)| call.origin == origin)
-            .map(|(call_id, _)| *call_id)
-            .collect();
-        let calls: Vec<PendingCall> = failed
-            .iter()
-            .filter_map(|call_id| state.pending.remove(call_id))
-            .collect();
-        drop(state);
-        match reason {
-            CloseReason::Protocol(detail)
-            | CloseReason::Checksum(detail)
-            | CloseReason::Version(detail) => {
-                Counters::bump(&self.counters.protocol_violations);
-                if matches!(reason, CloseReason::Checksum(_)) {
-                    Counters::bump(&self.counters.checksum_failures);
-                    if established {
-                        Counters::bump(&self.counters.established_checksum_failures);
-                    }
-                }
-                if matches!(reason, CloseReason::Version(_)) {
-                    Counters::bump(&self.counters.version_rejections);
-                }
-                tracing::warn!(peer = %connection.peer(), %detail, "rpc protocol violation, connection closed");
-            }
-            _ => tracing::debug!(peer = %connection.peer(), ?reason, "rpc connection closed"),
-        }
-        for call in calls {
-            let error = if let CloseReason::ConnectFailed(detail) = reason {
-                RpcError::not_admitted(ErrorReason::ConnectFailed(detail.clone()))
-            } else if !established {
-                // Requests wait for the handshake: none of these left.
-                RpcError::not_admitted(ErrorReason::ConnectFailed(format!(
-                    "session closed during handshake: {reason:?}"
-                )))
-            } else if call.transmitted {
-                if matches!(reason, CloseReason::Checksum(_)) {
-                    Counters::bump(&self.counters.calls_failed_by_corruption);
-                }
-                RpcError::new(ErrorReason::Disconnected, Execution::MaybeExecuted)
-            } else {
-                RpcError::not_admitted(ErrorReason::Disconnected)
-            };
-            let _ = call.sender.send(Err(error));
-        }
-    }
-
     fn stats(&self) -> RpcStats {
         let state = self.lock();
-        self.counters
-            .snapshot(state.registry.live(), state.pending.len())
+        let endpoints = state.registry.live() + state.well_known.len();
+        let retained = state
+            .pending
+            .values()
+            .filter(|call| call.retained.is_some())
+            .count();
+        let mut snapshot = self
+            .counters
+            .snapshot(endpoints, state.pending.len(), retained);
+        snapshot.peers = state.peers.len();
+        snapshot
     }
 }
 
 impl<P: Providers> EndpointOwner for Shared<P> {
     fn unregister(&self, token: EndpointToken) {
-        let removed = self.lock().registry.remove(token);
+        let removed = {
+            let mut state = self.lock();
+            match token.well_known_id() {
+                Some(id) => state.well_known.remove(&id),
+                None => state.registry.remove(token),
+            }
+        };
         // Dropped outside the lock: closing the inbox breaks queued promises.
         drop(removed);
         tracing::debug!(%token, "rpc endpoint destroyed");
-    }
-}
-
-impl<P: Providers> CallOwner for Shared<P> {
-    fn abandon(&self, call_id: u64) -> Option<bool> {
-        let mut state = self.lock();
-        let call = state.pending.remove(&call_id)?;
-        // A request still queued behind the handshake or other frames is
-        // withdrawn, so "not transmitted" stays true after the caller leaves.
-        // If the writer already took it, it may be on the wire.
-        let transmitted = call.transmitted
-            || match call.origin {
-                Origin::Local => true,
-                Origin::Connection(id) => state
-                    .connections
-                    .get(&id)
-                    .is_none_or(|connection| !connection.retract(call_id)),
-            };
-        drop(state);
-        Counters::bump(&self.counters.calls_abandoned);
-        tracing::debug!(call_id, transmitted, "rpc call abandoned by its caller");
-        Some(transmitted)
-    }
-}
-
-impl<P: Providers> LocalSink for Shared<P> {
-    fn complete_local(&self, call_id: u64, outcome: WireOutcome) {
-        self.complete(Origin::Local, call_id, outcome);
     }
 }
 
@@ -639,477 +484,19 @@ struct Admission<'a> {
     body: &'a [u8],
 }
 
-fn request_frame(
-    call_id: u64,
-    endpoint: &Endpoint,
-    identity: CallIdentity,
-    body: Vec<u8>,
-    max_frame_bytes: u32,
-) -> Result<Vec<u8>, RpcError> {
-    let payload = encode_message(&WireMessage::Request {
-        call_id,
-        incarnation: endpoint.incarnation(),
-        token: endpoint.token(),
-        method: identity.method,
-        schema: identity.schema,
-        codec: identity.codec,
-        metadata: Vec::new(),
-        body,
-    });
-    encode_frame(&payload, max_frame_bytes).map_err(|_| {
-        RpcError::not_admitted(ErrorReason::FrameTooLarge {
-            size: payload.len() as u64,
-            limit: max_frame_bytes,
-        })
-    })
-}
-
-/// A weak, cloneable handle to a running RPC runtime.
-///
-/// Registers endpoints and binds clients. It never keeps the runtime alive:
-/// once the [`RpcDriver`] is dropped every operation fails with
-/// [`ErrorReason::Shutdown`] (or returns `None`).
-pub struct RpcHandle<P: Providers> {
-    shared: Weak<Shared<P>>,
-}
-
-impl<P: Providers> Clone for RpcHandle<P> {
-    fn clone(&self) -> Self {
-        Self {
-            shared: self.shared.clone(),
-        }
+/// The failure a server rejection proves about a dynamic reference, if any.
+fn permanent_failure(error: WireError) -> Option<PermanentFailure> {
+    match error {
+        WireError::EndpointNotFound => Some(PermanentFailure::NotFound),
+        WireError::StaleIncarnation => Some(PermanentFailure::StaleIncarnation),
+        _ => None,
     }
 }
 
-impl<P: Providers> std::fmt::Debug for RpcHandle<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RpcHandle")
-            .field("running", &self.is_running())
-            .finish()
+/// The terminal error a remembered permanent failure produces.
+fn permanent_reason(failure: PermanentFailure) -> ErrorReason {
+    match failure {
+        PermanentFailure::NotFound => ErrorReason::EndpointNotFound,
+        PermanentFailure::StaleIncarnation => ErrorReason::StaleIncarnation,
     }
-}
-
-impl<P: Providers> RpcHandle<P> {
-    pub(crate) fn upgrade(&self) -> Option<Arc<Shared<P>>> {
-        self.shared.upgrade()
-    }
-
-    /// Register a new dynamic endpoint for `M` with the given access class.
-    ///
-    /// Returns the serialisable reference to hand to callers and the owned
-    /// receiver. Dropping the receiver destroys the endpoint.
-    ///
-    /// # Errors
-    ///
-    /// [`ErrorReason::NotListening`] on a client-only runtime,
-    /// [`ErrorReason::Overloaded`] when the endpoint budget is exhausted and
-    /// [`ErrorReason::Shutdown`] once the driver is gone.
-    pub fn register<M: RpcMethod>(
-        &self,
-        access: AccessClass,
-    ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
-        self.upgrade()
-            .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?
-            .register::<M>(access)
-    }
-
-    /// Bind a reference to this runtime (same as [`ServiceRef::bind`]).
-    #[must_use]
-    pub fn client<M: RpcMethod>(&self, target: &ServiceRef<M>) -> ServiceClient<P, M> {
-        target.bind(self)
-    }
-
-    /// Whether the driver still exists.
-    #[must_use]
-    pub fn is_running(&self) -> bool {
-        self.shared.strong_count() > 0
-    }
-
-    /// This runtime's incarnation, while it runs.
-    #[must_use]
-    pub fn incarnation(&self) -> Option<Incarnation> {
-        self.upgrade().map(|shared| shared.incarnation)
-    }
-
-    /// The address advertised in this runtime's endpoints, if listening.
-    #[must_use]
-    pub fn address(&self) -> Option<SocketAddr> {
-        self.upgrade().and_then(|shared| shared.address)
-    }
-
-    /// A snapshot of the counters, while the runtime runs.
-    #[must_use]
-    pub fn stats(&self) -> Option<RpcStats> {
-        self.upgrade().map(|shared| shared.stats())
-    }
-
-    /// A drop probe that keeps answering after the runtime is gone.
-    #[must_use]
-    pub fn probe(&self) -> Option<ResourceProbe> {
-        self.upgrade().map(|shared| {
-            ResourceProbe::new(Arc::clone(&shared.counters), Arc::downgrade(&shared.alive))
-        })
-    }
-}
-
-/// The owned RPC runtime: poll [`run`](Self::run) to make progress.
-///
-/// Dropping it (or the `run` future) is the shutdown: listener, connections,
-/// registrations and pending calls go with it. `U` upgrades every session
-/// ([`Plaintext`] by default).
-pub struct RpcDriver<P: Providers, U = Plaintext> {
-    shared: Arc<Shared<P>>,
-    commands: mpsc::UnboundedReceiver<Command<P>>,
-    listener: Option<Listener<P>>,
-    upgrade: Arc<U>,
-}
-
-impl<P: Providers, U> std::fmt::Debug for RpcDriver<P, U> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RpcDriver")
-            .field("incarnation", &self.shared.incarnation)
-            .field("address", &self.shared.address)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<P: Providers> RpcDriver<P> {
-    /// Bind `bind_address` and build a plaintext runtime that serves
-    /// endpoints there and can call others.
-    ///
-    /// # Errors
-    ///
-    /// `InvalidInput` when the configuration does not validate
-    /// ([`RpcConfig::validate`]), the listener's bind error, or
-    /// `InvalidData` when the bound address is not a resolved `ip:port`.
-    pub async fn listen(
-        providers: P,
-        bind_address: &str,
-        config: RpcConfig,
-    ) -> io::Result<(Self, RpcHandle<P>)> {
-        Self::listen_with(providers, bind_address, config, Plaintext).await
-    }
-
-    /// Build a plaintext runtime that only calls others (it cannot
-    /// register).
-    ///
-    /// # Errors
-    ///
-    /// `InvalidInput` when the configuration does not validate
-    /// ([`RpcConfig::validate`]).
-    pub fn client_only(providers: P, config: RpcConfig) -> io::Result<(Self, RpcHandle<P>)> {
-        Self::client_only_with(providers, config, Plaintext)
-    }
-}
-
-impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
-    fn build(
-        providers: P,
-        config: RpcConfig,
-        address: Option<SocketAddr>,
-        upgrade: U,
-    ) -> (Self, RpcHandle<P>) {
-        // Protocol identifiers come from the provider's random source (seeded
-        // in simulation, OS entropy in production) unless the caller supplies
-        // one. Never an authentication.
-        let incarnation = config
-            .incarnation
-            .unwrap_or_else(|| Incarnation::from_raw(providers.random().random::<u128>()));
-        let (sender, commands) = mpsc::unbounded();
-        let shared = Arc::new_cyclic(|this| Shared {
-            providers,
-            state: Mutex::new(State {
-                registry: Registry::new(config.max_endpoints),
-                pending: BTreeMap::new(),
-                next_call_id: 0,
-                outbound: BTreeMap::new(),
-                connections: BTreeMap::new(),
-                next_connection_id: 0,
-            }),
-            config,
-            incarnation,
-            address,
-            commands: sender,
-            counters: Arc::new(Counters::default()),
-            alive: Arc::new(()),
-            this: this.clone(),
-        });
-        let handle = RpcHandle {
-            shared: Arc::downgrade(&shared),
-        };
-        (
-            Self {
-                shared,
-                commands,
-                listener: None,
-                upgrade: Arc::new(upgrade),
-            },
-            handle,
-        )
-    }
-
-    /// Like [`RpcDriver::listen`], upgrading every session with `upgrade`.
-    ///
-    /// # Errors
-    ///
-    /// `InvalidInput` when the configuration does not validate, the
-    /// listener's bind error, or `InvalidData` when the bound address is not
-    /// a resolved `ip:port`.
-    pub async fn listen_with(
-        providers: P,
-        bind_address: &str,
-        config: RpcConfig,
-        upgrade: U,
-    ) -> io::Result<(Self, RpcHandle<P>)> {
-        validated(&config)?;
-        let listener = providers.network().bind(bind_address).await?;
-        let address = match config.advertised_address {
-            Some(advertised) => advertised,
-            None => listener
-                .local_addr()?
-                .parse::<SocketAddr>()
-                .map_err(|error| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("listener address is not a resolved ip:port: {error}"),
-                    )
-                })?,
-        };
-        let (mut driver, handle) = Self::build(providers, config, Some(address), upgrade);
-        driver.listener = Some(listener);
-        Ok((driver, handle))
-    }
-
-    /// Like [`RpcDriver::client_only`], upgrading every session with
-    /// `upgrade`.
-    ///
-    /// # Errors
-    ///
-    /// `InvalidInput` when the configuration does not validate.
-    pub fn client_only_with(
-        providers: P,
-        config: RpcConfig,
-        upgrade: U,
-    ) -> io::Result<(Self, RpcHandle<P>)> {
-        validated(&config)?;
-        Ok(Self::build(providers, config, None, upgrade))
-    }
-
-    /// A fresh handle to this runtime.
-    #[must_use]
-    pub fn handle(&self) -> RpcHandle<P> {
-        RpcHandle {
-            shared: Arc::downgrade(&self.shared),
-        }
-    }
-
-    /// Drive the runtime; drop it to shut down.
-    ///
-    /// Completes only when the listener fails fatally (see
-    /// [`is_transient_accept_error`]), returning that error; transient accept
-    /// errors are retried with bounded backoff on provider time. A
-    /// client-only runtime never completes.
-    pub async fn run(self) -> io::Error {
-        let Self {
-            shared,
-            mut commands,
-            listener,
-            upgrade,
-        } = self;
-        let mut children: FuturesUnordered<ChildFuture> = FuturesUnordered::new();
-        let mut acceptor: Option<Pin<Box<dyn Future<Output = io::Error> + Send>>> =
-            listener.map(|listener| {
-                Box::pin(accept_loop(Arc::clone(&shared), listener))
-                    as Pin<Box<dyn Future<Output = io::Error> + Send>>
-            });
-        futures::future::poll_fn(|cx| {
-            if let Some(accepting) = acceptor.as_mut()
-                && let Poll::Ready(error) = accepting.as_mut().poll(cx)
-            {
-                acceptor = None;
-                return Poll::Ready(error);
-            }
-            // New work first, so a connection queued by a caller is polled in
-            // this same pass.
-            while let Poll::Ready(Some(command)) = commands.poll_next_unpin(cx) {
-                let shared = Arc::clone(&shared);
-                let upgrade = Arc::clone(&upgrade);
-                let child: ChildFuture = match command {
-                    Command::Connect(connection, address) => {
-                        Box::pin(drive_outbound(shared, upgrade, connection, address))
-                    }
-                    Command::Accepted(connection, stream) => {
-                        Box::pin(drive_inbound(shared, upgrade, connection, stream))
-                    }
-                };
-                children.push(child);
-            }
-            // Returns Pending once every child is parked (or after its
-            // cooperative budget, having scheduled a re-poll).
-            while let Poll::Ready(Some(())) = children.poll_next_unpin(cx) {}
-            Poll::Pending
-        })
-        .await
-    }
-}
-
-/// Whether an accept error is worth retrying.
-///
-/// Per-connection failures (an aborted or reset handshake), interruptions
-/// and resource exhaustion (`EMFILE`/`ENFILE`/`ENOBUFS`, which std reports as
-/// uncategorised or `OutOfMemory`) pass: the listener itself is fine, and
-/// retrying after a pause is what servers do. A listener that is invalid,
-/// unsupported, denied or otherwise broken in a way that will not heal is
-/// fatal.
-#[must_use]
-pub fn is_transient_accept_error(error: &io::Error) -> bool {
-    !matches!(
-        error.kind(),
-        io::ErrorKind::InvalidInput
-            | io::ErrorKind::InvalidData
-            | io::ErrorKind::Unsupported
-            | io::ErrorKind::PermissionDenied
-            | io::ErrorKind::NotConnected
-            | io::ErrorKind::AddrNotAvailable
-            | io::ErrorKind::AddrInUse
-            | io::ErrorKind::NotFound
-    )
-}
-
-/// First pause after a transient accept error; doubles up to the maximum.
-const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(5);
-/// Longest pause between accept retries.
-const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
-
-fn validated(config: &RpcConfig) -> io::Result<()> {
-    config
-        .validate()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
-}
-
-async fn accept_loop<P: Providers>(shared: Arc<Shared<P>>, listener: Listener<P>) -> io::Error {
-    let _task = TaskGuard::new(&shared.counters);
-    let mut backoff = ACCEPT_BACKOFF_MIN;
-    loop {
-        match listener.accept().await {
-            Ok((stream, peer)) => {
-                backoff = ACCEPT_BACKOFF_MIN;
-                shared.accept(stream, peer);
-            }
-            Err(error) if is_transient_accept_error(&error) => {
-                Counters::bump(&shared.counters.accept_errors);
-                tracing::warn!(%error, ?backoff, "rpc accept failed, retrying");
-                // Existing sessions keep running while the listener waits.
-                let _ = shared.time().sleep(backoff).await;
-                backoff = (backoff * 2).min(ACCEPT_BACKOFF_MAX);
-            }
-            Err(error) => {
-                Counters::bump(&shared.counters.accept_errors);
-                tracing::error!(%error, "rpc listener failed fatally");
-                return error;
-            }
-        }
-    }
-}
-
-async fn drive_outbound<P: Providers, U: SessionUpgrade<P>>(
-    shared: Arc<Shared<P>>,
-    upgrade: Arc<U>,
-    connection: Arc<Connection>,
-    address: SocketAddr,
-) {
-    let _task = TaskGuard::new(&shared.counters);
-    let peer = address.to_string();
-    let connect = async {
-        let stream = shared.providers.network().connect(&peer).await?;
-        Connector::connect(upgrade.as_ref(), stream, &peer).await
-    };
-    let reason = match shared
-        .time()
-        .timeout(shared.config.connect_timeout, connect)
-        .await
-    {
-        Ok(Ok((stream, context))) => {
-            connection.set_peer_context(context);
-            run_session(&shared, &connection, stream).await
-        }
-        Ok(Err(error)) => CloseReason::ConnectFailed(error.to_string()),
-        Err(_) => CloseReason::ConnectFailed("connect timed out".into()),
-    };
-    shared.close_connection(&connection, &reason);
-}
-
-async fn drive_inbound<P: Providers, U: SessionUpgrade<P>>(
-    shared: Arc<Shared<P>>,
-    upgrade: Arc<U>,
-    connection: Arc<Connection>,
-    stream: Stream<P>,
-) {
-    let _task = TaskGuard::new(&shared.counters);
-    let accept = Acceptor::accept(upgrade.as_ref(), stream, connection.peer());
-    let reason = match shared
-        .time()
-        .timeout(shared.config.handshake_timeout, accept)
-        .await
-    {
-        Ok(Ok((stream, context))) => {
-            connection.set_peer_context(context);
-            run_session(&shared, &connection, stream).await
-        }
-        Ok(Err(error)) => CloseReason::Protocol(format!("upgrade failed: {error}")),
-        Err(_) => CloseReason::Protocol("upgrade timed out".into()),
-    };
-    shared.close_connection(&connection, &reason);
-}
-
-/// Run the framed session until either direction ends or the peer fails to
-/// complete its handshake in time.
-async fn run_session<P, S>(
-    shared: &Arc<Shared<P>>,
-    connection: &Arc<Connection>,
-    stream: S,
-) -> CloseReason
-where
-    P: Providers,
-    S: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    Counters::bump(&shared.counters.connections_opened);
-    let (reader, writer) = stream.split();
-    let read = read_loop(
-        reader,
-        shared.config.max_frame_bytes,
-        shared.config.read_chunk_bytes,
-        |payload| {
-            let message = decode_message(&payload)
-                .map_err(|error| CloseReason::Protocol(format!("bad envelope: {error}")))?;
-            shared.on_message(connection, message)
-        },
-    );
-    let write = write_loop(connection, writer, |call_id, frame_len| {
-        shared.admit_transmit(connection, call_id, frame_len)
-    });
-    let deadline = handshake_deadline(shared, connection, shared.config.handshake_timeout);
-    futures::pin_mut!(read, write, deadline);
-    let io = futures::future::select(read, write);
-    match futures::future::select(io, deadline).await {
-        futures::future::Either::Left((
-            futures::future::Either::Left((reason, _))
-            | futures::future::Either::Right((reason, _)),
-            _,
-        ))
-        | futures::future::Either::Right((reason, _)) => reason,
-    }
-}
-
-/// Resolves only if the peer's `Hello` has not arrived within `timeout`.
-async fn handshake_deadline<P: Providers>(
-    shared: &Arc<Shared<P>>,
-    connection: &Arc<Connection>,
-    timeout: Duration,
-) -> CloseReason {
-    let _ = shared.time().sleep(timeout).await;
-    if !connection.is_established() {
-        return CloseReason::Protocol("handshake timed out".into());
-    }
-    futures::future::pending().await
 }

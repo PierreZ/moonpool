@@ -49,7 +49,10 @@ impl<T> Registry<T> {
         let index = if let Some(index) = self.free.pop() {
             index
         } else {
-            let index = u64::try_from(self.slots.len()).map_err(|_| RegistryError::Full)?;
+            let index = u64::try_from(self.slots.len())
+                .ok()
+                .filter(|index| !EndpointToken::from_parts(*index, 0).is_well_known())
+                .ok_or(RegistryError::Full)?;
             self.slots.push(Slot {
                 generation: 0,
                 value: None,

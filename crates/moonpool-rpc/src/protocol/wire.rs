@@ -7,11 +7,14 @@
 //! ```text
 //! kind 0x01 HELLO    magic u32 | min_version u16 | max_version u16
 //!                    | incarnation u128 | features u64 | max_frame_bytes u32
+//!                    | listen: family u8 (0 none, 4, 6) | ip (0, 4 or 16 bytes) | port u16 (if family > 0)
 //! kind 0x02 REQUEST  call_id u64 | incarnation u128 | token.index u64 | token.generation u32
-//!                    | method u32 | schema u16 | codec u16
+//!                    | method u32 | schema u16 | codec u16 | flags u8
 //!                    | metadata_len u16 | metadata | body (rest of the frame)
 //! kind 0x03 REPLY    call_id u64 | status u8 | status 0:  codec u16 | body (rest)
 //!                                            | status >0: detail u64 (nothing after)
+//! kind 0x04 PING     nonce u64
+//! kind 0x05 PONG     nonce u64
 //! ```
 //!
 //! - HELLO: each side announces the range of envelope versions it speaks;
@@ -22,10 +25,19 @@
 //!   `max_frame_bytes` is the largest frame payload the sender accepts:
 //!   each side sends the peer nothing larger, so an oversized request or
 //!   reply fails its own call instead of tearing the session down.
+//!   `listen` is the sender's canonical listening address (none for a
+//!   client-only runtime): the receiver of an inbound session uses it to
+//!   share that session as its own connection to the sender and to settle
+//!   simultaneous connects (the larger canonical address keeps the
+//!   connection it dialed, as in `FoundationDB`).
 //! - REQUEST: `metadata` is a reserved, length-prefixed section for request
 //!   credentials (verified by the security package, #218). This version
 //!   sends it empty and ignores what it receives; it is never passed to a
-//!   handler.
+//!   handler. `flags` bit 0 marks a one-way request: the receiver never
+//!   sends a reply or a rejection for it. Every other bit is reserved and
+//!   must be zero.
+//! - PING / PONG: connection liveness. A PING is answered with a PONG
+//!   carrying the same nonce; any received byte counts as liveness.
 //!
 //! Reply status codes: `0` ok, `1` endpoint not found, `2` stale incarnation,
 //! `3` method mismatch (detail: registered method), `4` schema mismatch
@@ -48,14 +60,17 @@ use crate::endpoint::{EndpointToken, Incarnation};
 pub const PROTOCOL_MAGIC: u32 = 0x4d50_5243;
 
 /// The newest envelope layout version this build speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+///
+/// Version 1 was the unreleased first-package layout (no listen address,
+/// request flags or liveness frames); nothing speaks it any more.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// The oldest envelope layout version this build speaks.
 ///
 /// A peer whose announced range does not overlap
 /// `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION` is refused before any request
 /// is admitted. Supporting a wider window for rolling upgrades is #218.
-pub const MIN_PROTOCOL_VERSION: u16 = 1;
+pub const MIN_PROTOCOL_VERSION: u16 = 2;
 
 /// The highest version both ranges contain, if any.
 #[must_use]
@@ -68,6 +83,12 @@ pub fn negotiate(local: (u16, u16), peer: (u16, u16)) -> Option<u16> {
 const KIND_HELLO: u8 = 0x01;
 const KIND_REQUEST: u8 = 0x02;
 const KIND_REPLY: u8 = 0x03;
+const KIND_PING: u8 = 0x04;
+const KIND_PONG: u8 = 0x05;
+
+/// `flags` bit of a one-way request: no reply or rejection is ever sent.
+pub const REQUEST_FLAG_ONE_WAY: u8 = 0x01;
+const REQUEST_FLAGS_KNOWN: u8 = REQUEST_FLAG_ONE_WAY;
 
 /// One frame payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,8 +107,11 @@ pub enum WireMessage {
         features: u64,
         /// The largest frame payload the sender accepts.
         max_frame_bytes: u32,
+        /// The sender's canonical listening address; `None` for a runtime
+        /// that does not listen.
+        listen: Option<std::net::SocketAddr>,
     },
-    /// One request attempt for a dynamic endpoint.
+    /// One request attempt for an endpoint.
     Request {
         /// Caller-allocated reply route, meaningful only on this connection.
         call_id: u64,
@@ -101,6 +125,9 @@ pub enum WireMessage {
         schema: SchemaVersion,
         /// The codec that produced `body`.
         codec: CodecId,
+        /// Request flags ([`REQUEST_FLAG_ONE_WAY`]); unknown bits are a
+        /// protocol violation.
+        flags: u8,
         /// Reserved credential/metadata section; empty in this version.
         metadata: Vec<u8>,
         /// The encoded request.
@@ -112,6 +139,16 @@ pub enum WireMessage {
         call_id: u64,
         /// The handler's reply or the reason the request was not served.
         outcome: WireOutcome,
+    },
+    /// Liveness probe; answered with a [`WireMessage::Pong`].
+    Ping {
+        /// Echoed back in the pong.
+        nonce: u64,
+    },
+    /// Answer to a [`WireMessage::Ping`].
+    Pong {
+        /// The ping's nonce.
+        nonce: u64,
     },
 }
 
@@ -243,6 +280,7 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
             incarnation,
             features,
             max_frame_bytes,
+            listen,
         } => {
             out.u8(KIND_HELLO)
                 .u32(*magic)
@@ -251,6 +289,10 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
                 .u128(incarnation.get())
                 .u64(*features)
                 .u32(*max_frame_bytes);
+            match listen {
+                Some(address) => out.socket_addr(*address),
+                None => out.u8(0),
+            };
         }
         WireMessage::Request {
             call_id,
@@ -259,6 +301,7 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
             method,
             schema,
             codec,
+            flags,
             metadata,
             body,
         } => {
@@ -273,6 +316,7 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
                 .u32(method.get())
                 .u16(schema.get())
                 .u16(codec.get())
+                .u8(*flags)
                 .u16(u16::try_from(metadata.len()).unwrap_or(u16::MAX))
                 .bytes(metadata)
                 .bytes(body);
@@ -289,12 +333,22 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
                 }
             }
         }
+        WireMessage::Ping { nonce } => {
+            out.u8(KIND_PING).u64(*nonce);
+        }
+        WireMessage::Pong { nonce } => {
+            out.u8(KIND_PONG).u64(*nonce);
+        }
     }
     out.0
 }
 
-/// Size of a `Hello` envelope.
-pub const HELLO_ENVELOPE_LEN: usize = 1 + 4 + 2 + 2 + 16 + 8 + 4;
+/// Size of the largest `Hello` envelope (one announcing an IPv6 listen
+/// address).
+pub const HELLO_ENVELOPE_LEN: usize = 1 + 4 + 2 + 2 + 16 + 8 + 4 + 1 + 16 + 2;
+
+/// Size of a `Ping` or `Pong` envelope.
+pub const LIVENESS_ENVELOPE_LEN: usize = 1 + 8;
 
 /// Size of a rejection reply envelope (the largest fixed reply layout).
 pub const REJECTION_ENVELOPE_LEN: usize = 1 + 8 + 1 + 8;
@@ -302,7 +356,7 @@ pub const REJECTION_ENVELOPE_LEN: usize = 1 + 8 + 1 + 8;
 /// Size of a request envelope carrying a `body_len`-byte body.
 #[must_use]
 pub const fn request_envelope_len(body_len: usize) -> usize {
-    1 + 8 + 16 + 8 + 4 + 4 + 2 + 2 + 2 + body_len
+    1 + 8 + 16 + 8 + 4 + 4 + 2 + 2 + 1 + 2 + body_len
 }
 
 /// Size of an ok-reply envelope carrying a `body_len`-byte body.
@@ -330,6 +384,10 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
                 incarnation: Incarnation::from_raw(input.u128().ok_or_else(truncated)?),
                 features: input.u64().ok_or_else(truncated)?,
                 max_frame_bytes: input.u32().ok_or_else(truncated)?,
+                listen: match input.u8().ok_or_else(truncated)? {
+                    0 => None,
+                    family => Some(decode_listen(family, &mut input)?),
+                },
             };
             if !input.is_empty() {
                 return Err(EnvelopeError::TrailingBytes);
@@ -344,6 +402,10 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
             let method = MethodId::new(input.u32().ok_or_else(truncated)?);
             let schema = SchemaVersion::new(input.u16().ok_or_else(truncated)?);
             let codec = CodecId::new(input.u16().ok_or_else(truncated)?);
+            let flags = input.u8().ok_or_else(truncated)?;
+            if flags & !REQUEST_FLAGS_KNOWN != 0 {
+                return Err(EnvelopeError::InvalidField("flags"));
+            }
             let metadata_len = input.u16().ok_or_else(truncated)?;
             let metadata = input
                 .slice(usize::from(metadata_len))
@@ -356,6 +418,7 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
                 method,
                 schema,
                 codec,
+                flags,
                 metadata,
                 body: input.rest().to_vec(),
             }
@@ -377,9 +440,46 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
             };
             WireMessage::Reply { call_id, outcome }
         }
+        KIND_PING | KIND_PONG => {
+            let nonce = input.u64().ok_or_else(truncated)?;
+            if !input.is_empty() {
+                return Err(EnvelopeError::TrailingBytes);
+            }
+            if kind == KIND_PING {
+                WireMessage::Ping { nonce }
+            } else {
+                WireMessage::Pong { nonce }
+            }
+        }
         other => return Err(EnvelopeError::UnknownKind(other)),
     };
     Ok(message)
+}
+
+/// The listen address after its family byte (4 or 6).
+fn decode_listen(
+    family: u8,
+    input: &mut Reader<'_>,
+) -> Result<std::net::SocketAddr, EnvelopeError> {
+    let ip = match family {
+        4 => {
+            let octets: [u8; 4] = input
+                .slice(4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(EnvelopeError::Truncated)?;
+            std::net::IpAddr::from(octets)
+        }
+        6 => {
+            let octets: [u8; 16] = input
+                .slice(16)
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(EnvelopeError::Truncated)?;
+            std::net::IpAddr::from(octets)
+        }
+        _ => return Err(EnvelopeError::InvalidField("listen address family")),
+    };
+    let port = input.u16().ok_or(EnvelopeError::Truncated)?;
+    Ok(std::net::SocketAddr::new(ip, port))
 }
 
 #[cfg(test)]
@@ -401,6 +501,7 @@ mod tests {
             method: MethodId::new(0x20),
             schema: SchemaVersion::new(0x10),
             codec: CodecId::PROST,
+            flags: 0,
             metadata: Vec::new(),
             body: vec![0xAA, 0xBB],
         }
@@ -414,6 +515,31 @@ mod tests {
             incarnation: Incarnation::from_raw(1),
             features: 0,
             max_frame_bytes: 0x0001_0000,
+            listen: None,
+        }
+    }
+
+    fn hello_listening(listen: &str) -> WireMessage {
+        let WireMessage::Hello {
+            magic,
+            min_version,
+            max_version,
+            incarnation,
+            features,
+            max_frame_bytes,
+            ..
+        } = hello()
+        else {
+            unreachable!("hello() builds a Hello")
+        };
+        WireMessage::Hello {
+            magic,
+            min_version,
+            max_version,
+            incarnation,
+            features,
+            max_frame_bytes,
+            listen: listen.parse().ok(),
         }
     }
 
@@ -421,12 +547,27 @@ mod tests {
     /// protocol version bump, not a fixture update.
     #[test]
     fn golden_encodings() {
-        let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 1, 0, 1, 0, 1];
+        let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 2, 0, 2, 0, 1];
         expected.extend([0; 15]);
         expected.extend([0; 8]);
         expected.extend([0, 0, 1, 0]);
+        expected.push(0);
         assert_eq!(encode_message(&hello()), expected);
-        assert_eq!(encode_message(&hello()).len(), HELLO_ENVELOPE_LEN);
+        expected.pop();
+        expected.extend([4, 10, 0, 1, 1, 0x94, 0x11]);
+        assert_eq!(encode_message(&hello_listening("10.0.1.1:4500")), expected);
+        assert_eq!(
+            encode_message(&hello_listening("[::1]:4500")).len(),
+            HELLO_ENVELOPE_LEN
+        );
+        assert_eq!(
+            encode_message(&WireMessage::Ping { nonce: 7 }),
+            [0x04, 7, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            encode_message(&WireMessage::Pong { nonce: 7 }),
+            [0x05, 7, 0, 0, 0, 0, 0, 0, 0]
+        );
 
         let mut expected = vec![0x02, 5, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x01];
         expected.extend([0; 14]);
@@ -435,6 +576,7 @@ mod tests {
         expected.extend([0x20, 0, 0, 0]);
         expected.extend([0x10, 0]);
         expected.extend([1, 0]);
+        expected.push(0);
         expected.extend([0, 0]);
         expected.extend([0xAA, 0xBB]);
         assert_eq!(encode_message(&request()), expected);
@@ -477,6 +619,45 @@ mod tests {
         let at = request_envelope_len(0) - 2;
         lying[at] = 0xFF;
         assert_eq!(decode_message(&lying), Err(EnvelopeError::Truncated));
+    }
+
+    #[test]
+    fn liveness_listen_and_flags_round_trip_and_reject_garbage() {
+        for message in [
+            WireMessage::Ping { nonce: u64::MAX },
+            WireMessage::Pong { nonce: 3 },
+            hello_listening("10.0.1.1:4500"),
+            hello_listening("[2001:db8::1]:9"),
+        ] {
+            assert_eq!(decode_message(&encode_message(&message)), Ok(message));
+        }
+        let mut one_way = request();
+        if let WireMessage::Request { flags, .. } = &mut one_way {
+            *flags = super::REQUEST_FLAG_ONE_WAY;
+        }
+        assert_eq!(
+            decode_message(&encode_message(&one_way)),
+            Ok(one_way.clone())
+        );
+        let mut unknown_flag = encode_message(&one_way);
+        unknown_flag[request_envelope_len(0) - 3] = 0x80;
+        assert_eq!(
+            decode_message(&unknown_flag),
+            Err(EnvelopeError::InvalidField("flags"))
+        );
+        let mut bad_family = encode_message(&hello());
+        if let Some(last) = bad_family.last_mut() {
+            *last = 5;
+        }
+        assert_eq!(
+            decode_message(&bad_family),
+            Err(EnvelopeError::InvalidField("listen address family"))
+        );
+        assert_eq!(decode_message(&[0x04, 1]), Err(EnvelopeError::Truncated));
+        assert_eq!(
+            decode_message(&[0x05, 1, 0, 0, 0, 0, 0, 0, 0, 9]),
+            Err(EnvelopeError::TrailingBytes)
+        );
     }
 
     #[test]

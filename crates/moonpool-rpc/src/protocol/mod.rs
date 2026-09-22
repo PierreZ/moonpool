@@ -20,7 +20,8 @@
 //! Connection rules: the first frame each way is [`WireMessage::Hello`]
 //! carrying [`PROTOCOL_MAGIC`], the sender's supported version range
 //! (`MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`), its
-//! [`Incarnation`](crate::Incarnation) and reserved feature bits. A peer
+//! [`Incarnation`](crate::Incarnation), reserved feature bits, its frame
+//! limit and its canonical listening address. A peer
 //! with no common version, anything but a Hello first, a wrong magic, a
 //! checksum mismatch or an unparsable envelope is a protocol violation: the
 //! connection is closed (never resynchronised), its calls fail through the
@@ -40,7 +41,8 @@ pub(crate) use cursor::{Reader, Writer};
 pub use frame::{FrameDecoder, FrameError, HEADER_LEN, encode_frame};
 pub use schema::{MethodId, RpcMethod, SchemaVersion};
 pub use wire::{
-    EnvelopeError, HELLO_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION,
-    REJECTION_ENVELOPE_LEN, WireError, WireMessage, WireOutcome, decode_message, encode_message,
-    negotiate, reply_envelope_len, request_envelope_len,
+    EnvelopeError, HELLO_ENVELOPE_LEN, LIVENESS_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC,
+    PROTOCOL_VERSION, REJECTION_ENVELOPE_LEN, REQUEST_FLAG_ONE_WAY, WireError, WireMessage,
+    WireOutcome, decode_message, encode_message, negotiate, reply_envelope_len,
+    request_envelope_len,
 };
