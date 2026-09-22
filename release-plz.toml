@@ -88,6 +88,11 @@ release = false
 publish = false
 
 [[package]]
+name = "moonpool-rpc-sim"
+release = false
+publish = false
+
+[[package]]
 name = "moonpool-wasm-demo"
 release = false
 publish = false
