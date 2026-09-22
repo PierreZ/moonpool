@@ -36,6 +36,12 @@ version_group = "moonpool"
 name = "moonpool-hyper"
 version_group = "moonpool"
 
+# Typed dynamic-endpoint RPC over the provider traits; depends only on
+# moonpool-core, so it publishes in the same tier as moonpool-hyper.
+[[package]]
+name = "moonpool-rpc"
+version_group = "moonpool"
+
 # Prometheus registry adapter for simulation metrics; depends only on
 # moonpool-core, so it publishes in the same tier as moonpool-hyper.
 [[package]]
