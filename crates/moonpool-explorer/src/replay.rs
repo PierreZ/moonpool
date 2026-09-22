@@ -73,12 +73,10 @@ pub fn parse_timeline(s: &str) -> Result<Vec<(u64, u64)>, ParseTimelineError> {
         .split(" -> ")
         .map(|segment| {
             let segment = segment.trim();
-            let at_pos = segment.find('@').ok_or_else(|| ParseTimelineError {
-                message: format!("missing '@' in segment: {segment}"),
-            })?;
-
-            let count_str = &segment[..at_pos];
-            let seed_str = &segment[at_pos + 1..];
+            let (count_str, seed_str) =
+                segment.split_once('@').ok_or_else(|| ParseTimelineError {
+                    message: format!("missing '@' in segment: {segment}"),
+                })?;
 
             let count = count_str.parse::<u64>().map_err(|e| ParseTimelineError {
                 message: format!("invalid count '{count_str}': {e}"),

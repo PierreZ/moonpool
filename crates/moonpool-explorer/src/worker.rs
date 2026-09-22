@@ -99,6 +99,18 @@ impl SlotPool {
         unsafe { self.memory.as_ptr().add(idx * SLOT_SIZE) }
     }
 
+    /// A slot's `len` header and the start of its entry array.
+    fn slot_parts(&self, idx: usize) -> (*mut u32, *mut RawEvent) {
+        let ptr = self.slot_ptr(idx);
+        // Safety: the slot is SLOT_SIZE bytes: an 8-byte header followed by
+        // MAX_JOURNAL_ENTRIES RawEvents.
+        let entries = unsafe { ptr.add(8) };
+        (
+            ptr.cast::<()>().cast::<u32>(),
+            entries.cast::<()>().cast::<RawEvent>(),
+        )
+    }
+
     /// Zero a slot before handing it to a worker.
     pub fn clear_slot(&self, idx: usize) {
         // Safety: slot_ptr is in bounds for SLOT_SIZE bytes.
@@ -107,14 +119,12 @@ impl SlotPool {
 
     /// Serialize the given journal into a slot (called in the worker).
     pub fn write_slot(&self, idx: usize, journal: &[DiscoveryEvent]) {
-        let ptr = self.slot_ptr(idx);
+        let (header, entries) = self.slot_parts(idx);
         let len = journal.len().min(MAX_JOURNAL_ENTRIES);
-        // Safety: the slot is SLOT_SIZE bytes: an 8-byte header followed by
-        // MAX_JOURNAL_ENTRIES RawEvents; len is capped to that entry count.
+        // Safety: len is capped to the slot's MAX_JOURNAL_ENTRIES entries.
         // Write the entries before publishing len so a worker interrupted
         // during serialization still leaves the controller an empty slot.
         unsafe {
-            let entries = ptr.add(8).cast::<()>().cast::<RawEvent>();
             for (i, event) in journal.iter().take(len).enumerate() {
                 entries.add(i).write(RawEvent {
                     call_count: event.call_count,
@@ -122,20 +132,17 @@ impl SlotPool {
                     kind: event.kind as u64,
                 });
             }
-            *ptr.cast::<()>().cast::<u32>() =
-                u32::try_from(len).expect("len capped at MAX_JOURNAL_ENTRIES");
+            *header = u32::try_from(len).expect("len capped at MAX_JOURNAL_ENTRIES");
         }
     }
 
     /// Deserialize a slot's journal (called in the controller after reaping).
     pub fn read_slot(&self, idx: usize) -> Vec<DiscoveryEvent> {
-        let ptr = self.slot_ptr(idx);
+        let (header, entries) = self.slot_parts(idx);
         // Safety: the slot layout matches write_slot; len is re-capped on read
         // so a corrupted header cannot walk out of the slot.
         unsafe {
-            let len = (*ptr.cast::<()>().cast::<u32>()) as usize;
-            let len = len.min(MAX_JOURNAL_ENTRIES);
-            let entries = ptr.add(8).cast::<()>().cast::<RawEvent>();
+            let len = (*header as usize).min(MAX_JOURNAL_ENTRIES);
             (0..len)
                 .filter_map(|i| {
                     let raw = entries.add(i).read();

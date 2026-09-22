@@ -105,7 +105,7 @@
 //! Three shared memory regions:
 //!
 //! - **Transfer buffer** (`SANCOV_TRANSFER`): child writes raw counters
-//!   via [`copy_counters_to_shared`] before `_exit()`. In sequential mode,
+//!   via `copy_counters_to_shared` before `_exit()`. In sequential mode,
 //!   one buffer is reused. In parallel mode, each concurrent child gets
 //!   its own pool slot instead.
 //!
@@ -115,7 +115,7 @@
 //! - **Pool** (`SANCOV_POOL`): worker mode allocates
 //!   `slot_count × edge_count` bytes. Each concurrent child writes to its
 //!   own slot. Parent reads the slot after `waitpid()`. Allocated lazily
-//!   by [`get_or_init_sancov_pool`].
+//!   by `init_sancov_pool`.
 //!
 //! # AFL-style bucketing
 //!
@@ -156,8 +156,8 @@
 //! 4. Zero entries (unvisited edges) are skipped
 //!
 //! The public API has two entry points:
-//! - [`has_new_sancov_coverage`]: reads from the transfer buffer (sequential)
-//! - [`has_new_sancov_coverage_from`]: reads from a specific pool slot (parallel)
+//! - `has_new_sancov_coverage`: reads from the transfer buffer (sequential)
+//! - `has_new_pool_coverage`: reads from a specific pool slot (parallel)
 //!
 //! # Integration with workers
 //!
@@ -171,7 +171,7 @@
 //!
 //! in-process completion   has_new_sancov_coverage() merges the transfer buffer
 //!
-//! worker reap             has_new_sancov_coverage_from(slot) merges that worker
+//! worker reap             has_new_pool_coverage(slot) merges that worker
 //!                        slot into cumulative history
 //! ```
 //!
@@ -234,6 +234,8 @@
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
+use crate::shared_mem::SharedMemory;
+
 // ---------------------------------------------------------------------------
 // Global statics — set during static init, before main()
 // ---------------------------------------------------------------------------
@@ -260,31 +262,31 @@ thread_local! {
     /// MAP_SHARED global max map (history of highest bucketed values).
     static SANCOV_HISTORY: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
 
-    /// MAP_SHARED pool base for parallel mode (one slot per concurrent child).
-    ///
-    /// Initialized once for the bounded worker pool.
-    static SANCOV_POOL: Cell<*mut u8> = const { Cell::new(std::ptr::null_mut()) };
-
-    /// Number of slots in the sancov pool.
-    ///
-    /// Number of initialized bounded-worker slots.
-    static SANCOV_POOL_SLOTS: Cell<usize> = const { Cell::new(0) };
-
     /// Owners of the transfer and history pointers above.
-    static SANCOV_REGIONS: RefCell<Option<(
-        crate::shared_mem::SharedMemory,
-        crate::shared_mem::SharedMemory,
-    )>> = const { RefCell::new(None) };
-
-    /// Owner of the parallel worker pool pointer above.
-    static SANCOV_POOL_REGION: RefCell<Option<crate::shared_mem::SharedMemory>> =
+    static SANCOV_REGIONS: RefCell<Option<(SharedMemory, SharedMemory)>> =
         const { RefCell::new(None) };
+
+    /// MAP_SHARED pool for parallel mode (one slot per concurrent child) and
+    /// its slot count. Initialized once for the bounded worker pool.
+    static SANCOV_POOL: RefCell<Option<(SharedMemory, usize)>> = const { RefCell::new(None) };
 
     /// Cumulative "ever non-zero" mask over the BSS counter array (one byte per
     /// edge), for the fork-free live coverage reader. Lets the reader survive
     /// 8-bit counter wraparound: once an edge has been seen non-zero it stays
     /// counted, so the result is monotonic across seeds.
     static SANCOV_SEEN: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The BSS counter array and its length, or `None` when sancov is unavailable.
+fn counters() -> Option<(*mut u8, usize)> {
+    let ptr = COUNTERS_PTR.load(Ordering::Relaxed);
+    (!ptr.is_null()).then(|| (ptr, COUNTERS_LEN.load(Ordering::Relaxed)))
+}
+
+/// The history map, or `None` when sancov is unavailable or uninitialized.
+fn history() -> Option<*mut u8> {
+    let history = SANCOV_HISTORY.with(Cell::get);
+    (sancov_is_available() && !history.is_null()).then_some(history)
 }
 
 // ---------------------------------------------------------------------------
@@ -351,46 +353,27 @@ pub unsafe extern "C" fn __sanitizer_cov_pcs_init(_pcs_beg: *const usize, _pcs_e
 /// - 128..=255 → 128
 const COUNT_CLASS_LOOKUP: [u8; 256] = {
     let mut table = [0u8; 256];
-    // 0 stays 0
-    table[1] = 1;
-    table[2] = 2;
-    table[3] = 4;
-    let mut i = 4;
-    while i <= 7 {
-        table[i] = 8;
-        i += 1;
-    }
-    i = 8;
-    while i <= 15 {
-        table[i] = 16;
-        i += 1;
-    }
-    i = 16;
-    while i <= 31 {
-        table[i] = 32;
-        i += 1;
-    }
-    i = 32;
-    while i <= 127 {
-        table[i] = 64;
-        i += 1;
-    }
-    i = 128;
-    while i <= 255 {
-        table[i] = 128;
+    let mut i = 1;
+    while i < 256 {
+        table[i] = match i {
+            1 => 1,
+            2 => 2,
+            3 => 4,
+            4..=7 => 8,
+            8..=15 => 16,
+            16..=31 => 32,
+            32..=127 => 64,
+            _ => 128,
+        };
         i += 1;
     }
     table
 };
 
 /// Apply AFL bucketing to a buffer of edge counts in-place.
-fn classify_counts(buffer: *mut u8, len: usize) {
-    for i in 0..len {
-        // Safety: caller ensures buffer has at least `len` bytes
-        unsafe {
-            let val = *buffer.add(i);
-            *buffer.add(i) = COUNT_CLASS_LOOKUP[val as usize];
-        }
+fn classify_counts(buffer: &mut [u8]) {
+    for count in buffer {
+        *count = COUNT_CLASS_LOOKUP[usize::from(*count)];
     }
 }
 
@@ -406,56 +389,42 @@ fn classify_counts(buffer: *mut u8, len: usize) {
 ///
 /// Does NOT early-return: must update all history entries in one pass.
 /// Skips zero entries (unvisited edges).
-fn has_new_coverage_inner(buffer: *mut u8, history: *mut u8, len: usize) -> bool {
-    classify_counts(buffer, len);
+fn has_new_coverage_inner(buffer: &mut [u8], history: &mut [u8]) -> bool {
+    classify_counts(buffer);
 
     let mut found_new = false;
-    for i in 0..len {
-        // Safety: caller ensures both buffer and history have at least `len` bytes
-        unsafe {
-            let bucketed = *buffer.add(i);
-            if bucketed == 0 {
-                continue;
-            }
-            let prev = *history.add(i);
-            if bucketed > prev {
-                *history.add(i) = bucketed;
-                found_new = true;
-            }
+    for (&bucketed, prev) in buffer.iter().zip(history.iter_mut()) {
+        if bucketed != 0 && bucketed > *prev {
+            *prev = bucketed;
+            found_new = true;
         }
     }
     found_new
 }
 
+/// Classify the `COUNTERS_LEN`-byte buffer at `buffer` and merge it into the
+/// history map. Returns `false` when sancov or the history is unavailable.
+fn merge_into_history(buffer: *mut u8) -> bool {
+    let Some(history) = history() else {
+        return false;
+    };
+    let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    // Safety: `buffer` (the transfer buffer or a pool slot) and `history` are
+    // distinct live shared mappings of at least `len` bytes each.
+    unsafe {
+        has_new_coverage_inner(
+            std::slice::from_raw_parts_mut(buffer, len),
+            std::slice::from_raw_parts_mut(history, len),
+        )
+    }
+}
+
 /// Check for novel sancov coverage in the transfer buffer (sequential path).
 ///
 /// Returns `false` when sancov is unavailable.
-pub fn has_new_sancov_coverage() -> bool {
-    if !sancov_is_available() {
-        return false;
-    }
-    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
-    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
-    if transfer.is_null() || history.is_null() {
-        return false;
-    }
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    has_new_coverage_inner(transfer, history, len)
-}
-
-/// Check for novel sancov coverage from a specific pool slot (parallel path).
-///
-/// Returns `false` when sancov is unavailable.
-pub fn has_new_sancov_coverage_from(slot_ptr: *mut u8) -> bool {
-    if !sancov_is_available() || slot_ptr.is_null() {
-        return false;
-    }
-    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
-    if history.is_null() {
-        return false;
-    }
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    has_new_coverage_inner(slot_ptr, history, len)
+pub(crate) fn has_new_sancov_coverage() -> bool {
+    let transfer = SANCOV_TRANSFER.with(Cell::get);
+    !transfer.is_null() && merge_into_history(transfer)
 }
 
 // ---------------------------------------------------------------------------
@@ -481,22 +450,13 @@ pub fn sancov_edge_count() -> usize {
 ///
 /// Returns 0 when sancov is unavailable or history is not initialized.
 pub fn sancov_edges_covered() -> usize {
-    if !sancov_is_available() {
+    let Some(history) = history() else {
         return 0;
-    }
-    let history = SANCOV_HISTORY.with(std::cell::Cell::get);
-    if history.is_null() {
-        return 0;
-    }
+    };
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    let mut count = 0usize;
-    for i in 0..len {
-        // Safety: history was allocated with at least `len` bytes
-        if unsafe { *history.add(i) } != 0 {
-            count += 1;
-        }
-    }
-    count
+    // Safety: history was allocated with at least `len` bytes
+    let history = unsafe { std::slice::from_raw_parts(history, len) };
+    history.iter().filter(|&&bucket| bucket != 0).count()
 }
 
 /// Cumulative count of edges ever observed non-zero in the live BSS array.
@@ -511,24 +471,21 @@ pub fn sancov_edges_covered() -> usize {
 /// raw count. The union is monotonic across seeds, so it can plateau.
 ///
 /// Returns 0 when sancov is unavailable.
+#[must_use]
 pub fn sancov_edges_covered_live() -> usize {
-    if !sancov_is_available() {
+    let Some((ptr, len)) = counters() else {
         return 0;
-    }
-    let ptr = COUNTERS_PTR.load(Ordering::Relaxed);
-    if ptr.is_null() {
-        return 0;
-    }
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    };
+    // Safety: the LLVM ctor registered `len` bytes starting at `ptr`.
+    let live = unsafe { std::slice::from_raw_parts(ptr, len) };
     SANCOV_SEEN.with_borrow_mut(|seen| {
         if seen.len() != len {
             seen.clear();
             seen.resize(len, 0);
         }
         let mut count = 0usize;
-        for (i, slot) in seen.iter_mut().enumerate() {
-            // Safety: the LLVM ctor registered `len` bytes starting at `ptr`.
-            if unsafe { *ptr.add(i) } != 0 {
+        for (slot, &counter) in seen.iter_mut().zip(live) {
+            if counter != 0 {
                 *slot = 1;
             }
             if *slot != 0 {
@@ -550,20 +507,16 @@ pub fn sancov_edges_covered_live() -> usize {
 /// # Errors
 ///
 /// Returns an error if shared memory allocation fails.
-pub fn init_sancov_shared() -> Result<(), std::io::Error> {
-    if !sancov_is_available() {
+pub(crate) fn init_sancov_shared() -> Result<(), std::io::Error> {
+    let Some((_, len)) = counters() else {
         return Ok(());
-    }
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    if len == 0 {
-        return Ok(());
-    }
-    if SANCOV_REGIONS.with(|regions| regions.borrow().is_some()) {
+    };
+    if len == 0 || SANCOV_REGIONS.with(|regions| regions.borrow().is_some()) {
         return Ok(());
     }
 
-    let transfer = crate::shared_mem::SharedMemory::new(len)?;
-    let history = crate::shared_mem::SharedMemory::new(len)?;
+    let transfer = SharedMemory::new(len)?;
+    let history = SharedMemory::new(len)?;
 
     SANCOV_TRANSFER.with(|c| c.set(transfer.as_ptr()));
     SANCOV_HISTORY.with(|c| c.set(history.as_ptr()));
@@ -580,16 +533,14 @@ pub fn init_sancov_shared() -> Result<(), std::io::Error> {
 ///
 /// Call in the child process before `_exit()` so the parent can
 /// inspect coverage. No-op when sancov is unavailable.
-pub fn copy_counters_to_shared() {
-    if !sancov_is_available() {
+pub(crate) fn copy_counters_to_shared() {
+    let Some((src, len)) = counters() else {
         return;
-    }
-    let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
+    };
+    let transfer = SANCOV_TRANSFER.with(Cell::get);
     if transfer.is_null() {
         return;
     }
-    let src = COUNTERS_PTR.load(Ordering::Relaxed);
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
     // Safety: src points to the LLVM-generated BSS counter array (set by
     // __sanitizer_cov_8bit_counters_init), transfer points to a live shared mapping.
     // Both are valid for len bytes. The regions do not overlap (BSS vs mmap).
@@ -602,12 +553,10 @@ pub fn copy_counters_to_shared() {
 ///
 /// Call in the child process immediately after `fork()` so the child's
 /// counters start from zero. No-op when sancov is unavailable.
-pub fn reset_bss_counters() {
-    if !sancov_is_available() {
+pub(crate) fn reset_bss_counters() {
+    let Some((ptr, len)) = counters() else {
         return;
-    }
-    let ptr = COUNTERS_PTR.load(Ordering::Relaxed);
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
+    };
     // Safety: ptr points to the LLVM-generated BSS counter array (set by
     // __sanitizer_cov_8bit_counters_init). It is valid for len bytes and writable
     // (BSS is read-write). write_bytes zeroes exactly len bytes.
@@ -620,76 +569,54 @@ pub fn reset_bss_counters() {
 // Parallel pool
 // ---------------------------------------------------------------------------
 
-/// Get or initialize the sancov pool for parallel exploration.
+/// Allocate the per-worker sancov pool (`slot_count × edge_count` bytes).
 ///
-/// Returns the pool base pointer. Reuses the existing pool if it has
-/// enough slots; otherwise frees and reallocates.
-/// Returns null if sancov is unavailable or allocation fails.
-pub fn get_or_init_sancov_pool(slot_count: usize) -> *mut u8 {
-    if !sancov_is_available() {
-        return std::ptr::null_mut();
-    }
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    if len == 0 {
-        return std::ptr::null_mut();
-    }
-
-    let existing = SANCOV_POOL.with(std::cell::Cell::get);
-    let existing_slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
-
-    if !existing.is_null() && existing_slots >= slot_count {
-        return existing;
-    }
-
-    // Free the old pool if it is too small.
-    if !existing.is_null() {
-        SANCOV_POOL.with(|c| c.set(std::ptr::null_mut()));
-        SANCOV_POOL_SLOTS.with(|c| c.set(0));
-        SANCOV_POOL_REGION.with(|pool| drop(pool.borrow_mut().take()));
-    }
-
-    match crate::shared_mem::SharedMemory::array(slot_count, len) {
-        Ok(memory) => {
-            let ptr = memory.as_ptr();
-            SANCOV_POOL.with(|c| c.set(ptr));
-            SANCOV_POOL_SLOTS.with(|c| c.set(slot_count));
-            SANCOV_POOL_REGION.with(|pool| *pool.borrow_mut() = Some(memory));
-            ptr
-        }
-        Err(_) => std::ptr::null_mut(),
-    }
-}
-
-/// Return a pointer to slot `idx` within the sancov pool.
-///
-/// # Safety
-///
-/// Caller must ensure `idx < slot_count` and `pool_base` was returned
-/// by [`get_or_init_sancov_pool`].
-pub unsafe fn sancov_pool_slot(pool_base: *mut u8, idx: usize) -> *mut u8 {
-    let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    // Safety: pool_base is valid for slot_count * len bytes, idx < slot_count
-    unsafe { pool_base.add(idx * len) }
-}
-
-/// Allocate the per-worker sancov pool. No-op when sancov is unavailable.
+/// Reuses the existing pool if it has enough slots; otherwise frees and
+/// reallocates. No-op when sancov is unavailable or allocation fails.
 pub(crate) fn init_sancov_pool(slot_count: usize) {
-    let _ = get_or_init_sancov_pool(slot_count);
+    let Some((_, len)) = counters() else {
+        return;
+    };
+    if len == 0 {
+        return;
+    }
+    SANCOV_POOL.with_borrow_mut(|pool| {
+        if pool.as_ref().is_some_and(|&(_, slots)| slots >= slot_count) {
+            return;
+        }
+        // Free the old pool (if too small) before allocating its replacement.
+        *pool = None;
+        *pool = SharedMemory::array(slot_count, len)
+            .ok()
+            .map(|memory| (memory, slot_count));
+    });
+}
+
+/// Pointer to pool slot `idx`, or `None` when sancov is unavailable, the
+/// pool was not allocated, or `idx` is out of range.
+fn pool_slot_ptr(idx: usize) -> Option<*mut u8> {
+    SANCOV_POOL.with_borrow(|pool| {
+        let (memory, slots) = pool.as_ref()?;
+        if idx >= *slots {
+            return None;
+        }
+        let len = COUNTERS_LEN.load(Ordering::Relaxed);
+        // Safety: the pool covers slots * len bytes and idx < slots.
+        Some(unsafe { memory.as_ptr().add(idx * len) })
+    })
 }
 
 /// Zero one pool slot before handing it to a worker.
 ///
 /// No-op when sancov is unavailable or the pool was not allocated.
 pub(crate) fn clear_pool_slot(idx: usize) {
-    let pool = SANCOV_POOL.with(std::cell::Cell::get);
-    let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
-    if pool.is_null() || idx >= slots {
+    let Some(slot_ptr) = pool_slot_ptr(idx) else {
         return;
-    }
+    };
     let len = COUNTERS_LEN.load(Ordering::Relaxed);
-    // Safety: pool covers slots * len bytes and idx < slots.
+    // Safety: the slot is valid for len bytes.
     unsafe {
-        std::ptr::write_bytes(sancov_pool_slot(pool, idx), 0, len);
+        std::ptr::write_bytes(slot_ptr, 0, len);
     }
 }
 
@@ -698,14 +625,9 @@ pub(crate) fn clear_pool_slot(idx: usize) {
 ///
 /// No-op when sancov is unavailable or the pool was not allocated.
 pub(crate) fn redirect_transfer_to_pool_slot(idx: usize) {
-    let pool = SANCOV_POOL.with(std::cell::Cell::get);
-    let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
-    if pool.is_null() || idx >= slots {
-        return;
+    if let Some(slot_ptr) = pool_slot_ptr(idx) {
+        SANCOV_TRANSFER.with(|c| c.set(slot_ptr));
     }
-    // Safety: pool covers slots * len bytes and idx < slots.
-    let slot_ptr = unsafe { sancov_pool_slot(pool, idx) };
-    SANCOV_TRANSFER.with(|c| c.set(slot_ptr));
 }
 
 /// Classify one pool slot's counters and merge them into the history map.
@@ -713,14 +635,7 @@ pub(crate) fn redirect_transfer_to_pool_slot(idx: usize) {
 /// Returns `true` when the slot contributed new coverage. `false` when
 /// sancov is unavailable or the pool was not allocated.
 pub(crate) fn has_new_pool_coverage(idx: usize) -> bool {
-    let pool = SANCOV_POOL.with(std::cell::Cell::get);
-    let slots = SANCOV_POOL_SLOTS.with(std::cell::Cell::get);
-    if pool.is_null() || idx >= slots {
-        return false;
-    }
-    // Safety: pool covers slots * len bytes and idx < slots.
-    let slot_ptr = unsafe { sancov_pool_slot(pool, idx) };
-    has_new_sancov_coverage_from(slot_ptr)
+    pool_slot_ptr(idx).is_some_and(merge_into_history)
 }
 
 // ---------------------------------------------------------------------------
@@ -761,7 +676,7 @@ mod tests {
         let mut history = [0u8; 8];
         buffer[0] = 1; // edge 0 hit once
 
-        let novel = has_new_coverage_inner(buffer.as_mut_ptr(), history.as_mut_ptr(), 8);
+        let novel = has_new_coverage_inner(&mut buffer, &mut history);
         assert!(novel);
         // History should now have the bucketed value
         assert_eq!(history[0], 1);
@@ -774,12 +689,12 @@ mod tests {
 
         // First pass: establish coverage
         buffer[0] = 1;
-        let novel = has_new_coverage_inner(buffer.as_mut_ptr(), history.as_mut_ptr(), 8);
+        let novel = has_new_coverage_inner(&mut buffer, &mut history);
         assert!(novel);
 
         // Second pass: same coverage → not novel
         buffer[0] = 1; // re-set since bucketing was applied in-place
-        let novel = has_new_coverage_inner(buffer.as_mut_ptr(), history.as_mut_ptr(), 8);
+        let novel = has_new_coverage_inner(&mut buffer, &mut history);
         assert!(!novel);
     }
 
@@ -790,19 +705,19 @@ mod tests {
 
         // Hit once → bucket 1
         buffer[0] = 1;
-        let novel = has_new_coverage_inner(buffer.as_mut_ptr(), history.as_mut_ptr(), 4);
+        let novel = has_new_coverage_inner(&mut buffer, &mut history);
         assert!(novel);
         assert_eq!(history[0], 1);
 
         // Hit 5 times → bucket 8 (higher than 1) → novel
         buffer[0] = 5;
-        let novel = has_new_coverage_inner(buffer.as_mut_ptr(), history.as_mut_ptr(), 4);
+        let novel = has_new_coverage_inner(&mut buffer, &mut history);
         assert!(novel);
         assert_eq!(history[0], 8);
 
         // Hit 3 times → bucket 4 (lower than 8) → not novel
         buffer[0] = 3;
-        let novel = has_new_coverage_inner(buffer.as_mut_ptr(), history.as_mut_ptr(), 4);
+        let novel = has_new_coverage_inner(&mut buffer, &mut history);
         assert!(!novel);
         assert_eq!(history[0], 8); // unchanged
     }
@@ -813,7 +728,7 @@ mod tests {
         let mut history = [0u8; 8];
 
         // All zeros → no novelty
-        let novel = has_new_coverage_inner(buffer.as_mut_ptr(), history.as_mut_ptr(), 8);
+        let novel = has_new_coverage_inner(&mut buffer, &mut history);
         assert!(!novel);
     }
 
@@ -825,14 +740,14 @@ mod tests {
         assert_eq!(sancov_edges_covered(), 0);
         assert_eq!(sancov_edges_covered_live(), 0);
         assert!(!has_new_sancov_coverage());
-        assert!(!has_new_sancov_coverage_from(std::ptr::null_mut()));
+        assert!(!has_new_pool_coverage(0));
 
         // These should all be safe no-ops
         copy_counters_to_shared();
         reset_bss_counters();
 
-        let pool = get_or_init_sancov_pool(4);
-        assert!(pool.is_null());
+        init_sancov_pool(4);
+        assert!(pool_slot_ptr(0).is_none());
     }
 
     #[test]
@@ -846,7 +761,7 @@ mod tests {
     #[test]
     fn test_classify_counts_in_place() {
         let mut buf = [0u8, 1, 2, 3, 5, 10, 20, 50, 200];
-        classify_counts(buf.as_mut_ptr(), buf.len());
+        classify_counts(&mut buf);
         assert_eq!(buf, [0, 1, 2, 4, 8, 16, 32, 64, 128]);
     }
 }

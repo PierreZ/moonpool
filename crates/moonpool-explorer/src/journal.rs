@@ -153,10 +153,6 @@ mod tests {
         clear();
 
         // Simulate the accounting layer signalling a discovery.
-        moonpool_assertions::set_discovery_hooks(moonpool_assertions::DiscoveryHooks {
-            on_discovery: |_, _| {},
-        });
-        install_hooks();
         let hooks_event = DiscoveryEvent {
             call_count: 7,
             kind: DiscoveryKind::SometimesPass,

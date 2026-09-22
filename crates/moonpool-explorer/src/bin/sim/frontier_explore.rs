@@ -8,9 +8,8 @@
 
 use std::process;
 
-use moonpool_explorer::ExplorationConfig;
 use moonpool_explorer::simulations::{
-    LADDER_FLOORS, ladder_replay_reproduces, run_frontier_ladder,
+    LADDER_FLOORS, LADDER_MAX_RUNS, ladder_config, ladder_replay_reproduces, run_frontier_ladder,
 };
 
 fn fail(msg: &str) -> ! {
@@ -20,14 +19,7 @@ fn fail(msg: &str) -> ! {
 
 fn run_scenario(name: &str, workers: usize) {
     eprintln!("=== Frontier ladder ({name}) ===");
-    let config = ExplorationConfig {
-        workers,
-        max_runs_per_seed: 2000,
-        branching_factor: 4,
-        max_frontier: 256,
-        max_recipe_len: 32,
-    };
-    let outcome = match run_frontier_ladder(42, config) {
+    let outcome = match run_frontier_ladder(42, ladder_config(workers)) {
         Ok(outcome) => outcome,
         Err(e) => fail(&format!("{e}")),
     };
@@ -42,7 +34,7 @@ fn run_scenario(name: &str, workers: usize) {
         outcome.stats.bug_found,
     );
 
-    if outcome.stats.total_timelines > 2000 {
+    if outcome.stats.total_timelines > LADDER_MAX_RUNS {
         fail("run budget exceeded");
     }
     if outcome.stats.max_active_workers > workers {
