@@ -167,6 +167,16 @@ impl Connection {
         self.lock().established
     }
 
+    /// Withdraw the still-unsent request frame of `call_id`. Returns whether
+    /// it was withdrawn; `false` means the writer already took it (or the
+    /// session closed), so it may have been transmitted.
+    pub(crate) fn retract(&self, call_id: u64) -> bool {
+        let mut queue = self.lock();
+        let before = queue.requests.len();
+        queue.requests.retain(|(_, queued)| *queued != call_id);
+        queue.requests.len() != before
+    }
+
     /// Close the session: no more frames are accepted and the writer stops.
     pub(crate) fn close(&self) {
         let mut queue = self.lock();

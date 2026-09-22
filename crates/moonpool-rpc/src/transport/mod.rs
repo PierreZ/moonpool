@@ -557,10 +557,23 @@ impl<P: Providers> EndpointOwner for Shared<P> {
 
 impl<P: Providers> CallOwner for Shared<P> {
     fn abandon(&self, call_id: u64) -> Option<bool> {
-        let call = self.lock().pending.remove(&call_id)?;
+        let mut state = self.lock();
+        let call = state.pending.remove(&call_id)?;
+        // A request still queued behind the handshake or other frames is
+        // withdrawn, so "not transmitted" stays true after the caller leaves.
+        // If the writer already took it, it may be on the wire.
+        let transmitted = call.transmitted
+            || match call.origin {
+                Origin::Local => true,
+                Origin::Connection(id) => state
+                    .connections
+                    .get(&id)
+                    .is_none_or(|connection| !connection.retract(call_id)),
+            };
+        drop(state);
         Counters::bump(&self.counters.calls_abandoned);
-        tracing::debug!(call_id, "rpc call abandoned by its caller");
-        Some(call.transmitted)
+        tracing::debug!(call_id, transmitted, "rpc call abandoned by its caller");
+        Some(transmitted)
     }
 }
 
