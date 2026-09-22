@@ -10,6 +10,7 @@ use crate::protocol::{
 };
 use crate::stats::Counters;
 use crate::transport::connection::Connection;
+use crate::transport::upgrade::PeerContext;
 
 /// Completes local calls: implemented by the runtime's shared state.
 pub(crate) trait LocalSink: Send + Sync {
@@ -39,7 +40,7 @@ pub(crate) struct ReplyContext {
     pub(crate) counters: Arc<Counters>,
     pub(crate) max_frame_bytes: u32,
     /// Where the request came from (`None` for a local caller).
-    pub(crate) peer: Option<String>,
+    pub(crate) peer: Option<PeerContext>,
 }
 
 impl ReplyContext {
@@ -95,7 +96,7 @@ impl ReplyContext {
 /// The one-shot responder for one admitted request.
 ///
 /// Reply with [`send`](Self::send). Dropping the handle without replying
-/// completes the call with [`RpcError::BrokenPromise`](crate::RpcError::BrokenPromise):
+/// completes the call with [`ErrorReason::BrokenPromise`](crate::ErrorReason::BrokenPromise):
 /// the caller learns the request was admitted and abandoned.
 ///
 /// A reply handle is not a service reference: it has no byte form and
@@ -116,14 +117,14 @@ impl<M: RpcMethod> ReplyHandle<M> {
         }
     }
 
-    /// The address of the peer whose connection delivered the request, or
-    /// `None` for a caller in this runtime. An unauthenticated transport
-    /// address, not an identity.
+    /// What the session upgrade established about the peer whose
+    /// connection delivered the request, or `None` for a caller in this
+    /// runtime.
     #[must_use]
-    pub fn peer(&self) -> Option<&str> {
+    pub fn peer(&self) -> Option<&PeerContext> {
         self.context
             .as_ref()
-            .and_then(|context| context.peer.as_deref())
+            .and_then(|context| context.peer.as_ref())
     }
 
     /// Reply to the caller.

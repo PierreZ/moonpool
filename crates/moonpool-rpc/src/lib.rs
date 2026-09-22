@@ -24,29 +24,36 @@
 //!    application. The driver owns every connection, registration and
 //!    pending call; dropping it shuts everything down.
 //! 2. Define a method with [`RpcMethod`]: request/reply types implementing
-//!    [`Wire`] (any `prost::Message` with the default feature) plus stable
-//!    [`MethodId`] / [`SchemaId`] constants.
-//! 3. Register with [`RpcHandle::register`]: you get a [`ServiceRef`] (plain,
-//!    serialisable routing data: address, transport incarnation, checked
-//!    endpoint token, method, schema, codecs) and the owned
-//!    [`RequestStream`]. Each [`IncomingRequest`] carries a one-shot
+//!    [`Wire`] (any `prost::Message` with the default feature) plus an
+//!    explicit `u32` [`MethodId`] and `u16` [`SchemaVersion`].
+//! 3. Register with [`RpcHandle::register`] and an [`AccessClass`]: you get
+//!    a [`ServiceRef`] (plain, serialisable routing data: resolved address,
+//!    128-bit runtime incarnation, checked 64-bit endpoint token, method,
+//!    schema, codecs, access class) and the owned [`RequestStream`], the
+//!    pull-style receiver. Each [`IncomingRequest`] carries a one-shot
 //!    [`ReplyHandle`] bound to the session it arrived on.
-//! 4. A caller binds a reference to its own runtime
-//!    ([`ServiceRef::bind`]) and calls
-//!    [`ServiceClient::try_get_reply`]: one attempt, executed zero or one
-//!    times, never retransmitted.
+//! 4. A caller binds a reference to its own runtime ([`ServiceRef::bind`])
+//!    and calls [`ServiceClient::try_get_reply`] (or
+//!    [`ServiceClient::try_get_reply_within`] with a deadline): one
+//!    attempt, executed zero or one times, never retransmitted.
+//!
+//! Sessions go through an upgrade seam ([`Connector`] / [`Acceptor`],
+//! [`Plaintext`] by default) that yields the session stream and a
+//! [`PeerContext`], then a versioned handshake.
 //!
 //! ## Contracts
 //!
-//! - **At most once per attempt.** No hidden retry or reconnect replay. A
-//!   failure says what it proves ([`RpcError::execution`]); a timeout,
-//!   disconnect after transmission or dropped caller preserves ambiguity.
+//! - **At most once per attempt.** No hidden retry or reconnect replay.
+//!   Every failure is one [`RpcError`]: a [reason](ErrorReason) plus what it
+//!   proves ([`Execution::NotAdmitted`], [`Execution::MaybeExecuted`],
+//!   [`Execution::Executed`]); a timeout, disconnect after transmission or
+//!   dropped caller preserves ambiguity.
 //! - **Checked identity.** A request is admitted only if its incarnation,
 //!   endpoint token (slot + generation), method, schema and codec all match a
 //!   live registration, before any body byte is decoded. Dropping a receiver
 //!   destroys its endpoint; a reused slot never answers an old token; a
 //!   restarted process at the same address rejects its predecessor's
-//!   references ([`RpcError::StaleIncarnation`]).
+//!   references ([`ErrorReason::StaleIncarnation`]).
 //! - **Peer-relative replies.** A reply handle routes only to the
 //!   connection that delivered the request; it has no byte form and cannot
 //!   be forwarded.
@@ -74,8 +81,9 @@ pub(crate) mod transport;
 pub use call::{IncomingRequest, ReplyHandle, RequestStream, ServiceClient, ServiceRef};
 pub use codec::{CodecId, DecodeError, EncodeError, Wire};
 pub use config::RpcConfig;
-pub use endpoint::{Endpoint, EndpointToken, Incarnation};
-pub use error::{Execution, RpcError};
-pub use protocol::{MethodId, RpcMethod, SchemaId};
+pub use endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation};
+pub use error::{ErrorReason, Execution, RpcError};
+pub use protocol::{MethodId, RpcMethod, SchemaVersion};
 pub use stats::{ResourceProbe, RpcStats};
-pub use transport::{RpcDriver, RpcHandle};
+pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
+pub use transport::{RpcDriver, RpcHandle, SessionUpgrade};

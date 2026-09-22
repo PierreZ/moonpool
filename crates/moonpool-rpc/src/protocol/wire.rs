@@ -5,12 +5,24 @@
 //! integers are little-endian and fixed-width.
 //!
 //! ```text
-//! kind 0x01 HELLO    magic u32 | version u16 | incarnation u64
-//! kind 0x02 REQUEST  call_id u64 | incarnation u64 | token.index u32 | token.generation u32
-//!                    | method u64 | schema u64 | codec u16 | body (rest of the frame)
+//! kind 0x01 HELLO    magic u32 | min_version u16 | max_version u16
+//!                    | incarnation u128 | features u64
+//! kind 0x02 REQUEST  call_id u64 | incarnation u128 | token.index u64 | token.generation u32
+//!                    | method u32 | schema u16 | codec u16
+//!                    | metadata_len u16 | metadata | body (rest of the frame)
 //! kind 0x03 REPLY    call_id u64 | status u8 | status 0:  codec u16 | body (rest)
 //!                                            | status >0: detail u64 (nothing after)
 //! ```
+//!
+//! - HELLO: each side announces the range of envelope versions it speaks;
+//!   the session runs at the highest common version ([`negotiate`]) and a
+//!   peer with no common version is refused. `features` is reserved for
+//!   capabilities negotiated by later packages (TLS, authentication,
+//!   streams); this version sends zero and ignores unknown bits.
+//! - REQUEST: `metadata` is a reserved, length-prefixed section for request
+//!   credentials (verified by the security package, #218). This version
+//!   sends it empty and ignores what it receives; it is never passed to a
+//!   handler.
 //!
 //! Reply status codes: `0` ok, `1` endpoint not found, `2` stale incarnation,
 //! `3` method mismatch (detail: registered method), `4` schema mismatch
@@ -24,19 +36,30 @@
 use thiserror::Error;
 
 use super::cursor::{Reader, Writer};
-use super::schema::{MethodId, SchemaId};
+use super::schema::{MethodId, SchemaVersion};
 use crate::codec::CodecId;
 use crate::endpoint::{EndpointToken, Incarnation};
 
 /// Magic number opening every connection's first frame (`"MPRC"`).
 pub const PROTOCOL_MAGIC: u32 = 0x4d50_5243;
 
-/// The envelope layout version this build speaks.
-///
-/// A connection whose peer announces a different version is closed as a
-/// protocol violation before any request is admitted. Accepting adjacent
-/// versions during rolling upgrades is future work (#218).
+/// The newest envelope layout version this build speaks.
 pub const PROTOCOL_VERSION: u16 = 1;
+
+/// The oldest envelope layout version this build speaks.
+///
+/// A peer whose announced range does not overlap
+/// `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION` is refused before any request
+/// is admitted. Supporting a wider window for rolling upgrades is #218.
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
+
+/// The highest version both ranges contain, if any.
+#[must_use]
+pub fn negotiate(local: (u16, u16), peer: (u16, u16)) -> Option<u16> {
+    let low = local.0.max(peer.0);
+    let high = local.1.min(peer.1);
+    (low <= high).then_some(high)
+}
 
 const KIND_HELLO: u8 = 0x01;
 const KIND_REQUEST: u8 = 0x02;
@@ -49,10 +72,14 @@ pub enum WireMessage {
     Hello {
         /// Must equal [`PROTOCOL_MAGIC`].
         magic: u32,
-        /// The sender's [`PROTOCOL_VERSION`].
-        version: u16,
+        /// The oldest envelope version the sender speaks.
+        min_version: u16,
+        /// The newest envelope version the sender speaks.
+        max_version: u16,
         /// The sender's transport incarnation.
         incarnation: Incarnation,
+        /// Reserved capability bits; zero in this version.
+        features: u64,
     },
     /// One request attempt for a dynamic endpoint.
     Request {
@@ -65,9 +92,11 @@ pub enum WireMessage {
         /// The method the caller invokes.
         method: MethodId,
         /// The contract version the caller encoded with.
-        schema: SchemaId,
+        schema: SchemaVersion,
         /// The codec that produced `body`.
         codec: CodecId,
+        /// Reserved credential/metadata section; empty in this version.
+        metadata: Vec<u8>,
         /// The encoded request.
         body: Vec<u8>,
     },
@@ -109,7 +138,7 @@ pub enum WireError {
     /// The endpoint serves a different contract version.
     SchemaMismatch {
         /// The contract the endpoint was registered with.
-        registered: SchemaId,
+        registered: SchemaVersion,
     },
     /// The request body uses a codec the endpoint does not accept.
     CodecMismatch {
@@ -131,8 +160,8 @@ impl WireError {
         match self {
             Self::EndpointNotFound => (1, 0),
             Self::StaleIncarnation => (2, 0),
-            Self::MethodMismatch { registered } => (3, registered.get()),
-            Self::SchemaMismatch { registered } => (4, registered.get()),
+            Self::MethodMismatch { registered } => (3, u64::from(registered.get())),
+            Self::SchemaMismatch { registered } => (4, u64::from(registered.get())),
             Self::CodecMismatch { registered } => (5, u64::from(registered.get())),
             Self::MalformedRequest => (6, 0),
             Self::Overloaded => (7, 0),
@@ -146,10 +175,14 @@ impl WireError {
             1 => Self::EndpointNotFound,
             2 => Self::StaleIncarnation,
             3 => Self::MethodMismatch {
-                registered: MethodId::new(detail),
+                registered: MethodId::new(
+                    u32::try_from(detail).map_err(|_| EnvelopeError::InvalidField("method"))?,
+                ),
             },
             4 => Self::SchemaMismatch {
-                registered: SchemaId::new(detail),
+                registered: SchemaVersion::new(
+                    u16::try_from(detail).map_err(|_| EnvelopeError::InvalidField("schema"))?,
+                ),
             },
             5 => Self::CodecMismatch {
                 registered: CodecId::new(
@@ -195,13 +228,17 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
     match message {
         WireMessage::Hello {
             magic,
-            version,
+            min_version,
+            max_version,
             incarnation,
+            features,
         } => {
             out.u8(KIND_HELLO)
                 .u32(*magic)
-                .u16(*version)
-                .u64(incarnation.get());
+                .u16(*min_version)
+                .u16(*max_version)
+                .u128(incarnation.get())
+                .u64(*features);
         }
         WireMessage::Request {
             call_id,
@@ -210,16 +247,22 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
             method,
             schema,
             codec,
+            metadata,
             body,
         } => {
+            // The metadata section is bounded by its u16 length prefix; the
+            // encoder never produces more (callers keep it empty for now).
+            let metadata = &metadata[..metadata.len().min(usize::from(u16::MAX))];
             out.u8(KIND_REQUEST)
                 .u64(*call_id)
-                .u64(incarnation.get())
-                .u32(token.index())
+                .u128(incarnation.get())
+                .u64(token.index())
                 .u32(token.generation())
-                .u64(method.get())
-                .u64(schema.get())
+                .u32(method.get())
+                .u16(schema.get())
                 .u16(codec.get())
+                .u16(u16::try_from(metadata.len()).unwrap_or(u16::MAX))
+                .bytes(metadata)
                 .bytes(body);
         }
         WireMessage::Reply { call_id, outcome } => {
@@ -241,7 +284,7 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
 /// Size of a request envelope carrying a `body_len`-byte body.
 #[must_use]
 pub const fn request_envelope_len(body_len: usize) -> usize {
-    1 + 8 + 8 + 4 + 4 + 8 + 8 + 2 + body_len
+    1 + 8 + 16 + 8 + 4 + 4 + 2 + 2 + 2 + body_len
 }
 
 /// Size of an ok-reply envelope carrying a `body_len`-byte body.
@@ -264,8 +307,10 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
         KIND_HELLO => {
             let message = WireMessage::Hello {
                 magic: input.u32().ok_or_else(truncated)?,
-                version: input.u16().ok_or_else(truncated)?,
-                incarnation: Incarnation::from_raw(input.u64().ok_or_else(truncated)?),
+                min_version: input.u16().ok_or_else(truncated)?,
+                max_version: input.u16().ok_or_else(truncated)?,
+                incarnation: Incarnation::from_raw(input.u128().ok_or_else(truncated)?),
+                features: input.u64().ok_or_else(truncated)?,
             };
             if !input.is_empty() {
                 return Err(EnvelopeError::TrailingBytes);
@@ -274,12 +319,17 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
         }
         KIND_REQUEST => {
             let call_id = input.u64().ok_or_else(truncated)?;
-            let incarnation = Incarnation::from_raw(input.u64().ok_or_else(truncated)?);
-            let index = input.u32().ok_or_else(truncated)?;
+            let incarnation = Incarnation::from_raw(input.u128().ok_or_else(truncated)?);
+            let index = input.u64().ok_or_else(truncated)?;
             let generation = input.u32().ok_or_else(truncated)?;
-            let method = MethodId::new(input.u64().ok_or_else(truncated)?);
-            let schema = SchemaId::new(input.u64().ok_or_else(truncated)?);
+            let method = MethodId::new(input.u32().ok_or_else(truncated)?);
+            let schema = SchemaVersion::new(input.u16().ok_or_else(truncated)?);
             let codec = CodecId::new(input.u16().ok_or_else(truncated)?);
+            let metadata_len = input.u16().ok_or_else(truncated)?;
+            let metadata = input
+                .slice(usize::from(metadata_len))
+                .ok_or_else(truncated)?
+                .to_vec();
             WireMessage::Request {
                 call_id,
                 incarnation,
@@ -287,6 +337,7 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
                 method,
                 schema,
                 codec,
+                metadata,
                 body: input.rest().to_vec(),
             }
         }
@@ -315,12 +366,13 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EnvelopeError, PROTOCOL_MAGIC, PROTOCOL_VERSION, WireError, WireMessage, WireOutcome,
-        decode_message, encode_message, reply_envelope_len, request_envelope_len,
+        EnvelopeError, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, WireError,
+        WireMessage, WireOutcome, decode_message, encode_message, negotiate, reply_envelope_len,
+        request_envelope_len,
     };
     use crate::codec::CodecId;
     use crate::endpoint::{EndpointToken, Incarnation};
-    use crate::protocol::{MethodId, SchemaId};
+    use crate::protocol::{MethodId, SchemaVersion};
 
     fn request() -> WireMessage {
         WireMessage::Request {
@@ -328,9 +380,20 @@ mod tests {
             incarnation: Incarnation::from_raw(0x0102),
             token: EndpointToken::from_parts(3, 1),
             method: MethodId::new(0x20),
-            schema: SchemaId::new(0x10),
+            schema: SchemaVersion::new(0x10),
             codec: CodecId::PROST,
+            metadata: Vec::new(),
             body: vec![0xAA, 0xBB],
+        }
+    }
+
+    fn hello() -> WireMessage {
+        WireMessage::Hello {
+            magic: PROTOCOL_MAGIC,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: PROTOCOL_VERSION,
+            incarnation: Incarnation::from_raw(1),
+            features: 0,
         }
     }
 
@@ -338,24 +401,22 @@ mod tests {
     /// protocol version bump, not a fixture update.
     #[test]
     fn golden_encodings() {
-        let hello = WireMessage::Hello {
-            magic: PROTOCOL_MAGIC,
-            version: PROTOCOL_VERSION,
-            incarnation: Incarnation::from_raw(1),
-        };
-        assert_eq!(
-            encode_message(&hello),
-            [
-                0x01, 0x43, 0x52, 0x50, 0x4d, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0
-            ]
-        );
-        assert_eq!(
-            encode_message(&request()),
-            [
-                0x02, 5, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x01, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0,
-                0x20, 0, 0, 0, 0, 0, 0, 0, 0x10, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0xAA, 0xBB
-            ]
-        );
+        let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 1, 0, 1, 0, 1];
+        expected.extend([0; 15]);
+        expected.extend([0; 8]);
+        assert_eq!(encode_message(&hello()), expected);
+
+        let mut expected = vec![0x02, 5, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x01];
+        expected.extend([0; 14]);
+        expected.extend([3, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([1, 0, 0, 0]);
+        expected.extend([0x20, 0, 0, 0]);
+        expected.extend([0x10, 0]);
+        expected.extend([1, 0]);
+        expected.extend([0, 0]);
+        expected.extend([0xAA, 0xBB]);
+        assert_eq!(encode_message(&request()), expected);
+
         let reply = WireMessage::Reply {
             call_id: 5,
             outcome: WireOutcome::Err(WireError::CodecMismatch {
@@ -382,15 +443,38 @@ mod tests {
     }
 
     #[test]
+    fn metadata_section_round_trips_and_is_bounded() {
+        let mut with_metadata = request();
+        if let WireMessage::Request { metadata, .. } = &mut with_metadata {
+            *metadata = vec![1, 2, 3];
+        }
+        let bytes = encode_message(&with_metadata);
+        assert_eq!(decode_message(&bytes), Ok(with_metadata));
+        // A metadata length running past the frame is truncation.
+        let mut lying = encode_message(&request());
+        let at = request_envelope_len(0) - 2;
+        lying[at] = 0xFF;
+        assert_eq!(decode_message(&lying), Err(EnvelopeError::Truncated));
+    }
+
+    #[test]
+    fn versions_negotiate_to_the_highest_common_one() {
+        assert_eq!(negotiate((1, 1), (1, 1)), Some(1));
+        assert_eq!(negotiate((1, 3), (2, 5)), Some(3));
+        assert_eq!(negotiate((1, 1), (2, 2)), None);
+        assert_eq!(negotiate((4, 6), (1, 3)), None);
+    }
+
+    #[test]
     fn every_error_round_trips() {
         let errors = [
             WireError::EndpointNotFound,
             WireError::StaleIncarnation,
             WireError::MethodMismatch {
-                registered: MethodId::new(u64::MAX),
+                registered: MethodId::new(u32::MAX),
             },
             WireError::SchemaMismatch {
-                registered: SchemaId::new(7),
+                registered: SchemaVersion::new(7),
             },
             WireError::CodecMismatch {
                 registered: CodecId::new(0x8001),
@@ -413,6 +497,7 @@ mod tests {
     fn round_trips_and_rejects_malformed_envelopes() {
         let bytes = encode_message(&request());
         assert_eq!(decode_message(&bytes), Ok(request()));
+        assert_eq!(decode_message(&encode_message(&hello())), Ok(hello()));
         // The body is the rest of the frame, so only the fixed prefix can be
         // truncated.
         for cut in 0..request_envelope_len(0) {
@@ -432,11 +517,18 @@ mod tests {
             decode_message(&unknown_status),
             Err(EnvelopeError::UnknownStatus(200))
         );
-        let mut trailing = encode_message(&WireMessage::Hello {
-            magic: PROTOCOL_MAGIC,
-            version: PROTOCOL_VERSION,
-            incarnation: Incarnation::from_raw(1),
+        let mut oversized_detail = encode_message(&WireMessage::Reply {
+            call_id: 1,
+            outcome: WireOutcome::Err(WireError::SchemaMismatch {
+                registered: SchemaVersion::new(1),
+            }),
         });
+        oversized_detail[12] = 1;
+        assert_eq!(
+            decode_message(&oversized_detail),
+            Err(EnvelopeError::InvalidField("schema"))
+        );
+        let mut trailing = encode_message(&hello());
         trailing.push(0);
         assert_eq!(decode_message(&trailing), Err(EnvelopeError::TrailingBytes));
     }

@@ -9,21 +9,24 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 
 | Type | Role |
 |------|------|
-| `RpcDriver<P>` | the owned runtime: listener, connections, registry, pending calls; poll `run()`, drop to shut down |
-| `RpcHandle<P>` | weak, cloneable handle: `register`, `stats`, `probe` |
-| `RpcMethod` | one method: `Request`/`Reply` types plus stable `MethodId` / `SchemaId` |
+| `RpcDriver<P, U>` | the owned runtime: listener, connections, registry, pending calls; poll `run()`, drop to shut down |
+| `Connector` / `Acceptor` / `Plaintext` / `PeerContext` | the session upgrade seam (plaintext by default; TLS later) |
+| `RpcHandle<P>` | weak, cloneable handle: `register(AccessClass)`, `stats`, `probe` |
+| `RpcMethod` | one method: `Request`/`Reply` types plus explicit `u32` `MethodId` and `u16` `SchemaVersion` |
 | `Wire` / `CodecId` | the body codec seam; every `prost::Message` is `Wire` (default `prost` feature) |
-| `ServiceRef<M>` | plain, runtime-free reference: address, incarnation, checked token, method, schema, codecs |
-| `ServiceClient<P, M>` | a reference bound to a runtime; `try_get_reply` is one at-most-once attempt |
+| `ServiceRef<M>` | plain, runtime-free reference: resolved `ip:port`, 128-bit incarnation, 64-bit token + generation, method, schema, codecs, access class |
+| `ServiceClient<P, M>` | a reference bound to a runtime; `try_get_reply` / `try_get_reply_within` are one at-most-once attempt |
 | `RequestStream<M>` | the owned receiver; dropping it destroys the endpoint |
 | `ReplyHandle<M>` | one-shot, session-bound responder; dropping it is a broken promise |
-| `RpcError` / `Execution` | the failure reason, and what it proves about execution |
+| `RpcError` = `ErrorReason` + `Execution` | the failure reason, and what it proves (`NotAdmitted`, `MaybeExecuted`, `Executed`) |
 
 ## Wire format
 
 `u32 LE length | u64 LE XXH3-64(length ‖ payload) | payload`, where the
 payload is a hand-written, versioned envelope (kind, reply route, incarnation,
-token, method, schema, codec) followed by the opaque body. See the `protocol`
+token, method, schema, codec, reserved metadata) followed by the opaque body.
+Each session opens with a `Hello` carrying the supported version range, the
+runtime incarnation and reserved feature bits. See the `protocol`
 and `codec` module docs.
 
 ## Features

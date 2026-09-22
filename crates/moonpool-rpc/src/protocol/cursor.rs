@@ -28,6 +28,20 @@ impl Writer {
         self
     }
 
+    pub(crate) fn u128(&mut self, value: u128) -> &mut Self {
+        self.0.extend_from_slice(&value.to_le_bytes());
+        self
+    }
+
+    /// Family byte (4 or 6), the address octets, then the port.
+    pub(crate) fn socket_addr(&mut self, value: std::net::SocketAddr) -> &mut Self {
+        match value.ip() {
+            std::net::IpAddr::V4(ip) => self.u8(4).bytes(&ip.octets()),
+            std::net::IpAddr::V6(ip) => self.u8(6).bytes(&ip.octets()),
+        };
+        self.u16(value.port())
+    }
+
     pub(crate) fn bytes(&mut self, value: &[u8]) -> &mut Self {
         self.0.extend_from_slice(value);
         self
@@ -62,6 +76,19 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn u64(&mut self) -> Option<u64> {
         self.take().map(u64::from_le_bytes)
+    }
+
+    pub(crate) fn u128(&mut self) -> Option<u128> {
+        self.take().map(u128::from_le_bytes)
+    }
+
+    pub(crate) fn socket_addr(&mut self) -> Option<std::net::SocketAddr> {
+        let ip = match self.u8()? {
+            4 => std::net::IpAddr::from(self.take::<4>()?),
+            6 => std::net::IpAddr::from(self.take::<16>()?),
+            _ => return None,
+        };
+        Some(std::net::SocketAddr::new(ip, self.u16()?))
     }
 
     pub(crate) fn slice(&mut self, len: usize) -> Option<&'a [u8]> {

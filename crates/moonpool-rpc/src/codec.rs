@@ -30,13 +30,13 @@
 //!   (or have a harmless default); remove a field by reserving its tag.
 //!   Unknown fields are skipped, so old and new ends interoperate.
 //! - A change the tag rules cannot express is a new
-//!   [`SchemaId`](crate::SchemaId).
+//!   [`SchemaVersion`](crate::SchemaVersion).
 //! - Method and schema identifiers are application constants, never derived
 //!   from Rust type names, declaration order or layout
 //!   ([`RpcMethod`](crate::RpcMethod)).
 //! - The codec is part of an endpoint's interface: a request whose
 //!   [`CodecId`] differs from the one the endpoint registered is rejected
-//!   with [`RpcError::CodecMismatch`](crate::RpcError::CodecMismatch) before
+//!   with [`ErrorReason::CodecMismatch`](crate::ErrorReason::CodecMismatch) before
 //!   any decode, never parsed as garbage.
 
 use thiserror::Error;

@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use futures::task::AtomicWaker;
 
+use super::upgrade::PeerContext;
 use crate::stats::Counters;
 
 /// Why a connection ended.
@@ -23,6 +24,8 @@ pub(crate) enum CloseReason {
     Protocol(String),
     /// A frame failed its checksum: corruption.
     Checksum(String),
+    /// The peer speaks no protocol version this build supports.
+    Version(String),
     /// Closed from this side (control budget exceeded, runtime policy).
     Local,
 }
@@ -44,7 +47,12 @@ pub(crate) enum QueueRefusal {
 struct QueueState {
     control: VecDeque<Vec<u8>>,
     requests: VecDeque<(Vec<u8>, u64)>,
+    /// Requests are written only once the peer's handshake was accepted, so
+    /// a session refused at the handshake never carried a request.
+    established: bool,
     closed: bool,
+    /// What the upgrade learned about the peer (set before any frame is read).
+    peer_context: Option<PeerContext>,
 }
 
 /// One session's shared half: what callers and responders queue into and
@@ -78,7 +86,9 @@ impl Connection {
             queue: Mutex::new(QueueState {
                 control,
                 requests: VecDeque::new(),
+                established: false,
                 closed: false,
+                peer_context: None,
             }),
             max_requests,
             // The handshake frame does not count against the reserve.
@@ -137,6 +147,26 @@ impl Connection {
         true
     }
 
+    /// Record what the upgrade established about the peer.
+    pub(crate) fn set_peer_context(&self, context: PeerContext) {
+        self.lock().peer_context = Some(context);
+    }
+
+    /// What the upgrade established about the peer, once it ran.
+    pub(crate) fn peer_context(&self) -> Option<PeerContext> {
+        self.lock().peer_context.clone()
+    }
+
+    /// The peer's handshake was accepted: requests may flow.
+    pub(crate) fn establish(&self) {
+        self.lock().established = true;
+        self.waker.wake();
+    }
+
+    pub(crate) fn is_established(&self) -> bool {
+        self.lock().established
+    }
+
     /// Close the session: no more frames are accepted and the writer stops.
     pub(crate) fn close(&self) {
         let mut queue = self.lock();
@@ -164,6 +194,9 @@ impl Connection {
                 call_id: None,
             }));
         }
+        if !queue.established {
+            return Poll::Pending;
+        }
         if let Some((bytes, call_id)) = queue.requests.pop_front() {
             return Poll::Ready(Some(Outgoing {
                 bytes,
@@ -173,9 +206,10 @@ impl Connection {
         Poll::Pending
     }
 
+    /// Nothing is ready to write right now (requests wait for the handshake).
     fn is_drained(&self) -> bool {
         let queue = self.lock();
-        queue.control.is_empty() && queue.requests.is_empty()
+        queue.control.is_empty() && (queue.requests.is_empty() || !queue.established)
     }
 }
 

@@ -11,8 +11,8 @@ use futures::task::AtomicWaker;
 use super::client::ServiceRef;
 use super::reply::{ReplyContext, ReplyHandle};
 use crate::codec::{CodecId, Wire};
-use crate::endpoint::{Endpoint, EndpointToken};
-use crate::protocol::{MethodId, RpcMethod, SchemaId, WireError, WireOutcome};
+use crate::endpoint::EndpointToken;
+use crate::protocol::{MethodId, RpcMethod, SchemaVersion, WireError, WireOutcome};
 
 /// Why a mailbox refused an item.
 enum MailboxRefusal {
@@ -100,7 +100,7 @@ pub struct IncomingRequest<M: RpcMethod> {
 /// A type-erased registered endpoint, as the registry stores it.
 pub(crate) trait Inbox: Send + Sync {
     /// The method, schema and request codec the endpoint registered.
-    fn identity(&self) -> (MethodId, SchemaId, CodecId);
+    fn identity(&self) -> (MethodId, SchemaVersion, CodecId);
 
     /// Decode `body` as the registered request type and queue it with a
     /// responder on `context`. On refusal the rejection has already been
@@ -118,7 +118,7 @@ struct TypedInbox<M: RpcMethod> {
 }
 
 impl<M: RpcMethod> Inbox for TypedInbox<M> {
-    fn identity(&self) -> (MethodId, SchemaId, CodecId) {
+    fn identity(&self) -> (MethodId, SchemaVersion, CodecId) {
         (M::METHOD, M::SCHEMA, <M::Request as Wire>::CODEC)
     }
 
@@ -165,12 +165,12 @@ impl<M: RpcMethod> UnboundReceiver<M> {
     /// Attach the registered identity.
     pub(crate) fn bind(
         self,
-        endpoint: Endpoint,
+        service: ServiceRef<M>,
         owner: Weak<dyn EndpointOwner>,
     ) -> RequestStream<M> {
         RequestStream {
             mailbox: self.mailbox,
-            service: ServiceRef::new(endpoint),
+            service,
             owner,
         }
     }
@@ -189,7 +189,7 @@ pub(crate) fn endpoint_pair<M: RpcMethod>(capacity: usize) -> (Arc<dyn Inbox>, U
 ///
 /// Yields admitted requests in arrival order. Dropping it destroys the
 /// endpoint: the registration is removed at once, later requests for its
-/// token fail with [`RpcError::EndpointNotFound`](crate::RpcError::EndpointNotFound),
+/// token fail with [`ErrorReason::EndpointNotFound`](crate::ErrorReason::EndpointNotFound),
 /// and requests queued but not yet taken complete as broken promises. The
 /// stream ends when the owning runtime shuts down.
 pub struct RequestStream<M: RpcMethod> {

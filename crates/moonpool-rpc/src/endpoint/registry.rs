@@ -23,7 +23,7 @@ struct Slot<T> {
 pub(crate) struct Registry<T> {
     slots: Vec<Slot<T>>,
     /// Reusable slot indices, most recently freed last.
-    free: Vec<u32>,
+    free: Vec<u64>,
     live: usize,
     max_live: usize,
 }
@@ -49,22 +49,26 @@ impl<T> Registry<T> {
         let index = if let Some(index) = self.free.pop() {
             index
         } else {
-            let index = u32::try_from(self.slots.len()).map_err(|_| RegistryError::Full)?;
+            let index = u64::try_from(self.slots.len()).map_err(|_| RegistryError::Full)?;
             self.slots.push(Slot {
                 generation: 0,
                 value: None,
             });
             index
         };
-        let slot = &mut self.slots[index as usize];
+        let slot = Self::slot_mut(&mut self.slots, index).ok_or(RegistryError::Full)?;
         assert!(slot.value.is_none(), "free-listed slot must be empty");
         slot.value = Some(value);
         self.live += 1;
         Ok(EndpointToken::from_parts(index, slot.generation))
     }
 
+    fn slot_mut(slots: &mut [Slot<T>], index: u64) -> Option<&mut Slot<T>> {
+        slots.get_mut(usize::try_from(index).ok()?)
+    }
+
     pub(crate) fn get(&self, token: EndpointToken) -> Option<&T> {
-        let slot = self.slots.get(token.index() as usize)?;
+        let slot = self.slots.get(usize::try_from(token.index()).ok()?)?;
         if slot.generation == token.generation() {
             slot.value.as_ref()
         } else {
@@ -77,7 +81,7 @@ impl<T> Registry<T> {
     /// again; a slot whose generation cannot advance is retired, never
     /// wrapped.
     pub(crate) fn remove(&mut self, token: EndpointToken) -> Option<T> {
-        let slot = self.slots.get_mut(token.index() as usize)?;
+        let slot = Self::slot_mut(&mut self.slots, token.index())?;
         if slot.generation != token.generation() || slot.value.is_none() {
             return None;
         }
@@ -93,8 +97,10 @@ impl<T> Registry<T> {
     }
 
     #[cfg(test)]
-    fn force_generation(&mut self, index: u32, generation: u32) {
-        self.slots[index as usize].generation = generation;
+    fn force_generation(&mut self, index: u64, generation: u32) {
+        if let Some(slot) = Self::slot_mut(&mut self.slots, index) {
+            slot.generation = generation;
+        }
     }
 }
 

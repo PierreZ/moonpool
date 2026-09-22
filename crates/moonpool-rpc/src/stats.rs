@@ -36,6 +36,8 @@ pub struct RpcStats {
     pub protocol_violations: u64,
     /// Of those, frames whose checksum did not match (corruption).
     pub checksum_failures: u64,
+    /// Of those, peers that speak no supported protocol version.
+    pub version_rejections: u64,
     /// Connections established (either direction).
     pub connections_opened: u64,
     /// Connections refused by the connection budget.
@@ -56,6 +58,7 @@ pub(crate) struct Counters {
     pub(crate) broken_promises: AtomicU64,
     pub(crate) protocol_violations: AtomicU64,
     pub(crate) checksum_failures: AtomicU64,
+    pub(crate) version_rejections: AtomicU64,
     pub(crate) connections_opened: AtomicU64,
     pub(crate) connections_rejected: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
@@ -84,6 +87,7 @@ impl Counters {
             broken_promises: load(&self.broken_promises),
             protocol_violations: load(&self.protocol_violations),
             checksum_failures: load(&self.checksum_failures),
+            version_rejections: load(&self.version_rejections),
             connections_opened: load(&self.connections_opened),
             connections_rejected: load(&self.connections_rejected),
         }

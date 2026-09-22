@@ -1,6 +1,9 @@
 //! Transport limits and settings.
 
+use std::net::SocketAddr;
 use std::time::Duration;
+
+use crate::endpoint::Incarnation;
 
 /// Hard limits and settings of one RPC runtime.
 ///
@@ -16,7 +19,7 @@ pub struct RpcConfig {
     /// Live endpoints this runtime may register.
     pub max_endpoints: usize,
     /// Admitted-but-unread requests one endpoint may queue; beyond it new
-    /// requests are refused with [`RpcError::Overloaded`](crate::RpcError::Overloaded).
+    /// requests are refused with [`ErrorReason::Overloaded`](crate::ErrorReason::Overloaded).
     pub endpoint_queue_capacity: usize,
     /// Calls this runtime may have awaiting a reply at once.
     pub max_pending_calls: usize,
@@ -29,13 +32,22 @@ pub struct RpcConfig {
     /// A connection that would exceed it is closed rather than dropping a
     /// reply silently.
     pub reserved_control_frames: usize,
-    /// Budget for establishing one outbound connection, on provider time.
+    /// Budget for connecting and upgrading one outbound connection, on
+    /// provider time.
     pub connect_timeout: Duration,
+    /// Budget for upgrading an accepted connection, and for either peer's
+    /// `Hello` to arrive once a session runs.
+    pub handshake_timeout: Duration,
     /// Size of one socket read.
     pub read_chunk_bytes: usize,
-    /// Address to advertise in endpoints instead of the listener's local
-    /// address (for example when bound to a wildcard address).
-    pub advertised_address: Option<String>,
+    /// Resolved address to advertise in endpoints instead of the
+    /// listener's local address (for example when bound to a wildcard
+    /// address).
+    pub advertised_address: Option<SocketAddr>,
+    /// The runtime's incarnation. `None` (the default) draws 128 fresh bits
+    /// from the provider's random source; supply one only when the
+    /// application owns a better source of uniqueness.
+    pub incarnation: Option<Incarnation>,
 }
 
 impl Default for RpcConfig {
@@ -49,8 +61,10 @@ impl Default for RpcConfig {
             max_queued_requests: 1024,
             reserved_control_frames: 1024,
             connect_timeout: Duration::from_secs(5),
+            handshake_timeout: Duration::from_secs(5),
             read_chunk_bytes: 16 * 1024,
             advertised_address: None,
+            incarnation: None,
         }
     }
 }
