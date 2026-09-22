@@ -621,6 +621,15 @@ impl ChaosConfiguration {
         self.random_close_probability =
             crate::buggify_knob!(self.random_close_probability, 0.01..0.1);
         self.black_hole_probability = crate::buggify_knob!(self.black_hole_probability, 0.01..0.1);
+        // Bit flips are spiked only where the seed enabled them, so a swarm
+        // seed without the family never gains it. The sampled rate
+        // (0.001%–0.02% per send) is too rare for integrity checks above the
+        // transport (checksummed framing) to see corruption in a bounded run;
+        // the spike makes it a per-seed extreme instead.
+        if self.bit_flip_probability > 0.0 {
+            self.bit_flip_probability =
+                crate::buggify_knob!(self.bit_flip_probability, 0.001..0.01);
+        }
     }
 
     /// Turn every network fault family off, leaving performance shaping alone.
@@ -1047,6 +1056,31 @@ mod swarm_tests {
         reset_sim_rng();
         set_sim_seed(seed);
         NetworkConfiguration::swarm_for_seed()
+    }
+
+    /// The bit-flip knob spikes the rate on some seeds and never switches
+    /// the family on for a seed that left it off.
+    #[test]
+    fn bit_flip_knob_spikes_only_enabled_bit_flips() {
+        let mut spiked = false;
+        for seed in 0..400_u64 {
+            reset_sim_rng();
+            set_sim_seed(seed);
+            crate::chaos::buggify_init(0.5);
+            let mut config = NetworkConfiguration::swarm_for_seed();
+            let enabled = config.chaos.bit_flip_probability > 0.0;
+            config.chaos.apply_buggify_knobs();
+            if enabled {
+                spiked |= config.chaos.bit_flip_probability >= 0.001;
+            } else {
+                assert!(
+                    config.chaos.bit_flip_probability.abs() < f64::EPSILON,
+                    "seed {seed}: the knob enabled a disabled family"
+                );
+            }
+        }
+        crate::chaos::buggify_reset();
+        assert!(spiked, "no seed spiked the bit-flip rate");
     }
 
     #[test]
