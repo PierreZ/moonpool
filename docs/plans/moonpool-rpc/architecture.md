@@ -6,6 +6,30 @@ Status: approved design direction; implementation is organized by the linked Git
 
 The user accepted typed references with explicit request receivers/reply handles, Rust-defined messages with an established codec and explicit schema evolution, qualification on only Moonpool-supported platforms/providers and its existing wasm protocol/simulation path, internal fairness/control reserves instead of a Flow priority scheduler, and prompt terminal errors for definitively stale dynamic endpoints. They explicitly deferred **mTLS**. Server-authenticated TLS, per-request verification and a JWT/JWKS adapter remain in the accepted proposal; mutual certificate authentication of clients is not a release gate. No internet-scale multi-tenant service commitment is inferred.
 
+## Decided
+
+User-approved decisions recorded during #213. Later packages build on these; each names the package that implements it.
+
+| Decision | Package |
+|---|---|
+| **Codec closed.** Frame envelope is a hand-written, versioned, little-endian layout owned by moonpool-rpc (kind, reply route, 128-bit incarnation, u64 endpoint id + u32 generation, u32 method id, u16 schema version, u16 codec id, reserved metadata section, opaque body); the transport routes, bounds and rejects without touching user types, and the frame limit is enforced before any decode. Bodies go through a per-message `Wire` trait (`CODEC: CodecId`, `encode`, `decode`). **prost is the codec** (default-on `prost` feature, blanket `Wire` for `prost::Message + Default`, Rust-defined `#[derive(prost::Message)]` structs, no `.proto` step); postcard/serde was removed, the trait stays open for a later codec. Codec identity is part of the interface (carried in the envelope and in `ServiceRef`); a mismatch is rejected with `CodecMismatch` before decoding. Evolution: never reuse or renumber a prost tag, new fields optional, incompatible changes take a new schema version; method/schema ids are explicit constants, never derived from Rust names or order. | #213 (done) |
+| **Frame checksums.** Every frame is `u32 length \| u64 XXH3-64(length ‖ payload) \| payload` (`xxhash-rust`, pure Rust, wasm-buildable; FDB `FlowTransport` uses XXH3 for the same purpose). Verified before any header field is trusted beyond bounding/waiting and before any decode; a mismatch is counted, traced and closes the connection, never resynchronised; in-flight calls fail through the normal disconnect path. Always on for now; TLS may make it optional. | #213 (done); optionality with TLS in #218 |
+| **Connection upgrade seam.** RPC-local `Connector` / `Acceptor` traits (provider stream in, upgraded stream + `PeerContext` out), `Plaintext` default; the peer driver is generic over it, no new trait in moonpool-core. rustls arrives as another implementation. | #213 (seam, plaintext); #218 (TLS) |
+| **One error model.** `RpcError { reason: ErrorReason, execution: Execution::{NotAdmitted, MaybeExecuted, Executed} }`, both `#[non_exhaustive]`; every failure path reports honest execution knowledge (timeout/disconnect after send is `MaybeExecuted`; requests wait for the handshake and abandoned queued requests are withdrawn so `NotAdmitted` holds). | #213 (done) |
+| **Stable ids.** Each method declares an explicit `u32` `MethodId` and `u16` `SchemaVersion`, carried in the envelope. | #213 (done) |
+| **Resolved addresses.** Dynamic references carry resolved `SocketAddr`s only; hostnames exist only for well-known/bootstrap endpoints. | #213 (done); resolution in #214 |
+| **Handshake.** `Hello` carries the supported protocol version range, the runtime incarnation and a reserved feature-bits field; an unsupported peer is refused observably (`version_rejections`). | #213 (done) |
+| **Reserved sections.** Requests carry an empty, length-prefixed metadata/credential section; registration takes an `AccessClass` (public/private), stored and carried in `ServiceRef` now, enforced later. | #213 (carried); #218 (enforced) |
+| **Pull-style handlers.** The primitive is an owned receiver yielding (request, one-shot `ReplyHandle`); no push handler trait in P1. | #213 (done); derives add trait dispatch on top in #215 |
+| **Incarnation.** 128 bits from the `RandomProvider`, or a caller-supplied value at construction (`RpcConfig::incarnation`, no trait). Endpoint ids are 64-bit plus a 32-bit generation. | #213 (done) |
+| **Resolver.** A core `Resolver` trait (`resolve(&str) -> Vec<SocketAddr>`), Tokio impl via `lookup_host`, scripted sim impl; TTL/cache stays in RPC. | #214 |
+| **Failure/reconnect policy.** A plain, buggifiable config struct; the failure monitor is concrete, not a trait. The call layer exposes per-attempt completion, late replies included, for #217. | #214 |
+| **Interfaces in messages.** `ServiceRef` becomes itself a prost message with a `Wire` impl so applications embed it as a field (P1 ships a fixed byte layout and a `Wire` impl under `CodecId::RPC`). | #215 |
+| **Derives.** Generated trait-based dispatch on top of the pull primitive. | #215 |
+| **Selection.** A `Selector` trait with an FDB queue-model default; retry and hedge permissions are plain data. | #217 |
+| **Security.** `RequestVerifier` (metadata → principal, JWT/JWKS implementation), `KeySource` for rotation, `UtcClock`, rustls behind a feature. | #218 |
+| **Observability.** `tracing` plus the existing `MetricsSource`; no new metrics runtime. | #218 |
+
 ## Crates and dependency direction
 
 Keep `crates/` flat. `moonpool-rpc` owns `protocol/`, `transport/`, `endpoint/`, `call/`, `stream/`, `failure/`, `balance/`, `security/`, and `observability/` modules. Production depends on `moonpool-core`, established protocol/security dependencies, `tracing` and lightweight instrumentation where useful. It must never depend on `moonpool-sim` or explorer, including through feature defaults. `moonpool-rpc-sim` is non-published and owns workloads, independent oracles, fault campaigns and simulation integration. `moonpool-rpc-derive` is optional ergonomics over the manual API; its macros do not own registry, protocol, delivery or retry semantics. No crate per C++ component.

@@ -13,6 +13,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - **"How do I add chaos/faults?"** — [Chaos in Moonpool](./part3-building/07-chaos.md)
 - **"How do I use assertions?"** — [Assertions: Finding Bugs](./part3-building/12-assertions.md)
 - **"How do I simulate raw TCP?"** — [Simulating the Network](./part4-networking/01-simulating-network.md)
+- **"How do I call methods on other processes?"** — [Typed RPC with moonpool-rpc](./part4-networking/02-rpc.md)
 - **"How do I test an existing app (e.g. axum)?"** — [Using moonpool-sim Standalone](./part4-integration/01-standalone-sim.md)
 - **"How do I ship this to production?"** — [Using Providers in Production](./part4-integration/05-production.md)
 - **"How do I migrate my existing app onto providers?"** — [Migrating Existing Code to Providers](./part4-integration/06-migrating-existing-code.md)
@@ -83,6 +84,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 ## Part V: Raw Network Simulation
 
 - [Simulating the Network](./part4-networking/01-simulating-network.md) — Provider-backed TCP streams, connection-level faults, partial I/O, and the boundary between simulation and the kernel
+  - [Typed RPC with moonpool-rpc](./part4-networking/02-rpc.md) — Dynamic endpoints, checked identity, at-most-once attempts with honest execution knowledge, checksummed framing, and the receipt-ledger campaign
 
 ## Part VI: Building on Top
 
