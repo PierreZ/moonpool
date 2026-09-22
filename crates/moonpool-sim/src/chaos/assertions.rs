@@ -511,43 +511,44 @@ macro_rules! assert_unreachable {
     };
 }
 
-/// Assert that `val > threshold` always holds.
-///
-/// Does **not** panic on failure — records the violation and logs at ERROR level.
+/// Shared expansion of the four `assert_always_*` numeric comparisons:
+/// record the evaluation with its comparison and maximize direction, and on
+/// failure record the violation (printing the details when given).
+#[doc(hidden)]
 #[macro_export]
-macro_rules! assert_always_greater_than {
-    ($val:expr, $thresh:expr, $message:expr) => {
+macro_rules! __assert_always_numeric {
+    ($cmp:ident, $op:tt, $maximize:expr, $val:expr, $thresh:expr, $message:expr) => {
         let __msg = $message;
         let __v = $crate::chaos::assertions::to_i64_saturating($val);
         let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Gt,
+            $crate::chaos::assertions::_re_export::AssertCmp::$cmp,
             __t,
             $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            false,
+            $maximize,
         );
-        if !(__v > __t) {
+        if !(__v $op __t) {
             $crate::chaos::assertions::record_always_violation();
         }
     };
-    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
+    ($cmp:ident, $op:tt, $maximize:expr, $val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
         let __msg = $message;
         let __v = $crate::chaos::assertions::to_i64_saturating($val);
         let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
         $crate::chaos::assertions::on_assertion_numeric(
             &__msg,
             __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Gt,
+            $crate::chaos::assertions::_re_export::AssertCmp::$cmp,
             __t,
             $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            false,
+            $maximize,
         );
-        if !(__v > __t) {
+        if !(__v $op __t) {
             $crate::chaos::assertions::record_always_violation();
             eprintln!(
-                "[ASSERTION FAILED] {} ({}>{} failed, seed={}) | {}",
+                concat!("[ASSERTION FAILED] {} ({}", stringify!($op), "{} failed, seed={}) | {}"),
                 __msg, __v, __t,
                 $crate::current_sim_seed(),
                 $crate::chaos::assertions::format_details(
@@ -555,6 +556,34 @@ macro_rules! assert_always_greater_than {
                 )
             );
         }
+    };
+}
+
+/// Shared expansion of the four `assert_sometimes_*` numeric comparisons.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __assert_sometimes_numeric {
+    ($cmp:ident, $maximize:expr, $val:expr, $thresh:expr, $message:expr) => {
+        $crate::chaos::assertions::on_assertion_numeric(
+            &$message,
+            $crate::chaos::assertions::to_i64_saturating($val),
+            $crate::chaos::assertions::_re_export::AssertCmp::$cmp,
+            $crate::chaos::assertions::to_i64_saturating($thresh),
+            $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
+            $maximize,
+        );
+    };
+}
+
+/// Assert that `val > threshold` always holds.
+///
+/// Does **not** panic on failure — records the violation and logs at ERROR level.
+#[macro_export]
+macro_rules! assert_always_greater_than {
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+        $crate::__assert_always_numeric!(
+            Gt, >, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
+        );
     };
 }
 
@@ -563,45 +592,10 @@ macro_rules! assert_always_greater_than {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_greater_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:expr) => {
-        let __msg = $message;
-        let __v = $crate::chaos::assertions::to_i64_saturating($val);
-        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
-        $crate::chaos::assertions::on_assertion_numeric(
-            &__msg,
-            __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Ge,
-            __t,
-            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            false,
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+        $crate::__assert_always_numeric!(
+            Ge, >=, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
-        if !(__v >= __t) {
-            $crate::chaos::assertions::record_always_violation();
-        }
-    };
-    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
-        let __msg = $message;
-        let __v = $crate::chaos::assertions::to_i64_saturating($val);
-        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
-        $crate::chaos::assertions::on_assertion_numeric(
-            &__msg,
-            __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Ge,
-            __t,
-            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            false,
-        );
-        if !(__v >= __t) {
-            $crate::chaos::assertions::record_always_violation();
-            eprintln!(
-                "[ASSERTION FAILED] {} ({}>={} failed, seed={}) | {}",
-                __msg, __v, __t,
-                $crate::current_sim_seed(),
-                $crate::chaos::assertions::format_details(
-                    &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
-                )
-            );
-        }
     };
 }
 
@@ -610,45 +604,10 @@ macro_rules! assert_always_greater_than_or_equal_to {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than {
-    ($val:expr, $thresh:expr, $message:expr) => {
-        let __msg = $message;
-        let __v = $crate::chaos::assertions::to_i64_saturating($val);
-        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
-        $crate::chaos::assertions::on_assertion_numeric(
-            &__msg,
-            __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Lt,
-            __t,
-            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            true,
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+        $crate::__assert_always_numeric!(
+            Lt, <, true, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
-        if !(__v < __t) {
-            $crate::chaos::assertions::record_always_violation();
-        }
-    };
-    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
-        let __msg = $message;
-        let __v = $crate::chaos::assertions::to_i64_saturating($val);
-        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
-        $crate::chaos::assertions::on_assertion_numeric(
-            &__msg,
-            __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Lt,
-            __t,
-            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            true,
-        );
-        if !(__v < __t) {
-            $crate::chaos::assertions::record_always_violation();
-            eprintln!(
-                "[ASSERTION FAILED] {} ({}<{} failed, seed={}) | {}",
-                __msg, __v, __t,
-                $crate::current_sim_seed(),
-                $crate::chaos::assertions::format_details(
-                    &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
-                )
-            );
-        }
     };
 }
 
@@ -657,45 +616,10 @@ macro_rules! assert_always_less_than {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:expr) => {
-        let __msg = $message;
-        let __v = $crate::chaos::assertions::to_i64_saturating($val);
-        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
-        $crate::chaos::assertions::on_assertion_numeric(
-            &__msg,
-            __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Le,
-            __t,
-            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            true,
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+        $crate::__assert_always_numeric!(
+            Le, <=, true, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
-        if !(__v <= __t) {
-            $crate::chaos::assertions::record_always_violation();
-        }
-    };
-    ($val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
-        let __msg = $message;
-        let __v = $crate::chaos::assertions::to_i64_saturating($val);
-        let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
-        $crate::chaos::assertions::on_assertion_numeric(
-            &__msg,
-            __v,
-            $crate::chaos::assertions::_re_export::AssertCmp::Le,
-            __t,
-            $crate::chaos::assertions::_re_export::AssertKind::NumericAlways,
-            true,
-        );
-        if !(__v <= __t) {
-            $crate::chaos::assertions::record_always_violation();
-            eprintln!(
-                "[ASSERTION FAILED] {} ({}<={} failed, seed={}) | {}",
-                __msg, __v, __t,
-                $crate::current_sim_seed(),
-                $crate::chaos::assertions::format_details(
-                    &[ $(($key, &$dval as &dyn std::fmt::Display)),+ ]
-                )
-            );
-        }
     };
 }
 
@@ -703,14 +627,7 @@ macro_rules! assert_always_less_than_or_equal_to {
 #[macro_export]
 macro_rules! assert_sometimes_greater_than {
     ($val:expr, $thresh:expr, $message:expr) => {
-        $crate::chaos::assertions::on_assertion_numeric(
-            &$message,
-            $crate::chaos::assertions::to_i64_saturating($val),
-            $crate::chaos::assertions::_re_export::AssertCmp::Gt,
-            $crate::chaos::assertions::to_i64_saturating($thresh),
-            $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
-            true,
-        );
+        $crate::__assert_sometimes_numeric!(Gt, true, $val, $thresh, $message);
     };
 }
 
@@ -718,14 +635,7 @@ macro_rules! assert_sometimes_greater_than {
 #[macro_export]
 macro_rules! assert_sometimes_greater_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
-        $crate::chaos::assertions::on_assertion_numeric(
-            &$message,
-            $crate::chaos::assertions::to_i64_saturating($val),
-            $crate::chaos::assertions::_re_export::AssertCmp::Ge,
-            $crate::chaos::assertions::to_i64_saturating($thresh),
-            $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
-            true,
-        );
+        $crate::__assert_sometimes_numeric!(Ge, true, $val, $thresh, $message);
     };
 }
 
@@ -733,14 +643,7 @@ macro_rules! assert_sometimes_greater_than_or_equal_to {
 #[macro_export]
 macro_rules! assert_sometimes_less_than {
     ($val:expr, $thresh:expr, $message:expr) => {
-        $crate::chaos::assertions::on_assertion_numeric(
-            &$message,
-            $crate::chaos::assertions::to_i64_saturating($val),
-            $crate::chaos::assertions::_re_export::AssertCmp::Lt,
-            $crate::chaos::assertions::to_i64_saturating($thresh),
-            $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
-            false,
-        );
+        $crate::__assert_sometimes_numeric!(Lt, false, $val, $thresh, $message);
     };
 }
 
@@ -748,14 +651,7 @@ macro_rules! assert_sometimes_less_than {
 #[macro_export]
 macro_rules! assert_sometimes_less_than_or_equal_to {
     ($val:expr, $thresh:expr, $message:expr) => {
-        $crate::chaos::assertions::on_assertion_numeric(
-            &$message,
-            $crate::chaos::assertions::to_i64_saturating($val),
-            $crate::chaos::assertions::_re_export::AssertCmp::Le,
-            $crate::chaos::assertions::to_i64_saturating($thresh),
-            $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
-            false,
-        );
+        $crate::__assert_sometimes_numeric!(Le, false, $val, $thresh, $message);
     };
 }
 

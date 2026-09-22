@@ -88,6 +88,12 @@ pub struct FaultContext {
     chaos_shutdown: tokio_util::sync::CancellationToken,
 }
 
+/// Parse a process IP as the simulator addresses it.
+fn parse_ip(ip: &str) -> SimulationResult<std::net::IpAddr> {
+    ip.parse()
+        .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))
+}
+
 impl FaultContext {
     /// Create a new fault context with process information.
     #[must_use]
@@ -171,12 +177,8 @@ impl FaultContext {
     ///
     /// Returns an error if IP parsing fails.
     pub fn partition(&self, a: &str, b: &str) -> SimulationResult<()> {
-        let a_ip: std::net::IpAddr = a
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{a}': {e}")))?;
-        let b_ip: std::net::IpAddr = b
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
+        let a_ip = parse_ip(a)?;
+        let b_ip = parse_ip(b)?;
         // Use a long duration — heal_partition is the expected way to undo
         self.sim.partition_pair(a_ip, b_ip, Duration::from_hours(1));
         self.sim.partition_pair(b_ip, a_ip, Duration::from_hours(1));
@@ -189,12 +191,8 @@ impl FaultContext {
     ///
     /// Returns an error if IP parsing fails.
     pub fn heal_partition(&self, a: &str, b: &str) -> SimulationResult<()> {
-        let a_ip: std::net::IpAddr = a
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{a}': {e}")))?;
-        let b_ip: std::net::IpAddr = b
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
+        let a_ip = parse_ip(a)?;
+        let b_ip = parse_ip(b)?;
         self.sim.restore_partition(a_ip, b_ip);
         Ok(())
     }
@@ -205,12 +203,8 @@ impl FaultContext {
     ///
     /// Returns an error if IP parsing fails.
     pub fn is_partitioned(&self, a: &str, b: &str) -> SimulationResult<bool> {
-        let a_ip: std::net::IpAddr = a
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{a}': {e}")))?;
-        let b_ip: std::net::IpAddr = b
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{b}': {e}")))?;
+        let a_ip = parse_ip(a)?;
+        let b_ip = parse_ip(b)?;
         Ok(self.sim.is_partitioned(a_ip, b_ip))
     }
 
@@ -297,9 +291,7 @@ impl FaultContext {
         recovery_delay_range_ms: &std::ops::Range<usize>,
         grace_period_range_ms: &std::ops::Range<usize>,
     ) -> SimulationResult<()> {
-        let ip_addr: std::net::IpAddr = ip
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))?;
+        let ip_addr = parse_ip(ip)?;
 
         match kind {
             RebootKind::Graceful => {
@@ -366,9 +358,7 @@ impl FaultContext {
     ///
     /// Returns an error if IP parsing fails.
     pub fn crash(&self, ip: &str) -> SimulationResult<()> {
-        let ip_addr: std::net::IpAddr = ip
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))?;
+        let ip_addr = parse_ip(ip)?;
         assert_reachable!("crash: hold-down path");
         self.mark_dead(ip_addr);
         self.sim.schedule_event(
@@ -403,9 +393,7 @@ impl FaultContext {
     ///
     /// Returns an error if IP parsing fails.
     pub fn restart(&self, ip: &str) -> SimulationResult<()> {
-        let ip_addr: std::net::IpAddr = ip
-            .parse()
-            .map_err(|e| crate::SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))?;
+        let ip_addr = parse_ip(ip)?;
         assert_reachable!("restart: explicit restart path");
         self.sim.schedule_event(
             crate::sim::Event::ProcessRestart { ip: ip_addr },
