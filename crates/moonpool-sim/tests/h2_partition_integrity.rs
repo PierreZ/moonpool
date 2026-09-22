@@ -49,6 +49,10 @@ const HEALED: Duration = Duration::from_micros(700);
 /// How long each partition holds.
 const PARTITIONED: Duration = Duration::from_millis(3);
 
+/// Connect timeout: a hung connect must be retried well inside the 5s
+/// run-time budget, which exists to catch a stream a partition strands.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// The body for a request tag: uniform, so any missing interior range shows.
 fn body_for(tag: u8) -> Bytes {
     Bytes::from(vec![tag; BODY_LEN])
@@ -148,8 +152,18 @@ impl Workload for MultiplexedClient {
             .peer("echo")
             .ok_or_else(|| SimulationError::InvalidState("echo process not found".into()))?;
 
-        let channel: ReconnectingChannel<SimProviders, Full<Bytes>> =
-            ReconnectingChannel::new(ctx.providers(), server_ip.clone(), ChannelConfig::default());
+        // The default network config keeps buggified `Probabilistic` connect
+        // failures, so a connect may hang forever even without network chaos.
+        // The connect timeout must recover it well inside the run-time budget;
+        // the default (5s) equals the budget and fails the round instead.
+        let channel: ReconnectingChannel<SimProviders, Full<Bytes>> = ReconnectingChannel::new(
+            ctx.providers(),
+            server_ip.clone(),
+            ChannelConfig {
+                connection_timeout: CONNECT_TIMEOUT,
+                ..ChannelConfig::default()
+            },
+        );
 
         let mut completed = 0;
         for round in 0..ROUNDS {
