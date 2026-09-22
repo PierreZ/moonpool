@@ -36,26 +36,11 @@ pub(crate) struct ProcessConfig<'a> {
     pub(crate) group_registry: GroupRegistry,
 }
 
-impl ProcessConfig<'_> {
-    /// A process's identity within its own group: `(index, size)`.
-    ///
-    /// This is what a process sees as
-    /// [`client_id`](SimContext::client_id) / [`client_count`](SimContext::client_count):
-    /// its position among its group's members and the group's member count,
-    /// so a role can number its own instances without knowing how many
-    /// processes the other groups drew this seed.
-    pub(crate) fn position_in_group(&self, ip: std::net::IpAddr) -> (usize, usize) {
-        self.group_registry
-            .position_in_group(ip)
-            .expect("every configured process IP is registered in a group")
-    }
-}
-
-/// Everything a restarted process needs to rebuild its [`SimContext`].
+/// Everything a booted or restarted process needs to build its [`SimContext`].
 ///
 /// `Copy`, being nothing but shared borrows.
 #[derive(Clone, Copy)]
-pub(crate) struct RestartEnv<'a> {
+pub(crate) struct ProcessEnv<'a> {
     pub(crate) sim: &'a crate::sim::WeakSimWorld,
     pub(crate) state: &'a StateHandle,
     pub(crate) obs: &'a SimulationLayerHandle,
@@ -190,12 +175,11 @@ impl<'a> ProcessManager<'a> {
         }
     }
 
+    /// A manager for `config`'s processes, none of them booted yet (see
+    /// [`Self::boot_all`]).
     pub(crate) fn new(
         config: ProcessConfig<'a>,
-        handles: Vec<Option<ProcessBoot>>,
-        process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
         all_entities: Vec<(String, String)>,
-        panics: ProcessPanics,
         task_panics: TaskPanicTracker,
     ) -> Self {
         let ProcessConfig {
@@ -208,17 +192,31 @@ impl<'a> ProcessManager<'a> {
         } = config;
         Self {
             factories,
-            handles,
-            process_tokens,
+            handles: ips.iter().map(|_| None).collect(),
+            process_tokens: ips.iter().map(|_| None).collect(),
             ips,
             tag_registry,
             machine_registry,
             group_registry,
             all_entities,
             dead: Arc::new(Mutex::new(BTreeSet::new())),
-            panics,
+            panics: ProcessPanics::default(),
             task_panics,
         }
+    }
+
+    /// Boot every configured process, in IP order.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(())` if a process IP fails to parse.
+    pub(crate) fn boot_all(&mut self, env: &ProcessEnv<'_>) -> Result<(), ()> {
+        for index in 0..self.ips.len() {
+            let ip: std::net::IpAddr = self.ips[index].parse().map_err(|_| ())?;
+            self.boot(index, ip, env);
+            tracing::debug!("Booted process {} at {}", index, self.ips[index]);
+        }
+        Ok(())
     }
 
     /// Take the panics recorded so far, leaving the ledger empty.
@@ -291,8 +289,34 @@ impl<'a> ProcessManager<'a> {
         self.process_tokens[index] = None;
     }
 
-    pub(crate) fn restart(&mut self, ip: std::net::IpAddr, env: &RestartEnv<'_>) {
-        let RestartEnv {
+    pub(crate) fn restart(&mut self, ip: std::net::IpAddr, env: &ProcessEnv<'_>) {
+        let Some(index) = self.index_for_ip(ip) else {
+            tracing::warn!(%ip, "ProcessRestart for unknown IP");
+            return;
+        };
+        if self.factories.get(index).is_none() {
+            tracing::warn!("ProcessRestart but no process factory configured");
+            return;
+        }
+
+        if let Some(boot) = self.handles[index].take() {
+            boot.kill();
+        }
+
+        self.boot(index, ip, env);
+        self.dead
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .remove(&ip);
+        assert_reachable!("process_manager: process restarted");
+        tracing::info!(ip = %ip, index, "process restarted");
+    }
+
+    /// Spawn a fresh instance of process `index` from its factory, with a new
+    /// per-process token (a child of the global shutdown signal) and a new
+    /// task scope.
+    fn boot(&mut self, index: usize, ip: std::net::IpAddr, env: &ProcessEnv<'_>) {
+        let ProcessEnv {
             sim,
             state,
             obs,
@@ -300,24 +324,12 @@ impl<'a> ProcessManager<'a> {
             shutdown_signal,
         } = *env;
         let ip_string = ip.to_string();
-        let Some(index) = self.index_for_ip(ip) else {
-            tracing::warn!(%ip, "ProcessRestart for unknown IP");
-            return;
-        };
-        let Some(factory) = self.factories.get(index) else {
-            tracing::warn!("ProcessRestart but no process factory configured");
-            return;
-        };
-
-        if let Some(boot) = self.handles[index].take() {
-            boot.kill();
-        }
-
         let process_token = shutdown_signal.child_token();
         let scope = tokio_util::sync::CancellationToken::new();
         self.process_tokens[index] = Some(process_token.clone());
-        let process = factory();
-        // A process is numbered within its own group, exactly as on first boot.
+        let process = (self.factories[index])();
+        // A process is numbered within its own group, so a role can index its
+        // instances without knowing what the other groups drew.
         let (client_id, client_count) = self
             .group_registry
             .position_in_group(ip)
@@ -346,14 +358,7 @@ impl<'a> ProcessManager<'a> {
             obs.clone(),
             metrics.clone(),
         );
-        let boot = spawn_process(process, ctx, &ip_string, &self.panics, scope);
-        self.handles[index] = Some(boot);
-        self.dead
-            .lock()
-            .expect("Mutex poisoned: prior task panicked")
-            .remove(&ip);
-        assert_reachable!("process_manager: process restarted");
-        tracing::info!(ip = %ip_string, index, "process restarted");
+        self.handles[index] = Some(spawn_process(process, ctx, &ip_string, &self.panics, scope));
     }
 
     pub(crate) fn abort_all(&mut self) {
