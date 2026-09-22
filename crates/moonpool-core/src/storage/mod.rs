@@ -65,6 +65,12 @@ pub fn stream_io_unsupported() -> io::Error {
 #[cfg(feature = "tokio-fs")]
 pub use tokio_impl::{TokioStorageFile, TokioStorageProvider};
 
+/// An [`io::ErrorKind::InvalidInput`] error: the class of failure a kernel
+/// returns for a request it refuses on its face.
+pub(crate) fn invalid_input(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
 /// Provider trait for file storage operations.
 ///
 /// The provider owns the filesystem *namespace*: everything that names a path

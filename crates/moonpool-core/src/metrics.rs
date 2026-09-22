@@ -139,9 +139,13 @@ impl HistogramValue {
                 self.buckets.push((*bound, *count));
             }
         }
-        self.buckets
-            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        self.buckets.sort_by(|a, b| cmp_f64(a.0, b.0));
     }
+}
+
+/// Order two floats, treating an incomparable pair (a NaN) as equal.
+fn cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
 }
 
 /// One metric, at one label combination, at one point in time.
@@ -190,24 +194,31 @@ impl MetricSample {
     /// together across simulation seeds.
     #[must_use]
     pub fn sort_key(&self) -> String {
-        if self.labels.is_empty() {
-            return self.name.clone();
-        }
-        let mut key = String::with_capacity(self.name.len() + self.labels.len() * 16);
-        key.push_str(&self.name);
-        key.push('{');
-        for (i, (k, v)) in self.labels.iter().enumerate() {
-            if i > 0 {
-                key.push(',');
-            }
-            key.push_str(k);
-            key.push_str("=\"");
-            key.push_str(v);
-            key.push('"');
-        }
-        key.push('}');
-        key
+        series_identity(&self.name, &self.labels)
     }
+}
+
+/// The canonical `name{key="value",...}` form of a series, shared by
+/// [`MetricSample::sort_key`] and [`query::SeriesKey`]'s `Display` so the two
+/// stay byte-identical.
+fn series_identity(name: &str, labels: &[(String, String)]) -> String {
+    if labels.is_empty() {
+        return name.to_owned();
+    }
+    let mut key = String::with_capacity(name.len() + labels.len() * 16);
+    key.push_str(name);
+    key.push('{');
+    for (i, (k, v)) in labels.iter().enumerate() {
+        if i > 0 {
+            key.push(',');
+        }
+        key.push_str(k);
+        key.push_str("=\"");
+        key.push_str(v);
+        key.push('"');
+    }
+    key.push('}');
+    key
 }
 
 /// One recorded value of a series, at one point in simulated time.

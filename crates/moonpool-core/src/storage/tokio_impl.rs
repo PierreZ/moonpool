@@ -71,10 +71,7 @@ async fn sync_dir_impl(path: &str) -> io::Result<()> {
     run_blocking(move || {
         let directory = std::fs::File::open(&path)?;
         if !directory.metadata()?.is_dir() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotADirectory,
-                "sync_dir requires a directory",
-            ));
+            return Err(not_a_directory());
         }
         directory.sync_all()
     })
@@ -87,12 +84,16 @@ async fn sync_dir_impl(path: &str) -> io::Result<()> {
 #[cfg(not(unix))]
 async fn sync_dir_impl(path: &str) -> io::Result<()> {
     if !tokio::fs::metadata(path).await?.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotADirectory,
-            "sync_dir requires a directory",
-        ));
+        return Err(not_a_directory());
     }
     Ok(())
+}
+
+fn not_a_directory() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotADirectory,
+        "sync_dir requires a directory",
+    )
 }
 
 /// Build the tokio open options for `options`, optionally adding `O_DIRECT`.
@@ -354,20 +355,14 @@ fn descriptor_paths_available() -> bool {
 
 /// The caller's access with **no lifecycle at all**: the shape that opens a
 /// file which already exists without being able to create or truncate one.
-fn existing_options(options: &OpenOptions) -> OpenOptions {
-    OpenOptions::new()
-        .read(options.is_read())
-        .write(options.is_write())
-        .append(options.is_append())
-}
-
-/// Options for the direct-I/O *upgrade* of a file that is already open: the
-/// same access, none of the lifecycle.
 ///
-/// `create`, `create_new` and `truncate` are deliberately dropped. The
-/// buffered open has already applied them exactly once, and repeating them
-/// could clobber the file it just created or fail against its own work.
-fn upgrade_options(options: &OpenOptions) -> OpenOptions {
+/// Used twice. A `Required` open reaches an existing file with it, so a
+/// refused `O_DIRECT` cannot have created or truncated anything. The
+/// direct-I/O *upgrade* of an `Optional` open uses it because `create`,
+/// `create_new` and `truncate` must not be repeated: the buffered open has
+/// already applied them exactly once, and repeating them could clobber the
+/// file it just created or fail against its own work.
+fn access_only(options: &OpenOptions) -> OpenOptions {
     OpenOptions::new()
         .read(options.is_read())
         .write(options.is_write())
@@ -418,7 +413,7 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
             // the file whose lifecycle was just applied, not whatever the path
             // names now.
             let upgrade = descriptor_path(&buffered, path);
-            match open_options(&upgrade_options(options), true)
+            match open_options(&access_only(options), true)
                 .open(&upgrade)
                 .await
             {
@@ -485,10 +480,7 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
 /// A journal or pager does all four anyway; the provider would only be
 /// guessing at steps 2 and 4 on its behalf.
 async fn open_required(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> {
-    match open_options(&existing_options(options), true)
-        .open(path)
-        .await
-    {
+    match open_options(&access_only(options), true).open(path).await {
         Ok(file) => finish_existing(file, options).await,
         Err(error) if is_direct_io_unsupported(&error) => Err(unsupported_direct_io(path, &error)),
         Err(error)
@@ -734,12 +726,14 @@ impl AsyncSeek for TokioStorageFile {
 mod tests {
     #[cfg(target_os = "linux")]
     use super::descriptor_path;
-    use super::{OpenOptions, existing_options, is_direct_io_unsupported, upgrade_options};
+    use super::{OpenOptions, access_only, is_direct_io_unsupported};
     use std::io;
 
     /// Only the two codes that mean "this filesystem cannot do direct I/O"
     /// may be absorbed into a buffered fallback. Everything else is a real
-    /// failure of the open.
+    /// failure of the open — a denial in particular is a real answer about
+    /// this process's rights, and swallowing it would let a security policy
+    /// silently downgrade a caller.
     #[cfg(unix)]
     #[test]
     fn only_unsupported_errors_are_absorbed() {
@@ -762,6 +756,8 @@ mod tests {
             libc::ENOSPC,
             libc::ELOOP,
             libc::ENAMETOOLONG,
+            libc::EIO,
+            libc::ENOSYS,
         ] {
             let error = io::Error::from_raw_os_error(code);
             assert!(
@@ -783,58 +779,30 @@ mod tests {
     /// and therefore nothing beyond "no direct I/O here" for the fallback to
     /// absorb. Pinned here because the classification depends on it.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn the_descriptor_path_survives_unlinking() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build runtime");
-        runtime.block_on(async {
-            let dir = tempfile::TempDir::new().expect("temp dir");
-            let path = dir.path().join("unlinked");
+    #[tokio::test]
+    async fn the_descriptor_path_survives_unlinking() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("unlinked");
 
-            let file = tokio::fs::File::create(&path).await.expect("create failed");
-            std::fs::remove_file(&path).expect("unlink failed");
-            assert!(std::fs::metadata(&path).is_err(), "the name is gone");
+        let file = tokio::fs::File::create(&path).await.expect("create failed");
+        std::fs::remove_file(&path).expect("unlink failed");
+        assert!(std::fs::metadata(&path).is_err(), "the name is gone");
 
-            tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(descriptor_path(&file, "unused"))
-                .await
-                .expect("the descriptor path still reaches the unlinked file");
-        });
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(descriptor_path(&file, "unused"))
+            .await
+            .expect("the descriptor path still reaches the unlinked file");
     }
 
-    /// Nothing but "this filesystem cannot do direct I/O" is ever absorbed
-    /// into a buffered fallback. A denial in particular is a real answer about
-    /// this process's rights, and swallowing it would let a security policy
-    /// silently downgrade a caller.
-    #[cfg(unix)]
+    /// The access-only shape carries the access the caller asked for and none
+    /// of the lifecycle. `Required` opens the existing file with it, so a
+    /// rejected `O_DIRECT` cannot create or truncate anything on the way out;
+    /// the `Optional` upgrade uses it because repeating `create_new` or
+    /// `truncate` against the file the buffered open just made is exactly the
+    /// bug it avoids.
     #[test]
-    fn no_other_failure_is_turned_into_a_fallback() {
-        for code in [
-            libc::EACCES,
-            libc::EPERM,
-            libc::EMFILE,
-            libc::ENFILE,
-            libc::EIO,
-            libc::EROFS,
-            libc::ENOENT,
-            libc::ENOSYS,
-        ] {
-            let error = io::Error::from_raw_os_error(code);
-            assert!(
-                !is_direct_io_unsupported(&error),
-                "{error} must be reported, not turned into a buffered fallback"
-            );
-        }
-    }
-
-    /// `Required` opens the existing file with no lifecycle flags at all, so
-    /// a rejected `O_DIRECT` cannot create or truncate anything on the way
-    /// out. Truncation is applied afterwards, through the descriptor.
-    #[test]
-    fn the_existing_open_carries_no_lifecycle() {
+    fn the_access_only_open_drops_every_lifecycle_flag() {
         let requested = OpenOptions::new()
             .read(true)
             .write(true)
@@ -842,14 +810,14 @@ mod tests {
             .create(true)
             .create_new(true)
             .truncate(true);
-        let existing = existing_options(&requested);
+        let access = access_only(&requested);
 
-        assert!(existing.is_read());
-        assert!(existing.is_write());
-        assert!(existing.is_append());
-        assert!(!existing.is_create());
-        assert!(!existing.is_create_new());
-        assert!(!existing.is_truncate());
+        assert!(access.is_read());
+        assert!(access.is_write());
+        assert!(access.is_append());
+        assert!(!access.is_create());
+        assert!(!access.is_create_new());
+        assert!(!access.is_truncate());
     }
 
     /// The upgrade reopens the file the descriptor holds, not the name it was
@@ -858,62 +826,34 @@ mod tests {
     /// from substituting a different one for the file `create_new` just
     /// exclusively created.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn the_upgrade_addresses_the_file_not_the_name() {
+    #[tokio::test]
+    async fn the_upgrade_addresses_the_file_not_the_name() {
         use std::os::unix::fs::MetadataExt as _;
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build runtime");
-        runtime.block_on(async {
-            let dir = tempfile::TempDir::new().expect("temp dir");
-            let original = dir.path().join("original");
-            let renamed = dir.path().join("renamed");
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let original = dir.path().join("original");
+        let renamed = dir.path().join("renamed");
 
-            let file = tokio::fs::File::create(&original)
-                .await
-                .expect("create failed");
-            let inode = file.metadata().await.expect("metadata failed").ino();
+        let file = tokio::fs::File::create(&original)
+            .await
+            .expect("create failed");
+        let inode = file.metadata().await.expect("metadata failed").ino();
 
-            // Somebody moves the name out from under us.
-            std::fs::rename(&original, &renamed).expect("rename failed");
-            assert!(
-                std::fs::metadata(&original).is_err(),
-                "the original name no longer resolves"
-            );
+        // Somebody moves the name out from under us.
+        std::fs::rename(&original, &renamed).expect("rename failed");
+        assert!(
+            std::fs::metadata(&original).is_err(),
+            "the original name no longer resolves"
+        );
 
-            // The descriptor path still reaches the file it always held.
-            let through_descriptor = descriptor_path(&file, "unused");
-            let reached = std::fs::metadata(&through_descriptor)
-                .expect("the descriptor path must still resolve");
-            assert_eq!(
-                reached.ino(),
-                inode,
-                "the upgrade must reopen the same file, not whatever the name points at"
-            );
-        });
-    }
-
-    /// The upgrade open carries the access the caller asked for and none of
-    /// the lifecycle: repeating `create_new` or `truncate` against the file
-    /// the buffered open just made is exactly the bug this avoids.
-    #[test]
-    fn the_upgrade_open_drops_every_lifecycle_flag() {
-        let requested = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .create_new(true)
-            .truncate(true)
-            .append(true);
-        let upgrade = upgrade_options(&requested);
-
-        assert!(upgrade.is_read());
-        assert!(upgrade.is_write());
-        assert!(upgrade.is_append());
-        assert!(!upgrade.is_create());
-        assert!(!upgrade.is_create_new());
-        assert!(!upgrade.is_truncate());
+        // The descriptor path still reaches the file it always held.
+        let through_descriptor = descriptor_path(&file, "unused");
+        let reached =
+            std::fs::metadata(&through_descriptor).expect("the descriptor path must still resolve");
+        assert_eq!(
+            reached.ino(),
+            inode,
+            "the upgrade must reopen the same file, not whatever the name points at"
+        );
     }
 }
