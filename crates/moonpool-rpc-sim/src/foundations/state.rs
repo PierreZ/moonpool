@@ -128,6 +128,7 @@ impl Board {
         for stats in inner.stats.values() {
             total.protocol_violations += stats.protocol_violations;
             total.checksum_failures += stats.checksum_failures;
+            total.established_checksum_failures += stats.established_checksum_failures;
             total.version_rejections += stats.version_rejections;
             total.late_replies += stats.late_replies;
             total.calls_abandoned += stats.calls_abandoned;

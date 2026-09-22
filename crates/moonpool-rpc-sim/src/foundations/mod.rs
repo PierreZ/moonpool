@@ -23,6 +23,7 @@
 //! destroyed endpoints, stale incarnations after same-address restarts, and
 //! callers that give up before the reply.
 
+mod corruption;
 mod faults;
 pub mod messages;
 mod relay;
@@ -33,9 +34,13 @@ mod workload;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moonpool_rpc::{RpcConfig, RpcHandle};
-use moonpool_sim::{Chaos, ChaosMode, SimContext, SimProviders, SimulationBuilder, TimeProvider};
+use moonpool_rpc::{RpcConfig, RpcDriver, RpcHandle};
+use moonpool_sim::{
+    Chaos, ChaosMode, SimContext, SimProviders, SimulationBuilder, SimulationError,
+    SimulationResult, TimeProvider,
+};
 
+pub use corruption::{CorruptingStream, CorruptingWire};
 pub use faults::CrashAfterReceiptInjector;
 pub use relay::RelayProcess;
 pub use server::ServerProcess;
@@ -56,6 +61,21 @@ pub fn rpc_config() -> RpcConfig {
         handshake_timeout: Duration::from_secs(2),
         ..RpcConfig::default()
     }
+}
+
+/// Start a listening runtime, over the corrupting wire when asked.
+async fn listen(
+    ctx: &SimContext,
+    corrupt_wire: bool,
+) -> SimulationResult<(
+    RpcDriver<SimProviders, CorruptingWire>,
+    RpcHandle<SimProviders>,
+)> {
+    let address = format!("{}:{RPC_PORT}", ctx.my_ip());
+    let wire = CorruptingWire::new(ctx.random().clone(), corrupt_wire);
+    RpcDriver::listen_with(ctx.providers().clone(), &address, rpc_config(), wire)
+        .await
+        .map_err(|error| SimulationError::IoError(format!("rpc listen: {error}")))
 }
 
 /// Publish a runtime's counters to the board every 100 ms of sim time.
@@ -81,8 +101,11 @@ async fn report_stats(
 pub struct RunRecord {
     /// One line per operation: id, operation, outcome class.
     pub history: Vec<String>,
-    /// Checksum mismatches observed by any runtime.
+    /// Checksum mismatches observed by any runtime (scripted openings
+    /// included).
     pub checksum_failures: u64,
+    /// Checksum mismatches on established sessions (network bit flips).
+    pub established_checksum_failures: u64,
     /// Protocol violations observed by any runtime.
     pub protocol_violations: u64,
 }
@@ -95,9 +118,10 @@ pub type Observations = Arc<Mutex<Vec<RunRecord>>>;
 #[must_use]
 pub fn campaign(config: WorkloadConfig, observations: &Observations) -> SimulationBuilder {
     let observations = Arc::clone(observations);
+    let corrupt_wire = config.corrupt_wire;
     SimulationBuilder::new()
-        .processes(1, || Box::new(ServerProcess))
-        .processes(1, || Box::new(RelayProcess))
+        .processes(1, move || Box::new(ServerProcess { corrupt_wire }))
+        .processes(1, move || Box::new(RelayProcess { corrupt_wire }))
         .workload_factory(move || {
             Box::new(FoundationsWorkload::new(
                 config.clone(),

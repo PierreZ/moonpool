@@ -12,8 +12,8 @@ use moonpool_rpc::{
     Wire,
 };
 use moonpool_sim::{
-    NetworkProvider, RandomProvider, SimContext, SimProviders, SimulationResult, TimeProvider,
-    Workload, assert_always, assert_sometimes,
+    NetworkProvider, RandomProvider, SimContext, SimProviders, SimulationError, SimulationResult,
+    TimeProvider, Workload, assert_always, assert_sometimes,
 };
 
 use super::messages::{
@@ -21,7 +21,7 @@ use super::messages::{
     Probe, Relay, RelayOutcome, Slow, WrongMethod,
 };
 use super::state::{Board, EPHEMERAL_KEY, Ledger, RELAY_REF_KEY, SERVER_REFS_KEY, ServerRefs};
-use super::{CALL_TIMEOUT, Observations, RPC_PORT, RunRecord, rpc_config};
+use super::{CALL_TIMEOUT, CorruptingWire, Observations, RPC_PORT, RunRecord, rpc_config};
 
 /// One operation of the workload's alphabet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,10 +44,13 @@ pub enum Op {
     Crash,
     /// Call a reference from an earlier server incarnation.
     Stale,
+    /// Many concurrent echo calls pipelined on one session, so corruption
+    /// or a disconnect meets calls already in flight.
+    Burst,
 }
 
 impl Op {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Echo,
         Self::Relay,
         Self::SlowCancel,
@@ -56,6 +59,7 @@ impl Op {
         Self::Malformed,
         Self::Crash,
         Self::Stale,
+        Self::Burst,
     ];
 }
 
@@ -65,9 +69,13 @@ pub struct WorkloadConfig {
     /// Operations per run.
     pub operations: usize,
     /// Relative weight per [`Op`], in `Op::ALL` order; zero disables one.
-    pub weights: [u32; 8],
+    pub weights: [u32; 9],
     /// Pause between operations, in milliseconds (half-open range).
     pub gap_ms: (u64, u64),
+    /// Run every session over [`CorruptingWire`], a BUGGIFY site that
+    /// corrupts live traffic; off when only the network's own faults may
+    /// corrupt bytes.
+    pub corrupt_wire: bool,
 }
 
 impl WorkloadConfig {
@@ -76,8 +84,9 @@ impl WorkloadConfig {
     pub fn campaign() -> Self {
         Self {
             operations: 60,
-            weights: [30, 20, 8, 10, 8, 6, 2, 6],
+            weights: [30, 20, 8, 10, 8, 6, 2, 6, 10],
             gap_ms: (20, 250),
+            corrupt_wire: true,
         }
     }
 
@@ -86,8 +95,9 @@ impl WorkloadConfig {
     pub fn traffic() -> Self {
         Self {
             operations: 400,
-            weights: [3, 1, 0, 0, 0, 0, 0, 0],
+            weights: [3, 1, 0, 0, 0, 0, 0, 0, 0],
             gap_ms: (1, 10),
+            corrupt_wire: false,
         }
     }
 }
@@ -219,6 +229,68 @@ impl FoundationsWorkload {
             Op::Mismatch => self.mismatch(id, &latest.echo, ctx, rpc).await,
             Op::Malformed => self.malformed(id, ctx).await,
             Op::Crash => self.crash(id, &latest.crash, rpc).await,
+            Op::Burst => self.burst(id, &latest.echo, ctx, rpc).await,
+        }
+    }
+
+    /// Transmitted calls this runtime failed because it caught corruption
+    /// on their session.
+    fn corruption_seen(rpc: &RpcHandle<SimProviders>) -> u64 {
+        rpc.stats()
+            .map_or(0, |stats| stats.calls_failed_by_corruption)
+    }
+
+    /// A transmitted call that failed as maybe-executed because its own
+    /// session carried corruption: the ambiguity corruption must produce.
+    fn note_corruption<T>(
+        rpc: &RpcHandle<SimProviders>,
+        before: u64,
+        outcome: &Result<T, RpcError>,
+    ) {
+        if let Err(error) = outcome
+            && *error.reason() == ErrorReason::Disconnected
+            && error.execution() == Execution::MaybeExecuted
+            && Self::corruption_seen(rpc) > before
+        {
+            assert_sometimes!(true, "rpc corruption failed an in-flight call ambiguously");
+        }
+    }
+
+    async fn burst(
+        &mut self,
+        first_id: u64,
+        bytes: &[u8],
+        ctx: &SimContext,
+        rpc: &RpcHandle<SimProviders>,
+    ) {
+        let Ok(echo) = ServiceRef::<Echo>::from_bytes(bytes) else {
+            return;
+        };
+        let count = ctx.random().random_range(8..32u64);
+        self.next_id = first_id + count - 1;
+        let client = echo.bind(rpc);
+        let corruption_before = Self::corruption_seen(rpc);
+        let calls = (first_id..first_id + count).map(|id| {
+            let client = client.clone();
+            async move {
+                (
+                    id,
+                    client
+                        .try_get_reply_within(&Probe::new(id), CALL_TIMEOUT)
+                        .await,
+                )
+            }
+        });
+        let outcomes = futures::future::join_all(calls).await;
+        for (id, outcome) in outcomes {
+            if let Ok(reply) = &outcome {
+                assert_always!(
+                    reply.id == id && reply.text == Probe::new(id).text,
+                    "a reply matches its request"
+                );
+            }
+            Self::note_corruption(rpc, corruption_before, &outcome);
+            self.record(id, Op::Burst, classify(&outcome), &describe(&outcome));
         }
     }
 
@@ -226,6 +298,7 @@ impl FoundationsWorkload {
         let Ok(echo) = ServiceRef::<Echo>::from_bytes(bytes) else {
             return;
         };
+        let corruption_before = Self::corruption_seen(rpc);
         let outcome = echo
             .bind(rpc)
             .try_get_reply_within(&Probe::new(id), CALL_TIMEOUT)
@@ -237,6 +310,7 @@ impl FoundationsWorkload {
             );
             assert_sometimes!(true, "rpc typed call succeeded");
         }
+        Self::note_corruption(rpc, corruption_before, &outcome);
         if op == Op::Stale {
             assert_always!(
                 outcome.is_err(),
@@ -444,6 +518,11 @@ impl FoundationsWorkload {
             .unwrap_or(false);
         if closed {
             assert_sometimes!(true, "rpc malformed input closed the session");
+            if kind == "checksum" {
+                // A corrupt opening frame, before any handshake: its own gate,
+                // distinct from corruption of live traffic.
+                assert_sometimes!(true, "rpc scripted corrupt frame closed the session");
+            }
         }
         self.history
             .push(format!("{id} Malformed {kind} closed={closed}"));
@@ -460,6 +539,7 @@ fn malformed_input(kind: u64, id: u64) -> (&'static str, Vec<u8>) {
                 max_version,
                 incarnation: Incarnation::from_raw(u128::from(id)),
                 features: 0,
+                max_frame_bytes: 1024,
             }),
             1024,
         )
@@ -501,13 +581,16 @@ impl Workload for FoundationsWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), rpc_config());
+        let wire = CorruptingWire::new(ctx.random().clone(), self.config.corrupt_wire);
+        let (driver, rpc) =
+            RpcDriver::client_only_with(ctx.providers().clone(), rpc_config(), wire)
+                .map_err(|error| SimulationError::InvalidState(format!("rpc config: {error}")))?;
         let probe = rpc.probe();
         if let Some(probe) = &probe {
             Board::of(ctx.state()).register_probe("workload", probe.clone());
         }
         let result = moonpool_sim::select! {
-            () = driver.run() => Ok(()),
+            error = driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             result = self.drive(ctx, &rpc) => result,
         };
         // The driver future was dropped with the select: the runtime, its
@@ -544,9 +627,12 @@ impl Workload for FoundationsWorkload {
             tracing::debug!(id, ?op, ?class, receipts, "rpc call judged");
         }
         let totals = Board::of(ctx.state()).totals();
+        // Corruption of live traffic on an established session, which only
+        // the network's bit flips produce (the scripted corrupt frame never
+        // gets past the handshake).
         assert_sometimes!(
-            totals.checksum_failures > 0,
-            "rpc checksum mismatch observed"
+            totals.established_checksum_failures > 0,
+            "rpc checksum mismatch on an established session"
         );
         assert_sometimes!(
             totals.version_rejections > 0,
@@ -558,6 +644,7 @@ impl Workload for FoundationsWorkload {
             .push(RunRecord {
                 history: std::mem::take(&mut self.history),
                 checksum_failures: totals.checksum_failures,
+                established_checksum_failures: totals.established_checksum_failures,
                 protocol_violations: totals.protocol_violations,
             });
         Ok(())

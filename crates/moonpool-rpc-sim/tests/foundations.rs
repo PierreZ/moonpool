@@ -69,7 +69,9 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc typed call succeeded",
         "rpc process-to-process call succeeded",
         "rpc malformed input closed the session",
-        "rpc checksum mismatch observed",
+        "rpc scripted corrupt frame closed the session",
+        "rpc checksum mismatch on an established session",
+        "rpc corruption failed an in-flight call ambiguously",
         "rpc unsupported protocol version refused",
         "rpc destroyed endpoint rejected a later call",
         "rpc contract mismatch rejected before decode",
@@ -124,11 +126,14 @@ fn network_bit_flips_are_caught_by_frame_checksums() {
     assert_clean(&report);
     let checksum_failures: u64 = records(&observations)
         .iter()
-        .map(|record| record.checksum_failures)
+        .map(|record| record.established_checksum_failures)
         .sum();
     assert!(
         checksum_failures > 0,
         "no bit flip hit an RPC frame in the seed budget"
     );
-    assert!(fired(&report, "rpc checksum mismatch observed"));
+    assert!(fired(
+        &report,
+        "rpc checksum mismatch on an established session"
+    ));
 }

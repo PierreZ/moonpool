@@ -5,7 +5,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
 use async_trait::async_trait;
-use moonpool_rpc::{AccessClass, Execution, IncomingRequest, RpcDriver, RpcHandle, ServiceRef};
+use moonpool_rpc::{AccessClass, Execution, IncomingRequest, RpcHandle, ServiceRef};
 use moonpool_sim::{
     Process, SimContext, SimProviders, SimulationError, SimulationResult, StateHandle,
     assert_always,
@@ -13,10 +13,13 @@ use moonpool_sim::{
 
 use super::messages::{Echo, Probe, Relay, RelayOutcome, Relayed};
 use super::state::{Board, RELAY_REF_KEY, SERVER_REFS_KEY, ServerRefs, bump};
-use super::{CALL_TIMEOUT, RPC_PORT, report_stats, rpc_config};
+use super::{CALL_TIMEOUT, listen, report_stats};
 
 /// The relay role.
-pub struct RelayProcess;
+pub struct RelayProcess {
+    /// Run sessions over the corrupting wire.
+    pub corrupt_wire: bool,
+}
 
 #[async_trait]
 impl Process for RelayProcess {
@@ -29,10 +32,7 @@ impl Process for RelayProcess {
         let boot = bump(&state, "rpc.relay.boots");
         let board = Board::of(&state);
         let label = format!("relay#{boot}");
-        let address = format!("{}:{RPC_PORT}", ctx.my_ip());
-        let (driver, rpc) = RpcDriver::listen(ctx.providers().clone(), &address, rpc_config())
-            .await
-            .map_err(|error| SimulationError::IoError(format!("rpc listen: {error}")))?;
+        let (driver, rpc) = listen(ctx, self.corrupt_wire).await?;
         if let Some(probe) = rpc.probe() {
             board.register_probe(&label, probe);
         }
@@ -55,7 +55,7 @@ impl Process for RelayProcess {
         };
         let report = report_stats(&rpc, &board, &label, ctx);
         moonpool_sim::select! {
-            () = driver.run() => Ok(()),
+            error = driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             () = serve => Ok(()),
             () = report => Ok(()),
             () = ctx.shutdown().cancelled() => Ok(()),

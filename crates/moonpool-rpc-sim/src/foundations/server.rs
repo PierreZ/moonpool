@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_rpc::{AccessClass, IncomingRequest, RequestStream, RpcDriver, RpcHandle};
+use moonpool_rpc::{AccessClass, IncomingRequest, RequestStream, RpcHandle};
 use moonpool_sim::{
     Process, RandomProvider, SimContext, SimProviders, SimulationError, SimulationResult,
     StateHandle, TimeProvider, assert_always, assert_sometimes,
@@ -15,10 +15,13 @@ use super::state::{
     Board, CRASH_REQUESTS_KEY, EPHEMERAL_KEY, Ledger, SERVER_BOOTS_KEY, SERVER_REFS_KEY,
     ServerRefs, bump,
 };
-use super::{RPC_PORT, report_stats, rpc_config};
+use super::{listen, report_stats};
 
 /// The server role: one RPC runtime per boot, a fresh incarnation each time.
-pub struct ServerProcess;
+pub struct ServerProcess {
+    /// Run sessions over the corrupting wire.
+    pub corrupt_wire: bool,
+}
 
 #[async_trait]
 impl Process for ServerProcess {
@@ -41,10 +44,7 @@ impl Process for ServerProcess {
             tracing::debug!(%earlier, "earlier server incarnation released");
         }
 
-        let address = format!("{}:{RPC_PORT}", ctx.my_ip());
-        let (driver, rpc) = RpcDriver::listen(ctx.providers().clone(), &address, rpc_config())
-            .await
-            .map_err(|error| SimulationError::IoError(format!("rpc listen: {error}")))?;
+        let (driver, rpc) = listen(ctx, self.corrupt_wire).await?;
         if let Some(probe) = rpc.probe() {
             board.register_probe(&label, probe);
         }
@@ -82,7 +82,7 @@ impl Process for ServerProcess {
             );
         };
         moonpool_sim::select! {
-            () = driver.run() => Ok(()),
+            error = driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             () = serve => Ok(()),
             () = ctx.shutdown().cancelled() => Ok(()),
         }
