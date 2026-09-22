@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 /// Maximum number of tracked assertion slots.
-pub const MAX_ASSERTION_SLOTS: usize = 512;
+pub const MAX_ASSERTION_SLOTS: usize = 2048;
 
 /// Maximum length of the assertion message stored in a slot.
 const SLOT_MSG_LEN: usize = 64;
@@ -95,16 +95,8 @@ pub enum AssertCmp {
 /// All fields are accessed via raw pointer arithmetic on the assertion region.
 #[repr(C)]
 pub struct AssertionSlot {
-    /// FNV-1a hash of the assertion message (u32).
-    pub msg_hash: u32,
-    /// The kind of assertion (`AssertKind` as u8).
-    pub kind: u8,
-    /// Whether this assertion must be hit (1) or not (0).
-    pub must_hit: u8,
-    /// Whether to maximize (1) or minimize (0) the watermark value.
-    pub maximize: u8,
-    /// Whether this assertion has made its first discovery (0 = no, 1 = yes).
-    pub discovered: u8,
+    /// 64-bit FNV-1a hash of the assertion message — the slot's identity.
+    pub msg_hash: u64,
     /// Total number of times this assertion passed.
     pub pass_count: u64,
     /// Total number of times this assertion failed.
@@ -115,6 +107,14 @@ pub struct AssertionSlot {
     pub discovery_watermark: i64,
     /// Bounded bloom bitmap of partial combinations seen by `sometimes_all`.
     pub combination_bits: u64,
+    /// The kind of assertion (`AssertKind` as u8).
+    pub kind: u8,
+    /// Whether this assertion must be hit (1) or not (0).
+    pub must_hit: u8,
+    /// Whether to maximize (1) or minimize (0) the watermark value.
+    pub maximize: u8,
+    /// Whether this assertion has made its first discovery (0 = no, 1 = yes).
+    pub discovered: u8,
     /// Frontier: number of simultaneously true bools (for `BooleanSometimesAll`).
     pub frontier: u8,
     /// Number of propositions in a `BooleanSometimesAll` assertion.
@@ -122,7 +122,7 @@ pub struct AssertionSlot {
     /// Publication state: zero = unused, one = initializing, two = ready.
     published: u8,
     /// Padding for alignment.
-    pad: [u8; 5],
+    pad: [u8; 1],
     /// Assertion message string (null-terminated).
     pub msg: [u8; SLOT_MSG_LEN],
 }
@@ -140,13 +140,19 @@ impl AssertionSlot {
     }
 }
 
-/// FNV-1a hash of a message string to a stable u32.
+/// 64-bit FNV-1a hash of a message string — the stable identity of an
+/// assertion site.
+///
+/// Two messages that hash alike share one slot and silently merge their
+/// accounting, so the hash is 64 bits wide: across a full table of
+/// [`MAX_ASSERTION_SLOTS`] sites the birthday bound puts the chance of any
+/// collision near 10⁻¹³, where 32 bits put it near 10⁻³.
 #[must_use]
-pub fn msg_hash(msg: &str) -> u32 {
-    let mut h: u32 = 0x811c_9dc5;
+pub fn msg_hash(msg: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in msg.bytes() {
-        h ^= u32::from(b);
-        h = h.wrapping_mul(0x0100_0193);
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
 }
@@ -168,8 +174,8 @@ fn boolean_combination_fingerprint(named_bools: &[(&str, bool)]) -> u64 {
 }
 
 /// Mix a site and proposition fingerprint into one semantic state id.
-fn boolean_combination_state_id(site_hash: u32, fingerprint: u64) -> u64 {
-    fingerprint ^ u64::from(site_hash).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+fn boolean_combination_state_id(site_hash: u64, fingerprint: u64) -> u64 {
+    fingerprint ^ site_hash.wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
 /// Update a monotonic watermark, returning whether this call advanced it.
@@ -196,7 +202,7 @@ fn update_watermark(watermark: &AtomicI64, value: i64, maximize: bool) -> bool {
 /// `ASSERTION_TABLE_MEM_SIZE` bytes.
 unsafe fn find_or_alloc_slot(
     table_ptr: *mut u8,
-    hash: u32,
+    hash: u64,
     kind: AssertKind,
     must_hit: u8,
     maximize: u8,
@@ -213,7 +219,7 @@ unsafe fn find_or_alloc_slot(
             let slot = base.add(i);
             let published = &*std::ptr::addr_of!((*slot).published).cast::<AtomicU8>();
             let state = published.load(Ordering::Acquire);
-            let h = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU32>();
+            let h = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU64>();
             if state == SLOT_READY && h.load(Ordering::Relaxed) == hash {
                 return (slot, i);
             }
@@ -237,7 +243,7 @@ unsafe fn find_or_alloc_slot(
         }
 
         let slot = base.add(new_idx);
-        let slot_hash = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU32>();
+        let slot_hash = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU64>();
         let published = &*std::ptr::addr_of!((*slot).published).cast::<AtomicU8>();
         slot_hash.store(hash, Ordering::Relaxed);
         published.store(SLOT_INITIALIZING, Ordering::Release);
@@ -255,7 +261,7 @@ unsafe fn find_or_alloc_slot(
             if state == 0 {
                 continue;
             }
-            let existing_hash = &*std::ptr::addr_of!((*existing).msg_hash).cast::<AtomicU32>();
+            let existing_hash = &*std::ptr::addr_of!((*existing).msg_hash).cast::<AtomicU64>();
             if existing_hash.load(Ordering::Relaxed) != hash {
                 continue;
             }
@@ -286,7 +292,7 @@ unsafe fn find_or_alloc_slot(
         (*slot).combination_bits = 0;
         (*slot).frontier = 0;
         (*slot).frontier_target = 0;
-        (*slot).pad = [0; 5];
+        (*slot).pad = [0; 1];
         (*slot).msg = msg_buf;
 
         published.store(SLOT_READY, Ordering::Release);
@@ -346,7 +352,7 @@ pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &s
                     {
                         crate::hooks::on_discovery(
                             crate::hooks::DiscoveryKind::SometimesPass,
-                            u64::from(hash),
+                            hash,
                         );
                     }
                 } else {
@@ -436,10 +442,7 @@ pub fn assertion_numeric(
         if kind == AssertKind::NumericSometimes {
             let fw = &*(&raw const (*slot).discovery_watermark).cast::<AtomicI64>();
             if update_watermark(fw, left.saturating_sub(right), maximize) {
-                crate::hooks::on_discovery(
-                    crate::hooks::DiscoveryKind::WatermarkImprovement,
-                    u64::from(hash),
-                );
+                crate::hooks::on_discovery(crate::hooks::DiscoveryKind::WatermarkImprovement, hash);
             }
         }
     }
@@ -497,10 +500,7 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
 
         let fr = &*(&raw const (*slot).frontier).cast::<AtomicU8>();
         if true_count > fr.fetch_max(true_count, Ordering::Relaxed) {
-            crate::hooks::on_discovery(
-                crate::hooks::DiscoveryKind::FrontierAdvance,
-                u64::from(hash),
-            );
+            crate::hooks::on_discovery(crate::hooks::DiscoveryKind::FrontierAdvance, hash);
         } else if true_count > 0 && new_combination {
             crate::hooks::on_discovery(
                 crate::hooks::DiscoveryKind::BooleanCombination,
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn test_msg_hash_no_collision() {
         let names = ["a", "b", "c", "timeout", "connect", "retry"];
-        let hashes: Vec<u32> = names.iter().map(|n| msg_hash(n)).collect();
+        let hashes: Vec<u64> = names.iter().map(|n| msg_hash(n)).collect();
         for i in 0..hashes.len() {
             for j in (i + 1)..hashes.len() {
                 assert_ne!(
@@ -659,10 +659,10 @@ mod tests {
     #[test]
     fn test_slot_size_stable() {
         // Verify AssertionSlot size for shared memory layout stability.
-        // msg_hash(4) + kind(1) + must_hit(1) + maximize(1) + discovered(1) +
-        // pass_count(8) + fail_count(8) + watermark(8) + discovery_watermark(8) +
-        // combination_bits(8) + frontier(1) + frontier_target(1) + published(1) +
-        // _pad(5) + msg(64) = 120
+        // msg_hash(8) + pass_count(8) + fail_count(8) + watermark(8) +
+        // discovery_watermark(8) + combination_bits(8) + kind(1) + must_hit(1) +
+        // maximize(1) + discovered(1) + frontier(1) + frontier_target(1) +
+        // published(1) + _pad(1) + msg(64) = 120
         assert_eq!(std::mem::size_of::<AssertionSlot>(), 120);
     }
 
