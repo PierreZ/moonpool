@@ -291,141 +291,74 @@ impl<T: TimeProvider> std::fmt::Debug for SimTimer<T> {
     }
 }
 
-/// A labelled counter family. Resolve a label combination with
-/// [`with_label_values`](Self::with_label_values).
-#[derive(Clone)]
-pub struct SimCounterVec {
-    inner: IntCounterVec,
-    name: String,
-    labels: Vec<String>,
-    recorder: SeriesRecorder,
-}
-
-impl SimCounterVec {
-    pub(crate) fn new(
-        inner: IntCounterVec,
-        name: String,
-        labels: Vec<String>,
-        recorder: SeriesRecorder,
-    ) -> Self {
-        Self {
-            inner,
-            name,
-            labels,
-            recorder,
+/// Define a labelled family wrapper whose children are instrumented handles.
+macro_rules! labelled_family {
+    ($(#[$doc:meta])* $name:ident($inner:ty) -> $child:ident, $child_doc:literal) => {
+        $(#[$doc])*
+        #[derive(Clone)]
+        pub struct $name {
+            inner: $inner,
+            name: String,
+            labels: Vec<String>,
+            recorder: SeriesRecorder,
         }
-    }
 
-    /// Get the counter for one label combination.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `values` does not match the family's label count.
-    pub fn with_label_values(&self, values: &[&str]) -> prometheus::Result<SimCounter> {
-        let child = self.inner.get_metric_with_label_values(values)?;
-        Ok(SimCounter::new(
-            child,
-            series_key(&self.name, &self.labels, values),
-            self.recorder.clone(),
-        ))
-    }
+        impl $name {
+            pub(crate) fn new(
+                inner: $inner,
+                name: String,
+                labels: Vec<String>,
+                recorder: SeriesRecorder,
+            ) -> Self {
+                Self {
+                    inner,
+                    name,
+                    labels,
+                    recorder,
+                }
+            }
 
-    /// The wrapped `prometheus` family.
-    #[must_use]
-    pub fn inner(&self) -> &IntCounterVec {
-        &self.inner
-    }
-}
+            #[doc = $child_doc]
+            ///
+            /// # Errors
+            ///
+            /// Returns an error if `values` does not match the family's label count.
+            pub fn with_label_values(&self, values: &[&str]) -> prometheus::Result<$child> {
+                let child = self.inner.get_metric_with_label_values(values)?;
+                Ok($child::new(
+                    child,
+                    series_key(&self.name, &self.labels, values),
+                    self.recorder.clone(),
+                ))
+            }
 
-/// A labelled gauge family.
-#[derive(Clone)]
-pub struct SimGaugeVec {
-    inner: GaugeVec,
-    name: String,
-    labels: Vec<String>,
-    recorder: SeriesRecorder,
-}
-
-impl SimGaugeVec {
-    pub(crate) fn new(
-        inner: GaugeVec,
-        name: String,
-        labels: Vec<String>,
-        recorder: SeriesRecorder,
-    ) -> Self {
-        Self {
-            inner,
-            name,
-            labels,
-            recorder,
+            /// The wrapped `prometheus` family.
+            #[must_use]
+            pub fn inner(&self) -> &$inner {
+                &self.inner
+            }
         }
-    }
-
-    /// Get the gauge for one label combination.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `values` does not match the family's label count.
-    pub fn with_label_values(&self, values: &[&str]) -> prometheus::Result<SimGauge> {
-        let child = self.inner.get_metric_with_label_values(values)?;
-        Ok(SimGauge::new(
-            child,
-            series_key(&self.name, &self.labels, values),
-            self.recorder.clone(),
-        ))
-    }
-
-    /// The wrapped `prometheus` family.
-    #[must_use]
-    pub fn inner(&self) -> &GaugeVec {
-        &self.inner
-    }
+    };
 }
 
-/// A labelled histogram family.
-#[derive(Clone)]
-pub struct SimHistogramVec {
-    inner: HistogramVec,
-    name: String,
-    labels: Vec<String>,
-    recorder: SeriesRecorder,
-}
+labelled_family!(
+    /// A labelled counter family. Resolve a label combination with
+    /// [`with_label_values`](Self::with_label_values).
+    SimCounterVec(IntCounterVec) -> SimCounter,
+    "Get the counter for one label combination."
+);
 
-impl SimHistogramVec {
-    pub(crate) fn new(
-        inner: HistogramVec,
-        name: String,
-        labels: Vec<String>,
-        recorder: SeriesRecorder,
-    ) -> Self {
-        Self {
-            inner,
-            name,
-            labels,
-            recorder,
-        }
-    }
+labelled_family!(
+    /// A labelled gauge family.
+    SimGaugeVec(GaugeVec) -> SimGauge,
+    "Get the gauge for one label combination."
+);
 
-    /// Get the histogram for one label combination.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `values` does not match the family's label count.
-    pub fn with_label_values(&self, values: &[&str]) -> prometheus::Result<SimHistogram> {
-        let child = self.inner.get_metric_with_label_values(values)?;
-        Ok(SimHistogram::new(
-            child,
-            series_key(&self.name, &self.labels, values),
-            self.recorder.clone(),
-        ))
-    }
-
-    /// The wrapped `prometheus` family.
-    #[must_use]
-    pub fn inner(&self) -> &HistogramVec {
-        &self.inner
-    }
-}
+labelled_family!(
+    /// A labelled histogram family.
+    SimHistogramVec(HistogramVec) -> SimHistogram,
+    "Get the histogram for one label combination."
+);
 
 /// Build the series identity for a labelled child: `name{key="value",...}`.
 ///

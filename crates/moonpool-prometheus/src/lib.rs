@@ -56,6 +56,7 @@
 
 mod handles;
 
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -63,6 +64,7 @@ use moonpool_core::metrics::{
     HistogramValue, MetricClock, MetricPoint, MetricSample, MetricValue, MetricsSource,
     SeriesRecorder,
 };
+use prometheus::core::Collector;
 use prometheus::{
     Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, Opts,
     Registry,
@@ -72,17 +74,6 @@ pub use handles::{
     SimCounter, SimCounterVec, SimGauge, SimGaugeVec, SimHistogram, SimHistogramVec, SimTimer,
 };
 
-/// A metric already registered, kept so a rebooted process can look it up.
-#[derive(Clone)]
-enum Cached {
-    Counter(IntCounter),
-    Gauge(Gauge),
-    Histogram(Histogram),
-    CounterVec(IntCounterVec, Vec<String>),
-    GaugeVec(GaugeVec, Vec<String>),
-    HistogramVec(HistogramVec, Vec<String>),
-}
-
 /// A `prometheus::Registry` the simulation can report on.
 ///
 /// One per simulated node — see
@@ -91,7 +82,10 @@ enum Cached {
 pub struct PrometheusSource {
     registry: Registry,
     recorder: SeriesRecorder,
-    cache: Mutex<BTreeMap<String, Cached>>,
+    /// Every metric registered through this source, by name, kept so a
+    /// rebooted process can look it up. A family is cached with its label
+    /// names, as `(family, labels)`.
+    cache: Mutex<BTreeMap<String, Box<dyn Any + Send>>>,
 }
 
 impl Default for PrometheusSource {
@@ -143,19 +137,14 @@ impl PrometheusSource {
     /// Returns an error if `name` is not a valid metric name, or if it is
     /// already registered as a different metric kind.
     pub fn counter(&self, name: &str, help: &str) -> prometheus::Result<SimCounter> {
-        let metric = self.get_or_register(name, || {
-            let counter = IntCounter::with_opts(Opts::new(name, help))?;
-            self.registry.register(Box::new(counter.clone()))?;
-            Ok(Cached::Counter(counter))
+        let counter = self.get_or_register(name, "counter", || {
+            self.register(IntCounter::with_opts(Opts::new(name, help))?)
         })?;
-        match metric {
-            Cached::Counter(counter) => Ok(SimCounter::new(
-                counter,
-                name.to_owned(),
-                self.recorder.clone(),
-            )),
-            _ => Err(kind_clash(name, "counter")),
-        }
+        Ok(SimCounter::new(
+            counter,
+            name.to_owned(),
+            self.recorder.clone(),
+        ))
     }
 
     /// Get or register a gauge.
@@ -164,17 +153,10 @@ impl PrometheusSource {
     ///
     /// As [`counter`](Self::counter).
     pub fn gauge(&self, name: &str, help: &str) -> prometheus::Result<SimGauge> {
-        let metric = self.get_or_register(name, || {
-            let gauge = Gauge::with_opts(Opts::new(name, help))?;
-            self.registry.register(Box::new(gauge.clone()))?;
-            Ok(Cached::Gauge(gauge))
+        let gauge = self.get_or_register(name, "gauge", || {
+            self.register(Gauge::with_opts(Opts::new(name, help))?)
         })?;
-        match metric {
-            Cached::Gauge(gauge) => {
-                Ok(SimGauge::new(gauge, name.to_owned(), self.recorder.clone()))
-            }
-            _ => Err(kind_clash(name, "gauge")),
-        }
+        Ok(SimGauge::new(gauge, name.to_owned(), self.recorder.clone()))
     }
 
     /// Get or register a histogram with Prometheus' default buckets.
@@ -213,19 +195,10 @@ impl PrometheusSource {
     /// As [`histogram_with_buckets`](Self::histogram_with_buckets).
     pub fn histogram_with_opts(&self, opts: HistogramOpts) -> prometheus::Result<SimHistogram> {
         let name = opts.common_opts.name.clone();
-        let metric = self.get_or_register(&name, || {
-            let histogram = Histogram::with_opts(opts)?;
-            self.registry.register(Box::new(histogram.clone()))?;
-            Ok(Cached::Histogram(histogram))
+        let histogram = self.get_or_register(&name, "histogram", || {
+            self.register(Histogram::with_opts(opts)?)
         })?;
-        match metric {
-            Cached::Histogram(histogram) => Ok(SimHistogram::new(
-                histogram,
-                name.clone(),
-                self.recorder.clone(),
-            )),
-            _ => Err(kind_clash(&name, "histogram")),
-        }
+        Ok(SimHistogram::new(histogram, name, self.recorder.clone()))
     }
 
     /// Get or register a labelled counter family.
@@ -239,21 +212,16 @@ impl PrometheusSource {
         help: &str,
         labels: &[&str],
     ) -> prometheus::Result<SimCounterVec> {
-        let owned: Vec<String> = labels.iter().map(|l| (*l).to_owned()).collect();
-        let metric = self.get_or_register(name, || {
+        let (family, labels) = self.get_or_register(name, "counter vec", || {
             let family = IntCounterVec::new(Opts::new(name, help), labels)?;
-            self.registry.register(Box::new(family.clone()))?;
-            Ok(Cached::CounterVec(family, owned))
+            Ok((self.register(family)?, owned(labels)))
         })?;
-        match metric {
-            Cached::CounterVec(family, labels) => Ok(SimCounterVec::new(
-                family,
-                name.to_owned(),
-                labels,
-                self.recorder.clone(),
-            )),
-            _ => Err(kind_clash(name, "counter vec")),
-        }
+        Ok(SimCounterVec::new(
+            family,
+            name.to_owned(),
+            labels,
+            self.recorder.clone(),
+        ))
     }
 
     /// Get or register a labelled gauge family.
@@ -267,21 +235,16 @@ impl PrometheusSource {
         help: &str,
         labels: &[&str],
     ) -> prometheus::Result<SimGaugeVec> {
-        let owned: Vec<String> = labels.iter().map(|l| (*l).to_owned()).collect();
-        let metric = self.get_or_register(name, || {
+        let (family, labels) = self.get_or_register(name, "gauge vec", || {
             let family = GaugeVec::new(Opts::new(name, help), labels)?;
-            self.registry.register(Box::new(family.clone()))?;
-            Ok(Cached::GaugeVec(family, owned))
+            Ok((self.register(family)?, owned(labels)))
         })?;
-        match metric {
-            Cached::GaugeVec(family, labels) => Ok(SimGaugeVec::new(
-                family,
-                name.to_owned(),
-                labels,
-                self.recorder.clone(),
-            )),
-            _ => Err(kind_clash(name, "gauge vec")),
-        }
+        Ok(SimGaugeVec::new(
+            family,
+            name.to_owned(),
+            labels,
+            self.recorder.clone(),
+        ))
     }
 
     /// Get or register a labelled histogram family.
@@ -295,41 +258,48 @@ impl PrometheusSource {
         labels: &[&str],
     ) -> prometheus::Result<SimHistogramVec> {
         let name = opts.common_opts.name.clone();
-        let owned: Vec<String> = labels.iter().map(|l| (*l).to_owned()).collect();
-        let metric = self.get_or_register(&name, || {
+        let (family, labels) = self.get_or_register(&name, "histogram vec", || {
             let family = HistogramVec::new(opts, labels)?;
-            self.registry.register(Box::new(family.clone()))?;
-            Ok(Cached::HistogramVec(family, owned))
+            Ok((self.register(family)?, owned(labels)))
         })?;
-        match metric {
-            Cached::HistogramVec(family, labels) => Ok(SimHistogramVec::new(
-                family,
-                name.clone(),
-                labels,
-                self.recorder.clone(),
-            )),
-            _ => Err(kind_clash(&name, "histogram vec")),
-        }
+        Ok(SimHistogramVec::new(
+            family,
+            name,
+            labels,
+            self.recorder.clone(),
+        ))
+    }
+
+    /// Register `collector` with the wrapped registry and hand it back.
+    fn register<C: Collector + Clone + 'static>(&self, collector: C) -> prometheus::Result<C> {
+        self.registry.register(Box::new(collector.clone()))?;
+        Ok(collector)
     }
 
     /// Look a metric up by name, registering it on first use.
     ///
     /// The cache is what makes reboots work: a process that boots again finds
-    /// its metrics already registered rather than hitting `AlreadyReg`.
-    fn get_or_register(
+    /// its metrics already registered rather than hitting `AlreadyReg`. A name
+    /// cached as a different type than `M` is a kind clash, reported as
+    /// wanting a `kind`.
+    fn get_or_register<M: Clone + Send + 'static>(
         &self,
         name: &str,
-        create: impl FnOnce() -> prometheus::Result<Cached>,
-    ) -> prometheus::Result<Cached> {
+        kind: &str,
+        create: impl FnOnce() -> prometheus::Result<M>,
+    ) -> prometheus::Result<M> {
         let mut cache = self
             .cache
             .lock()
             .expect("Mutex poisoned: prior task panicked");
         if let Some(existing) = cache.get(name) {
-            return Ok(existing.clone());
+            return existing
+                .downcast_ref::<M>()
+                .cloned()
+                .ok_or_else(|| kind_clash(name, kind));
         }
         let created = create()?;
-        cache.insert(name.to_owned(), created.clone());
+        cache.insert(name.to_owned(), Box::new(created.clone()));
         Ok(created)
     }
 }
@@ -420,6 +390,11 @@ fn read_value(
             }))
         }
     }
+}
+
+/// Owned copies of a family's label names.
+fn owned(labels: &[&str]) -> Vec<String> {
+    labels.iter().map(|label| (*label).to_owned()).collect()
 }
 
 /// Error for a name already registered under a different metric kind.
