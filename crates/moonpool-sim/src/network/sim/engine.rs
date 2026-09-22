@@ -493,11 +493,7 @@ impl NetworkSimulation {
     }
 
     pub(crate) fn discard_connection_pair(&mut self, id: ConnectionId) -> WakeBatch {
-        let paired = self
-            .state
-            .connections
-            .get(&id)
-            .and_then(|connection| connection.paired_connection);
+        let paired = self.paired(id);
         let mut wakes = WakeBatch::default();
         for current in [Some(id), paired].into_iter().flatten() {
             self.state.connections.remove(&current);
@@ -519,9 +515,7 @@ impl NetworkSimulation {
 
     pub(crate) fn register_read(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .is_none_or(|connection| connection.flags.is_closed())
         {
             return false;
@@ -1227,7 +1221,7 @@ impl NetworkSimulation {
         actions: &mut NetworkActions,
         wakes: &mut WakeBatch,
     ) {
-        if self.state.connections.get(&id).is_none_or(|connection| {
+        if self.connection(id).is_none_or(|connection| {
             (connection.flags.is_closed() || connection.flags.send_closed())
                 && !connection.flags.graceful_close_pending()
         }) {
@@ -1243,9 +1237,7 @@ impl NetworkSimulation {
         // partition could reorder, and the normal path is what releases the
         // send-in-progress flag and any pending FIN.
         let has_queued_bytes = self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .is_some_and(|connection| !connection.send_buffer.is_empty());
         if has_queued_bytes && self.state.connection_partition_clear_at(id, now).is_some() {
             self.stall_partitioned_send(id);
@@ -1316,7 +1308,7 @@ impl NetworkSimulation {
         now: Duration,
         actions: &mut NetworkActions,
     ) {
-        let Some(snapshot) = self.state.connections.get(&id).map(|connection| {
+        let Some(snapshot) = self.connection(id).map(|connection| {
             (
                 connection.paired_connection,
                 connection.local_ip,
@@ -1383,9 +1375,7 @@ impl NetworkSimulation {
     /// Put `id`'s FIN on the wire, behind every data chunk in flight.
     fn put_fin_in_flight(&mut self, id: ConnectionId, now: Duration, actions: &mut NetworkActions) {
         if self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .is_none_or(|connection| connection.paired_connection.is_none())
         {
             return;
@@ -1480,96 +1470,72 @@ impl NetworkSimulation {
         self.failed_operations.insert(id);
     }
 
+    fn connection(&self, id: ConnectionId) -> Option<&ConnectionState> {
+        self.state.connections.get(&id)
+    }
+
+    fn paired(&self, id: ConnectionId) -> Option<ConnectionId> {
+        self.connection(id).and_then(|c| c.paired_connection)
+    }
+
     // Control/query methods are kept on the engine so `SimWorld` remains a lock wrapper.
     pub(crate) fn is_closed(&self, id: ConnectionId) -> bool {
-        self.state
-            .connections
-            .get(&id)
-            .is_some_and(|c| c.flags.is_closed())
+        self.connection(id).is_some_and(|c| c.flags.is_closed())
     }
 
     pub(crate) fn close_reason(&self, id: ConnectionId) -> CloseReason {
-        self.state
-            .connections
-            .get(&id)
+        self.connection(id)
             .map_or(CloseReason::None, |c| c.close_reason)
     }
 
     pub(crate) fn is_send_closed(&self, id: ConnectionId) -> bool {
-        self.state
-            .connections
-            .get(&id)
+        self.connection(id)
             .is_some_and(|c| c.flags.send_closed() || c.flags.is_closed())
     }
 
     pub(crate) fn is_recv_closed(&self, id: ConnectionId) -> bool {
-        self.state
-            .connections
-            .get(&id)
+        self.connection(id)
             .is_some_and(|c| c.flags.recv_closed() || c.flags.is_closed())
     }
 
     pub(crate) fn remote_fin_received(&self, id: ConnectionId) -> bool {
-        self.state
-            .connections
-            .get(&id)
+        self.connection(id)
             .is_some_and(|c| c.flags.remote_fin_received())
     }
 
     pub(crate) fn send_window_bytes(&self, id: ConnectionId) -> usize {
-        self.state
-            .connections
-            .get(&id)
-            .map_or(0, |c| c.window.capacity())
+        self.connection(id).map_or(0, |c| c.window.capacity())
     }
 
     pub(crate) fn outstanding_send_bytes(&self, id: ConnectionId) -> usize {
-        self.state
-            .connections
-            .get(&id)
-            .map_or(0, |c| c.window.outstanding())
+        self.connection(id).map_or(0, |c| c.window.outstanding())
     }
 
     pub(crate) fn available_send_bytes(&self, id: ConnectionId) -> usize {
-        self.state
-            .connections
-            .get(&id)
-            .map_or(0, |c| c.window.available())
+        self.connection(id).map_or(0, |c| c.window.available())
     }
 
     pub(crate) fn queued_send_bytes(&self, id: ConnectionId) -> usize {
-        self.state
-            .connections
-            .get(&id)
-            .map_or(0, ConnectionState::queued_bytes)
+        self.connection(id).map_or(0, ConnectionState::queued_bytes)
     }
 
     pub(crate) fn in_flight_bytes(&self, id: ConnectionId) -> usize {
-        self.state
-            .connections
-            .get(&id)
+        self.connection(id)
             .map_or(0, ConnectionState::in_flight_bytes)
     }
 
     pub(crate) fn unread_bytes(&self, id: ConnectionId) -> usize {
-        self.state
-            .connections
-            .get(&id)
-            .map_or(0, |c| c.receive_buffer.len())
+        self.connection(id).map_or(0, |c| c.receive_buffer.len())
     }
 
     pub(crate) fn is_in_flight_held(&self, id: ConnectionId) -> bool {
-        self.state
-            .connections
-            .get(&id)
+        self.connection(id)
             .is_some_and(|c| c.in_flight_held_since.is_some())
     }
 
     pub(crate) fn register_send_buffer(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .is_none_or(|connection| connection.flags.is_closed() || connection.flags.send_closed())
         {
             return false;
@@ -1586,9 +1552,7 @@ impl NetworkSimulation {
         let range = self.state.config.chaos.max_pair_latency.clone();
         let link = self.state.config.link_latency.clone();
         let Some((local, remote)) = self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .and_then(|c| Some((c.local_ip?, c.remote_ip?)))
         else {
             return Duration::ZERO;
@@ -1635,17 +1599,42 @@ impl NetworkSimulation {
         crate::network::sample_latency(config.distribution_for(class))
     }
 
-    pub(crate) fn should_clog_write(&self, id: ConnectionId, now: Duration) -> bool {
-        if let Some(clog) = self.state.connection_clogs.get(&id) {
+    /// Whether a clog tracked in `clogs` is in force for `id`, or, when none
+    /// is tracked, whether the clog coin fires now.
+    fn should_clog(
+        &self,
+        clogs: &BTreeMap<ConnectionId, ClogState>,
+        id: ConnectionId,
+        now: Duration,
+    ) -> bool {
+        if let Some(clog) = clogs.get(&id) {
             return now < clog.expires_at;
         }
         let probability = self.state.config.chaos.clog_probability;
         probability > 0.0 && sim_random::<f64>() < probability
     }
 
-    pub(crate) fn clog_write(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
+    /// Sample a clog duration and return the deadline at which a clog
+    /// starting `now` clears.
+    fn sample_clog_deadline(&self, now: Duration) -> Duration {
         let duration = crate::network::sample_duration(&self.state.config.chaos.clog_duration);
-        let deadline = now.saturating_add(duration);
+        now.saturating_add(duration)
+    }
+
+    fn is_clogged(
+        clogs: &BTreeMap<ConnectionId, ClogState>,
+        id: ConnectionId,
+        now: Duration,
+    ) -> bool {
+        clogs.get(&id).is_some_and(|c| now < c.expires_at)
+    }
+
+    pub(crate) fn should_clog_write(&self, id: ConnectionId, now: Duration) -> bool {
+        self.should_clog(&self.state.connection_clogs, id, now)
+    }
+
+    pub(crate) fn clog_write(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
+        let deadline = self.sample_clog_deadline(now);
         self.state.connection_clogs.insert(
             id,
             ClogState {
@@ -1664,17 +1653,12 @@ impl NetworkSimulation {
     }
 
     pub(crate) fn is_write_clogged(&self, id: ConnectionId, now: Duration) -> bool {
-        self.state
-            .connection_clogs
-            .get(&id)
-            .is_some_and(|c| now < c.expires_at)
+        Self::is_clogged(&self.state.connection_clogs, id, now)
     }
 
     pub(crate) fn register_write_clog(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .is_none_or(|connection| connection.flags.is_closed())
         {
             return false;
@@ -1684,16 +1668,11 @@ impl NetworkSimulation {
     }
 
     pub(crate) fn should_clog_read(&self, id: ConnectionId, now: Duration) -> bool {
-        if let Some(clog) = self.state.read_clogs.get(&id) {
-            return now < clog.expires_at;
-        }
-        let probability = self.state.config.chaos.clog_probability;
-        probability > 0.0 && sim_random::<f64>() < probability
+        self.should_clog(&self.state.read_clogs, id, now)
     }
 
     pub(crate) fn clog_read(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
-        let duration = crate::network::sample_duration(&self.state.config.chaos.clog_duration);
-        let deadline = now.saturating_add(duration);
+        let deadline = self.sample_clog_deadline(now);
         self.state.read_clogs.insert(
             id,
             ClogState {
@@ -1712,17 +1691,12 @@ impl NetworkSimulation {
     }
 
     pub(crate) fn is_read_clogged(&self, id: ConnectionId, now: Duration) -> bool {
-        self.state
-            .read_clogs
-            .get(&id)
-            .is_some_and(|c| now < c.expires_at)
+        Self::is_clogged(&self.state.read_clogs, id, now)
     }
 
     pub(crate) fn register_read_clog(&mut self, id: ConnectionId, waker: &Waker) -> bool {
         if self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .is_none_or(|connection| connection.flags.is_closed())
         {
             return false;
@@ -1998,11 +1972,7 @@ impl NetworkSimulation {
             return (None, NetworkActions::default(), WakeBatch::default());
         }
         self.state.last_random_close_time = now;
-        let paired = self
-            .state
-            .connections
-            .get(&id)
-            .and_then(|c| c.paired_connection);
+        let paired = self.paired(id);
         let a = sim_random_f64();
         let close_recv = a < 0.66;
         let close_send = a > 0.33;
@@ -2044,9 +2014,7 @@ impl NetworkSimulation {
     pub(crate) fn roll_black_hole(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
         let config = &self.state.config.chaos;
         if self
-            .state
-            .connections
-            .get(&id)
+            .connection(id)
             .is_none_or(|connection| connection.flags.is_closed())
             || config.black_hole_probability <= 0.0
             || now.saturating_sub(self.state.last_black_hole_time) < config.black_hole_cooldown
@@ -2072,11 +2040,7 @@ impl NetworkSimulation {
         hole_send: bool,
         hole_recv: bool,
     ) -> NetworkActions {
-        let paired = self
-            .state
-            .connections
-            .get(&id)
-            .and_then(|c| c.paired_connection);
+        let paired = self.paired(id);
         let mut newly_send = false;
         if hole_send
             && let Some(c) = self.state.connections.get_mut(&id)
@@ -2108,9 +2072,7 @@ impl NetworkSimulation {
     }
 
     pub(crate) fn is_send_black_holed(&self, id: ConnectionId) -> bool {
-        self.state
-            .connections
-            .get(&id)
+        self.connection(id)
             .is_some_and(|connection| connection.flags.send_black_holed())
     }
 
@@ -2202,11 +2164,7 @@ impl NetworkSimulation {
     }
 
     pub(crate) fn close_aborted(&mut self, id: ConnectionId) -> WakeBatch {
-        let paired = self
-            .state
-            .connections
-            .get(&id)
-            .and_then(|c| c.paired_connection);
+        let paired = self.paired(id);
         let mut wakes = self.evict_aborted_from_backlogs(id, paired);
         for current in [Some(id), paired].into_iter().flatten() {
             if let Some(c) = self.state.connections.get_mut(&current) {
@@ -2292,11 +2250,7 @@ impl NetworkSimulation {
         close_send: bool,
         close_recv: bool,
     ) -> WakeBatch {
-        let paired = self
-            .state
-            .connections
-            .get(&id)
-            .and_then(|c| c.paired_connection);
+        let paired = self.paired(id);
         if close_send && let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_send_closed(true);
         }

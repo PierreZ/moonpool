@@ -525,10 +525,7 @@ impl StorageEngine {
         path: &str,
         sectors: Range<u64>,
     ) -> Result<(), StorageError> {
-        for file in self.files_named(path)? {
-            file.image.corrupt(sectors.clone());
-        }
-        Ok(())
+        self.for_each_file_named(path, |image| image.corrupt(sectors.clone()))
     }
 
     /// Make reads and/or writes touching `sectors` of `path` fail with EIO.
@@ -538,10 +535,7 @@ impl StorageEngine {
         sectors: Range<u64>,
         target: EioTarget,
     ) -> Result<(), StorageError> {
-        for file in self.files_named(path)? {
-            file.image.fail_with_eio(sectors.clone(), target);
-        }
-        Ok(())
+        self.for_each_file_named(path, |image| image.fail_with_eio(sectors.clone(), target))
     }
 
     /// Clear targeted EIO injections on `path`.
@@ -550,10 +544,7 @@ impl StorageEngine {
         path: &str,
         target: EioTarget,
     ) -> Result<(), StorageError> {
-        for file in self.files_named(path)? {
-            file.image.clear_eio(target);
-        }
-        Ok(())
+        self.for_each_file_named(path, |image| image.clear_eio(target))
     }
 
     /// Mutate a durable sector of `path` out of band, bypassing the crash
@@ -563,19 +554,29 @@ impl StorageEngine {
         path: &str,
         sector: u64,
     ) -> Result<(), StorageError> {
-        for file in self.files_named(path)? {
-            file.image.corrupt_committed_out_of_band(sector);
-        }
-        Ok(())
+        self.for_each_file_named(path, |image| image.corrupt_committed_out_of_band(sector))
     }
 
-    /// Every file currently named `path`, on whichever process's disk: a
-    /// targeted injection is addressed by file and sector, and a path names
-    /// one file per process that has it.
+    /// Apply `inject` to every file currently named `path`, on whichever
+    /// process's disk: a targeted injection is addressed by file and sector,
+    /// and a path names one file per process that has it.
     ///
     /// # Errors
     ///
     /// [`StorageError::NotFound`] when no process has a file at `path`.
+    fn for_each_file_named(
+        &mut self,
+        path: &str,
+        mut inject: impl FnMut(&mut FileImage),
+    ) -> Result<(), StorageError> {
+        for file in self.files_named(path)? {
+            inject(&mut file.image);
+        }
+        Ok(())
+    }
+
+    /// Every file currently named `path`; see
+    /// [`for_each_file_named`](Self::for_each_file_named).
     fn files_named(&mut self, path: &str) -> Result<Vec<&mut FileState>, StorageError> {
         let file_ids: Vec<FileId> = self
             .state
@@ -871,14 +872,7 @@ impl StorageEngine {
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
         }
-        let episode = self.update_disk_episode(owner_ip, now);
-        let latency = Self::calculate_storage_latency(
-            self.state.config_for(owner_ip),
-            len,
-            false,
-            episode,
-            now,
-        );
+        let latency = self.transfer_latency(owner_ip, len, false, now);
         self.schedule_operation(
             pending,
             StorageOperation::ReadComplete {
@@ -916,14 +910,7 @@ impl StorageEngine {
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
         }
-        let episode = self.update_disk_episode(owner_ip, now);
-        let latency = Self::calculate_storage_latency(
-            self.state.config_for(owner_ip),
-            len,
-            true,
-            episode,
-            now,
-        );
+        let latency = self.transfer_latency(owner_ip, len, true, now);
         self.schedule_operation(
             pending,
             StorageOperation::WriteComplete {
@@ -996,6 +983,25 @@ impl StorageEngine {
             pending,
             StorageOperation::SetLenComplete { new_len },
             now.saturating_add(latency),
+        )
+    }
+
+    /// Advance `owner_ip`'s disk episode and sample the latency of one
+    /// `len`-byte read or write issued at `now`.
+    fn transfer_latency(
+        &mut self,
+        owner_ip: IpAddr,
+        len: usize,
+        is_write: bool,
+        now: Duration,
+    ) -> Duration {
+        let episode = self.update_disk_episode(owner_ip, now);
+        Self::calculate_storage_latency(
+            self.state.config_for(owner_ip),
+            len,
+            is_write,
+            episode,
+            now,
         )
     }
 
