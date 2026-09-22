@@ -15,7 +15,7 @@
 //! The `next_bucket` counter is incremented atomically (via `AtomicU32::fetch_add`)
 //! to allocate new buckets safely across process boundaries.
 
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 /// Maximum number of `EachBucket` slots.
 pub const MAX_EACH_BUCKETS: usize = 256;
@@ -39,10 +39,10 @@ pub const EACH_BUCKET_MEM_SIZE: usize = 8 + MAX_EACH_BUCKETS * std::mem::size_of
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct EachBucket {
-    /// FNV-1a hash of the assertion message string.
-    pub site_hash: u32,
+    /// 64-bit FNV-1a hash of the assertion message string.
+    pub site_hash: u64,
     /// Hash of (`site_hash` + identity key values) — uniquely identifies this bucket.
-    pub bucket_hash: u32,
+    pub bucket_hash: u64,
     /// CAS guard: 0 = not yet discovered, 1 = first discovery signalled.
     pub discovered: u8,
     /// Number of identity keys stored in `key_values`.
@@ -86,8 +86,8 @@ use crate::slots::msg_hash;
 /// `EACH_BUCKET_MEM_SIZE` bytes.
 unsafe fn find_or_alloc_each_bucket(
     ptr: *mut u8,
-    site_hash: u32,
-    bucket_hash: u32,
+    site_hash: u64,
+    bucket_hash: u64,
     keys: &[(&str, i64)],
     msg: &str,
     has_quality: u8,
@@ -105,8 +105,8 @@ unsafe fn find_or_alloc_each_bucket(
             if state == 0 {
                 continue;
             }
-            let existing_site = &*std::ptr::addr_of!((*bucket).site_hash).cast::<AtomicU32>();
-            let existing_bucket = &*std::ptr::addr_of!((*bucket).bucket_hash).cast::<AtomicU32>();
+            let existing_site = &*std::ptr::addr_of!((*bucket).site_hash).cast::<AtomicU64>();
+            let existing_bucket = &*std::ptr::addr_of!((*bucket).bucket_hash).cast::<AtomicU64>();
             if existing_site.load(Ordering::Relaxed) == site_hash
                 && existing_bucket.load(Ordering::Relaxed) == bucket_hash
             {
@@ -125,8 +125,8 @@ unsafe fn find_or_alloc_each_bucket(
         }
 
         let bucket = base.add(new_idx);
-        let bucket_site = &*std::ptr::addr_of!((*bucket).site_hash).cast::<AtomicU32>();
-        let bucket_hash_field = &*std::ptr::addr_of!((*bucket).bucket_hash).cast::<AtomicU32>();
+        let bucket_site = &*std::ptr::addr_of!((*bucket).site_hash).cast::<AtomicU64>();
+        let bucket_hash_field = &*std::ptr::addr_of!((*bucket).bucket_hash).cast::<AtomicU64>();
         let published = &*std::ptr::addr_of!((*bucket).published).cast::<AtomicU8>();
         bucket_site.store(site_hash, Ordering::Relaxed);
         bucket_hash_field.store(bucket_hash, Ordering::Relaxed);
@@ -145,8 +145,8 @@ unsafe fn find_or_alloc_each_bucket(
             if state == 0 {
                 continue;
             }
-            let existing_site = &*std::ptr::addr_of!((*existing).site_hash).cast::<AtomicU32>();
-            let existing_bucket = &*std::ptr::addr_of!((*existing).bucket_hash).cast::<AtomicU32>();
+            let existing_site = &*std::ptr::addr_of!((*existing).site_hash).cast::<AtomicU64>();
+            let existing_bucket = &*std::ptr::addr_of!((*existing).bucket_hash).cast::<AtomicU64>();
             if existing_site.load(Ordering::Relaxed) != site_hash
                 || existing_bucket.load(Ordering::Relaxed) != bucket_hash
             {
@@ -235,8 +235,8 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     let mut bucket_hash = site_hash;
     for &(_, val) in keys {
         for b in val.to_le_bytes() {
-            bucket_hash ^= u32::from(b);
-            bucket_hash = bucket_hash.wrapping_mul(0x0100_0193);
+            bucket_hash ^= u64::from(b);
+            bucket_hash = bucket_hash.wrapping_mul(0x0100_0000_01b3);
         }
     }
 
@@ -279,15 +279,9 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
             .is_ok();
 
         if first_discovery {
-            crate::hooks::on_discovery(
-                crate::hooks::DiscoveryKind::BucketFirst,
-                u64::from(bucket_hash),
-            );
+            crate::hooks::on_discovery(crate::hooks::DiscoveryKind::BucketFirst, bucket_hash);
         } else if quality_advanced {
-            crate::hooks::on_discovery(
-                crate::hooks::DiscoveryKind::BucketQuality,
-                u64::from(bucket_hash),
-            );
+            crate::hooks::on_discovery(crate::hooks::DiscoveryKind::BucketQuality, bucket_hash);
         }
     }
 }
@@ -378,8 +372,9 @@ mod tests {
     #[test]
     fn test_each_bucket_size_stable() {
         // EachBucket must have a stable size for shared memory layout.
-        // 4+4+1+1+1+1+4+8+6*8+32 = 104 bytes
-        assert_eq!(std::mem::size_of::<EachBucket>(), 104);
+        // site_hash(8) + bucket_hash(8) + 1+1+1+1 + pass_count(4) +
+        // best_score(8) + key_values(6*8) + msg(32) = 112 bytes
+        assert_eq!(std::mem::size_of::<EachBucket>(), 112);
     }
 
     #[test]
