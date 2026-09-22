@@ -8,8 +8,10 @@ use moonpool_sim::{Invariant, SIM_FAULT_EVENT_NAME, TraceQuery};
 
 use crate::{Outcome, RunResult, Shot};
 
-const NODE_A: u8 = 0;
-const NODE_B: u8 = 1;
+/// Client (node A) to server (node B).
+const A_TO_B: (u8, u8) = (0, 1);
+/// Server (node B) back to client (node A).
+const B_TO_A: (u8, u8) = (1, 0);
 const MIN_DROP_SPAN_MS: u64 = 50;
 
 const EV_ISSUED: &str = "client_issued";
@@ -104,7 +106,10 @@ pub(crate) fn finish(seed: u64, handle: &RecorderHandle) -> RunResult {
         .lock()
         .expect("Mutex poisoned: prior task panicked");
     if data.issued.is_empty() {
-        return RunResult::empty(seed);
+        return RunResult {
+            seed,
+            ..RunResult::default()
+        };
     }
 
     let acknowledgements: BTreeMap<_, _> = data.acked.iter().copied().collect();
@@ -124,38 +129,26 @@ pub(crate) fn finish(seed: u64, handle: &RecorderHandle) -> RunResult {
             longest_rtt_ms = longest_rtt_ms.max(rtt);
             let midpoint_ms = issue_ms.saturating_add(rtt / 2);
             shots.extend([
-                Shot {
-                    seq: sequence,
-                    from: NODE_A,
-                    to: NODE_B,
-                    depart_ms: issue_ms,
-                    arrive_ms: midpoint_ms,
-                    latency_ms: midpoint_ms.saturating_sub(issue_ms),
-                    outcome: Outcome::Delivered,
-                },
-                Shot {
-                    seq: sequence,
-                    from: NODE_B,
-                    to: NODE_A,
-                    depart_ms: midpoint_ms,
-                    arrive_ms: acknowledged_ms,
-                    latency_ms: acknowledged_ms.saturating_sub(midpoint_ms),
-                    outcome: Outcome::Delivered,
-                },
+                Shot::leg(sequence, A_TO_B, issue_ms, midpoint_ms, Outcome::Delivered),
+                Shot::leg(
+                    sequence,
+                    B_TO_A,
+                    midpoint_ms,
+                    acknowledged_ms,
+                    Outcome::Delivered,
+                ),
             ]);
         } else {
             dropped += 1;
             let failed_ms = failures.get(&sequence).copied().unwrap_or(issue_ms);
             let span = failed_ms.saturating_sub(issue_ms).max(MIN_DROP_SPAN_MS);
-            shots.push(Shot {
-                seq: sequence,
-                from: NODE_A,
-                to: NODE_B,
-                depart_ms: issue_ms,
-                arrive_ms: issue_ms.saturating_add(span),
-                latency_ms: span,
-                outcome: Outcome::Dropped,
-            });
+            shots.push(Shot::leg(
+                sequence,
+                A_TO_B,
+                issue_ms,
+                issue_ms.saturating_add(span),
+                Outcome::Dropped,
+            ));
         }
     }
 

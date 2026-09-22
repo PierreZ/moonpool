@@ -29,8 +29,29 @@ pub struct Shot {
     pub outcome: Outcome,
 }
 
+impl Shot {
+    /// A leg from `from` to `to`, its latency derived from the two times.
+    pub(crate) fn leg(
+        seq: u64,
+        (from, to): (u8, u8),
+        depart_ms: u64,
+        arrive_ms: u64,
+        outcome: Outcome,
+    ) -> Self {
+        Self {
+            seq,
+            from,
+            to,
+            depart_ms,
+            arrive_ms,
+            latency_ms: arrive_ms.saturating_sub(depart_ms),
+            outcome,
+        }
+    }
+}
+
 /// The result of one seeded run, including the animation timeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RunResult {
     /// The seed this run used.
     pub seed: u64,
@@ -48,19 +69,4 @@ pub struct RunResult {
     pub longest_rtt_ms: u64,
     /// Total simulated time elapsed, in milliseconds.
     pub sim_duration_ms: u64,
-}
-
-impl RunResult {
-    pub(crate) fn empty(seed: u64) -> Self {
-        Self {
-            seed,
-            requests: 0,
-            shots: Vec::new(),
-            delivered: 0,
-            dropped: 0,
-            faults: 0,
-            longest_rtt_ms: 0,
-            sim_duration_ms: 0,
-        }
-    }
 }
