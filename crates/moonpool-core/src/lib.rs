@@ -95,11 +95,11 @@ pub use providers::Providers;
 #[cfg(feature = "tokio-providers")]
 pub use providers::TokioProviders;
 pub use random::RandomProvider;
+#[cfg(feature = "tokio-random")]
+pub use random::TokioRandomProvider;
 #[cfg(feature = "tokio-net")]
 pub use resolver::TokioResolver;
 pub use resolver::{Resolver, split_host_port};
-#[cfg(feature = "tokio-random")]
-pub use random::TokioRandomProvider;
 pub use storage::{
     AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, OpenOptions, StorageFile,
     StorageProvider, stream_io_unsupported,
