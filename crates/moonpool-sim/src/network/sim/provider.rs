@@ -144,7 +144,8 @@ impl NetworkProvider for SimNetworkProvider {
     /// based on the `connect_failure_mode` setting (FDB ref: sim2.actor.cpp:1243-1250):
     /// - Disabled: Normal operation (no failure injection)
     /// - `AlwaysFail`: Always fail with `ConnectionRefused` when buggified
-    /// - Probabilistic: 50% fail with error, 50% hang forever (tests timeout handling)
+    /// - Probabilistic: a buggified connect is refused with probability
+    ///   `connect_failure_probability` and hangs forever otherwise (tests timeout handling)
     #[instrument(skip(self))]
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
         let sim = self
@@ -174,9 +175,9 @@ impl NetworkProvider for SimNetworkProvider {
                 }
             }
             ConnectFailureMode::Probabilistic => {
-                // Probabilistic - fail or hang forever
+                // Probabilistic - refused with `failure_probability`, else hang forever
                 if buggify!() {
-                    if sim_random::<f64>() > failure_probability {
+                    if sim_random::<f64>() < failure_probability {
                         // Throw connection_failed error
                         tracing::debug!(addr = %addr, "Connection establishment failed (Probabilistic mode - error)");
                         return Err(io::Error::new(

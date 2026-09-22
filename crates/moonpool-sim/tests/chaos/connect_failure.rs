@@ -4,7 +4,8 @@
 //! - Follow FDB's `SIM_CONNECT_ERROR_MODE` pattern (sim2.actor.cpp:1243-1250)
 //! - Disabled: Normal operation (no failure injection)
 //! - `AlwaysFail`: Always fail with `ConnectionRefused` when buggified
-//! - Probabilistic: 50% fail with error, 50% hang forever (tests timeout handling)
+//! - Probabilistic: refused with `connect_failure_probability`, otherwise hang
+//!   forever (tests timeout handling)
 //! - Can be disabled via configuration
 //! - Are deterministic across runs with the same seed
 
@@ -12,7 +13,26 @@ use moonpool_sim::{
     ConnectFailureMode, NetworkConfiguration, NetworkProvider, SimWorld, buggify_init,
     buggify_reset,
 };
+use std::future::Future;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
+
+/// Drive `future` against `sim` until it resolves or the world runs out of
+/// events. `None` means the future is still pending with nothing left that
+/// could wake it — a hang, reported instead of blocking the test forever.
+fn settle<F: Future>(sim: &mut SimWorld, future: F) -> Option<F::Output> {
+    let mut future = std::pin::pin!(future);
+    let mut cx = Context::from_waker(Waker::noop());
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return Some(output);
+        }
+        if !sim.has_pending_events() {
+            return None;
+        }
+        sim.step();
+    }
+}
 
 /// Test that connection failure mode Disabled works normally
 #[test]
@@ -89,51 +109,78 @@ fn test_connect_failure_mode_always_fail() {
     });
 }
 
-/// Test that connection failure mode Probabilistic produces errors (not hangs)
-/// Note: We set `connect_failure_probability=0.0` to force error path, not hang path
+/// Test that `connect_failure_probability = 1.0` refuses every buggified
+/// connect and never hangs one (#251: the comparison was inverted, so `1.0`
+/// hung every buggified connect instead).
 #[test]
 fn test_connect_failure_mode_probabilistic_error() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
+    moonpool_sim::set_sim_seed(99999);
+    buggify_init(1.0);
 
-    local_runtime.block_on(async move {
-        moonpool_sim::set_sim_seed(99999);
-        buggify_init(1.0);
+    let mut config = NetworkConfiguration::fast_local();
+    config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
+    config.chaos.connect_failure_probability = 1.0; // always refuse, never hang
 
-        let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
-        // Force error path (not hang) by setting probability to 0.0
-        // With prob=0.0: random01() > 0.0 is always true, so we get errors
-        config.chaos.connect_failure_probability = 0.0;
+    let mut sim = SimWorld::new_with_network_config(config);
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
-        let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
+    let addr = "prob-server";
+    let _listener = settle(&mut sim, provider.bind(addr))
+        .expect("bind settles")
+        .expect("bind succeeds");
 
-        let addr = "prob-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
-
-        // With Probabilistic and probability=0.0, connections should fail with error (not hang)
-        let mut success_count = 0;
-        let mut error_count = 0;
-
-        for _ in 0..20 {
-            let result = super::drive(&mut sim, provider.connect(addr)).await;
-            match result {
-                Ok(_) => success_count += 1,
-                Err(_) => error_count += 1,
+    let mut success_count = 0;
+    let mut error_count = 0;
+    for i in 0..20 {
+        match settle(&mut sim, provider.connect(addr)) {
+            Some(Ok(_)) => success_count += 1,
+            Some(Err(e)) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
+                error_count += 1;
             }
+            None => panic!("connect {i} hung with connect_failure_probability = 1.0"),
         }
+    }
 
-        println!(
-            "Probabilistic mode results: {success_count} successes, {error_count} errors out of 20"
-        );
+    buggify_reset();
+    assert!(
+        error_count > 0,
+        "expected refused connects, got {success_count} successes and no errors"
+    );
+}
 
-        buggify_reset();
-        println!("✅ Connection failure mode Probabilistic error executed");
-    });
+/// Test that `connect_failure_probability = 0.0` never refuses a connect:
+/// a buggified connect hangs, every other one succeeds.
+#[test]
+fn test_connect_failure_mode_probabilistic_hang() {
+    moonpool_sim::set_sim_seed(99999);
+    buggify_init(1.0);
+
+    let mut config = NetworkConfiguration::fast_local();
+    config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
+    config.chaos.connect_failure_probability = 0.0; // never refuse, always hang
+
+    let mut sim = SimWorld::new_with_network_config(config);
+    let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
+
+    let addr = "hang-server";
+    let _listener = settle(&mut sim, provider.bind(addr))
+        .expect("bind settles")
+        .expect("bind succeeds");
+
+    let mut hang_count = 0;
+    for i in 0..20 {
+        match settle(&mut sim, provider.connect(addr)) {
+            Some(Ok(_)) => {}
+            Some(Err(e)) => {
+                panic!("connect {i} refused with connect_failure_probability = 0.0: {e}")
+            }
+            None => hang_count += 1,
+        }
+    }
+
+    buggify_reset();
+    assert!(hang_count > 0, "expected hung connects, got none");
 }
 
 /// Test that disabled buggify doesn't inject failures even with mode set
@@ -187,7 +234,7 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
-        config.chaos.connect_failure_probability = 1.0; // 100% hang (not error)
+        config.chaos.connect_failure_probability = 0.0; // 100% hang (not error)
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
@@ -361,7 +408,7 @@ fn test_connect_failure_error_message_probabilistic() {
 
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
-        config.chaos.connect_failure_probability = 0.0; // Force error path, not hang
+        config.chaos.connect_failure_probability = 1.0; // Force error path, not hang
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
