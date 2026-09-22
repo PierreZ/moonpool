@@ -39,6 +39,7 @@
 //! | [`RandomProvider`] | Seeded RNG | System RNG | Deterministic randomness |
 //! | [`NetworkProvider`] | Simulated TCP | Real TCP | Connect, listen, accept |
 //! | [`StorageProvider`] | Fault-injected I/O | Real filesystem | File open, read, write, sync |
+//! | [`Resolver`] (optional, outside the bundle) | Scripted table | OS lookup | `host:port` to addresses |
 //!
 //! **Important**: Never call tokio directly in application code.
 //! - ❌ `tokio::time::sleep()`
@@ -53,6 +54,7 @@ pub mod metrics;
 mod network;
 mod providers;
 mod random;
+mod resolver;
 #[cfg(feature = "deterministic-select")]
 mod select;
 #[cfg(feature = "deterministic-select")]
@@ -93,6 +95,9 @@ pub use providers::Providers;
 #[cfg(feature = "tokio-providers")]
 pub use providers::TokioProviders;
 pub use random::RandomProvider;
+#[cfg(feature = "tokio-net")]
+pub use resolver::TokioResolver;
+pub use resolver::{Resolver, split_host_port};
 #[cfg(feature = "tokio-random")]
 pub use random::TokioRandomProvider;
 pub use storage::{

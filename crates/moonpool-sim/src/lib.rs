@@ -73,8 +73,8 @@
 
 // Re-export core types for convenience
 pub use moonpool_core::{
-    Detach, NetworkProvider, Providers, RandomProvider, SimulationError, SimulationResult,
-    TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
+    Detach, NetworkProvider, Providers, RandomProvider, Resolver, SimulationError,
+    SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
 };
 // The deterministic select! (moonpool-sim always enables core's
 // deterministic-select, so this is tokio's expansion with a seeded start
@@ -197,7 +197,9 @@ pub use storage::{
 };
 
 // Provider exports
-pub use providers::{SimProviders, SimRandomProvider, SimTaskProvider, SimTimeProvider};
+pub use providers::{
+    ScriptedResolver, SimProviders, SimRandomProvider, SimTaskProvider, SimTimeProvider,
+};
 
 // Assertion vocabulary — always available (dependency-free accounting layer).
 pub use moonpool_assertions::{AssertCmp, AssertKind};

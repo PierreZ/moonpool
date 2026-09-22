@@ -53,6 +53,8 @@ select only `tokio`, then add `hyper` if it speaks HTTP or gRPC.
 - `RandomProvider` for runtime-controlled randomness
 - `StorageProvider` for file operations
 - `Providers` for carrying the five implementations as one bundle
+- `Resolver`, outside the bundle, for `host:port` name resolution
+  (`TokioResolver`; the simulation's `ScriptedResolver`)
 
 The Tokio implementations provide real production I/O. Simulation supplies
 deterministic implementations of the same traits.

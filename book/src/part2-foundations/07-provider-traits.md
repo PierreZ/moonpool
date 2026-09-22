@@ -287,3 +287,19 @@ pub trait Providers: Clone + Send + Sync + 'static {
 ```
 
 `TokioProviders` bundles all five production implementations. `SimProviders` bundles all five simulation implementations and requires an IP address at construction (`SimProviders::new(sim, seed, ip)`) so that the storage provider is scoped to the correct process. Your application code sees `P: Providers` and nothing else.
+
+## Resolver (Optional)
+
+Name resolution is not in the bundle: most code never resolves a name, and code that does picks its resolver next to its providers.
+
+```rust
+pub trait Resolver: Clone + Send + Sync + 'static {
+    fn resolve(&self, target: &str) -> impl Future<Output = io::Result<Vec<SocketAddr>>> + Send;
+}
+```
+
+The target is the same `host:port` string `connect` takes, and a numeric target resolves to itself. An answer is never empty: a name with no address is an error, so a caller can tell a failed lookup from a failed connection. `connect(&str)` hides both the address list and that distinction, which is why the capability exists at all. How long to trust an answer and when to ask again belong to the caller (moonpool-rpc keeps a bootstrap cache that drops an entry when a connection to it fails).
+
+**Production**: `TokioResolver` (feature `tokio-net`) calls `tokio::net::lookup_host`.
+
+**Simulation**: `ScriptedResolver` answers from a shared table that a fault injector or workload edits while the run goes (`set`, `fail`, `remove`). Answers are immediate and draw no randomness, so a name repointed at a restarted process replays identically for a seed.

@@ -40,8 +40,11 @@ The same goes for branch selection. Bare `tokio::select!` draws its polling offs
 |-----------|-------------|
 | `tokio::net::{TcpStream, TcpListener, UdpSocket}` | `network.connect(addr)`, `network.bind(addr)` |
 | `std::net::*` for live I/O | `NetworkProvider` |
+| `tokio::net::lookup_host`, `ToSocketAddrs` | a `Resolver` (`TokioResolver` / `ScriptedResolver`) |
 
 `NetworkProvider::TcpStream` implements `futures::io::AsyncRead + AsyncWrite`. For hyper (and therefore axum and tonic), wrap it in `moonpool_hyper::HyperIo`, which presents that shape as hyper's own `rt::Read` and `rt::Write`. That replaces the older two-hop bridge through `tokio_util::compat::Compat` and `hyper_util::rt::TokioIo`, so neither of those crates needs to appear in your dependency list.
+
+Name resolution is its own optional capability, outside the `Providers` bundle: `moonpool_core::Resolver` turns a `host:port` string into every address it names. Production uses `TokioResolver` (the operating system's lookup); a simulation uses `moonpool_sim::ScriptedResolver`, a table the run edits while it goes, so a renamed or moved service, a failing lookup and a stale cache are deterministic. Caching and invalidation stay with the caller.
 
 Provider conformance tests run the same network contract against both Tokio and simulation providers. The contract checks that concurrent `:0` binds return distinct usable ports, then verifies connect, echo, EOF, and refusal of an unbound target.
 
