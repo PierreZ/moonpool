@@ -8,6 +8,7 @@
 //! - Can be disabled via configuration
 //! - Are handled gracefully by the peer layer with reconnection
 
+use super::local_runtime;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
     NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait, buggify_init,
@@ -17,13 +18,7 @@ use std::time::Duration;
 /// Test that random close is disabled when probability is 0.0
 #[test]
 fn test_random_close_disabled_with_zero_probability() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.0; // Explicitly disable
 
@@ -58,13 +53,7 @@ fn test_random_close_disabled_with_zero_probability() {
 /// Test that random close chaos triggers with high probability
 #[test]
 fn test_random_close_injection_with_high_probability() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         // Enable buggify for chaos testing
         buggify_init(1.0);
 
@@ -105,13 +94,7 @@ fn test_random_close_injection_with_high_probability() {
 /// Test asymmetric closure behavior (send-only, recv-only, both)
 #[test]
 fn test_random_close_asymmetric_behavior() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.0; // We'll trigger manually
 
@@ -162,13 +145,7 @@ fn test_random_close_asymmetric_behavior() {
 /// Test cooldown mechanism prevents cascading failures
 #[test]
 fn test_random_close_cooldown() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
@@ -211,13 +188,7 @@ fn test_random_close_cooldown() {
 /// Test explicit vs silent failure modes (30% vs 70%)
 #[test]
 fn test_random_close_explicit_vs_silent() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
@@ -258,13 +229,7 @@ fn test_random_close_explicit_vs_silent() {
 /// Test connection state consistency across paired connections
 #[test]
 fn test_random_close_paired_connection_coordination() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.0; // Manual control
 
@@ -297,13 +262,7 @@ fn test_random_close_paired_connection_coordination() {
 /// Test buffer clearing on connection closure
 #[test]
 fn test_random_close_buffer_clearing() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.0;
 
@@ -334,13 +293,7 @@ fn test_random_close_buffer_clearing() {
 /// Test random close with bidirectional communication
 #[test]
 fn test_random_close_bidirectional_communication() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
@@ -397,13 +350,7 @@ fn test_random_close_bidirectional_communication() {
 /// Test interaction with network partitions
 #[test]
 fn test_random_close_with_partitions() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.01;
         config.chaos.partition_probability = 0.05;

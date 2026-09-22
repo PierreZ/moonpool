@@ -6,46 +6,18 @@
 
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
+use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
-use std::net::IpAddr;
+
+#[path = "common/runtime.rs"]
+mod runtime;
+#[path = "common/storage.rs"]
+mod support;
+
+use runtime::local_runtime;
+use support::{fast_sim, run_on, test_ip};
 
 const BLOCK: usize = 4096;
-
-fn test_ip() -> IpAddr {
-    "127.0.0.1".parse().expect("valid IP")
-}
-
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-fn fast_sim() -> SimWorld {
-    let mut sim = SimWorld::new();
-    sim.set_storage_config(StorageConfiguration::fast_local());
-    sim
-}
-
-async fn run_on<F, Fut, T>(sim: &mut SimWorld, f: F) -> T
-where
-    F: FnOnce(SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-    handle.await.expect("task panicked")
-}
 
 /// The ownership boundary: the caller opens a file, the block layer wraps it.
 /// Open `path` for direct I/O the way a journal or pager does.

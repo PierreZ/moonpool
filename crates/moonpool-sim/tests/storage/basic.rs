@@ -3,53 +3,10 @@
 //! Tests fundamental storage operations: read, write, seek, size, truncate, sync,
 //! and file management (create, delete, rename).
 
+use crate::{fast_sim, local_runtime, run_storage_test};
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
-use std::net::IpAddr;
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Helper to run an async storage test with proper simulation stepping.
-async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked")
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-/// Create a `SimWorld` with fast storage configuration.
-fn fast_sim() -> SimWorld {
-    let mut sim = SimWorld::new();
-    sim.set_storage_config(StorageConfiguration::fast_local());
-    sim
-}
 
 #[test]
 fn test_create_write_read() {

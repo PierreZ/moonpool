@@ -5,12 +5,12 @@
 //! degenerate partition duration, so `sample_duration` consumes no RNG draw and
 //! the only randomness left is the strategy's own selection.
 
-use futures::future::poll_fn;
+use crate::async_drive::drive;
 use moonpool_sim::{
     LocalityInfo, NetworkProvider, SimFaultEvent, SimWorld, TcpListenerTrait,
     network::{NetworkConfiguration, PartitionStrategy},
 };
-use std::{collections::BTreeMap, future::Future, net::IpAddr, time::Duration};
+use std::{collections::BTreeMap, net::IpAddr, time::Duration};
 
 /// Fixed seed for every rotation test in this file.
 const SEED: u64 = 42;
@@ -50,21 +50,6 @@ fn localities(layout: [(&str, &str); 4]) -> BTreeMap<IpAddr, LocalityInfo> {
             )
         })
         .collect()
-}
-
-async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    futures::pin_mut!(future);
-    poll_fn(|cx| match future.as_mut().poll(cx) {
-        std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
-        std::task::Poll::Pending => {
-            if sim.has_pending_events() {
-                sim.step();
-                cx.waker().wake_by_ref();
-            }
-            std::task::Poll::Pending
-        }
-    })
-    .await
 }
 
 /// Build a simulation with two established connections, so the engine sees the

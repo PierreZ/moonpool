@@ -9,6 +9,7 @@
 //! - Can be disabled via configuration
 //! - Are deterministic across runs with the same seed
 
+use super::local_runtime;
 use moonpool_sim::{
     ConnectFailureMode, NetworkConfiguration, NetworkProvider, SimWorld, buggify_init,
     buggify_reset,
@@ -37,13 +38,7 @@ fn settle<F: Future>(sim: &mut SimWorld, future: F) -> Option<F::Output> {
 /// Test that connection failure mode Disabled works normally
 #[test]
 fn test_connect_failure_mode_disabled() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0); // Enable buggify
 
         let mut config = NetworkConfiguration::fast_local();
@@ -74,13 +69,7 @@ fn test_connect_failure_mode_disabled() {
 /// Test that connection failure mode `AlwaysFail` fails when buggified
 #[test]
 fn test_connect_failure_mode_always_fail() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0); // Enable buggify with 100% activation
 
         let mut config = NetworkConfiguration::fast_local();
@@ -186,13 +175,7 @@ fn test_connect_failure_mode_probabilistic_hang() {
 /// Test that disabled buggify doesn't inject failures even with mode set
 #[test]
 fn test_connect_failure_requires_buggify() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_reset(); // Ensure buggify is disabled
 
         let mut config = NetworkConfiguration::fast_local();
@@ -222,13 +205,7 @@ fn test_connect_failure_requires_buggify() {
 /// Test connection failure with timeout handling (Probabilistic hang scenario)
 #[test]
 fn test_connect_failure_mode_probabilistic_with_timeout() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         moonpool_sim::set_sim_seed(42);
         buggify_init(1.0);
 
@@ -271,13 +248,7 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
 #[test]
 fn test_connect_failure_deterministic() {
     let run_simulation = || -> Vec<bool> {
-        let local_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .expect("Failed to build local runtime");
-
-        local_runtime.block_on(async move {
+        local_runtime().block_on(async move {
             moonpool_sim::set_sim_seed(12345);
             buggify_init(1.0);
 
@@ -317,13 +288,7 @@ fn test_connect_failure_deterministic() {
 fn test_connect_failure_existing_connections() {
     use futures::io::AsyncWriteExt;
 
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.connect_failure_mode = ConnectFailureMode::Disabled; // Start with disabled
 
@@ -356,13 +321,7 @@ fn test_connect_failure_existing_connections() {
 /// Test error message content for `AlwaysFail` mode
 #[test]
 fn test_connect_failure_error_message_always_fail() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         moonpool_sim::set_sim_seed(77777);
         buggify_init(1.0);
 
@@ -396,13 +355,7 @@ fn test_connect_failure_error_message_always_fail() {
 /// Test error message content for Probabilistic mode
 #[test]
 fn test_connect_failure_error_message_probabilistic() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         moonpool_sim::set_sim_seed(88888);
         buggify_init(1.0);
 
@@ -442,13 +395,7 @@ fn test_connect_failure_error_message_probabilistic() {
 #[test]
 #[ignore = "May hang forever with Probabilistic mode - requires manual testing"]
 fn test_connect_failure_random_config() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         moonpool_sim::set_sim_seed(11111);
         buggify_init(1.0);
 

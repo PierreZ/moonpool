@@ -16,20 +16,10 @@
 //! Every test here pins probabilities to 0.0 or 1.0 so the interesting path is
 //! taken deterministically rather than sampled.
 
-use std::{
-    future::Future,
-    io::SeekFrom,
-    net::IpAddr,
-    pin::pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{io::SeekFrom, net::IpAddr, pin::pin, task::Poll, time::Duration};
 
 use async_trait::async_trait;
-use futures::{
-    io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt},
-    task::noop_waker,
-};
+use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
     Event, FaultContext, FaultInjector, LatencyDistribution, NetworkConfiguration, NetworkEvent,
@@ -38,73 +28,18 @@ use moonpool_sim::{
     TcpListenerTrait, TimeProvider, Workload,
 };
 
-/// How many events a driven future may consume before it is declared stuck.
-const MAX_DRIVER_STEPS: usize = 10_000;
+#[path = "common/drive.rs"]
+mod driver;
+#[path = "common/poll_io.rs"]
+mod poll_io;
+
+use driver::{drive, settle};
+use poll_io::{poll_read_once, poll_write_once};
 
 fn ip(last_octet: u8) -> IpAddr {
     format!("10.0.1.{last_octet}")
         .parse()
         .expect("valid test IP")
-}
-
-/// Poll a simulation-backed future, advancing virtual time whenever it parks.
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        assert!(
-            sim.has_pending_events(),
-            "simulation-backed future stalled without a pending event"
-        );
-        sim.step();
-    }
-
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
-}
-
-fn poll_write_once(
-    stream: &mut (impl AsyncWrite + Unpin),
-    data: &[u8],
-) -> Poll<std::io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    std::pin::Pin::new(stream).poll_write(&mut context, data)
-}
-
-fn poll_read_once(
-    stream: &mut (impl AsyncRead + Unpin),
-    data: &mut [u8],
-) -> Poll<std::io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    std::pin::Pin::new(stream).poll_read(&mut context, data)
-}
-
-/// Poll a simulation-backed future until it resolves or the world runs out of
-/// events. `Pending` means it is parked for good: nothing is left to wake it.
-fn settle<F: Future + ?Sized>(
-    sim: &mut SimWorld,
-    mut future: std::pin::Pin<&mut F>,
-) -> Poll<F::Output> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return Poll::Ready(output);
-        }
-        if !sim.has_pending_events() {
-            return Poll::Pending;
-        }
-        sim.step();
-    }
-
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
 }
 
 /// Pump the scheduler by feeding it network maintenance ticks, which is where

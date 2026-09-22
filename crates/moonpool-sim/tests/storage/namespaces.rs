@@ -6,6 +6,7 @@
 //! other, share bytes, or make another disk's metadata durable — so
 //! replication and crash tests did not model independent storage.
 
+use crate::{local_runtime, run_as};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
@@ -19,14 +20,6 @@ fn node_b() -> IpAddr {
     "10.0.1.2".parse().expect("valid IP")
 }
 
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
 /// A world whose crashes always lose an unsynced directory entry.
 fn losing_sim() -> SimWorld {
     let mut config = StorageConfiguration::fast_local();
@@ -34,23 +27,6 @@ fn losing_sim() -> SimWorld {
     let mut sim = SimWorld::new();
     sim.set_storage_config(config);
     sim
-}
-
-async fn run_as<F, Fut, T>(sim: &mut SimWorld, ip: IpAddr, f: F) -> T
-where
-    F: FnOnce(SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(ip);
-    let handle = tokio::spawn(f(provider));
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-    handle.await.expect("task panicked")
 }
 
 async fn write_file(

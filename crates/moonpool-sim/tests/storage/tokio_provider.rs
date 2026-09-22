@@ -4,19 +4,11 @@
 //! actual filesystem operations, following the same pattern as network/traits.rs
 //! for `TokioNetworkProvider`.
 
+use crate::local_runtime;
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
 use std::io::SeekFrom;
 use tempfile::TempDir;
-
-/// Helper to create a local runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
 
 #[test]
 fn test_tokio_provider_basic_write_read() {

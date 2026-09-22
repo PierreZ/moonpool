@@ -3,6 +3,9 @@
 //! These tests verify that storage operations respect configured latencies
 //! and follow the FDB latency formula: `base_latency` + 1/iops + size/bandwidth
 
+use crate::{
+    local_runtime, run_and_measure_time, run_and_measure_time_on, step_until_done, test_ip,
+};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::storage::sim::DiskEpisodeKind;
@@ -13,50 +16,6 @@ use std::time::Duration;
 /// Build a uniform latency distribution over `[start, end)` for test configs.
 fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
     LatencyDistribution::Uniform { start, end }
-}
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Run a storage test for files owned by `ip` and return the simulation time elapsed.
-async fn run_and_measure_time_on<F, Fut>(mut sim: SimWorld, ip: IpAddr, f: F) -> Duration
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-{
-    let provider = sim.storage_provider(ip);
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked").expect("io error");
-    sim.current_time()
-}
-
-/// Run a storage test on the default test IP and return the simulation time elapsed.
-async fn run_and_measure_time<F, Fut>(sim: SimWorld, f: F) -> Duration
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-{
-    run_and_measure_time_on(sim, test_ip(), f).await
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
 }
 
 #[test]
@@ -271,13 +230,7 @@ fn test_read_latency_scales_with_size() {
                 Ok::<_, std::io::Error>(())
             });
 
-            while !handle.is_finished() {
-                while sim.pending_event_count() > 0 {
-                    sim.step();
-                }
-                tokio::task::yield_now().await;
-            }
-            handle.await.expect("task panicked").expect("io error");
+            step_until_done(&mut sim, handle).await.expect("io error");
 
             let start_time = sim.current_time();
 

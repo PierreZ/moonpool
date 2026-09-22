@@ -1,4 +1,6 @@
-use futures::{future::poll_fn, io::AsyncWriteExt};
+use crate::async_drive::drive;
+use crate::runtime::local_runtime;
+use futures::io::AsyncWriteExt;
 use moonpool_sim::{
     ChaosConfiguration, LatencyDistribution, LinkLatencyConfig, LocalityInfo, NetworkConfiguration,
     NetworkProvider, SimWorld, TcpListenerTrait,
@@ -16,20 +18,6 @@ fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
 }
 
 // Simple networking test that measures bind + connect + accept latency
-async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    futures::pin_mut!(future);
-    poll_fn(|cx| match future.as_mut().poll(cx) {
-        std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
-        std::task::Poll::Pending => {
-            if sim.has_pending_events() {
-                sim.step();
-                cx.waker().wake_by_ref();
-            }
-            std::task::Poll::Pending
-        }
-    })
-    .await
-}
 
 fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
     let waker = futures::task::noop_waker();
@@ -103,13 +91,7 @@ where
 
 #[test]
 fn test_fast_local_configuration() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let fast_config = NetworkConfiguration::fast_local();
         let mut sim = SimWorld::new_with_network_config(fast_config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
@@ -136,13 +118,7 @@ fn test_fast_local_configuration() {
 
 #[test]
 fn test_default_simulation_configuration() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let wan_config = NetworkConfiguration::default(); // Use default config with reasonable delays
         let mut sim = SimWorld::new_with_network_config(wan_config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
@@ -169,13 +145,7 @@ fn test_default_simulation_configuration() {
 
 #[test]
 fn test_custom_latency_configuration() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         // Create custom configuration with specific latency ranges
         let config = NetworkConfiguration {
             bind_latency: uniform(Duration::from_millis(5), Duration::from_millis(5)),
@@ -215,13 +185,7 @@ fn test_custom_latency_configuration() {
 
 #[test]
 fn test_latency_range_sampling() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         // Test multiple runs to verify latency variance with jitter
         let config = NetworkConfiguration {
             bind_latency: uniform(Duration::from_millis(1), Duration::from_millis(6)), // 1-6ms range
@@ -270,13 +234,7 @@ fn test_latency_range_sampling() {
 
 #[test]
 fn test_network_randomization_ranges() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         // Create custom configuration with predictable latencies
         let config = NetworkConfiguration {
             bind_latency: uniform(Duration::from_millis(1), Duration::from_millis(1)),
@@ -410,13 +368,7 @@ fn memoized_pair_latency(
     config: NetworkConfiguration,
     localities: BTreeMap<IpAddr, LocalityInfo>,
 ) -> Option<Duration> {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut sim = SimWorld::new_with_network_config_and_seed(config, 42);
         sim.set_localities(localities);
 

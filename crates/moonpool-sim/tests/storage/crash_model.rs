@@ -6,50 +6,21 @@
 //! outcomes it must *never* produce (losing a synced write silently, healing a
 //! damaged sector on retry), and the oracle that catches the first of those.
 
+use crate::{local_runtime, run_on, test_ip};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
     CrashOutcome, EioTarget, FileCrashReport, SECTOR_SIZE, SimStorageProvider, SimWorld,
     StorageConfiguration, StorageFaultKind,
 };
-use std::net::IpAddr;
 use std::sync::Arc;
 
 const SECTOR: u64 = SECTOR_SIZE as u64;
-
-fn test_ip() -> IpAddr {
-    "127.0.0.1".parse().expect("valid IP")
-}
-
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
 
 /// A seeded world with a fast disk and whatever fault profile the test needs.
 fn sim_with(seed: u64, config: StorageConfiguration) -> SimWorld {
     let mut sim = SimWorld::new_with_seed(seed);
     sim.set_storage_config(config);
     sim
-}
-
-async fn run_on<F, Fut, T>(sim: &mut SimWorld, f: F) -> T
-where
-    F: FnOnce(SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-    handle.await.expect("task panicked")
 }
 
 fn sectors(count: usize, byte: u8) -> Vec<u8> {

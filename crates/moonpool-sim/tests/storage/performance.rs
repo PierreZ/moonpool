@@ -4,50 +4,15 @@
 //! IOPS limits and bandwidth constraints following the latency formula:
 //! `total_latency = base_latency + 1/iops + size/bandwidth`
 
+use crate::{local_runtime, run_and_measure_time, step_until_done, test_ip};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration};
-use std::net::IpAddr;
 use std::time::Duration;
 
 /// Build a uniform latency distribution over `[start, end)` for test configs.
 fn uniform(start: Duration, end: Duration) -> LatencyDistribution {
     LatencyDistribution::Uniform { start, end }
-}
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-/// Run a storage test and return the simulation time elapsed.
-async fn run_and_measure_time<F, Fut>(mut sim: SimWorld, f: F) -> Duration
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked").expect("io error");
-    sim.current_time()
 }
 
 /// Test that low IOPS configuration increases latency for many small operations
@@ -310,13 +275,7 @@ fn test_read_bandwidth_constraint() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Reset time reference
         let start_time = sim.current_time();

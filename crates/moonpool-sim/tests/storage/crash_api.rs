@@ -4,33 +4,11 @@
 //! following the same pattern as `network/partition.rs` tests
 //! for `sim.partition_pair()`.
 
+use crate::{fast_sim, local_runtime, step_until_done, test_ip};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{Event, SimWorld, StorageConfiguration};
-use std::net::IpAddr;
 use std::time::Duration;
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-/// Create a `SimWorld` with fast storage configuration.
-fn fast_sim() -> SimWorld {
-    let mut sim = SimWorld::new();
-    sim.set_storage_config(StorageConfiguration::fast_local());
-    sim
-}
 
 /// Test the basic `simulate_crash` API call
 #[test]
@@ -48,13 +26,7 @@ fn test_simulate_crash_api_basic() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Call simulate_crash - should not panic
         sim.simulate_crash_for_process(test_ip(), true);
@@ -84,13 +56,7 @@ fn test_simulate_crash_synced_data_survives() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Simulate crash
         sim.simulate_crash_for_process(test_ip(), true);
@@ -142,13 +108,7 @@ fn test_simulate_crash_unsynced_data_behavior() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Simulate crash with high corruption probability
         sim.simulate_crash_for_process(test_ip(), true);
@@ -212,13 +172,7 @@ fn test_simulate_crash_close_files_true() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Crash with close_files=true
         sim.simulate_crash_for_process(test_ip(), true);
@@ -258,13 +212,7 @@ fn test_simulate_crash_close_files_false() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Crash with close_files=false
         sim.simulate_crash_for_process(test_ip(), false);
@@ -309,13 +257,7 @@ fn test_simulate_crash_multiple_files() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Crash affects all files
         sim.simulate_crash_for_process(test_ip(), true);
@@ -366,13 +308,7 @@ fn test_simulate_crash_during_write() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Simulate crash "mid-write" (after write but before sync)
         sim.simulate_crash_for_process(test_ip(), true);
@@ -420,13 +356,7 @@ fn test_simulate_crash_zero_corruption_probability() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Crash with 0% corruption
         sim.simulate_crash_for_process(test_ip(), true);
@@ -475,13 +405,7 @@ fn test_simulate_crash_repeated() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Multiple crashes should not panic or cause issues
         for i in 0..10 {
@@ -524,14 +448,7 @@ fn test_simulate_crash_no_files() {
             provider.exists("after_crash.txt").await
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let exists = handle.await.expect("task panicked").expect("io error");
+        let exists = step_until_done(&mut sim, handle).await.expect("io error");
         assert!(exists, "Should be able to create files after crash");
     });
 }

@@ -1,6 +1,7 @@
 //! A listener's pending and reserved accept slots are bounded. Parked
 //! connects resume in poll order and belong to one listener generation.
 
+use crate::sync_drive::{drive, settle};
 use futures::task::noop_waker;
 use moonpool_sim::{
     LatencyDistribution, NetworkConfiguration, NetworkProvider, SimWorld, SimulationBuilder,
@@ -21,7 +22,6 @@ use std::{
 };
 
 const SERVER: &str = "10.0.1.2:8080";
-const MAX_STEPS: usize = 10_000;
 
 fn ip(value: &str) -> IpAddr {
     value.parse().expect("valid test IP")
@@ -53,27 +53,6 @@ fn counting_waker(count: &Arc<AtomicUsize>) -> Waker {
 
 fn poll_with<F: Future>(mut future: Pin<&mut F>, waker: &Waker) -> Poll<F::Output> {
     future.as_mut().poll(&mut Context::from_waker(waker))
-}
-
-fn settle<F: Future>(sim: &mut SimWorld, mut future: Pin<&mut F>) -> Poll<F::Output> {
-    for _ in 0..MAX_STEPS {
-        if let ready @ Poll::Ready(_) = poll_once(future.as_mut()) {
-            return ready;
-        }
-        if !sim.has_pending_events() {
-            return Poll::Pending;
-        }
-        sim.step();
-    }
-    panic!("simulation-backed future exceeded {MAX_STEPS} events")
-}
-
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    match settle(sim, future.as_mut()) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("simulation-backed future stalled"),
-    }
 }
 
 #[test]

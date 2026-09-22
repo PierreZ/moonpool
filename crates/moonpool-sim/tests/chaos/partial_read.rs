@@ -12,6 +12,7 @@
 //! reads with no zero-length read — and the fixed seed range collectively proves
 //! that partial reads do occur (a fully-buffered payload split across >1 read).
 
+use super::local_runtime;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
     NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait, buggify_init, buggify_reset,
@@ -64,13 +65,7 @@ async fn drain_with_partial_reads(seed: u64, max_bytes: usize, payload: &[u8]) -
 /// least one seed splits the fully-buffered payload across multiple reads.
 #[test]
 fn test_partial_reads_preserve_data() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let payload: Vec<u8> = (0u8..200).collect();
         let mut any_partial = false;
         for seed in 0..40u64 {
@@ -91,13 +86,7 @@ fn test_partial_reads_preserve_data() {
 /// Guards against an off-by-one that would make the sample range empty and panic.
 #[test]
 fn test_partial_read_single_byte_boundary() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let payload: Vec<u8> = (0u8..32).collect();
         let mut any_partial = false;
         for seed in 0..40u64 {
@@ -116,13 +105,7 @@ fn test_partial_read_single_byte_boundary() {
 /// Without BUGGIFY, reads behave normally: a single read drains the whole buffer.
 #[test]
 fn test_partial_read_disabled_without_buggify() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_reset(); // BUGGIFY disabled -> no partial reads
 
         let config = NetworkConfiguration::fast_local();

@@ -1,62 +1,16 @@
-use futures::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite},
-    task::noop_waker,
-};
+use crate::poll_io::{poll_read_once, poll_write_once};
+use crate::sync_drive::drive;
+use futures::io::AsyncReadExt;
 use moonpool_sim::{
     NetworkProvider, SimFaultEvent, SimWorld, TcpListenerTrait,
     network::config::NetworkConfiguration,
 };
-use std::{
-    future::Future,
-    io,
-    net::IpAddr,
-    pin::{Pin, pin},
-    task::{Context, Poll},
-    time::Duration,
-};
-
-/// How many events a driven future may consume before it is declared stuck.
-const MAX_DRIVER_STEPS: usize = 10_000;
+use std::{net::IpAddr, task::Poll, time::Duration};
 
 fn ip(last_octet: u8) -> IpAddr {
     format!("10.0.1.{last_octet}")
         .parse()
         .expect("valid test IP")
-}
-
-/// Poll a simulation-backed future, advancing virtual time whenever it parks.
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        assert!(
-            sim.has_pending_events(),
-            "simulation-backed future stalled without a pending event"
-        );
-        sim.step();
-    }
-
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
-}
-
-fn poll_write_once(stream: &mut (impl AsyncWrite + Unpin), data: &[u8]) -> Poll<io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    Pin::new(stream).poll_write(&mut context, data)
-}
-
-fn poll_read_once(
-    stream: &mut (impl AsyncRead + Unpin),
-    data: &mut [u8],
-) -> Poll<io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    Pin::new(stream).poll_read(&mut context, data)
 }
 
 /// Test basic partition functionality by directly testing the `SimWorld` API

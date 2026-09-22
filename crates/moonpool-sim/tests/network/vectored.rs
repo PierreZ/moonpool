@@ -1,9 +1,7 @@
-use futures::{
-    future::poll_fn,
-    io::{AsyncRead, AsyncWriteExt},
-};
+use crate::async_drive::drive;
+use crate::runtime::local_runtime;
+use futures::io::{AsyncRead, AsyncWriteExt};
 use moonpool_sim::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
-use std::future::Future;
 use std::io::IoSlice;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -17,30 +15,9 @@ fn try_read(server: &mut (impl AsyncRead + Unpin), buf: &mut [u8]) -> Option<usi
     }
 }
 
-async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    futures::pin_mut!(future);
-    poll_fn(|cx| match future.as_mut().poll(cx) {
-        Poll::Ready(output) => Poll::Ready(output),
-        Poll::Pending => {
-            if sim.has_pending_events() {
-                sim.step();
-                cx.waker().wake_by_ref();
-            }
-            Poll::Pending
-        }
-    })
-    .await
-}
-
 #[test]
 fn vectored_write_preserves_slice_boundaries_as_delivery_events() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "vectored-write-test";

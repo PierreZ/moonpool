@@ -4,28 +4,17 @@
 //! *name* that reaches them. These tests pin that distinction — and the fault
 //! that punishes an engine which forgets the second half.
 
+use crate::{local_runtime, run_on, step_until_done, test_ip};
 use futures::io::AsyncWriteExt;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
-    CrashOutcome, EioTarget, SimFaultEvent, SimStorageProvider, SimWorld, StorageConfiguration,
-    StorageFaultKind, executor::Executor,
+    CrashOutcome, EioTarget, SimFaultEvent, SimWorld, StorageConfiguration, StorageFaultKind,
+    executor::Executor,
 };
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::task::Poll;
-
-fn test_ip() -> IpAddr {
-    "127.0.0.1".parse().expect("valid IP")
-}
-
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
 
 /// A world whose crashes always lose an unsynced directory entry, so the
 /// distinction is deterministic rather than statistical.
@@ -35,23 +24,6 @@ fn losing_sim() -> SimWorld {
     let mut sim = SimWorld::new();
     sim.set_storage_config(config);
     sim
-}
-
-async fn run_on<F, Fut, T>(sim: &mut SimWorld, f: F) -> T
-where
-    F: FnOnce(SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-    handle.await.expect("task panicked")
 }
 
 /// Drive a low-level provider future and its scheduled storage events on
@@ -707,13 +679,7 @@ fn a_crash_resolves_only_the_crashing_processs_namespace() {
                     .expect("open failed");
                 file.sync_all().await.expect("sync failed");
             });
-            while !handle.is_finished() {
-                while sim.pending_event_count() > 0 {
-                    sim.step();
-                }
-                tokio::task::yield_now().await;
-            }
-            handle.await.expect("task panicked");
+            step_until_done(&mut sim, handle).await;
         }
 
         // Crash only the first process.

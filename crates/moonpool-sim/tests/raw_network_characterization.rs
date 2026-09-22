@@ -5,16 +5,15 @@
 //! scheduler and the network state machine.
 
 use std::{
-    future::Future,
     io,
-    pin::{Pin, pin},
+    pin::Pin,
     task::{Context, Poll},
     time::Duration,
 };
 
 use futures::{
     future::join,
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     task::noop_waker,
 };
 use moonpool_sim::{
@@ -22,43 +21,13 @@ use moonpool_sim::{
     reset_rng_call_count, rng_call_count,
 };
 
-const MAX_DRIVER_STEPS: usize = 100_000;
+#[path = "common/drive.rs"]
+mod driver;
+#[path = "common/poll_io.rs"]
+mod poll_io;
 
-/// Poll a simulation-backed future, advancing virtual time whenever it parks.
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-
-        assert!(
-            sim.has_pending_events(),
-            "simulation-backed future stalled without a pending event"
-        );
-        sim.step();
-    }
-
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
-}
-
-fn poll_write_once(stream: &mut (impl AsyncWrite + Unpin), data: &[u8]) -> Poll<io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    Pin::new(stream).poll_write(&mut context, data)
-}
-
-fn poll_read_once(
-    stream: &mut (impl AsyncRead + Unpin),
-    data: &mut [u8],
-) -> Poll<io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    Pin::new(stream).poll_read(&mut context, data)
-}
+use driver::drive;
+use poll_io::{poll_read_once, poll_write_once};
 
 fn poll_write_vectored_once(
     stream: &mut (impl AsyncWrite + Unpin),

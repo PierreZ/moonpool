@@ -8,6 +8,7 @@
 //! A black hole is permanent for the connection: only a new connection is
 //! clean.
 
+use super::local_runtime;
 use futures::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     task::noop_waker,
@@ -22,14 +23,6 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
-
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
 
 /// One poll of a read with a no-op waker, after the world has been drained.
 /// `Pending` means no data and no EOF: nothing is left that could arrive.
