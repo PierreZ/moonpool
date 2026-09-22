@@ -163,7 +163,9 @@ pub enum ConnectFailureMode {
     Disabled,
     /// Always fail with `ConnectionRefused` when buggified
     AlwaysFail,
-    /// Probabilistic: 50% fail with `ConnectionRefused`, 50% hang forever
+    /// Probabilistic: a buggified connect fails with `ConnectionRefused` with
+    /// probability [`ChaosConfiguration::connect_failure_probability`] and hangs
+    /// forever otherwise
     Probabilistic,
 }
 
@@ -413,7 +415,9 @@ pub struct ChaosConfiguration {
     /// FDB ref: sim2.actor.cpp:1243-1250 (`SIM_CONNECT_ERROR_MODE`)
     pub connect_failure_mode: ConnectFailureMode,
 
-    /// Probability of connect failure when Probabilistic mode is enabled (default 50%)
+    /// Probability that a buggified connect is refused with `ConnectionRefused`
+    /// when Probabilistic mode is enabled; the remainder hang forever (default 50%).
+    /// `1.0` always refuses, `0.0` always hangs.
     pub connect_failure_probability: f64,
 
     /// Permanent per-IP-pair latency range (FDB `SimClogging::MAX_CLOGGING_LATENCY`).
@@ -460,7 +464,7 @@ impl Default for ChaosConfiguration {
             buggified_delay_max: Duration::from_millis(100), // FDB: MAX_BUGGIFIED_DELAY
             buggified_delay_probability: 0.25, // FDB: random01() < 0.25
             connect_failure_mode: ConnectFailureMode::Probabilistic, // FDB: SIM_CONNECT_ERROR_MODE = 2
-            connect_failure_probability: 0.5,                        // FDB: random01() > 0.5
+            connect_failure_probability: 0.5,                        // FDB: random01() > 0.5 errors
             max_pair_latency: Duration::ZERO..Duration::ZERO, // FDB: MAX_CLOGGING_LATENCY default 0
             partition_strategy: PartitionStrategy::default(),
         }

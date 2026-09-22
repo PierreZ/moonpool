@@ -327,7 +327,7 @@ configured fault for its whole lifetime, unless you call
 | `connect_failure_mode` | `ConnectFailureMode` | `Probabilistic` |
 | `connect_failure_probability` | `f64` | 0.5 (50%) |
 
-**ConnectFailureMode** variants: `Disabled`, `AlwaysFail`, `Probabilistic` (50% refused, 50% hang).
+**ConnectFailureMode** variants: `Disabled`, `AlwaysFail`, `Probabilistic` (refused with `connect_failure_probability`, otherwise hang).
 
 ### Handshake Delay
 
