@@ -366,7 +366,13 @@ impl StreamCore {
         if state.credit.has_room() && state.waiters.is_empty() {
             return Poll::Ready(Ok(()));
         }
-        state.ready_waiters.push(cx.waker().clone());
+        if !state
+            .ready_waiters
+            .iter()
+            .any(|waker| waker.will_wake(cx.waker()))
+        {
+            state.ready_waiters.push(cx.waker().clone());
+        }
         Poll::Pending
     }
 

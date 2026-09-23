@@ -62,8 +62,10 @@ impl<T> Mailbox<T> {
         if state.closed {
             return Err((item, MailboxRefusal::Closed));
         }
+        // The byte budget always admits one request into an empty queue:
+        // a request larger than the budget is slow, never refused forever.
         if state.items.len() >= self.capacity
-            || state.bytes.saturating_add(bytes) > self.byte_capacity
+            || (!state.items.is_empty() && state.bytes.saturating_add(bytes) > self.byte_capacity)
         {
             return Err((item, MailboxRefusal::Full));
         }
