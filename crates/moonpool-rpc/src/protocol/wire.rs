@@ -25,9 +25,10 @@
 //!
 //! - HELLO: each side announces the range of envelope versions it speaks;
 //!   the session runs at the highest common version ([`negotiate`]) and a
-//!   peer with no common version is refused. `features` is reserved for
-//!   capabilities negotiated by later packages (TLS, authentication,
-//!   streams); this version sends zero and ignores unknown bits.
+//!   peer with no common version is refused. `features` is reserved and
+//!   unused: every version so far sends zero and ignores whatever arrives
+//!   (TLS is a session upgrade, credentials and streams are negotiated by
+//!   the version itself).
 //!   `max_frame_bytes` is the largest frame payload the sender accepts:
 //!   each side sends the peer nothing larger, so an oversized request or
 //!   reply fails its own call instead of tearing the session down.

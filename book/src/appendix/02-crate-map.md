@@ -45,7 +45,7 @@ select only `tokio`, then add `hyper` if it speaks HTTP or gRPC.
 | Feature | Adds |
 |---------|------|
 | `rpc` | `moonpool::rpc` (moonpool-rpc with its prost codec) |
-| `rpc-derive` | `#[moonpool::rpc::service]` generated interfaces |
+| `rpc-derive` | the `#[moonpool_rpc::service]` attribute (re-exported as `moonpool::rpc::service`; its generated code names `moonpool_rpc`, so depend on `moonpool-rpc` directly to use it) |
 | `rpc-tls` | server-authenticated TLS sessions (rustls + ring, native only) |
 | `rpc-jwt` | JWT/JWKS request verification (jsonwebtoken, native only) |
 

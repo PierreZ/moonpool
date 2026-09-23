@@ -227,7 +227,7 @@ pub struct StreamPolicy {
     /// the caller picks one
     /// ([`ServiceClient::get_reply_stream_with_window`](crate::ServiceClient::get_reply_stream_with_window)).
     /// An item larger than the window can never be sent: the producer is
-    /// told so ([`SendError::TooLarge`](crate::SendError::TooLarge)).
+    /// told so ([`SendError::TooLarge`](crate::stream::SendError::TooLarge)).
     pub window_bytes: u64,
     /// The largest window this runtime honours as a producer; a caller
     /// announcing more is held to this.

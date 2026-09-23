@@ -19,10 +19,11 @@ use moonpool_rpc::protocol::{
     PROTOCOL_MAGIC, PROTOCOL_VERSION, WireMessage, encode_frame, encode_message,
     stream_item_frame_len,
 };
+use moonpool_rpc::stream::SendError;
 use moonpool_rpc::{
     AccessClass, ErrorReason, Execution, IncomingRequest, MethodId, PeerPolicy, RequestStream,
-    ResourceLimits, RpcConfig, RpcDriver, RpcHandle, RpcMethod, SchemaVersion, SendError,
-    ServiceRef, StreamPolicy,
+    ResourceLimits, RpcConfig, RpcDriver, RpcHandle, RpcMethod, SchemaVersion, ServiceRef,
+    StreamPolicy,
 };
 use tokio::io::AsyncWriteExt;
 

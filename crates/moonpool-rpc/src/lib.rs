@@ -206,7 +206,7 @@ pub use interface::{
 };
 pub use protocol::{MethodId, RpcMethod, SchemaVersion};
 pub use stats::{Outstanding, ResourceProbe, RpcStats};
-pub use stream::{ReplyStream, SendError, StreamProducer};
+pub use stream::{ReplyStream, StreamProducer};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
 pub use transport::{
     RpcDriver, RpcHandle, SessionUpgrade, ShutdownReport, is_transient_accept_error,

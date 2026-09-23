@@ -32,7 +32,9 @@ prometheus = ["dep:moonpool-prometheus"]
 # default above: a stack that uses no RPC compiles none of it. The RPC crate
 # never depends on the simulation, and hyper stays independent of it.
 rpc = ["dep:moonpool-rpc"]
-# `#[moonpool::rpc::service]` generated interfaces (proc-macro dependencies).
+# The `#[moonpool_rpc::service]` attribute (proc-macro dependencies), also
+# reachable as `moonpool::rpc::service`; its generated code names the
+# `moonpool_rpc` crate, so a crate using it depends on moonpool-rpc directly.
 rpc-derive = ["rpc", "moonpool-rpc/derive"]
 # Server-authenticated TLS sessions (rustls + ring). Native targets only.
 rpc-tls = ["rpc", "moonpool-rpc/tls"]

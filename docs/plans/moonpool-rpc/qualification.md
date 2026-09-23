@@ -4,7 +4,7 @@ Release-readiness record for the agreed moonpool-rpc scope: every behaviour row 
 
 ## Integration base
 
-- Base: `2edfbc0` on `claude/epic-albattani-v7vs90`, with #213–#218 merged (#216 streams/credit/admission, #217 balancing, #218 security, TLS/JWT, protocol v2, graceful shutdown, observability and the facade `rpc` feature).
+- Base: commit `2edfbc0`, with #213–#218 merged (#216 streams/credit/admission, #217 balancing, #218 security, TLS/JWT, protocol v2, graceful shutdown, observability and the facade `rpc` feature).
 - FoundationDB behavioural reference: `c0c44752df676e4a2d532b5cdb4bf96728a30b78` (`fdbrpc/FlowTransport.cpp`, `fdbrpc/include/fdbrpc/fdbrpc.h`, `LoadBalance.actor.h`, `sim2.cpp`, `flow/Net2.cpp`).
 - #219 commits, in order: the bit-flip mask for non-corruption campaigns; `ResourceProbe::outstanding` / `is_at_baseline`; seeded malformed-input property tests; the `sim-rpc-qualification` campaign; the real-network soak example; `TCP_NODELAY` on Tokio connections; CI; the soak latency fix; these documents.
 
@@ -213,7 +213,7 @@ Budgets recorded for regressions (this machine, release): unary p99 at 5,000/s o
 - The simulator has no bandwidth model: byte-level head-of-line figures come from real TCP only.
 - The bounded qualification test takes about a minute in the debug profile (nextest override: 30 s period, 8 periods); its rarest required scenarios fire on 3–5 of 30 seeds, checked on three windows.
 - The redaction invariant scans the captured trace (campaign, audit and shutdown events), not every `tracing` event of every crate.
-- Previously recorded residuals stand: a vanished caller's streams are released only after the producer's inbound idle timeout and a ping timeout; a client sends a bearer credential over any session it opens (run credential-carrying runtimes over TLS or a trusted network); a version 1 caller refused by a version 2 server sees `EndpointNotFound`.
+- Previously recorded residuals stand: a vanished caller's streams are released only after the producer's inbound idle timeout and a ping timeout; a version 1 caller refused by a version 2 server sees `EndpointNotFound`.
 
 ## Non-claims
 

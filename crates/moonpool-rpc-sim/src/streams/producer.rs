@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use moonpool_rpc::protocol::stream_item_frame_len;
-use moonpool_rpc::{AccessClass, IncomingRequest, RequestStream, RpcDriver, SendError};
+use moonpool_rpc::stream::SendError;
+use moonpool_rpc::{AccessClass, IncomingRequest, RequestStream, RpcDriver};
 use moonpool_sim::{
     Process, SimContext, SimulationError, SimulationResult, TimeProvider, assert_always,
     assert_sometimes,
