@@ -365,6 +365,29 @@ pub struct SimulationReport {
 }
 
 impl SimulationReport {
+    /// Whether this run found a definite failure.
+    ///
+    /// True when any seed failed, when an always-type assertion was violated,
+    /// or when evaluations were dropped because the assertion slot table
+    /// overflowed. The last two are run-level: they reach
+    /// [`assertion_violations`](Self::assertion_violations) and
+    /// [`dropped_assertion_allocations`](Self::dropped_assertion_allocations)
+    /// without necessarily failing a seed, so gating on
+    /// [`seeds_failing`](Self::seeds_failing) alone lets a simulation with
+    /// partial assertion accounting pass.
+    ///
+    /// Coverage is deliberately not part of it: an unsatisfied `sometimes` is
+    /// in [`coverage_violations`](Self::coverage_violations) and an
+    /// unsaturated `UntilCoverageStable` run sets
+    /// [`convergence_timeout`](Self::convergence_timeout); a caller that
+    /// gates on coverage checks those as well.
+    #[must_use]
+    pub fn is_failure(&self) -> bool {
+        !self.seeds_failing.is_empty()
+            || !self.assertion_violations.is_empty()
+            || self.dropped_assertion_allocations > 0
+    }
+
     /// Calculate the success rate as a percentage.
     #[must_use]
     pub fn success_rate(&self) -> f64 {
@@ -500,5 +523,66 @@ impl fmt::Display for SimulationReport {
     /// in `display.rs` with colour off.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         super::display::fmt_report(f, self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SimulationMetrics, SimulationReport};
+    use std::collections::BTreeMap;
+
+    fn clean_report() -> SimulationReport {
+        SimulationReport {
+            iterations: 1,
+            successful_runs: 1,
+            failed_runs: 0,
+            metrics: SimulationMetrics::default(),
+            individual_metrics: Vec::new(),
+            seeds_used: vec![1],
+            seeds_failing: Vec::new(),
+            assertion_results: BTreeMap::new(),
+            assertion_violations: Vec::new(),
+            dropped_assertion_allocations: 0,
+            coverage_violations: Vec::new(),
+            exploration: None,
+            assertion_details: Vec::new(),
+            bucket_summaries: Vec::new(),
+            convergence_timeout: false,
+            saturation: None,
+            app_metrics: Vec::new(),
+            run_id: 0,
+            metric_queries: Vec::new(),
+        }
+    }
+
+    /// Run-level violations fail the run even when no seed failed: gating on
+    /// `seeds_failing` alone let an assertion-table overflow pass (#263).
+    #[test]
+    fn run_level_violations_are_failures() {
+        assert!(!clean_report().is_failure());
+
+        let mut failing_seed = clean_report();
+        failing_seed.seeds_failing.push(1);
+        assert!(failing_seed.is_failure());
+
+        let mut violation = clean_report();
+        violation
+            .assertion_violations
+            .push("assert_always!('x') failed 1 times out of 1".to_owned());
+        assert!(violation.is_failure());
+
+        let mut overflow = clean_report();
+        overflow.dropped_assertion_allocations = 3;
+        assert!(overflow.is_failure());
+
+        let mut unconverged = clean_report();
+        unconverged.convergence_timeout = true;
+        unconverged
+            .coverage_violations
+            .push("never reached".to_owned());
+        assert!(
+            !unconverged.is_failure(),
+            "coverage is the caller's choice, not a definite failure"
+        );
     }
 }

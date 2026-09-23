@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use moonpool_sim::{AttritionScope, LocalityConfig, SimulationBuilder};
-use moonpool_sim_examples::support::{finish_or_exit_on_failing_seeds, reboot_attrition};
+use moonpool_sim_examples::support::{finish_or_exit_on_failure, reboot_attrition};
 use moonpool_sim_examples::topology::{PROCESSES_PER_MACHINE, TopologyProcess, TopologyWorkload};
 
 fn main() {
@@ -26,5 +26,5 @@ fn main() {
         .run()
         .expect("simulation configuration is valid");
 
-    finish_or_exit_on_failing_seeds(&report);
+    finish_or_exit_on_failure(&report);
 }

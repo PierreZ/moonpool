@@ -19,5 +19,5 @@ fn main() {
         .run()
         .expect("simulation configuration is valid");
 
-    moonpool_sim_examples::support::finish_or_exit_if_unexplored(&report);
+    moonpool_sim_examples::support::finish_or_exit_unless_bug_found(&report);
 }

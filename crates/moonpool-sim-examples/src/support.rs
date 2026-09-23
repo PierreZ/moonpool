@@ -8,8 +8,8 @@ use std::future::Future;
 use std::process;
 
 use moonpool_sim::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, SimContext, SimulationError,
-    SimulationReport, SimulationResult,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, ExplorationReport, SimContext,
+    SimulationError, SimulationReport, SimulationResult,
 };
 
 /// Wrap a message as [`SimulationError::InvalidState`].
@@ -58,30 +58,90 @@ pub fn reboot_attrition(max_dead: usize, scope: AttritionScope) -> Chaos {
     }
 }
 
-/// Print the report and exit non-zero when any seed failed.
-pub fn finish_or_exit_on_failing_seeds(report: &SimulationReport) {
+/// Print the report and exit non-zero when the run found a failure.
+///
+/// Gates on [`SimulationReport::is_failure`], not on `seeds_failing` alone: an
+/// always-violation or an assertion-table overflow is recorded at run level
+/// and may fail no individual seed.
+pub fn finish_or_exit_on_failure(report: &SimulationReport) {
     report.eprint();
 
-    if !report.seeds_failing.is_empty() {
+    if report.is_failure() {
         eprintln!(
-            "ERROR: {} seeds failed: {:?}",
+            "ERROR: {} seeds failed {:?}, {} assertion violations, {} dropped assertion allocations",
             report.seeds_failing.len(),
-            report.seeds_failing
+            report.seeds_failing,
+            report.assertion_violations.len(),
+            report.dropped_assertion_allocations
         );
         process::exit(1);
     }
 }
 
-/// Print the report and exit non-zero when exploration ran no timeline.
-pub fn finish_or_exit_if_unexplored(report: &SimulationReport) {
+/// Print the report and exit non-zero unless exploration found the planted
+/// bug.
+///
+/// For a planted-bug example (maze) whose seeds are *expected* to fail.
+/// Running a timeline is not enough: an exploration that expands one level
+/// and stalls, or never reaches the bug, must not exit 0.
+pub fn finish_or_exit_unless_bug_found(report: &SimulationReport) {
     report.eprint();
 
-    if report
-        .exploration
-        .as_ref()
-        .is_some_and(|e| e.total_timelines == 0)
-    {
+    let exploration = explored(report);
+    if exploration.bugs_found == 0 {
+        eprintln!(
+            "ERROR: exploration ran {} timelines but never reached the planted bug",
+            exploration.total_timelines
+        );
+        process::exit(1);
+    }
+}
+
+/// Print the report and exit non-zero unless exploration either found the
+/// planted bug or drove the numeric assertion `msg` to a watermark of at least
+/// `floor`.
+///
+/// For a planted-bug example (dungeon) whose bug is deep enough that a CI
+/// budget does not reliably reach it: the depth the exploration did reach is
+/// then the regression signal, so a stall at a shallow level fails the run.
+pub fn finish_or_exit_below_watermark(report: &SimulationReport, msg: &str, floor: i64) {
+    report.eprint();
+
+    let exploration = explored(report);
+    if exploration.bugs_found > 0 {
+        return;
+    }
+    let watermark = report
+        .assertion_details
+        .iter()
+        .find(|detail| detail.msg == msg)
+        .map(|detail| detail.watermark);
+    match watermark {
+        Some(watermark) if watermark >= floor => {}
+        Some(watermark) => {
+            eprintln!(
+                "ERROR: exploration ran {} timelines, found no bug, and drove \"{msg}\" only to {watermark} (floor {floor})",
+                exploration.total_timelines
+            );
+            process::exit(1);
+        }
+        None => {
+            eprintln!("ERROR: exploration never evaluated \"{msg}\"");
+            process::exit(1);
+        }
+    }
+}
+
+/// The exploration section of `report`, exiting non-zero when exploration did
+/// not run or ran no timeline.
+fn explored(report: &SimulationReport) -> &ExplorationReport {
+    let Some(exploration) = report.exploration.as_ref() else {
+        eprintln!("ERROR: exploration did not run");
+        process::exit(1);
+    };
+    if exploration.total_timelines == 0 {
         eprintln!("ERROR: no timelines explored");
         process::exit(1);
     }
+    exploration
 }
