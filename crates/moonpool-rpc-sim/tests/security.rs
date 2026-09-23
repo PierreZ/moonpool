@@ -95,6 +95,7 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc security v1 client refused at the handshake",
         "rpc security legacy v1 server answered a public call",
         "rpc security v1 session kept out of a private endpoint",
+        "rpc security credential withheld from a v1 session",
         // Lifecycle.
         "rpc security server crashed mid-work",
         "rpc security server shut down gracefully mid-work",

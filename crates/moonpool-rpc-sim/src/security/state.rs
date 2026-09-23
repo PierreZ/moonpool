@@ -146,6 +146,9 @@ struct Inner {
     issued: BTreeMap<u64, Issued>,
     receipts: BTreeMap<u64, Vec<Receipt>>,
     outcomes: BTreeMap<u64, Class>,
+    /// Every credential a refreshing source minted for a request, with the
+    /// UTC and key-set generation of the mint.
+    mints: BTreeMap<u64, Vec<(Minted, u64, u64)>>,
 }
 
 /// The run's ledger. Clones share it.
@@ -189,10 +192,11 @@ impl Ledger {
     #[must_use]
     pub fn receive(&self, id: u64, receipt: Receipt, trust: &Trust) -> bool {
         let mut inner = lock(&self.inner);
-        let allowed = inner
-            .issued
-            .get(&id)
-            .is_some_and(|issued| may_run(issued, &receipt, trust));
+        let allowed = inner.issued.get(&id).is_some_and(|issued| {
+            candidates(issued, inner.mints.get(&id))
+                .iter()
+                .any(|candidate| may_run(candidate, &receipt, trust))
+        });
         inner.receipts.entry(id).or_default().push(receipt);
         allowed
     }
@@ -207,6 +211,28 @@ impl Ledger {
     #[must_use]
     pub fn receipts(&self, id: u64) -> usize {
         lock(&self.inner).receipts.get(&id).map_or(0, Vec::len)
+    }
+
+    /// Record a credential a refreshing source minted for request `id`, at
+    /// the script's current UTC and key-set generation.
+    pub fn mint(&self, id: u64, minted: Minted, utc: u64, generation: u64) {
+        lock(&self.inner)
+            .mints
+            .entry(id)
+            .or_default()
+            .push((minted, utc, generation));
+    }
+
+    /// The credentials request `id` may have carried: its own, or for a
+    /// refreshing source every one it minted (each judged from its mint).
+    #[must_use]
+    pub fn carried(&self, id: u64) -> Vec<Issued> {
+        let inner = lock(&self.inner);
+        inner
+            .issued
+            .get(&id)
+            .map(|issued| candidates(issued, inner.mints.get(&id)))
+            .unwrap_or_default()
     }
 
     /// Record what the caller of `id` saw.
@@ -233,6 +259,24 @@ impl Ledger {
     }
 }
 
+/// The credentials a request may have carried: for a refreshing source,
+/// each minted one as if issued at its mint; otherwise the request's own.
+fn candidates(issued: &Issued, mints: Option<&Vec<(Minted, u64, u64)>>) -> Vec<Issued> {
+    if issued.minted.kind != Kind::Refreshing {
+        return vec![issued.clone()];
+    }
+    mints
+        .into_iter()
+        .flatten()
+        .map(|(minted, utc, generation)| Issued {
+            minted: minted.clone(),
+            utc_sent: *utc,
+            generation_sent: *generation,
+            ..issued.clone()
+        })
+        .collect()
+}
+
 /// Whether the credential could have been accepted at some point between
 /// its sending and `utc`/`generation` (a receipt, or the caller seeing the
 /// outcome).
@@ -240,10 +284,11 @@ impl Ledger {
 pub fn acceptable(issued: &Issued, utc: u64, generation: u64, trust: &Trust) -> bool {
     let minted = &issued.minted;
     match minted.kind {
-        Kind::Refreshing => true,
         kind if kind.is_signed_by_the_issuer() => {
+            // Some instant in [utc_sent, utc] lies in [nbf, exp).
             minted.not_before <= utc
                 && minted.expires > issued.utc_sent
+                && minted.not_before.max(issued.utc_sent) < minted.expires
                 && minted.key.is_some_and(|key| {
                     trust.published_between(key, issued.generation_sent, generation)
                 })
@@ -308,5 +353,58 @@ pub fn consistent_denial(
             .key
             .is_some_and(|key| !trust.published_between(key, generation, generation)),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moonpool_sim::StateHandle;
+
+    use super::{Issued, Ledger, Receipt, Route, Target};
+    use crate::security::trust::{Kind, START_UTC, Trust};
+
+    /// Regression: a receipt of a refreshing source's request was accepted
+    /// whatever tokens it minted. It is now judged against the minted
+    /// tokens: none minted, or only expired ones, means no receipt allowed.
+    #[test]
+    fn refreshed_receipts_are_judged_against_the_tokens_minted() {
+        let state = StateHandle::new();
+        let trust = Trust::of(&state).expect("trust");
+        let ledger = Ledger::of(&state);
+        let issue = || {
+            ledger.issue(Issued {
+                minted: trust.mint(Kind::Refreshing, "refresher", 120, 0),
+                subject: "refresher".into(),
+                target: Target::Private,
+                route: Route::Remote,
+                utc_sent: trust.utc(),
+                generation_sent: trust.generation(),
+            })
+        };
+        let receipt = |utc| Receipt {
+            target: Target::Private,
+            subject: Some("refresher".into()),
+            utc,
+            generation: trust.generation(),
+        };
+        let unminted = issue();
+        assert!(!ledger.receive(unminted, receipt(START_UTC), &trust));
+        let minted = issue();
+        ledger.mint(
+            minted,
+            trust.mint(Kind::Refreshing, "refresher", 120, 0),
+            trust.utc(),
+            trust.generation(),
+        );
+        assert!(ledger.receive(minted, receipt(START_UTC + 1), &trust));
+        trust.advance(10_000);
+        let stale = issue();
+        // Its only token had expired when it was sent (a source handing
+        // out a stale token): never acceptable, whenever it arrived.
+        let mut old = trust.mint(Kind::Refreshing, "refresher", 120, 0);
+        old.not_before = START_UTC;
+        old.expires = START_UTC + 60;
+        ledger.mint(stale, old, trust.utc(), trust.generation());
+        assert!(!ledger.receive(stale, receipt(START_UTC + 20_000), &trust));
     }
 }

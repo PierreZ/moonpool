@@ -93,6 +93,8 @@ impl SecurityConfig {
 /// and counts how often it was asked.
 struct Refresher {
     trust: Trust,
+    ledger: Ledger,
+    id: u64,
     subject: String,
     asks: Arc<AtomicU32>,
 }
@@ -100,10 +102,16 @@ struct Refresher {
 impl CredentialSource for Refresher {
     fn credential(&self, _target: &Endpoint) -> Option<Credential> {
         self.asks.fetch_add(1, Ordering::Relaxed);
-        self.trust
-            .mint(Kind::Refreshing, &self.subject, 120, 0)
-            .token
-            .map(Credential::bearer)
+        let minted = self.trust.mint(Kind::Refreshing, &self.subject, 120, 0);
+        // Recorded before it can leave: the oracle judges each receipt
+        // against the tokens actually minted, at their mint.
+        self.ledger.mint(
+            self.id,
+            minted.clone(),
+            self.trust.utc(),
+            self.trust.generation(),
+        );
+        minted.token.map(Credential::bearer)
     }
 }
 
@@ -140,6 +148,16 @@ async fn drain_watcher(
         history.push(format!("{id} Drain Valid {}", describe(&outcome)));
     }
     history
+}
+
+/// The workload runtimes' configuration: the simulation's sessions are
+/// plaintext, so they opt into sending credentials over them explicitly.
+fn client_config() -> RpcConfig {
+    let config = rpc_config();
+    RpcConfig {
+        security: config.security.clone().send_credentials_over_plaintext(),
+        ..config
+    }
 }
 
 /// The campaign's workload.
@@ -498,6 +516,8 @@ impl SecurityWorkload {
         let asks = Arc::new(AtomicU32::new(0));
         let client = service.bind(rpc).with_credentials(Refresher {
             trust: remote.trust.clone(),
+            ledger: remote.ledger.clone(),
+            id,
             subject,
             asks: Arc::clone(&asks),
         });
@@ -550,7 +570,14 @@ impl SecurityWorkload {
         } else {
             Target::LegacyPublic
         };
-        let (id, _) = remote.issue(Kind::Valid, target, 120, 0);
+        // A credential is never written on a version 1 session: a call
+        // carrying one fails before anything leaves.
+        let kind = if ctx.random().random_bool(0.5) {
+            Kind::Valid
+        } else {
+            Kind::Anonymous
+        };
+        let (id, _) = remote.issue(kind, target, 120, 0);
         let outcome = if private {
             let Ok(service) = ServiceRef::<PrivateEcho>::from_bytes(&refs.private) else {
                 return;
@@ -563,7 +590,7 @@ impl SecurityWorkload {
             remote.unary(rpc, &service, id, 0).await
         };
         let _ = remote.judge(id, &outcome.clone().map(Some));
-        self.note(id, SecurityOp::Legacy, Kind::Valid, &describe(&outcome));
+        self.note(id, SecurityOp::Legacy, kind, &describe(&outcome));
     }
 
     /// After the script stopped (clock restored, server back), a fresh
@@ -613,13 +640,13 @@ impl Workload for SecurityWorkload {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let config_error = |error| SimulationError::InvalidState(format!("rpc config: {error}"));
-        let (driver, rpc) =
-            RpcDriver::client_only(ctx.providers().clone(), rpc_config()).map_err(config_error)?;
+        let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), client_config())
+            .map_err(config_error)?;
         let (version1_driver, version1) = RpcDriver::client_only(
             ctx.providers().clone(),
             RpcConfig {
                 protocol_versions: 1..=1,
-                ..rpc_config()
+                ..client_config()
             },
         )
         .map_err(config_error)?;

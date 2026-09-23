@@ -47,8 +47,24 @@ impl SecurityFaults {
         ctx.partition(&workload, server)?;
         assert_reachable!("rpc security workload cut off from the server");
         pause(ctx, ctx.random().random_range(CUT)).await?;
-        ctx.heal_partition(&workload, server)
+        // Sometimes the server also loses the time across the heal: the
+        // call's next copy is then refused although an earlier copy may
+        // have run.
+        let forget = ctx.random().random_bool(0.5) && !trust_is_forgotten(ctx)?;
+        if forget {
+            Trust::of(ctx.state())?.forget();
+        }
+        ctx.heal_partition(&workload, server)?;
+        if forget {
+            pause(ctx, ctx.random().random_range(500..1500)).await?;
+            Trust::of(ctx.state())?.restore();
+        }
+        Ok(())
     }
+}
+
+fn trust_is_forgotten(ctx: &FaultContext) -> SimulationResult<bool> {
+    Ok(Trust::of(ctx.state())?.is_forgotten())
 }
 
 #[async_trait]

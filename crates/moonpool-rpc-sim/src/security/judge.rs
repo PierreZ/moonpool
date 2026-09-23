@@ -109,7 +109,7 @@ impl Caller {
         };
         match outcome {
             Ok(answer) => self.judge_answer(id, &issued, answer.as_ref()),
-            Err(error) => self.judge_error(&issued, error),
+            Err(error) => self.judge_error(id, &issued, error),
         }
         class
     }
@@ -163,7 +163,7 @@ impl Caller {
         );
     }
 
-    fn judge_error(&self, issued: &Issued, error: &RpcError) {
+    fn judge_error(&self, id: u64, issued: &Issued, error: &RpcError) {
         match error.reason() {
             ErrorReason::Unauthenticated(reason) => {
                 // A refusal proves non-admission of its own attempt; a
@@ -182,14 +182,19 @@ impl Caller {
                         "rpc security resent call refused after an earlier copy left"
                     );
                 }
-                assert_always!(
+                // A refreshing source's refusal concerns one of the tokens
+                // it minted; any of them may be the one refused.
+                let consistent = self.ledger.carried(id).iter().any(|carried| {
                     consistent_denial(
-                        issued,
+                        carried,
                         *reason,
                         self.trust.utc(),
                         self.trust.generation(),
-                        &self.trust
-                    ),
+                        &self.trust,
+                    )
+                });
+                assert_always!(
+                    consistent,
                     "a credential is refused only for what is wrong with it",
                     { "kind" => format!("{:?}", issued.minted.kind), "reason" => reason.name() }
                 );
@@ -216,6 +221,17 @@ impl Caller {
                     true,
                     "rpc security v1 session kept out of a private endpoint"
                 );
+            }
+            ErrorReason::CredentialWithheld(_) => {
+                assert_always!(
+                    error.execution() == Execution::NotAdmitted,
+                    "a withheld credential never left"
+                );
+                assert_always!(
+                    matches!(issued.target, Target::LegacyPublic | Target::LegacyPrivate),
+                    "credentials are withheld only from version 1 sessions here"
+                );
+                assert_sometimes!(true, "rpc security credential withheld from a v1 session");
             }
             ErrorReason::ServerShuttingDown => {
                 assert_always!(
