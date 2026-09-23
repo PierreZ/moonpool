@@ -91,6 +91,16 @@ pub(crate) async fn drain_watcher(
     (lines, calls)
 }
 
+/// A lane's end-of-run phase could not finish (the simulation shut it
+/// down): the run's recovery or judgement would be skipped silently.
+pub(crate) fn cut_short(phase: &str) {
+    assert_always!(
+        false,
+        "rpc qual a lane ran every phase to its end",
+        { "phase" => phase }
+    );
+}
+
 /// One service the recovery phase must regain.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Service {
@@ -112,9 +122,14 @@ impl QualificationWorkload {
                 break;
             }
             if pause(ctx, Duration::from_millis(50)).await.is_err() {
+                cut_short("waiting for the fault script");
                 return;
             }
         }
+        assert_always!(
+            ctx.state().contains(SCRIPT_DONE_KEY),
+            "rpc qual the fault script ended before the recovery phase"
+        );
         let start = ctx.time().now();
         // Everything learned before is suspect: look every process up again.
         self.known.clear();
@@ -137,6 +152,7 @@ impl QualificationWorkload {
                 }
             }
             if !missing.is_empty() && pause(ctx, Duration::from_millis(250)).await.is_err() {
+                cut_short("recovery");
                 return;
             }
         }
@@ -214,6 +230,7 @@ impl QualificationWorkload {
         let outcome = runtimes.balanced.call(request, &policy).await;
         let check = super::ops::BalancedCheck {
             id,
+            policy_cap: super::ops::policy_cap(&policy),
             permitted: Observer::load(&self.observer.primaries) - primaries
                 + Observer::load(&self.observer.copies)
                 - copies,
@@ -244,6 +261,7 @@ impl QualificationWorkload {
                 break;
             }
             if pause(ctx, Duration::from_millis(50)).await.is_err() {
+                cut_short("draining the balancer");
                 return;
             }
         }
@@ -316,6 +334,7 @@ impl QualificationWorkload {
         };
         while !open().is_empty() && ctx.time().now() < deadline {
             if pause(ctx, Duration::from_millis(50)).await.is_err() {
+                cut_short("waiting for streams to end");
                 return;
             }
         }
@@ -327,19 +346,26 @@ impl QualificationWorkload {
         );
         // Requests of cancelled calls and dropped late losers may still land.
         if pause(ctx, Duration::from_secs(3)).await.is_err() {
+            cut_short("settling before the baseline");
             return;
         }
         self.client_idle(runtimes);
+        // Every running server's live runtime, read through its probe (not
+        // a periodic report): nothing owed, produced, queued or reserved.
         let board = Board::of(ctx.state());
         for server in ctx.topology().ips_in_group("server") {
             let label = format!("server@{server}#{:04}", ledger.current_boot(&server));
-            for (_, stats) in board.stats_with_prefix(&label) {
+            let probes = board.probes(&label, "");
+            assert_always!(
+                !probes.is_empty(),
+                "rpc qual every running server registered its probe"
+            );
+            for (_, probe) in probes {
+                let outstanding = probe.outstanding();
                 assert_always!(
-                    stats.inflight_requests == 0
-                        && stats.streams_producing == 0
-                        && stats.producer_window_reserved == 0,
+                    outstanding.is_empty(),
                     "rpc qual every serving runtime returned to its idle baseline",
-                    { "runtime" => label.clone(), "stats" => format!("{stats:?}") }
+                    { "runtime" => label.clone(), "outstanding" => format!("{outstanding:?}") }
                 );
             }
         }
@@ -452,6 +478,12 @@ fn judge_stream(ledger: &StreamLedger, check: &super::ops::StreamCheck) {
             consumed.items.is_empty(),
             "stream items come only from a producer that served the stream"
         );
+    }
+    if let StreamOutcome::Failed(error) = &check.outcome
+        && *error.reason() == ErrorReason::Disconnected
+        && !consumed.items.is_empty()
+    {
+        assert_sometimes!(true, "rpc qual stream ended by a disconnect mid-stream");
     }
     let all_items = produced
         .as_ref()

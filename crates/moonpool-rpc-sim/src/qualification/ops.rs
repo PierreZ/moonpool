@@ -75,7 +75,12 @@ pub(crate) struct StreamCheck {
 #[derive(Debug, Clone)]
 pub(crate) struct BalancedCheck {
     pub(crate) id: u64,
-    /// Effectful executions its started attempts and permissions allow.
+    /// Executions its policy alone allows, whatever the balancer did:
+    /// at most one sequential attempt may run without retry permission
+    /// (`max_attempts` with it), plus `max_copies` concurrent copies.
+    pub(crate) policy_cap: u64,
+    /// A tighter bound from the attempts the observation hook reported
+    /// (the balancer's own account, so only an additional check).
     pub(crate) permitted: u64,
     /// It reported that nothing ran.
     pub(crate) not_admitted: bool,
@@ -83,10 +88,28 @@ pub(crate) struct BalancedCheck {
     pub(crate) instances: Vec<Instance>,
 }
 
+/// The executions `policy` allows one balanced call, from the policy alone.
+pub(crate) fn policy_cap(policy: &BalancePolicy) -> u64 {
+    let sequential = match policy.retry {
+        Retry::AtMostOnce => 1,
+        Retry::AfterAmbiguous => u64::from(policy.max_attempts.max(1)),
+    };
+    let copies = match &policy.duplicates {
+        Duplicates::Permitted(copies) => u64::from(copies.max_copies),
+        Duplicates::Forbidden => 0,
+    };
+    sequential + copies
+}
+
 impl BalancedCheck {
     pub(crate) fn verify(&self, ledger: &QualLedger) {
         let runs = ledger.executions(self.id);
         let executed = u64::try_from(runs.len()).unwrap_or(u64::MAX);
+        assert_always!(
+            executed <= self.policy_cap,
+            "rpc qual a balanced job ran at most as often as its policy allows",
+            { "id" => self.id, "executed" => executed, "cap" => self.policy_cap }
+        );
         assert_always!(
             executed <= self.permitted,
             "rpc qual a balanced job ran at most as often as permitted",
@@ -116,6 +139,8 @@ enum Permission {
     Retry,
     Hedged,
     Cancel,
+    /// Hedged, through the client that carries credentials.
+    Credentialed,
 }
 
 impl Permission {
@@ -131,7 +156,7 @@ impl Permission {
                 attempt_timeout: timeout,
                 ..BalancePolicy::default()
             },
-            Self::Hedged | Self::Cancel => BalancePolicy {
+            Self::Hedged | Self::Cancel | Self::Credentialed => BalancePolicy {
                 duplicates: Duplicates::Permitted(DuplicatePolicy {
                     max_copies: 1,
                     hedge: Some(HedgeTiming::default()),
@@ -207,7 +232,8 @@ impl QualificationWorkload {
                     Permission::Hedged,
                     Permission::Hedged,
                     Permission::Cancel,
-                ][ctx.random().random_range(0..5)];
+                    Permission::Credentialed,
+                ][ctx.random().random_range(0..6)];
                 let _ = self.balanced_call(ctx, runtimes, permission).await;
             }
             QualOp::Auth => {
@@ -423,14 +449,23 @@ impl QualificationWorkload {
                 _ = pause(ctx, Duration::from_secs(15)) => None,
             }
         };
-        let (outcome, streamed) = if beside {
+        let (outcome, beside) = if beside {
             let server = Some(expected.process.clone());
-            let (outcome, streamed) =
-                futures::join!(call, self.stream_beside(ctx, runtimes, server));
-            (outcome, streamed)
+            futures::join!(call, self.stream_beside(ctx, runtimes, server))
         } else {
-            (call.await, false)
+            (call.await, None)
         };
+        let streamed = beside.as_ref().is_some_and(|check| {
+            !crate::streams::state::StreamLedger::of(ctx.state())
+                .consumed(check.id)
+                .items
+                .is_empty()
+        });
+        if let Some(check) = beside {
+            self.history
+                .push(format!("{} Stream beside {}", check.id, id));
+            self.streams.push(check);
+        }
         let op = if bounded {
             QualOp::UnlessFailed
         } else {
@@ -472,25 +507,18 @@ impl QualificationWorkload {
         self.record(id, op, &expected, false, &outcome);
     }
 
-    /// A slow stream opened beside a held reliable call; returns whether
-    /// it delivered at least one item.
+    /// A slow stream opened beside a held reliable call, consumed to its
+    /// end; returns its check (judged against the incarnation its
+    /// reference named, like every other stream) once it ended.
     async fn stream_beside(
         &self,
         ctx: &SimContext,
         runtimes: &Runtimes,
         server: Option<String>,
-    ) -> bool {
-        let Some(server) = server else {
-            return false;
-        };
-        let Some(publication) = self.known.get(&server).cloned() else {
-            return false;
-        };
-        let Ok(target) = ServiceRef::<ScanItems>::from_bytes(&publication.scan) else {
-            return false;
-        };
-        // Its own id space (the high bit): judged by the stream ledgers'
-        // shared assertions, not recorded as a call.
+    ) -> Option<StreamCheck> {
+        let publication = self.known.get(&server?).cloned()?;
+        let target = ServiceRef::<ScanItems>::from_bytes(&publication.scan).ok()?;
+        // Its own id space (the high bit), apart from the lanes' ids.
         let id = (1 << 63) | ctx.random().random_range(0..(1u64 << 40));
         let scan = Scan {
             id,
@@ -501,21 +529,16 @@ impl QualificationWorkload {
             end: End::Finish as u32,
             code: 0,
         };
-        let Ok(mut stream) = target.bind(&runtimes.rpc).get_reply_stream(&scan) else {
-            return false;
+        let outcome = match target.bind(&runtimes.rpc).get_reply_stream(&scan) {
+            Err(error) => StreamOutcome::NotOpened(error),
+            Ok(stream) => self.consume(ctx, stream, id, StreamShape::Complete).await,
         };
-        let ledger = crate::streams::state::StreamLedger::of(ctx.state());
-        let mut taken = 0u64;
-        while let Ok(Some(Ok(chunk))) = ctx.time().timeout(CALL_TIMEOUT, stream.next()).await {
-            assert_always!(
-                chunk.id == id && chunk.seq == taken,
-                "stream items arrive in order, without gaps or repeats"
-            );
-            let size = stream_item_frame_len(prost::Message::encoded_len(&chunk));
-            ledger.consume(id, chunk.seq, size, chunk.boot);
-            taken += 1;
-        }
-        taken > 0
+        Some(StreamCheck {
+            id,
+            shape: StreamShape::Complete,
+            expected: instance_code(&publication.server, publication.boot),
+            outcome,
+        })
     }
 
     async fn one_way(&mut self, ctx: &SimContext, runtimes: &Runtimes) {
@@ -700,15 +723,23 @@ impl QualificationWorkload {
         let observer = &self.observer;
         let primaries_before = Observer::load(&observer.primaries);
         let copies_before = Observer::load(&observer.copies);
+        let client = if permission == Permission::Credentialed {
+            &runtimes.credentialed
+        } else {
+            &runtimes.balanced
+        };
         let outcome = if permission == Permission::Cancel {
             let give_up = Duration::from_millis(ctx.random().random_range(1..400));
             moonpool_sim::select! {
-                outcome = runtimes.balanced.call(request, &policy) => Some(outcome),
+                outcome = client.call(request, &policy) => Some(outcome),
                 _ = pause(ctx, give_up) => None,
             }
         } else {
-            Some(runtimes.balanced.call(request, &policy).await)
+            Some(client.call(request, &policy).await)
         };
+        if permission == Permission::Credentialed && matches!(outcome, Some(Ok(_))) {
+            assert_sometimes!(true, "rpc qual credentialed balanced call served");
+        }
         let primaries = Observer::load(&observer.primaries) - primaries_before;
         let copies = Observer::load(&observer.copies) - copies_before;
         let sequential = match policy.retry {
@@ -717,6 +748,7 @@ impl QualificationWorkload {
         };
         let check = BalancedCheck {
             id,
+            policy_cap: policy_cap(&policy),
             permitted: sequential + copies,
             not_admitted: matches!(
                 &outcome,
@@ -1229,6 +1261,20 @@ impl QualificationWorkload {
         let Some(server) = Self::random_server(ctx) else {
             return;
         };
+        // The server's own count of sessions it closed for a protocol
+        // violation, before and after: the refusal must be its own, not a
+        // disconnect the chaos caused.
+        let violations = |ctx: &SimContext| {
+            let label = format!(
+                "server@{server}#{:04}",
+                QualLedger::of(ctx.state()).current_boot(&server)
+            );
+            crate::foundations::state::Board::of(ctx.state())
+                .stats_with_prefix(&label)
+                .first()
+                .map(|(label, stats)| (label.clone(), stats.protocol_violations))
+        };
+        let before = violations(ctx);
         let address = format!("{server}:{RPC_PORT}");
         let connect = ctx.network().connect(&address);
         let Ok(Ok(mut stream)) = ctx.time().timeout(Duration::from_secs(1), connect).await else {
@@ -1256,14 +1302,20 @@ impl QualificationWorkload {
             .await
             .unwrap_or(false);
         let answered = self.unary(ctx, runtimes, Some(server.clone())).await;
-        if closed && answered {
+        // Stats are reported every 100 ms.
+        let _ = pause(ctx, Duration::from_millis(250)).await;
+        let counted = match (before, violations(ctx)) {
+            (Some((was, earlier)), Some((now, later))) => was == now && later > earlier,
+            _ => false,
+        };
+        if closed && answered && counted {
             assert_sometimes!(
                 true,
                 "rpc qual malformed peer closed, other sessions unaffected"
             );
         }
         self.history.push(format!(
-            "malformed {server} closed={closed} answered={answered}"
+            "malformed {server} closed={closed} answered={answered} counted={counted}"
         ));
     }
 

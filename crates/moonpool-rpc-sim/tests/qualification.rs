@@ -96,6 +96,7 @@ const REQUIRED: &[&str] = &[
     "rpc qual hedge budget exhausted",
     "rpc qual late loser completed after its call returned",
     "rpc qual stale incarnation skipped for a healthy one",
+    "rpc qual credentialed balanced call served",
     // Credentials and versions.
     "rpc qual expired credential denied before dispatch",
     "rpc qual rotated key denied then new key accepted",
@@ -147,7 +148,11 @@ fn bounded_campaign_hits_every_required_scenario() {
         "required scenarios never fired: {missing:?}"
     );
     let finished = finished(&records);
-    assert!(!finished.is_empty());
+    // One record per run: every seed twice under the canary.
+    assert_eq!(
+        finished.len(),
+        2 * usize::try_from(SEED_BUDGET).unwrap_or(usize::MAX)
+    );
     for record in &finished {
         assert!(!record.history.is_empty());
         assert!(record.recovered_ms.is_some(), "a run did not recover");

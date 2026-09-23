@@ -84,7 +84,7 @@ use std::time::Duration;
 use moonpool_rpc::RpcConfig;
 use moonpool_sim::{
     Chaos, ChaosMode, Invariant, SimulationBuilder, TraceQuery, WorkloadCount, assert_always,
-    assert_sometimes,
+    assert_reachable,
 };
 
 pub use faults::QualificationFaults;
@@ -178,10 +178,7 @@ pub(crate) fn check_previous_boots(board: &Board, role: &str, me: &str, boot: u6
         );
     }
     if boot > 10 {
-        assert_sometimes!(
-            true,
-            "rpc qual a tenth reboot still found its runtimes at baseline"
-        );
+        assert_reachable!("rpc qual a tenth reboot still found its runtimes at baseline");
     }
     label
 }

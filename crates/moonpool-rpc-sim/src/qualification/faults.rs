@@ -168,7 +168,7 @@ impl FaultInjector for QualificationFaults {
                 }
                 continue;
             }
-            match ctx.random().random_range(0..18u8) {
+            match ctx.random().random_range(0..19u8) {
                 0..=3 => trust.advance(ctx.random().random_range(1..15)),
                 4 => {
                     trust.advance(ctx.random().random_range(60..900));
@@ -189,7 +189,7 @@ impl FaultInjector for QualificationFaults {
                     let draw = ctx.random().random_range(0..4u8);
                     self.lifecycle(ctx, &victim, draw).await?;
                 }
-                12 => {
+                12 | 13 => {
                     if let Some(third) = &third {
                         if ctx.random().random_bool(0.5) {
                             ctx.crash(third)?;
@@ -199,13 +199,13 @@ impl FaultInjector for QualificationFaults {
                         assert_reachable!("rpc qual third participant restarted");
                     }
                 }
-                13 => {
+                14 => {
                     if let Some(legacy) = &legacy {
                         ctx.restart(legacy)?;
                         assert_reachable!("rpc qual legacy peer restarted");
                     }
                 }
-                14 => self.isolate_workload(ctx, &servers).await?,
+                15 => self.isolate_workload(ctx, &servers).await?,
                 _ => {}
             }
         }

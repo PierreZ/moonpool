@@ -232,6 +232,24 @@ impl BalanceHooks<Work> for Hooks {
     }
 }
 
+/// Mints a valid token (newest key, current scripted UTC) for every
+/// balanced attempt.
+struct Minting {
+    trust: Trust,
+}
+
+impl moonpool_rpc::security::CredentialSource for Minting {
+    fn credential(
+        &self,
+        _target: &moonpool_rpc::Endpoint,
+    ) -> Option<moonpool_rpc::security::Credential> {
+        self.trust
+            .mint(crate::security::trust::Kind::Valid, "balancer", 300, 0)
+            .token
+            .map(moonpool_rpc::security::Credential::bearer)
+    }
+}
+
 /// The balancer's queue model: a small hedge budget so it runs out, a
 /// small late-loser bound, short exclusions.
 pub(crate) fn model_config() -> ModelConfig {
@@ -261,6 +279,9 @@ pub(crate) struct Runtimes {
     pub(crate) version1: RpcHandle<SimProviders>,
     /// Balanced calls over `Work`.
     pub(crate) balanced: BalancedClient<SimProviders, Work>,
+    /// The same set and model, every attempt carrying a freshly minted
+    /// valid credential (`BalancedClient::with_credentials`).
+    pub(crate) credentialed: BalancedClient<SimProviders, Work>,
     /// Credentialed calls, judged by the security campaign's ledger.
     pub(crate) auth: Caller,
 }
@@ -532,7 +553,10 @@ impl QualificationWorkload {
         self.set_version += 1;
         match AlternativeSet::new(SetVersion::new(self.set_version), alternatives) {
             Ok(set) => {
-                let replaced = runtimes.balanced.replace(set);
+                let replaced = runtimes
+                    .credentialed
+                    .replace(set.clone())
+                    .and(runtimes.balanced.replace(set));
                 assert_always!(
                     replaced.is_ok(),
                     "a newer alternative set is always installed"
@@ -584,6 +608,7 @@ impl QualificationWorkload {
         self.history.extend(drain_lines);
         self.calls.extend(drain_calls);
         if ctx.shutdown().is_cancelled() {
+            super::recovery::cut_short("operations");
             return Ok(());
         }
         self.drain_balancer(ctx, runtimes).await;
@@ -598,9 +623,14 @@ impl QualificationWorkload {
                     break;
                 }
                 if super::pause(ctx, Duration::from_millis(50)).await.is_err() {
+                    super::recovery::cut_short("waiting for the other lanes");
                     return Ok(());
                 }
             }
+            assert_always!(
+                ctx.state().get::<u64>(LANES_STOPPED_KEY).unwrap_or(0) >= lane_count,
+                "rpc qual every lane stopped before the baseline"
+            );
             self.quiesce(ctx, runtimes).await;
             ctx.state().publish(QUIESCED_KEY, true);
         } else {
@@ -609,9 +639,14 @@ impl QualificationWorkload {
                     break;
                 }
                 if super::pause(ctx, Duration::from_millis(50)).await.is_err() {
+                    super::recovery::cut_short("waiting for the lead's baseline");
                     return Ok(());
                 }
             }
+            assert_always!(
+                ctx.state().contains(QUIESCED_KEY),
+                "rpc qual the lead checked the baseline before the lanes judged"
+            );
             self.client_idle(runtimes);
         }
         self.judge_all(ctx);
@@ -662,6 +697,22 @@ impl Workload for QualificationWorkload {
         .with_hooks(Hooks {
             observer: Arc::clone(&self.observer),
         });
+        let credentialed = BalancedClient::new(
+            &rpc,
+            AlternativeSet::empty(SetVersion::new(0)),
+            model.clone(),
+            BalanceConfig {
+                locality: Locality::in_datacenter("dc0"),
+                ..BalanceConfig::default()
+            },
+        )
+        .map_err(|error| SimulationError::InvalidState(format!("balance: {error}")))?
+        .with_hooks(Hooks {
+            observer: Arc::clone(&self.observer),
+        })
+        .with_credentials(Minting {
+            trust: Trust::of(ctx.state())?,
+        });
         let board = Board::of(ctx.state());
         let probes = [rpc.probe(), version1.probe()];
         let label = format!("{WORKLOAD_LABEL}-{}", self.lane);
@@ -680,6 +731,7 @@ impl Workload for QualificationWorkload {
             rpc: rpc.clone(),
             version1,
             balanced,
+            credentialed,
             auth,
         };
         let result = moonpool_sim::select! {
@@ -716,6 +768,10 @@ impl Workload for QualificationWorkload {
         if !self.is_lead() {
             return Ok(());
         }
+        assert_always!(
+            self.recovered_ms.is_some(),
+            "rpc qual the run recovered within its bound"
+        );
         let ledger = QualLedger::of(ctx.state());
         let board = Board::of(ctx.state());
         // Every runtime of an ended boot is back at its baseline (the

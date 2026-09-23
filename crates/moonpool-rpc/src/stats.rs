@@ -448,6 +448,17 @@ impl ResourceProbe {
     /// and every gauge it accounted is back to zero
     /// ([`outstanding`](Self::outstanding)): nothing of it is left, not even
     /// a reservation held by an owner that outlived it.
+    ///
+    /// [`monitor_waiters`](Self::monitor_waiters) is not part of it: a
+    /// failure-monitor handle an application still holds is the
+    /// application's, and resolves with an error once the runtime is gone.
+    ///
+    /// The gauges are read with relaxed loads. That is exact once the
+    /// question matters: after the owners are dropped on this thread, or
+    /// after the thread or task that dropped them was joined (a join
+    /// synchronizes, so every decrement made before it is visible). Read
+    /// while owners are still being dropped elsewhere, it may report work
+    /// that is already gone, never the opposite.
     #[must_use]
     pub fn is_at_baseline(&self) -> bool {
         self.is_released() && self.outstanding().is_empty()
