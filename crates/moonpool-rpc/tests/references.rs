@@ -155,6 +155,10 @@ struct ServiceRefMirror {
     ip: Vec<u8>,
     #[prost(uint32, tag = "11")]
     port: u32,
+    #[prost(uint32, tag = "12")]
+    interface: u32,
+    #[prost(uint32, tag = "13")]
+    interface_version: u32,
 }
 
 #[test]
@@ -186,6 +190,29 @@ fn golden_encodings_are_fixed() {
         address("[2001:db8::1]:4500")
     );
     assert_eq!(interface.interface_id(), Some(Kv::INTERFACE));
+
+    let adjusted = kv_ref().method::<Echo>().expect("adjusts");
+    assert_eq!(adjusted.to_bytes(), fixture("adjusted"));
+    assert_eq!(adjusted.interface(), Some((Kv::INTERFACE, Kv::VERSION)));
+    assert_eq!(echo_ref().interface(), None, "a single-method endpoint");
+    assert_eq!(
+        ServiceRef::<Echo>::from_bytes(&fixture("adjusted")).expect("decodes"),
+        adjusted
+    );
+
+    let zeros = InterfaceRef::<Kv>::new(
+        Endpoint::new(
+            address("10.0.1.1:4500"),
+            Incarnation::from_raw(7),
+            EndpointToken::from_parts(0, 0),
+        ),
+        AccessClass::Private,
+    );
+    assert_eq!(zeros.to_bytes(), fixture("interface-zeros"));
+    assert_eq!(
+        InterfaceRef::<Kv>::from_bytes(&fixture("interface-zeros")).expect("decodes"),
+        zeros
+    );
 }
 
 #[test]
@@ -194,8 +221,12 @@ fn hand_codec_and_prost_derive_agree() {
         .expect("prost decodes");
     assert_eq!(mirror.method, 0x6563_686f);
     assert_eq!(mirror.port, 4500);
-    // No field of this fixture is zero, so prost writes the same bytes.
-    assert_eq!(mirror.encode_to_vec(), fixture("service"));
+    // prost writes the same bytes: tag order, defaults left out.
+    for name in ["service", "well-known", "adjusted"] {
+        let mirror =
+            <ServiceRefMirror as Message>::decode(fixture(name).as_slice()).expect("prost decodes");
+        assert_eq!(mirror.encode_to_vec(), fixture(name), "{name}");
+    }
     // prost omits zero fields, the reference writes every field: decode in
     // both directions and compare values rather than bytes.
     assert_eq!(
@@ -209,6 +240,9 @@ fn hand_codec_and_prost_derive_agree() {
     // `prost::Message` on the reference itself writes the golden bytes.
     assert_eq!(Message::encode_to_vec(&echo_ref()), fixture("service"));
     assert_eq!(Message::encoded_len(&echo_ref()), fixture("service").len());
+    let adjusted = kv_ref().method::<Echo>().expect("adjusts");
+    assert_eq!(Message::encoded_len(&adjusted), fixture("adjusted").len());
+    assert_eq!(Message::encoded_len(&kv_ref()), fixture("interface").len());
     assert_eq!(
         <ServiceRef<Echo> as moonpool_rpc::Wire>::CODEC,
         moonpool_rpc::CodecId::PROST
@@ -380,4 +414,68 @@ fn adjustment_keeps_the_incarnation_and_uses_explicit_ids() {
     .expect("present");
     assert!(as_kv.method::<Echo>().is_err());
     assert!(InterfaceRef::<Kv>::default().method::<Echo>().is_err());
+}
+
+/// The dependency-free reader and prost agree on every edge case: both
+/// accept with the same value, or both refuse.
+#[test]
+fn the_plain_reader_and_prost_agree_on_edge_cases() {
+    let base = fixture("service");
+    let mut corpus: Vec<Vec<u8>> = vec![
+        base.clone(),
+        fixture("well-known"),
+        fixture("adjusted"),
+        Vec::new(),
+        vec![0x00],
+        vec![0x0c],
+        vec![0x0e],
+        vec![0x0f, 0x01],
+        vec![0x08],
+        vec![
+            0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+        ],
+        vec![
+            0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01,
+        ],
+    ];
+    let suffixes: [&[u8]; 13] = [
+        // An unknown group, possibly nested, is skipped.
+        &[0xa3, 0x01, 0x08, 0x01, 0xa4, 0x01],
+        &[0xa3, 0x01, 0xab, 0x01, 0xac, 0x01, 0xa4, 0x01],
+        // An unterminated or mismatched group is refused.
+        &[0xa3, 0x01, 0x08, 0x01],
+        &[0xa3, 0x01, 0xac, 0x01],
+        // Unknown fields of every wire type are skipped.
+        &[0xa0, 0x01, 0x07],
+        &[0xa5, 0x01, 1, 2, 3, 4],
+        &[0xa1, 0x01, 1, 2, 3, 4, 5, 6, 7, 8],
+        &[0xa2, 0x01, 0x02, 0xaa, 0xbb],
+        // The largest tag is fine, a key beyond u32 is not.
+        &[0xf8, 0xff, 0xff, 0xff, 0x0f, 0x01],
+        &[0x80, 0x80, 0x80, 0x80, 0x10, 0x00],
+        // A known tag with the wrong wire type, invalid wire types.
+        &[0x0d, 1, 2, 3, 4],
+        &[0x56, 0x00],
+        // A repeated known field: the last value wins.
+        &[0x58, 0x95, 0x23],
+    ];
+    for suffix in suffixes {
+        corpus.push([base.as_slice(), suffix].concat());
+    }
+    for bytes in &corpus {
+        let plain = ServiceRef::<Echo>::from_bytes(bytes).ok();
+        let prost = <ServiceRef<Echo> as Message>::decode(bytes.as_slice())
+            .ok()
+            .filter(|reference| reference.check().is_ok());
+        assert_eq!(plain, prost, "{bytes:02x?}");
+    }
+    let last_wins = [base.as_slice(), &[0x58, 0x95, 0x23]].concat();
+    assert_eq!(
+        ServiceRef::<Echo>::from_bytes(&last_wins)
+            .expect("decodes")
+            .endpoint()
+            .address()
+            .port(),
+        4501
+    );
 }

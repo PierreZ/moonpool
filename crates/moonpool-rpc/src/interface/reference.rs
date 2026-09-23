@@ -6,13 +6,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use moonpool_core::Providers;
 
-use super::proto::{ProtoError, ProtoReader, ProtoWriter, Value};
+use super::proto::{Counter, ProtoError, ProtoReader, ProtoWriter, Sink, Value};
 use super::{InterfaceId, InterfaceMethod, RpcInterface};
 use crate::call::client::ServiceClient;
 use crate::codec::{DecodeError, Wire};
 use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation};
 use crate::error::{ErrorReason, RpcError};
-use crate::protocol::RpcMethod;
+use crate::protocol::{RpcMethod, SchemaVersion};
 use crate::transport::RpcHandle;
 
 /// The protobuf field shapes routing data uses.
@@ -167,7 +167,7 @@ impl Routing {
         Ok(())
     }
 
-    fn encode(&self, out: &mut ProtoWriter<'_>) {
+    fn encode<S: Sink>(&self, out: &mut ProtoWriter<'_, S>) {
         out.varint(tags::ACCESS, self.access)
             .fixed64(tags::INCARNATION_HIGH, self.incarnation_high)
             .fixed64(tags::INCARNATION_LOW, self.incarnation_low)
@@ -208,7 +208,7 @@ impl Routing {
 /// One of the two reference messages, for the shared codec code.
 pub(crate) trait RefMessage: Default {
     /// Append every field, in tag order, zeros included.
-    fn encode_fields(&self, out: &mut ProtoWriter<'_>);
+    fn encode_fields<S: Sink>(&self, out: &mut ProtoWriter<'_, S>);
     /// The shape of a known tag.
     fn field_kind(tag: u32) -> Option<FieldKind>;
     /// Merge one decoded field.
@@ -218,6 +218,13 @@ pub(crate) trait RefMessage: Default {
         let mut out = Vec::new();
         self.encode_fields(&mut ProtoWriter(&mut out));
         out
+    }
+
+    /// The encoded length, measured without allocating.
+    fn proto_len(&self) -> usize {
+        let mut counter = Counter::default();
+        self.encode_fields(&mut ProtoWriter(&mut counter));
+        counter.0
     }
 
     /// Decode without judging the content (see each type's `check`).
@@ -246,6 +253,8 @@ mod service_tags {
     pub(super) const SCHEMA: u32 = 2;
     pub(super) const REQUEST_CODEC: u32 = 3;
     pub(super) const REPLY_CODEC: u32 = 4;
+    pub(super) const INTERFACE: u32 = 12;
+    pub(super) const INTERFACE_VERSION: u32 = 13;
 }
 
 /// Field tags of the interface identity in an [`InterfaceRef`].
@@ -288,8 +297,9 @@ mod interface_tags {
 ///
 /// # Encoding
 ///
-/// A protobuf message with fixed tags, every field always written (zeros
-/// included), so one reference has exactly one encoding:
+/// A protobuf message with fixed tags, written in tag order with fields
+/// equal to their default left out (proto3, as prost does), so one
+/// reference has exactly one encoding:
 ///
 /// | Tag | Field | Type |
 /// |---|---|---|
@@ -303,8 +313,10 @@ mod interface_tags {
 /// | 9 | token generation | `uint32` |
 /// | 10 | IP address, 4 or 16 bytes | `bytes` |
 /// | 11 | port | `uint32` |
+/// | 12 | interface id of the group (0: a single-method endpoint) | `uint32` |
+/// | 13 | interface version | `uint32` (a `u16`) |
 ///
-/// Unknown tags are skipped. The encoding needs neither the `prost` feature
+/// Unknown tags (groups included) are skipped. The encoding needs neither the `prost` feature
 /// nor a runtime; with the feature, `ServiceRef` also implements
 /// `prost::Message` (and therefore [`Wire`]).
 ///
@@ -325,6 +337,10 @@ pub struct ServiceRef<M: RpcMethod> {
     schema: u64,
     request_codec: u64,
     reply_codec: u64,
+    /// The interface of the group this method belongs to (0: a
+    /// single-method endpoint).
+    interface: u64,
+    interface_version: u64,
     routing: Routing,
     _method: PhantomData<fn() -> M>,
 }
@@ -342,9 +358,34 @@ impl<M: RpcMethod> ServiceRef<M> {
             schema: u64::from(M::SCHEMA.get()),
             request_codec: u64::from(<M::Request as Wire>::CODEC.get()),
             reply_codec: u64::from(<M::Reply as Wire>::CODEC.get()),
+            interface: 0,
+            interface_version: 0,
             routing: Routing::new(&endpoint, access),
             _method: PhantomData,
         }
+    }
+
+    /// A reference to method `M` of a group serving interface `I`: the
+    /// server checks the interface as well as the method.
+    #[must_use]
+    pub fn in_interface<I: RpcInterface>(endpoint: Endpoint, access: AccessClass) -> Self
+    where
+        M: InterfaceMethod<I>,
+    {
+        let mut reference = Self::new(endpoint, access);
+        reference.interface = u64::from(I::INTERFACE.get());
+        reference.interface_version = u64::from(I::VERSION.get());
+        reference
+    }
+
+    /// The interface of the group this method belongs to and its version,
+    /// or `None` for a single-method endpoint (or a malformed value, which
+    /// [`check`](Self::check) reports).
+    #[must_use]
+    pub fn interface(&self) -> Option<(InterfaceId, SchemaVersion)> {
+        let id = u32::try_from(self.interface).ok()?;
+        let version = u16::try_from(self.interface_version).ok()?;
+        (id != 0).then(|| (InterfaceId::new(id), SchemaVersion::new(version)))
     }
 
     /// The addressed endpoint (for a reference that fails
@@ -391,6 +432,15 @@ impl<M: RpcMethod> ServiceRef<M> {
                 M::SCHEMA
             )));
         }
+        if u32::try_from(self.interface).is_err()
+            || u16::try_from(self.interface_version).is_err()
+            || (self.interface == 0 && self.interface_version != 0)
+        {
+            return Err(DecodeError(format!(
+                "invalid interface {:#x} version {}",
+                self.interface, self.interface_version
+            )));
+        }
         self.routing.check().map_err(DecodeError)
     }
 
@@ -431,6 +481,8 @@ impl<M: RpcMethod> Default for ServiceRef<M> {
             schema: 0,
             request_codec: 0,
             reply_codec: 0,
+            interface: 0,
+            interface_version: 0,
             routing: Routing::default(),
             _method: PhantomData,
         }
@@ -438,12 +490,14 @@ impl<M: RpcMethod> Default for ServiceRef<M> {
 }
 
 impl<M: RpcMethod> RefMessage for ServiceRef<M> {
-    fn encode_fields(&self, out: &mut ProtoWriter<'_>) {
+    fn encode_fields<S: Sink>(&self, out: &mut ProtoWriter<'_, S>) {
         out.varint(service_tags::METHOD, self.method)
             .varint(service_tags::SCHEMA, self.schema)
             .varint(service_tags::REQUEST_CODEC, self.request_codec)
             .varint(service_tags::REPLY_CODEC, self.reply_codec);
         self.routing.encode(out);
+        out.varint(service_tags::INTERFACE, self.interface)
+            .varint(service_tags::INTERFACE_VERSION, self.interface_version);
     }
 
     fn field_kind(tag: u32) -> Option<FieldKind> {
@@ -451,7 +505,9 @@ impl<M: RpcMethod> RefMessage for ServiceRef<M> {
             service_tags::METHOD
             | service_tags::SCHEMA
             | service_tags::REQUEST_CODEC
-            | service_tags::REPLY_CODEC => Some(FieldKind::Varint),
+            | service_tags::REPLY_CODEC
+            | service_tags::INTERFACE
+            | service_tags::INTERFACE_VERSION => Some(FieldKind::Varint),
             tag => Routing::kind(tag),
         }
     }
@@ -462,11 +518,15 @@ impl<M: RpcMethod> RefMessage for ServiceRef<M> {
             (service_tags::SCHEMA, Value::Varint(raw)) => self.schema = raw,
             (service_tags::REQUEST_CODEC, Value::Varint(raw)) => self.request_codec = raw,
             (service_tags::REPLY_CODEC, Value::Varint(raw)) => self.reply_codec = raw,
+            (service_tags::INTERFACE, Value::Varint(raw)) => self.interface = raw,
+            (service_tags::INTERFACE_VERSION, Value::Varint(raw)) => self.interface_version = raw,
             (
                 service_tags::METHOD
                 | service_tags::SCHEMA
                 | service_tags::REQUEST_CODEC
-                | service_tags::REPLY_CODEC,
+                | service_tags::REPLY_CODEC
+                | service_tags::INTERFACE
+                | service_tags::INTERFACE_VERSION,
                 _,
             ) => return Err(WrongWireType),
             (tag, value) => return self.routing.apply(tag, value),
@@ -482,6 +542,8 @@ impl<M: RpcMethod> Clone for ServiceRef<M> {
             schema: self.schema,
             request_codec: self.request_codec,
             reply_codec: self.reply_codec,
+            interface: self.interface,
+            interface_version: self.interface_version,
             routing: self.routing.clone(),
             _method: PhantomData,
         }
@@ -515,12 +577,16 @@ impl<M: RpcMethod> Ord for ServiceRef<M> {
 }
 
 impl<M: RpcMethod> ServiceRef<M> {
-    fn key(&self) -> (u64, u64, u64, u64, &Routing) {
+    fn key(&self) -> ([u64; 6], &Routing) {
         (
-            self.method,
-            self.schema,
-            self.request_codec,
-            self.reply_codec,
+            [
+                self.method,
+                self.schema,
+                self.request_codec,
+                self.reply_codec,
+                self.interface,
+                self.interface_version,
+            ],
             &self.routing,
         )
     }
@@ -622,7 +688,10 @@ impl<I: RpcInterface> InterfaceRef<I> {
     /// The reference fails [`check`](Self::check).
     pub fn method<M: InterfaceMethod<I>>(&self) -> Result<ServiceRef<M>, DecodeError> {
         self.check()?;
-        Ok(ServiceRef::new(self.endpoint(), self.access()))
+        Ok(ServiceRef::in_interface::<I>(
+            self.endpoint(),
+            self.access(),
+        ))
     }
 
     /// Bind to a runtime after [`check`](Self::check)ing the reference.
@@ -681,7 +750,7 @@ impl<I: RpcInterface> Default for InterfaceRef<I> {
 }
 
 impl<I: RpcInterface> RefMessage for InterfaceRef<I> {
-    fn encode_fields(&self, out: &mut ProtoWriter<'_>) {
+    fn encode_fields<S: Sink>(&self, out: &mut ProtoWriter<'_, S>) {
         out.varint(interface_tags::INTERFACE, self.interface)
             .varint(interface_tags::VERSION, self.version);
         self.routing.encode(out);
@@ -782,7 +851,7 @@ impl<P: Providers, I: RpcInterface> InterfaceClient<P, I> {
     #[must_use]
     pub fn method<M: InterfaceMethod<I>>(&self) -> ServiceClient<P, M> {
         // The target was checked when it was bound.
-        ServiceRef::new(self.target.endpoint(), self.target.access()).bind(&self.rpc)
+        ServiceRef::in_interface::<I>(self.target.endpoint(), self.target.access()).bind(&self.rpc)
     }
 }
 
@@ -810,13 +879,15 @@ mod plain_wire {
     use super::{InterfaceRef, RefMessage, ServiceRef};
     use crate::codec::{CodecId, DecodeError, EncodeError, Wire};
     use crate::interface::RpcInterface;
+    use crate::interface::proto::ProtoWriter;
     use crate::protocol::RpcMethod;
 
     impl<M: RpcMethod> Wire for ServiceRef<M> {
         const CODEC: CodecId = CodecId::PROST;
 
         fn encode(&self, buf: &mut Vec<u8>) -> Result<(), EncodeError> {
-            buf.extend_from_slice(&self.to_proto());
+            buf.reserve(self.proto_len());
+            self.encode_fields(&mut ProtoWriter(buf));
             Ok(())
         }
 
@@ -830,7 +901,8 @@ mod plain_wire {
         const CODEC: CodecId = CodecId::PROST;
 
         fn encode(&self, buf: &mut Vec<u8>) -> Result<(), EncodeError> {
-            buf.extend_from_slice(&self.to_proto());
+            buf.reserve(self.proto_len());
+            self.encode_fields(&mut ProtoWriter(buf));
             Ok(())
         }
 
@@ -850,7 +922,16 @@ mod prost_message {
 
     use super::{FieldKind, InterfaceRef, RefMessage, ServiceRef};
     use crate::interface::RpcInterface;
-    use crate::interface::proto::Value;
+    use crate::interface::proto::{ProtoWriter, Sink, Value};
+
+    /// Writes straight into prost's buffer.
+    struct BufSink<'a, B: BufMut>(&'a mut B);
+
+    impl<B: BufMut> Sink for BufSink<'_, B> {
+        fn put(&mut self, bytes: &[u8]) {
+            self.0.put_slice(bytes);
+        }
+    }
     use crate::protocol::RpcMethod;
 
     fn merge<T: RefMessage>(
@@ -887,7 +968,7 @@ mod prost_message {
         ($type:ident, $param:ident, $bound:path) => {
             impl<$param: $bound> prost::Message for $type<$param> {
                 fn encode_raw(&self, buf: &mut impl BufMut) {
-                    buf.put_slice(&self.to_proto());
+                    self.encode_fields(&mut ProtoWriter(&mut BufSink(buf)));
                 }
 
                 fn merge_field(
@@ -901,7 +982,7 @@ mod prost_message {
                 }
 
                 fn encoded_len(&self) -> usize {
-                    self.to_proto().len()
+                    self.proto_len()
                 }
 
                 fn clear(&mut self) {

@@ -53,7 +53,7 @@ impl<I: RpcInterface> ServiceGroup<I> {
     /// The serialisable reference to one method of the group.
     #[must_use]
     pub fn service_ref<M: InterfaceMethod<I>>(&self) -> ServiceRef<M> {
-        ServiceRef::new(self.endpoint, self.access)
+        ServiceRef::in_interface::<I>(self.endpoint, self.access)
     }
 
     /// Start serving method `M`: its requests are admitted from now on and
