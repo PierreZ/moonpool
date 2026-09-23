@@ -51,6 +51,7 @@ jobs:
   # docs/plans/moonpool-rpc/qualification.md).
   rpc-soak:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
@@ -94,7 +95,10 @@ jobs:
       - name: moonpool-rpc with its native security features
         run: |
           nix develop --command cargo clippy -p moonpool-rpc --features tls,jwt --all-targets -- --deny warnings
-          nix develop --command cargo nextest run -p moonpool-rpc --features tls,jwt
+          # Only what the features add (the rest runs in the test job):
+          # the tests/tls.rs binary and every jwt test (security::jwt
+          # unit tests, tests/security.rs's jwt module).
+          nix develop --command cargo nextest run -p moonpool-rpc --features tls,jwt -E 'binary(tls) | test(/jwt/)'
       # nextest skips doctests; the RPC crate's examples and compile-fail
       # doctests (derive included) run here.
       - name: moonpool-rpc doctests
@@ -195,6 +199,7 @@ jobs:
       - name: Run moonpool-rpc real-network tests
         run: nix develop --command cargo nextest run -p moonpool-rpc
       - name: moonpool-rpc real-network soak (smoke)
+        timeout-minutes: 20
         run: nix develop --command cargo run -p moonpool-rpc-sim --example rpc_soak -- --smoke
       - name: Run fork-based exploration simulation
         run: nix develop --command cargo xtask sim run frontier-explore
