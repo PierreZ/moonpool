@@ -8,6 +8,8 @@ repository.workspace = true
 description = "Prometheus registry adapter for moonpool simulation metrics"
 documentation = "https://docs.rs/moonpool-prometheus"
 readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 # Only the metrics vocabulary (MetricsSource / MetricSample) and TimeProvider.

@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 edition.workspace = true
 readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 # Default = the full simulation framework. Lean production builds opt out of
@@ -72,3 +74,8 @@ required-features = ["sim", "hyper", "prometheus"]
 
 [lints]
 workspace = true
+
+# docs.rs builds every optional module the crate documents.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

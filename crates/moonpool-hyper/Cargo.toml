@@ -8,6 +8,8 @@ repository.workspace = true
 description = "hyper 1.x integration for the moonpool provider traits"
 documentation = "https://docs.rs/moonpool-hyper"
 readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 # The runtime adapters (rt), the IO bridge and the tower/hyper service adapter

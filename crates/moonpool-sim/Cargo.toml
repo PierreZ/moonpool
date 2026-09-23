@@ -8,6 +8,8 @@ repository.workspace = true
 description = "Simulation engine for the moonpool framework"
 documentation = "https://docs.rs/moonpool-sim"
 readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 # tokio-providers re-exports core's production provider bundle (TokioProviders,
