@@ -28,6 +28,13 @@
 //!   crashes, graceful shutdowns and mixed protocol versions, judged by an
 //!   issue/receipt ledger: no unauthorized execution, ever.
 //!
+//! - [`qualification`]: the `sim-rpc-qualification` campaign (#219): all of
+//!   the above at once — Paros-style publication and same-address reboots,
+//!   reliable ambiguity, streams, balancing, credentials, versions,
+//!   graceful shutdown and overload — with a declared recovery phase,
+//!   resource baselines after every process death and at the end, and
+//!   semantic replay across runs and host speeds.
+//!
 //! Only the foundations campaign draws the simulator's bit flips (next to
 //! its own corrupting wire): it is the corruption suite. Every other
 //! campaign runs [`without_corruption`].
@@ -38,6 +45,7 @@ pub mod balance;
 pub mod delivery;
 pub mod foundations;
 pub mod interfaces;
+pub mod qualification;
 pub mod security;
 pub mod streams;
 

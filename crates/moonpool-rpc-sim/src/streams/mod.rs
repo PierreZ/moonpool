@@ -44,7 +44,7 @@
 pub mod faults;
 pub mod messages;
 mod policy;
-mod producer;
+pub(crate) mod producer;
 pub mod stall;
 pub mod state;
 mod workload;

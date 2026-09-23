@@ -58,5 +58,9 @@ path = "src/bin/sim/rpc_streams.rs"
 name = "sim-rpc-security"
 path = "src/bin/sim/rpc_security.rs"
 
+[[bin]]
+name = "sim-rpc-qualification"
+path = "src/bin/sim/rpc_qualification.rs"
+
 [lints]
 workspace = true

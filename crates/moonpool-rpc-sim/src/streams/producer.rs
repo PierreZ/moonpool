@@ -170,7 +170,7 @@ fn send_end(error: &SendError) -> ProducerEnd {
 }
 
 /// Serve one stream as its request asks, writing the producer ledger.
-async fn produce(
+pub(crate) async fn produce(
     IncomingRequest { request, reply }: IncomingRequest<ScanItems>,
     ledger: &StreamLedger,
     boot: u64,

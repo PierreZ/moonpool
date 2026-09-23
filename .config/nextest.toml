@@ -26,6 +26,15 @@ slow-timeout = { period = "10s", terminate-after = 6 }
 filter = 'package(moonpool-rpc-sim)'
 slow-timeout = { period = "10s", terminate-after = 6 }
 
+# The qualification campaign's bounded test runs thirty seeds of every RPC
+# contract at once (three client lanes, five processes, twenty seconds of
+# chaos and a recovery phase), each twice under the RNG canary: about a
+# minute in the debug profile on four cores. A wider budget for that binary
+# rather than a smaller seed budget, which would cut required coverage.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and binary(qualification)'
+slow-timeout = { period = "30s", terminate-after = 8 }
+
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"
