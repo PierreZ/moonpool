@@ -273,6 +273,7 @@ pub(crate) struct Runtimes {
 pub struct QualificationWorkload {
     pub(crate) lane: usize,
     lanes: usize,
+    label: String,
     pub(crate) config: QualificationConfig,
     records: QualificationRecords,
     trace: Arc<Mutex<Vec<String>>>,
@@ -311,6 +312,7 @@ impl QualificationWorkload {
         Self {
             lane,
             lanes,
+            label: format!("rpc_qualification_lane_{lane}"),
             config,
             records,
             trace,
@@ -630,10 +632,7 @@ fn client_config() -> RpcConfig {
 #[async_trait]
 impl Workload for QualificationWorkload {
     fn name(&self) -> &str {
-        match self.lane {
-            0 => "rpc_qualification_lead",
-            _ => "rpc_qualification_lane",
-        }
+        &self.label
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
