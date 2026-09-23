@@ -11,7 +11,7 @@ SimulationBuilder::new()
     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
     .processes(3, || Box::new(MyNode::new()))
     .workload(MyWorkload::default())
-    .run();
+    .run()?;
 ```
 
 See the [moonpool book](https://pierrez.github.io/moonpool/) for the full guide.

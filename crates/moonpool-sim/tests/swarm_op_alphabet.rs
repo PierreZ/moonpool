@@ -64,7 +64,8 @@ fn swarm_makes_group_suppression_reachable() {
         .set_debug_seeds(seeds())
         .set_iterations(400)
         .workload(OpAlphabetWorkload)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "swarm run had failed seeds");
     assert!(
@@ -79,7 +80,8 @@ fn full_alphabet_never_suppresses_group() {
         .set_debug_seeds(seeds())
         .set_iterations(400)
         .workload(OpAlphabetWorkload)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "baseline run had failed seeds");
     assert_eq!(

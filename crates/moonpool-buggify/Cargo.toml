@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Standalone buggify fault-injection macros for the moonpool framework"
 documentation = "https://docs.rs/moonpool-buggify"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 # Pure std, zero dependencies — compiles on wasm32-unknown-unknown, macOS, and
 # Linux. Buggify is disabled by default and stays inert until a simulation

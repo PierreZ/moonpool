@@ -656,7 +656,8 @@ fn run_seed(seed: u64) -> Result<SimulationMetrics, String> {
         .workload(StormWorkload)
         .set_debug_seeds(vec![seed])
         .set_iterations(1)
-        .run();
+        .run()
+        .map_err(|error| error.to_string())?;
 
     match report.individual_metrics.into_iter().next() {
         Some(Ok(metrics)) => Ok(metrics),

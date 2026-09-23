@@ -310,20 +310,37 @@ pub unsafe extern "C" fn __sanitizer_cov_8bit_counters_init(start: *mut u8, stop
     // Safety: start and stop are valid pointers provided by LLVM, stop >= start
     let new_len = unsafe { stop.offset_from(start) }.cast_unsigned();
 
-    // Merge: keep the lowest start and highest stop across all TUs.
-    let prev = COUNTERS_PTR.load(Ordering::Relaxed);
-    if prev.is_null() || (start as usize) < (prev as usize) {
-        COUNTERS_PTR.store(start, Ordering::Relaxed);
-    }
+    let prev_ptr = COUNTERS_PTR.load(Ordering::Relaxed);
+    let prev =
+        (!prev_ptr.is_null()).then(|| (prev_ptr as usize, COUNTERS_LEN.load(Ordering::Relaxed)));
+    let (merged_start, merged_len) = merge_counter_range(prev, (start as usize, new_len));
+    // Re-derive the pointer from `start` or `prev_ptr` to keep provenance.
+    let merged_ptr = if merged_start == start as usize {
+        start
+    } else {
+        prev_ptr
+    };
+    COUNTERS_PTR.store(merged_ptr, Ordering::Relaxed);
+    COUNTERS_LEN.store(merged_len, Ordering::Relaxed);
+}
 
-    // Accumulate length: the total span is max(stop) - min(start).
-    // Since TUs may be non-contiguous, we track the max of all
-    // (start + len) and then recompute len as max_stop - min_start.
-    let current_start = COUNTERS_PTR.load(Ordering::Relaxed) as usize;
-    let new_stop = start as usize + new_len;
-    let current_stop = current_start + COUNTERS_LEN.load(Ordering::Relaxed);
-    let final_stop = current_stop.max(new_stop);
-    COUNTERS_LEN.store(final_stop - current_start, Ordering::Relaxed);
+/// Merge a newly registered counter range `(start, len)` into the range
+/// tracked so far, returning the covering `(min_start, max_stop - min_start)`.
+///
+/// The previous range's end is computed from its *own* start before the start
+/// moves, so registration order never changes the result.
+fn merge_counter_range(prev: Option<(usize, usize)>, new: (usize, usize)) -> (usize, usize) {
+    let (new_start, new_len) = new;
+    let new_stop = new_start + new_len;
+    match prev {
+        None => (new_start, new_len),
+        Some((prev_start, prev_len)) => {
+            let prev_stop = prev_start + prev_len;
+            let start = prev_start.min(new_start);
+            let stop = prev_stop.max(new_stop);
+            (start, stop - start)
+        }
+    }
 }
 
 /// Called by LLVM for PC table initialization. Stub — we don't use PC info.
@@ -756,6 +773,47 @@ mod tests {
         init_sancov_shared().expect("init should succeed as no-op");
         let transfer = SANCOV_TRANSFER.with(std::cell::Cell::get);
         assert!(transfer.is_null(), "no buffers allocated without sancov");
+    }
+
+    /// Fold `ranges` in order through [`merge_counter_range`].
+    fn merge_all(ranges: &[(usize, usize)]) -> (usize, usize) {
+        ranges
+            .iter()
+            .fold(None, |acc, &r| Some(merge_counter_range(acc, r)))
+            .expect("at least one range")
+    }
+
+    #[test]
+    fn test_counter_range_merge_is_order_independent() {
+        // Disjoint: [0x1000, 0x1100) and [0x0800, 0x0900).
+        let disjoint = [(0x1000, 0x100), (0x0800, 0x100)];
+        assert_eq!(merge_all(&disjoint), (0x0800, 0x900));
+        assert_eq!(merge_all(&[disjoint[1], disjoint[0]]), (0x0800, 0x900));
+
+        // Overlapping: [0x1000, 0x1200) and [0x1100, 0x1300).
+        let overlap = [(0x1000, 0x200), (0x1100, 0x200)];
+        assert_eq!(merge_all(&overlap), (0x1000, 0x300));
+        assert_eq!(merge_all(&[overlap[1], overlap[0]]), (0x1000, 0x300));
+
+        // Nested: an inner range never shrinks the span.
+        let nested = [(0x1000, 0x400), (0x1100, 0x10)];
+        assert_eq!(merge_all(&nested), (0x1000, 0x400));
+        assert_eq!(merge_all(&[nested[1], nested[0]]), (0x1000, 0x400));
+
+        // Three ranges, every permutation agrees.
+        let three = [(0x2000, 0x10), (0x0800, 0x20), (0x1000, 0x5)];
+        let expected = (0x0800, 0x2010 - 0x0800);
+        for perm in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let ordered = perm.map(|i| three[i]);
+            assert_eq!(merge_all(&ordered), expected);
+        }
     }
 
     #[test]

@@ -47,7 +47,7 @@ Attrition {
 }
 ```
 
-**`max_dead`** is the most important field. It caps the number of simultaneously dead processes. If you have a 3-node cluster with `max_dead: 1`, attrition will never kill a second node before the first has restarted. This ensures the system always has enough live nodes to remain operational (assuming your replication factor matches).
+**`max_dead`** is the most important field. It caps the number of simultaneously dead processes. If you have a 3-node cluster with `max_dead: 1`, attrition will never kill a second node before the first has restarted. A process counts as dead from the moment its reboot is decided, graceful or crash, until its restart runs. Victims are drawn only from live processes, and a reboot aimed at a process that is already dead is skipped, so one outage never schedules two restarts. This ensures the system always has enough live nodes to remain operational (assuming your replication factor matches).
 
 **`prob_graceful`, `prob_crash`, `prob_wipe`** are weights, not probabilities. They do not need to sum to 1.0. The attrition injector normalizes them internally and picks a reboot kind by weighted random selection. Setting `prob_wipe: 0.0` disables wipe reboots entirely.
 
@@ -83,11 +83,10 @@ SimulationBuilder::new()
     }])
     .chaos_duration(Duration::from_secs(60))
     .workload(MyWorkload::new())
-    .run()
-    .await;
+    .run()?;
 ```
 
-The `.chaos_duration()` call is required because attrition runs only during the chaos phase. After the chaos duration elapses the simulation enters recovery mode: fault injectors stop, every configuration-driven network and storage fault family is switched off, and partitions are healed, while the system continues until all workloads complete. That quiet tail is where a rebooted process rejoins and the cluster reconverges — the damage from the chaos phase is still there to recover from, since recovery mode stops new faults rather than repairing old ones. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
+The `.chaos_duration()` call is required because attrition runs only during the chaos phase: `run()` returns `SimulationError::InvalidConfiguration` for a builder that registers attrition or a `fault_factory` without it, instead of dropping the injectors unrun. After the chaos duration elapses the simulation enters recovery mode: fault injectors stop, every configuration-driven network and storage fault family is switched off, and partitions are healed, while the system continues until all workloads complete. That quiet tail is where a rebooted process rejoins and the cluster reconverges — the damage from the chaos phase is still there to recover from, since recovery mode stops new faults rather than repairing old ones. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
 
 `ChaosMode::Random` uses your configured weights, recovery window, and scope as
 written every seed. Switch to `ChaosMode::Swarm` to swarm the reboot *regime*

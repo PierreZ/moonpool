@@ -13,7 +13,7 @@
 //!
 //! On a "discovery" (first Sometimes/Reachable pass, numeric watermark
 //! improvement, frontier advance, or new partial boolean combination) the accounting calls
-//! [`crate::hooks::on_discovery`]. Each discovery is guarded by an atomic
+//! `on_discovery` (in the `hooks` module). Each discovery is guarded by an atomic
 //! latch so it fires exactly once globally. With no hook installed this is a
 //! no-op (pure accounting); the exploration backend wires it to a per-run
 //! discovery journal.

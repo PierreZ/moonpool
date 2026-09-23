@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 description = "Frontier-based exploration controller for moonpool simulation testing"
 documentation = "https://docs.rs/moonpool-explorer"
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "sim-frontier-explore"

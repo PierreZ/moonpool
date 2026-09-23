@@ -192,7 +192,7 @@ SimulationBuilder::new()
     .processes(1, || Box::new(WebProcess))
     .workload(WebWorkload)
     .set_iterations(10)
-    .run();
+    .run()?;
 ```
 
 One web server process, one workload driving requests, ten iterations with different seeds. Each iteration creates a fresh simulation: new network, new processes, new store state, new buggify activation decisions.

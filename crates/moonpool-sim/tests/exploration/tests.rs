@@ -17,7 +17,7 @@ use moonpool_sim::{
 
 /// Helper to run a simulation and return the report.
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
-    builder.run()
+    builder.run().expect("simulation configuration is valid")
 }
 
 /// Small bounded exploration config for tests.

@@ -79,7 +79,8 @@ mod tests {
         let report = SimulationBuilder::new()
             .set_iterations(50)
             .workload(RetryWorkload)
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
         assert_eq!(report.failed_runs, 0, "worker should survive every seed");
     }
 }

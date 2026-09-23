@@ -187,7 +187,8 @@ fn two_groups_draw_independent_counts_on_contiguous_ranges() {
         })
         .set_iterations(seeds.len())
         .set_debug_seeds(seeds)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "group layout should hold: {report}");
     assert!(report.assertion_violations.is_empty(), "{report}");
@@ -243,7 +244,8 @@ fn filtered_attrition(victims: AttritionVictims, seeds: Vec<u64>) -> Vec<String>
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(seeds.len())
         .set_debug_seeds(seeds)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "{report}");
     assert!(report.assertion_violations.is_empty(), "{report}");
     booted_ips(&boots)
@@ -315,7 +317,8 @@ fn one_attrition_regime_per_group_reboots_both_groups() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(seeds.len())
         .set_debug_seeds(seeds.clone())
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "{report}");
     assert!(report.assertion_violations.is_empty(), "{report}");

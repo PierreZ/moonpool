@@ -284,7 +284,8 @@ fn builder_campaign_stops_buggified_delay_at_chaos_deadline() {
         .set_iterations(1)
         .set_debug_seeds(vec![42])
         .workload(QuietTailSleep)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "quiet-tail campaign failed");
 }

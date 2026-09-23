@@ -11,11 +11,10 @@ The simplest possible simulation has one workload and runs once:
 ```rust
 let report = SimulationBuilder::new()
     .workload(KvWorkload::new(100, keys))
-    .run()
-    .await;
+    .run()?;
 ```
 
-This creates a single workload at IP `10.0.0.1`, runs it with a random seed, and produces a `SimulationReport`. No processes, no chaos, no multiple iterations. Useful for smoke testing, but not for finding bugs.
+This creates a single workload at IP `10.0.0.1`, runs it with a random seed, and produces a `SimulationReport`. `run()` returns a `Result`: it is `Err(SimulationError::InvalidConfiguration)` when the builder cannot run as written (fault injectors without `chaos_duration`, an instance workload under exploration or `check_determinism`), and no seed runs. No processes, no chaos, no multiple iterations. Useful for smoke testing, but not for finding bugs.
 
 ## Adding Processes
 
@@ -25,8 +24,7 @@ To test a client-server system, add processes alongside the workload:
 let report = SimulationBuilder::new()
     .processes(3, || Box::new(KvServer))
     .workload(KvWorkload::new(100, keys))
-    .run()
-    .await;
+    .run()?;
 ```
 
 The builder creates 3 server processes at `10.0.1.1` through `10.0.1.3` and one workload at `10.0.0.1`. The workload finds server IPs through `ctx.topology().all_process_ips()`.
@@ -60,8 +58,7 @@ SimulationBuilder::new()
     .processes(3, || Box::new(KvServer))
     .workload(KvWorkload::new(100, keys))
     .set_debug_seeds(vec![42, 7891])
-    .run()
-    .await;
+    .run()?;
 ```
 
 This runs exactly 2 iterations with seeds 42 and 7891. Combined with `RUST_LOG=error`, this is the primary debugging workflow: find the failing seed in the report, reproduce it in isolation, add logging, find the bug.
@@ -144,8 +141,7 @@ SimulationBuilder::new()
         mode: ChaosMode::Random,
     }])
     .set_iterations(100)
-    .run()
-    .await;
+    .run()?;
 ```
 
 The simulation lifecycle:
@@ -214,8 +210,7 @@ let report = SimulationBuilder::new()
         Chaos::Storage(ChaosMode::Swarm),
     ])
     .set_iterations(100)
-    .run()
-    .await;
+    .run()?;
 ```
 
 The builder takes care of the rest: creating the simulated world, assigning IPs, seeding the RNG, running the orchestration loop, collecting metrics, and producing the report.

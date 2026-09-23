@@ -96,7 +96,8 @@ fn events_from_spawned_child_tasks_are_attributed_to_their_process() {
         .workload(TimelineWorkload)
         .set_debug_seeds(vec![1])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(

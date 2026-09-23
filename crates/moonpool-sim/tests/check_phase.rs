@@ -68,7 +68,8 @@ fn check_error_fails_the_iteration() {
         .workload(CheckRejects)
         .set_debug_seeds(vec![1])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(
@@ -85,7 +86,8 @@ fn check_panic_fails_the_iteration() {
         .workload(CheckPanics)
         .set_debug_seeds(vec![1])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(
@@ -103,7 +105,8 @@ fn one_rejecting_check_fails_the_seed_for_all_workloads() {
         .workload(CheckRejects)
         .set_debug_seeds(vec![1])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(report.successful_runs, 0);
@@ -116,7 +119,8 @@ fn passing_check_stays_a_success() {
         .workload(CheckPasses)
         .set_debug_seeds(vec![1])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(report.successful_runs, 1);

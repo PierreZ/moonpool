@@ -19,6 +19,11 @@ pub use model::{Outcome, RunResult, Shot};
 use wasm_bindgen::prelude::wasm_bindgen;
 
 /// Run one deterministic seed and return its complete animation timeline.
+///
+/// # Panics
+///
+/// Panics if the demo's fixed builder configuration is invalid, which is a
+/// bug in this crate rather than something a seed can cause.
 #[must_use]
 pub fn run_seed(seed: u64) -> RunResult {
     let (data, recorder) = timeline::recorder();
@@ -30,7 +35,8 @@ pub fn run_seed(seed: u64) -> RunResult {
         .enable_chaos([Chaos::Network(ChaosMode::Random)])
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     timeline::finish(seed, &data)
 }

@@ -63,7 +63,8 @@ fn fatal_setup_stall_keeps_unobserved_panic_diagnostics() {
         .run_time_budget(Duration::from_secs(1))
         .set_iterations(1)
         .set_debug_seeds(vec![12])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
     assert_eq!(report.seeds_failing, vec![12], "report: {report:?}");
@@ -119,7 +120,8 @@ fn handled_joined_panic_does_not_fail_the_seed() {
         .workload(HandledJoinedPanic)
         .set_iterations(1)
         .set_debug_seeds(vec![8])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.successful_runs, 1, "report: {report:?}");
     assert_eq!(report.failed_runs, 0, "report: {report:?}");
 }
@@ -159,7 +161,8 @@ fn panic_before_explicit_detach_still_fails_the_seed() {
         .workload(CompletedUnobservedPanic { detach: true })
         .set_iterations(1)
         .set_debug_seeds(vec![9])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.successful_runs, 0, "report: {report:?}");
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
 }
@@ -170,7 +173,8 @@ fn panic_before_handle_drop_still_fails_the_seed() {
         .workload(CompletedUnobservedPanic { detach: false })
         .set_iterations(1)
         .set_debug_seeds(vec![10])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.successful_runs, 0, "report: {report:?}");
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
 }
@@ -203,7 +207,8 @@ fn abort_before_child_poll_is_not_a_panic() {
         .workload(AbortedBeforePanic)
         .set_iterations(1)
         .set_debug_seeds(vec![11])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.successful_runs, 1, "report: {report:?}");
     assert_eq!(report.failed_runs, 0, "report: {report:?}");
 }
@@ -240,7 +245,8 @@ fn setup_child_panic_fails_the_seed() {
         .workload(SetupChildPanic)
         .set_iterations(1)
         .set_debug_seeds(vec![1])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 0, "report: {report:?}");
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
@@ -278,7 +284,8 @@ fn check_child_panic_fails_the_seed() {
         .workload(CheckChildPanic)
         .set_iterations(1)
         .set_debug_seeds(vec![2])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 0, "report: {report:?}");
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
@@ -327,7 +334,8 @@ fn process_child_panic_fails_the_seed() {
         .workload(BriefWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![3])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 0, "report: {report:?}");
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
@@ -354,7 +362,8 @@ fn fault_injector_panic_fails_the_seed() {
         .workload(BriefWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![4])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 0, "report: {report:?}");
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
@@ -393,7 +402,8 @@ fn task_panic_accounting_is_reset_for_each_seed() {
         .workload(FirstIterationPanic { panic_once: true })
         .set_iterations(2)
         .set_debug_seeds(vec![5, 6])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
     assert_eq!(report.successful_runs, 1, "report: {report:?}");
@@ -420,7 +430,8 @@ fn executor_teardown_cancellation_is_not_a_task_panic() {
         .workload(DetachedCancellation)
         .set_iterations(1)
         .set_debug_seeds(vec![7])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "report: {report:?}");
     assert_eq!(report.successful_runs, 1, "report: {report:?}");

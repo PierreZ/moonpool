@@ -19,7 +19,7 @@ let report = SimulationBuilder::new()
     .processes(3, || Box::new(MyNode::new()))
     .workload(MyWorkload::default())
     .set_iterations(10)
-    .run();
+    .run()?;
 
 report.eprint();
 ```
@@ -132,7 +132,7 @@ let report = SimulationBuilder::new()
     .processes(3, || Box::new(MyNode::new()))
     .workload(MyWorkload::default())
     .set_iterations(500)
-    .run();
+    .run()?;
 ```
 
 ```text

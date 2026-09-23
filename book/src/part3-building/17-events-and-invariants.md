@@ -73,7 +73,7 @@ SimulationBuilder::new()
     .workload(ConsensusWorkload::new(3))
     .invariant(AgreementInvariant::default())
     .invariant(ValidityInvariant::default())
-    .run();
+    .run()?;
 ```
 
 For quick one-off checks there is a closure shorthand:

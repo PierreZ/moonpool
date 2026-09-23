@@ -12,7 +12,7 @@ use moonpool_sim::ExplorationConfig;
 use moonpool_sim::{SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload};
 
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
-    builder.run()
+    builder.run().expect("simulation configuration is valid")
 }
 
 /// Workload firing three sometimes assertions deterministically. The full
@@ -94,6 +94,41 @@ fn test_plateau_no_exploration() {
         "should not be marked as a convergence timeout"
     );
     assert_eq!(report.failed_runs, 0);
+}
+
+/// A workload with no coverage assertion at all.
+struct NoCoverageAssertions;
+
+#[async_trait]
+impl Workload for NoCoverageAssertions {
+    fn name(&self) -> &'static str {
+        "client"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        Ok(())
+    }
+}
+
+/// The default stop condition must converge on the plateau alone when the
+/// simulation declares no `assert_sometimes!` / `assert_reachable!`: there is
+/// nothing left to reach, so it must not run to the cap and time out.
+#[test]
+fn plateau_alone_converges_without_coverage_assertions() {
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .until_coverage_stable(3, 100)
+            .workload(NoCoverageAssertions),
+    );
+
+    assert_eq!(
+        report.iterations, 4,
+        "seed 1 plus 3 quiet plateau seeds, then stop"
+    );
+    assert!(!report.convergence_timeout);
+    assert_eq!(report.failed_runs, 0);
+    let saturation = report.saturation.expect("saturation is reported");
+    assert_eq!(saturation.sometimes_total, 0);
 }
 
 /// Same condition with exploration enabled — children write into the shared

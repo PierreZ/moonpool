@@ -17,10 +17,10 @@ cargo xtask sim run-all      # Run everything
 The `run` subcommand matches against binary names. For example,
 `cargo xtask sim run tonic-grpc` selects the `sim-tonic-grpc` example.
 
-Each simulation binary is a standalone Rust binary that constructs a `SimulationBuilder`, calls `.run()`, and prints the report. A typical `main` function:
+Each simulation binary is a standalone Rust binary that constructs a `SimulationBuilder`, calls `.run()`, and prints the report. `run()` returns `Result<SimulationReport, SimulationError>`: failing seeds are in the report, and an `Err` (`SimulationError::InvalidConfiguration`) means the builder cannot run as configured, so no seed ran. A typical `main` function:
 
 ```rust
-fn main() {
+fn main() -> Result<(), SimulationError> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .try_init();
@@ -30,13 +30,14 @@ fn main() {
         .workload(KvWorkload::new(200, keys))
         .set_iterations(100)
         .enable_chaos([Chaos::Network(ChaosMode::Random)])
-        .run();
+        .run()?;
 
     report.eprint();
 
     if !report.seeds_failing.is_empty() || !report.assertion_violations.is_empty() {
         std::process::exit(1);
     }
+    Ok(())
 }
 ```
 
@@ -121,8 +122,7 @@ SimulationBuilder::new()
     .processes(3, || Box::new(KvServer))
     .workload(KvWorkload::new(200, keys))
     .set_debug_seeds(vec![7891])
-    .run()
-    .await;
+    .run()?;
 ```
 
 Now increase logging. Set the environment variable:
@@ -146,18 +146,20 @@ The debugging workflow:
 
 How long should a chaos run last? Any fixed seed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count** — when the run has nothing left to discover. Moonpool exposes two answers via `IterationControl`.
 
-**`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default, and the one you want most of the time. It stops when every observed `assert_sometimes!`, numeric sometimes assertion, or `assert_reachable!` has fired at least once **and** code coverage has not grown for `plateau_seeds` consecutive seeds. The `max_iterations` field is a safety cap. Under `cargo xtask sim run` the binaries are sancov-instrumented, so the progress signal is **real code coverage**, the count of distinct edges the seeds have exercised. Under plain `cargo nextest run` there is no instrumentation, so it falls back to **assertion coverage**, the set of sometimes, numeric-sometimes, and reachable messages that have fired. The report names which signal it used, so the fallback is never silent. This works **with or without** exploration; no fork happens unless you call `.enable_exploration()`.
+**`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default, and the one you want most of the time. It stops when every observed `assert_sometimes!`, numeric sometimes assertion, or `assert_reachable!` has fired at least once **and** code coverage has not grown for `plateau_seeds` consecutive seeds. The `max_iterations` field is a safety cap. Under `cargo xtask sim run` the binaries are sancov-instrumented, so the progress signal is **real code coverage**, the count of distinct edges the seeds have exercised. Under plain `cargo nextest run` there is no instrumentation, so it falls back to **assertion coverage**, the set of sometimes, numeric-sometimes, and reachable messages that have fired. The report names which signal it used, so the fallback is never silent. A simulation that declares no coverage assertion at all has nothing left to reach, so it stops on the plateau alone and logs a warning saying so. This works **with or without** exploration; no fork happens unless you call `.enable_exploration()`.
 
 ```rust
 SimulationBuilder::new()
     .workload(KvWorkload::new(200, keys))
     .until_coverage_stable(10, 5_000)  // 10 quiet seeds, 5_000 safety cap
-    .run();
+    .run()?;
 ```
 
 **`FixedCount(n)`** is the workhorse for reproducible replay. You commit to running exactly `n` seeds, the duration is bounded, and the report is identical across machines. Reach for this when debugging a specific seed or when budgets must be predictable.
 
 `UntilCoverageStable` sets `report.convergence_timeout = true` when the safety cap is hit before the run saturates, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
+
+A seed that deadlocks stops the whole campaign, but not the report: the deadlocked seed is listed in `seeds_failing`, and everything the earlier seeds gathered (assertion details, bucket summaries, saturation, exploration recipes) is still there. A deadlock is not a saturation timeout, so `convergence_timeout` stays `false`.
 
 Each workload phase also has a generous virtual-time budget. It bounds a
 setup, run, or final check that keeps rearming timers without completing. The

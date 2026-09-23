@@ -177,6 +177,7 @@ These indicate real bugs and are safe to check regardless of iteration count.
 | `Unreachable` | `pass_count > 0` (code path was reached) |
 | `NumericAlways` | `fail_count > 0` (comparison failed at least once) |
 | Slot table | `dropped_assertion_allocations > 0` (one or more evaluations could not be tracked) |
+| Each-bucket table | `each_bucket_dropped_allocations() > 0` (one or more `assert_sometimes_each!` observations found the 256-bucket table full) |
 
 ### Coverage violations (statistical)
 

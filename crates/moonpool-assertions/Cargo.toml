@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Portable assertion accounting (Antithesis-style) for the moonpool framework"
 documentation = "https://docs.rs/moonpool-assertions"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 # Pure std, zero dependencies — compiles on wasm32-unknown-unknown, macOS, and Linux.
 # Assertion counts live in a heap-allocated table by default; moonpool-explorer

@@ -10,7 +10,8 @@ fn main() {
         .processes(1, || Box::new(moonpool_sim_examples::axum_web::WebProcess))
         .workload(moonpool_sim_examples::axum_web::WebWorkload)
         .set_iterations(50)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     moonpool_sim_examples::support::finish_or_exit_on_failing_seeds(&report);
 }

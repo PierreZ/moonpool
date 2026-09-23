@@ -13,8 +13,7 @@ SimulationBuilder::new()
     .workload(MyWorkload::new())
     .set_iterations(1)
     .set_debug_seeds(vec![17429853261])
-    .run()
-    .await
+    .run()?
 ```
 
 `set_debug_seeds` fixes the RNG seed. `set_iterations(1)` tells the runner to execute exactly one iteration with that seed instead of sweeping through random seeds. Together, they replay the exact execution that failed.

@@ -15,7 +15,7 @@
 //!     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
 //!     .processes(3, || Box::new(MyNode::new()))
 //!     .workload(MyWorkload::default())
-//!     .run();
+//!     .run()?;
 //! ```
 //!
 //! ## Two ways metrics reach the report

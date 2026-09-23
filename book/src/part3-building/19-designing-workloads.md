@@ -128,8 +128,7 @@ Then run many instances concurrently:
 SimulationBuilder::new()
     .processes(3, || Box::new(KvServer::new()))
     .workloads(5, || Box::new(KvWorkload::new(200)))
-    .run()
-    .await
+    .run()?
 ```
 
 Five workloads running 200 operations each, against three servers, with chaos enabled. The combinatorial interactions between concurrent operations, across servers experiencing faults, produce the complex interleavings where bugs live.

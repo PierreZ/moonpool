@@ -62,7 +62,8 @@ fn bounded_campaign_hits_every_required_scenario() {
         .check_determinism()
         .set_debug_seeds(seed_budget(12))
         .set_iterations(12)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     report.eprint();
     assert_clean(&report);
     for required in [
@@ -97,7 +98,8 @@ fn same_seed_replays_the_same_semantic_history() {
         let report = campaign(WorkloadConfig::campaign(), &observations)
             .set_debug_seeds(vec![seed])
             .set_iterations(1)
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
         assert_clean(&report);
         records(&observations)
     };
@@ -122,7 +124,8 @@ fn network_bit_flips_are_caught_by_frame_checksums() {
         .network_fault_mask(NetworkFaultMask::none().with(NetworkFault::BitFlip))
         .set_debug_seeds(seed_budget(BIT_FLIP_SEEDS))
         .set_iterations(BIT_FLIP_SEEDS)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_clean(&report);
     let checksum_failures: u64 = records(&observations)
         .iter()

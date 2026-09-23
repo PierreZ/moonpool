@@ -309,7 +309,8 @@ fn a_partition_never_alters_a_multiplexed_request_body() {
         .run_time_budget(Duration::from_secs(5))
         .set_iterations(5)
         .set_debug_seeds(vec![1, 2, 3, 4, 5])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     println!("{report}");
     assert!(

@@ -26,7 +26,8 @@ fn zero_sleep_loop_fails_instead_of_hanging() {
         .workload(ZeroSleepLoop)
         .set_iterations(1)
         .set_debug_seeds(vec![13])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
     assert_eq!(report.seeds_failing, vec![13], "report: {report:?}");

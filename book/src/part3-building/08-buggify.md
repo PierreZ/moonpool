@@ -132,7 +132,7 @@ SimulationBuilder::new()
         Chaos::BuggifyKnobs,
     ])
     .workload(MyWorkload)
-    .run();
+    .run()?;
 ```
 
 On the network surface the knobs include clog, partition, random-close and black-hole rates, and the in-flight bit-flip rate, which a seed can push from FoundationDB's rare 0.01% to around 1% of sends, enough for an integrity check above the transport to meet corruption within a bounded run.
@@ -171,7 +171,7 @@ The `buggify!()` and `buggify_with_prob!()` macros live in the zero-dependency `
 
 ```toml
 [dependencies]
-moonpool-buggify = "0.8"
+moonpool-buggify = "0.9"
 ```
 
 The crate owns only the disabled-by-default state and the macros. When a simulation run starts, `moonpool-sim` installs its deterministic seeded RNG into that shared state, so macros imported through either crate share activation decisions during simulation — and stay inert everywhere else. `moonpool-sim` re-exports both macros, so existing `moonpool_sim::buggify!` call sites are unchanged.

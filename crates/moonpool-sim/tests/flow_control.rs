@@ -561,7 +561,8 @@ fn a_streamer_into_a_slow_reader_blocks_resumes_and_replays_deterministically() 
         .check_determinism()
         .set_iterations(4)
         .set_debug_seeds(vec![1, 2, 3, 4])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs,

@@ -17,7 +17,8 @@ fn main() {
     let report = streams_campaign(StreamsConfig::campaign(), &records)
         .check_determinism()
         .until_coverage_stable(10, 1000)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     report.eprint();
 

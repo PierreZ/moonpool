@@ -44,7 +44,8 @@ fn swarm_runs_clean_across_seeds() {
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
         .set_iterations(50)
         .workload(SwarmSmokeWorkload)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -70,7 +71,8 @@ fn buggify_knobs_runs_clean_across_seeds() {
         ])
         .set_iterations(50)
         .workload(SwarmSmokeWorkload)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,

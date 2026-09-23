@@ -95,7 +95,8 @@ fn test_process_boot_and_topology() {
         .workload(ProcessMonitorWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 1, "simulation should succeed");
     assert_eq!(report.failed_runs, 0);
@@ -138,7 +139,8 @@ fn test_process_tags_round_robin() {
         .workload(TagVerifierWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 1, "tag verification should succeed");
 }
@@ -198,7 +200,8 @@ fn test_manual_reboot_via_fault_injector() {
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -231,7 +234,8 @@ fn test_builtin_attrition() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -275,7 +279,8 @@ fn test_tag_based_reboot() {
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0);
 }
@@ -319,7 +324,8 @@ fn test_process_reads_own_tags() {
         .workload(TimedWorkload(Duration::from_secs(1)))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 1);
 }
@@ -396,7 +402,8 @@ fn test_graceful_reboot_signals_shutdown_token() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -437,7 +444,8 @@ fn test_graceful_reboot_force_kills_stuck_process() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -551,7 +559,8 @@ fn test_graceful_reboot_timing_invariant() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -581,7 +590,8 @@ fn test_attrition_timing_invariant() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![42, 123, 999, 7, 314])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -612,7 +622,8 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![42, 123, 999, 7, 314])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -822,7 +833,8 @@ fn run_crash_scenario(seed: u64) -> (moonpool_sim::SimulationReport, CrashObserv
         .chaos_duration(Duration::from_secs(6))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     let observed = std::mem::take(&mut *lock(&observations));
     (report, observed)
@@ -894,5 +906,165 @@ fn test_crash_reboot_replays_identically_for_a_seed() {
     assert!(
         !first.lifecycle.is_empty(),
         "the scenario must actually crash a process"
+    );
+}
+
+// ============================================================================
+// Test: a dead process is never rebooted again before its restart
+// ============================================================================
+
+/// Counts boots of every process instance across the whole test.
+struct CountingProcess {
+    boots: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl Process for CountingProcess {
+    fn name(&self) -> &'static str {
+        "counting"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        self.boots.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ctx.shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+/// What [`DoubleRebootInjector`] observed synchronously after each call.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DoubleRebootObservations {
+    dead_after_first: usize,
+    dead_after_second: usize,
+}
+
+/// Reboots the first process twice within one tick, then waits out chaos.
+struct DoubleRebootInjector {
+    kind: RebootKind,
+    seen: std::sync::Arc<std::sync::Mutex<DoubleRebootObservations>>,
+}
+
+#[async_trait]
+impl FaultInjector for DoubleRebootInjector {
+    fn name(&self) -> &'static str {
+        "double_reboot"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let _ = ctx.time().sleep(Duration::from_millis(100)).await;
+        let ip = ctx.process_ips()[0].clone();
+        ctx.reboot(&ip, self.kind)?;
+        let dead_after_first = ctx.dead_count();
+        ctx.reboot(&ip, self.kind)?;
+        let dead_after_second = ctx.dead_count();
+        *self.seen.lock().expect("observation lock") = DoubleRebootObservations {
+            dead_after_first,
+            dead_after_second,
+        };
+        ctx.chaos_shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+fn double_reboot_boots(kind: RebootKind) -> (usize, DoubleRebootObservations) {
+    let boots = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(DoubleRebootObservations::default()));
+    let process_boots = boots.clone();
+    let injector_seen = seen.clone();
+    let report = SimulationBuilder::new()
+        .processes(3, move || {
+            Box::new(CountingProcess {
+                boots: process_boots.clone(),
+            })
+        })
+        .workload(TimedWorkload(Duration::from_secs(30)))
+        .fault_factory(move || {
+            Box::new(DoubleRebootInjector {
+                kind,
+                seen: injector_seen.clone(),
+            })
+        })
+        .chaos_duration(Duration::from_secs(20))
+        .set_iterations(1)
+        .set_debug_seeds(vec![7])
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "{:?}", report.assertion_violations);
+    let seen = seen.lock().expect("observation lock").clone();
+    (boots.load(std::sync::atomic::Ordering::SeqCst), seen)
+}
+
+/// Crashing a process twice before it recovers must restart it once: a second
+/// restart would kill and replace the incarnation the first one booted.
+#[test]
+fn crashing_a_dead_process_schedules_no_second_restart() {
+    let (boots, seen) = double_reboot_boots(RebootKind::Crash);
+    assert_eq!(boots, 3 + 1, "three initial boots plus exactly one restart");
+    assert_eq!(seen.dead_after_first, 1);
+    assert_eq!(seen.dead_after_second, 1);
+}
+
+/// A graceful reboot counts as dead from the call, not from the shutdown
+/// event a tick later, so a budget checked in between sees it.
+#[test]
+fn graceful_reboot_is_dead_from_the_call() {
+    let (boots, seen) = double_reboot_boots(RebootKind::Graceful);
+    assert_eq!(boots, 3 + 1, "three initial boots plus exactly one restart");
+    assert_eq!(seen.dead_after_first, 1, "dead at scheduling time");
+    assert_eq!(seen.dead_after_second, 1);
+}
+
+/// Holds two of three processes down, then asks for random reboots: every
+/// draw must land on the one live process.
+struct RandomAmongLiveInjector {
+    picked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl FaultInjector for RandomAmongLiveInjector {
+    fn name(&self) -> &'static str {
+        "random_among_live"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let _ = ctx.time().sleep(Duration::from_millis(100)).await;
+        let ips = ctx.process_ips().to_vec();
+        ctx.crash(&ips[0])?;
+        ctx.crash(&ips[1])?;
+        let first = ctx.reboot_random(RebootKind::Crash)?;
+        // Every process is now dead: nothing left to reboot.
+        let second = ctx.reboot_random(RebootKind::Crash)?;
+        self.picked
+            .lock()
+            .expect("picked lock")
+            .extend(first.into_iter().chain(second));
+        ctx.restart(&ips[0])?;
+        ctx.restart(&ips[1])?;
+        ctx.chaos_shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+#[test]
+fn reboot_random_only_picks_live_processes() {
+    let picked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let injector_picked = picked.clone();
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(EchoProcess))
+        .workload(TimedWorkload(Duration::from_secs(30)))
+        .fault_factory(move || {
+            Box::new(RandomAmongLiveInjector {
+                picked: injector_picked.clone(),
+            })
+        })
+        .chaos_duration(Duration::from_secs(20))
+        .set_iterations(1)
+        .set_debug_seeds(vec![3])
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "{:?}", report.assertion_violations);
+    assert_eq!(
+        *picked.lock().expect("picked lock"),
+        vec!["10.0.1.3".to_string()]
     );
 }

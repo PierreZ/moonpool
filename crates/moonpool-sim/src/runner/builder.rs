@@ -55,9 +55,20 @@ struct RunOrchestratorInputs<'a> {
 /// Outcome of an orchestration attempt.
 type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
 
+/// Whether an iteration let the run loop continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IterationOutcome {
+    /// The seed ran to completion (successfully or not).
+    Completed,
+    /// The seed deadlocked: the campaign stops and reports what it gathered.
+    Deadlocked,
+}
+
 /// Per-run outcomes passed into the final-report builder.
 struct FinalReportInputs {
     converged: bool,
+    /// The run stopped on a deadlocked seed rather than its iteration cap.
+    deadlocked: bool,
     /// Saturation outcome captured during the last scan (`UntilCoverageStable`).
     saturation: Option<super::report::SaturationReport>,
     /// The exploration summary, when exploration was configured.
@@ -706,7 +717,7 @@ impl SimulationBuilder {
     ///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
     ///     .processes(3, || Box::new(MyNode::new()))
     ///     .workload(MyWorkload::default())
-    ///     .run();
+    ///     .run()?;
     /// ```
     ///
     /// Metric values are reported, never used to steer the simulation: a
@@ -763,7 +774,7 @@ impl SimulationBuilder {
     ///             .named("write_p99"),
     ///     )
     ///     .workload(MyWorkload::default())
-    ///     .run();
+    ///     .run()?;
     /// ```
     ///
     /// Queries read the same data the report already collects, so this needs a
@@ -783,6 +794,11 @@ impl SimulationBuilder {
     /// restart) replay exactly from the root seed plus recipe. Stateful
     /// injectors that need to share something across iterations (a test's
     /// observation log, say) capture an `Arc` in the factory closure.
+    ///
+    /// Injectors run only inside the chaos window, so a fault factory
+    /// requires [`Self::chaos_duration`]: [`Self::run`] returns
+    /// [`SimulationError::InvalidConfiguration`] for a builder that registers
+    /// one without it, rather than silently never running it.
     #[must_use]
     pub fn fault_factory(mut self, factory: impl Fn() -> Box<dyn FaultInjector> + 'static) -> Self {
         self.fault_factories.push(Box::new(factory));
@@ -867,7 +883,8 @@ impl SimulationBuilder {
     /// Run until the system is saturated: every observed
     /// `assert_sometimes!` / `assert_reachable!` assertion has fired **and**
     /// code coverage has not grown for `plateau_seeds` consecutive seeds
-    /// (capped at `max_iterations`).
+    /// (capped at `max_iterations`). A simulation with no coverage assertion
+    /// saturates on the plateau alone (with a warning).
     ///
     /// Uses real LLVM sancov code coverage when the binary is instrumented
     /// (built via `cargo xtask sim run`); otherwise falls back to assertion-slot
@@ -911,6 +928,8 @@ impl SimulationBuilder {
     /// independent injector, so a campaign with several process groups can
     /// give each its own reboot regime, victim filter, and `max_dead` budget
     /// (a filtered injector spends its budget on its own pool only).
+    /// Attrition, like every fault injector, runs only inside the chaos window
+    /// and therefore requires [`Self::chaos_duration`].
     ///
     /// `Swarm` mode defeats passive suppression: when every fault is always
     /// slightly on (`Random`) families crowd each other out and the extreme
@@ -1022,11 +1041,11 @@ impl SimulationBuilder {
     ///
     /// # Panics
     ///
-    /// Panics when the configuration contains a zero exploration bound. The
-    /// simulation also fails fast from [`Self::run`] if exploration is combined
-    /// with instance workloads, because those values cannot be reconstructed
-    /// for each continuation timeline. Use [`Self::workload_factory`] or
-    /// [`Self::workloads`] instead.
+    /// Panics when the configuration contains a zero exploration bound. If
+    /// exploration is combined with instance workloads, [`Self::run`] returns
+    /// [`SimulationError::InvalidConfiguration`] instead, because those values
+    /// cannot be reconstructed for each continuation timeline. Use
+    /// [`Self::workload_factory`] or [`Self::workloads`] instead.
     #[cfg(feature = "exploration")]
     #[must_use]
     pub fn enable_exploration(
@@ -1241,31 +1260,35 @@ impl SimulationBuilder {
         fault_injectors
     }
 
-    /// Build an early-exit report on deadlock: snapshot the assertion
-    /// state, reset buggify, and consume the metrics collector.
-    fn build_early_exit_report(
-        metrics_collector: MetricsCollector,
-        iteration_count: usize,
-        seeds_used: Vec<u64>,
-    ) -> SimulationReport {
-        let assertion_results = crate::chaos::assertion_results();
-        let (assertion_violations, coverage_violations) =
-            crate::chaos::validate_assertion_contracts();
-        let dropped_assertion_allocations = moonpool_assertions::assertion_dropped_allocations();
-        crate::chaos::buggify_reset();
-        metrics_collector.generate_report(GenerateReportInputs {
-            iteration_count,
-            seeds_used,
-            assertion_results,
-            assertion_violations,
-            dropped_assertion_allocations,
-            coverage_violations,
-            exploration: None,
-            assertion_details: Vec::new(),
-            bucket_summaries: Vec::new(),
-            convergence_timeout: false,
-            saturation: None,
-        })
+    /// Refuse fault injectors that could never run: injectors (custom
+    /// factories and attrition regimes) only run inside the chaos window, so
+    /// without [`Self::chaos_duration`] they would be dropped unrun while the
+    /// campaign reports success.
+    fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
+        if self.chaos_duration.is_some() {
+            return Ok(());
+        }
+        let mut unrun = Vec::new();
+        if !self.fault_factories.is_empty() {
+            unrun.push(format!(
+                "{} fault_factory injector(s)",
+                self.fault_factories.len()
+            ));
+        }
+        if !self.attritions.is_empty() {
+            unrun.push(format!(
+                "{} Chaos::Attrition regime(s)",
+                self.attritions.len()
+            ));
+        }
+        if unrun.is_empty() {
+            return Ok(());
+        }
+        Err(SimulationError::InvalidConfiguration(format!(
+            "{} registered without SimulationBuilder::chaos_duration: fault injectors only run \
+             inside the chaos window, so they would never fire; set chaos_duration",
+            unrun.join(" and ")
+        )))
     }
 
     /// Enforce the fresh-state boundary required by exploration recipes.
@@ -1273,24 +1296,27 @@ impl SimulationBuilder {
     /// Factory entries are reconstructed by `resolve_entries` for every root
     /// and continuation. The rejected inputs are opaque mutable values whose
     /// pristine state cannot be recovered after one timeline has run.
-    fn validate_rerun_lifecycle(&self) {
+    fn validate_rerun_lifecycle(&self) -> Result<(), SimulationError> {
         let feature = if self.exploration_config.is_some() {
             "exploration"
         } else if self.check_determinism {
             "check_determinism"
         } else {
-            return;
+            return Ok(());
         };
 
-        assert!(
-            !self
-                .entries
-                .iter()
-                .any(|entry| matches!(entry, WorkloadEntry::Instance(..))),
-            "{feature} runs a seed more than once and requires fresh workloads for every run; \
-             use SimulationBuilder::workload_factory or SimulationBuilder::workloads instead of \
-             SimulationBuilder::workload"
-        );
+        if self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, WorkloadEntry::Instance(..)))
+        {
+            return Err(SimulationError::InvalidConfiguration(format!(
+                "{feature} runs a seed more than once and requires fresh workloads for every run; \
+                 use SimulationBuilder::workload_factory or SimulationBuilder::workloads instead \
+                 of SimulationBuilder::workload"
+            )));
+        }
+        Ok(())
     }
 
     /// Check whether the `UntilCoverageStable` saturation condition has been
@@ -1300,7 +1326,8 @@ impl SimulationBuilder {
     /// the progress signal (real code coverage when sancov is available, else
     /// the reached-assertion count) has not grown for `plateau_seeds`
     /// consecutive seeds. Both signals are monotonic non-decreasing, so
-    /// `current == prev` marks a quiet seed.
+    /// `current == prev` marks a quiet seed. A run that observes no coverage
+    /// assertion at all is vacuously "all reached" and stops on the plateau.
     fn check_convergence_or_plateau(state: ConvergenceState<'_>) -> bool {
         let ConvergenceState {
             iteration_control,
@@ -1340,7 +1367,9 @@ impl SimulationBuilder {
             *prev_signal = current;
         }
 
-        let all_reached = all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
+        // With no coverage assertion observed there is nothing left to reach:
+        // the plateau alone decides (otherwise such a run could never converge).
+        let all_reached = reached_sometimes.len() >= all_sometimes_count;
 
         let edges_total = crate::chaos::exploration_glue::code_coverage_total().unwrap_or_default();
         *saturation = Some(super::report::SaturationReport {
@@ -1363,6 +1392,13 @@ impl SimulationBuilder {
             plateau_seeds,
         );
         if *plateau_count >= *plateau_seeds && all_reached {
+            if all_sometimes_count == 0 {
+                tracing::warn!(
+                    "no assert_sometimes!/assert_reachable! was observed: saturation was judged \
+                     on the {:?} plateau alone",
+                    signal,
+                );
+            }
             tracing::info!(
                 "Saturated after {} seeds: all {} sometimes reached, {:?} stable ({}) for {} seeds",
                 iteration_count,
@@ -1561,16 +1597,27 @@ impl SimulationBuilder {
     /// per iteration for full isolation — all tasks are killed when the
     /// executor is dropped at iteration end.
     ///
+    /// Failing seeds are not errors: they are in the report. An `Err` means
+    /// the builder cannot run as configured, and no seed ran.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimulationError::InvalidConfiguration`] when exploration or
+    /// [`Self::check_determinism`] is combined with an instance workload (its
+    /// state cannot be reconstructed for each rerun), or when fault injectors
+    /// ([`Self::fault_factory`], [`Chaos::Attrition`]) are registered without
+    /// [`Self::chaos_duration`].
+    ///
     /// # Panics
     ///
-    /// Panics if a simulation invariant fails, a workload panics, or exploration
-    /// is configured with lifecycle state that cannot be reconstructed for each
-    /// timeline (an instance workload). Also panics when a process group draws
-    /// more than 255 processes, the most its `10.0.{group}.x` range can address.
-    pub fn run(mut self) -> SimulationReport {
-        self.validate_rerun_lifecycle();
+    /// Panics if a simulation invariant fails or a workload panics. Also
+    /// panics when a process group draws more than 255 processes, the most its
+    /// `10.0.{group}.x` range can address.
+    pub fn run(mut self) -> Result<SimulationReport, SimulationError> {
+        self.validate_rerun_lifecycle()?;
+        self.validate_fault_injectors()?;
         if self.entries.is_empty() {
-            return Self::empty_report();
+            return Ok(Self::empty_report());
         }
 
         // Uninstall the select! offset override on every exit path (normal,
@@ -1585,6 +1632,18 @@ impl SimulationBuilder {
             }
         }
         let _select_reset = SelectOverrideReset;
+
+        // Free the assertion region on every exit path, including a panic:
+        // otherwise the next run() on this thread would inherit this run's
+        // counts and discovery latches. Idempotent, so the normal path's
+        // explicit cleanup in build_final_report is unaffected.
+        struct AssertionRegionCleanup;
+        impl Drop for AssertionRegionCleanup {
+            fn drop(&mut self) {
+                crate::chaos::exploration_glue::cleanup_assertion_region();
+            }
+        }
+        let _region_cleanup = AssertionRegionCleanup;
 
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.
@@ -1606,9 +1665,13 @@ impl SimulationBuilder {
             state.explorer = explorer;
         }
 
+        // A deadlocked seed aborts the campaign, but the report still carries
+        // everything gathered so far (exploration, assertions, saturation).
+        let mut deadlocked = false;
         while state.iteration_manager.should_continue() {
-            if let Some(report) = self.execute_iteration(&mut state, &obs_handle) {
-                return report;
+            if self.execute_iteration(&mut state, &obs_handle) == IterationOutcome::Deadlocked {
+                deadlocked = true;
+                break;
             }
             if state.converged {
                 break;
@@ -1635,25 +1698,26 @@ impl SimulationBuilder {
         #[cfg(not(feature = "exploration"))]
         let exploration = None;
 
-        Self::build_final_report(
+        Ok(Self::build_final_report(
             state.metrics_collector,
             &state.iteration_manager,
             &self.iteration_control,
             FinalReportInputs {
                 converged: state.converged,
+                deadlocked,
                 saturation: state.saturation,
                 exploration,
             },
-        )
+        ))
     }
 
-    /// Execute one iteration of the run loop. Returns `Some(report)` when the
-    /// loop must terminate early (e.g. orchestrator deadlock).
+    /// Execute one iteration of the run loop. Returns
+    /// [`IterationOutcome::Deadlocked`] when the loop must stop early.
     fn execute_iteration(
         &mut self,
         state: &mut RunState,
         obs_handle: &SimulationLayerHandle,
-    ) -> Option<SimulationReport> {
+    ) -> IterationOutcome {
         let seed = state.iteration_manager.next_iteration();
         let iteration_count = state.iteration_manager.current_iteration();
 
@@ -1673,15 +1737,24 @@ impl SimulationBuilder {
             Err(_) => true,
         };
 
-        if let Err(report) = self.handle_orchestration_result(
+        if self.handle_orchestration_result(
             state,
             orchestration_result,
             seed,
             iteration_count,
             start_time,
-        ) {
+        ) == IterationOutcome::Deadlocked
+        {
             crate::sim::stop_determinism_canary();
-            return Some(*report);
+            // Keep the per-seed exploration series aligned with seeds_used.
+            #[cfg(feature = "exploration")]
+            if self.exploration_config.is_some() {
+                state
+                    .exploration_totals
+                    .accumulate(state.explorer.as_ref(), seed);
+            }
+            crate::chaos::buggify_reset();
+            return IterationOutcome::Deadlocked;
         }
 
         if self.check_determinism {
@@ -1692,7 +1765,7 @@ impl SimulationBuilder {
         self.run_exploration_phase(state, obs_handle, seed, iteration_count, root_failed);
 
         self.finish_iteration(state, seed, iteration_count);
-        None
+        IterationOutcome::Completed
     }
 
     /// The determinism canary's second pass (see
@@ -1715,9 +1788,25 @@ impl SimulationBuilder {
         self.stage_replay_recipe();
         let (outcome, _start) =
             self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
-        if let Ok(output) = outcome {
-            self.return_entries(state, output.workloads);
-        }
+        // The replay is a full run of the seed and is judged like one: a
+        // workload error, an always-violation or a deadlock fails the seed even
+        // when the draw fingerprints matched.
+        let replay_failure = match outcome {
+            Ok(output) => {
+                let errors = output.results.iter().filter(|r| r.is_err()).count();
+                self.return_entries(state, output.workloads);
+                if errors > 0 {
+                    Some(format!(
+                        "determinism canary: the replay's workloads failed ({errors} error(s))"
+                    ))
+                } else if crate::chaos::has_always_violations() {
+                    Some("determinism canary: the replay violated an always-assertion".to_string())
+                } else {
+                    None
+                }
+            }
+            Err(_) => Some("determinism canary: the replay deadlocked".to_string()),
+        };
         let verdict = crate::sim::finish_determinism_check();
         let matched = verdict.is_ok();
         let detail = match &verdict {
@@ -1733,6 +1822,10 @@ impl SimulationBuilder {
             state
                 .metrics_collector
                 .mark_current_iteration_failed(seed, "determinism canary: the replay diverged");
+        } else if let Some(reason) = replay_failure {
+            state
+                .metrics_collector
+                .mark_current_iteration_failed(seed, &reason);
         }
     }
 
@@ -1911,7 +2004,7 @@ impl SimulationBuilder {
     }
 
     /// Process the orchestration outcome: route the success path back into
-    /// state, or build an early-exit report on deadlock.
+    /// state, or record the deadlocked seed as failed.
     fn handle_orchestration_result(
         &mut self,
         state: &mut RunState,
@@ -1919,9 +2012,8 @@ impl SimulationBuilder {
         seed: u64,
         iteration_count: usize,
         start_time: Instant,
-    ) -> Result<(), Box<SimulationReport>> {
+    ) -> IterationOutcome {
         let max_iterations = state.iteration_manager.max_iterations();
-        let seeds_used_snapshot = state.iteration_manager.seeds_used().to_vec();
         match result {
             Ok(OrchestrateOutput {
                 workloads: returned_workloads,
@@ -1942,22 +2034,14 @@ impl SimulationBuilder {
                     iteration_count,
                     max_iterations,
                 );
-                Ok(())
+                IterationOutcome::Completed
             }
             Err((faulty_seeds_from_deadlock, failed_count)) => {
                 state
                     .metrics_collector
                     .add_faulty_seeds(faulty_seeds_from_deadlock);
                 state.metrics_collector.add_failed_runs(failed_count);
-                let metrics_collector = std::mem::replace(
-                    &mut state.metrics_collector,
-                    MetricsCollector::new(0, Vec::new()),
-                );
-                Err(Box::new(Self::build_early_exit_report(
-                    metrics_collector,
-                    iteration_count,
-                    seeds_used_snapshot,
-                )))
+                IterationOutcome::Deadlocked
             }
         }
     }
@@ -2006,6 +2090,7 @@ impl SimulationBuilder {
     ) -> SimulationReport {
         let FinalReportInputs {
             converged,
+            deadlocked,
             saturation,
             exploration,
         } = inputs;
@@ -2027,11 +2112,13 @@ impl SimulationBuilder {
         let bucket_summaries = build_bucket_summaries(&raw_each_buckets);
         let iteration_count = iteration_manager.current_iteration();
 
-        // Detect saturation timeout: the cap was hit without saturating.
+        // Detect saturation timeout: the cap was hit without saturating. A
+        // deadlock stopped the run before the cap, which is not a timeout.
         let convergence_timeout = matches!(
             iteration_control,
             IterationControl::UntilCoverageStable { .. }
-        ) && !converged;
+        ) && !converged
+            && !deadlocked;
 
         crate::chaos::buggify_reset();
 
@@ -2210,13 +2297,77 @@ mod tests {
         }
     }
 
+    /// The configuration error a builder's `run()` refused with.
+    fn configuration_error(result: Result<SimulationReport, SimulationError>) -> String {
+        match result {
+            Err(SimulationError::InvalidConfiguration(message)) => message,
+            other => panic!("expected InvalidConfiguration, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attrition_without_chaos_duration_is_refused() {
+        let result = SimulationBuilder::new()
+            .workload(BasicWorkload)
+            .enable_chaos([
+                Chaos::Network(ChaosMode::Swarm),
+                Chaos::Attrition {
+                    config: Attrition {
+                        max_dead: 1,
+                        prob_graceful: 0.0,
+                        prob_crash: 1.0,
+                        prob_wipe: 0.0,
+                        recovery_delay_ms: None,
+                        grace_period_ms: None,
+                        scope: crate::AttritionScope::PerProcess,
+                        victims: crate::AttritionVictims::Any,
+                    },
+                    mode: ChaosMode::Random,
+                },
+            ])
+            .set_iterations(1)
+            .run();
+        let message = configuration_error(result);
+        assert!(
+            message.starts_with(
+                "1 Chaos::Attrition regime(s) registered without SimulationBuilder::chaos_duration"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn fault_factory_without_chaos_duration_is_refused() {
+        struct Idle;
+        #[async_trait]
+        impl FaultInjector for Idle {
+            fn name(&self) -> &'static str {
+                "idle"
+            }
+            async fn inject(&mut self, _ctx: &crate::FaultContext) -> SimulationResult<()> {
+                Ok(())
+            }
+        }
+        let result = SimulationBuilder::new()
+            .workload(BasicWorkload)
+            .fault_factory(|| Box::new(Idle))
+            .set_iterations(1)
+            .run();
+        let message = configuration_error(result);
+        assert!(
+            message.starts_with("1 fault_factory injector(s) registered without"),
+            "{message}"
+        );
+    }
+
     #[test]
     fn test_simulation_builder_basic() {
         let report = SimulationBuilder::new()
             .workload(BasicWorkload)
             .set_iterations(3)
             .set_debug_seeds(vec![1, 2, 3])
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
 
         assert_eq!(report.iterations, 3);
         assert_eq!(report.successful_runs, 3);
@@ -2300,7 +2451,9 @@ mod tests {
             .enable_chaos([Chaos::Network(ChaosMode::Random)])
             .enable_exploration(test_exploration_config());
 
-        builder.validate_rerun_lifecycle();
+        builder
+            .validate_rerun_lifecycle()
+            .expect("factory workloads can be rebuilt for every timeline");
     }
 
     #[cfg(feature = "exploration")]
@@ -2315,14 +2468,17 @@ mod tests {
 
     #[cfg(feature = "exploration")]
     #[test]
-    #[should_panic(
-        expected = "exploration runs a seed more than once and requires fresh workloads"
-    )]
     fn exploration_rejects_instance_workloads() {
-        SimulationBuilder::new()
+        let result = SimulationBuilder::new()
             .workload(BasicWorkload)
             .enable_exploration(test_exploration_config())
-            .validate_rerun_lifecycle();
+            .run();
+        let message = configuration_error(result);
+        assert!(
+            message
+                .starts_with("exploration runs a seed more than once and requires fresh workloads"),
+            "{message}"
+        );
     }
 
     struct FailingWorkload;
@@ -2355,7 +2511,8 @@ mod tests {
             .workload(FailingWorkload)
             .set_debug_seeds((1..=10).collect())
             .set_iterations(10)
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
 
         assert_eq!(report.iterations, 10);
         assert_eq!(

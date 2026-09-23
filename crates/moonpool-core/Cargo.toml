@@ -8,6 +8,8 @@ repository.workspace = true
 description = "Core abstractions for the moonpool simulation framework"
 documentation = "https://docs.rs/moonpool-core"
 readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
 
 [features]
 default = ["tokio-providers", "select"]
@@ -48,3 +50,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
+
+# docs.rs builds every optional module the crate documents.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
