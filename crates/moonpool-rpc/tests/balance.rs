@@ -16,6 +16,9 @@ use moonpool_rpc::balance::{
     Feedback, HedgeBudget, Locality, ModelConfig, QueueModel, ReplaceError, Retry, SetVersion,
     Verdict,
 };
+use moonpool_rpc::security::{
+    AccessRequest, Credential, CredentialError, Principal, RequestVerifier, SecurityConfig,
+};
 use moonpool_rpc::{
     AccessClass, ErrorReason, Execution, IncomingRequest, MethodId, RpcConfig, RpcDriver, RpcError,
     RpcHandle, RpcMethod, SchemaVersion, ServiceRef,
@@ -68,14 +71,22 @@ struct Server {
 
 impl Server {
     async fn start(name: &'static str, mode: Mode) -> Self {
-        let (driver, rpc) =
-            RpcDriver::listen(TokioProviders::new(), "127.0.0.1:0", RpcConfig::default())
-                .await
-                .expect("bind an ephemeral port");
+        Self::start_with(name, mode, RpcConfig::default(), AccessClass::Public).await
+    }
+
+    async fn start_with(
+        name: &'static str,
+        mode: Mode,
+        config: RpcConfig,
+        access: AccessClass,
+    ) -> Self {
+        let (driver, rpc) = RpcDriver::listen(TokioProviders::new(), "127.0.0.1:0", config)
+            .await
+            .expect("bind an ephemeral port");
         let driver = tokio::spawn(async move {
             let _ = driver.run().await;
         });
-        let (service, mut stream) = rpc.register::<Work>(AccessClass::Public).expect("register");
+        let (service, mut stream) = rpc.register::<Work>(access).expect("register");
         let receipts = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&receipts);
         let time = TokioProviders::new();
@@ -813,4 +824,194 @@ async fn comparison_hooks_cannot_bypass_the_duplicate_permission() {
     assert_eq!(*compared.lock().expect("compared"), 1);
     assert!(settled(&model).await);
     collector.abort();
+}
+
+/// The one credential the verifying servers below accept.
+const TOKEN: &str = "balanced-bearer-token";
+
+struct OneToken;
+impl RequestVerifier for OneToken {
+    fn verify(
+        &self,
+        _request: &AccessRequest<'_>,
+        credential: &[u8],
+    ) -> Result<Principal, CredentialError> {
+        if credential == TOKEN.as_bytes() {
+            Ok(Principal::new("balancer"))
+        } else {
+            Err(CredentialError::BadSignature)
+        }
+    }
+}
+
+fn verifying() -> RpcConfig {
+    RpcConfig {
+        security: SecurityConfig::enforced(OneToken).accept_credentials_over_plaintext(),
+        ..RpcConfig::default()
+    }
+}
+
+fn credentialed_client() -> (RpcHandle<TokioProviders>, tokio::task::JoinHandle<()>) {
+    let config = RpcConfig::default();
+    let (driver, rpc) = RpcDriver::client_only(
+        TokioProviders::new(),
+        RpcConfig {
+            security: config.security.clone().send_credentials_over_plaintext(),
+            ..config
+        },
+    )
+    .expect("valid");
+    (
+        rpc,
+        tokio::spawn(async move {
+            let _ = driver.run().await;
+        }),
+    )
+}
+
+fn hedged() -> BalancePolicy {
+    BalancePolicy {
+        duplicates: Duplicates::Permitted(DuplicatePolicy {
+            max_copies: 1,
+            hedge: Some(moonpool_rpc::balance::HedgeTiming::default()),
+            compare_within: Duration::from_secs(1),
+        }),
+        attempt_timeout: Some(Duration::from_secs(5)),
+        ..BalancePolicy::default()
+    }
+}
+
+/// `BalancedClient::with_credentials` attaches the credential to every
+/// attempt, the hedge included: against private endpoints of verifying
+/// servers, a slow first choice is hedged and the credentialed copy wins.
+/// Without credentials the first refusal ends the call: a denial is the
+/// caller's problem, never failed over (no other server sees it).
+async fn credentials_reach_every_balanced_attempt() {
+    let slow = Server::start_with(
+        "slow",
+        Mode::Slow(Duration::from_millis(400)),
+        verifying(),
+        AccessClass::Private,
+    )
+    .await;
+    let fast = Server::start_with("fast", Mode::Fast, verifying(), AccessClass::Private).await;
+    let (rpc, driver) = credentialed_client();
+    let model = model(10.0);
+    let credentialed = BalancedClient::new(&rpc, set(1, &slow, &[&fast]), model.clone(), config())
+        .expect("valid")
+        .with_credentials(Credential::bearer(TOKEN));
+    let collector = tokio::spawn({
+        let model = model.clone();
+        async move { model.collect_lagging().await }
+    });
+    let done = credentialed
+        .call(Job { id: 1 }, &hedged())
+        .await
+        .expect("a credentialed hedged call succeeds");
+    assert_eq!(done.reply.server, "fast");
+    assert!(
+        done.attempts
+            .iter()
+            .any(|attempt| attempt.kind == AttemptKind::Hedge),
+        "{:?}",
+        done.attempts
+    );
+    assert!(
+        eventually(|| slow.receipts() == [1]).await,
+        "the slow copy ran too"
+    );
+    assert_eq!(fast.receipts(), [1]);
+    // A replaced set keeps the credential.
+    credentialed
+        .replace(set(2, &fast, &[&slow]))
+        .expect("newer set");
+    let again = credentialed
+        .call(Job { id: 2 }, &BalancePolicy::default())
+        .await
+        .expect("the replaced set carries the credential");
+    assert_eq!(again.reply.id, 2);
+
+    // Anonymous: refused by the first alternative, no failover.
+    let anonymous =
+        BalancedClient::new(&rpc, set(1, &fast, &[&slow]), model.clone(), config()).expect("valid");
+    let error = anonymous
+        .call(Job { id: 3 }, &hedged())
+        .await
+        .expect_err("private endpoints refuse anonymous calls");
+    assert!(
+        matches!(
+            error.failure(),
+            BalanceFailure::Rejected(rejected)
+                if matches!(rejected.reason(), ErrorReason::Unauthenticated(CredentialError::Missing))
+        ),
+        "{error:?}"
+    );
+    assert_eq!(error.execution(), Execution::NotAdmitted);
+    assert_eq!(error.attempts().len(), 1, "{:?}", error.attempts());
+    assert!(!fast.receipts().contains(&3) && !slow.receipts().contains(&3));
+    assert!(
+        !anonymous.status().stale,
+        "a denial never marks an alternative dead"
+    );
+    assert!(settled(&model).await);
+    collector.abort();
+    driver.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credentials_reach_every_balanced_attempt_multi_thread() {
+    credentials_reach_every_balanced_attempt().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn credentials_reach_every_balanced_attempt_current_thread() {
+    credentials_reach_every_balanced_attempt().await;
+}
+
+/// A server draining for a graceful shutdown refuses the attempt
+/// (`ServerShuttingDown`, never admitted): the call fails over to another
+/// alternative, and the draining one is excluded like an overloaded one.
+#[tokio::test]
+async fn a_draining_server_is_failed_over_and_excluded() {
+    let draining = Server::start("draining", Mode::Blackhole).await;
+    let healthy = Server::start("healthy", Mode::Fast).await;
+    let (rpc, driver) = client();
+    // Something owed keeps the drain going; the call also opens the
+    // session the balancer reuses (the listener closes on shutdown).
+    let owed = {
+        let client = draining.service.bind(&rpc);
+        tokio::spawn(async move { client.try_get_reply(&Job { id: 0 }).await })
+    };
+    assert!(eventually(|| draining.receipts() == [0]).await);
+    let shutdown = {
+        let rpc = draining.rpc.clone();
+        tokio::spawn(async move { rpc.shutdown(Duration::from_secs(30)).await })
+    };
+    assert!(eventually(|| draining.rpc.is_shutting_down()).await);
+    let model = model(0.0);
+    let balanced = BalancedClient::new(
+        &rpc,
+        set(1, &draining, &[&healthy]),
+        model.clone(),
+        config(),
+    )
+    .expect("valid");
+    let done = balanced
+        .call(Job { id: 1 }, &BalancePolicy::default())
+        .await
+        .expect("fails over to the healthy server");
+    assert_eq!(done.reply.server, "healthy");
+    assert!(
+        done.attempts.iter().any(|attempt| matches!(
+            &attempt.outcome,
+            AttemptOutcome::Failed(error) if *error.reason() == ErrorReason::ServerShuttingDown
+        )),
+        "{:?}",
+        done.attempts
+    );
+    assert!(model.stats().exclusions >= 1, "{:?}", model.stats());
+    assert!(!draining.receipts().contains(&1));
+    owed.abort();
+    shutdown.abort();
+    driver.abort();
 }

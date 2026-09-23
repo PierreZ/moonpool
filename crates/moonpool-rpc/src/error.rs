@@ -290,6 +290,44 @@ impl RpcError {
         self
     }
 
+    /// Whether no retry or failover can help: a contract error (interface,
+    /// method, schema, codec or streaming mismatch, an invalid reference,
+    /// frame limits, encoding, a malformed request or reply), a security
+    /// refusal (no or bad credential, permission denied, a credential
+    /// withheld from an unauthenticated session), or the local runtime
+    /// gone or misused (shut down, not listening, already registered).
+    ///
+    /// The one list [`RetryPolicy`](crate::RetryPolicy) and the balancer
+    /// consult: a security refusal is the caller's credential or the
+    /// service's policy, both expected to be the same for every
+    /// alternative and every retry, so repeating the call only burns
+    /// budget. A refusal is never remembered as an endpoint failure:
+    /// fixing the credential makes the next call succeed.
+    #[must_use]
+    pub fn is_never_retried(&self) -> bool {
+        matches!(
+            self.reason,
+            ErrorReason::MethodMismatch { .. }
+                | ErrorReason::InvalidReference(_)
+                | ErrorReason::InterfaceMismatch { .. }
+                | ErrorReason::SchemaMismatch { .. }
+                | ErrorReason::CodecMismatch { .. }
+                | ErrorReason::StreamingMismatch { .. }
+                | ErrorReason::FrameTooLarge { .. }
+                | ErrorReason::Encode(_)
+                | ErrorReason::MalformedRequest
+                | ErrorReason::ReplyTooLarge
+                | ErrorReason::ReplyEncodeFailed
+                | ErrorReason::MalformedReply(_)
+                | ErrorReason::Unauthenticated(_)
+                | ErrorReason::PermissionDenied
+                | ErrorReason::CredentialWithheld(_)
+                | ErrorReason::Shutdown
+                | ErrorReason::NotListening
+                | ErrorReason::AlreadyRegistered
+        )
+    }
+
     /// Whether retrying the same reference cannot succeed.
     #[must_use]
     pub fn is_terminal_for_reference(&self) -> bool {

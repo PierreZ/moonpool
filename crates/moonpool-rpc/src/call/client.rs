@@ -68,6 +68,13 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
         self
     }
 
+    /// This client with an already shared credential source (the balancer
+    /// attaches one source to every alternative).
+    pub(crate) fn with_shared_credentials(mut self, source: Arc<dyn CredentialSource>) -> Self {
+        self.credentials = Some(source);
+        self
+    }
+
     /// The reference this client calls.
     #[must_use]
     pub fn target(&self) -> &ServiceRef<M> {

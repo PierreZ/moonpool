@@ -164,9 +164,12 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Whether `error` may be retried under this policy.
     ///
-    /// Contract errors (interface, method, schema or codec mismatch, an
-    /// invalid reference, frame limits, encoding, reply problems) and
-    /// shutdown never are; [`ErrorReason::MethodNotFound`] (never executed,
+    /// Errors [`RpcError::is_never_retried`] lists never are: contract
+    /// errors (interface, method, schema, codec or streaming mismatch, an
+    /// invalid reference, frame limits, encoding, reply problems), security
+    /// refusals (`Unauthenticated`, `PermissionDenied`, `CredentialWithheld`:
+    /// the same credential and policy would be refused again) and a local
+    /// runtime that is gone; [`ErrorReason::MethodNotFound`] (never executed,
     /// but perhaps never served) only with `retry_method_not_found`;
     /// anything else proven
     /// [`Execution::NotAdmitted`] is (a lookup or connect failure, an
@@ -178,23 +181,7 @@ impl RetryPolicy {
         if matches!(error.reason(), ErrorReason::MethodNotFound { .. }) {
             return self.retry_method_not_found;
         }
-        let contract = matches!(
-            error.reason(),
-            ErrorReason::MethodMismatch { .. }
-                | ErrorReason::InvalidReference(_)
-                | ErrorReason::InterfaceMismatch { .. }
-                | ErrorReason::SchemaMismatch { .. }
-                | ErrorReason::CodecMismatch { .. }
-                | ErrorReason::FrameTooLarge { .. }
-                | ErrorReason::Encode(_)
-                | ErrorReason::MalformedRequest
-                | ErrorReason::ReplyTooLarge
-                | ErrorReason::ReplyEncodeFailed
-                | ErrorReason::MalformedReply(_)
-                | ErrorReason::Shutdown
-                | ErrorReason::NotListening
-                | ErrorReason::AlreadyRegistered
-        );
+        let contract = error.is_never_retried();
         !contract
             && match error.execution() {
                 Execution::NotAdmitted => true,
@@ -483,5 +470,34 @@ mod tests {
         assert!(RetryPolicy::default().permits(&overloaded));
         let executed = RpcError::new(ErrorReason::ReplyTooLarge, Execution::Executed);
         assert!(!patient.permits(&executed));
+    }
+
+    /// Streaming mismatches and security refusals (#216/#218 reasons) are
+    /// never retried, whatever the policy: the same request with the same
+    /// credential would be refused again. A draining server is retried.
+    #[test]
+    fn security_and_streaming_refusals_are_never_retried() {
+        use crate::security::CredentialError;
+
+        let everything = RetryPolicy {
+            retry_ambiguous: true,
+            retry_method_not_found: true,
+            ..RetryPolicy::default()
+        };
+        for reason in [
+            ErrorReason::StreamingMismatch {
+                endpoint_streams: true,
+            },
+            ErrorReason::Unauthenticated(CredentialError::Expired),
+            ErrorReason::PermissionDenied,
+            ErrorReason::CredentialWithheld("plaintext session".into()),
+        ] {
+            let error = RpcError::not_admitted(reason);
+            assert!(error.is_never_retried(), "{error}");
+            assert!(!everything.permits(&error), "{error}");
+        }
+        let draining = RpcError::not_admitted(ErrorReason::ServerShuttingDown);
+        assert!(!draining.is_never_retried());
+        assert!(RetryPolicy::default().permits(&draining));
     }
 }

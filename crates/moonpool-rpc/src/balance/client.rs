@@ -29,6 +29,7 @@ use crate::error::{ErrorReason, Execution, RpcError};
 use crate::failure::watch::Watch;
 use crate::failure::{AddressState, EndpointState, FailureMonitor};
 use crate::protocol::RpcMethod;
+use crate::security::CredentialSource;
 use crate::transport::RpcHandle;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -230,6 +231,8 @@ struct Installed<P: Providers, M: RpcMethod> {
     snapshot: Arc<Snapshot<P, M>>,
     stale: bool,
     all_failed: bool,
+    /// Attached to every alternative's client, on install and replace.
+    credentials: Option<Arc<dyn CredentialSource>>,
 }
 
 /// Balances calls of one method over an explicit alternative set.
@@ -403,25 +406,11 @@ impl<P: Providers, R: Send + 'static> Drop for Flights<P, R> {
 }
 
 /// Errors after which no other alternative is tried: the request or the
-/// set is wrong, or the local runtime is gone.
+/// set is wrong, the caller's credential is refused (security policy is
+/// expected to be the same on every alternative), or the local runtime is
+/// gone ([`RpcError::is_never_retried`]).
 fn is_fatal(error: &RpcError) -> bool {
-    matches!(
-        error.reason(),
-        ErrorReason::MethodMismatch { .. }
-            | ErrorReason::InvalidReference(_)
-            | ErrorReason::InterfaceMismatch { .. }
-            | ErrorReason::SchemaMismatch { .. }
-            | ErrorReason::CodecMismatch { .. }
-            | ErrorReason::FrameTooLarge { .. }
-            | ErrorReason::Encode(_)
-            | ErrorReason::MalformedRequest
-            | ErrorReason::ReplyTooLarge
-            | ErrorReason::ReplyEncodeFailed
-            | ErrorReason::MalformedReply(_)
-            | ErrorReason::Shutdown
-            | ErrorReason::NotListening
-            | ErrorReason::AlreadyRegistered
-    )
+    error.is_never_retried()
 }
 
 /// The hedge delay (`loadBalance`'s `secondDelay`): zero when the first
@@ -453,15 +442,23 @@ impl<P: Providers, M: RpcMethod> BalancedClient<P, M> {
     ///
     /// # Errors
     ///
-    /// An invalid [`BalanceConfig`].
+    /// An invalid [`BalanceConfig`], or a streaming method
+    /// ([`RpcMethod::STREAMING`]): a reply stream is one registration
+    /// attempt bound to one producer, never balanced, retried or hedged.
     pub fn new(
         rpc: &RpcHandle<P>,
         set: AlternativeSet<M>,
         model: QueueModel,
         config: BalanceConfig,
     ) -> Result<Self, InvalidConfig> {
+        if M::STREAMING {
+            return Err(InvalidConfig(format!(
+                "{} is a streaming method: reply streams are not balanced",
+                M::NAME
+            )));
+        }
         config.validate()?;
-        let snapshot = Arc::new(snapshot_of(rpc, &config, set));
+        let snapshot = Arc::new(snapshot_of(rpc, &config, set, None));
         Ok(Self {
             rpc: rpc.clone(),
             model,
@@ -472,9 +469,28 @@ impl<P: Providers, M: RpcMethod> BalancedClient<P, M> {
                 snapshot,
                 stale: false,
                 all_failed: false,
+                credentials: None,
             })),
             watch: Arc::new(Watch::default()),
         })
+    }
+
+    /// Attach credentials from `source` to every request this client (and
+    /// every clone sharing its set) sends: first attempts, retries, hedges
+    /// and comparison copies, on the installed set and on every set that
+    /// replaces it. As [`ServiceClient::with_credentials`], the source is
+    /// asked again for every attempt. A refusal of the credential ends the
+    /// call without trying another alternative
+    /// ([`RpcError::is_never_retried`]).
+    #[must_use]
+    pub fn with_credentials(self, source: impl CredentialSource) -> Self {
+        let source: Arc<dyn CredentialSource> = Arc::new(source);
+        let mut installed = lock(&self.installed);
+        let set = installed.snapshot.set.clone();
+        installed.snapshot = Arc::new(snapshot_of(&self.rpc, &self.config, set, Some(&source)));
+        installed.credentials = Some(source);
+        drop(installed);
+        self
     }
 
     /// Use `hooks` for classification, comparison and observation.
@@ -541,7 +557,13 @@ impl<P: Providers, M: RpcMethod> BalancedClient<P, M> {
                 offered: set.version(),
             });
         }
-        installed.snapshot = Arc::new(snapshot_of(&self.rpc, &self.config, set));
+        let credentials = installed.credentials.clone();
+        installed.snapshot = Arc::new(snapshot_of(
+            &self.rpc,
+            &self.config,
+            set,
+            credentials.as_ref(),
+        ));
         installed.stale = false;
         installed.all_failed = false;
         drop(installed);
@@ -689,6 +711,7 @@ fn snapshot_of<P: Providers, M: RpcMethod>(
     rpc: &RpcHandle<P>,
     config: &BalanceConfig,
     set: AlternativeSet<M>,
+    credentials: Option<&Arc<dyn CredentialSource>>,
 ) -> Snapshot<P, M> {
     let distances = set
         .alternatives()
@@ -698,7 +721,13 @@ fn snapshot_of<P: Providers, M: RpcMethod>(
     let clients = set
         .alternatives()
         .iter()
-        .map(|alternative| alternative.target.bind(rpc))
+        .map(|alternative| {
+            let client = alternative.target.bind(rpc);
+            match credentials {
+                Some(source) => client.with_shared_credentials(Arc::clone(source)),
+                None => client,
+            }
+        })
         .collect();
     Snapshot {
         set,
@@ -885,7 +914,14 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
                 (Ok(_), Some(Verdict::Accept(feedback))) => ModelOutcome::Clean(feedback),
                 (Ok(_), Some(Verdict::Overloaded(feedback))) => ModelOutcome::Overloaded(feedback),
                 (Ok(_), Some(Verdict::Behind) | None) => ModelOutcome::Behind,
-                (Err(error), _) if *error.reason() == ErrorReason::Overloaded => {
+                // A server draining for a graceful shutdown is excluded like
+                // an overloaded one: it will not serve for a while.
+                (Err(error), _)
+                    if matches!(
+                        error.reason(),
+                        ErrorReason::Overloaded | ErrorReason::ServerShuttingDown
+                    ) =>
+                {
                     ModelOutcome::Overloaded(Feedback::default())
                 }
                 (Err(_), _) => ModelOutcome::Failed,
@@ -1313,6 +1349,51 @@ mod tests {
             ErrorReason::Disconnected,
             Execution::MaybeExecuted
         )));
+        // #216/#218 reasons: a streaming mismatch and every security
+        // refusal end the call (no failover); a draining server fails over.
+        assert!(is_fatal(&refused(ErrorReason::StreamingMismatch {
+            endpoint_streams: false
+        })));
+        assert!(is_fatal(&refused(ErrorReason::Unauthenticated(
+            crate::security::CredentialError::Missing
+        ))));
+        assert!(is_fatal(&refused(ErrorReason::PermissionDenied)));
+        assert!(is_fatal(&refused(ErrorReason::CredentialWithheld(
+            "v1".into()
+        ))));
+        assert!(!is_fatal(&refused(ErrorReason::ServerShuttingDown)));
+    }
+
+    #[cfg(feature = "prost")]
+    #[test]
+    fn streaming_methods_are_refused_at_construction() {
+        use moonpool_core::TokioProviders;
+
+        use crate::balance::{
+            AlternativeSet, BalanceConfig, BalancedClient, ModelConfig, QueueModel,
+        };
+        use crate::protocol::{MethodId, RpcMethod, SchemaVersion};
+        use crate::{RpcConfig, RpcDriver};
+
+        struct Scan;
+        impl RpcMethod for Scan {
+            type Request = ();
+            type Reply = ();
+            const METHOD: MethodId = MethodId::new(7);
+            const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+            const NAME: &'static str = "scan";
+            const STREAMING: bool = true;
+        }
+        let (_driver, rpc) =
+            RpcDriver::client_only(TokioProviders::new(), RpcConfig::default()).expect("config");
+        let model = QueueModel::new(ModelConfig::default()).expect("model");
+        let refused = BalancedClient::<_, Scan>::new(
+            &rpc,
+            AlternativeSet::empty(SetVersion::new(0)),
+            model,
+            BalanceConfig::default(),
+        );
+        assert!(refused.is_err());
     }
 
     #[test]
