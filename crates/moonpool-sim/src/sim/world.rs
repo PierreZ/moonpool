@@ -25,7 +25,7 @@ use super::{
     events::{Event, ScheduleId, Scheduler},
     rng::{reset_sim_rng, set_sim_seed, sim_random},
     sleep::SleepFuture,
-    wakers::Wakers,
+    wakers::{WakeBatch, Wakers},
 };
 use crate::storage::sim::{OperationId, StorageEngine};
 
@@ -204,8 +204,9 @@ impl SimWorld {
                 return false;
             };
             let now = inner.now();
-            let (actions, mut wakes) = inner.network.before_event(now);
+            let actions = inner.network.before_event(now);
             inner.apply_network(actions);
+            let mut wakes = WakeBatch::default();
 
             let event = scheduled.into_value();
             inner.last_processed_event = Some(event.clone());
