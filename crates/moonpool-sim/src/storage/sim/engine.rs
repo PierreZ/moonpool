@@ -1600,6 +1600,16 @@ impl StorageEngine {
         actions
     }
 
+    /// Crash `ip`'s storage: resolve every unsynced write through the crash
+    /// model and fail the process's in-flight I/O.
+    ///
+    /// A crash reboots the process onto the *same* disk, so a disk-degradation
+    /// episode in force carries over: a stall that started before the crash
+    /// still has to be waited out after it. The failed-disk mark is the one
+    /// exception and is cleared: a failed disk has no expiry, and keeping it
+    /// would park every operation of the rebooted process forever — a
+    /// permanent partition rather than a fault. A wipe
+    /// ([`wipe_process`](Self::wipe_process)) replaces the disk and clears both.
     pub(crate) fn simulate_crash(&mut self, ip: IpAddr, close_files: bool) -> StorageActions {
         // The reboot replaces a failed disk; the operations it parked are
         // failed below with the rest of the process's in-flight I/O.
@@ -1659,8 +1669,15 @@ impl StorageEngine {
         actions
     }
 
+    /// Wipe `ip`'s storage: the process reboots onto a replacement disk.
+    ///
+    /// The replacement carries nothing of the old disk: every file, name and
+    /// directory is gone, and so are the failed-disk mark and any
+    /// disk-degradation episode in force (a crash, by contrast, keeps the
+    /// episode — see [`simulate_crash`](Self::simulate_crash)).
     pub(crate) fn wipe_process(&mut self, ip: IpAddr) -> StorageActions {
         self.state.failed_disks.remove(&ip);
+        self.state.disk_episodes.remove(&ip);
         let files = self
             .state
             .files

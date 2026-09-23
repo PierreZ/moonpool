@@ -576,3 +576,44 @@ fn test_disk_episode_isolated_across_machines() {
         );
     });
 }
+
+/// A crash reboots onto the same disk, so the episode in force carries over; a
+/// wipe replaces the disk, so the episode goes with it (issue #257).
+#[test]
+fn test_wipe_clears_disk_episode_crash_keeps_it() {
+    local_runtime().block_on(async {
+        let ip: IpAddr = "10.0.1.1".parse().expect("valid IP");
+        let mut sim = SimWorld::new();
+        sim.set_process_storage_config(
+            ip,
+            StorageConfiguration {
+                disk_stall_probability: 1.0,
+                disk_stall_duration: Duration::from_secs(10),
+                ..StorageConfiguration::fast_local()
+            },
+        );
+        crate::run_as(&mut sim, ip, |p| write_sync_workload(p, 1))
+            .await
+            .expect("io error");
+        assert!(
+            sim.current_time() >= Duration::from_secs(10),
+            "the write waited out the stall"
+        );
+        assert!(
+            sim.disk_episode_for(ip).is_some(),
+            "the stall episode is recorded against the disk"
+        );
+
+        sim.simulate_crash_for_process(ip, true);
+        assert!(
+            sim.disk_episode_for(ip).is_some(),
+            "a crash keeps the disk, and with it the episode"
+        );
+
+        sim.wipe_storage_for_process(ip);
+        assert!(
+            sim.disk_episode_for(ip).is_none(),
+            "a wipe replaces the disk, and clears its episode"
+        );
+    });
+}
