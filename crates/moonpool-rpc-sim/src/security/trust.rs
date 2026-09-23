@@ -5,6 +5,13 @@
 //! a seed replays the same tokens byte for byte. None of this is secret or
 //! secure: it is a deterministic stand-in for an identity provider, used
 //! to drive the production verifier through key and time transitions.
+//!
+//! **Keep simulated signing deterministic.** `EdDSA` (and HMAC) signatures
+//! are functions of the key and the message; `jsonwebtoken`'s ECDSA signer
+//! uses RFC 6979 nonces as well, but its RSA (`RS*`/`PS*`) signing draws
+//! from `thread_rng`, the host's entropy: a seed would no longer replay the
+//! same tokens and the determinism canary would trip. Never sign with RSA
+//! here.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

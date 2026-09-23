@@ -9,7 +9,9 @@
 //!
 //! 1. Size: a token above [`JwtConfig::max_token_bytes`] is
 //!    [`CredentialError::TooLarge`] before it is parsed.
-//! 2. Header: it parses, its `alg` is in the allow list
+//! 2. Header: it parses, declares no critical extension (`crit`), its
+//!    `typ`, when present, is accepted ([`JwtConfig::accepted_types`]), its
+//!    `alg` is in the allow list
 //!    ([`JwtConfig::algorithms`]; only public-key algorithms can be allowed,
 //!    so an `HS256` token presented against a public key is refused), and it
 //!    names a key id (`kid`). Keys embedded in the token (`jwk`, `jku`,
@@ -18,7 +20,8 @@
 //!    ([`JwksKeys`]; unknown or rotated out: [`CredentialError::UnknownKey`])
 //!    and the token's `alg` is the key's own algorithm.
 //! 4. Signature, then issuer and audience ([`JwtConfig::issuers`],
-//!    [`JwtConfig::audiences`]); `sub`, `iss`, `aud` and `exp` are required.
+//!    [`JwtConfig::audiences`]); `sub` (non-empty), `iss`, `aud` and `exp`
+//!    are required.
 //! 5. Time, against the injected [`UtcClock`](super::UtcClock) (never the
 //!    host clock): `exp` must be after now and `nbf`, when present, not
 //!    after now, both within [`JwtConfig::leeway_seconds`]. An unknown time
@@ -34,8 +37,9 @@
 //! `applyPublicKeySet` does after re-reading its JWKS file: a key left out is
 //! revoked for every later request. A set that does not parse, is larger
 //! than [`MAX_JWKS_BYTES`], has more than [`MAX_JWKS_KEYS`] keys, or holds a
-//! key without an id, with a symmetric (`oct`) key or an unsupported
-//! algorithm is refused as a whole and the current set stays.
+//! key without an id, with a symmetric (`oct`) key, an RSA modulus below
+//! [`MIN_RSA_MODULUS_BITS`] or an unsupported algorithm is refused as a
+//! whole and the current set stays.
 //!
 //! # Cache
 //!
@@ -50,15 +54,21 @@
 //! `jsonwebtoken` with `rust_crypto` pulls the `rsa` crate, which carries
 //! RUSTSEC-2023-0071 (a timing side channel in RSA **private-key**
 //! operations). This module only verifies signatures with public keys.
-//! The constructor installs `jsonwebtoken`'s pure-Rust crypto provider as
-//! the process default if no other provider was installed first.
+//!
+//! `jsonwebtoken` 11 selects its crypto backend through a **process-wide**
+//! default provider, and panics on first use without one. [`JwtVerifier::new`]
+//! and [`JwksKeys`] install the pure-Rust provider as that default if none
+//! was installed first; an application that installs another provider
+//! (`aws_lc_rs`) before them keeps it, for this module too.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 pub use jsonwebtoken::Algorithm;
 use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, Jwk, JwkSet, KeyAlgorithm};
-use jsonwebtoken::{DecodingKey, Validation, decode, decode_header, errors::ErrorKind};
+use jsonwebtoken::{
+    DecodingKey, DecodingKeyKind, Validation, decode, decode_header, errors::ErrorKind,
+};
 use serde::Deserialize;
 
 use super::{AccessRequest, CredentialError, Principal, RequestVerifier, RotatingKeys, UtcTime};
@@ -68,6 +78,9 @@ pub const MAX_JWKS_BYTES: usize = 64 * 1024;
 
 /// The most keys one JWKS may hold.
 pub const MAX_JWKS_KEYS: usize = 64;
+
+/// The smallest RSA modulus a JWKS key may have, in bits.
+pub const MIN_RSA_MODULUS_BITS: usize = 2048;
 
 /// One verification key: the public key and the only algorithm it verifies.
 #[derive(Clone)]
@@ -213,6 +226,15 @@ fn convert(set: &JwkSet) -> Result<Vec<(String, VerificationKey)>, JwksError> {
             kid: kid.clone(),
             detail: error.to_string(),
         })?;
+        if let DecodingKeyKind::RsaModulusExponent { n, .. } = key.kind() {
+            let bits = modulus_bits(n);
+            if bits < MIN_RSA_MODULUS_BITS {
+                return Err(JwksError::Unsupported {
+                    kid: kid.clone(),
+                    detail: format!("RSA modulus of {bits} bits, below {MIN_RSA_MODULUS_BITS}"),
+                });
+            }
+        }
         if keys
             .insert(kid, VerificationKey { key, algorithm })
             .is_some()
@@ -276,6 +298,15 @@ fn key_algorithm(jwk: &Jwk) -> Result<Algorithm, String> {
     }
 }
 
+/// The significant bits of a big-endian modulus.
+fn modulus_bits(n: &[u8]) -> usize {
+    let n = match n.iter().position(|byte| *byte != 0) {
+        Some(first) => &n[first..],
+        None => return 0,
+    };
+    n.len() * 8 - n.first().map_or(0, |top| top.leading_zeros() as usize)
+}
+
 /// Install `jsonwebtoken`'s pure-Rust provider as the process default
 /// unless one is already installed (its first use panics without one).
 fn install_provider() {
@@ -308,6 +339,11 @@ pub struct JwtConfig {
     pub max_token_bytes: usize,
     /// Verified tokens remembered (default 1024; 0 disables the cache).
     pub cache_capacity: usize,
+    /// Accepted values of the header's `typ`, compared ignoring ASCII
+    /// case. A token without `typ` is accepted; one with any other value is
+    /// [`CredentialError::Malformed`]. Default: `JWT`, `at+jwt` and
+    /// `application/at+jwt` (RFC 9068 access tokens).
+    pub accepted_types: Vec<String>,
 }
 
 impl JwtConfig {
@@ -321,6 +357,7 @@ impl JwtConfig {
             leeway_seconds: 0,
             max_token_bytes: 4 * 1024,
             cache_capacity: 1024,
+            accepted_types: vec!["JWT".into(), "at+jwt".into(), "application/at+jwt".into()],
         }
     }
 }
@@ -464,6 +501,20 @@ impl JwtVerifier {
         generation: &mut u64,
     ) -> Result<(Principal, Option<u64>, u64), CredentialError> {
         let header = decode_header(token).map_err(|_| CredentialError::Malformed)?;
+        // No JWS extension is understood here, so a critical one is refused
+        // (RFC 7515 §4.1.11).
+        if header.crit.is_some() {
+            return Err(CredentialError::Malformed);
+        }
+        if let Some(typ) = &header.typ
+            && !self
+                .config
+                .accepted_types
+                .iter()
+                .any(|accepted| accepted.eq_ignore_ascii_case(typ))
+        {
+            return Err(CredentialError::Malformed);
+        }
         let validation = self
             .validations
             .iter()
@@ -492,6 +543,9 @@ impl JwtVerifier {
                 _ => CredentialError::Malformed,
             })?;
         let claims = data.claims;
+        if claims.sub.is_empty() {
+            return Err(CredentialError::Malformed);
+        }
         let mut principal = Principal::new(claims.sub)
             .with_issuer(claims.iss)
             .with_expiry(UtcTime::from_unix_seconds(claims.exp));

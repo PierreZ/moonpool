@@ -320,3 +320,84 @@ fn configurations_that_cannot_verify_are_refused() {
     nothing.algorithms.clear();
     assert!(JwtVerifier::new(keys(), nothing).is_err());
 }
+
+/// Base64url without padding, for hand-made JWKs.
+fn b64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let mut buffer = [0u8; 3];
+        buffer[..chunk.len()].copy_from_slice(chunk);
+        let value =
+            (u32::from(buffer[0]) << 16) | (u32::from(buffer[1]) << 8) | u32::from(buffer[2]);
+        for index in 0..=chunk.len() {
+            let shift = 18 - 6 * index;
+            out.push(char::from(ALPHABET[((value >> shift) & 0x3f) as usize]));
+        }
+    }
+    out
+}
+
+/// Regression: tokens with an empty subject, an unexpected `typ` or a
+/// critical header extension were accepted.
+#[test]
+fn empty_subjects_foreign_types_and_critical_extensions_are_refused() {
+    let (ed, jwk) = ed_key(10, "k");
+    let verifier = verifier(vec![jwk], |_| {});
+    let mut empty = claims(NOW + 60);
+    empty["sub"] = json!("");
+    assert_eq!(
+        check(
+            &verifier,
+            &token(&ed, Algorithm::EdDSA, Some("k"), &empty),
+            NOW
+        ),
+        Err(CredentialError::Malformed)
+    );
+    let typed = |typ: Option<&str>, crit: Option<Vec<String>>| {
+        let mut header = Header::new(Algorithm::EdDSA);
+        header.kid = Some("k".into());
+        header.typ = typ.map(Into::into);
+        header.crit = crit;
+        encode(&header, &claims(NOW + 60), &ed)
+            .expect("sign")
+            .into_bytes()
+    };
+    for accepted in [None, Some("JWT"), Some("jwt"), Some("at+jwt")] {
+        assert_eq!(
+            check(&verifier, &typed(accepted, None), NOW),
+            Ok("alice".into()),
+            "{accepted:?}"
+        );
+    }
+    assert_eq!(
+        check(&verifier, &typed(Some("dpop+jwt"), None), NOW),
+        Err(CredentialError::Malformed)
+    );
+    assert_eq!(
+        check(&verifier, &typed(None, Some(vec!["exp".into()])), NOW),
+        Err(CredentialError::Malformed)
+    );
+}
+
+/// Regression: RSA keys of any size were published.
+#[test]
+fn short_rsa_keys_are_refused() {
+    let rsa = |bits: usize| {
+        let mut modulus = vec![0xff_u8; bits / 8];
+        modulus[0] = 0xc1;
+        serde_json::json!({"keys": [{
+            "kty": "RSA", "kid": format!("rsa{bits}"), "alg": "RS256",
+            "n": b64url(&modulus), "e": "AQAB",
+        }]})
+        .to_string()
+    };
+    assert!(matches!(
+        JwksKeys::from_json(&rsa(1024)),
+        Err(JwksError::Unsupported { .. })
+    ));
+    assert!(JwksKeys::from_json(&rsa(2048)).is_ok());
+    assert_eq!(super::modulus_bits(&[0, 0, 1]), 1);
+    assert_eq!(super::modulus_bits(&[0x80, 0]), 16);
+    assert_eq!(super::modulus_bits(&[]), 0);
+}
