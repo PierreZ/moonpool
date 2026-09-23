@@ -35,6 +35,8 @@ fn request_frame(
         call_id,
         incarnation: endpoint.incarnation(),
         token: endpoint.token(),
+        interface: identity.interface.0,
+        interface_version: identity.interface.1,
         method: identity.method,
         schema: identity.schema,
         codec: identity.codec,

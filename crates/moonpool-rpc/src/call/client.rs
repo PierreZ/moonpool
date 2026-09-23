@@ -63,6 +63,10 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
         let body = encode_to_vec(request)
             .map_err(|error| RpcError::not_admitted(ErrorReason::Encode(error.0)))?;
         let identity = CallIdentity {
+            interface: self.target.interface().unwrap_or((
+                crate::interface::InterfaceId::new(0),
+                crate::protocol::SchemaVersion::new(0),
+            )),
             method: M::METHOD,
             schema: M::SCHEMA,
             codec: <M::Request as Wire>::CODEC,

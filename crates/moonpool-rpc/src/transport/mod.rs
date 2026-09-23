@@ -76,10 +76,10 @@ use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKno
 use crate::error::{CallIdentity, ErrorReason, RpcError};
 use crate::failure::watch::Watch;
 use crate::failure::{MonitorState, PermanentFailure};
-use crate::interface::{RpcInterface, ServiceGroup, ServiceRef};
+use crate::interface::{InterfaceId, RpcInterface, ServiceGroup, ServiceRef};
 use crate::protocol::{
-    MIN_PROTOCOL_VERSION, MethodId, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, WireError,
-    WireMessage, WireOutcome, encode_frame, encode_message,
+    MIN_PROTOCOL_VERSION, MethodId, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, SchemaVersion,
+    WireError, WireMessage, WireOutcome, encode_frame, encode_message,
 };
 use crate::stats::{Counters, RpcStats};
 
@@ -151,6 +151,9 @@ struct Registration {
     methods: BTreeMap<MethodId, Arc<dyn Inbox>>,
     /// A group (from `register_group`) rather than one method's endpoint.
     grouped: bool,
+    /// The group's interface and version; zero for a single-method
+    /// endpoint.
+    interface: (InterfaceId, SchemaVersion),
     // Stored and carried now, enforced by the security package (#218).
     _access: AccessClass,
 }
@@ -161,13 +164,25 @@ impl Registration {
         Self {
             methods: BTreeMap::from([(method, inbox)]),
             grouped: false,
+            interface: (InterfaceId::new(0), SchemaVersion::new(0)),
             _access: access,
         }
     }
 
-    /// The inbox serving `method`, or the rejection that says why none
-    /// does.
-    fn route(&self, method: MethodId) -> Result<Arc<dyn Inbox>, WireError> {
+    /// The inbox serving `method` of `interface`, or the rejection that
+    /// says why none does. The interface is checked first: a reference to
+    /// another interface never reaches a method that happens to share an
+    /// id.
+    fn route(
+        &self,
+        interface: (InterfaceId, SchemaVersion),
+        method: MethodId,
+    ) -> Result<Arc<dyn Inbox>, WireError> {
+        if interface != self.interface {
+            return Err(WireError::InterfaceMismatch {
+                registered: self.interface,
+            });
+        }
         if let Some(inbox) = self.methods.get(&method) {
             return Ok(Arc::clone(inbox));
         }
@@ -342,6 +357,7 @@ impl<P: Providers> Shared<P> {
         let registration = Registration {
             methods: BTreeMap::new(),
             grouped: true,
+            interface: (I::INTERFACE, I::VERSION),
             _access: access,
         };
         let token = self.insert(registration, None)?;
@@ -389,7 +405,7 @@ impl<P: Providers> Shared<P> {
                 None => state.registry.get(token),
             }
             .map_or(Err(WireError::EndpointNotFound), |registration| {
-                registration.route(request.identity.method)
+                registration.route(request.identity.interface, request.identity.method)
             })
         };
         // Checked in order, all before a single body byte is decoded.

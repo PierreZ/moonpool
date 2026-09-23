@@ -2,6 +2,7 @@
 //! about execution.
 
 use crate::codec::CodecId;
+use crate::interface::InterfaceId;
 use crate::protocol::{MethodId, SchemaVersion, WireError};
 
 /// What a failure proves about whether the server ran the handler for the
@@ -43,6 +44,16 @@ pub enum ErrorReason {
     MethodNotFound {
         /// The method the caller invoked.
         called: MethodId,
+    },
+    /// The endpoint serves another interface (or none, or another version
+    /// of it) than the reference names; checked before any body byte is
+    /// decoded. [`InterfaceId`] zero stands for a single-method endpoint.
+    /// Terminal for this reference.
+    InterfaceMismatch {
+        /// The interface and version the caller's reference names.
+        called: (InterfaceId, SchemaVersion),
+        /// The interface and version the endpoint was registered with.
+        registered: (InterfaceId, SchemaVersion),
     },
     /// The reference itself is malformed or names another method or
     /// interface than the one it is used as (see
@@ -121,6 +132,14 @@ impl std::fmt::Display for ErrorReason {
                 write!(f, "the endpoint group does not serve {called}")
             }
             Self::InvalidReference(detail) => write!(f, "invalid reference: {detail}"),
+            Self::InterfaceMismatch { called, registered } => write!(
+                f,
+                "interface mismatch: called {} v{}, endpoint serves {} v{}",
+                called.0,
+                called.1.get(),
+                registered.0,
+                registered.1.get()
+            ),
             Self::MethodMismatch { called, registered } => {
                 write!(
                     f,
@@ -225,6 +244,7 @@ impl RpcError {
                 | ErrorReason::MethodMismatch { .. }
                 | ErrorReason::MethodNotFound { .. }
                 | ErrorReason::InvalidReference(_)
+                | ErrorReason::InterfaceMismatch { .. }
                 | ErrorReason::SchemaMismatch { .. }
                 | ErrorReason::CodecMismatch { .. }
         )
@@ -245,6 +265,10 @@ impl RpcError {
             WireError::CodecMismatch { registered } => ErrorReason::CodecMismatch {
                 sent: called.codec,
                 expected: registered,
+            },
+            WireError::InterfaceMismatch { registered } => ErrorReason::InterfaceMismatch {
+                called: called.interface,
+                registered,
             },
             WireError::MethodNotFound => ErrorReason::MethodNotFound {
                 called: called.method,
@@ -277,6 +301,9 @@ impl std::error::Error for RpcError {}
 /// What a caller claimed about the endpoint it called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CallIdentity {
+    /// The interface of the group the reference names, and its version
+    /// ([`InterfaceId`] zero: a single-method endpoint).
+    pub(crate) interface: (InterfaceId, SchemaVersion),
     pub(crate) method: MethodId,
     pub(crate) schema: SchemaVersion,
     pub(crate) codec: CodecId,
@@ -286,11 +313,13 @@ pub(crate) struct CallIdentity {
 mod tests {
     use super::{CallIdentity, ErrorReason, Execution, RpcError};
     use crate::codec::CodecId;
+    use crate::interface::InterfaceId;
     use crate::protocol::{MethodId, SchemaVersion, WireError};
 
     #[test]
     fn server_rejections_map_to_honest_execution_knowledge() {
         let called = CallIdentity {
+            interface: (InterfaceId::new(0), SchemaVersion::new(0)),
             method: MethodId::new(1),
             schema: SchemaVersion::new(1),
             codec: CodecId::PROST,
@@ -312,6 +341,14 @@ mod tests {
         assert_eq!(knowledge(WireError::ReplyTooLarge), Execution::Executed);
         assert_eq!(knowledge(WireError::ReplyEncodeFailed), Execution::Executed);
         assert_eq!(knowledge(WireError::MethodNotFound), Execution::NotAdmitted);
+        let mismatch = RpcError::from_wire(
+            WireError::InterfaceMismatch {
+                registered: (InterfaceId::new(7), SchemaVersion::new(1)),
+            },
+            called,
+        );
+        assert_eq!(mismatch.execution(), Execution::NotAdmitted);
+        assert!(mismatch.is_terminal_for_reference());
         let stale = RpcError::from_wire(WireError::StaleIncarnation, called);
         assert!(stale.is_terminal_for_reference());
         assert_eq!(stale.reason(), &ErrorReason::StaleIncarnation);

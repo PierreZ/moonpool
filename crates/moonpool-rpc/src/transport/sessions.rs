@@ -69,6 +69,8 @@ impl<P: Providers> Shared<P> {
                 call_id,
                 incarnation,
                 token,
+                interface,
+                interface_version,
                 method,
                 schema,
                 codec,
@@ -94,6 +96,7 @@ impl<P: Providers> Shared<P> {
                         incarnation,
                         token,
                         identity: CallIdentity {
+                            interface: (interface, interface_version),
                             method,
                             schema,
                             codec,

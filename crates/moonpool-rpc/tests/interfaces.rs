@@ -48,6 +48,23 @@ method!(Put, 2, "kv.put");
 // A member the server never serves.
 method!(Scan, 3, "kv.scan");
 
+/// Another interface whose method shares `Get`'s id, schema and codecs.
+struct Other;
+impl RpcInterface for Other {
+    const INTERFACE: InterfaceId = InterfaceId::new(0x07e4);
+    const VERSION: SchemaVersion = SchemaVersion::new(1);
+    const NAME: &'static str = "other";
+}
+struct OtherGet;
+impl RpcMethod for OtherGet {
+    type Request = Text;
+    type Reply = Text;
+    const METHOD: MethodId = MethodId::new(1);
+    const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+    const NAME: &'static str = "other.get";
+}
+impl InterfaceMethod<Other> for OtherGet {}
+
 fn text(text: &str) -> Text {
     Text { text: text.into() }
 }
@@ -450,4 +467,92 @@ async fn restart_scenario() {
     ));
     assert!(b.stats().expect("running").calls_failed_fast > before);
     b_driver.abort();
+}
+
+/// The server checks the interface a reference names: a reference to
+/// another interface, a plain reference to a group method and a group
+/// reference to a single-method endpoint are refused before decoding and
+/// never executed, even when method id, schema and codecs all match.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reference_to_another_interface_is_refused_before_any_handler() {
+    let (server, server_driver) = listen_at("127.0.0.1:0").await;
+    let (client, client_driver) = client_only();
+    let group = server
+        .register_group::<Kv>(AccessClass::Public)
+        .expect("register group");
+    let executions = Arc::new(AtomicU64::new(0));
+    let _get = serve(
+        group.serve::<Get>().expect("serve"),
+        "get",
+        executions.clone(),
+    );
+    let (single, single_stream) = server.register::<Get>(AccessClass::Public).expect("single");
+    let _single = serve(single_stream, "single", executions.clone());
+
+    let foreign = InterfaceRef::<Other>::new(group.endpoint(), AccessClass::Public)
+        .bind(&client)
+        .expect("well formed")
+        .method::<OtherGet>()
+        .try_get_reply(&text("x"))
+        .await;
+    assert_eq!(
+        reason(&foreign),
+        Some((
+            ErrorReason::InterfaceMismatch {
+                called: (Other::INTERFACE, Other::VERSION),
+                registered: (Kv::INTERFACE, Kv::VERSION),
+            },
+            Execution::NotAdmitted
+        ))
+    );
+    assert!(foreign.expect_err("refused").is_terminal_for_reference());
+
+    let plain = ServiceRef::<Get>::new(group.endpoint(), AccessClass::Public)
+        .bind(&client)
+        .try_get_reply(&text("y"))
+        .await;
+    assert!(matches!(
+        reason(&plain),
+        Some((
+            ErrorReason::InterfaceMismatch { .. },
+            Execution::NotAdmitted
+        ))
+    ));
+
+    let as_group = InterfaceRef::<Kv>::new(single.endpoint(), AccessClass::Public)
+        .bind(&client)
+        .expect("well formed")
+        .method::<Get>()
+        .try_get_reply(&text("z"))
+        .await;
+    assert!(matches!(
+        reason(&as_group),
+        Some((
+            ErrorReason::InterfaceMismatch { .. },
+            Execution::NotAdmitted
+        ))
+    ));
+    assert_eq!(executions.load(Ordering::SeqCst), 0, "nothing ran");
+
+    // The right references still work.
+    let kv = group.interface_ref().bind(&client).expect("valid");
+    assert_eq!(
+        kv.method::<Get>()
+            .try_get_reply(&text("a"))
+            .await
+            .expect("get")
+            .text,
+        "get:a"
+    );
+    assert_eq!(
+        single
+            .bind(&client)
+            .try_get_reply(&text("b"))
+            .await
+            .expect("single")
+            .text,
+        "single:b"
+    );
+    server_driver.abort();
+    client_driver.abort();
 }

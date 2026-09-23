@@ -171,6 +171,7 @@ impl RetryPolicy {
             ErrorReason::MethodMismatch { .. }
                 | ErrorReason::MethodNotFound { .. }
                 | ErrorReason::InvalidReference(_)
+                | ErrorReason::InterfaceMismatch { .. }
                 | ErrorReason::SchemaMismatch { .. }
                 | ErrorReason::CodecMismatch { .. }
                 | ErrorReason::FrameTooLarge { .. }

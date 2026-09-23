@@ -9,6 +9,7 @@
 //!                    | incarnation u128 | features u64 | max_frame_bytes u32
 //!                    | listen: family u8 (0 none, 4, 6) | ip (0, 4 or 16 bytes) | port u16 (if family > 0)
 //! kind 0x02 REQUEST  call_id u64 | incarnation u128 | token.index u64 | token.generation u32
+//!                    | interface u32 | interface_version u16
 //!                    | method u32 | schema u16 | codec u16 | flags u8
 //!                    | metadata_len u16 | metadata | body (rest of the frame)
 //! kind 0x03 REPLY    call_id u64 | status u8 | status 0:  codec u16 | body (rest)
@@ -30,7 +31,10 @@
 //!   share that session as its own connection to the sender and to settle
 //!   simultaneous connects (the larger canonical address keeps the
 //!   connection it dialed, as in `FoundationDB`).
-//! - REQUEST: `metadata` is a reserved, length-prefixed section for request
+//! - REQUEST: `interface` / `interface_version` name the endpoint group's
+//!   interface the reference was adjusted from; zero for a single-method
+//!   endpoint. The server compares them with the registration before the
+//!   method. `metadata` is a reserved, length-prefixed section for request
 //!   credentials (verified by the security package, #218). This version
 //!   sends it empty and ignores what it receives; it is never passed to a
 //!   handler. `flags` bit 0 marks a one-way request: the receiver never
@@ -43,8 +47,9 @@
 //! `3` method mismatch (detail: registered method), `4` schema mismatch
 //! (detail: registered schema), `5` codec mismatch (detail: registered
 //! codec), `6` malformed request, `7` overloaded, `8` broken promise, `9`
-//! reply too large, `10` reply encoding failed. Detail is `0` when it
-//! carries nothing.
+//! reply too large, `10` reply encoding failed, `11` method not found in
+//! the group, `12` interface mismatch (detail: registered interface `<< 16`
+//! | registered interface version). Detail is `0` when it carries nothing.
 //!
 //! Changing this layout, adding a kind or a status code requires a new
 //! [`PROTOCOL_VERSION`]; the golden vectors in the tests pin version 1.
@@ -55,6 +60,7 @@ use super::cursor::{Reader, Writer};
 use super::schema::{MethodId, SchemaVersion};
 use crate::codec::CodecId;
 use crate::endpoint::{EndpointToken, Incarnation};
+use crate::interface::InterfaceId;
 
 /// Magic number opening every connection's first frame (`"MPRC"`).
 pub const PROTOCOL_MAGIC: u32 = 0x4d50_5243;
@@ -116,6 +122,11 @@ pub enum WireMessage {
         incarnation: Incarnation,
         /// The endpoint the caller's reference names.
         token: EndpointToken,
+        /// The interface of the group the reference names (zero: a
+        /// single-method endpoint).
+        interface: InterfaceId,
+        /// That interface's version (zero with interface zero).
+        interface_version: SchemaVersion,
         /// The method the caller invokes.
         method: MethodId,
         /// The contract version the caller encoded with.
@@ -197,6 +208,12 @@ pub enum WireError {
     ReplyEncodeFailed,
     /// The endpoint is a group that does not serve the method.
     MethodNotFound,
+    /// The endpoint serves another interface than the reference names.
+    InterfaceMismatch {
+        /// The interface and version the endpoint was registered with
+        /// (zero: a single-method endpoint).
+        registered: (InterfaceId, SchemaVersion),
+    },
 }
 
 impl WireError {
@@ -213,6 +230,12 @@ impl WireError {
             Self::ReplyTooLarge => (9, 0),
             Self::ReplyEncodeFailed => (10, 0),
             Self::MethodNotFound => (11, 0),
+            Self::InterfaceMismatch {
+                registered: (interface, version),
+            } => (
+                12,
+                (u64::from(interface.get()) << 16) | u64::from(version.get()),
+            ),
         }
     }
 
@@ -241,6 +264,15 @@ impl WireError {
             9 => Self::ReplyTooLarge,
             10 => Self::ReplyEncodeFailed,
             11 => Self::MethodNotFound,
+            12 => Self::InterfaceMismatch {
+                registered: (
+                    InterfaceId::new(
+                        u32::try_from(detail >> 16)
+                            .map_err(|_| EnvelopeError::InvalidField("interface"))?,
+                    ),
+                    SchemaVersion::new(u16::try_from(detail & 0xffff).unwrap_or(0)),
+                ),
+            },
             other => return Err(EnvelopeError::UnknownStatus(other)),
         })
     }
@@ -299,6 +331,8 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
             call_id,
             incarnation,
             token,
+            interface,
+            interface_version,
             method,
             schema,
             codec,
@@ -314,6 +348,8 @@ pub fn encode_message(message: &WireMessage) -> Vec<u8> {
                 .u128(incarnation.get())
                 .u64(token.index())
                 .u32(token.generation())
+                .u32(interface.get())
+                .u16(interface_version.get())
                 .u32(method.get())
                 .u16(schema.get())
                 .u16(codec.get())
@@ -357,7 +393,7 @@ pub const REJECTION_ENVELOPE_LEN: usize = 1 + 8 + 1 + 8;
 /// Size of a request envelope carrying a `body_len`-byte body.
 #[must_use]
 pub const fn request_envelope_len(body_len: usize) -> usize {
-    1 + 8 + 16 + 8 + 4 + 4 + 2 + 2 + 1 + 2 + body_len
+    1 + 8 + 16 + 8 + 4 + 4 + 2 + 4 + 2 + 2 + 1 + 2 + body_len
 }
 
 /// Size of an ok-reply envelope carrying a `body_len`-byte body.
@@ -400,6 +436,8 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
             let incarnation = Incarnation::from_raw(input.u128().ok_or_else(truncated)?);
             let index = input.u64().ok_or_else(truncated)?;
             let generation = input.u32().ok_or_else(truncated)?;
+            let interface = InterfaceId::new(input.u32().ok_or_else(truncated)?);
+            let interface_version = SchemaVersion::new(input.u16().ok_or_else(truncated)?);
             let method = MethodId::new(input.u32().ok_or_else(truncated)?);
             let schema = SchemaVersion::new(input.u16().ok_or_else(truncated)?);
             let codec = CodecId::new(input.u16().ok_or_else(truncated)?);
@@ -416,6 +454,8 @@ pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
                 call_id,
                 incarnation,
                 token: EndpointToken::from_parts(index, generation),
+                interface,
+                interface_version,
                 method,
                 schema,
                 codec,
@@ -492,6 +532,7 @@ mod tests {
     };
     use crate::codec::CodecId;
     use crate::endpoint::{EndpointToken, Incarnation};
+    use crate::interface::InterfaceId;
     use crate::protocol::{MethodId, SchemaVersion};
 
     fn request() -> WireMessage {
@@ -499,6 +540,8 @@ mod tests {
             call_id: 5,
             incarnation: Incarnation::from_raw(0x0102),
             token: EndpointToken::from_parts(3, 1),
+            interface: InterfaceId::new(0x4b56),
+            interface_version: SchemaVersion::new(2),
             method: MethodId::new(0x20),
             schema: SchemaVersion::new(0x10),
             codec: CodecId::PROST,
@@ -574,6 +617,8 @@ mod tests {
         expected.extend([0; 14]);
         expected.extend([3, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0]);
+        expected.extend([0x56, 0x4b, 0, 0]);
+        expected.extend([2, 0]);
         expected.extend([0x20, 0, 0, 0]);
         expected.extend([0x10, 0]);
         expected.extend([1, 0]);
@@ -689,6 +734,12 @@ mod tests {
             WireError::ReplyTooLarge,
             WireError::ReplyEncodeFailed,
             WireError::MethodNotFound,
+            WireError::InterfaceMismatch {
+                registered: (InterfaceId::new(u32::MAX), SchemaVersion::new(u16::MAX)),
+            },
+            WireError::InterfaceMismatch {
+                registered: (InterfaceId::new(0), SchemaVersion::new(0)),
+            },
         ];
         for error in errors {
             let message = WireMessage::Reply {
