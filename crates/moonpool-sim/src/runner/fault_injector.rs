@@ -266,6 +266,13 @@ impl FaultContext {
     /// wiping) its storage, then schedules the restart. The process runs no
     /// further application work during the recovery delay.
     ///
+    /// Either way the process counts as dead from this call on (so a second
+    /// reboot in the same tick sees it against `max_dead`), and a process that
+    /// is already dead — its kill scheduled, its restart not yet run — is left
+    /// alone: rebooting it again would schedule a second restart that kills
+    /// and replaces the incarnation the first one boots. A held-down process
+    /// ([`crash`](Self::crash)) comes back through [`restart`](Self::restart).
+    ///
     /// # Errors
     ///
     /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
@@ -292,10 +299,19 @@ impl FaultContext {
         grace_period_range_ms: &std::ops::Range<usize>,
     ) -> SimulationResult<()> {
         let ip_addr = parse_ip(ip)?;
+        if self.is_dead(ip) {
+            assert_reachable!("reboot: target already dead, skipped");
+            tracing::debug!("Skipped reboot of already-dead process at IP {}", ip);
+            return Ok(());
+        }
 
         match kind {
             RebootKind::Graceful => {
                 assert_reachable!("reboot: graceful path");
+                // Dead from the decision, like the crash path: the shutdown
+                // event runs a tick later, and a budget checked in between
+                // must already count this process.
+                self.mark_dead(ip_addr);
                 let grace_ms = crate::sim::sim_random_range(grace_period_range_ms.clone()) as u64;
                 let recovery_ms =
                     crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
@@ -405,23 +421,30 @@ impl FaultContext {
 
     /// Reboot a random alive server process.
     ///
-    /// Picks a random process from the process IP list and reboots it.
-    /// Returns `Ok(None)` if no processes are available.
+    /// Picks a random process among those not currently dead and reboots it.
+    /// Returns `Ok(None)` if every process is dead (or there are none).
     ///
     /// # Errors
     ///
     /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn reboot_random(&self, kind: RebootKind) -> SimulationResult<Option<String>> {
-        if self.process_info.process_ips.is_empty() {
+        let alive: Vec<&String> = self
+            .process_info
+            .process_ips
+            .iter()
+            .filter(|ip| !self.is_dead(ip))
+            .collect();
+        if alive.is_empty() {
             return Ok(None);
         }
-        let idx = crate::sim::sim_random_range(0..self.process_info.process_ips.len());
-        let ip = self.process_info.process_ips[idx].clone();
+        let idx = crate::sim::sim_random_range(0..alive.len());
+        let ip = alive[idx].clone();
         self.reboot(&ip, kind)?;
         Ok(Some(ip))
     }
 
-    /// Reboot all processes matching a tag key=value pair.
+    /// Reboot all processes matching a tag key=value pair. Processes already
+    /// dead are skipped (see [`reboot`](Self::reboot)).
     ///
     /// # Errors
     ///
@@ -470,6 +493,7 @@ impl FaultContext {
     }
 
     /// Reboot every process in a failure domain (`level` + `id`) together.
+    /// Processes already dead are skipped (see [`reboot`](Self::reboot)).
     ///
     /// Returns the IPs that were rebooted (empty if the domain is unknown).
     ///
@@ -591,22 +615,25 @@ impl AttritionInjector {
         }
     }
 
-    /// Reboot a single random eligible process, respecting the `max_dead`
-    /// budget over the eligible pool.
+    /// Reboot a single random live eligible process, respecting the
+    /// `max_dead` budget over the whole eligible pool.
     fn inject_process(&self, ctx: &FaultContext) -> SimulationResult<()> {
         let eligible = self.eligible(ctx, ctx.process_ips());
         if Self::dead_among(ctx, &eligible) >= self.config.max_dead {
             assert_reachable!("attrition: max_dead limit enforced");
             return Ok(());
         }
-        if eligible.is_empty() {
+        // Only a live process can be killed: drawing a dead one would schedule
+        // a second restart for it.
+        let live: Vec<&String> = eligible.into_iter().filter(|ip| !ctx.is_dead(ip)).collect();
+        if live.is_empty() {
             assert_reachable!("attrition: no eligible victim");
             return Ok(());
         }
         let kind = self.choose_kind();
         let (recovery_range, grace_range) = self.delay_ranges();
-        let idx = crate::sim::sim_random_range(0..eligible.len());
-        let ip = eligible[idx].clone();
+        let idx = crate::sim::sim_random_range(0..live.len());
+        let ip = live[idx].clone();
         assert_sometimes_each!(
             "attrition_process_targeted",
             [("process_idx", i64::try_from(idx).unwrap_or(i64::MAX))]
@@ -615,11 +642,12 @@ impl AttritionInjector {
         ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)
     }
 
-    /// Reboot every eligible process in a random failure domain *together*,
-    /// only if the group fits within the `max_dead` budget over the eligible
-    /// pool. A no-op when no locality topology is configured (`domains`
-    /// empty). Domains holding no eligible process are never drawn, so the
-    /// victim filter cannot make a round silently pick an empty group.
+    /// Reboot every live eligible process in a random failure domain
+    /// *together*, only if the group fits within the `max_dead` budget over
+    /// the eligible pool. A no-op when no locality topology is configured
+    /// (`domains` empty). Domains holding no live eligible process are never
+    /// drawn, so neither the victim filter nor earlier kills can make a round
+    /// silently pick an empty group.
     fn inject_domain(
         &self,
         ctx: &FaultContext,
@@ -633,7 +661,11 @@ impl AttritionInjector {
                 .into_iter()
                 .map(|ip| ip.to_string())
                 .collect();
-            self.eligible(ctx, &all).into_iter().cloned().collect()
+            self.eligible(ctx, &all)
+                .into_iter()
+                .filter(|ip| !ctx.is_dead(ip))
+                .cloned()
+                .collect()
         };
         let domains: Vec<&String> = domains
             .iter()

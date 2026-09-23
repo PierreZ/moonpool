@@ -47,7 +47,7 @@ Attrition {
 }
 ```
 
-**`max_dead`** is the most important field. It caps the number of simultaneously dead processes. If you have a 3-node cluster with `max_dead: 1`, attrition will never kill a second node before the first has restarted. This ensures the system always has enough live nodes to remain operational (assuming your replication factor matches).
+**`max_dead`** is the most important field. It caps the number of simultaneously dead processes. If you have a 3-node cluster with `max_dead: 1`, attrition will never kill a second node before the first has restarted. A process counts as dead from the moment its reboot is decided, graceful or crash, until its restart runs. Victims are drawn only from live processes, and a reboot aimed at a process that is already dead is skipped, so one outage never schedules two restarts. This ensures the system always has enough live nodes to remain operational (assuming your replication factor matches).
 
 **`prob_graceful`, `prob_crash`, `prob_wipe`** are weights, not probabilities. They do not need to sum to 1.0. The attrition injector normalizes them internally and picks a reboot kind by weighted random selection. Setting `prob_wipe: 0.0` disables wipe reboots entirely.
 
