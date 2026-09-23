@@ -783,6 +783,10 @@ impl SimulationBuilder {
     /// restart) replay exactly from the root seed plus recipe. Stateful
     /// injectors that need to share something across iterations (a test's
     /// observation log, say) capture an `Arc` in the factory closure.
+    ///
+    /// Injectors run only inside the chaos window, so a fault factory
+    /// requires [`Self::chaos_duration`]: [`Self::run`] refuses a builder that
+    /// registers one without it rather than silently never running it.
     #[must_use]
     pub fn fault_factory(mut self, factory: impl Fn() -> Box<dyn FaultInjector> + 'static) -> Self {
         self.fault_factories.push(Box::new(factory));
@@ -911,6 +915,8 @@ impl SimulationBuilder {
     /// independent injector, so a campaign with several process groups can
     /// give each its own reboot regime, victim filter, and `max_dead` budget
     /// (a filtered injector spends its budget on its own pool only).
+    /// Attrition, like every fault injector, runs only inside the chaos window
+    /// and therefore requires [`Self::chaos_duration`].
     ///
     /// `Swarm` mode defeats passive suppression: when every fault is always
     /// slightly on (`Random`) families crowd each other out and the extreme
@@ -1268,6 +1274,35 @@ impl SimulationBuilder {
         })
     }
 
+    /// Refuse fault injectors that could never run: injectors (custom
+    /// factories and attrition regimes) only run inside the chaos window, so
+    /// without [`Self::chaos_duration`] they would be dropped unrun while the
+    /// campaign reports success.
+    fn validate_fault_injectors(&self) {
+        if self.chaos_duration.is_some() {
+            return;
+        }
+        let mut unrun = Vec::new();
+        if !self.fault_factories.is_empty() {
+            unrun.push(format!(
+                "{} fault_factory injector(s)",
+                self.fault_factories.len()
+            ));
+        }
+        if !self.attritions.is_empty() {
+            unrun.push(format!(
+                "{} Chaos::Attrition regime(s)",
+                self.attritions.len()
+            ));
+        }
+        assert!(
+            unrun.is_empty(),
+            "{} registered without SimulationBuilder::chaos_duration: fault injectors only run \
+             inside the chaos window, so they would never fire; set chaos_duration",
+            unrun.join(" and ")
+        );
+    }
+
     /// Enforce the fresh-state boundary required by exploration recipes.
     ///
     /// Factory entries are reconstructed by `resolve_entries` for every root
@@ -1566,9 +1601,12 @@ impl SimulationBuilder {
     /// Panics if a simulation invariant fails, a workload panics, or exploration
     /// is configured with lifecycle state that cannot be reconstructed for each
     /// timeline (an instance workload). Also panics when a process group draws
-    /// more than 255 processes, the most its `10.0.{group}.x` range can address.
+    /// more than 255 processes, the most its `10.0.{group}.x` range can address,
+    /// and when fault injectors ([`Self::fault_factory`], [`Chaos::Attrition`])
+    /// are registered without [`Self::chaos_duration`].
     pub fn run(mut self) -> SimulationReport {
         self.validate_rerun_lifecycle();
+        self.validate_fault_injectors();
         if self.entries.is_empty() {
             return Self::empty_report();
         }
@@ -2208,6 +2246,51 @@ mod tests {
             max_frontier: 1,
             max_recipe_len: 1,
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "registered without SimulationBuilder::chaos_duration")]
+    fn attrition_without_chaos_duration_is_refused() {
+        let _ = SimulationBuilder::new()
+            .workload(BasicWorkload)
+            .enable_chaos([
+                Chaos::Network(ChaosMode::Swarm),
+                Chaos::Attrition {
+                    config: Attrition {
+                        max_dead: 1,
+                        prob_graceful: 0.0,
+                        prob_crash: 1.0,
+                        prob_wipe: 0.0,
+                        recovery_delay_ms: None,
+                        grace_period_ms: None,
+                        scope: crate::AttritionScope::PerProcess,
+                        victims: crate::AttritionVictims::Any,
+                    },
+                    mode: ChaosMode::Random,
+                },
+            ])
+            .set_iterations(1)
+            .run();
+    }
+
+    #[test]
+    #[should_panic(expected = "1 fault_factory injector(s) registered without")]
+    fn fault_factory_without_chaos_duration_is_refused() {
+        struct Idle;
+        #[async_trait]
+        impl FaultInjector for Idle {
+            fn name(&self) -> &'static str {
+                "idle"
+            }
+            async fn inject(&mut self, _ctx: &crate::FaultContext) -> SimulationResult<()> {
+                Ok(())
+            }
+        }
+        let _ = SimulationBuilder::new()
+            .workload(BasicWorkload)
+            .fault_factory(|| Box::new(Idle))
+            .set_iterations(1)
+            .run();
     }
 
     #[test]
