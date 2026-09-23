@@ -286,8 +286,11 @@ pub struct PeerPolicy {
     pub idle_timeout: Duration,
     /// An inbound connection this runtime does not use for its own calls
     /// is closed after receiving nothing for this long with no reply
-    /// outstanding. Its dialer pings, so this only reaps dead dialers; keep
-    /// it well above `ping_interval`.
+    /// outstanding. With replies or streams still owed it is probed with a
+    /// ping instead, and failed if nothing answers within `ping_timeout`
+    /// (a dialer that vanished behind a half-open session), which releases
+    /// the work owed to it. Its dialer pings, so this only reaps dead
+    /// dialers; keep it well above `ping_interval`.
     pub inbound_idle_timeout: Duration,
     /// Connection failures to an address must persist this long before the
     /// failure monitor marks the address failed. A disconnect is reported

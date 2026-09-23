@@ -429,8 +429,16 @@ async fn monitor<P: Providers>(
         if shared.close_if_idle(connection) {
             return CloseReason::Idle;
         }
-        if connection.peer_address().is_none() {
-            // Served only: the dialer pings us; idleness reaps it.
+        if connection.peer_address().is_none()
+            && connection.silent_for(shared.now()) < policy.inbound_idle_timeout
+        {
+            // Served only: the dialer pings us, and idleness reaps it once
+            // nothing is owed. But a dialer silent for the inbound idle
+            // timeout while replies or streams are still owed to it has
+            // vanished behind a half-open session: probe it ourselves and
+            // fail the session if nothing answers (`FoundationDB`'s
+            // `connectionMonitor` for incoming connections), so the work
+            // owed to it is released instead of waiting forever.
             continue;
         }
         let before = connection.received();

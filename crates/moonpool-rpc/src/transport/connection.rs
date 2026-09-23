@@ -579,6 +579,11 @@ impl Connection {
         self.lock().received
     }
 
+    /// How long nothing has arrived, at `now`.
+    pub(crate) fn silent_for(&self, now: Duration) -> Duration {
+        now.saturating_sub(self.lock().last_received)
+    }
+
     /// One more admitted request awaits its reply; returns the new count.
     pub(crate) fn begin_outstanding(&self) -> usize {
         self.outstanding.fetch_add(1, Ordering::Relaxed) + 1

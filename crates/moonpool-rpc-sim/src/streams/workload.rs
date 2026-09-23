@@ -149,6 +149,17 @@ enum Read {
 /// Deadline for things that should complete.
 const LONG: Duration = Duration::from_secs(25);
 
+/// How long a reboot request may take to end its stream before the
+/// workload gives up on it (the script may have stopped serving).
+const REBOOT_PATIENCE: Duration = Duration::from_secs(10);
+
+/// How long the producer may take to release streams whose consumer is
+/// gone. A consumer that gave up during a partition may leave the
+/// producer's side of the session half open; the producer then notices
+/// only after its inbound idle timeout plus a probe (at most 36 s + 6 s
+/// with the campaign's knobs, plus ping-loop jitter).
+const RELEASE_BOUND: Duration = Duration::from_secs(60);
+
 /// The campaign's workload.
 pub struct StreamsWorkload {
     config: StreamsConfig,
@@ -752,9 +763,20 @@ impl StreamsWorkload {
             .unwrap_or_default();
         requests.push(graceful);
         ctx.state().publish(REBOOT_REQUESTS_KEY, requests);
-        let read = self
-            .read(ctx, &mut stream, scan.id, Pace::Eager, None, LONG)
-            .await;
+        // Read until the reboot ends the stream. A request that raced the
+        // end of the fault script is never served: give up after a bound
+        // and abandon the stream instead of reading an endless one forever.
+        let deadline = ctx.time().now() + REBOOT_PATIENCE;
+        let read = loop {
+            let limit = self.ledger.consumed(scan.id).items.len() + 16;
+            match self
+                .read(ctx, &mut stream, scan.id, Pace::Eager, Some(limit), LONG)
+                .await
+            {
+                Read::Limit if ctx.time().now() < deadline => {}
+                read => break read,
+            }
+        };
         if let Read::Ended(Some(error)) = &read {
             match error.reason() {
                 ErrorReason::Disconnected if !graceful => {
@@ -831,10 +853,12 @@ impl StreamsWorkload {
         );
     }
 
-    /// Wait until every stream of the producer's current boot ended: an
-    /// abandoned stream must release its producer.
+    /// Wait until every stream of the producer's current boot ended (at
+    /// most [`RELEASE_BOUND`]): an abandoned stream must release its
+    /// producer.
     async fn settle(&self, ctx: &SimContext) {
-        for _ in 0..400 {
+        let deadline = ctx.time().now() + RELEASE_BOUND;
+        while ctx.time().now() < deadline {
             let boots = ctx.state().get::<u64>(PRODUCER_BOOTS_KEY).unwrap_or(0);
             let running = self
                 .ledger
@@ -972,6 +996,11 @@ impl Workload for StreamsWorkload {
         assert_sometimes!(
             workload.stream_acks_popped > 0,
             "rpc stream item acknowledged when popped from the queue"
+        );
+        let producers = board.stats_with_prefix(PRODUCER_LABEL);
+        assert_sometimes!(
+            producers.iter().any(|(_, stats)| stats.ping_timeouts > 0),
+            "rpc producer probed a silent caller and failed its session"
         );
         if let Some((_, producer)) = board
             .stats_with_prefix(&format!("{PRODUCER_LABEL}{boots}"))
