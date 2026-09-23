@@ -90,19 +90,17 @@ impl BalanceOp {
     }
 }
 
-/// How many handler runs (declined ones aside) a policy permits: one per
-/// sequential attempt it may repeat after an ambiguous one, plus its
-/// concurrent copies.
-fn permitted_executions(policy: &BalancePolicy) -> usize {
+/// How many effectful handler runs (declined ones aside) one call may
+/// cause, given the attempts the observation hook saw it start: every
+/// attempt runs at most once; without retry permission at most one
+/// primary attempt (first or retry) may have run, plus each concurrent
+/// copy actually started.
+fn permitted_executions(policy: &BalancePolicy, primaries: u64, copies: u64) -> u64 {
     let sequential = match policy.retry {
-        Retry::AtMostOnce => 1,
-        Retry::AfterAmbiguous => policy.max_attempts.max(1),
+        Retry::AtMostOnce => primaries.min(1),
+        Retry::AfterAmbiguous => primaries,
     };
-    let copies = policy
-        .duplicates
-        .policy()
-        .map_or(0, |copies| copies.max_copies);
-    usize::try_from(sequential + copies).unwrap_or(usize::MAX)
+    sequential + copies
 }
 
 /// The workload's shape.
@@ -161,6 +159,10 @@ struct Observer {
     ended_late: AtomicU64,
     dropped: AtomicU64,
     hedges: AtomicU64,
+    /// First attempts and retries started.
+    primaries: AtomicU64,
+    /// Hedges and comparison copies started.
+    copies: AtomicU64,
 }
 
 impl Observer {
@@ -209,6 +211,11 @@ impl BalanceHooks<Work> for Hooks {
                 if *kind == AttemptKind::Hedge {
                     self.observer.hedges.fetch_add(1, Ordering::Relaxed);
                 }
+                let class = match kind {
+                    AttemptKind::First | AttemptKind::Retry => &self.observer.primaries,
+                    _ => &self.observer.copies,
+                };
+                class.fetch_add(1, Ordering::Relaxed);
             }
             AttemptEvent::Ended { end, late, .. } => {
                 self.observer.ended.fetch_add(1, Ordering::Relaxed);
@@ -228,7 +235,7 @@ type Outcome = Option<Result<Balanced<Done>, BalanceError>>;
 /// The campaign's workload.
 pub struct BalanceWorkload {
     config: BalanceCampaignConfig,
-    records: BalanceRecords,
+    records: Option<BalanceRecords>,
     history: Vec<String>,
     next_id: u64,
     version: u64,
@@ -238,12 +245,48 @@ pub struct BalanceWorkload {
     failed_during_outage: bool,
     calls: u64,
     recovered: bool,
+    /// Every call, for the final re-check against the receipt ledger.
+    checks: Vec<CallCheck>,
+}
+
+/// What one call allows the receipt ledger to show, re-checked once
+/// every late loser drained.
+struct CallCheck {
+    id: u64,
+    op: BalanceOp,
+    permitted: u64,
+    /// The call reported that nothing with an effect ran.
+    not_admitted: bool,
+}
+
+impl CallCheck {
+    fn verify(&self, receipts: &[super::state::Receipt]) {
+        let executed = receipts.iter().filter(|receipt| !receipt.declined).count();
+        let executed = u64::try_from(executed).unwrap_or(u64::MAX);
+        assert_always!(
+            executed <= self.permitted,
+            "a balanced job never runs more often than its permissions allow",
+            { "id" => self.id, "op" => format!("{:?}", self.op), "executed" => executed, "permitted" => self.permitted }
+        );
+        if self.not_admitted {
+            assert_always!(
+                executed == 0,
+                "a job reported not admitted never took effect",
+                { "id" => self.id, "executed" => executed }
+            );
+        }
+    }
+}
+
+/// Sleep on provider time; `false` once the simulation is shutting down.
+async fn pause(ctx: &SimContext, duration: Duration) -> bool {
+    ctx.time().sleep(duration).await.is_ok()
 }
 
 impl BalanceWorkload {
-    /// A fresh workload appending its run record to `records`.
+    /// A fresh workload appending its run record to `records`, if any.
     #[must_use]
-    pub fn new(config: BalanceCampaignConfig, records: BalanceRecords) -> Self {
+    pub fn new(config: BalanceCampaignConfig, records: Option<BalanceRecords>) -> Self {
         Self {
             config,
             records,
@@ -254,6 +297,7 @@ impl BalanceWorkload {
             failed_during_outage: false,
             calls: 0,
             recovered: false,
+            checks: Vec::new(),
         }
     }
 
@@ -325,6 +369,10 @@ impl BalanceWorkload {
         let ledger = Ledger::of(ctx.state());
         let outage_at_start = ledger.outage();
         let hedges_before = Observer::load(&self.observer.hedges);
+        // Calls run one at a time and start attempts only while running:
+        // the counters' growth over the call is this call's attempts.
+        let primaries_before = Observer::load(&self.observer.primaries);
+        let copies_before = Observer::load(&self.observer.copies);
         let outcome: Outcome = if op == BalanceOp::Cancel {
             let wait_for_hedge = ctx.random().random_bool(0.5);
             let give_up = ctx.random().random_range(1..300u64);
@@ -335,10 +383,12 @@ impl BalanceWorkload {
                         if Observer::load(&observer.hedges) > hedges_before {
                             break;
                         }
-                        let _ = ctx.time().sleep(Duration::from_millis(1)).await;
+                        if !pause(ctx, Duration::from_millis(1)).await {
+                            return;
+                        }
                     }
                 }
-                let _ = ctx.time().sleep(Duration::from_millis(give_up)).await;
+                let _ = pause(ctx, Duration::from_millis(give_up)).await;
             };
             moonpool_sim::select! {
                 outcome = balanced.call(job, &policy) => Some(outcome),
@@ -351,7 +401,11 @@ impl BalanceWorkload {
         let call = Judged {
             op,
             id,
-            policy,
+            permitted: permitted_executions(
+                &policy,
+                Observer::load(&self.observer.primaries) - primaries_before,
+                Observer::load(&self.observer.copies) - copies_before,
+            ),
             outcome,
             outage: outage_at_start || ledger.outage(),
             hedged: Observer::load(&self.observer.hedges) > hedges_before,
@@ -372,13 +426,17 @@ impl BalanceWorkload {
         call: &Judged,
     ) {
         let receipts = Ledger::of(ctx.state()).receipts(call.id);
-        let executed = receipts.iter().filter(|receipt| !receipt.declined).count();
-        let permitted = permitted_executions(&call.policy);
-        assert_always!(
-            executed <= permitted,
-            "a balanced job never runs more often than its permissions allow",
-            { "id" => call.id, "op" => format!("{:?}", call.op), "executed" => executed, "permitted" => permitted }
-        );
+        let check = CallCheck {
+            id: call.id,
+            op: call.op,
+            permitted: call.permitted,
+            not_admitted: matches!(
+                &call.outcome,
+                Some(Err(error)) if error.execution() == Execution::NotAdmitted
+            ),
+        };
+        check.verify(&receipts);
+        self.checks.push(check);
         let summary = match &call.outcome {
             None => {
                 if call.hedged {
@@ -417,9 +475,14 @@ impl BalanceWorkload {
                     && attempt.outcome == AttemptOutcome::Replied
             })
         };
+        let primary_won =
+            won(AttemptKind::First) || won(AttemptKind::Retry) || won(AttemptKind::Hedge);
+        let primary_replied = done.attempts.iter().any(|attempt| {
+            attempt.kind != AttemptKind::Comparison && attempt.outcome == AttemptOutcome::Replied
+        });
         assert_always!(
-            won(AttemptKind::First) || won(AttemptKind::Retry) || won(AttemptKind::Hedge),
-            "the winning attempt is a primary attempt that replied"
+            primary_won || (won(AttemptKind::Comparison) && !primary_replied),
+            "the winner replied, a copy only when no primary attempt did"
         );
         assert_sometimes!(won(AttemptKind::Hedge), "rpc balance hedge won the race");
         let any = |check: &dyn Fn(&AttemptOutcome) -> bool| {
@@ -481,8 +544,10 @@ impl BalanceWorkload {
         receipts: &[super::state::Receipt],
     ) -> String {
         if error.execution() == Execution::NotAdmitted {
+            // Declined runs are handler runs without effect, which the
+            // call reports as not admitted.
             assert_always!(
-                receipts.is_empty(),
+                receipts.iter().all(|receipt| receipt.declined),
                 "a balanced call reported not admitted never reached a handler"
             );
         }
@@ -506,7 +571,7 @@ impl BalanceWorkload {
                 assert_sometimes!(true, "rpc balance all alternatives failed");
             }
             BalanceFailure::Rejected(rejected)
-                if call.policy.retry == Retry::AtMostOnce
+                if call.op.policy().retry == Retry::AtMostOnce
                     && rejected.execution() == Execution::MaybeExecuted =>
             {
                 assert_sometimes!(
@@ -535,7 +600,8 @@ impl BalanceWorkload {
 struct Judged {
     op: BalanceOp,
     id: u64,
-    policy: BalancePolicy,
+    /// Effectful executions its started attempts and permissions allow.
+    permitted: u64,
     outcome: Outcome,
     outage: bool,
     hedged: bool,
@@ -589,14 +655,17 @@ impl Workload for BalanceWorkload {
     }
 
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
-        self.records
-            .lock()
-            .expect("Mutex poisoned: prior task panicked")
-            .push(BalanceRecord {
-                history: std::mem::take(&mut self.history),
-                calls: self.calls,
-                recovered: self.recovered,
-            });
+        let history = std::mem::take(&mut self.history);
+        if let Some(records) = &self.records {
+            records
+                .lock()
+                .expect("Mutex poisoned: prior task panicked")
+                .push(BalanceRecord {
+                    history,
+                    calls: self.calls,
+                    recovered: self.recovered,
+                });
+        }
         Ok(())
     }
 }
@@ -609,14 +678,18 @@ impl BalanceWorkload {
             if ledger.directory().len() == ctx.topology().ips_in_group("balance-server").len() {
                 break;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(50)).await;
+            if !pause(ctx, Duration::from_millis(50)).await {
+                return;
+            }
         }
         self.refresh(ctx, balanced);
         for _ in 0..self.config.operations {
             let gap = ctx
                 .random()
                 .random_range(self.config.gap_ms.0..self.config.gap_ms.1);
-            let _ = ctx.time().sleep(Duration::from_millis(gap)).await;
+            if !pause(ctx, Duration::from_millis(gap)).await {
+                return;
+            }
             match self.pick(ctx) {
                 BalanceOp::Refresh => self.refresh(ctx, balanced),
                 op => {
@@ -629,9 +702,13 @@ impl BalanceWorkload {
             if ctx.state().get::<bool>(SCRIPT_DONE_KEY).unwrap_or(false) {
                 break;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(50)).await;
+            if !pause(ctx, Duration::from_millis(50)).await {
+                return;
+            }
         }
-        let _ = ctx.time().sleep(Duration::from_secs(2)).await;
+        if !pause(ctx, Duration::from_secs(2)).await {
+            return;
+        }
         let mut recovered = false;
         for _ in 0..6 {
             self.refresh(ctx, balanced);
@@ -639,7 +716,9 @@ impl BalanceWorkload {
                 recovered = true;
                 break;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(500)).await;
+            if !pause(ctx, Duration::from_millis(500)).await {
+                return;
+            }
         }
         self.recovered = recovered;
         // Fallback after recovery: no belief the balancer or the failure
@@ -660,7 +739,9 @@ impl BalanceWorkload {
             if stats.in_flight == 0 && stats.lagging == 0 {
                 break;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(50)).await;
+            if !pause(ctx, Duration::from_millis(50)).await {
+                return;
+            }
         }
         let stats = model.stats();
         let started = Observer::load(&self.observer.started);
@@ -698,5 +779,15 @@ impl BalanceWorkload {
             Observer::load(&self.observer.dropped) > 0,
             "rpc balance late loser dropped at its bound"
         );
+        // Requests of cancelled calls and dropped late losers may still
+        // reach a server after their call ended: let the network settle,
+        // then judge every call again against the complete ledger.
+        if !pause(ctx, Duration::from_secs(3)).await {
+            return;
+        }
+        let ledger = Ledger::of(ctx.state());
+        for check in &self.checks {
+            check.verify(&ledger.receipts(check.id));
+        }
     }
 }

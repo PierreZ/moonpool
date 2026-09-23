@@ -53,7 +53,7 @@ fn fired(report: &SimulationReport, message: &str) -> bool {
 #[test]
 fn bounded_campaign_hits_every_required_scenario() {
     let records = records();
-    let report = balance_campaign(BalanceCampaignConfig::campaign(), &records)
+    let report = balance_campaign(BalanceCampaignConfig::campaign(), Some(&records))
         .check_determinism()
         .set_debug_seeds((1..=SEED_BUDGET).collect())
         .set_iterations(usize::try_from(SEED_BUDGET).unwrap_or(usize::MAX))
@@ -109,7 +109,7 @@ fn bounded_campaign_hits_every_required_scenario() {
 fn same_seed_replays_the_same_semantic_history() {
     let run = |seed| {
         let records = records();
-        let report = balance_campaign(BalanceCampaignConfig::campaign(), &records)
+        let report = balance_campaign(BalanceCampaignConfig::campaign(), Some(&records))
             .set_debug_seeds(vec![seed])
             .set_iterations(1)
             .run();

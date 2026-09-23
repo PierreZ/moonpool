@@ -59,18 +59,18 @@ pub struct BalanceRecord {
 /// Where finished runs are appended, for tests to inspect.
 pub type BalanceRecords = Arc<Mutex<Vec<BalanceRecord>>>;
 
-/// The campaign's builder without an iteration policy.
+/// The campaign's builder without an iteration policy. Finished runs are
+/// appended to `records` when given; without it nothing is kept (the
+/// coverage-guided binary runs up to a thousand seeds twice).
 #[must_use]
 pub fn balance_campaign(
     config: BalanceCampaignConfig,
-    records: &BalanceRecords,
+    records: Option<&BalanceRecords>,
 ) -> SimulationBuilder {
-    let records = Arc::clone(records);
+    let records = records.map(Arc::clone);
     SimulationBuilder::new()
         .processes(3, || Box::new(BalanceServer))
-        .workload_factory(move || {
-            Box::new(BalanceWorkload::new(config.clone(), Arc::clone(&records)))
-        })
+        .workload_factory(move || Box::new(BalanceWorkload::new(config.clone(), records.clone())))
         .fault_factory(|| Box::new(BalanceFaults))
         .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])
         .chaos_duration(Duration::from_secs(10))

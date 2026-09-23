@@ -122,7 +122,11 @@ impl Server {
                     inflight.push(self.handle(ctx, request, reply));
                 }
                 Some(()) = inflight.next(), if !inflight.is_empty() => {}
-                _ = pause => {
+                slept = pause => {
+                    if slept.is_err() {
+                        // The simulation is shutting down.
+                        return Ok(());
+                    }
                     // Destroy the endpoint and publish a fresh one: the old
                     // reference is refused from now on (EndpointNotFound).
                     generation += 1;
@@ -167,7 +171,14 @@ impl Server {
         } else {
             random.random_range(0..15u64)
         };
-        let _ = ctx.time().sleep(Duration::from_millis(delay)).await;
+        if ctx
+            .time()
+            .sleep(Duration::from_millis(delay))
+            .await
+            .is_err()
+        {
+            return;
+        }
         if drop_reply {
             // Executed, then the promise breaks: ambiguous for the caller.
             drop(reply);
@@ -175,7 +186,9 @@ impl Server {
         }
         if hold {
             // Executed, answered only after every caller gave up.
-            let _ = ctx.time().sleep(Duration::from_secs(5)).await;
+            if ctx.time().sleep(Duration::from_secs(5)).await.is_err() {
+                return;
+            }
             drop(reply);
             return;
         }
