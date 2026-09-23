@@ -17,14 +17,14 @@
 //! - **One registration attempt.** Opening a stream sends one request, at
 //!   most once; it is never retransmitted, and a stream is never resumed
 //!   on another connection. A broken connection ends the stream on both
-//!   sides ([`ErrorReason::Disconnected`](crate::ErrorReason::Disconnected)
+//!   sides ([`ErrorReason::Disconnected`]
 //!   for the consumer, [`SendError::Disconnected`] for the producer);
 //!   continuing is the application's decision, with a new stream.
 //! - **Credit is consumption.** The consumer announces a window `W`
 //!   ([`StreamPolicy::window_bytes`](crate::StreamPolicy::window_bytes)).
 //!   The producer's [`send`](StreamProducer::send) reserves an item's
 //!   accounted size (its whole frame,
-//!   [`stream_item_frame_len`](crate::protocol::stream_item_frame_len))
+//!   [`stream_item_frame_len`])
 //!   atomically, first come first served, and waits while `W` bytes are
 //!   sent and unacknowledged. The consumer acknowledges an item when its
 //!   application takes it: on arrival if the application is already
@@ -39,7 +39,7 @@
 //! - **Order and one terminal state.** Items carry sequence numbers; the
 //!   consumer checks them, the announced item count at the end and its
 //!   window, and ends the stream with
-//!   [`ErrorReason::StreamProtocol`](crate::ErrorReason::StreamProtocol)
+//!   [`ErrorReason::StreamProtocol`]
 //!   (telling the producer to stop) on any violation instead of skipping.
 //!   The producer checks every acknowledgement: a repeat is ignored; one
 //!   that regresses, exceeds what was sent, or does not land on an item
@@ -59,11 +59,11 @@
 //!   queued.
 //!
 //! What an error proves about execution: a rejection before admission is
-//! [`Execution::NotAdmitted`](crate::Execution::NotAdmitted); once an item
+//! [`Execution::NotAdmitted`]; once an item
 //! arrived the handler demonstrably ran, so every later error is
-//! [`Execution::Executed`](crate::Execution::Executed); before any item, a
+//! [`Execution::Executed`]; before any item, a
 //! disconnect or broken promise is
-//! [`Execution::MaybeExecuted`](crate::Execution::MaybeExecuted).
+//! [`Execution::MaybeExecuted`].
 
 pub(crate) mod consumer;
 pub(crate) mod credit;

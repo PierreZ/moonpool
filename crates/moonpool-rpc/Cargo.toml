@@ -59,5 +59,9 @@ required-features = ["prost"]
 name = "balanced_mutation"
 required-features = ["prost"]
 
+[[example]]
+name = "stream_saturation"
+required-features = ["prost"]
+
 [lints]
 workspace = true

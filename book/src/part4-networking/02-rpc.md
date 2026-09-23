@@ -69,9 +69,68 @@ There is one place we deliberately differ from FoundationDB. When a reliable cal
 
 On the serving side a `ReplyHandle` finishes one of three ways. `send` replies. Dropping it tells the caller the promise was broken. `never_reply()` says, on purpose, that no answer will come: nothing is sent and the caller keeps waiting under its own deadline or failure bound. A one-way request's handle reports `expects_reply() == false` and nothing it does reaches anyone.
 
+## Reply Streams
+
+Some answers do not fit one reply: a range scan, a changefeed, a log tail. FoundationDB answers those with `getReplyStream`: one request, then an ordered stream of replies, paced so a slow reader cannot make the server buffer without bound. We have the same shape. A method opts in with `const STREAMING: bool = true`, the caller opens the stream, and the handler turns its reply handle into a producer:
+
+```rust
+// Caller: one registration attempt, then a futures::Stream of items.
+let mut rows = scan_ref.bind(&rpc).get_reply_stream(&ScanRange { from, to })?;
+while let Some(row) = rows.next().await {
+    let row = row?; // items in order, then Ok(None), or exactly one Err
+}
+
+// Server: the handler's ReplyHandle becomes a StreamProducer.
+let IncomingRequest { request, reply } = requests.recv().await.expect("open");
+let producer = reply.into_stream().expect("a streaming method");
+for row in store.range(request.from, request.to) {
+    producer.send(&row).await?; // waits while the caller's window is full
+}
+let _ = producer.finish(); // or producer.fail(code), or drop it: a broken promise
+```
+
+The pacing is **credit counted in consumed bytes**. The caller announces a window when it opens the stream (`StreamPolicy::window_bytes`, 1 MiB by default, or `get_reply_stream_with_window`). Every item counts its whole frame, a unit both sides compute from the same bytes (`protocol::stream_item_frame_len`). `send` reserves an item's size atomically and in arrival order, so several tasks sending through one producer can never oversubscribe the window, and it waits while the window is used up. The caller acknowledges an item when its *application takes it*: on arrival if the application was already waiting for it, when it is popped from the queue otherwise. Bytes read off the socket earn nothing. That is the whole point, and the simulation proves it the blunt way: a variant that acknowledged on read broke the window bound, measured against the consumers' own ledger, more than 100,000 times in 40 seeds.
+
+A few rules keep the stream honest:
+
+- **Oversized items are refused, not parked.** An item larger than the window (or the frame limit) fails its `send` with `SendError::TooLarge` at once, and the stream stays open. FoundationDB lets one item overshoot once anything is free; we prefer a defined refusal to a window that means "roughly".
+- **Order is checked, not assumed.** Items carry sequence numbers and the end carries the item count. A gap, a repeat, more unconsumed bytes than the window, or an end that disagrees ends the stream with `StreamProtocol` instead of skipping. The producer checks acknowledgements the same way: a repeat is ignored; one that regresses, exceeds what was sent or lands between two items ends the stream.
+- **One terminal outcome, after every item.** A normal end, the producer's `fail(code)` (`StreamFailed`), a broken promise and a disconnect all arrive *after* every item that reached the caller, and the end needs no credit, so an error gets through even when the window is exhausted. Once an item arrived, every later error says `Executed`.
+- **Abandoning a stream stops the producer, and rolls nothing back.** Dropping a `ReplyStream` withdraws a request that has not left yet; otherwise it sends a cancel, the producer's next `send` fails with `SendError::Cancelled` and its unwritten items are dropped. Effects the handler already had stay.
+- **No resumption.** One request opens a stream, once. A broken connection ends it on both sides; carrying on is a new stream, which is the application's decision (a new incarnation's reference, a resumption point in its own request).
+
+## Admission, Budgets and Push-Back
+
+Every queue the runtime owns has a budget, per endpoint, per connection and per runtime (`ResourceLimits`, `StreamPolicy`): queued requests and their bytes, requests admitted but not yet answered, reliable retention, streams and the sum of their windows, control frames. A budget is enforced where work would *enter*, and a refusal there is `Overloaded` with `NotAdmitted`: nothing was queued, sent or handed to a handler. Nothing already admitted is ever dropped to make room.
+
+The interesting one is replies. In the first package replies shared the control queue, so a caller pipelining requests to a server whose writer was stuck could fill that queue and get the whole session closed, failing unrelated calls. Now each admitted request reserves the room of its reply, and beyond the in-flight budget new requests are refused before admission: a slow writer pushes back instead of disconnecting. A real-TCP test sends 200 requests with 256 KiB replies from a peer that never reads; the server admits what fits, refuses the rest, and keeps the session.
+
+Progress under saturation comes from ordering, not from a scheduler. The writer sends control frames first (handshake, pings, pongs, rejections), then the coalesced acknowledgements and cancels of the streams it consumes (only the latest cumulative acknowledgement per stream is ever queued), then one data frame per source in turn: the request queue, the reply queue and each produced stream. A busy stream delays another stream's next item by one frame, not by its backlog; a control frame waits for at most the one data frame being written, bounded by the frame limit. The socket reader never waits on an application queue: every frame is queued, answered or refused on the spot, and reader and writer both yield after a bounded batch (`max_frames_per_batch`). There is no priority API: FoundationDB's task priorities become these internal orderings.
+
+The defaults were measured with the `stream_saturation` example on localhost (a debug build, four cores; the shape matters, not the absolute numbers):
+
+| Window | MiB/s, one stream of 4 KiB items |
+|---|---|
+| 16 KiB | 39 |
+| 64 KiB | 68 |
+| 256 KiB | 53 |
+| 1 MiB | 87 |
+| 4 MiB | 86 |
+
+| `max_frames_per_batch` | unary p50 | p99 | beside eight saturating streams |
+|---|---|---|---|
+| 1 | 157 ms | 3.09 s | yields so often the session crawls |
+| 16 | 38 ms | 52 ms | |
+| 64 | 39 ms | 54 ms | the default |
+| 256 | 62 ms | 122 ms | |
+
+So the window defaults to 1 MiB (FoundationDB uses 2 MB) and the batch to 64. A burst of 4096 slow calls against the defaults admits 1024 (the request queue) and refuses the other 3072 as `Overloaded`, `NotAdmitted`, with the session still open.
+
 ## Peers, Reconnects and Liveness
 
 Every remote address has one **selected connection**, dialed on demand. When it ends, the next dial waits out a jittered backoff that grows while connections keep failing and resets only after one stayed up for a while, exactly FoundationDB's `connectionKeeper`. While a connection lives, the side using it for calls pings it; if nothing at all arrives within the ping timeout the connection is declared dead. That is how a black-holed peer, which TCP alone would never report, turns into an ordinary disconnect. A connection with no calls, no queued frames and no replies owed for the idle timeout is closed quietly; the next call dials again.
+
+The side that only *serves* a connection does not ping it: its dialer does. But a dialer can vanish behind a half-open session, and if replies or streams are still owed to it, "idle" never comes. So, like FoundationDB's `connectionMonitor` for incoming connections, a served session that has heard nothing for the inbound idle timeout is probed with a ping of its own and failed if nothing answers. The streams campaign found exactly this: a consumer that gave up during a partition left its producer blocked on credit forever.
 
 Two listening runtimes that call each other share one connection. Each `Hello` names the sender's listen address (when it shares sessions), so an accepted session can become the receiver's own connection to its dialer. When both dial at the same instant, the runtime with the smaller canonical address adopts the other's dial and closes its own, which is FoundationDB's rule seen from the side that gives way. Unlike FoundationDB, the larger side never closes the other's dial: a peer that will not or cannot adopt simply keeps one connection per direction, instead of watching its dials being refused forever. FoundationDB's `ALWAYS_ACCEPT_DELAY` is here too, as `always_accept_after`: if our own dials to a peer have not established for that long, we use the peer's session to us, so a peer we cannot dial (a firewall that only lets it dial out) is still reachable. Frames that were queued but never written move to the adopted connection; anything already written rides the old one down and fails (or, for a reliable call, is sent again).
 
@@ -205,4 +264,10 @@ The `sim-rpc-balance` campaign gives three servers a character per boot (fast, o
 
 ```bash
 cargo xtask sim run rpc-balance
+```
+
+The `sim-rpc-streams` campaign streams under all of that. A producer process serves every kind of stream a request can ask for (a count, an item size, pauses, an ending: finish, fail with a code, drop, or send until closed) and writes a producer ledger: its boot, every item it queued with its accounted size, how it ended. The surviving consumer opens streams and reads them eagerly, slowly or not at all; abandons them before and after the first item; times out on them; fills several windows while a unary call, a new stream and a cancel must still get through; bursts calls and streams against squeezed budgets; and asks for producer crashes and graceful shutdowns mid-stream. It writes its own ledger of every item its application took. Every consumed item must be the produced item at the same position; a normal end or a failure must follow every item its producer sent; a refused stream or call never reached a handler; an abandoned stream's producer must stop; a producer never runs ahead of consumption beyond its window. At the end, after the faults stopped, a fresh stream and a unary call must succeed. Acknowledging on read, forgetting the cancel, or letting the end overtake the items each turned the bounded campaign red (the first and the last on every one of its 40 seeds). The campaign also caught a real leak: a consumer that gave up during a partition left the producer's side of the session half open, owed a stream and therefore never idle, and the producer waited on credit forever. Served sessions are now probed when they fall silent, as described above.
+
+```bash
+cargo xtask sim run rpc-streams
 ```

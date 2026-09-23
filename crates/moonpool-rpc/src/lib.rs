@@ -66,6 +66,13 @@
 //! | [`ServiceClient::get_reply`] | request retained in memory and resent on every new connection: **may execute more than once** | first outcome wins; a dead dynamic endpoint ends it at once |
 //! | [`ServiceClient::get_reply_unless_failed_for`] | reliable, bounded by sustained observed failure | [`ErrorReason::PeerFailed`] keeps the ambiguity |
 //!
+//! A method whose [`RpcMethod::STREAMING`] is `true` answers with a **reply
+//! stream** instead: [`ServiceClient::get_reply_stream`] returns a
+//! [`ReplyStream`] of ordered items, the handler turns its reply handle
+//! into a [`StreamProducer`] ([`ReplyHandle::into_stream`]), and the
+//! producer is paced by what the caller's application consumed, never by
+//! what was merely read off the socket. See [`stream`].
+//!
 //! A [`ReplyAttempt`] is one attempt as a future: kept, it yields a late
 //! outcome after its caller moved on; dropped, its route is released and a
 //! late reply is counted and discarded. On the serving side a
@@ -127,9 +134,16 @@
 //!   ```
 //! - **Owned lifetimes.** Handles, clients, receivers and reply handles hold
 //!   the runtime weakly; nothing but the driver keeps it serving.
-//! - **Bounded everything.** Frame size, queued requests, control frames,
-//!   pending calls, endpoints and connections all have hard limits
-//!   ([`RpcConfig`]); malformed, corrupt or oversized input closes the
+//! - **Bounded everything, pushing back instead of failing.** Frame size,
+//!   queued requests and bytes, in-flight requests, retained bodies,
+//!   streams and their windows, control frames, pending calls, endpoints
+//!   and connections all have hard limits ([`RpcConfig`],
+//!   [`ResourceLimits`], [`StreamPolicy`]). Work beyond a budget is refused
+//!   where it would enter, as [`ErrorReason::Overloaded`] with
+//!   [`Execution::NotAdmitted`]; nothing admitted is dropped to make room,
+//!   and a slow writer pushes back on admission instead of closing the
+//!   session. Control frames go first and the socket reader never waits on
+//!   an application queue; malformed, corrupt or oversized input closes the
 //!   connection observably ([`RpcStats`]).
 //!
 //! Wire format: [`protocol`] (frame and envelope), [`codec`] (bodies).

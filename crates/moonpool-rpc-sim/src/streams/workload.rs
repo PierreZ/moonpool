@@ -158,7 +158,7 @@ const REBOOT_PATIENCE: Duration = Duration::from_secs(10);
 /// producer's side of the session half open; the producer then notices
 /// only after its inbound idle timeout plus a probe (at most 36 s + 6 s
 /// with the campaign's knobs, plus ping-loop jitter).
-const RELEASE_BOUND: Duration = Duration::from_secs(60);
+const RELEASE_BOUND: Duration = Duration::from_mins(1);
 
 /// The campaign's workload.
 pub struct StreamsWorkload {

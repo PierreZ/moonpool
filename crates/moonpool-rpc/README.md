@@ -23,7 +23,9 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 | `FailureMonitor<P>` | address availability, disconnect events and permanent endpoint failures, with race-free waits |
 | `WellKnownId` / `WellKnownRef<M>` / `BootstrapClient<P, R>` / `RetryPolicy` | bootstrap endpoints that survive restarts, hostname resolution through a `moonpool_core::Resolver`, explicit retries |
 | `RequestStream<M>` | the owned receiver; dropping it destroys the endpoint |
-| `ReplyHandle<M>` | one-shot, session-bound responder; dropping it is a broken promise, `never_reply()` is not |
+| `ReplyHandle<M>` | one-shot, session-bound responder; dropping it is a broken promise, `never_reply()` is not; `into_stream()` for a streaming method |
+| `ReplyStream<M>` / `StreamProducer<M>` / `SendError` | reply streams (`RpcMethod::STREAMING`, `ServiceClient::get_reply_stream`): ordered items paced by consumption credit, one terminal outcome |
+| `ResourceLimits` / `StreamPolicy` | admission and buffering budgets per endpoint, connection and runtime; stream windows and budgets (`RpcConfig::limits`, `RpcConfig::streams`) |
 | `RpcError` = `ErrorReason` + `Execution` | the failure reason, and what it proves (`NotAdmitted`, `MaybeExecuted`, `Executed`) |
 | `balance::{AlternativeSet, BalancedClient, BalancePolicy, QueueModel}` | load balancing over an explicit, versioned set of incarnation-specific references: locality, queue model, penalties, expiring exclusion, separate retry and duplicate (hedge) permissions, late losers, `Selector` and hooks |
 
@@ -34,8 +36,9 @@ payload is a hand-written, versioned envelope (kind, reply route, incarnation,
 token, interface, method, schema, codec, reserved metadata) followed by the opaque body.
 Each session opens with a `Hello` carrying the supported version range, the
 runtime incarnation, reserved feature bits, the frame limit and the listen
-address; `PING`/`PONG` frames carry liveness. See the `protocol`
-and `codec` module docs.
+address; `PING`/`PONG` frames carry liveness; `STREAM_ITEM`, `STREAM_END`,
+`STREAM_ACK` and `STREAM_CANCEL` carry reply streams. See the `protocol`,
+`stream` and `codec` module docs.
 
 ## Features
 
@@ -51,7 +54,10 @@ The `recruitment` example publishes, restarts and recruits interfaces on
 real TCP with the manual API:
 `cargo run -p moonpool-rpc --example recruitment`. The `balanced_mutation`
 example shows what retry and hedge permissions do to a mutation whose
-reply is lost: `cargo run -p moonpool-rpc --example balanced_mutation`.
+reply is lost: `cargo run -p moonpool-rpc --example balanced_mutation`. The `stream_saturation`
+example measures stream throughput by window, unary latency beside
+saturated streams and push-back under a burst:
+`cargo run --release -p moonpool-rpc --example stream_saturation`.
 
 The simulation harness, workloads and oracles live in the non-published
 `moonpool-rpc-sim` crate; this crate never depends on `moonpool-sim`.

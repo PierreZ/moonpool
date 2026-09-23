@@ -137,7 +137,11 @@ pub struct ResourceLimits {
     /// Encoded request bytes one endpoint may queue unread.
     pub endpoint_queue_bytes: u64,
     /// Frames one connection reads (or writes) in a batch before it yields
-    /// to the other connections and tasks of its executor.
+    /// to the other connections and tasks of its executor. Measured with
+    /// the `stream_saturation` example: a unary call beside eight
+    /// saturating streams waits about as long with 16 or 64 (the default),
+    /// twice as long at the tail with 256, and a batch of 1 yields so often
+    /// that the session crawls.
     pub max_frames_per_batch: usize,
 }
 
@@ -194,6 +198,13 @@ impl ResourceLimits {
 /// and unacknowledged, and the caller acknowledges an item only when its
 /// application takes it, never merely because it was read off the socket
 /// (`FoundationDB`'s `ReplyPromiseStream` acknowledgements).
+///
+/// The 1 MiB default window was measured with the `stream_saturation`
+/// example on localhost: an eagerly consumed stream of 4 KiB items gains
+/// throughput up to about 1 MiB and nothing beyond (`FoundationDB` uses
+/// 2 MB, `RANGESTREAM_LIMIT_BYTES`). A stream costs its consumer at most
+/// its window, so [`max_buffered_bytes`](Self::max_buffered_bytes) (256
+/// MiB) admits 256 default streams per consuming runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamPolicy {
     /// The window this runtime announces for the streams it opens, unless
@@ -217,7 +228,7 @@ pub struct StreamPolicy {
 impl Default for StreamPolicy {
     fn default() -> Self {
         Self {
-            window_bytes: 256 << 10,
+            window_bytes: 1 << 20,
             max_window_bytes: 16 << 20,
             max_streams_per_connection: 1024,
             max_streams: 16 * 1024,

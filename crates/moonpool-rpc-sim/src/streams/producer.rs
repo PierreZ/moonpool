@@ -113,14 +113,14 @@ async fn serve_directory(
 }
 
 async fn serve_pings(mut stream: RequestStream<Ping>, ledger: &StreamLedger, ctx: &SimContext) {
-    let mut held = FuturesUnordered::new();
+    let mut replies = FuturesUnordered::new();
     loop {
         moonpool_sim::select! {
             incoming = stream.recv() => match incoming {
                 Some(IncomingRequest { request, reply }) => {
                     // Recorded first: the ledger judges what a refusal proved.
                     ledger.probe(request.id);
-                    held.push(async move {
+                    replies.push(async move {
                         let hold = Duration::from_millis(u64::from(request.hold_ms));
                         if !hold.is_zero() {
                             let _ = ctx.time().sleep(hold).await;
@@ -130,7 +130,7 @@ async fn serve_pings(mut stream: RequestStream<Ping>, ledger: &StreamLedger, ctx
                 }
                 None => return,
             },
-            Some(()) = held.next(), if !held.is_empty() => {}
+            Some(()) = replies.next(), if !replies.is_empty() => {}
             () = ctx.shutdown().cancelled() => return,
         }
     }
