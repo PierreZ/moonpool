@@ -68,6 +68,8 @@
 pub(crate) mod consumer;
 pub(crate) mod credit;
 pub(crate) mod producer;
+#[cfg(test)]
+mod tests;
 
 use std::future::Future;
 use std::marker::PhantomData;

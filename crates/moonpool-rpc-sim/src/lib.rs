@@ -20,6 +20,9 @@
 //!   permissions, hedging, comparison copies, cancellation, late losers
 //!   and outages of every alternative, judged by receipt and attempt
 //!   ledgers.
+//! - [`streams`]: the `sim-rpc-streams` campaign (#216): reply streams with
+//!   consumption-based credit, abandonment, saturation, bounded admission
+//!   and producer reboots, judged by producer and consumer ledgers.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
@@ -27,3 +30,4 @@ pub mod balance;
 pub mod delivery;
 pub mod foundations;
 pub mod interfaces;
+pub mod streams;

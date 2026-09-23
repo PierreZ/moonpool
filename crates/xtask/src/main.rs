@@ -55,6 +55,7 @@ const SIM_BINARIES: &[SimBinary] = &[
     SimBinary::rpc("sim-rpc-delivery"),
     SimBinary::rpc("sim-rpc-interfaces"),
     SimBinary::rpc("sim-rpc-balance"),
+    SimBinary::rpc("sim-rpc-streams"),
 ];
 
 fn main() -> ExitCode {

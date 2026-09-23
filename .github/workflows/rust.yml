@@ -158,6 +158,7 @@ jobs:
           - rpc-delivery
           - rpc-interfaces
           - rpc-balance
+          - rpc-streams
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
