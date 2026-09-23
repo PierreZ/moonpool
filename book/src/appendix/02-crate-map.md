@@ -182,8 +182,9 @@ dependencies.
 ### moonpool-rpc-sim
 
 The simulation harness for moonpool-rpc: process and workload definitions, the
-receipt-ledger oracle, the `sim-rpc-foundations`, `sim-rpc-delivery` and
-`sim-rpc-interfaces` campaigns and a real-TCP example. Not published, so the RPC crate never
+receipt-ledger oracle, the `sim-rpc-foundations`, `sim-rpc-delivery`,
+`sim-rpc-interfaces` and `sim-rpc-balance` campaigns and real-TCP examples
+(including the `balance_latency` comparison). Not published, so the RPC crate never
 depends on the simulator.
 
 ### moonpool-wasm-demo

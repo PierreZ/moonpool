@@ -147,6 +147,38 @@ pub trait Kv {
 
 It generates `KvInterface`, one method marker per method (`KvGet`, `KvPut`), `KvRef` (an `InterfaceRef<KvInterface>`), `KvClient<P>` whose `get()` is an ordinary `ServiceClient` with every delivery mode, `KvRequest` (one variant per method, holding the `IncomingRequest` and its `ReplyHandle`) and `KvServer`, the registered group with a fair multiplexed `next()` over its request streams, `dispatch` and `serve`. Ids stay explicit; a duplicate is a compile error. The macro owns no protocol state: a server that wants to reply later, never reply or look at the caller matches on `KvRequest` and uses the reply handle itself, and a hand-written interface with the same ids is byte-for-byte interchangeable with the generated one.
 
+## Balancing Across Alternatives
+
+A read that three replicas can serve should go to the one that answers fastest, skip the one that just crashed, and maybe try a second one when the first is slow. FoundationDB's `loadBalance` does all of that, and it is one of the most useful pieces of `fdbrpc`. It is also where the easiest RPC mistake hides: **sending the same request twice is only safe if the application says so.** So `moonpool_rpc::balance` keeps FoundationDB's mechanics and makes the permissions explicit.
+
+The input is an `AlternativeSet<M>`: typed `ServiceRef`s to specific incarnations, each with a generic `Locality` (a machine id and a datacenter id, both opaque strings), and a `SetVersion` the application chooses. The balancer never refreshes a reference. When a server restarts, the application learns its new reference the way it always does and installs a strictly newer set with `replace`. A call already running keeps the set it started with, and when every alternative turns out to be permanently gone, the call fails with `StaleAlternatives` and the client's status says so.
+
+```rust
+let model = QueueModel::new(ModelConfig::default())?;
+let balanced = BalancedClient::new(&rpc, set, model.clone(), BalanceConfig {
+    locality: Locality::new("m1", "dc1"),
+    ..BalanceConfig::default()
+})?;
+// Late losers update the model after their call returned: drive them.
+spawn(model.collect_lagging());
+
+// Idempotent read: retry after an ambiguous attempt, hedge a slow one.
+let policy = BalancePolicy {
+    retry: Retry::AfterAmbiguous,
+    duplicates: Duplicates::hedged(),
+    ..BalancePolicy::default()
+};
+let read = balanced.call(Get { key }, &policy).await?;
+```
+
+Two permissions, independent and both off by default. `Retry::AfterAmbiguous` allows another attempt after one that may have executed. `Duplicates::Permitted` allows concurrent copies: hedges, and comparison copies requested by the hooks. Failing over after an attempt that **provably** never reached a handler (a refused connection, a destroyed endpoint, a stale incarnation, an overload refusal) needs no permission, because it cannot run the request twice. In FoundationDB, `AtMostOnce` stops the retry but still sends the budgeted second request. Here the hedge timing lives inside the duplicate permission, so no retry setting can ever grant a copy. The `balanced_mutation` example shows what each permission does to a deposit whose reply is lost: at most once reports `MaybeExecuted` and stops, a retry applies a blind deposit twice, and a deposit keyed by id applies once.
+
+Selection follows FoundationDB's queue model. The `QueueModel` keeps, per endpoint **incarnation**, the weighted outstanding work (each attempt adds the server's current penalty), the last clean latency measured on provider time, the penalty the server reports, and a temporary exclusion with a growing, jittered backoff when the application's classifier says a reply is "temporarily behind". The default `QueueSelector` prefers the nearest alternatives by outstanding work and spills to farther ones once more than one nearby alternative is bad. Exclusions and failed addresses rank last but are never hidden for good: when everything looks unreachable, the call waits a bounded time and then probes anyway, because a failed address only changes when something dials it.
+
+Every started attempt holds one `Reservation` in the model and gives it back exactly once. `release` consumes it and dropping it is the unclean release, so there is no path that leaks one or releases one twice: not a winner, not an error, not a caller that gives up, not a hedge that lost the race and answered a second later. Attempts still in flight when the winner answers become **late losers**, collected by `collect_lagging` so their latency still updates the model, bounded in number and in time. Hedges draw from a shared budget that grows with every first response and runs out, as FoundationDB's `secondBudget` does.
+
+Hooks let the application teach the balancer its own vocabulary without teaching it storage semantics: `classify` turns a reply into accept, temporarily behind or overloaded, `wants_comparison` asks for a second copy whose reply `compare` checks against the winner's, and `observe` sees every attempt start and end. A comparison copy still needs the duplicate permission and a budget unit, and a failed comparison fails the call as executed.
+
 ## Testing It the Way It Fails
 
 The `sim-rpc-foundations` campaign in `moonpool-rpc-sim` runs a server group, a relay group that calls the server itself, and a surviving client workload, under swarm network chaos with `Chaos::BuggifyKnobs` (which spikes the bit-flip rate on some seeds), a scripted crash right after a handler receives a request, raw malformed sessions, forged references and destroyed endpoints. The oracle is deliberately **outside the transport**: handlers write a receipt ledger keyed by workload-generated request ids before replying, and at the end the workload judges its own outcomes against it. At most one receipt per id, exactly one for a reply, none for anything reported `NotAdmitted`. It never asks the RPC runtime what it thinks happened.
@@ -167,4 +199,10 @@ The `sim-rpc-interfaces` campaign restarts three participants at their own addre
 
 ```bash
 cargo xtask sim run rpc-interfaces
+```
+
+The `sim-rpc-balance` campaign gives three servers a character per boot (fast, or slow with a penalty, faithful or divergent) and each job a fate (answered, declined as temporarily behind, promise broken, reply held past every deadline). Servers destroy and republish their endpoint now and then, and a fault script takes every alternative away, by partitioning the client from all of them or by crashing all of them, then brings them back. The surviving client balances under every combination of permissions, cancels calls during the first attempt or during the hedge, and replaces its set only from the servers' own publications. Two ledgers judge it, neither of them the queue model: handlers record every run of every job, and the observation hook records every attempt. No job may run more often than its permissions allow, a reply must come from a server that ran the job, `NotAdmitted` must mean no handler ran, and at the end every attempt must have started, ended, reserved and released exactly once. Ignoring the retry permission, or skipping the release on drop, turns most seeds red. The campaign's first run found a real lockout: a client whose alternatives all looked failed kept failing every call after the servers had recovered, because nothing ever dialed them again to find out.
+
+```bash
+cargo xtask sim run rpc-balance
 ```

@@ -25,6 +25,7 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 | `RequestStream<M>` | the owned receiver; dropping it destroys the endpoint |
 | `ReplyHandle<M>` | one-shot, session-bound responder; dropping it is a broken promise, `never_reply()` is not |
 | `RpcError` = `ErrorReason` + `Execution` | the failure reason, and what it proves (`NotAdmitted`, `MaybeExecuted`, `Executed`) |
+| `balance::{AlternativeSet, BalancedClient, BalancePolicy, QueueModel}` | load balancing over an explicit, versioned set of incarnation-specific references: locality, queue model, penalties, expiring exclusion, separate retry and duplicate (hedge) permissions, late losers, `Selector` and hooks |
 
 ## Wire format
 
@@ -48,7 +49,9 @@ and `codec` module docs.
 
 The `recruitment` example publishes, restarts and recruits interfaces on
 real TCP with the manual API:
-`cargo run -p moonpool-rpc --example recruitment`.
+`cargo run -p moonpool-rpc --example recruitment`. The `balanced_mutation`
+example shows what retry and hedge permissions do to a mutation whose
+reply is lost: `cargo run -p moonpool-rpc --example balanced_mutation`.
 
 The simulation harness, workloads and oracles live in the non-published
 `moonpool-rpc-sim` crate; this crate never depends on `moonpool-sim`.

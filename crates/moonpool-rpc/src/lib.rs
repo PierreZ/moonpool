@@ -85,6 +85,11 @@
 //! [`Resolver`](moonpool_core::Resolver) and an explicit [`RetryPolicy`]);
 //! dynamic references are never re-resolved or refreshed.
 //!
+//! [`balance`] spreads calls of one method over an explicit, versioned set
+//! of alternatives (locality, a queue model, penalties, temporary
+//! exclusion), with a retry permission and a duplicate (hedge) permission
+//! kept apart and both off by default.
+//!
 //! Sessions go through an upgrade seam ([`Connector`] / [`Acceptor`],
 //! [`Plaintext`] by default) that yields the session stream and a
 //! [`PeerContext`], then a versioned handshake.
