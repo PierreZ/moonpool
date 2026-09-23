@@ -190,7 +190,8 @@ fn run_panic_stops_before_reusing_a_survivor() {
         .workload(RunIdentitySurvivor)
         .set_iterations(2)
         .set_debug_seeds(vec![1, 2])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_stops_after_lost_instance(&report, RUN_SURVIVOR_CALLS.load(Ordering::SeqCst));
 }
@@ -203,7 +204,8 @@ fn check_panic_stops_before_reusing_a_survivor() {
         .workload(CheckIdentitySurvivor)
         .set_iterations(2)
         .set_debug_seeds(vec![1, 2])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_stops_after_lost_instance(&report, CHECK_SURVIVOR_CALLS.load(Ordering::SeqCst));
 }
@@ -216,7 +218,8 @@ fn check_stall_cancellation_stops_before_reusing_a_survivor() {
         .workload(CheckStallIdentitySurvivor)
         .set_iterations(2)
         .set_debug_seeds(vec![1, 2])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_stops_after_lost_instance(&report, CHECK_STALL_SURVIVOR_CALLS.load(Ordering::SeqCst));
 }
@@ -229,7 +232,8 @@ fn setup_panic_stops_before_reusing_a_survivor() {
         .workload(SetupIdentitySurvivor)
         .set_iterations(2)
         .set_debug_seeds(vec![1, 2])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_stops_after_lost_instance(&report, SETUP_SURVIVOR_CALLS.load(Ordering::SeqCst));
 }
@@ -242,7 +246,8 @@ fn ordinary_error_returns_instances_for_later_seeds() {
         .workload(ErrorIdentitySurvivor)
         .set_iterations(2)
         .set_debug_seeds(vec![1, 2])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 2, "report: {report:?}");
     assert_eq!(report.failed_runs, 2, "report: {report:?}");

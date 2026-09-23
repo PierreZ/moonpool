@@ -84,10 +84,11 @@ so `cargo xtask sim list` discovers the harness.
 A standalone simulation binary needs no Tokio runtime:
 
 ```rust,ignore
-fn main() {
+fn main() -> Result<(), moonpool_sim::SimulationError> {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
-    let report = build_simulation().run();
+    let report = build_simulation().run()?;
     report.eprint();
+    Ok(())
 }
 ```
 
@@ -281,7 +282,7 @@ let report = SimulationBuilder::new()
     .workload_factory(|| Box::new(ClientWorkload::new(20)))
     .set_debug_seeds(vec![1])
     .set_iterations(1)
-    .run();
+    .run()?;
 
 report.eprint();
 assert_eq!(report.failed_runs, 0, "smoke seed failed: {report}");
@@ -730,7 +731,7 @@ let report = SimulationBuilder::new()
         Chaos::BuggifyKnobs,
     ])
     .until_coverage_stable(10, 5_000)
-    .run();
+    .run()?;
 ```
 
 The attrition `prob_*` values are weights, not percentages. Wipe is only valid
@@ -866,7 +867,7 @@ let report = SimulationBuilder::new()
         max_recipe_len: 32,
     })
     .until_coverage_stable(10, 1_000)
-    .run();
+    .run()?;
 ```
 
 Exploration rejects `.workload(instance)` because it cannot be reconstructed
@@ -901,7 +902,7 @@ let replay = SimulationBuilder::new()
     .workload_factory(|| Box::new(ClientWorkload::new(200)))
     .invariant(Agreement::new())
     .replay_timeline(bug.seed, bug.recipe.clone())
-    .run();
+    .run()?;
 ```
 
 If replay differs, audit external I/O, reused state, unseeded collections,

@@ -83,7 +83,7 @@ A failing exploration run — a workload error, an `assert_always!` violation, o
 SimulationBuilder::new()
     .replay_timeline(bug.seed, bug.recipe.clone())
     .workload(MyWorkload)
-    .run();
+    .run()?;
 ```
 
 The next chapter looks at how jobs are physically executed while keeping the process count fixed.

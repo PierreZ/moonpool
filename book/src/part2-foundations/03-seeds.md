@@ -38,7 +38,7 @@ Everything above assumes nothing escapes the seed. Something always tries to: a 
 SimulationBuilder::new()
     .check_determinism()
     .workload_factory(|| Box::new(MyWorkload::new()))
-    .run();
+    .run()?;
 ```
 
 Every seed now runs twice. During the first run, each draw on the simulation stream records a 64-bit fingerprint: a probe of the generator's state *after* the draw, taken on a clone so the check consumes no randomness, mixed with the logical clock. During the second run the same hook compares each draw's fingerprint against the record, and when the run ends the whole record must have been consumed. Because task scheduling, `select!` offsets, swarm masks and every fault coin are draws on that one stream, any uncontrolled difference in scheduling, ordering, draw count or simulated timing shows up as a fingerprint that does not match, and the seed fails with the always-assertion `determinism canary: replay matched the recorded draw sequence`, naming the first diverging draw. A replay that matches a prefix and then stops early fails too: the leftover record is the evidence. The replay is also judged as a full run of the seed. If its workloads return an error, it violates an always-assertion, or it deadlocks, the seed fails even when every fingerprint matched. A `static` that changes a verdict without changing a draw is caught this way.
@@ -55,7 +55,7 @@ A single seed tests one execution path. To build confidence, you need many paths
 SimulationBuilder::new()
     .set_iterations(100)  // 100 different seeds
     // ... workloads ...
-    .run();
+    .run()?;
 ```
 
 **UntilCoverageStable** (the default) keeps drawing seeds until every observed `assert_sometimes!` / `assert_reachable!` has fired and code coverage has stopped growing, capped at a safety limit:
@@ -64,7 +64,7 @@ SimulationBuilder::new()
 SimulationBuilder::new()
     .until_coverage_stable(10, 5_000)  // 10 quiet seeds, 5_000 safety cap
     // ... workloads ...
-    .run();
+    .run()?;
 ```
 
 The power of seed-driven testing compounds over time. Run 1,000 seeds in CI on every commit. Run 100,000 overnight. Each seed explores a different combination of timing, faults, and ordering. Bugs that require three independent unlikely events to coincide will surface within a few thousand seeds because the simulation amplifies failure probability through BUGGIFY.
@@ -84,7 +84,7 @@ SimulationBuilder::new()
     .set_iterations(1)
     .set_debug_seeds(vec![17429853261])
     // ... same workloads ...
-    .run();
+    .run()?;
 ```
 
 The simulation replays the exact same execution. Set a breakpoint. Step through. The bug is deterministic now.

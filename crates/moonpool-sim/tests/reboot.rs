@@ -95,7 +95,8 @@ fn test_process_boot_and_topology() {
         .workload(ProcessMonitorWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 1, "simulation should succeed");
     assert_eq!(report.failed_runs, 0);
@@ -138,7 +139,8 @@ fn test_process_tags_round_robin() {
         .workload(TagVerifierWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 1, "tag verification should succeed");
 }
@@ -198,7 +200,8 @@ fn test_manual_reboot_via_fault_injector() {
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -231,7 +234,8 @@ fn test_builtin_attrition() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -275,7 +279,8 @@ fn test_tag_based_reboot() {
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0);
 }
@@ -319,7 +324,8 @@ fn test_process_reads_own_tags() {
         .workload(TimedWorkload(Duration::from_secs(1)))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 1);
 }
@@ -396,7 +402,8 @@ fn test_graceful_reboot_signals_shutdown_token() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -437,7 +444,8 @@ fn test_graceful_reboot_force_kills_stuck_process() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -551,7 +559,8 @@ fn test_graceful_reboot_timing_invariant() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(3)
         .set_debug_seeds(vec![42, 123, 999])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -581,7 +590,8 @@ fn test_attrition_timing_invariant() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![42, 123, 999, 7, 314])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -612,7 +622,8 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![42, 123, 999, 7, 314])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -822,7 +833,8 @@ fn run_crash_scenario(seed: u64) -> (moonpool_sim::SimulationReport, CrashObserv
         .chaos_duration(Duration::from_secs(6))
         .set_iterations(1)
         .set_debug_seeds(vec![seed])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     let observed = std::mem::take(&mut *lock(&observations));
     (report, observed)
@@ -975,7 +987,8 @@ fn double_reboot_boots(kind: RebootKind) -> (usize, DoubleRebootObservations) {
         .chaos_duration(Duration::from_secs(20))
         .set_iterations(1)
         .set_debug_seeds(vec![7])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "{:?}", report.assertion_violations);
     let seen = seen.lock().expect("observation lock").clone();
     (boots.load(std::sync::atomic::Ordering::SeqCst), seen)
@@ -1047,7 +1060,8 @@ fn reboot_random_only_picks_live_processes() {
         .chaos_duration(Duration::from_secs(20))
         .set_iterations(1)
         .set_debug_seeds(vec![3])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "{:?}", report.assertion_violations);
     assert_eq!(
         *picked.lock().expect("picked lock"),

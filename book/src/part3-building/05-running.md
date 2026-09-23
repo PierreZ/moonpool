@@ -17,10 +17,10 @@ cargo xtask sim run-all      # Run everything
 The `run` subcommand matches against binary names. For example,
 `cargo xtask sim run tonic-grpc` selects the `sim-tonic-grpc` example.
 
-Each simulation binary is a standalone Rust binary that constructs a `SimulationBuilder`, calls `.run()`, and prints the report. A typical `main` function:
+Each simulation binary is a standalone Rust binary that constructs a `SimulationBuilder`, calls `.run()`, and prints the report. `run()` returns `Result<SimulationReport, SimulationError>`: failing seeds are in the report, and an `Err` (`SimulationError::InvalidConfiguration`) means the builder cannot run as configured, so no seed ran. A typical `main` function:
 
 ```rust
-fn main() {
+fn main() -> Result<(), SimulationError> {
     let _ = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::WARN)
         .try_init();
@@ -30,13 +30,14 @@ fn main() {
         .workload(KvWorkload::new(200, keys))
         .set_iterations(100)
         .enable_chaos([Chaos::Network(ChaosMode::Random)])
-        .run();
+        .run()?;
 
     report.eprint();
 
     if !report.seeds_failing.is_empty() || !report.assertion_violations.is_empty() {
         std::process::exit(1);
     }
+    Ok(())
 }
 ```
 
@@ -121,8 +122,7 @@ SimulationBuilder::new()
     .processes(3, || Box::new(KvServer))
     .workload(KvWorkload::new(200, keys))
     .set_debug_seeds(vec![7891])
-    .run()
-    .await;
+    .run()?;
 ```
 
 Now increase logging. Set the environment variable:
@@ -152,7 +152,7 @@ How long should a chaos run last? Any fixed seed count is wrong: too small misse
 SimulationBuilder::new()
     .workload(KvWorkload::new(200, keys))
     .until_coverage_stable(10, 5_000)  // 10 quiet seeds, 5_000 safety cap
-    .run();
+    .run()?;
 ```
 
 **`FixedCount(n)`** is the workhorse for reproducible replay. You commit to running exactly `n` seeds, the duration is bounded, and the report is identical across machines. Reach for this when debugging a specific seed or when budgets must be predictable.

@@ -68,7 +68,8 @@ fn a_panicking_process_fails_the_iteration() {
         .workload(ObliviousWorkload)
         .set_debug_seeds(vec![1])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(
@@ -86,7 +87,8 @@ fn a_process_that_exits_with_an_error_is_not_a_failure() {
         .workload(ObliviousWorkload)
         .set_debug_seeds(vec![1])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(report.successful_runs, 1);

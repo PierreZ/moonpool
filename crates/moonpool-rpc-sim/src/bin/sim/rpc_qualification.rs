@@ -16,7 +16,8 @@ fn main() {
     let report = qualification_campaign(QualificationConfig::campaign(), &records)
         .check_determinism()
         .until_coverage_stable(10, 1000)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     report.eprint();
 

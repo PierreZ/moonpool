@@ -129,7 +129,8 @@ fn cluster_assigns_locality_and_answers_domain_queries() {
         .workload(DomainQueryWorkload)
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.successful_runs, 1, "domain queries should hold");
     assert_eq!(report.failed_runs, 0);
@@ -188,7 +189,8 @@ fn machine_reboot_is_collocated() {
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -227,7 +229,8 @@ fn per_machine_attrition_respects_group_budget() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![1, 2, 3, 4, 5])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -266,7 +269,8 @@ fn per_datacenter_attrition_reboots_a_whole_region() {
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(5)
         .set_debug_seeds(vec![1, 2, 3, 4, 5])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -314,7 +318,8 @@ fn range_topology_runs_clean_across_seeds() {
         .workload(RangeTopologyWorkload)
         .set_iterations(8)
         .set_debug_seeds(vec![10, 20, 30, 40, 50, 60, 70, 80])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,

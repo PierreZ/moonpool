@@ -76,7 +76,8 @@ fn run_once(seed: u64) -> Vec<String> {
         // iterating past the debug seed, which is not what a trace-equality
         // check wants.
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "seed {seed} must succeed");
     TRACE
         .lock()

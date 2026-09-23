@@ -83,11 +83,10 @@ SimulationBuilder::new()
     }])
     .chaos_duration(Duration::from_secs(60))
     .workload(MyWorkload::new())
-    .run()
-    .await;
+    .run()?;
 ```
 
-The `.chaos_duration()` call is required because attrition runs only during the chaos phase: `run()` refuses a builder that registers attrition or a `fault_factory` without it, instead of dropping the injectors unrun. After the chaos duration elapses the simulation enters recovery mode: fault injectors stop, every configuration-driven network and storage fault family is switched off, and partitions are healed, while the system continues until all workloads complete. That quiet tail is where a rebooted process rejoins and the cluster reconverges — the damage from the chaos phase is still there to recover from, since recovery mode stops new faults rather than repairing old ones. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
+The `.chaos_duration()` call is required because attrition runs only during the chaos phase: `run()` returns `SimulationError::InvalidConfiguration` for a builder that registers attrition or a `fault_factory` without it, instead of dropping the injectors unrun. After the chaos duration elapses the simulation enters recovery mode: fault injectors stop, every configuration-driven network and storage fault family is switched off, and partitions are healed, while the system continues until all workloads complete. That quiet tail is where a rebooted process rejoins and the cluster reconverges — the damage from the chaos phase is still there to recover from, since recovery mode stops new faults rather than repairing old ones. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
 
 `ChaosMode::Random` uses your configured weights, recovery window, and scope as
 written every seed. Switch to `ChaosMode::Swarm` to swarm the reboot *regime*

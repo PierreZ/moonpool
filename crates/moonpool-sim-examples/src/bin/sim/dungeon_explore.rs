@@ -18,7 +18,8 @@ fn main() {
             max_recipe_len: 64,
         })
         .set_iterations(3)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     moonpool_sim_examples::support::finish_or_exit_if_unexplored(&report);
 }

@@ -65,7 +65,7 @@
 //!     })
 //!     .until_coverage_stable(10, 1_000)
 //!     .workload_factory(|| Box::new(MyWorkload::default()))
-//!     .run();
+//!     .run()?;
 //! ```
 
 #![deny(missing_docs)]

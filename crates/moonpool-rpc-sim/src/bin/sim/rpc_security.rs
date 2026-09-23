@@ -17,7 +17,8 @@ fn main() {
     let report = security_campaign(SecurityConfig::campaign(), &records)
         .check_determinism()
         .until_coverage_stable(10, 1000)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     report.eprint();
 

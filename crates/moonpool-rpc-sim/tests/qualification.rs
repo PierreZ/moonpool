@@ -3,7 +3,7 @@
 //! binary (`cargo xtask sim run rpc-qualification`).
 //!
 //! Reproduce one seed: `qualification_campaign(QualificationConfig::campaign(), &records)
-//! .set_debug_seeds(vec![seed]).set_iterations(1).run()`.
+//! .set_debug_seeds(vec![seed]).set_iterations(1).run()?`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -135,7 +135,8 @@ fn bounded_campaign_hits_every_required_scenario() {
         .check_determinism()
         .set_debug_seeds((offset() + 1..=offset() + SEED_BUDGET).collect())
         .set_iterations(usize::try_from(SEED_BUDGET).unwrap_or(usize::MAX))
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     report.eprint();
     assert_clean(&report);
     let missing: Vec<&str> = REQUIRED
@@ -180,7 +181,8 @@ fn run(seed: u64, config: QualificationConfig) -> QualificationRecord {
     let report = qualification_campaign(config, &records)
         .set_debug_seeds(vec![seed])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_clean(&report);
     let mut finished = finished(&records);
     assert_eq!(finished.len(), 1);
@@ -212,7 +214,8 @@ fn reboot_storm_returns_to_baseline() {
     let report = qualification_campaign(QualificationConfig::reboot_storm(), &records)
         .set_debug_seeds(vec![1, 2, 3])
         .set_iterations(3)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_clean(&report);
     assert!(fired(&report, "rpc qual one server rebooted ten times"));
     assert!(fired(

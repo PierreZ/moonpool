@@ -22,7 +22,7 @@ use moonpool_sim::{
 // ============================================================================
 
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
-    builder.run()
+    builder.run().expect("simulation configuration is valid")
 }
 
 fn assert_simulation_success(report: &SimulationReport) {

@@ -11,6 +11,10 @@ pub enum SimulationError {
     /// The simulation is in an invalid state.
     #[error("Invalid simulation state: {0}")]
     InvalidState(String),
+    /// The simulation was configured in a way that cannot run as written,
+    /// detected before any seed runs.
+    #[error("Invalid simulation configuration: {0}")]
+    InvalidConfiguration(String),
     /// An I/O error occurred during simulation.
     #[error("I/O error: {0}")]
     IoError(String),

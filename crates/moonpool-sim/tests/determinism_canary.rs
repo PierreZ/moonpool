@@ -153,7 +153,8 @@ fn honest_workload_passes_the_canary_on_every_seed() {
         .set_iterations(5)
         .set_debug_seeds(vec![1, 2, 3, 4, 5])
         .workload_factory(|| Box::new(Honest))
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "{:?}", report.assertion_violations);
     assert_eq!(report.iterations, 5);
@@ -193,7 +194,8 @@ fn canary_is_green_under_full_chaos() {
         .chaos_duration(Duration::from_secs(5))
         .set_iterations(8)
         .set_debug_seeds((1..=8).collect())
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 0, "{:?}", report.assertion_violations);
     assert_eq!(report.iterations, 8);
@@ -214,7 +216,8 @@ fn extra_draw_on_the_replay_trips_the_canary() {
                 delta: 1,
             })
         })
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(report.failed_runs, 1, "the seed must be reported as failed");
@@ -239,7 +242,8 @@ fn early_exit_after_a_matching_prefix_trips_the_canary() {
                 delta: -1,
             })
         })
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(report.failed_runs, 1, "a shorter replay must fail too");
@@ -286,7 +290,8 @@ fn replay_failure_with_matching_draws_fails_the_seed() {
         .set_iterations(1)
         .set_debug_seeds(vec![13])
         .workload_factory(|| Box::new(FailsOnReplay { runs: &RUNS }))
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
     assert_eq!(canary_pass_count(&report), 1, "the draws did replay");
@@ -296,11 +301,17 @@ fn replay_failure_with_matching_draws_fails_the_seed() {
 }
 
 #[test]
-#[should_panic(expected = "check_determinism runs a seed more than once")]
 fn instance_workloads_are_rejected() {
-    let _ = SimulationBuilder::new()
+    let result = SimulationBuilder::new()
         .check_determinism()
         .set_iterations(1)
         .workload(Honest)
         .run();
+    match result {
+        Err(moonpool_sim::SimulationError::InvalidConfiguration(message)) => assert!(
+            message.starts_with("check_determinism runs a seed more than once"),
+            "{message}"
+        ),
+        other => panic!("expected InvalidConfiguration, got {other:?}"),
+    }
 }

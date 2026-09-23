@@ -325,7 +325,8 @@ fn run_once(seed: u64) -> Vec<TraceEntry> {
         .chaos_duration(Duration::from_secs(10))
         .set_debug_seeds(vec![seed])
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "seed {seed} must succeed");
 
     let events = take_trace(&trace);
@@ -347,7 +348,8 @@ fn run_multi_channel_once(seed: u64) -> Vec<TraceEntry> {
     )
     .set_debug_seeds(vec![seed])
     .set_iterations(1)
-    .run();
+    .run()
+    .expect("simulation configuration is valid");
     assert_eq!(
         report.failed_runs, 0,
         "seed {seed} must succeed:\n{report}\n{:?}",

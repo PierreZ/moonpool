@@ -47,7 +47,8 @@ fn main() {
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
         .chaos_duration(Duration::from_secs(3))
         .set_iterations(10)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     moonpool_sim_examples::support::finish_or_exit_on_failing_seeds(&report);
 }

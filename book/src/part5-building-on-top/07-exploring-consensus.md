@@ -29,7 +29,7 @@ let report = SimulationBuilder::new()
         max_recipe_len: 32,
     })
     .until_coverage_stable(10, 1_000)
-    .run();
+    .run()?;
 ```
 
 `workers: 0` makes controller order deterministic and avoids `fork()` while
@@ -152,7 +152,7 @@ let replay = SimulationBuilder::new()
     })
     .invariant(AgreementInvariant::default())
     .replay_timeline(bug.seed, bug.recipe.clone())
-    .run();
+    .run()?;
 
 assert_eq!(replay.failed_runs, 1);
 ```

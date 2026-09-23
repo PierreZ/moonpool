@@ -22,7 +22,8 @@ fn main() {
         .enable_chaos([reboot_attrition(1, AttritionScope::PerProcess)])
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(50)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     finish_or_exit_on_failing_seeds(&report);
 }

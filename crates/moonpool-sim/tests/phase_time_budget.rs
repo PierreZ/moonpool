@@ -35,7 +35,8 @@ fn setup_timer_loop_fails_instead_of_hanging() {
         .run_time_budget(Duration::from_secs(1))
         .set_iterations(1)
         .set_debug_seeds(vec![11])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
     assert_eq!(report.seeds_failing, vec![11], "report: {report:?}");
@@ -65,7 +66,8 @@ fn check_timer_loop_fails_instead_of_hanging() {
         .run_time_budget(Duration::from_secs(1))
         .set_iterations(1)
         .set_debug_seeds(vec![12])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.failed_runs, 1, "report: {report:?}");
     assert_eq!(report.seeds_failing, vec![12], "report: {report:?}");

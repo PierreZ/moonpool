@@ -717,7 +717,7 @@ impl SimulationBuilder {
     ///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
     ///     .processes(3, || Box::new(MyNode::new()))
     ///     .workload(MyWorkload::default())
-    ///     .run();
+    ///     .run()?;
     /// ```
     ///
     /// Metric values are reported, never used to steer the simulation: a
@@ -774,7 +774,7 @@ impl SimulationBuilder {
     ///             .named("write_p99"),
     ///     )
     ///     .workload(MyWorkload::default())
-    ///     .run();
+    ///     .run()?;
     /// ```
     ///
     /// Queries read the same data the report already collects, so this needs a
@@ -796,8 +796,9 @@ impl SimulationBuilder {
     /// observation log, say) capture an `Arc` in the factory closure.
     ///
     /// Injectors run only inside the chaos window, so a fault factory
-    /// requires [`Self::chaos_duration`]: [`Self::run`] refuses a builder that
-    /// registers one without it rather than silently never running it.
+    /// requires [`Self::chaos_duration`]: [`Self::run`] returns
+    /// [`SimulationError::InvalidConfiguration`] for a builder that registers
+    /// one without it, rather than silently never running it.
     #[must_use]
     pub fn fault_factory(mut self, factory: impl Fn() -> Box<dyn FaultInjector> + 'static) -> Self {
         self.fault_factories.push(Box::new(factory));
@@ -1040,11 +1041,11 @@ impl SimulationBuilder {
     ///
     /// # Panics
     ///
-    /// Panics when the configuration contains a zero exploration bound. The
-    /// simulation also fails fast from [`Self::run`] if exploration is combined
-    /// with instance workloads, because those values cannot be reconstructed
-    /// for each continuation timeline. Use [`Self::workload_factory`] or
-    /// [`Self::workloads`] instead.
+    /// Panics when the configuration contains a zero exploration bound. If
+    /// exploration is combined with instance workloads, [`Self::run`] returns
+    /// [`SimulationError::InvalidConfiguration`] instead, because those values
+    /// cannot be reconstructed for each continuation timeline. Use
+    /// [`Self::workload_factory`] or [`Self::workloads`] instead.
     #[cfg(feature = "exploration")]
     #[must_use]
     pub fn enable_exploration(
@@ -1263,9 +1264,9 @@ impl SimulationBuilder {
     /// factories and attrition regimes) only run inside the chaos window, so
     /// without [`Self::chaos_duration`] they would be dropped unrun while the
     /// campaign reports success.
-    fn validate_fault_injectors(&self) {
+    fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
         if self.chaos_duration.is_some() {
-            return;
+            return Ok(());
         }
         let mut unrun = Vec::new();
         if !self.fault_factories.is_empty() {
@@ -1280,12 +1281,14 @@ impl SimulationBuilder {
                 self.attritions.len()
             ));
         }
-        assert!(
-            unrun.is_empty(),
+        if unrun.is_empty() {
+            return Ok(());
+        }
+        Err(SimulationError::InvalidConfiguration(format!(
             "{} registered without SimulationBuilder::chaos_duration: fault injectors only run \
              inside the chaos window, so they would never fire; set chaos_duration",
             unrun.join(" and ")
-        );
+        )))
     }
 
     /// Enforce the fresh-state boundary required by exploration recipes.
@@ -1293,24 +1296,27 @@ impl SimulationBuilder {
     /// Factory entries are reconstructed by `resolve_entries` for every root
     /// and continuation. The rejected inputs are opaque mutable values whose
     /// pristine state cannot be recovered after one timeline has run.
-    fn validate_rerun_lifecycle(&self) {
+    fn validate_rerun_lifecycle(&self) -> Result<(), SimulationError> {
         let feature = if self.exploration_config.is_some() {
             "exploration"
         } else if self.check_determinism {
             "check_determinism"
         } else {
-            return;
+            return Ok(());
         };
 
-        assert!(
-            !self
-                .entries
-                .iter()
-                .any(|entry| matches!(entry, WorkloadEntry::Instance(..))),
-            "{feature} runs a seed more than once and requires fresh workloads for every run; \
-             use SimulationBuilder::workload_factory or SimulationBuilder::workloads instead of \
-             SimulationBuilder::workload"
-        );
+        if self
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, WorkloadEntry::Instance(..)))
+        {
+            return Err(SimulationError::InvalidConfiguration(format!(
+                "{feature} runs a seed more than once and requires fresh workloads for every run; \
+                 use SimulationBuilder::workload_factory or SimulationBuilder::workloads instead \
+                 of SimulationBuilder::workload"
+            )));
+        }
+        Ok(())
     }
 
     /// Check whether the `UntilCoverageStable` saturation condition has been
@@ -1591,19 +1597,27 @@ impl SimulationBuilder {
     /// per iteration for full isolation — all tasks are killed when the
     /// executor is dropped at iteration end.
     ///
+    /// Failing seeds are not errors: they are in the report. An `Err` means
+    /// the builder cannot run as configured, and no seed ran.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimulationError::InvalidConfiguration`] when exploration or
+    /// [`Self::check_determinism`] is combined with an instance workload (its
+    /// state cannot be reconstructed for each rerun), or when fault injectors
+    /// ([`Self::fault_factory`], [`Chaos::Attrition`]) are registered without
+    /// [`Self::chaos_duration`].
+    ///
     /// # Panics
     ///
-    /// Panics if a simulation invariant fails, a workload panics, or exploration
-    /// is configured with lifecycle state that cannot be reconstructed for each
-    /// timeline (an instance workload). Also panics when a process group draws
-    /// more than 255 processes, the most its `10.0.{group}.x` range can address,
-    /// and when fault injectors ([`Self::fault_factory`], [`Chaos::Attrition`])
-    /// are registered without [`Self::chaos_duration`].
-    pub fn run(mut self) -> SimulationReport {
-        self.validate_rerun_lifecycle();
-        self.validate_fault_injectors();
+    /// Panics if a simulation invariant fails or a workload panics. Also
+    /// panics when a process group draws more than 255 processes, the most its
+    /// `10.0.{group}.x` range can address.
+    pub fn run(mut self) -> Result<SimulationReport, SimulationError> {
+        self.validate_rerun_lifecycle()?;
+        self.validate_fault_injectors()?;
         if self.entries.is_empty() {
-            return Self::empty_report();
+            return Ok(Self::empty_report());
         }
 
         // Uninstall the select! offset override on every exit path (normal,
@@ -1684,7 +1698,7 @@ impl SimulationBuilder {
         #[cfg(not(feature = "exploration"))]
         let exploration = None;
 
-        Self::build_final_report(
+        Ok(Self::build_final_report(
             state.metrics_collector,
             &state.iteration_manager,
             &self.iteration_control,
@@ -1694,7 +1708,7 @@ impl SimulationBuilder {
                 saturation: state.saturation,
                 exploration,
             },
-        )
+        ))
     }
 
     /// Execute one iteration of the run loop. Returns
@@ -2283,10 +2297,17 @@ mod tests {
         }
     }
 
+    /// The configuration error a builder's `run()` refused with.
+    fn configuration_error(result: Result<SimulationReport, SimulationError>) -> String {
+        match result {
+            Err(SimulationError::InvalidConfiguration(message)) => message,
+            other => panic!("expected InvalidConfiguration, got {other:?}"),
+        }
+    }
+
     #[test]
-    #[should_panic(expected = "registered without SimulationBuilder::chaos_duration")]
     fn attrition_without_chaos_duration_is_refused() {
-        let _ = SimulationBuilder::new()
+        let result = SimulationBuilder::new()
             .workload(BasicWorkload)
             .enable_chaos([
                 Chaos::Network(ChaosMode::Swarm),
@@ -2306,10 +2327,16 @@ mod tests {
             ])
             .set_iterations(1)
             .run();
+        let message = configuration_error(result);
+        assert!(
+            message.starts_with(
+                "1 Chaos::Attrition regime(s) registered without SimulationBuilder::chaos_duration"
+            ),
+            "{message}"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "1 fault_factory injector(s) registered without")]
     fn fault_factory_without_chaos_duration_is_refused() {
         struct Idle;
         #[async_trait]
@@ -2321,11 +2348,16 @@ mod tests {
                 Ok(())
             }
         }
-        let _ = SimulationBuilder::new()
+        let result = SimulationBuilder::new()
             .workload(BasicWorkload)
             .fault_factory(|| Box::new(Idle))
             .set_iterations(1)
             .run();
+        let message = configuration_error(result);
+        assert!(
+            message.starts_with("1 fault_factory injector(s) registered without"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -2334,7 +2366,8 @@ mod tests {
             .workload(BasicWorkload)
             .set_iterations(3)
             .set_debug_seeds(vec![1, 2, 3])
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
 
         assert_eq!(report.iterations, 3);
         assert_eq!(report.successful_runs, 3);
@@ -2418,7 +2451,9 @@ mod tests {
             .enable_chaos([Chaos::Network(ChaosMode::Random)])
             .enable_exploration(test_exploration_config());
 
-        builder.validate_rerun_lifecycle();
+        builder
+            .validate_rerun_lifecycle()
+            .expect("factory workloads can be rebuilt for every timeline");
     }
 
     #[cfg(feature = "exploration")]
@@ -2433,14 +2468,17 @@ mod tests {
 
     #[cfg(feature = "exploration")]
     #[test]
-    #[should_panic(
-        expected = "exploration runs a seed more than once and requires fresh workloads"
-    )]
     fn exploration_rejects_instance_workloads() {
-        SimulationBuilder::new()
+        let result = SimulationBuilder::new()
             .workload(BasicWorkload)
             .enable_exploration(test_exploration_config())
-            .validate_rerun_lifecycle();
+            .run();
+        let message = configuration_error(result);
+        assert!(
+            message
+                .starts_with("exploration runs a seed more than once and requires fresh workloads"),
+            "{message}"
+        );
     }
 
     struct FailingWorkload;
@@ -2473,7 +2511,8 @@ mod tests {
             .workload(FailingWorkload)
             .set_debug_seeds((1..=10).collect())
             .set_iterations(10)
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
 
         assert_eq!(report.iterations, 10);
         assert_eq!(

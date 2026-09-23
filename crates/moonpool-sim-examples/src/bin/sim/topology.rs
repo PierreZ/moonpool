@@ -23,7 +23,8 @@ fn main() {
         )])
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(20)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     finish_or_exit_on_failing_seeds(&report);
 }

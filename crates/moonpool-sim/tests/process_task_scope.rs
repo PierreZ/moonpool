@@ -138,7 +138,8 @@ fn a_crash_stops_the_tasks_the_process_spawned() {
         .chaos_duration(Duration::from_secs(30))
         .set_iterations(3)
         .set_debug_seeds(vec![7, 11, 13])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 3);
     assert_eq!(
@@ -235,7 +236,8 @@ fn an_in_place_restart_never_overlaps_two_boots() {
         .chaos_duration(Duration::from_secs(30))
         .set_iterations(5)
         .set_debug_seeds(vec![1, 2, 3, 4, 5])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.iterations, 5);
     assert!(
         report.assertion_violations.is_empty(),

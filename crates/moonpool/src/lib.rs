@@ -45,7 +45,7 @@
 //! SimulationBuilder::new()
 //!     .processes(1, || Box::new(MyServer::default()))
 //!     .workload(MyWorkload::default())
-//!     .run();
+//!     .run()?;
 //! ```
 //!
 //! ## Which Crate to Use
@@ -108,7 +108,7 @@ pub mod hyper {
 ///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
 ///     .processes(3, || Box::new(MyNode::new()))
 ///     .workload(MyWorkload::default())
-///     .run();
+///     .run()?;
 /// ```
 ///
 /// Register a source per simulated node and the counters, gauges and

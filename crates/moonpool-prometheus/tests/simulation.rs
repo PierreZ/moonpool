@@ -61,6 +61,7 @@ fn run_metered(requests: u64, seed: u64) -> moonpool_sim::SimulationReport {
         .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
         .workload(MeteredWorkload { requests })
         .run()
+        .expect("simulation configuration is valid")
 }
 
 #[test]
@@ -192,6 +193,7 @@ fn run_queried(requests: u64, seeds: &[u64]) -> moonpool_sim::SimulationReport {
         )
         .workload(MeteredWorkload { requests })
         .run()
+        .expect("simulation configuration is valid")
 }
 
 #[test]

@@ -75,7 +75,8 @@ fn self_perpetuating_timer_is_caught_by_run_time_budget() {
         .run_time_budget(Duration::from_mins(1))
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert!(
         report.failed_runs >= 1,
@@ -116,7 +117,8 @@ fn well_behaved_workload_is_unaffected_by_budget() {
         .run_time_budget(Duration::from_secs(1))
         .set_iterations(3)
         .set_debug_seeds(vec![1, 2, 3])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -157,7 +159,8 @@ fn deadlock_report_keeps_the_accumulated_state() {
         .run_time_budget(Duration::from_mins(1))
         .until_coverage_stable(5, 10)
         .set_debug_seeds(vec![1, 2, 3, 4])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 2, "the deadlock stops the campaign");
     assert_eq!(report.seeds_failing, vec![2]);
@@ -182,7 +185,8 @@ fn deadlock_report_keeps_the_accumulated_state() {
     let fresh = SimulationBuilder::new()
         .workload(WellBehavedWorkload)
         .set_iterations(1)
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert!(
         fresh
             .assertion_details

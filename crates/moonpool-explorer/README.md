@@ -62,7 +62,7 @@ let report = SimulationBuilder::new()
     })
     .until_coverage_stable(10, 1_000)
     .workload_factory(|| Box::new(MyWorkload::new()))
-    .run();
+    .run()?;
 ```
 
 - `max_runs_per_seed` is a ceiling, not a quota. A root run that discovers

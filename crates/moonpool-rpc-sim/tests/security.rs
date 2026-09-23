@@ -57,7 +57,8 @@ fn bounded_campaign_hits_every_required_scenario() {
         .check_determinism()
         .set_debug_seeds((1..=SEED_BUDGET).collect())
         .set_iterations(usize::try_from(SEED_BUDGET).unwrap_or(usize::MAX))
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     report.eprint();
     assert_clean(&report);
     let mut missing = Vec::new();
@@ -129,7 +130,8 @@ fn same_seed_replays_the_same_semantic_history() {
         let report = security_campaign(SecurityConfig::campaign(), &records)
             .set_debug_seeds(vec![seed])
             .set_iterations(1)
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
         assert_clean(&report);
         finished(&records)
     };

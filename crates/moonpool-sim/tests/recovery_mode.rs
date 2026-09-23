@@ -948,7 +948,8 @@ fn a_campaign_heals_its_partitions_at_the_chaos_cutoff() {
         .run_time_budget(Duration::from_mins(2))
         .set_iterations(3)
         .set_debug_seeds(vec![1, 2, 3])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,

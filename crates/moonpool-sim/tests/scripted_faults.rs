@@ -179,7 +179,8 @@ fn test_scripted_crash_hold_restart() {
     let report = scripted_builder(&events)
         .set_iterations(3)
         .set_debug_seeds(vec![7, 11, 13])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "scripted lifecycle script must pass");
     assert_eq!(report.successful_runs, 3);
 
@@ -217,7 +218,8 @@ fn test_scripted_faults_replay_exactly() {
         let report = scripted_builder(&events)
             .set_iterations(1)
             .set_debug_seeds(vec![4242])
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
         assert_eq!(report.failed_runs, 0);
         events
             .lock()
@@ -251,7 +253,8 @@ fn test_fault_factory_with_in_process_exploration() {
                 max_frontier: 16,
                 max_recipe_len: 4,
             })
-            .run();
+            .run()
+            .expect("simulation configuration is valid");
         assert_eq!(report.failed_runs, 0, "exploration run must pass");
         let exploration = report.exploration.expect("exploration report missing");
         let log = events

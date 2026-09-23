@@ -123,7 +123,8 @@ fn happy_path_no_split_brain() {
         .invariant(SplitBrainInvariant::new())
         .set_iterations(3)
         .set_debug_seeds(vec![1, 2, 3])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert_eq!(
         report.failed_runs, 0,
@@ -141,7 +142,8 @@ fn split_brain_is_detected() {
         .invariant(SplitBrainInvariant::new())
         .set_iterations(1)
         .set_debug_seeds(vec![42])
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     assert!(
         report.failed_runs >= 1,

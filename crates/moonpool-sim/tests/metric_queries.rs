@@ -116,6 +116,7 @@ fn run_with_queries(seeds: &[u64], requests: u64) -> SimulationReport {
         )
         .workload(MeteredWorkload { requests })
         .run()
+        .expect("simulation configuration is valid")
 }
 
 fn query<'a>(report: &'a SimulationReport, name: &str) -> &'a moonpool_sim::MetricQueryReport {
@@ -269,7 +270,8 @@ fn a_query_matching_nothing_reports_no_runs() {
                 .named("nope"),
         )
         .workload(MeteredWorkload { requests: 3 })
-        .run();
+        .run()
+        .expect("simulation configuration is valid");
 
     let nope = query(&report, "nope");
     assert_eq!(nope.runs, 0);

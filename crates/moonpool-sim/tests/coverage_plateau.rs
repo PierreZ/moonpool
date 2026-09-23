@@ -12,7 +12,7 @@ use moonpool_sim::ExplorationConfig;
 use moonpool_sim::{SimContext, SimulationBuilder, SimulationReport, SimulationResult, Workload};
 
 fn run_simulation(builder: SimulationBuilder) -> SimulationReport {
-    builder.run()
+    builder.run().expect("simulation configuration is valid")
 }
 
 /// Workload firing three sometimes assertions deterministically. The full
