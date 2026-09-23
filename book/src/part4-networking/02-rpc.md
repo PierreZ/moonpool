@@ -15,7 +15,7 @@ let (driver, rpc) = RpcDriver::listen(providers, "10.0.1.1:4500", RpcConfig::def
 let (echo_ref, mut requests) = rpc.register::<Echo>(AccessClass::Public)?;
 ```
 
-`echo_ref` is a `ServiceRef<Echo>`: plain routing data we can hand to anyone, as bytes if we like (`to_bytes` / `from_bytes`, no runtime needed to decode it). It names three things. The **resolved address** of the process. The **incarnation**, 128 random bits drawn from the `RandomProvider` when the runtime started. And the **endpoint token**, a registry slot plus a generation that advances every time the slot is reused. A method is a marker type with explicit identifiers, never derived from Rust names:
+`echo_ref` is a `ServiceRef<Echo>`: plain routing data we can hand to anyone. It is itself a protobuf message, so it travels as a field of our own messages or as bytes (`to_bytes` / `from_bytes`), and no runtime is needed to decode it. It names three things. The **resolved address** of the process. The **incarnation**, 128 random bits drawn from the `RandomProvider` when the runtime started. And the **endpoint token**, a registry slot plus a generation that advances every time the slot is reused. A method is a marker type with explicit identifiers, never derived from Rust names:
 
 ```rust
 struct Echo;
@@ -89,6 +89,64 @@ Every `on_*` wait (`on_disconnect`, `on_failed`, `on_available`, `on_failed_for`
 
 Dynamic references carry resolved addresses and die with their incarnation. Bootstrapping needs the opposite: a fixed service at a name that survives restarts. `register_well_known::<M>(WellKnownId::new(1), ..)` registers one, and its admission ignores the incarnation, so a `WellKnownRef` keeps working across server restarts. A `BootstrapClient` resolves the `host:port` in a well-known reference through a `moonpool_core::Resolver`, caches the answer for a TTL, and drops it when a call through it fails to connect or loses its connection. `retry_get_reply` retries under an explicit `RetryPolicy`: never after a contract error, always after a failure proven `NotAdmitted` (the name did not resolve, nothing listened, the endpoint is not registered yet), and after an ambiguous one only if the policy says so, because only the application knows whether running it twice is safe. Lookup failure, connection failure and endpoint failure stay three distinct errors.
 
+## Interfaces as Data
+
+A service with several methods is one **endpoint group**: one registry slot, one incarnation, several methods told apart by their explicit method ids. The interface gets an explicit id too:
+
+```rust
+struct Kv;
+impl RpcInterface for Kv {
+    const INTERFACE: InterfaceId = InterfaceId::new(0x6b76_0001);
+    const VERSION: SchemaVersion = SchemaVersion::new(1);
+    const NAME: &'static str = "kv";
+}
+impl InterfaceMethod<Kv> for Get {}
+impl InterfaceMethod<Kv> for Put {}
+
+let group = rpc.register_group::<Kv>(AccessClass::Public)?;
+let mut gets = group.serve::<Get>()?;   // a RequestStream<Get>, as before
+let mut puts = group.serve::<Put>()?;
+let kv_ref: InterfaceRef<Kv> = group.interface_ref();
+```
+
+FoundationDB serializes one endpoint of an interface and derives the others by adding an offset (`getAdjustedEndpoint`). We keep the idea and drop the arithmetic: `kv_ref.method::<Put>()` gives a `ServiceRef<Put>` for the same address, incarnation and token, differing only in `Put`'s method id. Reordering, adding or removing methods in the source cannot retarget a reference someone stored last week, and a method the group does not serve is refused with `MethodNotFound` before any handler runs. Dropping the `ServiceGroup` destroys the whole group: new requests get `EndpointNotFound`, requests still queued complete as broken promises, and a request already received finishes under its own `ReplyHandle`, which still routes to the session it came from.
+
+Both reference types are protobuf messages with fixed tags, every field always written, pinned by golden fixtures and cross-checked against a prost-derived mirror. That makes them ordinary data: a field of a request, a reply, a file on disk.
+
+```rust
+#[derive(Clone, PartialEq, prost::Message)]
+struct Recruited {
+    #[prost(uint64, tag = "1")]
+    configuration: u64,
+    #[prost(message, repeated, tag = "2")]
+    members: Vec<InterfaceRef<Kv>>,
+}
+```
+
+Decoding such a field cannot reject it (protobuf merges field by field), so a reference is kept exactly as decoded and checked before use: binding an `InterfaceRef` or sending through a `ServiceRef` that names another method, schema, codec or interface fails with `InvalidReference` and nothing leaves. Re-encoding never repairs it. `from_bytes` is the strict decode.
+
+### Restarts are learned, never refreshed
+
+A reference names one incarnation. When a process restarts at the same `ip:port`, every reference to its previous incarnation is refused with `StaleIncarnation`, remembered by the failure monitor so the next call fails without a round trip, and **never dispatched to the new incarnation**, not even by a reliable call. The new boot publishes new references; callers learn them through the application: a well-known directory, a registration, a recruitment reply. That is FoundationDB's model too (a worker re-registers with the cluster controller; nobody patches old interfaces), and it is deliberate: a fresh endpoint says nothing about whether the durable state behind it is the one we were talking to. Participant identity, configuration identity and fencing are the application's.
+
+A callback works the same way. A `ReplyHandle` is bound to the session its request arrived on and has no byte form, so it cannot be forwarded. A callback a third party may call is an ordinary registered endpoint whose `ServiceRef` travels in the request; once dropped, it is refused like any destroyed endpoint.
+
+## Generated Interfaces
+
+With the optional `derive` feature, one trait generates all of the above:
+
+```rust
+#[moonpool_rpc::service(id = 0x6b76_0001, version = 1)]
+pub trait Kv {
+    #[method(id = 1, schema = 1)]
+    async fn get(&self, key: Key) -> Value;
+    #[method(id = 2, schema = 1)]
+    async fn put(&self, entry: Entry);
+}
+```
+
+It generates `KvInterface`, one method marker per method (`KvGet`, `KvPut`), `KvRef` (an `InterfaceRef<KvInterface>`), `KvClient<P>` whose `get()` is an ordinary `ServiceClient` with every delivery mode, `KvRequest` (one variant per method, holding the `IncomingRequest` and its `ReplyHandle`) and `KvServer`, the registered group with a fair multiplexed `next()` over its request streams, `dispatch` and `serve`. Ids stay explicit; a duplicate is a compile error. The macro owns no protocol state: a server that wants to reply later, never reply or look at the caller matches on `KvRequest` and uses the reply handle itself, and a hand-written interface with the same ids is byte-for-byte interchangeable with the generated one.
+
 ## Testing It the Way It Fails
 
 The `sim-rpc-foundations` campaign in `moonpool-rpc-sim` runs a server group, a relay group that calls the server itself, and a surviving client workload, under swarm network chaos with `Chaos::BuggifyKnobs` (which spikes the bit-flip rate on some seeds), a scripted crash right after a handler receives a request, raw malformed sessions, forged references and destroyed endpoints. The oracle is deliberately **outside the transport**: handlers write a receipt ledger keyed by workload-generated request ids before replying, and at the end the workload judges its own outcomes against it. At most one receipt per id, exactly one for a reply, none for anything reported `NotAdmitted`. It never asks the RPC runtime what it thinks happened.
@@ -103,4 +161,10 @@ The `sim-rpc-delivery` campaign does the same for delivery and recovery. Its ser
 
 ```bash
 cargo xtask sim run rpc-delivery
+```
+
+The `sim-rpc-interfaces` campaign restarts three participants at their own address throughout the chaos window: held-down crashes, in-place reboots and graceful shutdowns, sometimes with registrations delayed after the boot. Each boot serves a generated role interface through its directory and recruits a fresh instance per configuration on request. The surviving client learns interfaces only from those directories and recruiters, stores every publication as bytes, calls current and ended boots alike, and forwards recruited members to a third participant, which calls them through its own runtime. The oracles are three ledgers kept outside the transport: each participant's boot count, every publication with the boot that made it, every execution with the boot and instance that ran it. A handler checks, as it runs, that the reference named its own boot and instance and that its boot is still the current one; the client checks that a stale refusal always names a boot that really ended. With the incarnation check removed from admission, most seeds go red. The campaign also caught a simulator bug: an in-place restart could poll the new boot before the executor had dropped the old one, so for a moment two boots of one process were alive at the same address.
+
+```bash
+cargo xtask sim run rpc-interfaces
 ```

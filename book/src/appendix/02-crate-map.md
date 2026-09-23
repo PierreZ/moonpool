@@ -24,6 +24,7 @@ usually need.
                     +----------------------------------+
 
   moonpool-rpc            (typed RPC over moonpool-core; depends on no sim crate)
+  moonpool-rpc-derive     (optional typed-interface attribute for moonpool-rpc)
   moonpool-rpc-sim        (RPC simulation campaigns and oracles)
   moonpool-sim-examples  (raw TCP, axum, tonic, topology)
   moonpool-wasm-demo      (browser simulation over raw TCP)
@@ -129,7 +130,9 @@ over provider TCP. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.
 **Key types**:
 
 - `RpcDriver` owns the listener, connections, registry and pending calls
-- `RpcHandle` registers endpoints; `ServiceRef` is the serialisable reference
+- `RpcHandle` registers endpoints and endpoint groups (`ServiceGroup`)
+- `ServiceRef` / `InterfaceRef` are protobuf-encoded references, decodable
+  without a runtime and embeddable in application messages
 - `ServiceClient::try_get_reply` is one at-most-once attempt
 - `RequestStream`, `IncomingRequest` and `ReplyHandle` are the serving side
 - `RpcError` pairs an `ErrorReason` with `Execution` knowledge
@@ -137,7 +140,9 @@ over provider TCP. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.
 - `Connector` / `Acceptor` / `Plaintext` is the session upgrade seam
 
 It depends only on moonpool-core, never on moonpool-sim, and builds for wasm
-with or without its `prost` feature.
+with or without its `prost` feature. The optional `derive` feature adds
+`#[moonpool_rpc::service]` (the `moonpool-rpc-derive` proc-macro crate), which
+generates typed interfaces on top of the manual API.
 
 ### moonpool-prometheus
 
@@ -177,8 +182,8 @@ dependencies.
 ### moonpool-rpc-sim
 
 The simulation harness for moonpool-rpc: process and workload definitions, the
-receipt-ledger oracle, the `sim-rpc-foundations` and `sim-rpc-delivery`
-campaigns and a real-TCP example. Not published, so the RPC crate never
+receipt-ledger oracle, the `sim-rpc-foundations`, `sim-rpc-delivery` and
+`sim-rpc-interfaces` campaigns and a real-TCP example. Not published, so the RPC crate never
 depends on the simulator.
 
 ### moonpool-wasm-demo
