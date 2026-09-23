@@ -18,6 +18,35 @@ fn millis(value: u64) -> Duration {
 /// an extreme that is still a valid configuration (the policy validates).
 #[must_use]
 pub fn delivery_config() -> RpcConfig {
+    delivery_config_sharing(None)
+}
+
+/// Map a draw in `0..3` to a sharing mode: disabled, same-IP, trusted.
+///
+/// The simulator gives accepted sessions a synthesized peer IP near the
+/// dialer's (as `FoundationDB`'s `sim2` does), so `SameIp` mostly refuses
+/// there: it exercises the unverified path, `Trusted` the sharing path.
+#[must_use]
+pub fn sharing_from(draw: u8) -> InboundSharing {
+    match draw {
+        0 => InboundSharing::Disabled,
+        1 => InboundSharing::SameIp,
+        _ => InboundSharing::Trusted,
+    }
+}
+
+/// [`delivery_config`] with the sharing mode forced (peers draw theirs per
+/// process, so a run meets mixed settings).
+#[must_use]
+pub fn delivery_config_sharing(sharing: Option<InboundSharing>) -> RpcConfig {
+    let mut config = knobbed();
+    if let Some(sharing) = sharing {
+        config.peer.share_inbound_sessions = sharing;
+    }
+    config
+}
+
+fn knobbed() -> RpcConfig {
     let initial = buggify_knob!(50, 1..400);
     let max = buggify_knob!(500, 1..3000).max(initial);
     let ping_interval = buggify_knob!(750, 20..3000);
@@ -37,8 +66,8 @@ pub fn delivery_config() -> RpcConfig {
         failure_detection_delay: millis(buggify_knob!(1000, 0..300)),
         max_failed_endpoints: buggify_knob!(1024, 1..4),
         max_tracked_addresses: 64,
-        share_inbound_sessions: InboundSharing::Trusted,
-        always_accept_after: Duration::from_secs(15),
+        share_inbound_sessions: sharing_from(buggify_knob!(2, 0..2)),
+        always_accept_after: millis(buggify_knob!(1000, 0..8000)),
     };
     RpcConfig {
         max_frame_bytes: 64 * 1024,

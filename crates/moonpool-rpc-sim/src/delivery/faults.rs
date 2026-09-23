@@ -124,6 +124,45 @@ impl DeliveryFaults {
     }
 }
 
+impl DeliveryFaults {
+    /// One-way reachability between the peers: cut them apart so their
+    /// shared connection dies, and keep the larger address from dialing
+    /// out while the smaller one can dial it (a firewall, not a network
+    /// fault: the gate lives in the peers' session upgrade).
+    async fn one_way(ctx: &FaultContext) -> SimulationResult<()> {
+        let mut peers = ctx.ips_in_group("peer");
+        peers.sort_by_key(|ip| ip.parse::<IpAddr>().ok());
+        let (Some(smaller), Some(larger)) = (peers.first().cloned(), peers.last().cloned()) else {
+            return Ok(());
+        };
+        if smaller == larger {
+            return Ok(());
+        }
+        pause(
+            ctx,
+            Duration::from_millis(ctx.random().random_range(500..3000)),
+        )
+        .await?;
+        let key = super::peer::no_dial_key(&larger);
+        ctx.state().publish(&key, true);
+        ctx.partition(&smaller, &larger)?;
+        assert_reachable!("rpc peers cut apart with one-way reachability");
+        pause(
+            ctx,
+            Duration::from_millis(ctx.random().random_range(1000..4000)),
+        )
+        .await?;
+        ctx.heal_partition(&smaller, &larger)?;
+        pause(
+            ctx,
+            Duration::from_millis(ctx.random().random_range(2000..6000)),
+        )
+        .await?;
+        ctx.state().publish(&key, false);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl FaultInjector for DeliveryFaults {
     fn name(&self) -> &'static str {
@@ -135,9 +174,21 @@ impl FaultInjector for DeliveryFaults {
             return Ok(());
         };
         Self::script_dns(ctx, &server).await?;
+        let mut one_way = Box::pin(Self::one_way(ctx));
+        let mut one_way_done = false;
         while !ctx.chaos_shutdown().is_cancelled() {
+            if !one_way_done
+                && let std::task::Poll::Ready(result) = futures::poll!(one_way.as_mut())
+            {
+                result?;
+                one_way_done = true;
+            }
             pause(ctx, Duration::from_millis(20)).await?;
             self.serve_requests(ctx, &server).await?;
+        }
+        // Finish the one-way window (it always lifts the gate).
+        if !one_way_done {
+            one_way.await?;
         }
         // Tell the workload to stop asking, then serve what raced the flag.
         ctx.state().publish(SCRIPT_DONE_KEY, true);

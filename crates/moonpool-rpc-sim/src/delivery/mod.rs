@@ -43,7 +43,8 @@ use moonpool_sim::{Chaos, ChaosMode, SimulationBuilder};
 
 pub use faults::DeliveryFaults;
 pub use peer::DeliveryPeer;
-pub use policy::delivery_config;
+pub use peer::DialGate;
+pub use policy::{delivery_config, delivery_config_sharing, sharing_from};
 pub use server::DeliveryServer;
 pub use workload::{DeliveryConfig, DeliveryOp, DeliveryWorkload};
 

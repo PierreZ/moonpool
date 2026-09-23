@@ -797,6 +797,20 @@ impl Workload for DeliveryWorkload {
             workload.retransmissions > 0,
             "rpc retained request retransmitted on a new connection"
         );
+        // Quiescence between the two peers: when both share on the claim,
+        // each should end up holding exactly the one connection they share.
+        let peers = Board::of(ctx.state()).stats_with_prefix("peer#");
+        let trusted = ctx
+            .topology()
+            .ips_in_group("peer")
+            .iter()
+            .all(|ip| ctx.state().get::<u8>(&super::peer::sharing_key(ip)) == Some(2));
+        if trusted && peers.len() == 2 {
+            assert_sometimes!(
+                peers.iter().all(|(_, stats)| stats.connections == 1),
+                "rpc peers agree on one shared connection at the end of the run"
+            );
+        }
         self.records
             .lock()
             .expect("Mutex poisoned: prior task panicked")

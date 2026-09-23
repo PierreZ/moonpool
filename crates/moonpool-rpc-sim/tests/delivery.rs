@@ -91,6 +91,10 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc ping timeout detected a dead connection",
         "rpc idle connection closed",
         "rpc reconnect waited out the backoff",
+        "rpc peers with mixed sharing kept calling each other",
+        "rpc peers cut apart with one-way reachability",
+        "rpc peer reached through its own dial while ours stalled",
+        "rpc peers agree on one shared connection at the end of the run",
         // Failure-monitor transitions.
         "rpc disconnect observed before the address failed",
         "rpc failure monitor marked the address failed",
