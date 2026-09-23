@@ -38,6 +38,22 @@ pub trait Kv {
     async fn touch(&self, request: Key);
 }
 
+/// A one-method service: the generated pull has nothing to rotate.
+#[moonpool_rpc_derive::service(id = 0x6b77, version = 1)]
+pub trait Ping {
+    /// Answer with the key.
+    #[method(id = 1, schema = 1)]
+    async fn ping(&self, request: Key) -> Value;
+}
+
+struct Pinger;
+
+impl Ping for Pinger {
+    async fn ping(&self, request: Key) -> Value {
+        Value { value: request.key }
+    }
+}
+
 /// The same interface by hand.
 struct ManualKv;
 impl RpcInterface for ManualKv {
@@ -316,6 +332,24 @@ async fn the_generated_pull_alternates_between_methods() {
         });
     }
     assert_eq!(order.iter().collect::<String>(), "gtgtgtgt");
+    server_driver.abort();
+    client_driver.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_single_method_service_serves_through_the_generated_pull() {
+    let (server, server_driver) = listen().await;
+    let (client, client_driver) = client_only();
+    let ping = PingServer::register(&server, AccessClass::Public).expect("register");
+    let target = ping.interface_ref();
+    let task = tokio::spawn(async move { ping.serve(&Pinger).await });
+    let reply = PingClient::bind(&target, &client)
+        .expect("valid")
+        .ping()
+        .try_get_reply(&key("p"))
+        .await;
+    assert_eq!(reply.expect("reply").value, "p");
+    task.abort();
     server_driver.abort();
     client_driver.abort();
 }

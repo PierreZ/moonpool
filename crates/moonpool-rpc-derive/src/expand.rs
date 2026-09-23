@@ -632,6 +632,27 @@ fn server(service: &Service, names: &Names, methods: &[Method]) -> TokenStream {
 fn poll_next(names: &Names, methods: &[Method]) -> TokenStream {
     let request_enum = &names.request;
     let count = methods.len();
+    if let [
+        Method {
+            stream, variant, ..
+        },
+    ] = methods
+    {
+        // One stream: nothing to rotate (and no `% 1` for lints to flag).
+        return quote! {
+            /// Poll the method's stream; `None` once the group or the
+            /// runtime is gone.
+            pub fn poll_next(
+                &mut self,
+                cx: &mut ::core::task::Context<'_>,
+            ) -> ::core::task::Poll<::core::option::Option<#request_enum>> {
+                let _ = self.cursor;
+                self.#stream
+                    .poll_recv(cx)
+                    .map(|polled| polled.map(#request_enum::#variant))
+            }
+        };
+    }
     let polls = methods.iter().enumerate().map(|(index, method)| {
         let Method {
             stream, variant, ..
