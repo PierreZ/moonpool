@@ -37,7 +37,7 @@ These are deliberate, not missing:
 - **No FoundationDB wire compatibility.** The protocol, envelope and codec are this crate's own.
 - **No confidentiality or peer authentication in plaintext mode.** `SecurityConfig::trusted_network()` claims nothing; credentials go over plaintext only where each side opts in separately (the sender with `send_credentials_over_plaintext`, the receiver with `accept_credentials_over_plaintext`); otherwise a credential is withheld from an unauthenticated session (`CredentialWithheld`, never sent).
 - **No internet-scale multi-tenant isolation.** Budgets bound resources per connection and runtime; they are not a tenant scheduler.
-- **No platform beyond Moonpool's own.** Linux and macOS on Tokio (current-thread and multi-thread; qualified on Linux, macOS pending its first CI run); on `wasm32-unknown-unknown`, the protocol and the simulation only, without the native TLS/JWT adapters.
+- **No platform beyond Moonpool's own.** Linux and macOS on Tokio (current-thread and multi-thread; qualified on Linux, and on macOS by CI); on `wasm32-unknown-unknown`, the protocol and the simulation only, without the native TLS/JWT adapters.
 - **No performance envelope.** The measured numbers are calibration points on recorded hardware, not service-level objectives.
 
 ## How It Is Qualified

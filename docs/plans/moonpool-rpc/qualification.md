@@ -135,7 +135,7 @@ Every row of parity.md, its owned evidence (the P1–P6 sections) and what the q
 | Graceful/abrupt shutdown | P6 | "graceful shutdown drained an in-flight call", "graceful shutdown ended work at its deadline", "shutdown refused new admissions" | Proven |
 | Faults and deterministic replay | #219 | The campaign, its canary, semantic replay, the explicit corruption suite (foundations) | Proven |
 | Process/run isolation and post-fault recovery | #219 | Baselines per boot and per run, repeated complete runs, reboot storm, declared recovery bound | Proven |
-| Platform/performance/release | #219 | Linux: every suite, both Tokio flavors, soak; wasm32: protocol and simulation builds (CI); macOS: CI job added, **not run here** | Proven on Linux; macOS **pending CI** |
+| Platform/performance/release | #219 | Linux: every suite, both Tokio flavors, soak; wasm32: protocol and simulation builds (CI); macOS: CI job (`cargo nextest run -p moonpool-rpc`, soak smoke), green on 8f48d2d ([run](https://github.com/PierreZ/moonpool/actions/runs/35878779475)) | Proven on Linux and macOS |
 
 ## Mandatory scenarios
 
@@ -209,7 +209,7 @@ Budgets recorded for regressions (this machine, release): unary p99 at 5,000/s o
 
 ## Residual risks
 
-- **macOS**: no macOS host was available; the real-network suites and the soak smoke run there only once CI runs the new macOS steps.
+- **macOS**: qualified by CI only (no local macOS host): the real-network suites on both Tokio flavors and the soak smoke passed on 8f48d2d ([run](https://github.com/PierreZ/moonpool/actions/runs/35878779475)); no macOS performance numbers are recorded.
 - The soak runs on one host over loopback; no cross-host network, no WAN latency or loss on real sockets (the simulator covers faults).
 - The simulator has no bandwidth model: byte-level head-of-line figures come from real TCP only.
 - The bounded qualification test takes about a minute in the debug profile (nextest override: 30 s period, 8 periods); its rarest required scenarios fire on at most 3–4 of 30 seeds, checked on three windows.
