@@ -5,8 +5,11 @@
 //! throughout (queued bytes, owed replies, pending calls, connections,
 //! driver tasks and live heap), sampled every 100 ms.
 //!
-//! Latencies are measured from each call's *scheduled* start (open loop,
-//! no coordinated omission). Every scenario ends by dropping its runtimes
+//! Calls are offered open loop at their scheduled instants (the generator
+//! never waits for replies); latency is measured from the moment a call
+//! actually starts, as in `balance_latency`, and the generator's own lag
+//! behind the schedule (Tokio's timer has millisecond granularity) is
+//! reported beside it. Every scenario ends by dropping its runtimes
 //! and requires every resource probe back at its baseline
 //! (`ResourceProbe::is_at_baseline`). `--smoke` runs every scenario briefly
 //! at low rates and checks only the invariants (CI); the full run prints
@@ -275,6 +278,8 @@ struct UnaryResult {
     shed: u64,
     elapsed: Duration,
     samples: Vec<Duration>,
+    /// How late each call started against its schedule.
+    lags: Vec<Duration>,
     peaks: Peaks,
 }
 
@@ -309,11 +314,13 @@ async fn unary_load(pair: &Pair, load: &UnaryLoad, seconds: u64) -> UnaryResult 
             let failed = Arc::clone(&failed);
             let sender = sender.clone();
             tokio::spawn(async move {
+                let call = Instant::now();
                 let outcome = client.try_get_reply(&request).await;
+                let latency = call.elapsed();
                 in_flight.fetch_sub(1, Ordering::Relaxed);
                 match outcome {
                     Ok(_) => {
-                        let _ = sender.send(due.elapsed());
+                        let _ = sender.send((latency, call.saturating_duration_since(due)));
                     }
                     Err(_) => {
                         failed.fetch_add(1, Ordering::Relaxed);
@@ -331,8 +338,10 @@ async fn unary_load(pair: &Pair, load: &UnaryLoad, seconds: u64) -> UnaryResult 
     let elapsed = started.elapsed();
     drop(sender);
     let mut samples = Vec::new();
-    while let Some(sample) = receiver.recv().await {
+    let mut lags = Vec::new();
+    while let Some((sample, lag)) = receiver.recv().await {
         samples.push(sample);
+        lags.push(lag);
     }
     UnaryResult {
         offered: total,
@@ -341,6 +350,7 @@ async fn unary_load(pair: &Pair, load: &UnaryLoad, seconds: u64) -> UnaryResult 
         shed,
         elapsed,
         samples,
+        lags,
         peaks,
     }
 }
@@ -528,16 +538,16 @@ async fn soak_unary(options: &Options, flavor: &str) -> Result<bool, Error> {
     };
     println!("\n### Unary, open loop ({flavor}-thread runtime)\n");
     println!(
-        "| offered/s | payload | max in flight | completed/s | p50 | p99 | p99.9 | max | failed | shed | peak queued | peak owed | peak heap |"
+        "| offered/s | payload | max in flight | completed/s | p50 | p99 | p99.9 | max | start lag p99 | failed | shed | peak queued | peak owed | peak heap |"
     );
-    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for load in &unary_loads {
         let pair = Pair::start().await?;
         let mut result = unary_load(&pair, load, options.seconds).await;
         let throughput = f64::from(u32::try_from(result.completed).unwrap_or(u32::MAX))
             / result.elapsed.as_secs_f64();
         println!(
-            "| {} | {} B | {} | {throughput:.0} | {:.2?} | {:.2?} | {:.2?} | {:.2?} | {} | {} | {} B | {} | {:.1} MiB |",
+            "| {} | {} B | {} | {throughput:.0} | {:.2?} | {:.2?} | {:.2?} | {:.2?} | {:.2?} | {} | {} | {} B | {} | {:.1} MiB |",
             load.rate,
             load.payload,
             load.concurrency,
@@ -545,6 +555,7 @@ async fn soak_unary(options: &Options, flavor: &str) -> Result<bool, Error> {
             percentile(&mut result.samples, 990),
             percentile(&mut result.samples, 999),
             percentile(&mut result.samples, 1000),
+            percentile(&mut result.lags, 990),
             result.failed,
             result.shed,
             result.peaks.queued_bytes,
