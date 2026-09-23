@@ -1560,7 +1560,7 @@ impl WorkloadOrchestrator {
                 process_manager.abort_process(ip);
                 sim.abort_all_connections_for_ip(ip);
                 match cause {
-                    ProcessKillKind::GracePeriodExpired => {}
+                    ProcessKillKind::GracePeriodExpired | ProcessKillKind::RestartInPlace => {}
                     ProcessKillKind::Crash => sim.simulate_crash_for_process(ip, true),
                     ProcessKillKind::CrashAndWipe => {
                         sim.simulate_crash_for_process(ip, true);
@@ -1585,6 +1585,15 @@ impl WorkloadOrchestrator {
                     // kill, and boot one tick later, after the executor
                     // has drained the old boot: two boots of one process
                     // never overlap.
+                    // Recorded as a force kill so the aborted connections
+                    // have a cause in the fault timeline.
+                    obs.record_sim_fault(
+                        Self::sim_now_ms(sim),
+                        &SimFaultEvent::ProcessForceKill {
+                            ip: ip.to_string(),
+                            cause: ProcessKillKind::RestartInPlace,
+                        },
+                    );
                     process_manager.abort_process(ip);
                     sim.abort_all_connections_for_ip(ip);
                     sim.schedule_process_restart(ip, Duration::from_nanos(1));

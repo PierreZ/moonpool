@@ -202,12 +202,23 @@ impl FaultInjector for RestartInPlace {
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         let target = ctx.process_ips()[0].clone();
+        let boots_key = format!("boots:{target}");
+        let mut restarts = 0u64;
         for _ in 0..40 {
             if !CrashAndWatchWorker::pause(ctx, 3).await? {
                 break;
             }
             ctx.restart(&target)?;
+            restarts += 1;
         }
+        CrashAndWatchWorker::pause(ctx, 10).await?;
+        // Not vacuous: every restart booted a fresh instance, each of
+        // which checked its predecessor.
+        let boots: u64 = ctx.state().get(&boots_key).unwrap_or(0);
+        assert_always!(
+            restarts == 40 && boots == restarts + 1,
+            "every in-place restart booted a fresh instance"
+        );
         Ok(())
     }
 }
@@ -232,4 +243,9 @@ fn an_in_place_restart_never_overlaps_two_boots() {
         report.assertion_violations
     );
     assert_eq!(report.failed_runs, 0, "two boots of one process overlapped");
+    let booted = report
+        .assertion_results
+        .get("every in-place restart booted a fresh instance")
+        .map_or(0, |stats| stats.successes);
+    assert_eq!(booted, 5, "every seed restarted the process forty times");
 }

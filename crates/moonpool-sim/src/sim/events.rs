@@ -69,6 +69,11 @@ pub enum ProcessKillKind {
     /// A [`RebootKind::CrashAndWipe`](crate::RebootKind::CrashAndWipe) reboot:
     /// every persistent file owned by the process is deleted as well.
     CrashAndWipe,
+    /// [`FaultContext::restart`](crate::FaultContext::restart) of a
+    /// process that was still running: the old boot is killed (task, task
+    /// scope, connections; storage untouched, as when the process exits
+    /// on its own) and the fresh boot follows one tick later.
+    RestartInPlace,
 }
 
 impl Event {
