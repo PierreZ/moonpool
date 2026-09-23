@@ -30,7 +30,7 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 
 `u32 LE length | u64 LE XXH3-64(length ‖ payload) | payload`, where the
 payload is a hand-written, versioned envelope (kind, reply route, incarnation,
-token, method, schema, codec, reserved metadata) followed by the opaque body.
+token, interface, method, schema, codec, reserved metadata) followed by the opaque body.
 Each session opens with a `Hello` carrying the supported version range, the
 runtime incarnation, reserved feature bits, the frame limit and the listen
 address; `PING`/`PONG` frames carry liveness. See the `protocol`
