@@ -237,11 +237,12 @@ async fn produce(
                 let (sent_bytes, consumed) = ledger.sent(id, size, waited);
                 // The external bound on buffering: the producer never runs
                 // further ahead of what the consumer's application took than
-                // the window, give or take the one item a waiting consumer
-                // was handed (acknowledged on arrival, recorded when its
-                // task runs).
+                // the window. Exact: an item earns credit only when the
+                // application takes it, and the consumer records the take
+                // in the same task step, before its acknowledgement can
+                // be written.
                 assert_always!(
-                    sent_bytes.saturating_sub(consumed) <= window + size,
+                    sent_bytes.saturating_sub(consumed) <= window,
                     "a producer never runs ahead of consumption beyond its window"
                 );
             }

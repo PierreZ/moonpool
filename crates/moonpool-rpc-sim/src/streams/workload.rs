@@ -24,6 +24,7 @@ use super::messages::{
     DIRECTORY_ID, Directory, End, Listing, Lookup, Ping, Probe, SHUTDOWN_CODE, Scan, ScanItems,
 };
 use super::policy::streams_config;
+use super::stall::{ReadStall, Stalled};
 use super::state::{
     FAULTS_DONE_KEY, PRODUCER_BOOTS_KEY, PRODUCER_LABEL, ProducerEnd, REBOOT_REQUESTS_KEY,
     StreamLedger, WORKLOAD_LABEL,
@@ -58,12 +59,16 @@ pub enum StreamOp {
     Saturate,
     /// Many calls and streams at once, against squeezed budgets.
     Burst,
+    /// The consumer stops reading its socket: the producer's writer backs
+    /// up behind the full TCP window while acknowledgements, a cancel and a
+    /// unary request must still reach it.
+    Clog,
     /// Ask for a producer crash or graceful shutdown mid-stream.
     Reboot,
 }
 
 impl StreamOp {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Complete,
         Self::SlowReader,
         Self::SlowWriter,
@@ -75,6 +80,7 @@ impl StreamOp {
         Self::Oversize,
         Self::Saturate,
         Self::Burst,
+        Self::Clog,
         Self::Reboot,
     ];
 }
@@ -85,7 +91,7 @@ pub struct StreamsConfig {
     /// Operations per run.
     pub operations: usize,
     /// Relative weight per [`StreamOp`], in declaration order.
-    pub weights: [u32; 12],
+    pub weights: [u32; 13],
     /// Pause between operations, in milliseconds (half-open range).
     pub gap_ms: (u64, u64),
 }
@@ -96,7 +102,7 @@ impl StreamsConfig {
     pub fn campaign() -> Self {
         Self {
             operations: 28,
-            weights: [12, 7, 6, 6, 6, 5, 6, 4, 3, 5, 4, 4],
+            weights: [12, 7, 6, 6, 6, 5, 6, 4, 3, 5, 4, 5, 4],
             gap_ms: (5, 120),
         }
     }
@@ -171,6 +177,7 @@ pub struct StreamsWorkload {
     listing: Option<Listing>,
     stale: bool,
     ledger: StreamLedger,
+    stall: ReadStall,
 }
 
 type Streams = ServiceRef<ScanItems>;
@@ -189,6 +196,7 @@ impl StreamsWorkload {
             listing: None,
             stale: true,
             ledger: StreamLedger::default(),
+            stall: ReadStall::default(),
         }
     }
 
@@ -301,8 +309,8 @@ impl StreamsWorkload {
         }
     }
 
-    /// Take items from `stream` into the consumer ledger, checking order
-    /// and the buffer bound, until it ends, `limit` items were taken, or
+    /// Take items from `stream` into the consumer ledger, checking order,
+    /// until it ends, `limit` items were taken, or
     /// an item takes longer than `patience`.
     async fn read(
         &self,
@@ -335,10 +343,6 @@ impl StreamsWorkload {
                     assert_always!(
                         chunk.id == id && chunk.seq == expected,
                         "stream items arrive in order, without gaps or repeats"
-                    );
-                    assert_always!(
-                        stream.buffered_bytes() <= stream.window(),
-                        "a consumer never buffers more than its window"
                     );
                     let size = stream_item_frame_len(prost::Message::encoded_len(&chunk));
                     self.ledger.consume(id, chunk.seq, size, chunk.boot);
@@ -477,6 +481,7 @@ impl StreamsWorkload {
             }
             StreamOp::Saturate => self.saturate(ctx, rpc, streams, ping).await,
             StreamOp::Burst => self.burst(ctx, rpc, streams, ping).await,
+            StreamOp::Clog => self.clog(ctx, rpc, streams, ping).await,
             StreamOp::Reboot => self.reboot(ctx, rpc, streams).await,
         }
     }
@@ -755,6 +760,218 @@ impl StreamsWorkload {
         }
     }
 
+    /// Whether the current producer last reported at least `bytes` queued
+    /// behind its writer (reports come every 100 ms).
+    fn producer_queued(ctx: &SimContext, bytes: u64) -> bool {
+        let boots = ctx.state().get::<u64>(PRODUCER_BOOTS_KEY).unwrap_or(0);
+        Board::of(ctx.state())
+            .stats_with_prefix(&format!("{PRODUCER_LABEL}{boots}"))
+            .first()
+            .is_some_and(|(_, stats)| stats.queued_bytes >= bytes)
+    }
+
+    /// Endless streams with windows far larger than the TCP send window,
+    /// then the consumer stops reading its socket. The producer's writer
+    /// backs up behind the full TCP window; acknowledgements for buffered
+    /// items, a cancel and a unary request travel the other way and must
+    /// still take effect. Once reads resume, the unary reply arrives and
+    /// every stream resumes in order.
+    ///
+    /// Nothing producer-to-consumer can overtake the stalled bytes (TCP is
+    /// one ordered pipe): the unary reply, pongs and stream ends wait for
+    /// reads to resume. Control priority only orders what the producer
+    /// writes next.
+    async fn clog(
+        &mut self,
+        ctx: &SimContext,
+        rpc: &RpcHandle<SimProviders>,
+        streams: &Streams,
+        ping: &ServiceRef<Ping>,
+    ) {
+        let op = StreamOp::Clog;
+        let item = ctx.random().random_range(2000..8000);
+        let frame = stream_item_frame_len(item as usize + 40);
+        let running = self.clog_open(ctx, rpc, streams, item).await;
+        if running.is_empty() {
+            return;
+        }
+        // Let the windows fill the consumer's buffers, then stop reading.
+        let fill = Duration::from_millis(ctx.random().random_range(30..120));
+        if pause(ctx, fill).await.is_err() {
+            return;
+        }
+        let stalled = self.stall.stall();
+        let clog = Duration::from_millis(ctx.random().random_range(250..800));
+        if pause(ctx, clog / 2).await.is_err() {
+            return;
+        }
+        let mut backed_up = Self::producer_queued(ctx, 2 * frame);
+        // Acknowledgements: take what is already buffered; the credit it
+        // returns lets the producers queue more behind the blocked writer.
+        let before: Vec<usize> = running
+            .iter()
+            .map(|(id, _)| self.ledger.produced(*id).map_or(0, |p| p.items.len()))
+            .collect();
+        let (mut kept, ended) = self.take_buffered(ctx, running).await;
+        if pause(ctx, clog / 4).await.is_err() {
+            return;
+        }
+        backed_up |= Self::producer_queued(ctx, 2 * frame);
+        let resumed = kept.iter().zip(&before).any(|((id, _), before)| {
+            self.ledger
+                .produced(*id)
+                .is_some_and(|p| p.end.is_none() && p.items.len() > *before)
+        });
+        if backed_up {
+            assert_reachable!("rpc producer writer backed up behind a stalled reader");
+            if resumed {
+                assert_sometimes!(
+                    true,
+                    "rpc stream ack reached a producer with a blocked writer"
+                );
+            }
+        }
+        // A cancel: its producer must stop although its writer is blocked.
+        if kept.len() > 1
+            && let Some((id, stream)) = kept.pop()
+        {
+            drop(stream);
+            self.judge(id, op, Outcome::Abandoned);
+            for _ in 0..20 {
+                if self.ledger.produced(id).is_some_and(|p| p.end.is_some()) {
+                    if backed_up {
+                        assert_sometimes!(
+                            true,
+                            "rpc stream cancel reached a producer with a blocked writer"
+                        );
+                    }
+                    break;
+                }
+                if pause(ctx, Duration::from_millis(10)).await.is_err() {
+                    return;
+                }
+            }
+        }
+        self.clog_probe(ctx, rpc, ping, stalled, backed_up).await;
+        // Reads resumed: the queued items drain, in order.
+        let mut drained = !kept.is_empty();
+        for (id, mut stream) in kept {
+            let taken = self.ledger.consumed(id).items.len();
+            let read = self
+                .read(ctx, &mut stream, id, Pace::Eager, Some(taken + 2), LONG)
+                .await;
+            drained &= matches!(read, Read::Limit);
+            self.abandon_or_judge(read, stream, id, op, || {});
+        }
+        if drained && backed_up {
+            assert_sometimes!(true, "rpc streams resumed in order after a clog");
+        }
+        for (id, stream, read) in ended {
+            self.abandon_or_judge(read, stream, id, op, || {});
+        }
+    }
+
+    /// Open the clog's endless streams, with windows of many items, and
+    /// take the first item of each.
+    async fn clog_open(
+        &mut self,
+        ctx: &SimContext,
+        rpc: &RpcHandle<SimProviders>,
+        streams: &Streams,
+        item: u32,
+    ) -> Vec<(u64, ReplyStream<ScanItems>)> {
+        let op = StreamOp::Clog;
+        let count = ctx.random().random_range(2..5);
+        let mut running = Vec::new();
+        for _ in 0..count {
+            let scan = self.scan(0, item, End::Endless);
+            let window = Self::window(item, ctx.random().random_range(24..64));
+            let Some(mut stream) = self.open(streams, rpc, &scan, window, op) else {
+                continue;
+            };
+            match self
+                .read(ctx, &mut stream, scan.id, Pace::Eager, Some(1), LONG)
+                .await
+            {
+                Read::Limit => running.push((scan.id, stream)),
+                read => self.abandon_or_judge(read, stream, scan.id, op, || {}),
+            }
+        }
+        running
+    }
+
+    /// Take every item already buffered (no socket read needed), which
+    /// acknowledges them. Returns the streams still running and those that
+    /// ended.
+    async fn take_buffered(
+        &self,
+        ctx: &SimContext,
+        running: Vec<(u64, ReplyStream<ScanItems>)>,
+    ) -> (
+        Vec<(u64, ReplyStream<ScanItems>)>,
+        Vec<(u64, ReplyStream<ScanItems>, Read)>,
+    ) {
+        let mut ended = Vec::new();
+        let mut kept = Vec::new();
+        for (id, mut stream) in running {
+            let mut read = Read::Limit;
+            while stream.buffered_bytes() > 0 && matches!(read, Read::Limit) {
+                let taken = self.ledger.consumed(id).items.len();
+                read = self
+                    .read(ctx, &mut stream, id, Pace::Eager, Some(taken + 1), LONG)
+                    .await;
+            }
+            if matches!(read, Read::Limit) {
+                kept.push((id, stream));
+            } else {
+                ended.push((id, stream, read));
+            }
+        }
+        (kept, ended)
+    }
+
+    /// A unary request during the clog: it runs while the clog lasts; the
+    /// clog then clears (`stalled` dropped) and its reply arrives.
+    async fn clog_probe(
+        &mut self,
+        ctx: &SimContext,
+        rpc: &RpcHandle<SimProviders>,
+        ping: &ServiceRef<Ping>,
+        stalled: Stalled,
+        backed_up: bool,
+    ) {
+        let probe = Probe {
+            id: self.id(),
+            hold_ms: 0,
+        };
+        let client = ping.bind(rpc);
+        let ledger = &self.ledger;
+        let watch = async {
+            let mut ran = false;
+            for _ in 0..20 {
+                if ledger.probes(probe.id) > 0 {
+                    ran = true;
+                    break;
+                }
+                if pause(ctx, Duration::from_millis(10)).await.is_err() {
+                    break;
+                }
+            }
+            drop(stalled);
+            ran
+        };
+        let (reply, ran) = futures::join!(client.try_get_reply_within(&probe, LONG), watch);
+        match reply {
+            Ok(_) if ran && backed_up => {
+                assert_sometimes!(true, "rpc unary call ran during a clog, replied after");
+            }
+            Err(error) if *error.reason() == ErrorReason::Overloaded => {
+                self.refused_probes.push(RefusedProbe { id: probe.id });
+            }
+            _ => {}
+        }
+    }
+
     /// Ask the fault script to crash or gracefully stop the producer while
     /// a stream runs, and read the stream to its end.
     async fn reboot(&mut self, ctx: &SimContext, rpc: &RpcHandle<SimProviders>, streams: &Streams) {
@@ -942,8 +1159,12 @@ impl Workload for StreamsWorkload {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         self.ledger = StreamLedger::of(ctx.state());
-        let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), streams_config())
-            .map_err(|error| SimulationError::InvalidState(format!("rpc config: {error}")))?;
+        let (driver, rpc) = RpcDriver::client_only_with(
+            ctx.providers().clone(),
+            streams_config(),
+            self.stall.clone(),
+        )
+        .map_err(|error| SimulationError::InvalidState(format!("rpc config: {error}")))?;
         let board = Board::of(ctx.state());
         let probe = rpc.probe();
         if let Some(probe) = &probe {

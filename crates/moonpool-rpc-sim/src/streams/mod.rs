@@ -15,7 +15,10 @@
 //!   streams and consumes them eagerly, slowly or not at all; abandons them
 //!   before and after their first item; times out on them; saturates their
 //!   credit while checking that a unary call, a new stream and a cancel
-//!   still get through; bursts calls and streams against squeezed budgets;
+//!   still get through; clogs the session by stalling its own socket
+//!   reads ([`stall::ReadStall`]) so the producer's writer backs up behind
+//!   the full TCP window while acknowledgements, a cancel and a unary
+//!   request still reach it; bursts calls and streams against squeezed budgets;
 //!   asks for producer crashes and graceful shutdowns mid-stream; and at
 //!   the end, after the faults stopped, requires a fresh stream and a unary
 //!   call to succeed.
@@ -28,9 +31,10 @@
 //! producer sent, a producer's failure likewise; a refusal before
 //! admission never reached a producer, and a refused probe never ran; an
 //! abandoned stream's producer must stop (no orphan); a producer never runs
-//! further ahead of consumption than its window (plus the one item handed
-//! to a waiting reader). Nothing reads the transport's queues or credit to
-//! decide what should have happened.
+//! further ahead of what the application took than its window. Nothing
+//! reads the transport's queues or credit to decide what should have
+//! happened (the clog scenario reads the producer's reported queue only to
+//! know that its writer really backed up).
 //!
 //! **Faults.** Swarm network chaos with knob spikes, the delivery
 //! campaign's buggified peer policy, squeezed admission and stream budgets
@@ -41,6 +45,7 @@ pub mod faults;
 pub mod messages;
 mod policy;
 mod producer;
+pub mod stall;
 pub mod state;
 mod workload;
 

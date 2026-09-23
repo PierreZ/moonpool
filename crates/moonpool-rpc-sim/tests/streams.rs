@@ -79,6 +79,12 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc new stream progressed beside saturated ones",
         "rpc stream cancel took effect while the session was saturated",
         "rpc stream producer resumed after consumption",
+        // Clog: the producer's writer is blocked behind a stalled reader.
+        "rpc producer writer backed up behind a stalled reader",
+        "rpc stream ack reached a producer with a blocked writer",
+        "rpc stream cancel reached a producer with a blocked writer",
+        "rpc unary call ran during a clog, replied after",
+        "rpc streams resumed in order after a clog",
         // Admission budgets.
         "rpc request refused overloaded before admission",
         "rpc stream refused overloaded before admission",
