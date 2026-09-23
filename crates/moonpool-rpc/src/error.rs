@@ -39,8 +39,11 @@ pub enum ErrorReason {
         /// The method the endpoint was registered for.
         registered: MethodId,
     },
-    /// The endpoint is a group that does not serve the called method (it
-    /// never did, or its stream was dropped). Terminal for this reference.
+    /// The endpoint is a group that does not serve the called method right
+    /// now (it never did, or its stream was dropped). Never executed. Not
+    /// terminal for the reference: the group may serve the method later,
+    /// so retrying is the caller's decision
+    /// ([`RetryPolicy::retry_method_not_found`](crate::RetryPolicy::retry_method_not_found)).
     MethodNotFound {
         /// The method the caller invoked.
         called: MethodId,
@@ -242,7 +245,6 @@ impl RpcError {
             ErrorReason::EndpointNotFound
                 | ErrorReason::StaleIncarnation
                 | ErrorReason::MethodMismatch { .. }
-                | ErrorReason::MethodNotFound { .. }
                 | ErrorReason::InvalidReference(_)
                 | ErrorReason::InterfaceMismatch { .. }
                 | ErrorReason::SchemaMismatch { .. }
@@ -341,6 +343,10 @@ mod tests {
         assert_eq!(knowledge(WireError::ReplyTooLarge), Execution::Executed);
         assert_eq!(knowledge(WireError::ReplyEncodeFailed), Execution::Executed);
         assert_eq!(knowledge(WireError::MethodNotFound), Execution::NotAdmitted);
+        assert!(
+            !RpcError::from_wire(WireError::MethodNotFound, called).is_terminal_for_reference(),
+            "a group may serve the method later"
+        );
         let mismatch = RpcError::from_wire(
             WireError::InterfaceMismatch {
                 registered: (InterfaceId::new(7), SchemaVersion::new(1)),

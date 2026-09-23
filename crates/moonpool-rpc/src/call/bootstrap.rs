@@ -139,6 +139,11 @@ pub struct RetryPolicy {
     /// Also retry after [`Execution::MaybeExecuted`] outcomes (disconnects,
     /// timeouts after sending, broken promises).
     pub retry_ambiguous: bool,
+    /// Also retry [`ErrorReason::MethodNotFound`]: the group exists but
+    /// does not serve the method right now. Off by default, because a
+    /// method that is never served would be retried until the attempt
+    /// budget runs out.
+    pub retry_method_not_found: bool,
 }
 
 impl Default for RetryPolicy {
@@ -151,6 +156,7 @@ impl Default for RetryPolicy {
             attempt_timeout: Duration::from_secs(5),
             max_attempts: None,
             retry_ambiguous: false,
+            retry_method_not_found: false,
         }
     }
 }
@@ -158,18 +164,23 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Whether `error` may be retried under this policy.
     ///
-    /// Contract errors (method, schema or codec mismatch, frame limits,
-    /// encoding, reply problems) and shutdown never are; anything proven
+    /// Contract errors (interface, method, schema or codec mismatch, an
+    /// invalid reference, frame limits, encoding, reply problems) and
+    /// shutdown never are; [`ErrorReason::MethodNotFound`] (never executed,
+    /// but perhaps never served) only with `retry_method_not_found`;
+    /// anything else proven
     /// [`Execution::NotAdmitted`] is (a lookup or connect failure, an
     /// endpoint not registered yet, overload, a timeout before sending);
     /// [`Execution::MaybeExecuted`] only with `retry_ambiguous`;
     /// [`Execution::Executed`] never.
     #[must_use]
     pub fn permits(&self, error: &RpcError) -> bool {
+        if matches!(error.reason(), ErrorReason::MethodNotFound { .. }) {
+            return self.retry_method_not_found;
+        }
         let contract = matches!(
             error.reason(),
             ErrorReason::MethodMismatch { .. }
-                | ErrorReason::MethodNotFound { .. }
                 | ErrorReason::InvalidReference(_)
                 | ErrorReason::InterfaceMismatch { .. }
                 | ErrorReason::SchemaMismatch { .. }
@@ -446,5 +457,31 @@ impl<P: Providers, R: Resolver> BootstrapClient<P, R> {
             let _ = time.sleep(backoff.mul_f64(0.5 + draw / 2.0)).await;
             backoff = (backoff * 2).min(policy.max_backoff.max(policy.initial_backoff));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RetryPolicy;
+    use crate::error::{ErrorReason, Execution, RpcError};
+    use crate::protocol::MethodId;
+
+    #[test]
+    fn method_not_found_is_retried_only_on_request() {
+        let error = RpcError::not_admitted(ErrorReason::MethodNotFound {
+            called: MethodId::new(1),
+        });
+        assert!(!error.is_terminal_for_reference());
+        assert!(!RetryPolicy::default().permits(&error));
+        let patient = RetryPolicy {
+            retry_method_not_found: true,
+            ..RetryPolicy::default()
+        };
+        assert!(patient.permits(&error));
+        // Other not-admitted failures keep their rules.
+        let overloaded = RpcError::not_admitted(ErrorReason::Overloaded);
+        assert!(RetryPolicy::default().permits(&overloaded));
+        let executed = RpcError::new(ErrorReason::ReplyTooLarge, Execution::Executed);
+        assert!(!patient.permits(&executed));
     }
 }

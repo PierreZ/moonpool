@@ -30,7 +30,10 @@
 //! guard of admitted work: replying after the group is gone still reaches
 //! the caller over the session it came from. Dropping one method's stream
 //! removes only that method; the group keeps serving the others and the
-//! method may be served again under the same reference.
+//! method may be served again under the same reference. That is why
+//! [`MethodNotFound`](crate::ErrorReason::MethodNotFound) is not terminal
+//! for a reference (it proves only that this attempt never ran), while
+//! [`InterfaceMismatch`](crate::ErrorReason::InterfaceMismatch) is.
 //!
 //! # Fresh incarnations are explicit
 //!
