@@ -120,7 +120,9 @@ mod shared_mem;
 pub mod simulations;
 pub mod worker;
 
-pub use controller::{ExplorationConfig, ExplorationStats, ExploreJob, Explorer};
+pub use controller::{
+    DEFAULT_WORKER_TIMEOUT, ExplorationConfig, ExplorationStats, ExploreJob, Explorer,
+};
 pub use journal::{DiscoveryEvent, set_rng_count_hook};
 pub use replay::{ParseTimelineError, Recipe, format_timeline, parse_timeline};
 pub use sancov::{
