@@ -40,5 +40,9 @@ path = "src/bin/sim/rpc_delivery.rs"
 name = "sim-rpc-interfaces"
 path = "src/bin/sim/rpc_interfaces.rs"
 
+[[bin]]
+name = "sim-rpc-balance"
+path = "src/bin/sim/rpc_balance.rs"
+
 [lints]
 workspace = true

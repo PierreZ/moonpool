@@ -15,9 +15,15 @@
 //!   published, stored, recruited and forwarded to a third participant
 //!   across repeated same-address restarts, judged by boot, publication
 //!   and execution ledgers.
+//! - [`balance`]: the `sim-rpc-balance` campaign (#217): balanced calls
+//!   over explicit alternative sets under separate retry and duplicate
+//!   permissions, hedging, comparison copies, cancellation, late losers
+//!   and outages of every alternative, judged by receipt and attempt
+//!   ledgers.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+pub mod balance;
 pub mod delivery;
 pub mod foundations;
 pub mod interfaces;
