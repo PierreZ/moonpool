@@ -131,6 +131,9 @@ Moonpool deliberately skips:
 - **Congestion windows and flow control** (TCP slow start, etc.)
 - **DNS resolution**
 - **TLS handshakes** inside `SimNetwork`
+- **Nagle's algorithm and delayed ACKs**: a simulated write is delivered
+  after the scheduled latency, never held back waiting for an earlier
+  segment's acknowledgement
 
 Those concerns still need integration and production testing. The simulation
 focuses on application-visible timing, failure, and byte-stream behavior where
@@ -141,6 +144,15 @@ seeded replay gives the most leverage.
 The key architectural property is that **the same application code runs in both
 environments**. Production uses real TCP sockets. Simulation routes each
 connection and delivery through `SimWorld`.
+
+`TokioNetworkProvider` disables Nagle's algorithm (`TCP_NODELAY`) on every
+stream it connects or accepts, as FoundationDB's `Net2` does for every
+connection. Request/reply protocols (moonpool-rpc, hyper, tonic) write a
+small frame and wait for its answer; with Nagle on, that frame can wait for
+the previous segment's acknowledgement, a delayed-ACK timeout of added
+latency that the simulator never shows. With it off, production and
+simulated timing agree on this point. The setting is best-effort: a
+platform that refuses it leaves the connection as it is.
 
 ```text
 Application Code
