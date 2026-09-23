@@ -73,6 +73,14 @@ jobs:
         run: nix develop --command cargo clippy -p moonpool-rpc --no-default-features --all-targets -- --deny warnings
       - name: moonpool-rpc with its optional derive
         run: nix develop --command cargo clippy -p moonpool-rpc -p moonpool-rpc-derive --features moonpool-rpc/derive --all-targets -- --deny warnings
+      # The native security adapters (rustls + ring, jsonwebtoken) are
+      # non-default features: they do not build for wasm32, and the
+      # workspace test run enables only `jwt` (through moonpool-rpc-sim).
+      # Their real-TLS and real-token tests run here.
+      - name: moonpool-rpc with its native security features
+        run: |
+          nix develop --command cargo clippy -p moonpool-rpc --features tls,jwt --all-targets -- --deny warnings
+          nix develop --command cargo nextest run -p moonpool-rpc --features tls,jwt
       # nextest skips doctests; the RPC crate's examples and compile-fail
       # doctests (derive included) run here.
       - name: moonpool-rpc doctests
@@ -110,7 +118,7 @@ jobs:
           fi
       - name: moonpool-rpc production tree excludes sim/explorer
         run: |
-          for features in "--no-default-features" ""; do
+          for features in "--no-default-features" "" "--features tls,jwt"; do
             tree=$(nix develop --command cargo tree -p moonpool-rpc $features -e no-dev)
             echo "$tree"
             if echo "$tree" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-assertions|moonpool-buggify|tokio v"; then
@@ -123,6 +131,36 @@ jobs:
               exit 1
             fi
           done
+          # Declining the native security features keeps their crates out.
+          tree=$(nix develop --command cargo tree -p moonpool-rpc -e no-dev)
+          if echo "$tree" | grep -qE "rustls|ring v|jsonwebtoken"; then
+            echo "::error::moonpool-rpc pulled in TLS/JWT crates without their features"
+            exit 1
+          fi
+      - name: Facade rpc feature is optional and hyper stays RPC-independent
+        run: |
+          lean=$(nix develop --command cargo tree -p moonpool --no-default-features --features tokio -e no-dev)
+          if echo "$lean" | grep -qE "moonpool-rpc"; then
+            echo "::error::the lean facade pulled in moonpool-rpc"
+            exit 1
+          fi
+          rpc=$(nix develop --command cargo tree -p moonpool --no-default-features --features tokio,rpc -e no-dev)
+          echo "$rpc"
+          if ! echo "$rpc" | grep -qE "moonpool-rpc v"; then
+            echo "::error::the rpc facade feature did not pull in moonpool-rpc"
+            exit 1
+          fi
+          if echo "$rpc" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-hyper|moonpool-rpc-derive|rustls|jsonwebtoken"; then
+            echo "::error::the rpc facade feature pulled in more than moonpool-rpc"
+            exit 1
+          fi
+          hyper=$(nix develop --command cargo tree -p moonpool-hyper -e no-dev)
+          if echo "$hyper" | grep -qE "moonpool-rpc"; then
+            echo "::error::moonpool-hyper depends on moonpool-rpc"
+            exit 1
+          fi
+          nix develop --command cargo check -p moonpool --no-default-features --features tokio,rpc
+          nix develop --command cargo check -p moonpool --no-default-features --features tokio,rpc-tls,rpc-jwt,rpc-derive
 
   # The fork-based explorer must keep working on macOS, not just Linux: same
   # POSIX surface (fork/waitpid/mmap MAP_SHARED), but darwin is the platform
@@ -159,6 +197,7 @@ jobs:
           - rpc-interfaces
           - rpc-balance
           - rpc-streams
+          - rpc-security
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
