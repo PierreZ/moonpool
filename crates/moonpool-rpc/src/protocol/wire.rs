@@ -39,10 +39,10 @@
 //! - REQUEST: `interface` / `interface_version` name the endpoint group's
 //!   interface the reference was adjusted from; zero for a single-method
 //!   endpoint. The server compares them with the registration before the
-//!   method. `metadata` is a reserved, length-prefixed section for request
-//!   credentials (verified by the security package, #218). This version
-//!   sends it empty and ignores what it receives; it is never passed to a
-//!   handler. `flags` bit 0 marks a one-way request: the receiver never
+//!   method. `metadata` is a length-prefixed section: version 1 carries it
+//!   and ignores it; version 2 reads request credentials from it
+//!   ([`metadata`](super::metadata)), which the server's security check
+//!   verifies. It is never passed to a handler. `flags` bit 0 marks a one-way request: the receiver never
 //!   sends a reply or a rejection for it. Bit 1 opens a **reply stream**:
 //!   the request then carries the caller's credit `window` (accounted bytes
 //!   it buffers unconsumed) right after the flags, and its `call_id` names

@@ -9,8 +9,10 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 
 | Type | Role |
 |------|------|
-| `RpcDriver<P, U>` | the owned runtime: listener, connections, registry, pending calls; poll `run()`, drop to shut down |
-| `Connector` / `Acceptor` / `Plaintext` / `PeerContext` | the session upgrade seam (plaintext by default; TLS later) |
+| `RpcDriver<P, U>` | the owned runtime: listener, connections, registry, pending calls; poll `run()`, drop to shut down at once, or `RpcHandle::shutdown(grace)` to drain first (`ShutdownReport`) |
+| `Connector` / `Acceptor` / `Plaintext` / `PeerContext` | the session upgrade seam (plaintext by default; `security::tls::Tls` with the `tls` feature) |
+| `security::{SecurityConfig, RequestVerifier, AccessPolicy, Principal, Credential, CredentialSource, IpAllowList, UtcClock}` | who may call what: per-request credentials verified in admission, endpoint access policy (private endpoints fail closed by default), address allow lists, key rotation, the UTC validation clock; `security::jwt` (feature `jwt`) and `security::tls` (feature `tls`) |
+| `observability::RpcMetrics` | the counters and gauges as a bounded-label `MetricsSource` |
 | `RpcHandle<P>` | weak, cloneable handle: `register(AccessClass)`, `register_group`, `register_well_known`, `failure_monitor`, `stats`, `probe` |
 | `RpcMethod` | one method: `Request`/`Reply` types plus explicit `u32` `MethodId` and `u16` `SchemaVersion` |
 | `Wire` / `CodecId` | the body codec seam; every `prost::Message` is `Wire` (default `prost` feature) |
@@ -33,8 +35,10 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 
 `u32 LE length | u64 LE XXH3-64(length ‖ payload) | payload`, where the
 payload is a hand-written, versioned envelope (kind, reply route, incarnation,
-token, interface, method, schema, codec, reserved metadata) followed by the opaque body.
-Each session opens with a `Hello` carrying the supported version range, the
+token, interface, method, schema, codec, metadata: request credentials from
+protocol version 2) followed by the opaque body.
+Each session opens with a `Hello` carrying the supported version range (the
+session runs at the highest common version; `RpcConfig::protocol_versions`), the
 runtime incarnation, reserved feature bits, the frame limit and the listen
 address; `PING`/`PONG` frames carry liveness; `STREAM_ITEM`, `STREAM_END`,
 `STREAM_ACK` and `STREAM_CANCEL` carry reply streams. See the `protocol`,
@@ -49,6 +53,14 @@ address; `PING`/`PONG` frames carry liveness; `STREAM_ITEM`, `STREAM_END`,
 - `derive` (off): `#[moonpool_rpc::service]` generates an interface's
   markers, a dispatcher over its request streams and a typed client from a
   trait (`moonpool-rpc-derive`), on top of the manual API.
+- `tls` (off, native only): server-authenticated TLS 1.3 sessions over the
+  provider streams (`futures-rustls`, rustls with `ring`). Mutual TLS is not
+  provided.
+- `jwt` (off, native only): JWT/JWKS request verification (`jsonwebtoken`,
+  pure-Rust backend).
+
+The security policy itself (`SecurityConfig`, verifiers, policies, allow
+lists, key rotation, clocks) is always compiled, wasm included.
 
 The `recruitment` example publishes, restarts and recruits interfaces on
 real TCP with the manual API:

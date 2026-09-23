@@ -87,6 +87,13 @@ fn reply(error: WireError) -> WireMessage {
 
 /// Every version 1 message layout, as named in `wire-v1.txt`.
 fn v1_messages() -> Vec<(&'static str, WireMessage)> {
+    let mut messages = v1_sessions_and_requests();
+    messages.extend(v1_replies());
+    messages.extend(v1_streams());
+    messages
+}
+
+fn v1_sessions_and_requests() -> Vec<(&'static str, WireMessage)> {
     vec![
         ("hello-v1-only", hello(1, 1, None)),
         ("hello-v1-v2-listen-v4", hello(1, 2, Some("10.0.1.1:4500"))),
@@ -113,6 +120,13 @@ fn v1_messages() -> Vec<(&'static str, WireMessage)> {
                 },
             },
         ),
+        ("ping", WireMessage::Ping { nonce: 9 }),
+        ("pong", WireMessage::Pong { nonce: 9 }),
+    ]
+}
+
+fn v1_replies() -> Vec<(&'static str, WireMessage)> {
+    vec![
         (
             "reply-endpoint-not-found",
             reply(WireError::EndpointNotFound),
@@ -165,8 +179,11 @@ fn v1_messages() -> Vec<(&'static str, WireMessage)> {
                 endpoint_streams: true,
             }),
         ),
-        ("ping", WireMessage::Ping { nonce: 9 }),
-        ("pong", WireMessage::Pong { nonce: 9 }),
+    ]
+}
+
+fn v1_streams() -> Vec<(&'static str, WireMessage)> {
+    vec![
         (
             "stream-item",
             WireMessage::StreamItem {

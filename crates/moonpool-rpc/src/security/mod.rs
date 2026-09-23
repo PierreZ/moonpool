@@ -116,7 +116,14 @@ impl std::fmt::Debug for Credential {
 ///
 /// Asked again for **every** attempt, including each retransmission of a
 /// reliable call, so a refreshed token is picked up without restarting the
-/// call.
+/// call. Keep it quick and self-contained: a retransmission asks it while
+/// the runtime holds its internal lock, so it must never call back into
+/// the RPC runtime.
+///
+/// The credential is attached when the request is framed, before the
+/// runtime knows which session will carry it: a runtime that attaches
+/// bearer credentials should dial only over TLS (or run on a trusted
+/// network), or they travel in the clear.
 pub trait CredentialSource: Send + Sync + 'static {
     /// The credential for a request to `target`, or `None` to call
     /// anonymously.

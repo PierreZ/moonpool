@@ -152,15 +152,18 @@ impl std::fmt::Display for EndpointToken {
 /// Who may call an endpoint.
 ///
 /// Stored with every registration and carried in every
-/// [`ServiceRef`](crate::ServiceRef). Not enforced yet: the security
-/// package (#218) enforces it; declaring it now keeps references and
-/// registrations stable across that change.
+/// [`ServiceRef`](crate::ServiceRef), and enforced in admission by the
+/// runtime's [`SecurityConfig`](crate::security::SecurityConfig), for local
+/// and remote callers alike: by default a private endpoint refuses every
+/// caller it cannot verify (fail closed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum AccessClass {
-    /// Callable only by trusted peers.
+    /// Callable only by callers the access policy authorizes (by default:
+    /// a verified principal).
     #[default]
     Private,
-    /// Callable by any peer that passes request verification.
+    /// Callable by any caller that passes request verification (anonymous
+    /// callers included; a presented credential must still verify).
     Public,
 }
 

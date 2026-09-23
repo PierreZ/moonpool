@@ -98,8 +98,30 @@
 //! kept apart and both off by default.
 //!
 //! Sessions go through an upgrade seam ([`Connector`] / [`Acceptor`],
-//! [`Plaintext`] by default) that yields the session stream and a
-//! [`PeerContext`], then a versioned handshake.
+//! [`Plaintext`] by default, server-authenticated TLS with the `tls`
+//! feature) that yields the session stream and a [`PeerContext`], then a
+//! versioned handshake.
+//!
+//! ## Security, versions and shutdown
+//!
+//! Every request passes a security check in admission, locally as
+//! remotely: its credential ([`security::Credential`], verified by a
+//! [`security::RequestVerifier`], for example the JWT/JWKS adapter behind
+//! the `jwt` feature) and the endpoint's [`AccessClass`] under an
+//! [`security::AccessPolicy`]. **Private endpoints fail closed** by
+//! default; [`security::SecurityConfig::trusted_network`] opts out
+//! explicitly and claims nothing. See [`security`].
+//!
+//! Each session runs at the highest protocol version both sides speak
+//! ([`RpcConfig::protocol_versions`]); nothing newer than that version is
+//! sent or decoded, and a server that verifies credentials refuses older
+//! peers at the handshake. See [`protocol::wire`].
+//!
+//! [`RpcHandle::shutdown`] shuts a runtime down gracefully (close
+//! admission, drain on provider time, end the rest honestly, close every
+//! session); dropping the driver is the abrupt shutdown.
+//! [`observability::RpcMetrics`] exposes the counters as a bounded-label
+//! [`MetricsSource`](moonpool_core::MetricsSource).
 //!
 //! ## Contracts
 //!

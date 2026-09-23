@@ -375,7 +375,9 @@ pub enum InboundSharing {
     /// host from claiming a peer's identity; it does not stop another
     /// process on the claimed host, and it refuses peers behind NAT or with
     /// several addresses (they keep one connection per direction).
-    /// Authenticated peer identity arrives with #218.
+    /// No session upgrade authenticates the dialer (TLS here authenticates
+    /// servers only; mutual TLS is not provided), so the claim stays
+    /// unauthenticated whatever the upgrade.
     #[default]
     SameIp,
     /// Share on the claim alone (`FoundationDB`'s behaviour). Only for
