@@ -125,7 +125,7 @@ Where generics hurt, erase at an application boundary with a narrowly scoped tra
 **Target**: 100% success rate - no deadlocks/hangs acceptable
 
 **Multi-seed testing**: Default `UntilCoverageStable` runs adaptively until all assert_sometimes! statements have triggered and code coverage plateaus (`.until_coverage_stable(plateau_seeds, max_iterations)` to tune)
-**Failing seeds**: Debug with `SimulationBuilder::set_seed(failing_seed)` → fix root cause → verify → re-enable chaos
+**Failing seeds**: Debug with `SimulationBuilder::set_debug_seeds(vec![failing_seed])` → fix root cause → verify → re-enable chaos
 **Infrastructure events**: Tests terminate early when only partition-expiry events remain
 **Invariant checking**: Cross-workload properties validated after every simulation step
 **Goal**: Find bugs, not regression testing

@@ -171,7 +171,7 @@ The `buggify!()` and `buggify_with_prob!()` macros live in the zero-dependency `
 
 ```toml
 [dependencies]
-moonpool-buggify = "0.8"
+moonpool-buggify = "0.9"
 ```
 
 The crate owns only the disabled-by-default state and the macros. When a simulation run starts, `moonpool-sim` installs its deterministic seeded RNG into that shared state, so macros imported through either crate share activation decisions during simulation — and stay inert everywhere else. `moonpool-sim` re-exports both macros, so existing `moonpool_sim::buggify!` call sites are unchanged.
