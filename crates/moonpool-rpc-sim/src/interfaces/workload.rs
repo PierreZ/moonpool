@@ -19,8 +19,9 @@ use moonpool_sim::{
 use prost::Message;
 
 use super::messages::{
-    ADOPTER_ID, Adopt, Adopted, Adopter, DIRECTORY_ID, DISMISS_ID, Directory, Dismiss, Lookup,
-    Probe, Publication, RECRUITER_ID, Recruit, Recruiter, RoleClient,
+    ADOPTER_ID, Adopt, Adopted, Adopter, DIRECTORY_ID, DISMISS_ID, Directory, Dismiss,
+    ImpostorClient, ImpostorRef, Lookup, Probe, Publication, RECRUITER_ID, Recruit, Recruiter,
+    RoleClient,
 };
 use super::state::{Instance, Ledger, SCRIPT_DONE_KEY, WORKLOAD_LABEL};
 use super::{InterfacesRecord, InterfacesRecords};
@@ -47,10 +48,12 @@ pub enum InterfaceOp {
     Direct,
     /// Dismiss a recruited member, then call it.
     Dismiss,
+    /// Call a learned group through a reference to another interface.
+    Foreign,
 }
 
 impl InterfaceOp {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Lookup,
         Self::Call,
         Self::OneWay,
@@ -59,6 +62,7 @@ impl InterfaceOp {
         Self::Recruit,
         Self::Direct,
         Self::Dismiss,
+        Self::Foreign,
     ];
 }
 
@@ -68,7 +72,7 @@ pub struct InterfacesConfig {
     /// Operations per run.
     pub operations: usize,
     /// Relative weight per [`InterfaceOp`], in declaration order.
-    pub weights: [u32; 8],
+    pub weights: [u32; 9],
     /// Pause between operations, in milliseconds (half-open range).
     pub gap_ms: (u64, u64),
 }
@@ -79,7 +83,7 @@ impl InterfacesConfig {
     pub fn campaign() -> Self {
         Self {
             operations: 50,
-            weights: [10, 20, 6, 8, 10, 10, 8, 5],
+            weights: [10, 20, 6, 8, 10, 10, 8, 5, 5],
             gap_ms: (20, 300),
         }
     }
@@ -145,6 +149,8 @@ pub struct InterfacesWorkload {
     /// Participants whose learned interface was refused as stale, until a
     /// lookup replaced it.
     refused: BTreeMap<String, u64>,
+    /// Probe ids sent through a foreign-interface reference.
+    foreign: Vec<u64>,
 }
 
 impl InterfacesWorkload {
@@ -162,6 +168,7 @@ impl InterfacesWorkload {
             stored: Vec::new(),
             recruited: Vec::new(),
             refused: BTreeMap::new(),
+            foreign: Vec::new(),
         }
     }
 
@@ -652,6 +659,40 @@ impl InterfacesWorkload {
         }
     }
 
+    /// Call a learned group through a reference naming another interface
+    /// with the same method id, schema and codecs: the server refuses it
+    /// before decoding, and it never executes.
+    async fn foreign(&mut self, ctx: &SimContext, rpc: &RpcHandle<SimProviders>) {
+        let Some(publication) = self.target(ctx, rpc).await else {
+            return;
+        };
+        let Some(role) = publication.role.as_ref() else {
+            return;
+        };
+        let impostor = ImpostorRef::new(role.endpoint(), role.access());
+        let probe = self.probe(&publication);
+        let outcome = match ImpostorClient::bind(&impostor, rpc) {
+            Ok(client) => {
+                client
+                    .status()
+                    .try_get_reply_within(&probe, CALL_TIMEOUT)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        assert_always!(
+            outcome.is_err(),
+            "a reference to another interface never gets a reply"
+        );
+        if matches!(&outcome, Err(error) if matches!(error.reason(), ErrorReason::InterfaceMismatch { .. }))
+        {
+            assert_sometimes!(true, "rpc foreign interface refused before any handler");
+        }
+        // Judged with the rest: a not-admitted outcome must show no run.
+        self.record(InterfaceOp::Foreign, &probe, true, &outcome);
+        self.foreign.push(probe.id);
+    }
+
     async fn drive(&mut self, ctx: &SimContext, rpc: &RpcHandle<SimProviders>) {
         for _ in 0..self.config.operations {
             let gap = ctx
@@ -671,6 +712,7 @@ impl InterfacesWorkload {
                 InterfaceOp::Recruit => self.recruit(ctx, rpc).await,
                 InterfaceOp::Direct => self.direct(ctx, rpc).await,
                 InterfaceOp::Dismiss => self.dismiss(ctx, rpc).await,
+                InterfaceOp::Foreign => self.foreign(ctx, rpc).await,
             }
         }
         // After the faults: every participant is reachable again through
@@ -765,6 +807,12 @@ impl Workload for InterfacesWorkload {
             if call.single_attempt && call.class == Class::Maybe && !executions.is_empty() {
                 one_way_executed = true;
             }
+        }
+        for id in &self.foreign {
+            assert_always!(
+                ledger.executions(*id).is_empty(),
+                "a foreign-interface call never executed"
+            );
         }
         assert_sometimes!(
             one_way_executed,

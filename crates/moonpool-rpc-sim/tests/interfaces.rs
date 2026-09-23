@@ -82,6 +82,7 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc recruited interface invoked by a third participant",
         "rpc recruited interface refused after its participant restarted",
         "rpc dismissed recruited interface refused",
+        "rpc foreign interface refused before any handler",
         "rpc ambiguous interface call executed in its published instance",
         "rpc every participant answered a fresh publication at the end",
     ] {

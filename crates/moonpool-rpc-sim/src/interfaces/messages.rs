@@ -25,6 +25,15 @@ pub trait Role {
     async fn note(&self, request: Probe);
 }
 
+/// An interface no participant serves, whose methods share `Role`'s ids,
+/// schemas and codecs: a reference to it must be refused by the server.
+#[moonpool_rpc::service(id = 0x0215_0002, version = 1)]
+pub trait Impostor {
+    /// `Role::status`'s shape under another interface.
+    #[method(id = 1, schema = 1)]
+    async fn status(&self, request: Probe) -> Answer;
+}
+
 /// A call to a role instance, carrying who the caller expects to reach: the
 /// identities of the publication its reference came from.
 #[derive(Clone, PartialEq, prost::Message)]

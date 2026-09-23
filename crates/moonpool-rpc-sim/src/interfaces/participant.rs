@@ -93,6 +93,8 @@ struct Instances {
     boot: u64,
     ledger: Ledger,
     servers: BTreeMap<u64, (RoleServer, Arc<RoleInstance>)>,
+    /// Where the next poll starts, so no instance starves the others.
+    cursor: usize,
 }
 
 impl Instances {
@@ -132,11 +134,18 @@ impl Instances {
         }
     }
 
-    /// The next role request of any instance, with its handler.
+    /// The next role request of any instance, with its handler; instances
+    /// are polled in rotation, starting after the one that yielded last.
     async fn next(&mut self) -> (Arc<RoleInstance>, RoleRequest) {
         futures::future::poll_fn(|cx| {
-            for (server, handler) in self.servers.values_mut() {
+            let count = self.servers.len();
+            for offset in 0..count {
+                let slot = (self.cursor + offset) % count;
+                let Some((server, handler)) = self.servers.values_mut().nth(slot) else {
+                    continue;
+                };
                 if let Poll::Ready(Some(request)) = server.poll_next(cx) {
+                    self.cursor = (slot + 1) % count;
                     return Poll::Ready((Arc::clone(handler), request));
                 }
             }
@@ -183,6 +192,7 @@ impl Process for Participant {
             boot,
             ledger,
             servers: BTreeMap::new(),
+            cursor: 0,
         };
         let result = moonpool_sim::select! {
             error = driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
