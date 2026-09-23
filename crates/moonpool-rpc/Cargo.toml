@@ -55,5 +55,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", 
 name = "recruitment"
 required-features = ["prost"]
 
+[[example]]
+name = "balanced_mutation"
+required-features = ["prost"]
+
 [lints]
 workspace = true
