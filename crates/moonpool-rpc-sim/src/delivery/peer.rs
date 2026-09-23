@@ -109,7 +109,7 @@ async fn call_other(rpc: &RpcHandle<SimProviders>, ctx: &SimContext, other: Opti
         }
         if let Some(stats) = rpc.stats() {
             assert_sometimes!(
-                stats.redundant_connections > 0 && outcome.is_ok(),
+                stats.replaced_connections > 0 && outcome.is_ok(),
                 "rpc simultaneous connect resolved to one shared connection"
             );
             assert_sometimes!(

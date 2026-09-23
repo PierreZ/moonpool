@@ -19,8 +19,8 @@ use futures::io::{AsyncRead, AsyncWrite};
 use moonpool_core::{Resolver, TokioProviders};
 use moonpool_rpc::{
     Acceptor, AccessClass, AddressState, BootstrapAddress, BootstrapClient, Connector,
-    EndpointState, ErrorReason, Execution, IncomingRequest, MethodId, PeerContext, PeerPolicy,
-    RequestStream, RetryPolicy, RpcConfig, RpcDriver, RpcError, RpcHandle, RpcMethod,
+    EndpointState, ErrorReason, Execution, InboundSharing, IncomingRequest, MethodId, PeerContext,
+    PeerPolicy, RequestStream, RetryPolicy, RpcConfig, RpcDriver, RpcError, RpcHandle, RpcMethod,
     SchemaVersion, WellKnownId, WellKnownRef,
 };
 use tokio::sync::mpsc;
@@ -68,8 +68,9 @@ fn fast() -> RpcConfig {
         peer: PeerPolicy {
             initial_reconnect_delay: Duration::from_millis(10),
             max_reconnect_delay: Duration::from_millis(50),
-            ping_interval: Duration::from_millis(50),
-            ping_timeout: Duration::from_millis(150),
+            // Generous against scheduler stalls on small test runtimes.
+            ping_interval: Duration::from_millis(200),
+            ping_timeout: Duration::from_secs(1),
             failure_detection_delay: Duration::from_millis(200),
             ..PeerPolicy::default()
         },
@@ -518,7 +519,7 @@ async fn shared_connection() {
         eprintln!(
             "adopted {} redundant {}",
             stats.0.adopted_connections + stats.1.adopted_connections,
-            stats.0.redundant_connections + stats.1.redundant_connections
+            stats.0.replaced_connections + stats.1.replaced_connections
         );
         left_driver.abort();
         right_driver.abort();
@@ -614,8 +615,9 @@ async fn cancellation_during_backoff_is_not_admitted_and_releases_retention() {
         listener.local_addr().expect("address")
     };
     let mut config = fast();
-    config.peer.initial_reconnect_delay = Duration::from_millis(500);
-    config.peer.max_reconnect_delay = Duration::from_secs(2);
+    // A wide backoff window, so the cancellation lands inside it.
+    config.peer.initial_reconnect_delay = Duration::from_secs(3);
+    config.peer.max_reconnect_delay = Duration::from_secs(10);
     let (client, client_driver) = client_with(config, moonpool_rpc::Plaintext);
     let target = moonpool_rpc::ServiceRef::<Echo>::new(
         moonpool_rpc::Endpoint::new(
@@ -803,6 +805,251 @@ async fn bootstrap_resolves_invalidates_and_retries() {
     assert_eq!(reply.id, 4);
     let stats = bootstrap.stats();
     assert!(stats.retries >= 1 && stats.lookups >= 2, "{stats:?}");
+    server_driver.abort();
+    client_driver.abort();
+}
+
+/// A listening runtime that shares sessions and one that does not still
+/// call each other in both directions: the sharing side never locks the
+/// other out, and neither adopts anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_sharing_settings_never_lock_a_peer_out() {
+    let mut off = fast();
+    off.peer.share_inbound_sessions = InboundSharing::Disabled;
+    for (left_config, right_config) in [(fast(), off.clone()), (off.clone(), fast())] {
+        let (left, left_driver) = listen(left_config).await;
+        let (right, right_driver) = listen(right_config).await;
+        let (left_ref, left_stream) = left
+            .register::<Echo>(AccessClass::Public)
+            .expect("register");
+        let (right_ref, right_stream) = right
+            .register::<Echo>(AccessClass::Public)
+            .expect("register");
+        let _l = serve_echo(left_stream);
+        let _r = serve_echo(right_stream);
+        let to_right = right_ref.bind(&left);
+        let to_left = left_ref.bind(&right);
+        for round in 0..10 {
+            let ping = Ping { id: round };
+            let (a, b) = tokio::join!(
+                to_right.try_get_reply_within(&ping, Duration::from_secs(5)),
+                to_left.try_get_reply_within(&ping, Duration::from_secs(5))
+            );
+            assert!(a.is_ok() && b.is_ok(), "round {round}: {a:?} {b:?}");
+        }
+        let (l, r) = (
+            left.stats().expect("running"),
+            right.stats().expect("running"),
+        );
+        assert_eq!(
+            l.adopted_connections + r.adopted_connections,
+            0,
+            "{l:?} {r:?}"
+        );
+        left_driver.abort();
+        right_driver.abort();
+    }
+}
+
+/// A raw session that sends a `Hello`, claims `listen`, and stays open.
+async fn claim(address: &str, listen: &str) -> tokio::net::TcpStream {
+    use moonpool_rpc::protocol::{
+        MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, WireMessage, encode_frame,
+        encode_message,
+    };
+    use tokio::io::AsyncWriteExt;
+    let hello = encode_frame(
+        &encode_message(&WireMessage::Hello {
+            magic: PROTOCOL_MAGIC,
+            min_version: MIN_PROTOCOL_VERSION,
+            max_version: PROTOCOL_VERSION,
+            incarnation: moonpool_rpc::Incarnation::from_raw(77),
+            features: 0,
+            max_frame_bytes: 1024,
+            listen: listen.parse().ok(),
+        }),
+        1024,
+    )
+    .expect("frame");
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect");
+    stream.write_all(&hello).await.expect("write");
+    stream
+}
+
+/// A session claiming another host's address is served but never becomes
+/// the connection to that address; a same-host claim is adopted (the
+/// documented residual); the peer table stays bounded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claimed_listen_addresses_are_checked_and_bounded() {
+    let mut config = fast();
+    config.peer.max_tracked_addresses = 3;
+    let (server, server_driver) = listen(config).await;
+    let address = server.address().expect("listening").to_string();
+    let mut sessions = Vec::new();
+    sessions.push(claim(&address, "10.9.9.9:4500").await);
+    assert!(
+        eventually(|| server
+            .stats()
+            .is_some_and(|stats| stats.unverified_listen_addresses == 1))
+        .await
+    );
+    let monitor = server.failure_monitor().expect("running");
+    assert_eq!(
+        monitor.disconnects("10.9.9.9:4500".parse().expect("literal")),
+        0,
+        "a spoofed claim never touches the claimed address"
+    );
+    for port in 40_001..40_007 {
+        sessions.push(claim(&address, &format!("127.0.0.1:{port}")).await);
+    }
+    assert!(
+        eventually(|| server
+            .stats()
+            .is_some_and(|stats| { stats.adopted_connections + stats.peer_table_full == 6 }))
+        .await,
+        "{:?}",
+        server.stats()
+    );
+    let stats = server.stats().expect("running");
+    assert_eq!(stats.adopted_connections, 3, "{stats:?}");
+    assert!(stats.peers <= 3, "{stats:?}");
+    drop(sessions);
+    server_driver.abort();
+}
+
+/// Dials that always fail at one side and succeed at the other.
+#[derive(Clone, Default)]
+struct DialSwitch {
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<S> Connector<S> for DialSwitch
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = S;
+    async fn connect(&self, stream: S, peer: &str) -> io::Result<(S, PeerContext)> {
+        if self.refuse.load(Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "one-way"));
+        }
+        Ok((stream, PeerContext::new(peer)))
+    }
+}
+
+impl<S> Acceptor<S> for DialSwitch
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = S;
+    async fn accept(&self, stream: S, peer: &str) -> io::Result<(S, PeerContext)> {
+        Ok((stream, PeerContext::new(peer)))
+    }
+}
+
+/// One-way reachability: the larger address cannot dial the smaller, which
+/// can dial it. After `always_accept_after` of failed dials the larger
+/// side adopts the smaller side's session instead of keeping its own
+/// hopeless dial, so its reliable call gets through (FDB's
+/// `ALWAYS_ACCEPT_DELAY`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_we_cannot_dial_stays_reachable_through_its_dial() {
+    let mut config = fast();
+    config.peer.always_accept_after = Duration::from_millis(300);
+    let switches = [DialSwitch::default(), DialSwitch::default()];
+    let mut runtimes = Vec::new();
+    for switch in &switches {
+        let (driver, rpc) = RpcDriver::listen_with(
+            TokioProviders::new(),
+            "127.0.0.1:0",
+            config.clone(),
+            switch.clone(),
+        )
+        .await
+        .expect("bind");
+        runtimes.push((rpc, tokio::spawn(driver.run())));
+    }
+    // The larger address is the one that cannot dial.
+    let larger = usize::from(runtimes[1].0.address() > runtimes[0].0.address());
+    let smaller = 1 - larger;
+    switches[larger].refuse.store(true, Ordering::SeqCst);
+    let (big, small) = (&runtimes[larger].0, &runtimes[smaller].0);
+    let (small_ref, small_stream) = small
+        .register::<Echo>(AccessClass::Public)
+        .expect("register");
+    let (big_ref, big_stream) = big.register::<Echo>(AccessClass::Public).expect("register");
+    let _s = serve_echo(small_stream);
+    let _b = serve_echo(big_stream);
+    // The larger side starts dialing (and failing) first.
+    let stuck = tokio::spawn({
+        let to_small = small_ref.bind(big);
+        async move { to_small.get_reply(&Ping { id: 1 }).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The smaller side's dial arrives while the larger one is still failing.
+    let to_big = big_ref.bind(small);
+    assert!(to_big.try_get_reply(&Ping { id: 2 }).await.is_ok());
+    let reply = tokio::time::timeout(Duration::from_secs(10), stuck)
+        .await
+        .expect("delivered through the adopted session")
+        .expect("join")
+        .expect("reply");
+    assert_eq!(reply.id, 1);
+    let stats = big.stats().expect("running");
+    assert!(stats.accepted_over_stalled_dial >= 1, "{stats:?}");
+    for (_, driver) in runtimes {
+        driver.abort();
+    }
+}
+
+/// Retained requests beyond a connection's request cap are all sent again
+/// after a reconnect: retransmission is never refused as overloaded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retransmission_is_not_bounded_by_the_request_queue() {
+    let (server, server_driver) = listen(fast()).await;
+    let (service, mut stream) = server
+        .register::<Held>(AccessClass::Public)
+        .expect("register");
+    let wire = Cuttable::default();
+    let mut config = fast();
+    config.max_queued_requests = 4;
+    let (client, client_driver) = client_with(config, wire.clone());
+    let held = service.bind(&client);
+    let calls = 20u64;
+    let mut pending = Vec::new();
+    let mut first = Vec::new();
+    for id in 0..calls {
+        let held = held.clone();
+        pending.push(tokio::spawn(
+            async move { held.get_reply(&Ping { id }).await },
+        ));
+        // One at a time, so the request cap is never hit before the cut.
+        first.push(stream.recv().await.expect("request"));
+    }
+    wire.cut(SEVERED);
+    drop(first);
+    // Every retained request comes back over the next connection.
+    let mut seen = std::collections::BTreeSet::new();
+    while seen.len() < 20 {
+        let IncomingRequest { request, reply } =
+            tokio::time::timeout(Duration::from_secs(10), stream.recv())
+                .await
+                .expect("retransmitted in time")
+                .expect("request");
+        seen.insert(request.id);
+        let _ = reply.send(&Pong {
+            id: request.id,
+            execution: 2,
+        });
+    }
+    for call in pending {
+        let reply = call.await.expect("join").expect("reliable reply");
+        assert_eq!(reply.execution, 2);
+    }
+    assert_eq!(seen.len(), 20);
+    let stats = client.stats().expect("running");
+    assert!(stats.retransmissions >= calls, "{stats:?}");
     server_driver.abort();
     client_driver.abort();
 }

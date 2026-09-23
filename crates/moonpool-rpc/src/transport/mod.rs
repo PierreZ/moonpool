@@ -29,11 +29,12 @@
 //! Calls to a remote address ride that address's **selected connection**
 //! (see [`peer`]). It is dialed on demand, re-dialed with a jittered
 //! backoff after it ends, pinged while it lives and closed once idle. An
-//! accepted session whose `Hello` names a listen address becomes the
-//! selected connection to that address when none exists, so two runtimes
-//! calling each other share one connection; when both dial at once, the
-//! runtime with the larger canonical address keeps the connection it
-//! dialed and both close the other (`FoundationDB`'s
+//! accepted session whose `Hello` names a listen address (verified per
+//! [`InboundSharing`](crate::InboundSharing)) becomes the selected
+//! connection to that address when none exists, so two runtimes calling
+//! each other share one connection; when both dial at once, the runtime
+//! with the larger canonical address keeps the connection it dialed and
+//! the other adopts it and closes its own (`FoundationDB`'s
 //! `Peer::onIncomingConnection`).
 //!
 //! # Delivery
@@ -265,7 +266,11 @@ impl<P: Providers> Shared<P> {
             incarnation: self.incarnation,
             features: 0,
             max_frame_bytes: self.config.max_frame_bytes,
-            listen: self.address,
+            // Announced only when this runtime shares sessions: a peer then
+            // knows the tie-break applies on both sides.
+            listen: self.address.filter(|_| {
+                self.config.peer.share_inbound_sessions != crate::config::InboundSharing::Disabled
+            }),
         });
         // A handshake is a few dozen bytes and exempt from the configured
         // frame limit, which only bounds what peers may send us.
@@ -373,6 +378,23 @@ impl<P: Providers> Shared<P> {
         state: &mut State,
         address: SocketAddr,
     ) -> Result<Arc<Connection>, RpcError> {
+        let now = self.now();
+        if let Some(peer) = state.peers.get(&address)
+            && peer.dialing_stalled(now, self.config.peer.always_accept_after)
+            && let Some(candidate) = peer.usable_candidate()
+        {
+            // Our own dials keep failing while the peer's session to us
+            // works: use it (`ALWAYS_ACCEPT_DELAY`).
+            let replaced = peer
+                .live()
+                .filter(|current| !current.is_established())
+                .cloned();
+            if peer.live().is_none() || replaced.is_some() {
+                Counters::bump(&self.counters.accepted_over_stalled_dial);
+                self.adopt(state, address, &candidate, replaced, now);
+                return Ok(candidate);
+            }
+        }
         if let Some(existing) = state.peers.get(&address).and_then(Peer::live) {
             return Ok(Arc::clone(existing));
         }
@@ -383,7 +405,6 @@ impl<P: Providers> Shared<P> {
         if !state.peers.contains_key(&address)
             && state.peers.len() >= self.config.peer.max_tracked_addresses
         {
-            let now = self.now();
             state.peers.retain(|_, peer| !peer.is_forgettable(now));
         }
         let connection = self.new_connection(state, address.to_string(), Direction::Outbound);

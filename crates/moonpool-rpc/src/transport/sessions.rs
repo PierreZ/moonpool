@@ -8,9 +8,9 @@ use moonpool_core::Providers;
 
 use super::connection::{CloseReason, Connection, Direction, PeerHello};
 use super::peer::Peer;
-use super::{Admission, Origin, Shared};
+use super::{Admission, Origin, Shared, State};
 use crate::call::reply::{Outstanding, ReplyRoute};
-use crate::config::MIN_FRAME_BYTES;
+use crate::config::{InboundSharing, MIN_FRAME_BYTES};
 use crate::error::CallIdentity;
 use crate::protocol::{
     MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, REQUEST_FLAG_ONE_WAY, WireMessage,
@@ -27,14 +27,6 @@ struct Hello {
     features: u64,
     max_frame_bytes: u32,
     listen: Option<SocketAddr>,
-}
-
-/// What to do with an accepted session that names a listen address.
-enum Selection {
-    /// Make it the selected connection; close the one it replaces.
-    Adopt(Option<Arc<Connection>>),
-    /// This side's own dial wins the tie-break: close the accepted session.
-    Redundant,
 }
 
 impl<P: Providers> Shared<P> {
@@ -161,7 +153,7 @@ impl<P: Providers> Shared<P> {
         if connection.direction() == Direction::Inbound
             && let Some(listen) = listen
         {
-            self.select_inbound(connection, listen)?;
+            self.select_inbound(connection, listen);
         }
         connection.establish(
             PeerHello {
@@ -172,7 +164,13 @@ impl<P: Providers> Shared<P> {
             self.now(),
         );
         if let Some(address) = connection.peer_address() {
-            let changed = self.lock().monitor.connected(address);
+            let changed = {
+                let mut state = self.lock();
+                if let Some(peer) = state.peers.get_mut(&address) {
+                    peer.established();
+                }
+                state.monitor.connected(address)
+            };
             if changed {
                 self.watch.notify();
             }
@@ -193,47 +191,112 @@ impl<P: Providers> Shared<P> {
     /// whether it becomes this runtime's selected connection to that
     /// address.
     ///
-    /// No selected connection yet: adopt it. The selected connection is an
-    /// earlier accepted session: the peer dialed again, so the new one
-    /// replaces it. The selected connection is this runtime's own dial
-    /// (both sides dialed at once): the larger canonical address keeps the
-    /// connection it dialed, so adopt when `listen` is larger than this
-    /// runtime's address and refuse otherwise. Both sides reach the same
-    /// verdict. Queued, never-written requests move to the adopted
-    /// connection; anything already written rides the replaced one down.
-    fn select_inbound(
-        &self,
-        connection: &Arc<Connection>,
-        listen: SocketAddr,
-    ) -> Result<(), CloseReason> {
+    /// Only when sharing is on, the claim passes the [`InboundSharing`]
+    /// check, and the peer table has room. Then, following `FoundationDB`'s
+    /// `Peer::onIncomingConnection`: with no selected connection, adopt it;
+    /// the selected connection is an earlier accepted session (the peer
+    /// dialed again), replace it; the selected connection is this
+    /// runtime's own dial, adopt when `listen` is larger than this
+    /// runtime's address (the larger address keeps the connection *it*
+    /// dialed, so the smaller side gives its own up), or when that dial has
+    /// failed to establish for [`PeerPolicy::always_accept_after`]
+    /// (`ALWAYS_ACCEPT_DELAY`: a peer that can dial us but that we cannot
+    /// dial stays reachable). Otherwise the accepted session is only served.
+    ///
+    /// Unlike `FoundationDB`, the larger side never closes the other's dial:
+    /// the smaller side closes it itself once it adopted the larger side's
+    /// dial. A peer that cannot or will not adopt (sharing off, an
+    /// unverified claim, a full table) is therefore never locked out; the
+    /// pair just keeps one connection per direction. Queued, never-written
+    /// requests move to the adopted connection; anything already written
+    /// rides the replaced one down.
+    ///
+    /// [`InboundSharing`]: crate::InboundSharing
+    /// [`PeerPolicy::always_accept_after`]: crate::PeerPolicy::always_accept_after
+    fn select_inbound(&self, connection: &Arc<Connection>, listen: SocketAddr) {
         let Some(local) = self.address else {
-            return Ok(());
+            return;
         };
-        if !self.config.peer.share_inbound_sessions || listen == local {
-            return Ok(());
+        if listen == local {
+            return;
+        }
+        match self.config.peer.share_inbound_sessions {
+            InboundSharing::Disabled => return,
+            InboundSharing::Trusted => {}
+            InboundSharing::SameIp => {
+                let observed = connection
+                    .peer()
+                    .parse::<SocketAddr>()
+                    .ok()
+                    .map(|address| address.ip());
+                if observed != Some(listen.ip()) {
+                    Counters::bump(&self.counters.unverified_listen_addresses);
+                    tracing::debug!(
+                        %listen,
+                        peer = %connection.peer(),
+                        "rpc accepted session claims another host's address; served only"
+                    );
+                    return;
+                }
+            }
         }
         let now = self.now();
         let mut state = self.lock();
+        if !state.peers.contains_key(&listen)
+            && state.peers.len() >= self.config.peer.max_tracked_addresses
+        {
+            state.peers.retain(|_, peer| !peer.is_forgettable(now));
+            if state.peers.len() >= self.config.peer.max_tracked_addresses {
+                drop(state);
+                Counters::bump(&self.counters.peer_table_full);
+                tracing::debug!(%listen, "rpc peer table full; accepted session served only");
+                return;
+            }
+        }
+        let always_accept = self.config.peer.always_accept_after;
         let peer = state
             .peers
             .entry(listen)
             .or_insert_with(|| Peer::new(&self.config.peer));
-        let selection = match peer.live() {
-            None => Selection::Adopt(None),
-            Some(current) if current.direction() == Direction::Inbound => {
-                Selection::Adopt(Some(Arc::clone(current)))
+        let stalled = peer.dialing_stalled(now, always_accept);
+        let replaced = match peer.live() {
+            None => None,
+            Some(current) if current.direction() == Direction::Inbound => Some(Arc::clone(current)),
+            Some(current) if listen > local => Some(Arc::clone(current)),
+            Some(current) if stalled && !current.is_established() => {
+                Counters::bump(&self.counters.accepted_over_stalled_dial);
+                Some(Arc::clone(current))
             }
-            Some(current) if listen > local => Selection::Adopt(Some(Arc::clone(current))),
-            Some(_) => Selection::Redundant,
+            Some(_) => {
+                // Keep our own dial, but remember this session: if our
+                // dials stall, it is how we reach the peer.
+                peer.candidate = Some(Arc::downgrade(connection));
+                drop(state);
+                tracing::debug!(%listen, %local, "rpc simultaneous connect: keeping our own dial");
+                return;
+            }
         };
-        let Selection::Adopt(replaced) = selection else {
-            drop(state);
-            tracing::debug!(%listen, %local, "rpc simultaneous connect: keeping our own dial");
-            return Err(CloseReason::Redundant);
-        };
+        self.adopt(&mut state, listen, connection, replaced, now);
+    }
+
+    /// Make `connection` the selected connection to `listen`, moving the
+    /// never-written requests of the connection it replaces and closing
+    /// that one (its driver then reports the end and fails what it had
+    /// written).
+    pub(super) fn adopt(
+        &self,
+        state: &mut State,
+        listen: SocketAddr,
+        connection: &Arc<Connection>,
+        replaced: Option<Arc<Connection>>,
+        now: std::time::Duration,
+    ) {
         connection.select_for(listen);
-        peer.current = Some(Arc::clone(connection));
-        peer.adopted(now);
+        if let Some(peer) = state.peers.get_mut(&listen) {
+            peer.current = Some(Arc::clone(connection));
+            peer.candidate = None;
+            peer.adopted(now);
+        }
         Counters::bump(&self.counters.adopted_connections);
         if let Some(replaced) = replaced {
             let moved = replaced.take_requests();
@@ -243,12 +306,9 @@ impl<P: Providers> Shared<P> {
                 }
             }
             let _ = connection.adopt_requests(moved, now);
-            drop(state);
-            // Its driver reports the end (and fails what it had written).
             let _ = replaced.close(CloseReason::Replaced);
-            tracing::debug!(%listen, %local, "rpc accepted session replaces the selected connection");
+            tracing::debug!(%listen, "rpc accepted session replaces the selected connection");
         }
-        Ok(())
     }
 
     /// Close `connection` if it has been idle long enough at this instant.

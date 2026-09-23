@@ -481,10 +481,15 @@ impl<P: Providers> Shared<P> {
                 body,
                 self.config.max_frame_bytes,
             );
+            // A retained request was admitted once already: it is queued
+            // regardless of the connection's request cap (the pending-call
+            // budget bounds it), never refused as overloaded on the way.
             let queued = frame.and_then(|frame| {
-                connection
-                    .push_request(frame, Some(call_id), now)
-                    .map_err(|_| overloaded())
+                if connection.adopt_requests(vec![(frame, Some(call_id))], now) {
+                    Ok(())
+                } else {
+                    Err(RpcError::not_admitted(ErrorReason::Disconnected))
+                }
             });
             match queued {
                 Ok(()) => {
@@ -530,8 +535,8 @@ impl<P: Providers> Shared<P> {
                 Counters::bump(&self.counters.idle_closes);
                 tracing::debug!(peer = %connection.peer(), "rpc idle connection closed");
             }
-            CloseReason::Redundant | CloseReason::Replaced => {
-                Counters::bump(&self.counters.redundant_connections);
+            CloseReason::Replaced => {
+                Counters::bump(&self.counters.replaced_connections);
                 tracing::debug!(peer = %connection.peer(), ?reason, "rpc duplicate connection closed");
             }
             _ => tracing::debug!(peer = %connection.peer(), ?reason, "rpc connection closed"),

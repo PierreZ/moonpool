@@ -76,14 +76,20 @@ pub struct RpcStats {
     pub reconnect_waits: u64,
     /// Accepted sessions adopted as the selected connection to their peer.
     pub adopted_connections: u64,
-    /// Connections closed by simultaneous-connect resolution or replacement.
-    pub redundant_connections: u64,
+    /// Selected connections replaced by an adopted accepted session.
+    pub replaced_connections: u64,
     /// Liveness pings sent.
     pub pings_sent: u64,
     /// Connections failed because nothing arrived after a ping.
     pub ping_timeouts: u64,
     /// Connections closed for idleness.
     pub idle_closes: u64,
+    /// Accepted sessions whose claimed listen address failed the sharing check (served only).
+    pub unverified_listen_addresses: u64,
+    /// Accepted sessions adopted because this side's own dial had not established for `always_accept_after`.
+    pub accepted_over_stalled_dial: u64,
+    /// Accepted sessions served only because the peer table was full.
+    pub peer_table_full: u64,
 }
 
 /// The runtime's counters, shared by everything that updates them.
@@ -117,10 +123,13 @@ pub(crate) struct Counters {
     pub(crate) dials: AtomicU64,
     pub(crate) reconnect_waits: AtomicU64,
     pub(crate) adopted_connections: AtomicU64,
-    pub(crate) redundant_connections: AtomicU64,
+    pub(crate) replaced_connections: AtomicU64,
     pub(crate) pings_sent: AtomicU64,
     pub(crate) ping_timeouts: AtomicU64,
     pub(crate) idle_closes: AtomicU64,
+    pub(crate) unverified_listen_addresses: AtomicU64,
+    pub(crate) accepted_over_stalled_dial: AtomicU64,
+    pub(crate) peer_table_full: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
     pub(crate) live_connections: AtomicUsize,
 }
@@ -171,10 +180,13 @@ impl Counters {
             dials: load(&self.dials),
             reconnect_waits: load(&self.reconnect_waits),
             adopted_connections: load(&self.adopted_connections),
-            redundant_connections: load(&self.redundant_connections),
+            replaced_connections: load(&self.replaced_connections),
             pings_sent: load(&self.pings_sent),
             ping_timeouts: load(&self.ping_timeouts),
             idle_closes: load(&self.idle_closes),
+            unverified_listen_addresses: load(&self.unverified_listen_addresses),
+            accepted_over_stalled_dial: load(&self.accepted_over_stalled_dial),
+            peer_table_full: load(&self.peer_table_full),
         }
     }
 }

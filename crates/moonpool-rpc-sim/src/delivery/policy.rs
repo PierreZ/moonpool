@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use moonpool_rpc::{PeerPolicy, RpcConfig};
+use moonpool_rpc::{InboundSharing, PeerPolicy, RpcConfig};
 use moonpool_sim::buggify_knob;
 
 fn millis(value: u64) -> Duration {
@@ -37,7 +37,8 @@ pub fn delivery_config() -> RpcConfig {
         failure_detection_delay: millis(buggify_knob!(1000, 0..300)),
         max_failed_endpoints: buggify_knob!(1024, 1..4),
         max_tracked_addresses: 64,
-        share_inbound_sessions: true,
+        share_inbound_sessions: InboundSharing::Trusted,
+        always_accept_after: Duration::from_secs(15),
     };
     RpcConfig {
         max_frame_bytes: 64 * 1024,

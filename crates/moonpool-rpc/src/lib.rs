@@ -112,7 +112,9 @@ pub use call::{
     RequestStream, RetryPolicy, ServiceClient, ServiceRef, WellKnownRef,
 };
 pub use codec::{CodecId, DecodeError, EncodeError, Wire};
-pub use config::{InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy, RpcConfig};
+pub use config::{
+    InboundSharing, InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy, RpcConfig,
+};
 pub use endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 pub use error::{ErrorReason, Execution, RpcError};
 pub use failure::{AddressState, EndpointState, FailureMonitor};

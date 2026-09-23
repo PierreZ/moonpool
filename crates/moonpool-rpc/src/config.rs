@@ -123,14 +123,39 @@ pub struct PeerPolicy {
     /// Addresses the failure monitor tracks; available addresses without a
     /// live peer are forgotten first.
     pub max_tracked_addresses: usize,
-    /// Use an accepted session as this runtime's own connection to the peer
-    /// that dialed it (the listen address in its `Hello`), and settle
-    /// simultaneous connects by address. With plaintext sessions that
-    /// address is self-asserted: any process that can connect may claim to
-    /// be a peer. Disable where unauthenticated peers can reach the
-    /// listener; the security package (#218) ties it to an authenticated
-    /// peer identity.
-    pub share_inbound_sessions: bool,
+    /// Whether an accepted session may become this runtime's own
+    /// connection to the peer that dialed it (see [`InboundSharing`]).
+    pub share_inbound_sessions: InboundSharing,
+    /// A runtime whose own dial to a peer has not established for this long
+    /// adopts the peer's accepted session even when the address tie-break
+    /// says to keep its own dial (`FoundationDB`'s `ALWAYS_ACCEPT_DELAY`),
+    /// so a peer that can dial us but that we cannot dial stays reachable.
+    pub always_accept_after: Duration,
+}
+
+/// When an accepted session may carry this runtime's own calls to its
+/// dialer.
+///
+/// Each `Hello` may name the sender's listen address. With plaintext
+/// sessions that claim is self-asserted: a runtime that adopts it routes
+/// its calls to that address, including retained reliable requests, over
+/// the claimant's connection, and counts the address as available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InboundSharing {
+    /// Never share: announce no listen address, adopt nothing. Two
+    /// runtimes calling each other then use one connection per direction.
+    Disabled,
+    /// Share, but adopt a session for address `X` only if its socket's
+    /// peer IP is `X`'s IP (the default). This stops a process on another
+    /// host from claiming a peer's identity; it does not stop another
+    /// process on the claimed host, and it refuses peers behind NAT or with
+    /// several addresses (they keep one connection per direction).
+    /// Authenticated peer identity arrives with #218.
+    #[default]
+    SameIp,
+    /// Share on the claim alone (`FoundationDB`'s behaviour). Only for
+    /// networks where every process that can reach the listener is trusted.
+    Trusted,
 }
 
 impl Default for PeerPolicy {
@@ -148,7 +173,8 @@ impl Default for PeerPolicy {
             failure_detection_delay: Duration::from_secs(4),
             max_failed_endpoints: 16 * 1024,
             max_tracked_addresses: 4096,
-            share_inbound_sessions: true,
+            share_inbound_sessions: InboundSharing::SameIp,
+            always_accept_after: Duration::from_secs(15),
         }
     }
 }

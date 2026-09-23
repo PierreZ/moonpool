@@ -37,9 +37,6 @@ pub(crate) enum CloseReason {
     /// Closed from this side after carrying nothing for the idle timeout.
     /// Not a failure.
     Idle,
-    /// An inbound session that lost the simultaneous-connect tie-break to
-    /// the connection this side dialed. Not a failure.
-    Redundant,
     /// This side's selected connection to a peer, replaced by a session the
     /// peer dialed. Not a failure.
     Replaced,
@@ -50,7 +47,7 @@ impl CloseReason {
     /// opposed to an idle close or a tie-break), so the failure monitor
     /// and the reconnect backoff should count it.
     pub(crate) fn is_failure(&self) -> bool {
-        !matches!(self, Self::Idle | Self::Redundant | Self::Replaced)
+        !matches!(self, Self::Idle | Self::Replaced)
     }
 }
 
@@ -219,8 +216,9 @@ impl Connection {
         Ok(())
     }
 
-    /// Queue frames moved from another connection, ahead of the reserve
-    /// check: they were admitted once already and must not be refused now.
+    /// Queue frames that were admitted once already (moved from a replaced
+    /// connection, or retained requests sent again), without the request
+    /// cap: they must not be refused now. Returns `false` once closed.
     pub(crate) fn adopt_requests(&self, moved: Vec<QueuedRequest>, now: Duration) -> bool {
         let mut queue = self.lock();
         if queue.closed.is_some() {
