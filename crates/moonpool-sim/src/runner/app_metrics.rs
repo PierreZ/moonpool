@@ -195,10 +195,17 @@ fn qualify_series_key(key: &str, ip: &str) -> String {
         // Already labelled by the application: keep its labels and add ours.
         Some((name, rest)) if rest.ends_with('}') => {
             let inner = &rest[..rest.len() - 1];
-            if inner.contains(&format!("{INSTANCE_LABEL}=")) {
+            let mut labels: Vec<&str> = inner.split(',').filter(|s| !s.is_empty()).collect();
+            // Compare label *names* exactly: a substring test would let an
+            // application label such as `upstream_instance` suppress ours.
+            let labelled = labels.iter().any(|label| {
+                label
+                    .split_once('=')
+                    .is_some_and(|(k, _)| k.trim() == INSTANCE_LABEL)
+            });
+            if labelled {
                 key.to_owned()
             } else {
-                let mut labels: Vec<&str> = inner.split(',').filter(|s| !s.is_empty()).collect();
                 labels.push(&instance);
                 labels.sort_unstable();
                 format!("{name}{{{}}}", labels.join(","))
@@ -316,6 +323,11 @@ mod tests {
             qualify_series_key(r#"hits_total{instance="mine"}"#, "10.0.1.1"),
             r#"hits_total{instance="mine"}"#,
             "an application-set instance label wins"
+        );
+        assert_eq!(
+            qualify_series_key(r#"hits_total{upstream_instance="10.0.1.3"}"#, "10.0.1.1"),
+            r#"hits_total{instance="10.0.1.1",upstream_instance="10.0.1.3"}"#,
+            "a label whose name merely ends in `instance` does not suppress ours"
         );
     }
 
