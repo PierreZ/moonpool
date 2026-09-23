@@ -70,7 +70,8 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 ## Crate Architecture
 ```
 crates/
-├── moonpool/              - Facade crate; features: sim/tokio/hyper.
+├── moonpool/              - Facade crate; features: sim/tokio/hyper/prometheus/rpc
+│                            (rpc-derive/rpc-tls/rpc-jwt).
 ├── moonpool-core/         - Provider traits (Time, Task, Network, Random, Storage) + core types.
 │                            Granular tokio features: tokio-task/-time/-net/-fs/-random
 │                            (umbrella `tokio-providers`). wasm-clean with all off.

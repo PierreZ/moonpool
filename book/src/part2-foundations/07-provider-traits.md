@@ -86,7 +86,9 @@ The associated types `TcpStream` and `TcpListener` let each implementation provi
 
 The API deliberately matches what you would expect from tokio networking. `bind`, `connect`, `accept` behave like their tokio counterparts. The streams implement `AsyncRead + AsyncWrite + Send`, so they work with any tokio-compatible codec or framing layer **and** they cross task boundaries cleanly.
 
-**Production**: `TokioNetworkProvider` wraps `tokio::net`.
+**Production**: `TokioNetworkProvider` wraps `tokio::net`, with Nagle's
+algorithm disabled (`TCP_NODELAY`, best-effort) on every connected and
+accepted stream, as FoundationDB's `Net2` does.
 
 **Simulation**: `NetworkSimulation` owns listeners, connections, topology,
 faults, pending operation results, and network wakers. Bind, connect, and accept

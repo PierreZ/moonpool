@@ -82,6 +82,7 @@
 
 - [Simulating the Network](./part4-networking/01-simulating-network.md)
   - [Typed RPC with moonpool-rpc](./part4-networking/02-rpc.md)
+  - [What moonpool-rpc Promises](./part4-networking/03-rpc-guarantees.md)
 
 ---
 

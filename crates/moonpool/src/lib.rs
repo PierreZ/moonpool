@@ -28,6 +28,10 @@
 //! │  • Scrapes a prometheus::Registry into the sim report       │
 //! │  • Instrumented handles record on the simulated clock       │
 //! ├─────────────────────────────────────────────────────────────┤
+//! │          moonpool-rpc (feature "rpc", opt-in)               │
+//! │  • Typed dynamic endpoints  • Delivery modes, streams       │
+//! │  • Balancing, security      • Graceful shutdown             │
+//! ├─────────────────────────────────────────────────────────────┤
 //! │                     moonpool-core                           │
 //! │  Provider traits: Time, Task, Network, Random, Storage      │
 //! └─────────────────────────────────────────────────────────────┘
@@ -53,6 +57,7 @@
 //! | Simulation runtime | `moonpool-sim` |
 //! | An HTTP/2 stack (tonic, axum, hyper) on the providers | `moonpool` with feature `hyper`, or `moonpool-hyper` |
 //! | Prometheus metrics in the simulation report | `moonpool` with feature `prometheus`, or `moonpool-prometheus` |
+//! | Typed RPC between processes (FDB-style endpoints) | `moonpool` with feature `rpc`, or `moonpool-rpc` |
 //! | Fork-based exploration internals | `moonpool-explorer` |
 //!
 //! ## Documentation
@@ -61,6 +66,8 @@
 //! - [`moonpool_sim`] - Simulation runtime and chaos testing
 //! - `moonpool::hyper` - hyper 1.x integration, behind the `hyper` feature
 //! - `moonpool::prometheus` - Prometheus metrics adapter, behind the `prometheus` feature
+//! - `moonpool::rpc` - typed dynamic-endpoint RPC, behind the `rpc` feature
+//!   (`rpc-derive`, `rpc-tls` and `rpc-jwt` add its optional parts)
 
 #![deny(missing_docs)]
 
@@ -113,6 +120,24 @@ pub mod hyper {
 #[cfg(feature = "prometheus")]
 pub mod prometheus {
     pub use moonpool_prometheus::*;
+}
+
+/// Typed dynamic-endpoint RPC, from [`moonpool_rpc`].
+///
+/// ```ignore
+/// use moonpool::rpc::{AccessClass, RpcConfig, RpcDriver};
+/// ```
+///
+/// The runtime, references, delivery modes, reply streams, balancing,
+/// security and shutdown of the `moonpool-rpc` crate, over the same
+/// providers as everything else. Requires the `rpc` feature; `rpc-derive`
+/// adds `#[moonpool_rpc::service]` (the generated code names the
+/// `moonpool_rpc` crate, so depend on it directly to use the derive),
+/// `rpc-tls` the TLS session upgrade and `rpc-jwt` the JWT verifier, both
+/// native-only.
+#[cfg(feature = "rpc")]
+pub mod rpc {
+    pub use moonpool_rpc::*;
 }
 
 /// Common imports for application code.

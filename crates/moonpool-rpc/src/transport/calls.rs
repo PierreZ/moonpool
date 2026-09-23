@@ -7,27 +7,53 @@ use moonpool_core::Providers;
 
 use super::connection::{CloseReason, Connection, QueueRefusal};
 use super::{
-    Admission, Delivery, Origin, PendingCall, ReplyBytes, Shared, State, permanent_failure,
-    permanent_reason,
+    Admission, Completion, Delivery, Origin, PendingCall, ReplyBytes, Shared, State,
+    permanent_failure, permanent_reason,
 };
 use crate::call::client::{CallGuard, CallOwner};
-use crate::call::reply::{LocalSink, ReplyRoute};
+use crate::call::reply::{LocalSink, Outstanding, ReplyRoute};
 use crate::endpoint::Endpoint;
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
 use crate::protocol::{
     HEADER_LEN, REQUEST_FLAG_ONE_WAY, WireMessage, WireOutcome, encode_frame, encode_message,
     request_envelope_len,
 };
+use crate::security::CredentialSource;
 use crate::stats::Counters;
+use crate::stream::consumer::AckRoute;
+use crate::stream::producer::Terminal;
+use crate::transport::upgrade::PeerContext;
+
+/// Where a call's credentials come from, if anywhere.
+pub(super) type Source = Option<Arc<dyn CredentialSource>>;
 
 /// A started call: its single completion and the guard that releases it.
 pub(crate) type Started = (oneshot::Receiver<Result<ReplyBytes, RpcError>>, CallGuard);
 
-fn request_frame(
+/// The flags and stream window of one request frame.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RequestKind {
+    pub(super) flags: u8,
+    pub(super) stream_window: u64,
+}
+
+impl RequestKind {
+    pub(super) const TWO_WAY: Self = Self {
+        flags: 0,
+        stream_window: 0,
+    };
+    pub(super) const ONE_WAY: Self = Self {
+        flags: REQUEST_FLAG_ONE_WAY,
+        stream_window: 0,
+    };
+}
+
+pub(super) fn request_frame(
     call_id: u64,
     endpoint: &Endpoint,
     identity: CallIdentity,
-    flags: u8,
+    kind: RequestKind,
+    metadata: Vec<u8>,
     body: Vec<u8>,
     max_frame_bytes: u32,
 ) -> Result<Vec<u8>, RpcError> {
@@ -40,8 +66,9 @@ fn request_frame(
         method: identity.method,
         schema: identity.schema,
         codec: identity.codec,
-        flags,
-        metadata: Vec::new(),
+        flags: kind.flags,
+        stream_window: kind.stream_window,
+        metadata,
         body,
     });
     encode_frame(&payload, max_frame_bytes).map_err(|_| {
@@ -52,21 +79,66 @@ fn request_frame(
     })
 }
 
-fn overloaded() -> RpcError {
+/// The credential section of one attempt to `endpoint`, asked from
+/// `source` now. Empty without a source or a credential.
+pub(super) fn credential_section(
+    source: Option<&Arc<dyn CredentialSource>>,
+    endpoint: &Endpoint,
+) -> Result<Vec<u8>, RpcError> {
+    let Some(credential) = source.and_then(|source| source.credential(endpoint)) else {
+        return Ok(Vec::new());
+    };
+    let section =
+        crate::protocol::metadata::encode_bearer(credential.expose()).ok_or_else(|| {
+            RpcError::not_admitted(ErrorReason::Encode(format!(
+                "a {}-byte credential does not fit the metadata section",
+                credential.len()
+            )))
+        })?;
+    Ok(section)
+}
+
+pub(super) fn overloaded() -> RpcError {
     RpcError::not_admitted(ErrorReason::Overloaded)
 }
 
 impl<P: Providers> Shared<P> {
+    /// Why a request carrying a credential must not be written on
+    /// `connection`, if it must not: the credential then never leaves this
+    /// process. Checked when the frame is about to be written, the first
+    /// moment the session is known.
+    fn credential_refusal(&self, connection: &Connection) -> Option<String> {
+        let context = connection.peer_context();
+        if connection
+            .peer_hello()
+            .is_some_and(|hello| hello.version < crate::protocol::CREDENTIALS_VERSION)
+        {
+            return Some("the session runs protocol version 1, which carries no credential".into());
+        }
+        if connection.direction() == super::connection::Direction::Inbound
+            && context
+                .as_ref()
+                .is_none_or(|context| context.identity().is_none())
+        {
+            return Some("an accepted session never authenticated the peer that dialed it".into());
+        }
+        let encrypted = context.as_ref().is_some_and(PeerContext::is_encrypted);
+        if !encrypted && !self.config.security.sends_credentials_over_plaintext() {
+            return Some("the session is not encrypted".into());
+        }
+        None
+    }
+
     /// The checks every outgoing request passes before anything is queued:
     /// the frame limit and the failure monitor's permanent verdicts.
-    fn precheck(
+    pub(super) fn precheck(
         &self,
         state: &State,
         endpoint: &Endpoint,
-        body_len: usize,
+        envelope_len: usize,
     ) -> Result<(), RpcError> {
         // Same frame limit on both routes: nothing oversized is admitted.
-        let size = request_envelope_len(body_len) as u64;
+        let size = envelope_len as u64;
         if size > u64::from(self.config.max_frame_bytes) {
             return Err(RpcError::not_admitted(ErrorReason::FrameTooLarge {
                 size,
@@ -82,6 +154,46 @@ impl<P: Providers> Shared<P> {
         Ok(())
     }
 
+    /// The credential source a call uses: the client's own, else the
+    /// runtime's.
+    pub(super) fn credential_source(
+        &self,
+        client: Option<Arc<dyn CredentialSource>>,
+    ) -> Option<Arc<dyn CredentialSource>> {
+        client.or_else(|| self.config.security.credentials().cloned())
+    }
+
+    /// What every new call checks and asks first: the runtime is not
+    /// shutting down; then the call's credential source and its first
+    /// attempt's credential section.
+    pub(super) fn call_credentials(
+        &self,
+        client: Option<Arc<dyn CredentialSource>>,
+        endpoint: &Endpoint,
+    ) -> Result<(Source, Vec<u8>), RpcError> {
+        self.refuse_if_closing()?;
+        let source = self.credential_source(client);
+        // Asked outside the state lock: the source is application code.
+        let section = credential_section(source.as_ref(), endpoint)?;
+        Ok((source, section))
+    }
+
+    /// Refuse a reliable call whose body would exceed the retained-bytes
+    /// budget.
+    fn check_retention(&self, state: &State, body_len: usize) -> Result<(), RpcError> {
+        let retained: u64 = state
+            .pending
+            .values()
+            .filter_map(|call| call.retained.as_ref())
+            .map(|body| body.len() as u64)
+            .sum();
+        if retained.saturating_add(body_len as u64) > self.config.limits.max_retained_bytes {
+            Counters::bump(&self.counters.overload_refusals);
+            return Err(overloaded());
+        }
+        Ok(())
+    }
+
     /// Start one call. The returned receiver completes exactly once.
     pub(crate) fn start_call(
         &self,
@@ -89,19 +201,28 @@ impl<P: Providers> Shared<P> {
         identity: CallIdentity,
         body: Vec<u8>,
         delivery: Delivery,
+        credentials: Option<Arc<dyn CredentialSource>>,
     ) -> Result<Started, RpcError> {
+        let (credentials, metadata) = self.call_credentials(credentials, endpoint)?;
         let local = self.address == Some(endpoint.address());
         let (sender, receiver) = oneshot::channel();
         let mut state = self.lock();
-        self.precheck(&state, endpoint, body.len())?;
+        self.precheck(
+            &state,
+            endpoint,
+            request_envelope_len(body.len()) + metadata.len(),
+        )?;
         if state.pending.len() >= self.config.max_pending_calls {
             return Err(overloaded());
         }
+        if delivery == Delivery::Reliable {
+            self.check_retention(&state, body.len())?;
+        }
         let call_id = state.next_call_id;
         state.next_call_id = call_id.checked_add(1).ok_or_else(overloaded)?;
-        let owner: Weak<dyn CallOwner> = self.this.clone();
-        let guard = CallGuard::new(owner, call_id);
-
+        // The call's guard is created only once the call is registered and
+        // the state lock released: a guard dropped by an early error return
+        // would abandon the call by locking the state it is still holding.
         if local {
             // Admission below is synchronous: once it returns, the request
             // either reached a receiver or was refused with an outcome. A
@@ -116,23 +237,33 @@ impl<P: Providers> Shared<P> {
                     transmitted: true,
                     earlier_transmitted: false,
                     retained: None,
-                    sender,
+                    credentials: None,
+                    completion: Completion::Reply(sender),
                 },
             );
             drop(state);
+            let guard = self.call_guard(call_id);
             Counters::bump(&self.counters.calls_started);
             let sink: Weak<dyn LocalSink> = self.this.clone();
-            // The same bytes, validation order, admission and frame limit as
-            // the remote path; only the socket is skipped.
+            // The same bytes, validation order, security check, admission
+            // and frame limit as the remote path; only the socket is
+            // skipped.
+            let context = self.context(
+                ReplyRoute::Local { sink, call_id },
+                None,
+                Some(Outstanding::local(&self.counters)),
+            );
             self.admit(
                 &Admission {
+                    local: true,
                     incarnation: endpoint.incarnation(),
                     token: endpoint.token(),
                     identity,
+                    stream_window: None,
+                    metadata: Some(&metadata),
                     body: &body,
                 },
-                ReplyRoute::Local { sink, call_id },
-                None,
+                context,
             );
             return Ok((receiver, guard));
         }
@@ -142,7 +273,8 @@ impl<P: Providers> Shared<P> {
             call_id,
             endpoint,
             identity,
-            0,
+            RequestKind::TWO_WAY,
+            metadata,
             body,
             self.config.max_frame_bytes,
         )?;
@@ -163,15 +295,24 @@ impl<P: Providers> Shared<P> {
                 transmitted: false,
                 earlier_transmitted: false,
                 retained,
-                sender,
+                credentials: credentials.filter(|_| delivery == Delivery::Reliable),
+                completion: Completion::Reply(sender),
             },
         );
         drop(state);
+        let guard = self.call_guard(call_id);
         Counters::bump(&self.counters.calls_started);
         if delivery == Delivery::Reliable {
             Counters::bump(&self.counters.reliable_calls_started);
         }
         Ok((receiver, guard))
+    }
+
+    /// The guard that abandons pending call `call_id` if its caller stops
+    /// waiting. Create it only after the state lock is released.
+    pub(super) fn call_guard(&self, call_id: u64) -> CallGuard {
+        let owner: Weak<dyn CallOwner> = self.this.clone();
+        CallGuard::new(owner, call_id)
     }
 
     /// Queue one one-way request. Success means it was handed to a
@@ -181,22 +322,31 @@ impl<P: Providers> Shared<P> {
         endpoint: &Endpoint,
         identity: CallIdentity,
         body: Vec<u8>,
+        credentials: Option<Arc<dyn CredentialSource>>,
     ) -> Result<(), RpcError> {
+        let (_, metadata) = self.call_credentials(credentials, endpoint)?;
         let local = self.address == Some(endpoint.address());
         let mut state = self.lock();
-        self.precheck(&state, endpoint, body.len())?;
+        self.precheck(
+            &state,
+            endpoint,
+            request_envelope_len(body.len()) + metadata.len(),
+        )?;
         if local {
             drop(state);
             Counters::bump(&self.counters.one_way_sent);
+            let context = self.context(ReplyRoute::Discard, None, None);
             self.admit(
                 &Admission {
+                    local: true,
                     incarnation: endpoint.incarnation(),
                     token: endpoint.token(),
                     identity,
+                    stream_window: None,
+                    metadata: Some(&metadata),
                     body: &body,
                 },
-                ReplyRoute::Discard,
-                None,
+                context,
             );
             return Ok(());
         }
@@ -204,7 +354,8 @@ impl<P: Providers> Shared<P> {
             0,
             endpoint,
             identity,
-            REQUEST_FLAG_ONE_WAY,
+            RequestKind::ONE_WAY,
+            metadata,
             body,
             self.config.max_frame_bytes,
         )?;
@@ -229,36 +380,47 @@ impl<P: Providers> Shared<P> {
         &self,
         connection: &Connection,
         call_id: Option<u64>,
-        frame_len: usize,
+        frame: &[u8],
     ) -> bool {
         let limit = connection
             .peer_hello()
             .map_or(self.config.max_frame_bytes, |hello| hello.max_frame_bytes);
-        let size = frame_len.saturating_sub(HEADER_LEN) as u64;
-        let mut state = self.lock();
-        if size > u64::from(limit) {
-            let call = call_id.and_then(|call_id| state.pending.remove(&call_id));
-            drop(state);
+        let payload = frame.get(HEADER_LEN..).unwrap_or_default();
+        let size = payload.len() as u64;
+        let refusal = if size > u64::from(limit) {
             tracing::debug!(
                 ?call_id,
                 size,
                 limit,
                 "rpc request exceeds the peer's frame limit"
             );
+            Some(ErrorReason::FrameTooLarge { size, limit })
+        } else if crate::protocol::request_metadata_len(payload).is_some_and(|len| len > 0) {
+            self.credential_refusal(connection)
+                .map(ErrorReason::CredentialWithheld)
+        } else {
+            None
+        };
+        let mut state = self.lock();
+        if let Some(refusal) = refusal {
+            let call = call_id.and_then(|call_id| state.pending.remove(&call_id));
+            drop(state);
             match call {
                 Some(call) => {
-                    let error = ErrorReason::FrameTooLarge { size, limit };
                     let error = if call.earlier_transmitted {
-                        RpcError::new(error, Execution::MaybeExecuted)
+                        RpcError::new(refusal, Execution::MaybeExecuted)
                     } else {
-                        RpcError::not_admitted(error)
+                        RpcError::not_admitted(refusal)
                     };
-                    let _ = call.sender.send(Err(error));
+                    call.completion.finish(Err(error));
                 }
                 None if call_id.is_none() => Counters::bump(&self.counters.one_way_dropped),
                 None => {}
             }
             return false;
+        }
+        if crate::protocol::request_metadata_len(payload).is_some_and(|len| len > 0) {
+            Counters::bump(&self.counters.credentials_attached);
         }
         if let Some(call) = call_id.and_then(|call_id| state.pending.get_mut(&call_id)) {
             call.transmitted = true;
@@ -313,9 +475,9 @@ impl<P: Providers> Shared<P> {
                 })
             }
         };
-        let _ = call.sender.send(result);
+        call.completion.finish(result);
         for (call, error) in released {
-            let _ = call.sender.send(Err(error));
+            call.completion.finish(Err(error));
         }
     }
 
@@ -405,12 +567,22 @@ impl<P: Providers> Shared<P> {
         let mut failed = Vec::new();
         let mut resend = Vec::new();
         for call_id in carried {
-            let Some(call) = state.pending.remove(&call_id) else {
+            let Some(call) = state.pending.get_mut(&call_id) else {
                 continue;
             };
-            if call.retained.is_some() && address.is_some() {
-                resend.push((call_id, call));
-            } else {
+            if call.retained.is_some() && address.is_some() && call.stream().is_none() {
+                // Stays pending (waiting on the ended connection) while its
+                // next copy is built outside the lock.
+                call.earlier_transmitted |= call.transmitted;
+                call.transmitted = false;
+                resend.push(Resend {
+                    call_id,
+                    endpoint: call.endpoint,
+                    identity: call.identity,
+                    body: call.retained.clone().unwrap_or_default(),
+                    credentials: call.credentials.clone(),
+                });
+            } else if let Some(call) = state.pending.remove(&call_id) {
                 let error = disconnect_error(&reason, established, &call);
                 if call.transmitted && matches!(reason, CloseReason::Checksum(_)) {
                     Counters::bump(&self.counters.calls_failed_by_corruption);
@@ -418,94 +590,110 @@ impl<P: Providers> Shared<P> {
                 failed.push((call, error));
             }
         }
-        if let Some(address) = address {
-            let probe = reason.is_failure() && state.monitor.references(address) > 0;
-            if !resend.is_empty() || probe {
-                failed.extend(self.retransmit(&mut state, address, resend));
-            }
-        }
+        let probe = address
+            .is_some_and(|address| reason.is_failure() && state.monitor.references(address) > 0);
         drop(state);
         self.log_close(connection, &reason, established);
         if notify {
             self.watch.notify();
         }
+        if let Some(address) = address
+            && (!resend.is_empty() || probe)
+        {
+            // Each copy asks its credential source again, outside every
+            // lock: a token refreshed since the last copy is the one sent,
+            // and the source may use the runtime.
+            let copies: Vec<(u64, Result<Vec<u8>, RpcError>)> = resend
+                .into_iter()
+                .map(|copy| {
+                    let frame = credential_section(copy.credentials.as_ref(), &copy.endpoint)
+                        .and_then(|metadata| {
+                            request_frame(
+                                copy.call_id,
+                                &copy.endpoint,
+                                copy.identity,
+                                RequestKind::TWO_WAY,
+                                metadata,
+                                copy.body,
+                                self.config.max_frame_bytes,
+                            )
+                        });
+                    (copy.call_id, frame)
+                })
+                .collect();
+            let mut state = self.lock();
+            failed.extend(self.retransmit(&mut state, address, origin, copies));
+        }
         for (call, error) in failed {
-            let _ = call.sender.send(Err(error));
+            call.completion.finish(Err(error));
+        }
+        // Streams produced over this session end with it; never resumed.
+        for stream in connection.take_streams() {
+            stream.terminate(Terminal::Disconnected);
+            Counters::bump(&self.counters.streams_disconnected);
         }
     }
 
-    /// Queue `calls` again on the peer's next connection (opening one even
-    /// when `calls` is empty: a probe for a watched, failing address).
+    /// Queue the prepared `copies` of calls still waiting on the ended
+    /// connection `ended` on the peer's next connection (opening one even
+    /// when there are none: a probe for a watched, failing address). A call
+    /// completed, abandoned or ended by a shutdown meanwhile is skipped.
     /// Returns the calls that could not be requeued, with their errors.
     fn retransmit(
         &self,
         state: &mut State,
         address: std::net::SocketAddr,
-        calls: Vec<(u64, PendingCall)>,
+        ended: Origin,
+        copies: Vec<(u64, Result<Vec<u8>, RpcError>)>,
     ) -> Vec<(PendingCall, RpcError)> {
-        let mut failed = Vec::new();
-        let connection = match self.peer_connection(state, address) {
-            Ok(connection) => connection,
-            Err(error) => {
-                for (_, call) in calls {
-                    let error = RpcError::new(
-                        error.reason().clone(),
-                        if call.may_have_executed() {
-                            Execution::MaybeExecuted
-                        } else {
-                            Execution::NotAdmitted
-                        },
-                    );
-                    failed.push((call, error));
-                }
-                return failed;
+        let execution = |call: &PendingCall| {
+            if call.may_have_executed() {
+                Execution::MaybeExecuted
+            } else {
+                Execution::NotAdmitted
             }
         };
+        let mut failed = Vec::new();
+        let connection = self.peer_connection(state, address);
         let now = self.now();
-        for (call_id, mut call) in calls {
-            call.earlier_transmitted |= call.transmitted;
-            call.transmitted = false;
+        for (call_id, frame) in copies {
+            if state
+                .pending
+                .get(&call_id)
+                .is_none_or(|call| call.origin != ended)
+            {
+                continue;
+            }
+            let Some(mut call) = state.pending.remove(&call_id) else {
+                continue;
+            };
             if let Some(failure) = state.monitor.permanent_failure(&call.endpoint) {
-                let execution = if call.earlier_transmitted {
-                    Execution::MaybeExecuted
-                } else {
-                    Execution::NotAdmitted
-                };
+                let execution = execution(&call);
                 failed.push((call, RpcError::new(permanent_reason(failure), execution)));
                 continue;
             }
-            let body = call.retained.clone().unwrap_or_default();
-            let frame = request_frame(
-                call_id,
-                &call.endpoint,
-                call.identity,
-                0,
-                body,
-                self.config.max_frame_bytes,
-            );
             // A retained request was admitted once already: it is queued
             // regardless of the connection's request cap (the pending-call
             // budget bounds it), never refused as overloaded on the way.
-            let queued = frame.and_then(|frame| {
-                if connection.adopt_requests(vec![(frame, Some(call_id))], now) {
-                    Ok(())
-                } else {
-                    Err(RpcError::not_admitted(ErrorReason::Disconnected))
+            let queued = match (&connection, &frame) {
+                (Err(error), _) | (_, Err(error)) => Err(error.reason().clone()),
+                (Ok(connection), Ok(frame)) => {
+                    if connection.adopt_requests(vec![(frame.clone(), Some(call_id))], now) {
+                        Ok(connection.id())
+                    } else {
+                        Err(ErrorReason::Disconnected)
+                    }
                 }
-            });
+            };
             match queued {
-                Ok(()) => {
+                Ok(id) => {
                     Counters::bump(&self.counters.retransmissions);
-                    call.origin = Origin::Connection(connection.id());
+                    call.origin = Origin::Connection(id);
                     state.pending.insert(call_id, call);
                 }
-                Err(error) => {
-                    let execution = if call.earlier_transmitted {
-                        Execution::MaybeExecuted
-                    } else {
-                        Execution::NotAdmitted
-                    };
-                    failed.push((call, RpcError::new(error.reason().clone(), execution)));
+                Err(reason) => {
+                    let execution = execution(&call);
+                    failed.push((call, RpcError::new(reason, execution)));
                 }
             }
         }
@@ -546,6 +734,15 @@ impl<P: Providers> Shared<P> {
     }
 }
 
+/// A retained call's next copy, prepared outside the state lock.
+struct Resend {
+    call_id: u64,
+    endpoint: Endpoint,
+    identity: CallIdentity,
+    body: Vec<u8>,
+    credentials: Option<Arc<dyn CredentialSource>>,
+}
+
 /// What a connection's end proves about an at-most-once call it carried.
 fn disconnect_error(reason: &CloseReason, established: bool, call: &PendingCall) -> RpcError {
     if let CloseReason::ConnectFailed(detail) = reason {
@@ -579,7 +776,36 @@ impl<P: Providers> CallOwner for Shared<P> {
                     .get(&id)
                     .is_none_or(|connection| !connection.retract(call_id)),
             };
+        // A stream whose request may have reached the server is cancelled
+        // there: the producer stops and its unwritten items are dropped.
+        let cancel = match (call.stream(), call.origin) {
+            (Some(_), Origin::Connection(id)) if transmitted => state
+                .connections
+                .get(&id)
+                .cloned()
+                .map(|connection| AckRoute::Remote(Arc::downgrade(&connection))),
+            (Some(stream), Origin::Local) => stream.route(),
+            _ => None,
+        };
         drop(state);
+        match cancel {
+            Some(AckRoute::Remote(connection)) => {
+                if let Some(connection) = connection.upgrade() {
+                    connection.signal_cancel(call_id);
+                }
+                Counters::bump(&self.counters.streams_abandoned);
+            }
+            Some(AckRoute::Local(producer)) => {
+                if let Some(producer) = producer.upgrade()
+                    && producer.cancel()
+                {
+                    Counters::bump(&self.counters.streams_cancelled);
+                }
+                Counters::bump(&self.counters.streams_abandoned);
+            }
+            None => {}
+        }
+        drop(call);
         Counters::bump(&self.counters.calls_abandoned);
         tracing::debug!(call_id, transmitted, "rpc call abandoned by its caller");
         Some(transmitted)

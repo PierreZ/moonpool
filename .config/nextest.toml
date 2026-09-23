@@ -19,6 +19,20 @@ test-threads = "num-cpus"
 filter = 'binary(metastable_grpc_retry_storm)'
 slow-timeout = { period = "10s", terminate-after = 6 }
 
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and (test(bounded_campaign) | test(network_bit_flips) | test(same_seed_replays) | test(repeated_complete_runs) | test(reboot_storm) | test(host_speed))'
+test-group = 'rpc-campaigns'
+
+# The qualification campaign's bounded test runs thirty seeds of every RPC
+# contract at once (three client lanes, five processes, twenty seconds of
+# chaos and a recovery phase), each twice under the RNG canary: about a
+# minute in the debug profile on four cores. A wider budget for that binary
+# rather than a smaller seed budget, which would cut required coverage. Listed
+# before the package-wide override: nextest applies the first match.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and binary(qualification)'
+slow-timeout = { period = "30s", terminate-after = 8 }
+
 # The bounded RPC campaigns run tens of seeds of full client/server traffic
 # (the bit-flip scenario eighty, each thousands of frames) in the debug
 # profile.
@@ -35,3 +49,11 @@ path = "target/nextest/default/junit.xml"
 [[profile.default.overrides]]
 filter = 'package(moonpool-rpc-derive) and binary(compile_fail)'
 slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The bounded RPC simulation campaigns each keep one core busy for tens of
+# seconds (qualification for about a minute and a half on CI). Run together
+# with everything else on a four-core runner they starve each other past their
+# timeouts, so at most two of them run at once; the remaining cores keep
+# serving the fast tests.
+[test-groups]
+rpc-campaigns = { max-threads = 2 }

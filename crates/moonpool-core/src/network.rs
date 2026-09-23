@@ -54,6 +54,18 @@ pub trait TcpListenerTrait: Send + Sync + 'static {
 /// Wraps `tokio::net::TcpStream` with `tokio_util::compat::Compat` so it
 /// implements the runtime-agnostic `futures::io::AsyncRead + AsyncWrite` traits
 /// required by [`NetworkProvider`].
+///
+/// Every connected and accepted stream has Nagle's algorithm disabled
+/// (`TCP_NODELAY`), as `FoundationDB`'s `Net2` does for every connection
+/// (`Connection::init`, knob `FLOW_TCP_NODELAY`, default on): request/reply
+/// protocols (moonpool-rpc, hyper, tonic) write a small frame and wait for
+/// its answer, and Nagle would hold that frame back until the previous
+/// segment is acknowledged — up to a delayed-ACK timeout of added latency.
+/// Protocols that batch their own writes lose nothing. The setting is
+/// best-effort: a platform that refuses it (macOS answers `EINVAL` on a
+/// socket its peer already reset) leaves the connection as it is, and the
+/// next read or write reports the real error. The simulator models no Nagle
+/// delay, so simulated and production timing agree on this point.
 #[cfg(feature = "tokio-net")]
 #[derive(Debug, Clone, Default)]
 pub struct TokioNetworkProvider;
@@ -78,7 +90,18 @@ impl NetworkProvider for TokioNetworkProvider {
     }
 
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
-        Ok(tokio::net::TcpStream::connect(addr).await?.compat())
+        let stream = tokio::net::TcpStream::connect(addr).await?;
+        disable_nagle(&stream);
+        Ok(stream.compat())
+    }
+}
+
+/// Disable Nagle's algorithm on `stream`, best-effort (see
+/// [`TokioNetworkProvider`]).
+#[cfg(feature = "tokio-net")]
+fn disable_nagle(stream: &tokio::net::TcpStream) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::debug!(%error, "TCP_NODELAY not set; the connection is used as it is");
     }
 }
 
@@ -95,6 +118,7 @@ impl TcpListenerTrait for TokioTcpListener {
 
     async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
         let (stream, addr) = self.inner.accept().await?;
+        disable_nagle(&stream);
         Ok((stream.compat(), addr.to_string()))
     }
 

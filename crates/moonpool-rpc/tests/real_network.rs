@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use moonpool_core::TokioProviders;
+use moonpool_rpc::security::SecurityConfig;
 use moonpool_rpc::{
     Acceptor, AccessClass, CodecId, Connector, DecodeError, EncodeError, Endpoint, ErrorReason,
     Execution, IncomingRequest, MethodId, PeerContext, RequestStream, RpcConfig, RpcDriver,
@@ -102,12 +103,19 @@ fn ping(id: u64) -> Ping {
     }
 }
 
+/// A listening runtime. These tests pin transport contracts, so their
+/// private endpoints need an explicit trust choice (private endpoints fail
+/// closed by default): a trusted network, which claims nothing.
 async fn listen(
     config: RpcConfig,
 ) -> (
     RpcHandle<TokioProviders>,
     tokio::task::JoinHandle<std::io::Error>,
 ) {
+    let config = RpcConfig {
+        security: SecurityConfig::trusted_network(),
+        ..config
+    };
     let (driver, rpc) = RpcDriver::listen(TokioProviders::new(), "127.0.0.1:0", config)
         .await
         .expect("bind an ephemeral port");

@@ -66,6 +66,13 @@
 //! | [`ServiceClient::get_reply`] | request retained in memory and resent on every new connection: **may execute more than once** | first outcome wins; a dead dynamic endpoint ends it at once |
 //! | [`ServiceClient::get_reply_unless_failed_for`] | reliable, bounded by sustained observed failure | [`ErrorReason::PeerFailed`] keeps the ambiguity |
 //!
+//! A method whose [`RpcMethod::STREAMING`] is `true` answers with a **reply
+//! stream** instead: [`ServiceClient::get_reply_stream`] returns a
+//! [`ReplyStream`] of ordered items, the handler turns its reply handle
+//! into a [`StreamProducer`] ([`ReplyHandle::into_stream`]), and the
+//! producer is paced by what the caller's application consumed, never by
+//! what was merely read off the socket. See [`stream`].
+//!
 //! A [`ReplyAttempt`] is one attempt as a future: kept, it yields a late
 //! outcome after its caller moved on; dropped, its route is released and a
 //! late reply is counted and discarded. On the serving side a
@@ -85,9 +92,36 @@
 //! [`Resolver`](moonpool_core::Resolver) and an explicit [`RetryPolicy`]);
 //! dynamic references are never re-resolved or refreshed.
 //!
+//! [`balance`] spreads calls of one method over an explicit, versioned set
+//! of alternatives (locality, a queue model, penalties, temporary
+//! exclusion), with a retry permission and a duplicate (hedge) permission
+//! kept apart and both off by default.
+//!
 //! Sessions go through an upgrade seam ([`Connector`] / [`Acceptor`],
-//! [`Plaintext`] by default) that yields the session stream and a
-//! [`PeerContext`], then a versioned handshake.
+//! [`Plaintext`] by default, server-authenticated TLS with the `tls`
+//! feature) that yields the session stream and a [`PeerContext`], then a
+//! versioned handshake.
+//!
+//! ## Security, versions and shutdown
+//!
+//! Every request passes a security check in admission, locally as
+//! remotely: its credential ([`security::Credential`], verified by a
+//! [`security::RequestVerifier`], for example the JWT/JWKS adapter behind
+//! the `jwt` feature) and the endpoint's [`AccessClass`] under an
+//! [`security::AccessPolicy`]. **Private endpoints fail closed** by
+//! default; [`security::SecurityConfig::trusted_network`] opts out
+//! explicitly and claims nothing. See [`security`].
+//!
+//! Each session runs at the highest protocol version both sides speak
+//! ([`RpcConfig::protocol_versions`]); nothing newer than that version is
+//! sent or decoded, and a server that verifies credentials refuses older
+//! peers at the handshake. See [`protocol::wire`].
+//!
+//! [`RpcHandle::shutdown`] shuts a runtime down gracefully (close
+//! admission, drain on provider time, end the rest honestly, close every
+//! session); dropping the driver is the abrupt shutdown.
+//! [`observability::RpcMetrics`] exposes the counters as a bounded-label
+//! [`MetricsSource`](moonpool_core::MetricsSource).
 //!
 //! ## Contracts
 //!
@@ -122,23 +156,34 @@
 //!   ```
 //! - **Owned lifetimes.** Handles, clients, receivers and reply handles hold
 //!   the runtime weakly; nothing but the driver keeps it serving.
-//! - **Bounded everything.** Frame size, queued requests, control frames,
-//!   pending calls, endpoints and connections all have hard limits
-//!   ([`RpcConfig`]); malformed, corrupt or oversized input closes the
+//! - **Bounded everything, pushing back instead of failing.** Frame size,
+//!   queued requests and bytes, in-flight requests, retained bodies,
+//!   streams and their windows, control frames, pending calls, endpoints
+//!   and connections all have hard limits ([`RpcConfig`],
+//!   [`ResourceLimits`], [`StreamPolicy`]). Work beyond a budget is refused
+//!   where it would enter, as [`ErrorReason::Overloaded`] with
+//!   [`Execution::NotAdmitted`]; nothing admitted is dropped to make room,
+//!   and a slow writer pushes back on admission instead of closing the
+//!   session. Control frames go first and the socket reader never waits on
+//!   an application queue; malformed, corrupt or oversized input closes the
 //!   connection observably ([`RpcStats`]).
 //!
 //! Wire format: [`protocol`] (frame and envelope), [`codec`] (bodies).
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+pub mod balance;
 pub mod codec;
 mod config;
 mod endpoint;
 mod error;
 mod failure;
 pub mod interface;
+pub mod observability;
 pub mod protocol;
+pub mod security;
 mod stats;
+pub mod stream;
 
 pub(crate) mod call;
 pub(crate) mod transport;
@@ -149,7 +194,8 @@ pub use call::{
 };
 pub use codec::{CodecId, DecodeError, EncodeError, Wire};
 pub use config::{
-    InboundSharing, InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy, RpcConfig,
+    InboundSharing, InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy, ResourceLimits,
+    RpcConfig, StreamPolicy,
 };
 pub use endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 pub use error::{ErrorReason, Execution, RpcError};
@@ -159,9 +205,12 @@ pub use interface::{
     ServiceRef,
 };
 pub use protocol::{MethodId, RpcMethod, SchemaVersion};
-pub use stats::{ResourceProbe, RpcStats};
+pub use stats::{Outstanding, ResourceProbe, RpcStats};
+pub use stream::{ReplyStream, StreamProducer};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
-pub use transport::{RpcDriver, RpcHandle, SessionUpgrade, is_transient_accept_error};
+pub use transport::{
+    RpcDriver, RpcHandle, SessionUpgrade, ShutdownReport, is_transient_accept_error,
+};
 
 /// Generate a typed interface from a trait (feature `derive`).
 ///

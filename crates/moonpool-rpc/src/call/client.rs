@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -14,6 +14,8 @@ use crate::codec::{Wire, encode_to_vec};
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
 use crate::interface::ServiceRef;
 use crate::protocol::RpcMethod;
+use crate::security::CredentialSource;
+use crate::stream::ReplyStream;
 use crate::transport::{Delivery, ReplyBytes, RpcHandle};
 
 /// A [`ServiceRef`] bound to a runtime: the calling side.
@@ -24,6 +26,7 @@ use crate::transport::{Delivery, ReplyBytes, RpcHandle};
 pub struct ServiceClient<P: Providers, M: RpcMethod> {
     rpc: RpcHandle<P>,
     target: ServiceRef<M>,
+    credentials: Option<Arc<dyn CredentialSource>>,
 }
 
 impl<P: Providers, M: RpcMethod> Clone for ServiceClient<P, M> {
@@ -31,6 +34,7 @@ impl<P: Providers, M: RpcMethod> Clone for ServiceClient<P, M> {
         Self {
             rpc: self.rpc.clone(),
             target: self.target.clone(),
+            credentials: self.credentials.clone(),
         }
     }
 }
@@ -45,7 +49,30 @@ impl<P: Providers, M: RpcMethod> std::fmt::Debug for ServiceClient<P, M> {
 
 impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
     pub(crate) fn new(rpc: RpcHandle<P>, target: ServiceRef<M>) -> Self {
-        Self { rpc, target }
+        Self {
+            rpc,
+            target,
+            credentials: None,
+        }
+    }
+
+    /// This client, attaching credentials from `source` to every request
+    /// instead of the runtime's
+    /// [`SecurityConfig::with_credentials`](crate::security::SecurityConfig::with_credentials).
+    /// The source is asked again for every attempt, retransmissions of
+    /// reliable calls included. Local calls carry the credential too: they
+    /// pass the same security check as remote ones.
+    #[must_use]
+    pub fn with_credentials(mut self, source: impl CredentialSource) -> Self {
+        self.credentials = Some(Arc::new(source));
+        self
+    }
+
+    /// This client with an already shared credential source (the balancer
+    /// attaches one source to every alternative).
+    pub(crate) fn with_shared_credentials(mut self, source: Arc<dyn CredentialSource>) -> Self {
+        self.credentials = Some(source);
+        self
     }
 
     /// The reference this client calls.
@@ -86,8 +113,13 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
             .rpc
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
-        let (receiver, guard) =
-            shared.start_call(&self.target.endpoint(), identity, body, delivery)?;
+        let (receiver, guard) = shared.start_call(
+            &self.target.endpoint(),
+            identity,
+            body,
+            delivery,
+            self.credentials.clone(),
+        )?;
         Ok(ReplyAttempt {
             receiver,
             guard: Some(guard),
@@ -173,7 +205,12 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
         self.rpc
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?
-            .send_one_way(&self.target.endpoint(), identity, body)
+            .send_one_way(
+                &self.target.endpoint(),
+                identity,
+                body,
+                self.credentials.clone(),
+            )
     }
 
     /// Reliable delivery: keep the request while waiting and send it again
@@ -199,6 +236,74 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
     /// reply problems), a terminal endpoint failure, or shutdown.
     pub async fn get_reply(&self, request: &M::Request) -> Result<M::Reply, RpcError> {
         self.start(request, Delivery::Reliable)?.await
+    }
+
+    /// Open a reply stream (`FoundationDB`'s `getReplyStream`) announcing
+    /// this runtime's default window
+    /// ([`StreamPolicy::window_bytes`](crate::StreamPolicy::window_bytes)).
+    ///
+    /// One registration attempt: the request is sent once, never
+    /// retransmitted, and the stream is never resumed on another
+    /// connection. Failures after this returns (a rejection, a disconnect,
+    /// the producer's error) arrive as the stream's terminal `Err`; see
+    /// [`stream`](crate::stream) for ordering, credit and cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Refusals before anything was queued, all [`Execution::NotAdmitted`]:
+    /// a unary method ([`ErrorReason::StreamingMismatch`]), encoding, the
+    /// frame limit, the pending-call or stream buffer budget
+    /// ([`ErrorReason::Overloaded`]), a known-dead endpoint, shutdown.
+    pub fn get_reply_stream(&self, request: &M::Request) -> Result<ReplyStream<M>, RpcError> {
+        let window = self
+            .rpc
+            .upgrade()
+            .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?
+            .config()
+            .streams
+            .window_bytes;
+        self.get_reply_stream_with_window(request, window)
+    }
+
+    /// [`get_reply_stream`](Self::get_reply_stream) announcing `window`
+    /// accounted bytes: the most this caller buffers unconsumed, and so
+    /// the largest item it can ever receive. The producer's runtime may
+    /// hold the stream to a smaller window.
+    ///
+    /// # Errors
+    ///
+    /// As for [`get_reply_stream`](Self::get_reply_stream), plus
+    /// [`ErrorReason::InvalidReference`] for a window below the smallest
+    /// possible item.
+    pub fn get_reply_stream_with_window(
+        &self,
+        request: &M::Request,
+        window: u64,
+    ) -> Result<ReplyStream<M>, RpcError> {
+        if !M::STREAMING {
+            return Err(RpcError::not_admitted(ErrorReason::StreamingMismatch {
+                endpoint_streams: false,
+            }));
+        }
+        let smallest = crate::protocol::stream_item_frame_len(0);
+        if window < smallest {
+            return Err(RpcError::not_admitted(ErrorReason::InvalidReference(
+                format!("a stream window of {window} bytes holds no item (at least {smallest})"),
+            )));
+        }
+        let (body, identity) = self.encode(request)?;
+        let shared = self
+            .rpc
+            .upgrade()
+            .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
+        let (core, guard) = shared.start_stream(
+            &self.target.endpoint(),
+            identity,
+            body,
+            window,
+            self.credentials.clone(),
+        )?;
+        Ok(ReplyStream::new(core, guard))
     }
 
     /// Reliable delivery bounded by observed failure
@@ -408,7 +513,7 @@ impl CallGuard {
 
     /// Abandon now and report whether the request had begun transmission;
     /// `None` when the call already completed or the runtime is gone.
-    fn expire(mut self) -> Option<bool> {
+    pub(crate) fn expire(mut self) -> Option<bool> {
         self.armed = false;
         self.owner.upgrade()?.abandon(self.call_id)
     }

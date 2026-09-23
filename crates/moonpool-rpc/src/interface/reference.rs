@@ -613,7 +613,7 @@ impl<M: RpcMethod> std::fmt::Debug for ServiceRef<M> {
 /// application embeds, returns, forwards or stores. A caller adjusts it to
 /// one method with [`method`](Self::method): the result addresses the same
 /// endpoint in the same incarnation and differs only in its explicit
-/// [`MethodId`], so reordering, adding or removing methods in the source
+/// [`MethodId`](crate::MethodId), so reordering, adding or removing methods in the source
 /// never retargets an existing reference; a method the group does not
 /// serve is refused by the server ([`ErrorReason::MethodNotFound`]).
 ///

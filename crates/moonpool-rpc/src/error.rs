@@ -121,6 +121,44 @@ pub enum ErrorReason {
     /// sustained-failure bound, or failed permanently, before a reply came.
     /// An observation, not proof that the server is gone.
     PeerFailed,
+    /// A stream request for a method that answers once, or a unary request
+    /// for a streaming method ([`RpcMethod::STREAMING`](crate::RpcMethod::STREAMING));
+    /// refused before any handler ran. Terminal for this reference.
+    StreamingMismatch {
+        /// Whether the endpoint's method streams its replies.
+        endpoint_streams: bool,
+    },
+    /// The producer ended the reply stream with this application error
+    /// code ([`StreamProducer::fail`](crate::StreamProducer::fail)); every
+    /// item it sent before was delivered first.
+    StreamFailed {
+        /// The application's code.
+        code: u64,
+    },
+    /// The reply stream broke its protocol: an item out of sequence, more
+    /// unconsumed bytes than the announced window, an end whose item count
+    /// disagrees with the items received, or a consumption acknowledgement
+    /// the producer refused. The stream ended; nothing is resumed.
+    StreamProtocol(String),
+    /// The server refused the request before admission: the caller is not
+    /// (validly) authenticated for the endpoint. Never executed. Not
+    /// terminal for the reference: a fresh credential, or the server's new
+    /// keys, may change the answer.
+    Unauthenticated(crate::security::CredentialError),
+    /// The server refused the request before admission: the caller is
+    /// authenticated, but its policy does not allow this call. Never
+    /// executed; not terminal for the reference (policies change).
+    PermissionDenied,
+    /// The server's runtime is shutting down gracefully and admitted
+    /// nothing new. Never executed.
+    ServerShuttingDown,
+    /// The request carried a credential and was not written: the session
+    /// that would have carried it is unencrypted (and this runtime did not
+    /// opt into
+    /// [`send_credentials_over_plaintext`](crate::security::SecurityConfig::send_credentials_over_plaintext)),
+    /// runs protocol version 1, or is an accepted session that never
+    /// authenticated its dialer. The credential never left this process.
+    CredentialWithheld(String),
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -179,6 +217,21 @@ impl std::fmt::Display for ErrorReason {
             Self::AlreadyRegistered => f.write_str("the well-known id is already registered"),
             Self::LookupFailed(detail) => write!(f, "lookup failed: {detail}"),
             Self::PeerFailed => f.write_str("the endpoint was observed failed"),
+            Self::StreamingMismatch { endpoint_streams } => {
+                if *endpoint_streams {
+                    f.write_str("the endpoint streams its replies; call it as a stream")
+                } else {
+                    f.write_str("the endpoint answers once; it cannot open a reply stream")
+                }
+            }
+            Self::StreamFailed { code } => {
+                write!(f, "the producer failed the stream (code {code})")
+            }
+            Self::StreamProtocol(detail) => write!(f, "stream protocol violation: {detail}"),
+            Self::Unauthenticated(reason) => write!(f, "unauthenticated: {reason}"),
+            Self::PermissionDenied => f.write_str("permission denied"),
+            Self::ServerShuttingDown => f.write_str("the server is shutting down"),
+            Self::CredentialWithheld(why) => write!(f, "credential withheld: {why}"),
         }
     }
 }
@@ -237,6 +290,44 @@ impl RpcError {
         self
     }
 
+    /// Whether no retry or failover can help: a contract error (interface,
+    /// method, schema, codec or streaming mismatch, an invalid reference,
+    /// frame limits, encoding, a malformed request or reply), a security
+    /// refusal (no or bad credential, permission denied, a credential
+    /// withheld from an unauthenticated session), or the local runtime
+    /// gone or misused (shut down, not listening, already registered).
+    ///
+    /// The one list [`RetryPolicy`](crate::RetryPolicy) and the balancer
+    /// consult: a security refusal is the caller's credential or the
+    /// service's policy, both expected to be the same for every
+    /// alternative and every retry, so repeating the call only burns
+    /// budget. A refusal is never remembered as an endpoint failure:
+    /// fixing the credential makes the next call succeed.
+    #[must_use]
+    pub fn is_never_retried(&self) -> bool {
+        matches!(
+            self.reason,
+            ErrorReason::MethodMismatch { .. }
+                | ErrorReason::InvalidReference(_)
+                | ErrorReason::InterfaceMismatch { .. }
+                | ErrorReason::SchemaMismatch { .. }
+                | ErrorReason::CodecMismatch { .. }
+                | ErrorReason::StreamingMismatch { .. }
+                | ErrorReason::FrameTooLarge { .. }
+                | ErrorReason::Encode(_)
+                | ErrorReason::MalformedRequest
+                | ErrorReason::ReplyTooLarge
+                | ErrorReason::ReplyEncodeFailed
+                | ErrorReason::MalformedReply(_)
+                | ErrorReason::Unauthenticated(_)
+                | ErrorReason::PermissionDenied
+                | ErrorReason::CredentialWithheld(_)
+                | ErrorReason::Shutdown
+                | ErrorReason::NotListening
+                | ErrorReason::AlreadyRegistered
+        )
+    }
+
     /// Whether retrying the same reference cannot succeed.
     #[must_use]
     pub fn is_terminal_for_reference(&self) -> bool {
@@ -249,6 +340,7 @@ impl RpcError {
                 | ErrorReason::InterfaceMismatch { .. }
                 | ErrorReason::SchemaMismatch { .. }
                 | ErrorReason::CodecMismatch { .. }
+                | ErrorReason::StreamingMismatch { .. }
         )
     }
 
@@ -286,6 +378,25 @@ impl RpcError {
             WireError::ReplyEncodeFailed => {
                 return Self::new(ErrorReason::ReplyEncodeFailed, Execution::Executed);
             }
+            WireError::StreamFailed { code } => {
+                return Self::new(ErrorReason::StreamFailed { code }, Execution::Executed);
+            }
+            WireError::StreamProtocol => {
+                return Self::new(
+                    ErrorReason::StreamProtocol(
+                        "the producer ended the stream for a protocol violation \
+                         (an acknowledgement it refused, or a counter overflow)"
+                            .into(),
+                    ),
+                    Execution::MaybeExecuted,
+                );
+            }
+            WireError::StreamingMismatch { endpoint_streams } => {
+                ErrorReason::StreamingMismatch { endpoint_streams }
+            }
+            WireError::Unauthenticated { reason } => ErrorReason::Unauthenticated(reason),
+            WireError::PermissionDenied => ErrorReason::PermissionDenied,
+            WireError::ShuttingDown => ErrorReason::ServerShuttingDown,
         };
         // Every other server-side rejection happens before admission.
         Self::not_admitted(reason)
@@ -343,6 +454,22 @@ mod tests {
         assert_eq!(knowledge(WireError::ReplyTooLarge), Execution::Executed);
         assert_eq!(knowledge(WireError::ReplyEncodeFailed), Execution::Executed);
         assert_eq!(knowledge(WireError::MethodNotFound), Execution::NotAdmitted);
+        assert_eq!(
+            knowledge(WireError::StreamFailed { code: 3 }),
+            Execution::Executed
+        );
+        assert_eq!(
+            knowledge(WireError::StreamProtocol),
+            Execution::MaybeExecuted
+        );
+        let mismatch = RpcError::from_wire(
+            WireError::StreamingMismatch {
+                endpoint_streams: true,
+            },
+            called,
+        );
+        assert_eq!(mismatch.execution(), Execution::NotAdmitted);
+        assert!(mismatch.is_terminal_for_reference());
         assert!(
             !RpcError::from_wire(WireError::MethodNotFound, called).is_terminal_for_reference(),
             "a group may serve the method later"
@@ -355,6 +482,24 @@ mod tests {
         );
         assert_eq!(mismatch.execution(), Execution::NotAdmitted);
         assert!(mismatch.is_terminal_for_reference());
+        for (error, reason) in [
+            (
+                WireError::Unauthenticated {
+                    reason: crate::security::CredentialError::Expired,
+                },
+                ErrorReason::Unauthenticated(crate::security::CredentialError::Expired),
+            ),
+            (WireError::PermissionDenied, ErrorReason::PermissionDenied),
+            (WireError::ShuttingDown, ErrorReason::ServerShuttingDown),
+        ] {
+            let refused = RpcError::from_wire(error, called);
+            assert_eq!(refused.reason(), &reason);
+            assert_eq!(refused.execution(), Execution::NotAdmitted);
+            assert!(
+                !refused.is_terminal_for_reference(),
+                "keys, credentials and policies change: never a dead reference"
+            );
+        }
         let stale = RpcError::from_wire(WireError::StaleIncarnation, called);
         assert!(stale.is_terminal_for_reference());
         assert_eq!(stale.reason(), &ErrorReason::StaleIncarnation);

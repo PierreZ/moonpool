@@ -13,7 +13,7 @@ use crate::codec::{CodecId, Wire};
 use crate::endpoint::EndpointToken;
 use crate::error::ErrorReason;
 use crate::interface::ServiceRef;
-use crate::protocol::{MethodId, RpcMethod, SchemaVersion, WireError, WireOutcome};
+use crate::protocol::{MethodId, RpcMethod, SchemaVersion, WireError};
 
 /// Why a mailbox refused an item.
 enum MailboxRefusal {
@@ -22,25 +22,31 @@ enum MailboxRefusal {
 }
 
 struct MailboxState<T> {
-    items: VecDeque<T>,
+    /// Each item with the bytes it counts against the byte budget.
+    items: VecDeque<(T, u64)>,
+    bytes: u64,
     closed: bool,
 }
 
-/// A bounded single-consumer queue whose producer never blocks.
+/// A bounded single-consumer queue whose producer never blocks: it holds
+/// at most `capacity` items and `byte_capacity` bytes.
 struct Mailbox<T> {
     state: Mutex<MailboxState<T>>,
     capacity: usize,
+    byte_capacity: u64,
     waker: AtomicWaker,
 }
 
 impl<T> Mailbox<T> {
-    fn new(capacity: usize) -> Self {
+    fn new((capacity, byte_capacity): (usize, u64)) -> Self {
         Self {
             state: Mutex::new(MailboxState {
                 items: VecDeque::new(),
+                bytes: 0,
                 closed: false,
             }),
             capacity,
+            byte_capacity,
             waker: AtomicWaker::new(),
         }
     }
@@ -51,15 +57,20 @@ impl<T> Mailbox<T> {
             .expect("Mutex poisoned: prior task panicked")
     }
 
-    fn push(&self, item: T) -> Result<(), (T, MailboxRefusal)> {
+    fn push(&self, item: T, bytes: u64) -> Result<(), (T, MailboxRefusal)> {
         let mut state = self.lock();
         if state.closed {
             return Err((item, MailboxRefusal::Closed));
         }
-        if state.items.len() >= self.capacity {
+        // The byte budget always admits one request into an empty queue:
+        // a request larger than the budget is slow, never refused forever.
+        if state.items.len() >= self.capacity
+            || (!state.items.is_empty() && state.bytes.saturating_add(bytes) > self.byte_capacity)
+        {
             return Err((item, MailboxRefusal::Full));
         }
-        state.items.push_back(item);
+        state.bytes = state.bytes.saturating_add(bytes);
+        state.items.push_back((item, bytes));
         drop(state);
         self.waker.wake();
         Ok(())
@@ -68,7 +79,8 @@ impl<T> Mailbox<T> {
     fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<T>> {
         self.waker.register(cx.waker());
         let mut state = self.lock();
-        if let Some(item) = state.items.pop_front() {
+        if let Some((item, bytes)) = state.items.pop_front() {
+            state.bytes -= bytes.min(state.bytes);
             Poll::Ready(Some(item))
         } else if state.closed {
             Poll::Ready(None)
@@ -79,9 +91,10 @@ impl<T> Mailbox<T> {
 
     /// Close the mailbox and hand back what was queued, so the caller can
     /// drop it outside the lock.
-    fn close(&self) -> VecDeque<T> {
+    fn close(&self) -> VecDeque<(T, u64)> {
         let mut state = self.lock();
         state.closed = true;
+        state.bytes = 0;
         let items = std::mem::take(&mut state.items);
         drop(state);
         self.waker.wake();
@@ -102,6 +115,9 @@ pub struct IncomingRequest<M: RpcMethod> {
 pub(crate) trait Inbox: Send + Sync {
     /// The method, schema and request codec the endpoint registered.
     fn identity(&self) -> (MethodId, SchemaVersion, CodecId);
+
+    /// Whether the method answers with a reply stream.
+    fn streaming(&self) -> bool;
 
     /// Decode `body` as the registered request type and queue it with a
     /// responder on `context`. On refusal the rejection has already been
@@ -124,8 +140,8 @@ pub(crate) trait EndpointOwner: Send + Sync {
         inbox: Arc<dyn Inbox>,
     ) -> Result<(), ErrorReason>;
 
-    /// The capacity of each endpoint's request queue.
-    fn queue_capacity(&self) -> usize;
+    /// The capacity of each endpoint's request queue: requests and bytes.
+    fn queue_capacity(&self) -> (usize, u64);
 }
 
 struct TypedInbox<M: RpcMethod> {
@@ -137,27 +153,33 @@ impl<M: RpcMethod> Inbox for TypedInbox<M> {
         (M::METHOD, M::SCHEMA, <M::Request as Wire>::CODEC)
     }
 
+    fn streaming(&self) -> bool {
+        M::STREAMING
+    }
+
     fn deliver(&self, body: &[u8], context: ReplyContext) -> Result<(), WireError> {
         let Ok(request) = <M::Request as Wire>::decode(body) else {
-            context.deliver(WireOutcome::Err(WireError::MalformedRequest));
+            context.reject(WireError::MalformedRequest);
             return Err(WireError::MalformedRequest);
         };
         let incoming = IncomingRequest {
             request,
             reply: ReplyHandle::new(context),
         };
-        self.mailbox.push(incoming).map_err(|(incoming, refusal)| {
-            let error = match refusal {
-                MailboxRefusal::Full => WireError::Overloaded,
-                MailboxRefusal::Closed => WireError::EndpointNotFound,
-            };
-            // Refused before admission: the caller gets the rejection, not a
-            // broken promise.
-            if let Some(context) = incoming.reply.defuse() {
-                context.deliver(WireOutcome::Err(error));
-            }
-            error
-        })
+        self.mailbox
+            .push(incoming, body.len() as u64)
+            .map_err(|(incoming, refusal)| {
+                let error = match refusal {
+                    MailboxRefusal::Full => WireError::Overloaded,
+                    MailboxRefusal::Closed => WireError::EndpointNotFound,
+                };
+                // Refused before admission: the caller gets the rejection, not a
+                // broken promise.
+                if let Some(context) = incoming.reply.defuse() {
+                    context.reject(error);
+                }
+                error
+            })
     }
 }
 
@@ -197,7 +219,9 @@ impl<M: RpcMethod> UnboundReceiver<M> {
 }
 
 /// Build the registry entry and the receiver for a new endpoint.
-pub(crate) fn endpoint_pair<M: RpcMethod>(capacity: usize) -> (Arc<dyn Inbox>, UnboundReceiver<M>) {
+pub(crate) fn endpoint_pair<M: RpcMethod>(
+    capacity: (usize, u64),
+) -> (Arc<dyn Inbox>, UnboundReceiver<M>) {
     let mailbox = Arc::new(Mailbox::new(capacity));
     let inbox: Arc<dyn Inbox> = Arc::new(TypedInbox::<M> {
         mailbox: Arc::clone(&mailbox),

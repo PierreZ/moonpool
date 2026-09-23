@@ -55,6 +55,8 @@ mod driver;
 mod handle;
 pub(crate) mod peer;
 mod sessions;
+mod shutdown;
+mod streams;
 pub mod upgrade;
 
 use std::collections::BTreeMap;
@@ -64,11 +66,11 @@ use std::sync::{Arc, Mutex, Weak};
 use futures::channel::{mpsc, oneshot};
 use moonpool_core::{NetworkProvider, Providers, RandomProvider};
 
-use self::connection::{Connection, Direction};
+use self::connection::{Connection, Direction, QueueLimits};
 use self::peer::Peer;
 use self::upgrade::{Acceptor, Connector, PeerContext};
 use crate::call::receiver::{EndpointOwner, Inbox, RequestStream, endpoint_pair};
-use crate::call::reply::{ReplyContext, ReplyRoute};
+use crate::call::reply::{Outstanding, ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
 use crate::config::RpcConfig;
 use crate::endpoint::registry::{Registry, RegistryError};
@@ -78,13 +80,16 @@ use crate::failure::watch::Watch;
 use crate::failure::{MonitorState, PermanentFailure};
 use crate::interface::{InterfaceId, RpcInterface, ServiceGroup, ServiceRef};
 use crate::protocol::{
-    MIN_PROTOCOL_VERSION, MethodId, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, SchemaVersion,
-    WireError, WireMessage, WireOutcome, encode_frame, encode_message,
+    MethodId, PROTOCOL_MAGIC, RpcMethod, SchemaVersion, WireError, WireMessage, encode_frame,
+    encode_message,
 };
+use crate::security::{AccessRequest, CredentialSource, Denial, RequestOrigin, audit_denial};
 use crate::stats::{Counters, RpcStats};
+use crate::stream::consumer::ConsumerCore;
 
 pub use self::driver::{RpcDriver, is_transient_accept_error};
 pub use self::handle::RpcHandle;
+pub use self::shutdown::ShutdownReport;
 
 type Stream<P> = <<P as Providers>::Network as NetworkProvider>::TcpStream;
 type Listener<P> = <<P as Providers>::Network as NetworkProvider>::TcpListener;
@@ -104,6 +109,8 @@ enum Command<P: Providers> {
     Connect(Arc<Connection>, SocketAddr),
     /// Upgrade and drive an accepted connection.
     Accepted(Arc<Connection>, Stream<P>),
+    /// A graceful shutdown began: stop accepting.
+    StopAccepting,
 }
 
 /// Where a pending call's reply may come from.
@@ -135,13 +142,68 @@ struct PendingCall {
     earlier_transmitted: bool,
     /// The request body, kept for retransmission (reliable calls only).
     retained: Option<Vec<u8>>,
-    sender: oneshot::Sender<Result<ReplyBytes, RpcError>>,
+    /// Where each attempt's credential comes from: asked again when a
+    /// reliable call is retransmitted, so it never travels with a stale or
+    /// missing credential.
+    credentials: Option<Arc<dyn CredentialSource>>,
+    completion: Completion,
 }
 
 impl PendingCall {
     /// Whether any attempt of this call may have reached a handler.
     fn may_have_executed(&self) -> bool {
         self.transmitted || self.earlier_transmitted
+    }
+
+    /// The consumer, for a call that opened a reply stream.
+    fn stream(&self) -> Option<&Arc<ConsumerCore>> {
+        match &self.completion {
+            Completion::Reply(_) => None,
+            Completion::Stream(stream) => Some(&stream.0),
+        }
+    }
+}
+
+/// How a pending call completes.
+enum Completion {
+    /// One reply, through a one-shot channel.
+    Reply(oneshot::Sender<Result<ReplyBytes, RpcError>>),
+    /// A reply stream: the call stays pending while items arrive, and its
+    /// outcome here is only a failure before the stream's own end.
+    Stream(StreamCompletion),
+}
+
+impl Completion {
+    /// Complete with `result`.
+    fn finish(self, result: Result<ReplyBytes, RpcError>) {
+        match self {
+            Self::Reply(sender) => {
+                let _ = sender.send(result);
+            }
+            Self::Stream(stream) => stream.0.terminate(result.map_or_else(
+                |error| error,
+                |_| {
+                    RpcError::new(
+                        ErrorReason::StreamProtocol("a single reply answered a stream".into()),
+                        crate::error::Execution::Executed,
+                    )
+                },
+            )),
+        }
+    }
+}
+
+/// A pending stream's consumer. Dropped with its runtime (or its call) it
+/// ends the stream as shut down, so no consumer waits forever; when the
+/// stream already ended that is a no-op.
+struct StreamCompletion(Arc<ConsumerCore>);
+
+impl Drop for StreamCompletion {
+    fn drop(&mut self) {
+        self.0.terminate(RpcError::new(
+            ErrorReason::Shutdown,
+            crate::error::Execution::MaybeExecuted,
+        ));
     }
 }
 
@@ -154,8 +216,8 @@ struct Registration {
     /// The group's interface and version; zero for a single-method
     /// endpoint.
     interface: (InterfaceId, SchemaVersion),
-    // Stored and carried now, enforced by the security package (#218).
-    _access: AccessClass,
+    /// Who may call it: enforced in admission.
+    access: AccessClass,
 }
 
 impl Registration {
@@ -165,7 +227,7 @@ impl Registration {
             methods: BTreeMap::from([(method, inbox)]),
             grouped: false,
             interface: (InterfaceId::new(0), SchemaVersion::new(0)),
-            _access: access,
+            access,
         }
     }
 
@@ -221,8 +283,25 @@ pub(crate) struct Shared<P: Providers> {
     /// Published after every failure-monitor change; closed on drop.
     watch: Arc<Watch>,
     alive: Arc<()>,
+    /// How accepted sessions may be shared: the configured mode, or
+    /// `Disabled` when the session upgrade authenticates servers.
+    inbound_sharing: crate::config::InboundSharing,
+    /// [`RUNNING`], [`DRAINING`] or [`TERMINATED`] (graceful shutdown).
+    lifecycle: std::sync::atomic::AtomicU8,
+    /// The graceful shutdown's outcome, once it finished: every other
+    /// caller of `shutdown` gets this one.
+    shutdown_report: Mutex<Option<ShutdownReport>>,
     this: Weak<Shared<P>>,
 }
+
+/// The runtime admits and starts work.
+const RUNNING: u8 = 0;
+/// A graceful shutdown began: nothing new is admitted, started, dialed or
+/// accepted; admitted work may finish.
+const DRAINING: u8 = 1;
+/// The drain ended: every remaining call was failed and every connection
+/// closed.
+const TERMINATED: u8 = 2;
 
 impl<P: Providers> Drop for Shared<P> {
     fn drop(&mut self) {
@@ -237,7 +316,18 @@ impl<P: Providers> Shared<P> {
         config: RpcConfig,
         address: Option<SocketAddr>,
         commands: mpsc::UnboundedSender<Command<P>>,
+        authenticates_server: bool,
     ) -> Arc<Self> {
+        let inbound_sharing = if authenticates_server {
+            if config.peer.share_inbound_sessions != crate::config::InboundSharing::Disabled {
+                tracing::debug!(
+                    "rpc inbound session sharing off: the session upgrade authenticates servers"
+                );
+            }
+            crate::config::InboundSharing::Disabled
+        } else {
+            config.peer.share_inbound_sessions
+        };
         // Protocol identifiers come from the provider's random source (seeded
         // in simulation, OS entropy in production) unless the caller supplies
         // one. Never an authentication.
@@ -267,6 +357,9 @@ impl<P: Providers> Shared<P> {
             counters: Arc::new(Counters::default()),
             watch: Arc::new(Watch::default()),
             alive: Arc::new(()),
+            inbound_sharing,
+            lifecycle: std::sync::atomic::AtomicU8::new(RUNNING),
+            shutdown_report: Mutex::new(None),
             this: this.clone(),
         })
     }
@@ -277,8 +370,16 @@ impl<P: Providers> Shared<P> {
             .expect("Mutex poisoned: prior task panicked")
     }
 
+    pub(crate) fn counters(&self) -> &Arc<Counters> {
+        &self.counters
+    }
+
     pub(crate) fn time(&self) -> &P::Time {
         self.providers.time()
+    }
+
+    pub(crate) fn config(&self) -> &RpcConfig {
+        &self.config
     }
 
     pub(crate) fn random(&self) -> &P::Random {
@@ -302,31 +403,54 @@ impl<P: Providers> Shared<P> {
         self.lock().monitor.reference(address, add);
     }
 
+    /// Whether a graceful shutdown began: nothing new may start.
+    pub(crate) fn is_closing(&self) -> bool {
+        self.lifecycle.load(std::sync::atomic::Ordering::Acquire) != RUNNING
+    }
+
+    /// The refusal of new work once a graceful shutdown began.
+    fn refuse_if_closing(&self) -> Result<(), RpcError> {
+        if self.is_closing() {
+            Err(RpcError::not_admitted(ErrorReason::Shutdown))
+        } else {
+            Ok(())
+        }
+    }
+
     fn hello(&self) -> Vec<u8> {
+        let (min_version, max_version) = self.config.advertised_versions();
         let payload = encode_message(&WireMessage::Hello {
             magic: PROTOCOL_MAGIC,
-            min_version: MIN_PROTOCOL_VERSION,
-            max_version: PROTOCOL_VERSION,
+            min_version,
+            max_version,
             incarnation: self.incarnation,
             features: 0,
             max_frame_bytes: self.config.max_frame_bytes,
             // Announced only when this runtime shares sessions: a peer then
             // knows the tie-break applies on both sides.
-            listen: self.address.filter(|_| {
-                self.config.peer.share_inbound_sessions != crate::config::InboundSharing::Disabled
-            }),
+            listen: self
+                .address
+                .filter(|_| self.inbound_sharing != crate::config::InboundSharing::Disabled),
         });
         // A handshake is a few dozen bytes and exempt from the configured
         // frame limit, which only bounds what peers may send us.
         encode_frame(&payload, u32::MAX).unwrap_or_default()
     }
 
-    fn context(&self, route: ReplyRoute, peer: Option<PeerContext>) -> ReplyContext {
+    fn context(
+        &self,
+        route: ReplyRoute,
+        peer: Option<PeerContext>,
+        outstanding: Option<Outstanding>,
+    ) -> ReplyContext {
         ReplyContext {
             route,
             counters: Arc::clone(&self.counters),
             max_frame_bytes: self.config.max_frame_bytes,
             peer,
+            principal: None,
+            outstanding,
+            stream: None,
         }
     }
 
@@ -335,10 +459,11 @@ impl<P: Providers> Shared<P> {
         access: AccessClass,
         well_known: Option<WellKnownId>,
     ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
+        self.refuse_if_closing()?;
         let address = self
             .address
             .ok_or(RpcError::not_admitted(ErrorReason::NotListening))?;
-        let (inbox, receiver) = endpoint_pair::<M>(self.config.endpoint_queue_capacity);
+        let (inbox, receiver) = endpoint_pair::<M>(self.queue_capacity());
         let token = self.insert(Registration::single(inbox, access), well_known)?;
         let endpoint = Endpoint::new(address, self.incarnation, token);
         let owner: Weak<dyn EndpointOwner> = self.this.clone();
@@ -351,6 +476,7 @@ impl<P: Providers> Shared<P> {
         &self,
         access: AccessClass,
     ) -> Result<ServiceGroup<I>, RpcError> {
+        self.refuse_if_closing()?;
         let address = self
             .address
             .ok_or(RpcError::not_admitted(ErrorReason::NotListening))?;
@@ -358,7 +484,7 @@ impl<P: Providers> Shared<P> {
             methods: BTreeMap::new(),
             grouped: true,
             interface: (I::INTERFACE, I::VERSION),
-            _access: access,
+            access,
         };
         let token = self.insert(registration, None)?;
         let endpoint = Endpoint::new(address, self.incarnation, token);
@@ -389,10 +515,27 @@ impl<P: Providers> Shared<P> {
 
     /// Validate and hand one request to its receiver. Local and remote
     /// admissions both come through here. Every rejection is delivered
-    /// along `route` before returning.
-    fn admit(&self, request: &Admission<'_>, route: ReplyRoute, peer: Option<PeerContext>) {
-        let context = self.context(route, peer);
+    /// along the context's route before returning.
+    ///
+    /// Order: shutdown, identity (incarnation, token), contract (interface,
+    /// method, schema, codec, streaming), **security** (credential and
+    /// access policy), then capacity; only then is the body decoded and
+    /// handed to the endpoint. A request that fails any check never reaches
+    /// a handler or a queue.
+    fn admit(&self, request: &Admission<'_>, mut context: ReplyContext) {
         let token = request.token;
+        if request.local && request.metadata.is_some_and(|section| !section.is_empty()) {
+            // A local caller's credential: it reached admission without
+            // crossing a session.
+            Counters::bump(&self.counters.credentials_attached);
+        }
+        if self.is_closing() {
+            Counters::bump(&self.counters.shutdown_refusals);
+            Counters::bump(&self.counters.requests_rejected);
+            tracing::debug!(%token, "rpc request refused: shutting down");
+            context.reject(WireError::ShuttingDown);
+            return;
+        }
         // A well-known endpoint answers in every incarnation; a dynamic one
         // only in the incarnation that registered it.
         let wrong_incarnation = !token.is_well_known() && request.incarnation != self.incarnation;
@@ -405,13 +548,15 @@ impl<P: Providers> Shared<P> {
                 None => state.registry.get(token),
             }
             .map_or(Err(WireError::EndpointNotFound), |registration| {
-                registration.route(request.identity.interface, request.identity.method)
+                registration
+                    .route(request.identity.interface, request.identity.method)
+                    .map(|inbox| (inbox, registration.access))
             })
         };
         // Checked in order, all before a single body byte is decoded.
         let rejection = match inbox {
             Err(rejection) => rejection,
-            Ok(inbox) => {
+            Ok((inbox, access)) => {
                 let (method, schema, codec) = inbox.identity();
                 if method != request.identity.method {
                     WireError::MethodMismatch { registered: method }
@@ -419,6 +564,29 @@ impl<P: Providers> Shared<P> {
                     WireError::SchemaMismatch { registered: schema }
                 } else if codec != request.identity.codec {
                     WireError::CodecMismatch { registered: codec }
+                } else if inbox.streaming() != request.stream_window.is_some() {
+                    WireError::StreamingMismatch {
+                        endpoint_streams: inbox.streaming(),
+                    }
+                } else if let Err(denial) = self.authorize(request, access, &mut context) {
+                    match denial {
+                        Denial::Unauthenticated(reason) => WireError::Unauthenticated { reason },
+                        Denial::PermissionDenied => WireError::PermissionDenied,
+                    }
+                } else if context
+                    .outstanding
+                    .as_ref()
+                    .is_some_and(|owed| owed.over(&self.config.limits))
+                {
+                    // Every admitted request reserves the room of its reply:
+                    // beyond the in-flight budget, push back before any
+                    // handler sees it.
+                    Counters::bump(&self.counters.overload_refusals);
+                    WireError::Overloaded
+                } else if let Some(window) = request.stream_window
+                    && let Err(refusal) = self.open_stream(&mut context, window)
+                {
+                    refusal
                 } else {
                     match inbox.deliver(request.body, context) {
                         Ok(()) => Counters::bump(&self.counters.requests_admitted),
@@ -433,7 +601,62 @@ impl<P: Providers> Shared<P> {
         };
         Counters::bump(&self.counters.requests_rejected);
         tracing::debug!(error = ?rejection, %token, "rpc request refused");
-        context.deliver(WireOutcome::Err(rejection));
+        context.reject(rejection);
+    }
+
+    /// The security check of one request whose endpoint and contract
+    /// matched: verify its credential and apply the access policy. On
+    /// success the verified principal goes into the reply context.
+    fn authorize(
+        &self,
+        request: &Admission<'_>,
+        access: AccessClass,
+        context: &mut ReplyContext,
+    ) -> Result<(), Denial> {
+        let security = &self.config.security;
+        // The admission site says where the request came from; a remote
+        // request whose session context is missing is judged as an
+        // unencrypted, unauthenticated peer (fail closed).
+        let unknown = PeerContext::new("unknown");
+        let origin = if request.local {
+            RequestOrigin::Local
+        } else {
+            RequestOrigin::Remote(context.peer.as_ref().unwrap_or(&unknown))
+        };
+        let check = AccessRequest {
+            origin,
+            access,
+            token: request.token,
+            interface: request.identity.interface,
+            method: request.identity.method,
+            now: if security.is_trusted_network() {
+                None
+            } else {
+                security.now_utc()
+            },
+        };
+        match security.decide(&check, request.metadata) {
+            Ok(principal) => {
+                if principal.is_some() {
+                    Counters::bump(&self.counters.requests_authenticated);
+                }
+                context.principal = principal.map(Arc::new);
+                Ok(())
+            }
+            Err(denial) => {
+                self.counters.count_denial(denial);
+                audit_denial(&check, denial);
+                Err(denial)
+            }
+        }
+    }
+
+    /// The per-endpoint queue budget: requests and bytes.
+    fn queue_capacity(&self) -> (usize, u64) {
+        (
+            self.config.endpoint_queue_capacity,
+            self.config.limits.endpoint_queue_bytes,
+        )
     }
 
     /// The live selected connection to `address`, opening one if needed.
@@ -442,6 +665,8 @@ impl<P: Providers> Shared<P> {
         state: &mut State,
         address: SocketAddr,
     ) -> Result<Arc<Connection>, RpcError> {
+        // Draining: no new work, and no new session or re-dial for old work.
+        self.refuse_if_closing()?;
         let now = self.now();
         if let Some(peer) = state.peers.get(&address)
             && peer.dialing_stalled(now, self.config.peer.always_accept_after)
@@ -503,10 +728,12 @@ impl<P: Providers> Shared<P> {
             peer,
             direction,
             self.hello(),
-            (
-                self.config.max_queued_requests,
-                self.config.reserved_control_frames,
-            ),
+            QueueLimits {
+                requests: self.config.max_queued_requests,
+                control: self.config.reserved_control_frames,
+                bytes: self.config.limits.max_queued_bytes_per_connection,
+                runtime_bytes: self.config.limits.max_queued_bytes,
+            },
             self.now(),
             &self.counters,
         ));
@@ -515,6 +742,18 @@ impl<P: Providers> Shared<P> {
     }
 
     fn accept(&self, stream: Stream<P>, peer: String) {
+        if self.is_closing() {
+            return;
+        }
+        if !self.config.security.allow_list().allows_peer(&peer) {
+            Counters::bump(&self.counters.connections_refused_by_policy);
+            tracing::warn!(
+                target: "moonpool_rpc::audit",
+                from = %peer,
+                "rpc_connection_refused"
+            );
+            return;
+        }
         let mut state = self.lock();
         if state.connections.len() >= self.config.max_connections {
             drop(state);
@@ -538,10 +777,16 @@ impl<P: Providers> Shared<P> {
             .values()
             .filter(|call| call.retained.is_some())
             .count();
+        let consuming = state
+            .pending
+            .values()
+            .filter(|call| call.stream().is_some())
+            .count();
         let mut snapshot = self
             .counters
             .snapshot(endpoints, state.pending.len(), retained);
         snapshot.peers = state.peers.len();
+        snapshot.streams_consuming = consuming;
         snapshot
     }
 }
@@ -586,16 +831,24 @@ impl<P: Providers> EndpointOwner for Shared<P> {
         Ok(())
     }
 
-    fn queue_capacity(&self) -> usize {
-        self.config.endpoint_queue_capacity
+    fn queue_capacity(&self) -> (usize, u64) {
+        Shared::queue_capacity(self)
     }
 }
 
 /// One request presented for admission, from either route.
 struct Admission<'a> {
+    /// A caller in this runtime (as opposed to one over a session): set by
+    /// the admission site itself, never inferred.
+    local: bool,
     incarnation: Incarnation,
     token: EndpointToken,
     identity: CallIdentity,
+    /// The caller's credit window, for a request that opens a stream.
+    stream_window: Option<u64>,
+    /// The request's credential section, or `None` when its session cannot
+    /// carry credentials (protocol version 1).
+    metadata: Option<&'a [u8]>,
     body: &'a [u8],
 }
 

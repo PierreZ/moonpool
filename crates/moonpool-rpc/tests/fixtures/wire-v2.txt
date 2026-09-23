@@ -1,0 +1,13 @@
+# Golden envelopes that protocol version 2 adds (see wire-v1.txt for the
+# format and shared values). Every layout is version 1's; version 2 adds
+# the meaning of the request metadata section (entries `kind u8 | len u16 |
+# value`, kind 1 = bearer credential) and reply statuses 16 (unauthenticated,
+# detail = credential error code: 9 expired, 5 unknown key), 17 (permission
+# denied) and 18 (shutting down). A version 1 decoder refuses statuses
+# 16-18; a version 2 sender never sends them to a version 1 peer.
+hello-v2-only 014352504d02000200100f0e0d0c0b0a09080706050403020100000000000000000000100000
+request-bearer 020700000000000000100f0e0d0c0b0a0908070605040302010300000000000000010000000100766b02002000000001000100001000010d0065794a2e746f6b656e2e7369670a026869
+reply-unauthenticated-expired 030700000000000000100900000000000000
+reply-unauthenticated-unknown-key 030700000000000000100500000000000000
+reply-permission-denied 030700000000000000110000000000000000
+reply-shutting-down 030700000000000000120000000000000000

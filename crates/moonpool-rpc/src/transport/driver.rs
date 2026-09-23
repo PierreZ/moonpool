@@ -21,7 +21,7 @@ use super::peer::jittered;
 use super::upgrade::{Acceptor, Connector, Plaintext};
 use super::{Command, Listener, SessionUpgrade, Shared, Stream};
 use crate::config::RpcConfig;
-use crate::protocol::decode_message;
+use crate::protocol::{PROTOCOL_VERSION, decode_message_at};
 use crate::stats::{Counters, TaskGuard};
 
 type ChildFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -84,7 +84,8 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
         upgrade: U,
     ) -> (Self, RpcHandle<P>) {
         let (sender, commands) = mpsc::unbounded();
-        let shared = Shared::new(providers, config, address, sender);
+        let authenticates_server = Connector::<Stream<P>>::authenticates_server(&upgrade);
+        let shared = Shared::new(providers, config, address, sender, authenticates_server);
         let handle = RpcHandle::new(&shared);
         (
             Self {
@@ -150,12 +151,14 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
         RpcHandle::new(&self.shared)
     }
 
-    /// Drive the runtime; drop it to shut down.
+    /// Drive the runtime; drop it to shut down at once.
     ///
     /// Completes only when the listener fails fatally (see
     /// [`is_transient_accept_error`]), returning that error; transient accept
     /// errors are retried with bounded backoff on provider time. A
-    /// client-only runtime never completes.
+    /// client-only runtime never completes. For a graceful shutdown, keep
+    /// polling it next to [`RpcHandle::shutdown`] and drop it once that
+    /// resolves.
     pub async fn run(self) -> io::Error {
         let Self {
             shared,
@@ -187,6 +190,11 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
                     }
                     Command::Accepted(connection, stream) => {
                         Box::pin(drive_inbound(shared, upgrade, connection, stream))
+                    }
+                    Command::StopAccepting => {
+                        // A graceful shutdown began: close the listener.
+                        acceptor = None;
+                        continue;
                     }
                 };
                 children.push(child);
@@ -359,19 +367,34 @@ where
 {
     Counters::bump(&shared.counters.connections_opened);
     let (reader, writer) = stream.split();
+    let batch = shared.config.limits.max_frames_per_batch;
     let read = read_loop(
         reader,
         shared.config.max_frame_bytes,
         shared.config.read_chunk_bytes,
+        batch,
         |payload| {
-            let message = decode_message(&payload)
+            // Before the handshake only a Hello is valid, whose layout every
+            // version shares; after it, the negotiated version decides.
+            let version = connection
+                .peer_hello()
+                .map_or(PROTOCOL_VERSION, |hello| hello.version);
+            let message = decode_message_at(&payload, version)
                 .map_err(|error| CloseReason::Protocol(format!("bad envelope: {error}")))?;
             shared.on_message(connection, message)
         },
     );
-    let write = write_loop(connection, writer, |call_id, frame_len| {
-        shared.admit_transmit(connection, call_id, frame_len)
-    });
+    let write = write_loop(
+        connection,
+        writer,
+        batch,
+        |call_id, frame| shared.admit_transmit(connection, call_id, frame),
+        // A session closed from this side closes its stream (a TLS
+        // close_notify), for at most the handshake budget.
+        || async {
+            let _ = shared.time().sleep(shared.config.handshake_timeout).await;
+        },
+    );
     let deadline = handshake_deadline(shared, connection, shared.config.handshake_timeout);
     let liveness = monitor(shared, connection);
     futures::pin_mut!(read, write, deadline, liveness);
@@ -427,8 +450,16 @@ async fn monitor<P: Providers>(
         if shared.close_if_idle(connection) {
             return CloseReason::Idle;
         }
-        if connection.peer_address().is_none() {
-            // Served only: the dialer pings us; idleness reaps it.
+        if connection.peer_address().is_none()
+            && connection.silent_for(shared.now()) < policy.inbound_idle_timeout
+        {
+            // Served only: the dialer pings us, and idleness reaps it once
+            // nothing is owed. But a dialer silent for the inbound idle
+            // timeout while replies or streams are still owed to it has
+            // vanished behind a half-open session: probe it ourselves and
+            // fail the session if nothing answers (`FoundationDB`'s
+            // `connectionMonitor` for incoming connections), so the work
+            // owed to it is released instead of waiting forever.
             continue;
         }
         let before = connection.received();

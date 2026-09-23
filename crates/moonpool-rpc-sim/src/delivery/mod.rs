@@ -20,7 +20,7 @@
 //! shows at least one; a `NotAdmitted` error shows none; reliable delivery
 //! may show several and the campaign requires that it sometimes does.
 //!
-//! **Faults.** Swarm network chaos with knob spikes, every
+//! **Faults.** Swarm network chaos (bit flips masked: [`crate::without_corruption`]) with knob spikes, every
 //! [`PeerPolicy`](moonpool_rpc::PeerPolicy) field a `buggify_knob!`, and a
 //! scripted injector ([`DeliveryFaults`]): the bootstrap name is missing,
 //! then points nowhere, then at the server; a lost-reply job partitions
@@ -75,5 +75,6 @@ pub fn delivery_campaign(config: DeliveryConfig, records: &DeliveryRecords) -> S
         })
         .fault_factory(|| Box::new(DeliveryFaults::default()))
         .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])
+        .network_fault_mask(crate::without_corruption())
         .chaos_duration(Duration::from_secs(8))
 }

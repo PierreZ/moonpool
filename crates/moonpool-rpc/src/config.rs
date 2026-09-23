@@ -4,7 +4,11 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::endpoint::Incarnation;
-use crate::protocol::{HELLO_ENVELOPE_LEN, REJECTION_ENVELOPE_LEN, request_envelope_len};
+use crate::protocol::{
+    CREDENTIALS_VERSION, HELLO_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    REJECTION_ENVELOPE_LEN, STREAM_END_ENVELOPE_LEN, request_envelope_len, stream_item_frame_len,
+    stream_request_envelope_len,
+};
 
 /// The smallest accepted [`RpcConfig::max_frame_bytes`]: every fixed
 /// envelope (handshake, empty request, rejection) must fit a frame.
@@ -13,7 +17,9 @@ pub const MIN_FRAME_BYTES: u32 = 64;
 const _: () = assert!(
     request_envelope_len(0) <= MIN_FRAME_BYTES as usize
         && HELLO_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize
-        && REJECTION_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize,
+        && REJECTION_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize
+        && stream_request_envelope_len(0) <= MIN_FRAME_BYTES as usize
+        && STREAM_END_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize,
     "MIN_FRAME_BYTES must hold every fixed envelope"
 );
 
@@ -28,9 +34,9 @@ pub struct InvalidConfig(pub String);
 
 /// Hard limits and settings of one RPC runtime.
 ///
-/// Every queue the transport owns is bounded by one of these. The numbers
-/// are conservative defaults for the first package; the resource-control
-/// package (#216) measures and freezes them.
+/// Every queue the transport owns is bounded by one of these, by
+/// [`ResourceLimits`] or by [`StreamPolicy`]; see [`ResourceLimits`] for
+/// the whole table and what happens at each limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcConfig {
     /// Largest frame payload accepted or produced, in bytes. A peer
@@ -48,10 +54,17 @@ pub struct RpcConfig {
     pub max_connections: usize,
     /// Request frames one connection may queue for writing.
     pub max_queued_requests: usize,
-    /// Control frames (handshake, replies, rejections) one connection may
-    /// queue, reserved separately so request traffic cannot starve them.
-    /// A connection that would exceed it is closed rather than dropping a
-    /// reply silently.
+    /// Control frames (handshake, pings, pongs and admission rejections)
+    /// one connection may queue. They are written before any data frame,
+    /// so request, reply and stream traffic cannot starve them. Replies to
+    /// admitted requests are not control frames: their room is reserved at
+    /// admission ([`ResourceLimits::max_inflight_per_connection`]), and
+    /// stream acknowledgements and cancellations are coalesced per stream.
+    /// A peer whose pipelined rejected requests and pings exceed this
+    /// reserve while this side cannot write is closed rather than answered
+    /// silently; a peer with default limits (at most
+    /// [`max_pending_calls`](Self::max_pending_calls) outstanding calls)
+    /// cannot.
     pub reserved_control_frames: usize,
     /// Budget for connecting and upgrading one outbound connection, on
     /// provider time.
@@ -71,6 +84,215 @@ pub struct RpcConfig {
     pub incarnation: Option<Incarnation>,
     /// Reconnect, liveness, idle and failure-detection timing.
     pub peer: PeerPolicy,
+    /// Admission and buffering budgets per endpoint, per connection and
+    /// per runtime.
+    pub limits: ResourceLimits,
+    /// Reply stream credit and stream budgets.
+    pub streams: StreamPolicy,
+    /// The protocol versions this runtime speaks, within
+    /// [`MIN_PROTOCOL_VERSION`](crate::protocol::MIN_PROTOCOL_VERSION)`..=`[`PROTOCOL_VERSION`](crate::protocol::PROTOCOL_VERSION)
+    /// (the default: all of them). Each session runs at the highest version
+    /// both sides speak; a peer with none in common is refused at the
+    /// handshake. Narrow it to pin a version during a rolling upgrade. A
+    /// runtime whose [`security`](Self::security) verifies credentials
+    /// speaks version 2 and up only (see [`advertised_versions`](Self::advertised_versions)).
+    pub protocol_versions: std::ops::RangeInclusive<u16>,
+    /// Who may call this runtime's endpoints and what its own calls carry.
+    /// The default verifies nothing, so private endpoints refuse every
+    /// caller; see [`SecurityConfig`](crate::security::SecurityConfig).
+    pub security: crate::security::SecurityConfig,
+}
+
+/// Admission and buffering budgets: what one runtime admits, queues and
+/// retains, per endpoint, per connection (peer) and in total.
+///
+/// Every budget is enforced where the work would enter, and a refusal
+/// there is reported as [`ErrorReason::Overloaded`](crate::ErrorReason::Overloaded)
+/// with [`Execution::NotAdmitted`](crate::Execution::NotAdmitted): nothing
+/// was queued, sent or handed to a handler. Nothing already admitted is
+/// dropped or failed to make room.
+///
+/// | Budget | Scope | Checked when | At the limit |
+/// |---|---|---|---|
+/// | [`RpcConfig::endpoint_queue_capacity`], [`endpoint_queue_bytes`](Self::endpoint_queue_bytes) | endpoint | a request is admitted | refused `Overloaded` |
+/// | [`max_inflight_per_connection`](Self::max_inflight_per_connection) | connection | a two-way or stream request is admitted | refused `Overloaded` |
+/// | [`max_inflight_requests`](Self::max_inflight_requests) | runtime | same | same |
+/// | [`StreamPolicy::max_streams_per_connection`], [`StreamPolicy::max_streams`] | connection, runtime | a stream request is admitted | refused `Overloaded` |
+/// | [`StreamPolicy::max_producer_bytes_per_connection`], [`StreamPolicy::max_producer_bytes`] | connection, runtime | a stream request is admitted (its window is reserved) | refused `Overloaded` |
+/// | [`RpcConfig::max_queued_requests`], [`max_queued_bytes_per_connection`](Self::max_queued_bytes_per_connection) | connection | a caller queues a request | the call fails `Overloaded` |
+/// | [`max_queued_bytes`](Self::max_queued_bytes) | runtime | same | same |
+/// | [`RpcConfig::max_pending_calls`] | runtime | a call or stream starts | fails `Overloaded` |
+/// | [`max_retained_bytes`](Self::max_retained_bytes) | runtime | a reliable call starts | fails `Overloaded` |
+/// | [`StreamPolicy::max_buffered_bytes`] | runtime | a caller opens a stream | fails `Overloaded` |
+/// | the stream's window | stream | the producer sends an item | the producer waits for credit |
+/// | [`RpcConfig::reserved_control_frames`] | connection | a control frame is queued | the connection closes |
+///
+/// Replies to admitted requests and items of admitted streams are never
+/// refused: an in-flight budget reserved their room at admission, and a
+/// stream's window bounds its items. A slow writer therefore pushes back
+/// on admission (new requests are refused, `NotAdmitted`) instead of
+/// closing the session and failing unrelated calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Admitted requests (two-way and streams) arriving on one connection
+    /// whose reply or stream end is still owed or queued unwritten.
+    pub max_inflight_per_connection: usize,
+    /// The same over every connection and local caller of the runtime.
+    pub max_inflight_requests: usize,
+    /// Bytes (whole frames) of requests queued unwritten on one connection
+    /// above which new outgoing requests on it are refused. Replies and
+    /// stream items are not counted: they are bounded by the in-flight
+    /// budgets and the reserved stream windows, and a stream backlog to one
+    /// slow peer never refuses calls to another.
+    pub max_queued_bytes_per_connection: u64,
+    /// The same over every connection.
+    pub max_queued_bytes: u64,
+    /// Request bodies retained for retransmission by reliable calls, in
+    /// bytes, over the whole runtime.
+    pub max_retained_bytes: u64,
+    /// Encoded request bytes one endpoint may queue unread.
+    pub endpoint_queue_bytes: u64,
+    /// Frames one connection reads (or writes) in a batch before it yields
+    /// to the other connections and tasks of its executor. Measured with
+    /// the `stream_saturation` example: a unary call beside eight
+    /// saturating streams waits about as long with 16 or 64 (the default),
+    /// twice as long at the tail with 256, and a batch of 1 yields so often
+    /// that the session crawls.
+    pub max_frames_per_batch: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_inflight_per_connection: 1024,
+            max_inflight_requests: 16 * 1024,
+            max_queued_bytes_per_connection: 16 << 20,
+            max_queued_bytes: 256 << 20,
+            max_retained_bytes: 64 << 20,
+            endpoint_queue_bytes: 16 << 20,
+            max_frames_per_batch: 64,
+        }
+    }
+}
+
+impl ResourceLimits {
+    fn validate(&self) -> Result<(), InvalidConfig> {
+        let counts = [
+            (
+                "limits.max_inflight_per_connection",
+                self.max_inflight_per_connection,
+            ),
+            ("limits.max_inflight_requests", self.max_inflight_requests),
+            ("limits.max_frames_per_batch", self.max_frames_per_batch),
+        ];
+        let bytes = [
+            (
+                "limits.max_queued_bytes_per_connection",
+                self.max_queued_bytes_per_connection,
+            ),
+            ("limits.max_queued_bytes", self.max_queued_bytes),
+            ("limits.max_retained_bytes", self.max_retained_bytes),
+            ("limits.endpoint_queue_bytes", self.endpoint_queue_bytes),
+        ];
+        if let Some((name, _)) = counts.iter().find(|(_, value)| *value == 0) {
+            return Err(InvalidConfig(format!("{name} must be positive")));
+        }
+        if let Some((name, _)) = bytes.iter().find(|(_, value)| *value == 0) {
+            return Err(InvalidConfig(format!("{name} must be positive")));
+        }
+        Ok(())
+    }
+}
+
+/// Reply stream credit and stream budgets.
+///
+/// A caller announces a **window** when it opens a stream: the bytes it is
+/// willing to hold received but not yet consumed by its application,
+/// counted in accounted item sizes
+/// ([`stream_item_frame_len`](crate::protocol::stream_item_frame_len): an
+/// item's whole frame). The producer may have at most that many bytes sent
+/// and unacknowledged, and the caller acknowledges an item only when its
+/// application takes it, never merely because it was read off the socket
+/// (`FoundationDB`'s `ReplyPromiseStream` acknowledgements).
+///
+/// The 1 MiB default window was measured with the `stream_saturation`
+/// example on localhost: an eagerly consumed stream of 4 KiB items gains
+/// throughput up to about 1 MiB and nothing beyond (`FoundationDB` uses
+/// 2 MB, `RANGESTREAM_LIMIT_BYTES`). A stream costs its consumer at most
+/// its window, so [`max_buffered_bytes`](Self::max_buffered_bytes) (256
+/// MiB) admits 256 default streams per consuming runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPolicy {
+    /// The window this runtime announces for the streams it opens, unless
+    /// the caller picks one
+    /// ([`ServiceClient::get_reply_stream_with_window`](crate::ServiceClient::get_reply_stream_with_window)).
+    /// An item larger than the window can never be sent: the producer is
+    /// told so ([`SendError::TooLarge`](crate::stream::SendError::TooLarge)).
+    pub window_bytes: u64,
+    /// The largest window this runtime honours as a producer; a caller
+    /// announcing more is held to this.
+    pub max_window_bytes: u64,
+    /// Streams one connection may have open on this (producing) side.
+    pub max_streams_per_connection: usize,
+    /// Streams this runtime may produce at once, over every connection.
+    pub max_streams: usize,
+    /// The sum of the windows of the streams this runtime consumes at once:
+    /// the most it may ever buffer for its own callers.
+    pub max_buffered_bytes: u64,
+    /// The sum of the windows of the streams produced over one connection:
+    /// the most this runtime may have to queue for one peer's streams. A
+    /// stream whose window does not fit is refused `Overloaded` before
+    /// admission.
+    pub max_producer_bytes_per_connection: u64,
+    /// The same over every connection and local caller.
+    pub max_producer_bytes: u64,
+}
+
+impl Default for StreamPolicy {
+    fn default() -> Self {
+        Self {
+            window_bytes: 1 << 20,
+            max_window_bytes: 16 << 20,
+            max_streams_per_connection: 1024,
+            max_streams: 16 * 1024,
+            max_buffered_bytes: 256 << 20,
+            max_producer_bytes_per_connection: 64 << 20,
+            max_producer_bytes: 1 << 30,
+        }
+    }
+}
+
+impl StreamPolicy {
+    fn validate(&self) -> Result<(), InvalidConfig> {
+        let smallest = stream_item_frame_len(0);
+        if self.window_bytes < smallest {
+            return Err(InvalidConfig(format!(
+                "streams.window_bytes below the {smallest}-byte smallest item"
+            )));
+        }
+        if self.max_window_bytes < self.window_bytes {
+            return Err(InvalidConfig(
+                "streams.max_window_bytes below streams.window_bytes".into(),
+            ));
+        }
+        if self.max_buffered_bytes < self.window_bytes {
+            return Err(InvalidConfig(
+                "streams.max_buffered_bytes below streams.window_bytes".into(),
+            ));
+        }
+        if self.max_producer_bytes_per_connection < smallest
+            || self.max_producer_bytes < self.max_producer_bytes_per_connection
+        {
+            return Err(InvalidConfig(
+                "streams producer budgets must hold an item, per connection below per runtime"
+                    .into(),
+            ));
+        }
+        if self.max_streams == 0 || self.max_streams_per_connection == 0 {
+            return Err(InvalidConfig("stream budgets must be positive".into()));
+        }
+        Ok(())
+    }
 }
 
 /// How a runtime keeps, probes, abandons and re-opens connections to its
@@ -108,8 +330,11 @@ pub struct PeerPolicy {
     pub idle_timeout: Duration,
     /// An inbound connection this runtime does not use for its own calls
     /// is closed after receiving nothing for this long with no reply
-    /// outstanding. Its dialer pings, so this only reaps dead dialers; keep
-    /// it well above `ping_interval`.
+    /// outstanding. With replies or streams still owed it is probed with a
+    /// ping instead, and failed if nothing answers within `ping_timeout`
+    /// (a dialer that vanished behind a half-open session), which releases
+    /// the work owed to it. Its dialer pings, so this only reaps dead
+    /// dialers; keep it well above `ping_interval`.
     pub inbound_idle_timeout: Duration,
     /// Connection failures to an address must persist this long before the
     /// failure monitor marks the address failed. A disconnect is reported
@@ -136,10 +361,18 @@ pub struct PeerPolicy {
 /// When an accepted session may carry this runtime's own calls to its
 /// dialer.
 ///
-/// Each `Hello` may name the sender's listen address. With plaintext
-/// sessions that claim is self-asserted: a runtime that adopts it routes
-/// its calls to that address, including retained reliable requests, over
-/// the claimant's connection, and counts the address as available.
+/// Each `Hello` may name the sender's listen address. That claim is always
+/// self-asserted: a runtime that adopts it routes its calls to that
+/// address, including retained reliable requests, over the claimant's
+/// connection, and counts the address as available.
+///
+/// **With a session upgrade that authenticates servers (TLS), sharing is
+/// always off**, whatever this says: our own dial would have verified the
+/// server's certificate, an accepted session verified nothing about its
+/// dialer, so adopting it would let any client that can reach us pose as
+/// the peer and receive our calls (and their credentials). And a request
+/// carrying a credential is never written on an accepted session whose
+/// dialer was not authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InboundSharing {
     /// Never share: announce no listen address, adopt nothing. Two
@@ -150,7 +383,9 @@ pub enum InboundSharing {
     /// host from claiming a peer's identity; it does not stop another
     /// process on the claimed host, and it refuses peers behind NAT or with
     /// several addresses (they keep one connection per direction).
-    /// Authenticated peer identity arrives with #218.
+    /// No session upgrade authenticates the dialer (TLS here authenticates
+    /// servers only; mutual TLS is not provided), so the claim stays
+    /// unauthenticated whatever the upgrade.
     #[default]
     SameIp,
     /// Share on the claim alone (`FoundationDB`'s behaviour). Only for
@@ -247,10 +482,54 @@ impl RpcConfig {
         ]
         .into_iter()
         .find(|(_, value)| *value == 0);
-        match zero {
-            Some((name, _)) => Err(InvalidConfig(format!("{name} must be positive"))),
-            None => self.peer.validate(),
+        if let Some((name, _)) = zero {
+            return Err(InvalidConfig(format!("{name} must be positive")));
         }
+        self.validate_versions()?;
+        self.peer.validate()?;
+        self.limits.validate()?;
+        self.streams.validate()
+    }
+
+    fn validate_versions(&self) -> Result<(), InvalidConfig> {
+        let (low, high) = (
+            *self.protocol_versions.start(),
+            *self.protocol_versions.end(),
+        );
+        if low > high || low < MIN_PROTOCOL_VERSION || high > PROTOCOL_VERSION {
+            return Err(InvalidConfig(format!(
+                "protocol_versions {low}..={high} outside the supported \
+                 {MIN_PROTOCOL_VERSION}..={PROTOCOL_VERSION}"
+            )));
+        }
+        if self.security.verifies_credentials() && high < CREDENTIALS_VERSION {
+            return Err(InvalidConfig(format!(
+                "credentials are verified, which needs protocol version \
+                 {CREDENTIALS_VERSION}, but protocol_versions ends at {high}"
+            )));
+        }
+        if self.security.max_credential_bytes() > usize::from(u16::MAX) {
+            return Err(InvalidConfig(
+                "security.max_credential_bytes above the 65535-byte metadata section".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The version range this runtime announces in its handshake:
+    /// [`protocol_versions`](Self::protocol_versions), raised to start at
+    /// version 2 when credentials are verified (a version 1 peer cannot
+    /// carry one, so it is refused at the handshake rather than admitted
+    /// anonymously: no silent downgrade).
+    #[must_use]
+    pub fn advertised_versions(&self) -> (u16, u16) {
+        let low = *self.protocol_versions.start();
+        let low = if self.security.verifies_credentials() {
+            low.max(CREDENTIALS_VERSION)
+        } else {
+            low
+        };
+        (low, *self.protocol_versions.end())
     }
 }
 
@@ -263,13 +542,17 @@ impl Default for RpcConfig {
             max_pending_calls: 4096,
             max_connections: 512,
             max_queued_requests: 1024,
-            reserved_control_frames: 1024,
+            reserved_control_frames: 8 * 1024,
             connect_timeout: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(5),
             read_chunk_bytes: 16 * 1024,
             advertised_address: None,
             incarnation: None,
             peer: PeerPolicy::default(),
+            limits: ResourceLimits::default(),
+            streams: StreamPolicy::default(),
+            protocol_versions: MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION,
+            security: crate::security::SecurityConfig::default(),
         }
     }
 }

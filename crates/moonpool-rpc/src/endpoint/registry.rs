@@ -88,6 +88,22 @@ impl<T> Registry<T> {
         }
     }
 
+    /// Remove every registered value (each token dies, as by
+    /// [`remove`](Self::remove)).
+    pub(crate) fn drain(&mut self) -> Vec<T> {
+        let tokens: Vec<EndpointToken> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.value.is_some())
+            .map(|(index, slot)| EndpointToken::from_parts(index as u64, slot.generation))
+            .collect();
+        tokens
+            .into_iter()
+            .filter_map(|token| self.remove(token))
+            .collect()
+    }
+
     /// Remove the value registered under `token`; a stale token removes
     /// nothing. The slot's generation advances so the token never matches
     /// again; a slot whose generation cannot advance is retired, never

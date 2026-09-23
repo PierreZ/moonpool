@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use crate::security::{CredentialError, Denial};
+
 /// A snapshot of one runtime's counters and gauges.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RpcStats {
@@ -90,6 +92,73 @@ pub struct RpcStats {
     pub accepted_over_stalled_dial: u64,
     /// Accepted sessions served only because the peer table was full.
     pub peer_table_full: u64,
+    /// Requests, calls or streams refused `Overloaded` by an in-flight, retention, stream or buffer budget (the endpoint queue and request-queue refusals are counted as rejections and call failures).
+    pub overload_refusals: u64,
+    /// Connections closed because their control reserve overflowed.
+    pub control_reserve_closes: u64,
+    /// Reply streams this runtime opened as a caller.
+    pub streams_opened: u64,
+    /// Reply streams this runtime admitted as a producer.
+    pub streams_admitted: u64,
+    /// Stream items queued by producers of this runtime.
+    pub stream_items_sent: u64,
+    /// Stream items refused as larger than their window or the frame limit.
+    pub stream_items_refused: u64,
+    /// Stream sends that had to wait for credit.
+    pub stream_credit_waits: u64,
+    /// Stream items acknowledged on arrival, handed to a consumer that was already waiting.
+    pub stream_acks_immediate: u64,
+    /// Stream items acknowledged when the application took them from the queue.
+    pub stream_acks_popped: u64,
+    /// Acknowledgements that returned credit to a producer of this runtime.
+    pub stream_acks_received: u64,
+    /// Stream acknowledgements and cancels ignored: repeated, or for a stream already over.
+    pub stream_acks_ignored: u64,
+    /// Stream protocol violations detected (sequence, window, item count or acknowledgement).
+    pub stream_violations: u64,
+    /// Streams ended by their producer (normal end, error or broken promise).
+    pub streams_ended: u64,
+    /// Produced streams stopped because their consumer abandoned them.
+    pub streams_cancelled: u64,
+    /// Consumed streams this runtime abandoned after its request may have left.
+    pub streams_abandoned: u64,
+    /// Produced streams ended because their connection ended.
+    pub streams_disconnected: u64,
+    /// Stream items or ends that arrived for a stream no longer consumed here.
+    pub late_stream_frames: u64,
+    /// Reply streams this runtime consumes right now.
+    pub streams_consuming: usize,
+    /// Reply streams this runtime produces right now.
+    pub streams_producing: usize,
+    /// Accounted stream bytes received and not yet taken by applications.
+    pub stream_buffered_bytes: u64,
+    /// Bytes of requests, replies and stream frames queued unwritten on every connection.
+    pub queued_bytes: u64,
+    /// Admitted requests whose reply or stream end is owed or queued.
+    pub inflight_requests: usize,
+    /// Sum of the windows of the streams this runtime consumes.
+    pub stream_window_reserved: u64,
+    /// Sum of the windows of the streams this runtime produces (reserved
+    /// from the producer budgets).
+    pub producer_window_reserved: u64,
+    /// Of `queued_bytes`, the bytes of queued requests (what the queue
+    /// budgets refuse).
+    pub queued_request_bytes: u64,
+    /// Requests whose credential verified into a principal.
+    pub requests_authenticated: u64,
+    /// Requests refused as unauthenticated (every [`CredentialError`](crate::security::CredentialError)).
+    pub requests_unauthenticated: u64,
+    /// Requests refused by the access policy (authenticated, not allowed).
+    pub requests_permission_denied: u64,
+    /// Accepted connections refused by the address allow list.
+    pub connections_refused_by_policy: u64,
+    /// Requests of this runtime that left (or reached local admission)
+    /// carrying a credential.
+    pub credentials_attached: u64,
+    /// Requests refused because a graceful shutdown was under way.
+    pub shutdown_refusals: u64,
+    /// Calls and streams a graceful shutdown ended at its deadline.
+    pub calls_ended_by_shutdown: u64,
 }
 
 /// The runtime's counters, shared by everything that updates them.
@@ -130,13 +199,68 @@ pub(crate) struct Counters {
     pub(crate) unverified_listen_addresses: AtomicU64,
     pub(crate) accepted_over_stalled_dial: AtomicU64,
     pub(crate) peer_table_full: AtomicU64,
+    pub(crate) overload_refusals: AtomicU64,
+    pub(crate) control_reserve_closes: AtomicU64,
+    pub(crate) streams_opened: AtomicU64,
+    pub(crate) streams_admitted: AtomicU64,
+    pub(crate) stream_items_sent: AtomicU64,
+    pub(crate) stream_items_refused: AtomicU64,
+    pub(crate) stream_credit_waits: AtomicU64,
+    pub(crate) stream_acks_immediate: AtomicU64,
+    pub(crate) stream_acks_popped: AtomicU64,
+    pub(crate) stream_acks_received: AtomicU64,
+    pub(crate) stream_acks_ignored: AtomicU64,
+    pub(crate) stream_violations: AtomicU64,
+    pub(crate) streams_ended: AtomicU64,
+    pub(crate) streams_cancelled: AtomicU64,
+    pub(crate) streams_abandoned: AtomicU64,
+    pub(crate) streams_disconnected: AtomicU64,
+    pub(crate) late_stream_frames: AtomicU64,
+    pub(crate) live_server_streams: AtomicUsize,
+    pub(crate) stream_buffered_bytes: AtomicU64,
+    pub(crate) queued_bytes: AtomicU64,
+    pub(crate) inflight_requests: AtomicUsize,
+    pub(crate) stream_window_reserved: AtomicU64,
+    pub(crate) producer_window_reserved: AtomicU64,
+    pub(crate) queued_request_bytes: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
     pub(crate) live_connections: AtomicUsize,
+    pub(crate) requests_authenticated: AtomicU64,
+    pub(crate) requests_permission_denied: AtomicU64,
+    /// Unauthenticated refusals by [`CredentialError`] code (index code − 1):
+    /// a fixed, bounded label set.
+    pub(crate) denials_by_reason: [AtomicU64; crate::security::CREDENTIAL_ERRORS],
+    pub(crate) connections_refused_by_policy: AtomicU64,
+    pub(crate) credentials_attached: AtomicU64,
+    pub(crate) shutdown_refusals: AtomicU64,
+    pub(crate) calls_ended_by_shutdown: AtomicU64,
 }
 
 impl Counters {
     pub(crate) fn bump(counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one security refusal.
+    pub(crate) fn count_denial(&self, denial: Denial) {
+        match denial {
+            Denial::Unauthenticated(reason) => {
+                if let Some(counter) = self
+                    .denials_by_reason
+                    .get(usize::from(reason.code()).saturating_sub(1))
+                {
+                    Self::bump(counter);
+                }
+            }
+            Denial::PermissionDenied => Self::bump(&self.requests_permission_denied),
+        }
+    }
+
+    /// Unauthenticated refusals with `reason`.
+    pub(crate) fn denials(&self, reason: CredentialError) -> u64 {
+        self.denials_by_reason
+            .get(usize::from(reason.code()).saturating_sub(1))
+            .map_or(0, |counter| counter.load(Ordering::Relaxed))
     }
 
     pub(crate) fn snapshot(
@@ -187,6 +311,38 @@ impl Counters {
             unverified_listen_addresses: load(&self.unverified_listen_addresses),
             accepted_over_stalled_dial: load(&self.accepted_over_stalled_dial),
             peer_table_full: load(&self.peer_table_full),
+            overload_refusals: load(&self.overload_refusals),
+            control_reserve_closes: load(&self.control_reserve_closes),
+            streams_opened: load(&self.streams_opened),
+            streams_admitted: load(&self.streams_admitted),
+            stream_items_sent: load(&self.stream_items_sent),
+            stream_items_refused: load(&self.stream_items_refused),
+            stream_credit_waits: load(&self.stream_credit_waits),
+            stream_acks_immediate: load(&self.stream_acks_immediate),
+            stream_acks_popped: load(&self.stream_acks_popped),
+            stream_acks_received: load(&self.stream_acks_received),
+            stream_acks_ignored: load(&self.stream_acks_ignored),
+            stream_violations: load(&self.stream_violations),
+            streams_ended: load(&self.streams_ended),
+            streams_cancelled: load(&self.streams_cancelled),
+            streams_abandoned: load(&self.streams_abandoned),
+            streams_disconnected: load(&self.streams_disconnected),
+            late_stream_frames: load(&self.late_stream_frames),
+            streams_consuming: 0,
+            streams_producing: self.live_server_streams.load(Ordering::Relaxed),
+            stream_buffered_bytes: self.stream_buffered_bytes.load(Ordering::Relaxed),
+            queued_bytes: self.queued_bytes.load(Ordering::Relaxed),
+            inflight_requests: self.inflight_requests.load(Ordering::Relaxed),
+            stream_window_reserved: self.stream_window_reserved.load(Ordering::Relaxed),
+            producer_window_reserved: self.producer_window_reserved.load(Ordering::Relaxed),
+            queued_request_bytes: self.queued_request_bytes.load(Ordering::Relaxed),
+            requests_authenticated: load(&self.requests_authenticated),
+            requests_unauthenticated: self.denials_by_reason.iter().map(load).sum(),
+            requests_permission_denied: load(&self.requests_permission_denied),
+            connections_refused_by_policy: load(&self.connections_refused_by_policy),
+            credentials_attached: load(&self.credentials_attached),
+            shutdown_refusals: load(&self.shutdown_refusals),
+            calls_ended_by_shutdown: load(&self.calls_ended_by_shutdown),
         }
     }
 }
@@ -265,5 +421,75 @@ impl ResourceProbe {
     #[must_use]
     pub fn is_released(&self) -> bool {
         !self.runtime_alive() && self.live_tasks() == 0 && self.live_connections() == 0
+    }
+
+    /// The work, bytes and windows the runtime still accounts for.
+    ///
+    /// Each gauge is held by an owner (a reply handle, a stream producer or
+    /// consumer, a connection's write queue) and given back exactly once
+    /// when that owner ends, so it keeps answering after the driver is
+    /// dropped: owners that outlive the runtime (a reply handle an
+    /// application still holds) keep their share until they go.
+    #[must_use]
+    pub fn outstanding(&self) -> Outstanding {
+        let counters = &self.counters;
+        Outstanding {
+            inflight_requests: counters.inflight_requests.load(Ordering::Relaxed),
+            producing_streams: counters.live_server_streams.load(Ordering::Relaxed),
+            queued_bytes: counters.queued_bytes.load(Ordering::Relaxed),
+            queued_request_bytes: counters.queued_request_bytes.load(Ordering::Relaxed),
+            stream_window_reserved: counters.stream_window_reserved.load(Ordering::Relaxed),
+            producer_window_reserved: counters.producer_window_reserved.load(Ordering::Relaxed),
+            stream_buffered_bytes: counters.stream_buffered_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Whether the runtime is released ([`is_released`](Self::is_released))
+    /// and every gauge it accounted is back to zero
+    /// ([`outstanding`](Self::outstanding)): nothing of it is left, not even
+    /// a reservation held by an owner that outlived it.
+    ///
+    /// [`monitor_waiters`](Self::monitor_waiters) is not part of it: a
+    /// failure-monitor handle an application still holds is the
+    /// application's, and resolves with an error once the runtime is gone.
+    ///
+    /// The gauges are read with relaxed loads. That is exact once the
+    /// question matters: after the owners are dropped on this thread, or
+    /// after the thread or task that dropped them was joined (a join
+    /// synchronizes, so every decrement made before it is visible). Read
+    /// while owners are still being dropped elsewhere, it may report work
+    /// that is already gone, never the opposite.
+    #[must_use]
+    pub fn is_at_baseline(&self) -> bool {
+        self.is_released() && self.outstanding().is_empty()
+    }
+}
+
+/// The gauges a runtime holds on behalf of in-flight work, from
+/// [`ResourceProbe::outstanding`]. All zero on an idle runtime and on one
+/// whose driver and every owner are gone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Outstanding {
+    /// Admitted requests whose reply or stream end is owed or queued.
+    pub inflight_requests: usize,
+    /// Reply streams produced (a producer or its registration exists).
+    pub producing_streams: usize,
+    /// Bytes of requests, replies and stream frames queued unwritten.
+    pub queued_bytes: u64,
+    /// Of `queued_bytes`, the bytes of queued requests.
+    pub queued_request_bytes: u64,
+    /// Windows of the streams consumed, as reserved from their budgets.
+    pub stream_window_reserved: u64,
+    /// Windows of the streams produced, as reserved from their budgets.
+    pub producer_window_reserved: u64,
+    /// Stream bytes received and not yet taken by applications.
+    pub stream_buffered_bytes: u64,
+}
+
+impl Outstanding {
+    /// Whether every gauge is zero.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
     }
 }

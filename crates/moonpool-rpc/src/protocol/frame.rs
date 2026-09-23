@@ -20,8 +20,10 @@
 //! XXH3-64 checksum, `PACKET_LIMIT` checked before waiting for the body, the
 //! checksum verified before anything is delivered, and `checksum_failed`
 //! tearing the connection down. Unlike FDB, the checksum also covers the
-//! length and is always on; the TLS package (#218) may make it optional on
-//! connections whose record layer already authenticates every byte.
+//! length and is always on, TLS sessions included: making it optional
+//! where the record layer already authenticates every byte would need one
+//! more negotiated capability for the cost of one hash per frame, so it
+//! stays on.
 //!
 //! Until the checksum is verified, `length` is used for exactly two things:
 //! rejecting a frame larger than the configured maximum (without buffering

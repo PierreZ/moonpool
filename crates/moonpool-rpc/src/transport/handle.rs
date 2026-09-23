@@ -151,6 +151,42 @@ impl<P: Providers> RpcHandle<P> {
         self.upgrade().map(|shared| shared.stats())
     }
 
+    /// Shut the runtime down gracefully, within `grace` of provider time.
+    ///
+    /// 1. **Close admission**: from now on new requests from peers are
+    ///    refused ([`ErrorReason::ServerShuttingDown`] for them, never
+    ///    admitted), new calls, streams and registrations here fail with
+    ///    [`ErrorReason::Shutdown`], the listener closes and nothing is
+    ///    dialed or re-dialed (a reliable call whose connection ends is
+    ///    failed, not retransmitted).
+    /// 2. **Drain**: admitted requests may still be answered, streams may
+    ///    still produce and be consumed, and calls this runtime made may
+    ///    still complete, until nothing is pending or `grace` has passed.
+    /// 3. **Terminate**: every call still pending fails with
+    ///    [`ErrorReason::Shutdown`] and the execution knowledge it has
+    ///    (`MaybeExecuted` once its request left), and every connection is
+    ///    closed from this side (a TLS session sends its `close_notify`),
+    ///    which ends the streams on it; callers still owed a reply see their
+    ///    session end after admission, i.e. `MaybeExecuted`. Nothing is
+    ///    reported as executed or not executed that was not proven.
+    /// 4. Waits (at most [`RpcConfig::handshake_timeout`](crate::RpcConfig::handshake_timeout))
+    ///    for every connection's driver to finish.
+    ///
+    /// The driver must keep being polled meanwhile (poll this future next to
+    /// [`RpcDriver::run`](crate::RpcDriver::run)); drop the driver once it
+    /// resolves. Dropping the driver instead is the abrupt shutdown: it
+    /// closes everything at once, and this future then resolves with
+    /// [`ShutdownReport::already_stopped`](crate::ShutdownReport::already_stopped).
+    pub async fn shutdown(&self, grace: std::time::Duration) -> super::ShutdownReport {
+        super::shutdown::shutdown(self.shared.clone(), grace).await
+    }
+
+    /// Whether a graceful shutdown began (or the runtime is gone).
+    #[must_use]
+    pub fn is_shutting_down(&self) -> bool {
+        self.upgrade().is_none_or(|shared| shared.is_closing())
+    }
+
     /// A drop probe that keeps answering after the runtime is gone.
     #[must_use]
     pub fn probe(&self) -> Option<ResourceProbe> {
