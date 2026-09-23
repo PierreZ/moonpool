@@ -18,9 +18,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_prometheus::{PrometheusSource, SimCounter, SimGauge, SimHistogram};
 use moonpool_sim::{
-    Process, RandomProvider, SimContext, SimulationError, SimulationResult, TaskProvider,
-    TimeProvider, Workload, assert_always, assert_sometimes,
+    Process, RandomProvider, SimContext, SimulationResult, TaskProvider, TimeProvider, Workload,
+    assert_always, assert_sometimes,
 };
+
+use crate::support::invalid_state;
 
 /// Latency buckets in seconds, bracketing what this service actually produces
 /// (single-digit to ~100ms of simulated work). Prometheus' defaults are tuned
@@ -42,7 +44,7 @@ struct ServiceMetrics {
 
 impl ServiceMetrics {
     fn resolve(source: &PrometheusSource) -> SimulationResult<Self> {
-        let err = |e: prometheus::Error| SimulationError::InvalidState(format!("metrics: {e}"));
+        let err = |e: prometheus::Error| invalid_state(format!("metrics: {e}"));
         Ok(Self {
             served: source
                 .counter("kv_requests_served_total", "Requests served")
@@ -136,12 +138,10 @@ impl Process for MeteredKvNode {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let source = ctx.metrics::<PrometheusSource>().ok_or_else(|| {
-            SimulationError::InvalidState("no metrics factory registered".to_owned())
-        })?;
-        let metrics = ServiceMetrics::resolve(&source)?;
-
-        let metrics = Arc::new(metrics);
+        let source = ctx
+            .metrics::<PrometheusSource>()
+            .ok_or_else(|| invalid_state("no metrics factory registered"))?;
+        let metrics = Arc::new(ServiceMetrics::resolve(&source)?);
         let mut handles = Vec::with_capacity(WORKERS_PER_NODE);
         for worker in 0..WORKERS_PER_NODE {
             let node = self.clone();

@@ -53,6 +53,7 @@
 //! - **[`EchoWorkload`]**: drives the RPC mix, validates responses under
 //!   chaos
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -67,6 +68,8 @@ use moonpool_sim::{
     NetworkProvider, Process, SimContext, SimProviders, SimTimeProvider, SimulationError,
     SimulationResult, TaskProvider, TcpListenerTrait, TimeError, TimeProvider, Workload,
 };
+
+use crate::support::{invalid_state, peer_ip, unless_shutdown};
 
 /// Protobuf messages and gRPC stubs generated from `proto/echo.proto` by
 /// `tonic-prost-build` (requires `protoc`).
@@ -283,9 +286,7 @@ impl Workload for EchoWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let server_ip = ctx
-            .peer("grpc")
-            .ok_or_else(|| SimulationError::InvalidState("grpc process not found".into()))?;
+        let server_ip = peer_ip(ctx, "grpc")?;
         tracing::info!(%server_ip, "workload starting");
 
         // One channel for the whole workload, exactly as a production tonic
@@ -303,18 +304,16 @@ impl Workload for EchoWorkload {
             },
         );
         let origin = http::Uri::try_from(format!("http://{server_ip}"))
-            .map_err(|e| SimulationError::InvalidState(format!("bad origin: {e}")))?;
+            .map_err(|e| invalid_state(format!("bad origin: {e}")))?;
 
         let mut failed_before = false;
         for round in 0..5u32 {
             tracing::info!(round, "starting round");
-            let result = moonpool_sim::select! {
-                biased;
-                result = Self::run_round(ctx, &channel, &origin, round) => result,
-                () = ctx.shutdown().cancelled() => {
-                    tracing::info!(round, "shutdown during round, exiting");
-                    break;
-                }
+            let Some(result) =
+                unless_shutdown(ctx, Self::run_round(ctx, &channel, &origin, round)).await
+            else {
+                tracing::info!(round, "shutdown during round, exiting");
+                break;
             };
             match result {
                 Ok(()) => {
@@ -339,20 +338,46 @@ impl Workload for EchoWorkload {
             // Spread rounds across sim time so Attrition chaos (server
             // crash/reboot windows) overlaps the workload instead of firing
             // after it already finished.
-            let pause = moonpool_sim::select! {
-                biased;
-                result = ctx.time().sleep(Duration::from_secs(2)) => result,
-                () = ctx.shutdown().cancelled() => break,
-            };
-            if pause.is_err() {
+            let Some(Ok(())) = unless_shutdown(ctx, ctx.time().sleep(Duration::from_secs(2))).await
+            else {
                 break;
-            }
+            };
         }
 
         channel.close();
         tracing::info!("workload finished all rounds");
         Ok(())
     }
+}
+
+/// Await one RPC step under [`RPC_DEADLINE`].
+///
+/// An expired deadline is recorded as `grpc_rpc_timed_out` and fails the
+/// round as "`what` timed out"; otherwise the step's own outcome is returned.
+async fn within_deadline<F, T>(
+    time: &SimTimeProvider,
+    what: &str,
+    step: F,
+) -> SimulationResult<Result<T, Status>>
+where
+    F: Future<Output = Result<T, Status>> + Send,
+    T: Send,
+{
+    match time.timeout(RPC_DEADLINE, step).await {
+        Err(TimeError::Elapsed | TimeError::Shutdown) => {
+            moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
+            Err(invalid_state(format!("{what} timed out")))
+        }
+        Ok(outcome) => Ok(outcome),
+    }
+}
+
+/// The transport failed under an RPC: no connection to be had, or one that
+/// died mid-RPC. tonic reports it as `Code::Unknown` because its h2-aware
+/// `Status` mapping is behind features this example does not enable.
+fn transport_failure(message: String) -> SimulationError {
+    moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
+    invalid_state(message)
 }
 
 impl EchoWorkload {
@@ -396,18 +421,14 @@ impl EchoWorkload {
             seq,
         });
         let round_value = MetadataValue::try_from(round.to_string())
-            .map_err(|e| SimulationError::InvalidState(format!("metadata value: {e}")))?;
+            .map_err(|e| invalid_state(format!("metadata value: {e}")))?;
         request
             .metadata_mut()
             .insert(ROUND_METADATA_KEY, round_value.clone());
         tracing::info!(round, seq, "sending echo rpc");
 
-        match time.timeout(RPC_DEADLINE, client.echo(request)).await {
-            Err(TimeError::Elapsed | TimeError::Shutdown) => {
-                moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
-                Err(SimulationError::InvalidState("echo rpc timed out".into()))
-            }
-            Ok(Ok(response)) => {
+        match within_deadline(&time, "echo rpc", client.echo(request)).await? {
+            Ok(response) => {
                 // Metadata must survive the full request/response round trip.
                 moonpool_sim::assert_always!(
                     response.metadata().get(ROUND_METADATA_KEY) == Some(&round_value),
@@ -424,28 +445,21 @@ impl EchoWorkload {
                 tracing::info!(round, seq, "echo rpc ok");
                 Ok(())
             }
-            Ok(Err(status)) if status.code() == Code::Unavailable => {
+            Err(status) if status.code() == Code::Unavailable => {
                 // Server-side buggify — the RPC failed cleanly, the channel
                 // stays usable.
                 moonpool_sim::assert_sometimes!(true, "grpc_echo_unavailable");
                 tracing::info!(round, seq, "echo unavailable (buggified server)");
                 Ok(())
             }
-            Ok(Err(status)) if status.code() == Code::Unknown => {
-                // The transport failed under us: no connection to be had, or
-                // one that died mid-RPC. tonic reports it as Unknown because
-                // its h2-aware Status mapping is behind features this example
-                // does not enable. The round fails; the channel reconnects on
-                // its own and a later round proves it.
-                moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
+            Err(status) if status.code() == Code::Unknown => {
+                // The round fails; the channel reconnects on its own and a
+                // later round proves it.
+                let error = transport_failure(format!("echo rpc transport failure: {status}"));
                 tracing::warn!(round, seq, "echo transport failure: {status}");
-                Err(SimulationError::InvalidState(format!(
-                    "echo rpc transport failure: {status}"
-                )))
+                Err(error)
             }
-            Ok(Err(status)) => Err(SimulationError::InvalidState(format!(
-                "echo rpc failed: {status}"
-            ))),
+            Err(status) => Err(invalid_state(format!("echo rpc failed: {status}"))),
         }
     }
 
@@ -461,43 +475,28 @@ impl EchoWorkload {
         };
         tracing::info!(round, "starting echo stream");
 
-        let mut stream = match time
-            .timeout(RPC_DEADLINE, client.echo_stream(request))
-            .await
-        {
-            Err(TimeError::Elapsed | TimeError::Shutdown) => {
-                moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
-                return Err(SimulationError::InvalidState("stream rpc timed out".into()));
-            }
-            Ok(Ok(response)) => response.into_inner(),
-            Ok(Err(status)) if status.code() == Code::Unavailable => {
-                moonpool_sim::assert_sometimes!(true, "grpc_echo_unavailable");
-                tracing::info!(round, "stream refused (buggified server)");
-                return Ok(());
-            }
-            Ok(Err(status)) if status.code() == Code::Unknown => {
-                moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
-                return Err(SimulationError::InvalidState(format!(
-                    "stream rpc transport failure: {status}"
-                )));
-            }
-            Ok(Err(status)) => {
-                return Err(SimulationError::InvalidState(format!(
-                    "stream rpc failed: {status}"
-                )));
-            }
-        };
+        let mut stream =
+            match within_deadline(&time, "stream rpc", client.echo_stream(request)).await? {
+                Ok(response) => response.into_inner(),
+                Err(status) if status.code() == Code::Unavailable => {
+                    moonpool_sim::assert_sometimes!(true, "grpc_echo_unavailable");
+                    tracing::info!(round, "stream refused (buggified server)");
+                    return Ok(());
+                }
+                Err(status) if status.code() == Code::Unknown => {
+                    return Err(transport_failure(format!(
+                        "stream rpc transport failure: {status}"
+                    )));
+                }
+                Err(status) => {
+                    return Err(invalid_state(format!("stream rpc failed: {status}")));
+                }
+            };
 
         let mut next_seq = 0u64;
         loop {
-            match time.timeout(RPC_DEADLINE, stream.message()).await {
-                Err(TimeError::Elapsed | TimeError::Shutdown) => {
-                    moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
-                    return Err(SimulationError::InvalidState(
-                        "stream item timed out".into(),
-                    ));
-                }
-                Ok(Ok(Some(item))) => {
+            match within_deadline(&time, "stream item", stream.message()).await? {
+                Ok(Some(item)) => {
                     // In-order, gap-free delivery: h2 preserves stream order
                     // even while the sim chops the connection into partial
                     // reads and delayed segments.
@@ -507,7 +506,7 @@ impl EchoWorkload {
                     );
                     next_seq += 1;
                 }
-                Ok(Ok(None)) => {
+                Ok(None) => {
                     // Clean end-of-stream: the server only ends early via an
                     // explicit error, so a clean end means full delivery.
                     moonpool_sim::assert_always!(
@@ -518,25 +517,22 @@ impl EchoWorkload {
                     tracing::info!(round, "stream completed");
                     return Ok(());
                 }
-                Ok(Err(status)) if status.code() == Code::Aborted => {
+                Err(status) if status.code() == Code::Aborted => {
                     // Buggified mid-stream abort: partial delivery is fine —
                     // every item that did arrive was already validated above.
                     moonpool_sim::assert_sometimes!(true, "grpc_stream_aborted");
                     tracing::info!(round, delivered = next_seq, "stream aborted (buggified)");
                     return Ok(());
                 }
-                Ok(Err(status)) if status.code() == Code::Unknown => {
+                Err(status) if status.code() == Code::Unknown => {
                     // The connection died with items still to come. Whatever
                     // arrived was validated above, so this is a clean loss.
-                    moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
-                    return Err(SimulationError::InvalidState(format!(
+                    return Err(transport_failure(format!(
                         "stream transport failure after {next_seq} items: {status}"
                     )));
                 }
-                Ok(Err(status)) => {
-                    return Err(SimulationError::InvalidState(format!(
-                        "stream failed: {status}"
-                    )));
+                Err(status) => {
+                    return Err(invalid_state(format!("stream failed: {status}")));
                 }
             }
         }
@@ -552,29 +548,20 @@ impl EchoWorkload {
             text: "probe".to_string(),
             seq: 0,
         };
-        match time.timeout(RPC_DEADLINE, client.shout(request)).await {
-            Err(TimeError::Elapsed | TimeError::Shutdown) => {
-                moonpool_sim::assert_sometimes!(true, "grpc_rpc_timed_out");
-                Err(SimulationError::InvalidState("probe rpc timed out".into()))
-            }
-            Ok(Ok(_)) => {
+        match within_deadline(time, "probe rpc", client.shout(request)).await? {
+            Ok(_) => {
                 moonpool_sim::assert_always!(false, "unmounted service must not succeed");
                 Ok(())
             }
-            Ok(Err(status)) if status.code() == Code::Unimplemented => {
+            Err(status) if status.code() == Code::Unimplemented => {
                 moonpool_sim::assert_sometimes!(true, "grpc_unimplemented_detected");
                 tracing::info!("unmounted service correctly rejected");
                 Ok(())
             }
-            Ok(Err(status)) if status.code() == Code::Unknown => {
-                moonpool_sim::assert_sometimes!(true, "grpc_transport_failed");
-                Err(SimulationError::InvalidState(format!(
-                    "probe rpc transport failure: {status}"
-                )))
-            }
-            Ok(Err(status)) => Err(SimulationError::InvalidState(format!(
-                "probe rpc failed: {status}"
+            Err(status) if status.code() == Code::Unknown => Err(transport_failure(format!(
+                "probe rpc transport failure: {status}"
             ))),
+            Err(status) => Err(invalid_state(format!("probe rpc failed: {status}"))),
         }
     }
 }

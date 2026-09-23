@@ -1,3 +1,4 @@
+use crate::runtime::local_runtime;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider};
 
@@ -21,13 +22,7 @@ where
 #[test]
 fn test_tokio_echo_server() {
     // Use local runtime for tests with async traits without Send - following Pierre's article
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let provider = TokioNetworkProvider::new();
 
         // Bind to any available port
@@ -59,13 +54,7 @@ fn test_tokio_echo_server() {
 
 #[test]
 fn test_provider_default() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         // Test that TokioNetworkProvider implements Default
         let provider = TokioNetworkProvider;
 
@@ -78,13 +67,7 @@ fn test_provider_default() {
 
 #[test]
 fn test_provider_clone() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         // Test that TokioNetworkProvider can be cloned
         let provider = TokioNetworkProvider::new();
         let cloned_provider = provider.clone();

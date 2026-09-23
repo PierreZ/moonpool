@@ -2,6 +2,9 @@
 //!
 //! Contains tests for the core simulation engine.
 
+#[path = "common/drive.rs"]
+mod sync_drive;
+
 #[path = "sim/determinism.rs"]
 mod determinism;
 #[path = "sim/integration.rs"]

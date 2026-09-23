@@ -5,13 +5,41 @@ use std::{collections::BTreeMap, io, net::IpAddr, task::Waker, time::Duration};
 use crate::{
     LocalityInfo, NetworkConfiguration, SimulationError, SimulationResult,
     network::sim::{
-        AcceptWaiterId, CloseReason, ConnectWaiterId, ConnectionId, ListenerId, NetworkDelay,
-        NetworkEvent, NetworkOperationId, PendingPublish,
+        AcceptWaiterId, CloseReason, ConnectWaiterId, ConnectionId, ListenerId, NetworkActions,
+        NetworkDelay, NetworkEvent, NetworkOperationId, PendingPublish,
     },
-    sim::{Event, ScheduleId, SimWorld, wakers::WakeBatch},
+    sim::{Event, ScheduleId, SimWorld, wakers::WakeBatch, world::SimInner},
 };
 
 impl SimWorld {
+    /// Run one timed network transition under the world lock and apply the
+    /// scheduling and fault effects it returned.
+    fn network_transition(
+        &self,
+        transition: impl FnOnce(&mut SimInner, Duration) -> NetworkActions,
+    ) {
+        let mut inner = self.inner.write();
+        let now = inner.now();
+        let actions = transition(&mut inner, now);
+        inner.apply_network(actions);
+    }
+
+    /// [`network_transition`](Self::network_transition) for a transition that
+    /// also releases waiters: they are woken after the lock is released.
+    fn network_transition_waking(
+        &self,
+        transition: impl FnOnce(&mut SimInner, Duration) -> (NetworkActions, WakeBatch),
+    ) {
+        let wakes = {
+            let mut inner = self.inner.write();
+            let now = inner.now();
+            let (actions, wakes) = transition(&mut inner, now);
+            inner.apply_network(actions);
+            wakes
+        };
+        wakes.wake();
+    }
+
     /// Installs process localities in the network engine.
     pub fn set_localities(&mut self, localities: BTreeMap<IpAddr, LocalityInfo>) {
         self.inner.write().network.set_localities(localities);
@@ -32,17 +60,12 @@ impl SimWorld {
     /// no-new-faults promise survives a later reconfiguration. Latency
     /// distributions and link shaping are installed as given.
     pub fn set_network_config(&mut self, mut config: NetworkConfiguration) {
-        let wakes = {
-            let mut inner = self.inner.write();
+        self.network_transition_waking(|inner, now| {
             if inner.recovery_mode() {
                 config.disable_fault_injection();
             }
-            let now = inner.now();
-            let (actions, wakes) = inner.network.set_config(config, now);
-            inner.apply_network(actions);
-            wakes
-        };
-        wakes.wake();
+            inner.network.set_config(config, now)
+        });
     }
 
     /// Bind `addr` for the process at `owner`, returning its resolved address.
@@ -252,10 +275,7 @@ impl SimWorld {
 
     /// Starts a write clog.
     pub fn clog_write(&self, id: ConnectionId) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.clog_write(id, now);
-        inner.apply_network(actions);
+        self.network_transition(|inner, now| inner.network.clog_write(id, now));
     }
 
     /// Returns whether a write is clogged.
@@ -278,10 +298,7 @@ impl SimWorld {
 
     /// Starts a read clog.
     pub fn clog_read(&self, id: ConnectionId) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.clog_read(id, now);
-        inner.apply_network(actions);
+        self.network_transition(|inner, now| inner.network.clog_read(id, now));
     }
 
     /// Returns whether a read is clogged.
@@ -372,27 +389,13 @@ impl SimWorld {
 
     /// Gracefully closes a connection.
     pub fn close_connection(&self, id: ConnectionId) {
-        let wakes = {
-            let mut inner = self.inner.write();
-            let now = inner.now();
-            let (actions, wakes) = inner.network.close_graceful(id, now);
-            inner.apply_network(actions);
-            wakes
-        };
-        wakes.wake();
+        self.network_transition_waking(|inner, now| inner.network.close_graceful(id, now));
     }
 
     /// Shuts down the send direction of a connection (`shutdown(SHUT_WR)`):
     /// a FIN behind the queued bytes, the receive direction left open.
     pub fn shutdown_send(&self, id: ConnectionId) {
-        let wakes = {
-            let mut inner = self.inner.write();
-            let now = inner.now();
-            let (actions, wakes) = inner.network.shutdown_send(id, now);
-            inner.apply_network(actions);
-            wakes
-        };
-        wakes.wake();
+        self.network_transition_waking(|inner, now| inner.network.shutdown_send(id, now));
     }
 
     /// Aborts a connection with RST semantics.
@@ -433,10 +436,7 @@ impl SimWorld {
     /// Rolls the black-hole coin for one I/O on `id` (see
     /// [`ChaosConfiguration::black_hole_probability`](crate::ChaosConfiguration::black_hole_probability)).
     pub fn roll_black_hole(&self, id: ConnectionId) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.roll_black_hole(id, now);
-        inner.apply_network(actions);
+        self.network_transition(|inner, now| inner.network.roll_black_hole(id, now));
     }
 
     /// Black-holes selected directions of a connection: `hole_send` makes this
@@ -448,9 +448,7 @@ impl SimWorld {
     /// it consumes no randomness, and a black hole is permanent for the
     /// connection's lifetime.
     pub fn black_hole_connection(&self, id: ConnectionId, hole_send: bool, hole_recv: bool) {
-        let mut inner = self.inner.write();
-        let actions = inner.network.black_hole(id, hole_send, hole_recv);
-        inner.apply_network(actions);
+        self.network_transition(|inner, _| inner.network.black_hole(id, hole_send, hole_recv));
     }
 
     /// Returns whether `id`'s sends are black-holed.
@@ -479,34 +477,26 @@ impl SimWorld {
 
     /// Creates a directed pair partition.
     pub fn partition_pair(&self, from: IpAddr, to: IpAddr, duration: Duration) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.partition_pair(from, to, duration, now);
-        inner.apply_network(actions);
+        self.network_transition(|inner, now| inner.network.partition_pair(from, to, duration, now));
     }
 
     /// Blocks all sends from an IP.
     pub fn partition_send_from(&self, ip: IpAddr, duration: Duration) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.insert_send_partition(ip, duration, now);
-        inner.apply_network(actions);
+        self.network_transition(|inner, now| {
+            inner.network.insert_send_partition(ip, duration, now)
+        });
     }
 
     /// Blocks all receives to an IP.
     pub fn partition_recv_to(&self, ip: IpAddr, duration: Duration) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.insert_recv_partition(ip, duration, now);
-        inner.apply_network(actions);
+        self.network_transition(|inner, now| {
+            inner.network.insert_recv_partition(ip, duration, now)
+        });
     }
 
     /// Restores pair partitions in both directions between two IPs.
     pub fn restore_partition(&self, from: IpAddr, to: IpAddr) {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.restore_partition(from, to, now);
-        inner.apply_network(actions);
+        self.network_transition(|inner, now| inner.network.restore_partition(from, to, now));
     }
 
     /// Returns whether a directed pair is partitioned.

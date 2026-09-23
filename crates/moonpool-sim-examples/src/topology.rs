@@ -16,9 +16,11 @@ use async_trait::async_trait;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 
 use moonpool_sim::{
-    DomainLevel, NetworkProvider, Process, RandomProvider, SimContext, SimulationError,
-    SimulationResult, TcpListenerTrait, TimeProvider, Workload, assert_always,
+    DomainLevel, NetworkProvider, Process, RandomProvider, SimContext, SimulationResult,
+    TcpListenerTrait, TimeProvider, Workload, assert_always,
 };
+
+use crate::support::{invalid_state, unless_shutdown};
 
 /// Processes collocated on each machine — the shared-fate group size.
 pub const PROCESSES_PER_MACHINE: usize = 2;
@@ -37,9 +39,10 @@ impl Process for TopologyProcess {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let topo = ctx.topology();
-        let locality = topo.my_locality().cloned().ok_or_else(|| {
-            SimulationError::InvalidState("process booted without locality".into())
-        })?;
+        let locality = topo
+            .my_locality()
+            .cloned()
+            .ok_or_else(|| invalid_state("process booted without locality"))?;
         tracing::info!(
             dc = %locality.datacenter(),
             zone = %locality.zone(),
@@ -72,10 +75,8 @@ impl Process for TopologyProcess {
 
         let listener = ctx.network().bind(ctx.my_ip()).await?;
         loop {
-            let accepted = moonpool_sim::select! {
-                biased;
-                r = listener.accept() => r,
-                () = ctx.shutdown().cancelled() => return Ok(()),
+            let Some(accepted) = unless_shutdown(ctx, listener.accept()).await else {
+                return Ok(());
             };
             if let Ok((mut stream, _)) = accepted {
                 let mut buf = [0u8; 32];
@@ -96,12 +97,12 @@ async fn ping(ctx: &SimContext, target: &str) -> SimulationResult<()> {
     stream
         .write_all(b"ping")
         .await
-        .map_err(|e| SimulationError::InvalidState(format!("write failed: {e}")))?;
+        .map_err(|e| invalid_state(format!("write failed: {e}")))?;
     let mut buf = [0u8; 8];
     stream
         .read(&mut buf)
         .await
-        .map_err(|e| SimulationError::InvalidState(format!("read failed: {e}")))?;
+        .map_err(|e| invalid_state(format!("read failed: {e}")))?;
     Ok(())
 }
 
@@ -141,7 +142,7 @@ impl Workload for TopologyWorkload {
             ctx.time()
                 .sleep(Duration::from_millis(200))
                 .await
-                .map_err(|e| SimulationError::InvalidState(format!("sleep failed: {e}")))?;
+                .map_err(|e| invalid_state(format!("sleep failed: {e}")))?;
         }
         Ok(())
     }

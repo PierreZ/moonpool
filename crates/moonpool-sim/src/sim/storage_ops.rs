@@ -64,6 +64,34 @@ pub(crate) fn handle_storage_event(
 }
 
 impl SimWorld {
+    /// Run one storage-engine transition under the world lock, apply the
+    /// effects it returned, and run the resulting wakers after the lock is
+    /// released.
+    fn storage_transition<R>(
+        &self,
+        transition: impl FnOnce(&mut SimInner) -> (R, StorageActions),
+    ) -> R {
+        let (result, wakes) = {
+            let mut inner = self.inner.write();
+            let (result, actions) = transition(&mut inner);
+            (result, apply_storage_actions(&mut inner, actions))
+        };
+        wakes.wake();
+        result
+    }
+
+    /// [`storage_transition`](Self::storage_transition) for a transition that
+    /// may be refused before producing any effect.
+    fn try_storage_transition<R>(
+        &self,
+        transition: impl FnOnce(&mut SimInner) -> Result<(R, StorageActions), StorageError>,
+    ) -> Result<R, StorageError> {
+        self.storage_transition(|inner| match transition(inner) {
+            Ok((result, actions)) => (Ok(result), actions),
+            Err(error) => (Err(error), StorageActions::default()),
+        })
+    }
+
     /// Access the default storage configuration for the simulation.
     ///
     /// # Panics
@@ -106,21 +134,21 @@ impl SimWorld {
     }
 
     pub(crate) fn create_dir_all(&self, path: &str, owner_ip: IpAddr) -> Result<(), StorageError> {
-        let mut inner = self.inner.write();
-        let actions = inner.storage.create_dir_all(path, owner_ip)?;
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        Ok(())
+        self.try_storage_transition(|inner| {
+            inner
+                .storage
+                .create_dir_all(path, owner_ip)
+                .map(|actions| ((), actions))
+        })
     }
 
     pub(crate) fn delete_file(&self, owner_ip: IpAddr, path: &str) -> Result<(), StorageError> {
-        let mut inner = self.inner.write();
-        let actions = inner.storage.delete_file(owner_ip, path)?;
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        Ok(())
+        self.try_storage_transition(|inner| {
+            inner
+                .storage
+                .delete_file(owner_ip, path)
+                .map(|actions| ((), actions))
+        })
     }
 
     pub(crate) fn rename_file(
@@ -129,21 +157,16 @@ impl SimWorld {
         from: &str,
         to: &str,
     ) -> Result<(), StorageError> {
-        let mut inner = self.inner.write();
-        let actions = inner.storage.rename_file(owner_ip, from, to)?;
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        Ok(())
+        self.try_storage_transition(|inner| {
+            inner
+                .storage
+                .rename_file(owner_ip, from, to)
+                .map(|actions| ((), actions))
+        })
     }
 
     pub(crate) fn sync_dir(&self, path: &str, owner_ip: IpAddr) -> Result<(), StorageError> {
-        let mut inner = self.inner.write();
-        let (result, actions) = inner.storage.sync_dir(path, owner_ip);
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        result
+        self.storage_transition(|inner| inner.storage.sync_dir(path, owner_ip))
     }
 
     pub(crate) fn schedule_read(
@@ -173,15 +196,12 @@ impl SimWorld {
         len: usize,
         positioned: bool,
     ) -> Result<OperationId, StorageError> {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let (operation_id, actions) = inner
-            .storage
-            .schedule_read(handle_id, offset, len, positioned, now)?;
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        Ok(operation_id)
+        self.try_storage_transition(|inner| {
+            let now = inner.now();
+            inner
+                .storage
+                .schedule_read(handle_id, offset, len, positioned, now)
+        })
     }
 
     pub(crate) fn schedule_write(
@@ -211,25 +231,19 @@ impl SimWorld {
         data: Vec<u8>,
         positioned: bool,
     ) -> Result<OperationId, StorageError> {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let (operation_id, actions) = inner
-            .storage
-            .schedule_write(handle_id, offset, data, positioned, now)?;
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        Ok(operation_id)
+        self.try_storage_transition(|inner| {
+            let now = inner.now();
+            inner
+                .storage
+                .schedule_write(handle_id, offset, data, positioned, now)
+        })
     }
 
     pub(crate) fn schedule_sync(&self, handle_id: HandleId) -> Result<OperationId, StorageError> {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let (operation_id, actions) = inner.storage.schedule_sync(handle_id, now)?;
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        Ok(operation_id)
+        self.try_storage_transition(|inner| {
+            let now = inner.now();
+            inner.storage.schedule_sync(handle_id, now)
+        })
     }
 
     pub(crate) fn schedule_set_len(
@@ -237,13 +251,10 @@ impl SimWorld {
         handle_id: HandleId,
         new_len: u64,
     ) -> Result<OperationId, StorageError> {
-        let mut inner = self.inner.write();
-        let now = inner.now();
-        let (operation_id, actions) = inner.storage.schedule_set_len(handle_id, new_len, now)?;
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
-        Ok(operation_id)
+        self.try_storage_transition(|inner| {
+            let now = inner.now();
+            inner.storage.schedule_set_len(handle_id, new_len, now)
+        })
     }
 
     pub(crate) fn poll_storage_operation(
@@ -258,11 +269,7 @@ impl SimWorld {
     }
 
     pub(crate) fn cancel_storage_operation(&self, operation_id: OperationId) {
-        let mut inner = self.inner.write();
-        let actions = inner.storage.cancel_operation(operation_id);
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
+        self.storage_transition(|inner| ((), inner.storage.cancel_operation(operation_id)));
     }
 
     pub(crate) fn file_position(&self, handle_id: HandleId) -> Result<u64, StorageError> {
@@ -285,11 +292,7 @@ impl SimWorld {
     }
 
     pub(crate) fn close_storage_handle(&self, handle_id: HandleId) {
-        let mut inner = self.inner.write();
-        let actions = inner.storage.close_handle(handle_id);
-        let wakes = apply_storage_actions(&mut inner, actions);
-        drop(inner);
-        wakes.wake();
+        self.storage_transition(|inner| ((), inner.storage.close_handle(handle_id)));
     }
 
     /// Simulate a crash affecting storage for a specific process.
@@ -306,12 +309,7 @@ impl SimWorld {
     /// the lost-synced-write oracle detects a simulator bug.
     #[instrument(skip(self))]
     pub fn simulate_crash_for_process(&self, ip: IpAddr, close_files: bool) {
-        let wakes = {
-            let mut inner = self.inner.write();
-            let actions = inner.storage.simulate_crash(ip, close_files);
-            apply_storage_actions(&mut inner, actions)
-        };
-        wakes.wake();
+        self.storage_transition(|inner| ((), inner.storage.simulate_crash(ip, close_files)));
     }
 
     /// Fail `ip`'s disk outright: every read, write, sync, or `set_len` issued
@@ -327,12 +325,7 @@ impl SimWorld {
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn fail_disk_for_process(&self, ip: IpAddr) {
-        let wakes = {
-            let mut inner = self.inner.write();
-            let actions = inner.storage.fail_disk(ip);
-            apply_storage_actions(&mut inner, actions)
-        };
-        wakes.wake();
+        self.storage_transition(|inner| ((), inner.storage.fail_disk(ip)));
     }
 
     /// Wipe all persistent storage for a specific process.
@@ -342,12 +335,7 @@ impl SimWorld {
     /// Panics if the simulation lock is poisoned by a prior task panic.
     #[instrument(skip(self))]
     pub fn wipe_storage_for_process(&self, ip: IpAddr) {
-        let wakes = {
-            let mut inner = self.inner.write();
-            let actions = inner.storage.wipe_process(ip);
-            apply_storage_actions(&mut inner, actions)
-        };
-        wakes.wake();
+        self.storage_transition(|inner| ((), inner.storage.wipe_process(ip)));
     }
 
     /// Install the eligibility mask consulted before any random fault damages

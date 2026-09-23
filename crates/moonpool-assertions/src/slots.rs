@@ -8,7 +8,8 @@
 //! Each slot is accessed via raw pointer arithmetic on the assertion region
 //! (heap by default, or `MAP_SHARED` memory when an exploration backend installs
 //! one). Slot metadata is fully initialized before a release-store publishes
-//! it, so concurrent readers never observe a partially initialized slot.
+//! it, so concurrent readers never observe a partially initialized slot (see
+//! the private `table` module).
 //!
 //! On a "discovery" (first Sometimes/Reachable pass, numeric watermark
 //! improvement, frontier advance, or new partial boolean combination) the accounting calls
@@ -17,7 +18,10 @@
 //! no-op (pure accounting); the exploration backend wires it to a per-run
 //! discovery journal.
 
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use crate::hooks::{DiscoveryKind, on_discovery};
+use crate::table::{self, Claim, Entry, atomic};
 
 /// Maximum number of tracked assertion slots.
 pub const MAX_ASSERTION_SLOTS: usize = 2048;
@@ -25,16 +29,14 @@ pub const MAX_ASSERTION_SLOTS: usize = 2048;
 /// Maximum length of the assertion message stored in a slot.
 const SLOT_MSG_LEN: usize = 64;
 
-const SLOT_INITIALIZING: u8 = 1;
-const SLOT_READY: u8 = 2;
-
 /// Total size of the assertion table memory region in bytes.
 ///
 /// Layout: `[next_slot: u32, dropped_allocations: u32, slots: [AssertionSlot; MAX_ASSERTION_SLOTS]]`
 pub const ASSERTION_TABLE_MEM_SIZE: usize =
     8 + MAX_ASSERTION_SLOTS * std::mem::size_of::<AssertionSlot>();
 
-const DROPPED_ALLOCATIONS_OFFSET: usize = std::mem::size_of::<AtomicU32>();
+/// Index of the dropped-allocation counter among the table's header words.
+const DROPPED_ALLOCATIONS_WORD: usize = 1;
 
 /// The kind of assertion being tracked.
 #[repr(u8)]
@@ -90,6 +92,17 @@ pub enum AssertCmp {
     Le = 3,
 }
 
+impl AssertCmp {
+    fn holds(self, left: i64, right: i64) -> bool {
+        match self {
+            Self::Gt => left > right,
+            Self::Ge => left >= right,
+            Self::Lt => left < right,
+            Self::Le => left <= right,
+        }
+    }
+}
+
 /// A single assertion tracking slot.
 ///
 /// All fields are accessed via raw pointer arithmetic on the assertion region.
@@ -131,13 +144,35 @@ impl AssertionSlot {
     /// Get the assertion message as a string slice.
     #[must_use]
     pub fn msg_str(&self) -> &str {
-        let len = self
-            .msg
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(SLOT_MSG_LEN);
-        std::str::from_utf8(&self.msg[..len]).unwrap_or("???")
+        table::msg_str(&self.msg)
     }
+}
+
+impl Entry for AssertionSlot {
+    type Id = u64;
+    const CAPACITY: usize = MAX_ASSERTION_SLOTS;
+
+    unsafe fn published(entry: *mut Self) -> *const u8 {
+        unsafe { &raw const (*entry).published }
+    }
+
+    unsafe fn load_id(entry: *mut Self) -> u64 {
+        unsafe { atomic(&raw const (*entry).msg_hash).load(Ordering::Relaxed) }
+    }
+
+    unsafe fn store_id(entry: *mut Self, id: u64) {
+        unsafe { atomic(&raw const (*entry).msg_hash).store(id, Ordering::Relaxed) }
+    }
+}
+
+/// 64-bit FNV-1a offset basis.
+const FNV64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a (64-bit) continuation of `hash` over `bytes`.
+pub(crate) fn fnv1a_64(hash: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes.into_iter().fold(hash, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// 64-bit FNV-1a hash of a message string — the stable identity of an
@@ -149,28 +184,18 @@ impl AssertionSlot {
 /// collision near 10⁻¹³, where 32 bits put it near 10⁻³.
 #[must_use]
 pub fn msg_hash(msg: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in msg.bytes() {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
+    fnv1a_64(FNV64_OFFSET, msg.bytes())
 }
 
 /// Stable fingerprint for one complete set of named boolean observations.
 fn boolean_combination_fingerprint(named_bools: &[(&str, bool)]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for (name, value) in named_bools {
-        for byte in name.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-        hash ^= u64::from(*value);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
+    // FNV-1a (64-bit) over each name, a 0xff separator, and the value byte.
+    fnv1a_64(
+        FNV64_OFFSET,
+        named_bools
+            .iter()
+            .flat_map(|&(name, value)| name.bytes().chain([0xff, u8::from(value)])),
+    )
 }
 
 /// Mix a site and proposition fingerprint into one semantic state id.
@@ -180,124 +205,76 @@ fn boolean_combination_state_id(site_hash: u64, fingerprint: u64) -> u64 {
 
 /// Update a monotonic watermark, returning whether this call advanced it.
 fn update_watermark(watermark: &AtomicI64, value: i64, maximize: bool) -> bool {
-    let previous = if maximize {
-        watermark.fetch_max(value, Ordering::Relaxed)
-    } else {
-        watermark.fetch_min(value, Ordering::Relaxed)
-    };
     if maximize {
-        value > previous
+        value > watermark.fetch_max(value, Ordering::Relaxed)
     } else {
-        value < previous
+        value < watermark.fetch_min(value, Ordering::Relaxed)
     }
 }
 
-/// Find an existing slot or allocate a new one by `msg_hash`.
+/// Find an existing slot for `msg` or allocate a new one.
 ///
-/// Returns a pointer to the slot and its index, or null if the table is full.
-///
-/// # Safety
-///
-/// `table_ptr` must point to a valid assertion table region of at least
-/// `ASSERTION_TABLE_MEM_SIZE` bytes.
-unsafe fn find_or_alloc_slot(
-    table_ptr: *mut u8,
-    hash: u64,
+/// Returns the slot and its message hash, or `None` when the assertion table
+/// is not initialized, the slot is still being initialized by another
+/// claimant, or the table is full (counted as a dropped allocation).
+fn find_or_alloc_slot(
     kind: AssertKind,
-    must_hit: u8,
-    maximize: u8,
+    must_hit: bool,
+    maximize: bool,
     msg: &str,
-) -> (*mut AssertionSlot, usize) {
-    unsafe {
-        let next_atomic = &*table_ptr.cast::<()>().cast::<AtomicU32>();
-        let count = next_atomic.load(Ordering::Acquire) as usize;
-        let base = table_ptr.add(8).cast::<()>().cast::<AssertionSlot>();
-
-        // Search only fully published slots. The acquire pairs with the
-        // release-store below, making immutable metadata safe to read.
-        for i in 0..count.min(MAX_ASSERTION_SLOTS) {
-            let slot = base.add(i);
-            let published = &*std::ptr::addr_of!((*slot).published).cast::<AtomicU8>();
-            let state = published.load(Ordering::Acquire);
-            let h = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU64>();
-            if state == SLOT_READY && h.load(Ordering::Relaxed) == hash {
-                return (slot, i);
-            }
-            if state == SLOT_INITIALIZING && h.load(Ordering::Relaxed) == hash {
-                return (std::ptr::null_mut(), 0);
-            }
+) -> Option<(*mut AssertionSlot, u64)> {
+    let table_ptr = crate::region::assertion_table_ptr();
+    if table_ptr.is_null() {
+        return None;
+    }
+    let hash = msg_hash(msg);
+    let init = |slot: *mut AssertionSlot| {
+        let start = if maximize { i64::MIN } else { i64::MAX };
+        // Safety: `claim` hands out an unpublished slot this call owns.
+        unsafe {
+            (*slot).kind = kind as u8;
+            (*slot).must_hit = u8::from(must_hit);
+            (*slot).maximize = u8::from(maximize);
+            (*slot).discovered = 0;
+            (*slot).pass_count = 0;
+            (*slot).fail_count = 0;
+            (*slot).watermark = start;
+            (*slot).discovery_watermark = start;
+            (*slot).combination_bits = 0;
+            (*slot).frontier = 0;
+            (*slot).frontier_target = 0;
+            (*slot).pad = [0; 1];
+            (*slot).msg = table::msg_buf(msg);
         }
-
-        // Allocate new slot atomically.
-        let new_idx = next_atomic.fetch_add(1, Ordering::AcqRel) as usize;
-        if new_idx >= MAX_ASSERTION_SLOTS {
-            next_atomic.fetch_sub(1, Ordering::AcqRel);
-            let dropped = &*table_ptr
-                .add(DROPPED_ALLOCATIONS_OFFSET)
-                .cast::<()>()
-                .cast::<AtomicU32>();
+    };
+    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
+    match unsafe { table::claim(table_ptr, hash, init) } {
+        Claim::Entry(slot) => Some((slot, hash)),
+        Claim::Busy => None,
+        Claim::Full => {
+            // Safety: the second header word is the dropped-allocation counter.
+            let dropped = unsafe { table::header_word(table_ptr, DROPPED_ALLOCATIONS_WORD) };
             let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
                 Some(count.saturating_add(1))
             });
-            return (std::ptr::null_mut(), 0);
+            None
         }
+    }
+}
 
-        let slot = base.add(new_idx);
-        let slot_hash = &*std::ptr::addr_of!((*slot).msg_hash).cast::<AtomicU64>();
-        let published = &*std::ptr::addr_of!((*slot).published).cast::<AtomicU8>();
-        slot_hash.store(hash, Ordering::Relaxed);
-        published.store(SLOT_INITIALIZING, Ordering::Release);
-
-        // A published claim wins immediately; among simultaneous initializers,
-        // the lower index wins deterministically.
-        let claimed = next_atomic.load(Ordering::Acquire) as usize;
-        for i in 0..claimed.min(MAX_ASSERTION_SLOTS) {
-            if i == new_idx {
-                continue;
-            }
-            let existing = base.add(i);
-            let existing_state = &*std::ptr::addr_of!((*existing).published).cast::<AtomicU8>();
-            let state = existing_state.load(Ordering::Acquire);
-            if state == 0 {
-                continue;
-            }
-            let existing_hash = &*std::ptr::addr_of!((*existing).msg_hash).cast::<AtomicU64>();
-            if existing_hash.load(Ordering::Relaxed) != hash {
-                continue;
-            }
-            if state == SLOT_INITIALIZING && i > new_idx {
-                continue;
-            }
-            slot_hash.store(0, Ordering::Relaxed);
-            published.store(0, Ordering::Release);
-            return if state == SLOT_READY {
-                (existing, i)
-            } else {
-                (std::ptr::null_mut(), 0)
-            };
-        }
-
-        let mut msg_buf = [0u8; SLOT_MSG_LEN];
-        let n = msg.len().min(SLOT_MSG_LEN - 1);
-        msg_buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
-
-        (*slot).kind = kind as u8;
-        (*slot).must_hit = must_hit;
-        (*slot).maximize = maximize;
-        (*slot).discovered = 0;
-        (*slot).pass_count = 0;
-        (*slot).fail_count = 0;
-        (*slot).watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
-        (*slot).discovery_watermark = if maximize == 1 { i64::MIN } else { i64::MAX };
-        (*slot).combination_bits = 0;
-        (*slot).frontier = 0;
-        (*slot).frontier_target = 0;
-        (*slot).pad = [0; 1];
-        (*slot).msg = msg_buf;
-
-        published.store(SLOT_READY, Ordering::Release);
-
-        (slot, new_idx)
+/// Bump the slot's pass (`passed`) or fail counter, returning its previous value.
+///
+/// # Safety
+///
+/// `slot` must point to a published slot of a live assertion table.
+unsafe fn record(slot: *mut AssertionSlot, passed: bool) -> u64 {
+    unsafe {
+        let counter = if passed {
+            &raw const (*slot).pass_count
+        } else {
+            &raw const (*slot).fail_count
+        };
+        atomic(counter).fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -309,63 +286,35 @@ unsafe fn find_or_alloc_slot(
 ///
 /// This is a no-op if the assertion table is not initialized.
 pub fn assertion_bool(kind: AssertKind, must_hit: bool, condition: bool, msg: &str) {
-    let table_ptr = crate::region::assertion_table_ptr();
-    if table_ptr.is_null() {
+    let Some((slot, hash)) = find_or_alloc_slot(kind, must_hit, false, msg) else {
         return;
-    }
-
-    let hash = msg_hash(msg);
-    let must_hit_u8 = u8::from(must_hit);
-
-    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
-    let (slot, _slot_idx) =
-        unsafe { find_or_alloc_slot(table_ptr, hash, kind, must_hit_u8, 0, msg) };
-    if slot.is_null() {
-        return;
-    }
+    };
 
     // Safety: slot points to valid memory.
     unsafe {
         match kind {
             AssertKind::Always | AssertKind::AlwaysOrUnreachable | AssertKind::NumericAlways => {
-                if condition {
-                    let pc = &*(&raw const (*slot).pass_count).cast::<AtomicU64>();
-                    pc.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    let fc = &*(&raw const (*slot).fail_count).cast::<AtomicU64>();
-                    let prev = fc.fetch_add(1, Ordering::Relaxed);
-                    if prev == 0 {
-                        eprintln!("[ASSERTION FAILED] {msg} (kind={kind:?})");
-                    }
+                let previous = record(slot, condition);
+                if !condition && previous == 0 {
+                    eprintln!("[ASSERTION FAILED] {msg} (kind={kind:?})");
                 }
             }
             AssertKind::Sometimes | AssertKind::Reachable => {
-                if condition {
-                    let pc = &*(&raw const (*slot).pass_count).cast::<AtomicU64>();
-                    pc.fetch_add(1, Ordering::Relaxed);
-
-                    // CAS discovered from 0 → 1 on first success
-                    let ft = &*(&raw const (*slot).discovered).cast::<AtomicU8>();
-                    if ft
+                record(slot, condition);
+                // CAS discovered from 0 → 1 on first success
+                if condition
+                    && atomic(&raw const (*slot).discovered)
                         .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
-                    {
-                        crate::hooks::on_discovery(
-                            crate::hooks::DiscoveryKind::SometimesPass,
-                            hash,
-                        );
-                    }
-                } else {
-                    let fc = &*(&raw const (*slot).fail_count).cast::<AtomicU64>();
-                    fc.fetch_add(1, Ordering::Relaxed);
+                {
+                    on_discovery(DiscoveryKind::SometimesPass, hash);
                 }
             }
             AssertKind::Unreachable => {
                 // Being reached at all is a "pass" (the assertion is that we should NOT reach)
                 // We track it as pass_count = times reached (bad), fail_count unused
-                let pc = &*(&raw const (*slot).pass_count).cast::<AtomicU64>();
-                let prev = pc.fetch_add(1, Ordering::Relaxed);
-                if prev == 0 {
+                let previous = record(slot, true);
+                if previous == 0 {
                     eprintln!("[UNREACHABLE REACHED] {msg}");
                 }
             }
@@ -392,58 +341,34 @@ pub fn assertion_numeric(
     right: i64,
     msg: &str,
 ) {
-    let table_ptr = crate::region::assertion_table_ptr();
-    if table_ptr.is_null() {
+    let Some((slot, hash)) = find_or_alloc_slot(kind, true, maximize, msg) else {
         return;
-    }
-
-    let hash = msg_hash(msg);
-    let maximize_u8 = u8::from(maximize);
-
-    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
-    let (slot, _slot_idx) =
-        unsafe { find_or_alloc_slot(table_ptr, hash, kind, 1, maximize_u8, msg) };
-    if slot.is_null() {
-        return;
-    }
-
-    // Evaluate the comparison
-    let passes = match cmp {
-        AssertCmp::Gt => left > right,
-        AssertCmp::Ge => left >= right,
-        AssertCmp::Lt => left < right,
-        AssertCmp::Le => left <= right,
     };
+    let passes = cmp.holds(left, right);
 
     // Safety: slot points to valid memory.
     unsafe {
-        if passes {
-            let pc = &*(&raw const (*slot).pass_count).cast::<AtomicU64>();
-            pc.fetch_add(1, Ordering::Relaxed);
-        } else {
-            let fc = &*(&raw const (*slot).fail_count).cast::<AtomicU64>();
-            let prev = fc.fetch_add(1, Ordering::Relaxed);
-            if kind == AssertKind::NumericAlways && prev == 0 {
-                eprintln!(
-                    "[NUMERIC ASSERTION FAILED] {msg} (left={left}, right={right}, cmp={cmp:?})"
-                );
-            }
+        let previous = record(slot, passes);
+        if !passes && kind == AssertKind::NumericAlways && previous == 0 {
+            eprintln!("[NUMERIC ASSERTION FAILED] {msg} (left={left}, right={right}, cmp={cmp:?})");
         }
 
         // Update watermark: track best value of `left`
-        let wm = &*(&raw const (*slot).watermark).cast::<AtomicI64>();
-        update_watermark(wm, left, maximize);
+        update_watermark(atomic(&raw const (*slot).watermark), left, maximize);
 
         // Numeric guidance follows the comparison distance (`left - right`),
         // matching Antithesis: a changing threshold must influence whether an
         // observation is actually closer to satisfying the property. The
         // public watermark above deliberately remains the best `left` value
         // for human-readable reporting.
-        if kind == AssertKind::NumericSometimes {
-            let fw = &*(&raw const (*slot).discovery_watermark).cast::<AtomicI64>();
-            if update_watermark(fw, left.saturating_sub(right), maximize) {
-                crate::hooks::on_discovery(crate::hooks::DiscoveryKind::WatermarkImprovement, hash);
-            }
+        if kind == AssertKind::NumericSometimes
+            && update_watermark(
+                atomic(&raw const (*slot).discovery_watermark),
+                left.saturating_sub(right),
+                maximize,
+            )
+        {
+            on_discovery(DiscoveryKind::WatermarkImprovement, hash);
         }
     }
 }
@@ -457,19 +382,10 @@ pub fn assertion_numeric(
 ///
 /// This is a no-op if the assertion table is not initialized.
 pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
-    let table_ptr = crate::region::assertion_table_ptr();
-    if table_ptr.is_null() {
+    let Some((slot, hash)) = find_or_alloc_slot(AssertKind::BooleanSometimesAll, true, false, msg)
+    else {
         return;
-    }
-
-    let hash = msg_hash(msg);
-
-    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
-    let (slot, _slot_idx) =
-        unsafe { find_or_alloc_slot(table_ptr, hash, AssertKind::BooleanSometimesAll, 1, 0, msg) };
-    if slot.is_null() {
-        return;
-    }
+    };
 
     // Count simultaneously true bools. The frontier field is u8, so we cap at u8::MAX —
     // callers passing more than 255 named bools is not a supported use case; clamp
@@ -483,27 +399,25 @@ pub fn assertion_sometimes_all(msg: &str, named_bools: &[(&str, bool)]) {
     // Safety: slot points to valid memory.
     unsafe {
         // Increment pass_count (always, for statistics)
-        let pc = &*(&raw const (*slot).pass_count).cast::<AtomicU64>();
-        pc.fetch_add(1, Ordering::Relaxed);
+        record(slot, true);
 
-        let frontier_target = &*(&raw const (*slot).frontier_target).cast::<AtomicU8>();
-        frontier_target.fetch_max(target, Ordering::Relaxed);
+        atomic(&raw const (*slot).frontier_target).fetch_max(target, Ordering::Relaxed);
 
         // Record the partial combination even when a frontier advance wins the
         // discovery for this encounter. That prevents the same combination
         // from producing a redundant event on its next encounter. A 64-bit
         // bloom bitmap bounds guidance per site; collisions lose optional
         // combination hints but never assertion accounting or frontier data.
-        let combinations = &*(&raw const (*slot).combination_bits).cast::<AtomicU64>();
-        let previous_combinations = combinations.fetch_or(combination_bit, Ordering::Relaxed);
+        let previous_combinations = atomic(&raw const (*slot).combination_bits)
+            .fetch_or(combination_bit, Ordering::Relaxed);
         let new_combination = previous_combinations & combination_bit == 0;
 
-        let fr = &*(&raw const (*slot).frontier).cast::<AtomicU8>();
-        if true_count > fr.fetch_max(true_count, Ordering::Relaxed) {
-            crate::hooks::on_discovery(crate::hooks::DiscoveryKind::FrontierAdvance, hash);
+        let frontier = atomic(&raw const (*slot).frontier);
+        if true_count > frontier.fetch_max(true_count, Ordering::Relaxed) {
+            on_discovery(DiscoveryKind::FrontierAdvance, hash);
         } else if true_count > 0 && new_combination {
-            crate::hooks::on_discovery(
-                crate::hooks::DiscoveryKind::BooleanCombination,
+            on_discovery(
+                DiscoveryKind::BooleanCombination,
                 boolean_combination_state_id(hash, fingerprint),
             );
         }
@@ -521,50 +435,22 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
     }
 
     // Safety: table_ptr was allocated with ASSERTION_TABLE_MEM_SIZE bytes.
-    // - The first 4 bytes hold the slot count (u32), capped at MAX_ASSERTION_SLOTS.
-    // - base = table_ptr + 8 is the start of the AssertionSlot array.
-    // - Loop bound 0..count ensures base.add(i) stays within the allocated region.
-    // - Mutable accounting fields are loaded atomically while immutable metadata
-    //   is read only after acquiring the publication latch.
+    // Mutable accounting fields are loaded atomically while immutable metadata
+    // is read only after acquiring the publication latch.
     unsafe {
-        let count = (&*table_ptr.cast::<()>().cast::<AtomicU32>()).load(Ordering::Acquire) as usize;
-        let count = count.min(MAX_ASSERTION_SLOTS);
-        let base = table_ptr.add(8).cast::<()>().cast::<AssertionSlot>();
-
-        (0..count)
-            .filter_map(|i| {
-                let slot = base.add(i);
-                let published = &*std::ptr::addr_of!((*slot).published).cast::<AtomicU8>();
-                if published.load(Ordering::Acquire) != SLOT_READY {
-                    return None;
-                }
-                let message = std::ptr::read(std::ptr::addr_of!((*slot).msg));
-                let message_len = message
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .unwrap_or(SLOT_MSG_LEN);
-                Some(AssertionSlotSnapshot {
-                    msg: std::str::from_utf8(&message[..message_len])
-                        .unwrap_or("???")
-                        .to_string(),
-                    kind: std::ptr::read(std::ptr::addr_of!((*slot).kind)),
-                    must_hit: std::ptr::read(std::ptr::addr_of!((*slot).must_hit)),
-                    pass_count: (&*std::ptr::addr_of!((*slot).pass_count).cast::<AtomicU64>())
-                        .load(Ordering::Relaxed),
-                    fail_count: (&*std::ptr::addr_of!((*slot).fail_count).cast::<AtomicU64>())
-                        .load(Ordering::Relaxed),
-                    watermark: (&*std::ptr::addr_of!((*slot).watermark).cast::<AtomicI64>())
-                        .load(Ordering::Relaxed),
-                    combinations_seen: (&*std::ptr::addr_of!((*slot).combination_bits)
-                        .cast::<AtomicU64>())
-                        .load(Ordering::Relaxed)
-                        .count_ones(),
-                    frontier: (&*std::ptr::addr_of!((*slot).frontier).cast::<AtomicU8>())
-                        .load(Ordering::Relaxed),
-                    frontier_target: (&*std::ptr::addr_of!((*slot).frontier_target)
-                        .cast::<AtomicU8>())
-                        .load(Ordering::Relaxed),
-                })
+        table::published_entries::<AssertionSlot>(table_ptr)
+            .map(|slot| AssertionSlotSnapshot {
+                msg: table::msg_str(&(*slot).msg).to_string(),
+                kind: (*slot).kind,
+                must_hit: (*slot).must_hit,
+                pass_count: atomic(&raw const (*slot).pass_count).load(Ordering::Relaxed),
+                fail_count: atomic(&raw const (*slot).fail_count).load(Ordering::Relaxed),
+                watermark: atomic(&raw const (*slot).watermark).load(Ordering::Relaxed),
+                combinations_seen: atomic(&raw const (*slot).combination_bits)
+                    .load(Ordering::Relaxed)
+                    .count_ones(),
+                frontier: atomic(&raw const (*slot).frontier).load(Ordering::Relaxed),
+                frontier_target: atomic(&raw const (*slot).frontier_target).load(Ordering::Relaxed),
             })
             .collect()
     }
@@ -584,13 +470,7 @@ pub fn assertion_dropped_allocations() -> u32 {
 
     // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes, and the
     // second u32 in the table header is the dropped-allocation counter.
-    unsafe {
-        (&*table_ptr
-            .add(DROPPED_ALLOCATIONS_OFFSET)
-            .cast::<()>()
-            .cast::<AtomicU32>())
-            .load(Ordering::Relaxed)
-    }
+    unsafe { table::header_word(table_ptr, DROPPED_ALLOCATIONS_WORD).load(Ordering::Relaxed) }
 }
 
 /// A snapshot of an assertion slot for reporting.
@@ -657,6 +537,17 @@ mod tests {
     }
 
     #[test]
+    fn hashes_are_a_stable_wire_format() {
+        // Slot identities and discovery ids are persisted by campaigns
+        // downstream; these values must never change.
+        assert_eq!(msg_hash("site"), 0x4dd5_aa18_e606_742e);
+        assert_eq!(
+            boolean_combination_fingerprint(&[("a", true), ("b", false)]),
+            0xd805_8bf7_0e22_3339
+        );
+    }
+
+    #[test]
     fn test_slot_size_stable() {
         // Verify AssertionSlot size for shared memory layout stability.
         // msg_hash(8) + pass_count(8) + fail_count(8) + watermark(8) +
@@ -676,7 +567,7 @@ mod tests {
         // initializing its metadata. Readers must not expose the zeroed slot.
         // Safety: `init` installed a correctly aligned table region.
         unsafe {
-            (&*table.cast::<()>().cast::<AtomicU32>()).store(1, Ordering::Release);
+            crate::table::header_word(table, 0).store(1, Ordering::Release);
         }
         assert!(assertion_read_all().is_empty());
         crate::region::clear();

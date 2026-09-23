@@ -4,6 +4,9 @@ Runnable simulations that double as the book's worked examples and as CI's
 end-to-end gate. Each is a library module (`src/<name>.rs`) with a thin binary
 under `src/bin/sim/<name>.rs` that wires the builder, prints the report and
 exits non-zero when `seeds_failing` is non-empty.
+Plumbing every example would otherwise repeat (error wrapping, shutdown
+racing, the attrition preset, the binaries' report-and-exit) lives in
+`support.rs`; it is not part of what any example demonstrates.
 
 | Module | Shows |
 |---|---|

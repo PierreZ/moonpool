@@ -52,6 +52,7 @@
 
 use std::io;
 
+use crate::storage::invalid_input;
 use crate::{AlignedBuf, IoConstraints, StorageFile};
 
 /// A block-addressed view of one open file.
@@ -82,42 +83,29 @@ impl<F: StorageFile> BlockFile<F> {
     /// buffered file any positive size is accepted.
     pub fn new(file: F, block_size: usize) -> io::Result<Self> {
         if block_size == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "block size must be greater than zero",
-            ));
+            return Err(invalid_input("block size must be greater than zero"));
         }
         let constraints = file.constraints();
         if !block_size.is_multiple_of(constraints.length_alignment()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "block size {block_size} is not a multiple of the file's length alignment {}",
-                    constraints.length_alignment()
-                ),
-            ));
+            return Err(invalid_input(format!(
+                "block size {block_size} is not a multiple of the file's length alignment {}",
+                constraints.length_alignment()
+            )));
         }
         let offset_alignment = constraints.offset_alignment();
         if !(block_size as u64).is_multiple_of(offset_alignment) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "block size {block_size} is not a multiple of the file's offset alignment \
-                     {offset_alignment}, so block boundaries would be unaddressable"
-                ),
-            ));
+            return Err(invalid_input(format!(
+                "block size {block_size} is not a multiple of the file's offset alignment \
+                 {offset_alignment}, so block boundaries would be unaddressable"
+            )));
         }
         // All three alignments are powers of two, so the coarsest of them is
         // their least common multiple: a boundary that satisfies all three at
         // once. `block_size` is a multiple of each (checked above), so it is a
         // multiple of the step, and every request the transfer loops issue
         // starts on a step boundary inside a block-aligned range.
-        let offset_alignment = usize::try_from(constraints.offset_alignment()).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "the file's offset alignment does not fit in memory",
-            )
-        })?;
+        let offset_alignment = usize::try_from(constraints.offset_alignment())
+            .map_err(|_| invalid_input("the file's offset alignment does not fit in memory"))?;
         let transfer_step = offset_alignment
             .max(constraints.length_alignment())
             .max(constraints.memory_alignment());
@@ -169,13 +157,10 @@ impl<F: StorageFile> BlockFile<F> {
     /// would hand back a buffer of the wrong size in release builds.
     pub fn buffer(&self, blocks: usize) -> io::Result<AlignedBuf> {
         let bytes = blocks.checked_mul(self.block_size).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{blocks} blocks of {} bytes do not fit in memory",
-                    self.block_size
-                ),
-            )
+            invalid_input(format!(
+                "{blocks} blocks of {} bytes do not fit in memory",
+                self.block_size
+            ))
         })?;
         Ok(AlignedBuf::for_constraints(bytes, self.constraints()))
     }
@@ -329,9 +314,9 @@ impl<F: StorageFile> BlockFile<F> {
     /// [`io::ErrorKind::InvalidInput`] if the requested size overflows, and
     /// any error the file's size query or resize reports.
     pub async fn grow_to_blocks(&self, blocks: u64) -> io::Result<()> {
-        let wanted = blocks.checked_mul(self.block_size as u64).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "file size overflows u64")
-        })?;
+        let wanted = blocks
+            .checked_mul(self.block_size as u64)
+            .ok_or_else(|| invalid_input("file size overflows u64"))?;
         if self.file.size().await? >= wanted {
             return Ok(());
         }
@@ -411,13 +396,10 @@ impl<F: StorageFile> BlockFile<F> {
         if (buf.as_ptr() as usize).is_multiple_of(memory_alignment) {
             return Ok(());
         }
-        Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "this file requires {memory_alignment}-byte aligned buffers; \
-                 use BlockFile::buffer to allocate one"
-            ),
-        ))
+        Err(invalid_input(format!(
+            "this file requires {memory_alignment}-byte aligned buffers; \
+             use BlockFile::buffer to allocate one"
+        )))
     }
 
     /// Byte offset of a block-aligned transfer, validating its length and
@@ -429,27 +411,21 @@ impl<F: StorageFile> BlockFile<F> {
     /// the file rather than failing.
     fn range(&self, block_index: u64, len: usize) -> io::Result<u64> {
         if len == 0 || !len.is_multiple_of(self.block_size) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "transfer of {len} bytes is not a non-zero multiple of the {}-byte block size",
-                    self.block_size
-                ),
-            ));
+            return Err(invalid_input(format!(
+                "transfer of {len} bytes is not a non-zero multiple of the {}-byte block size",
+                self.block_size
+            )));
         }
         let start = block_index
             .checked_mul(self.block_size as u64)
             .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("block index {block_index} overflows a byte offset"),
-                )
+                invalid_input(format!("block index {block_index} overflows a byte offset"))
             })?;
         start.checked_add(len as u64).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("a {len}-byte transfer at block {block_index} runs past the end of the address space"),
-            )
+            invalid_input(format!(
+                "a {len}-byte transfer at block {block_index} runs past the end of the address \
+                 space"
+            ))
         })?;
         Ok(start)
     }

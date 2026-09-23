@@ -13,12 +13,8 @@ pub(crate) fn encode_frame(sequence: u64) -> Frame {
 
 /// Decode a frame, rejecting corruption before it can become a false pong.
 pub(crate) fn decode_frame(frame: &Frame) -> Option<u64> {
-    let mut sequence = [0; 8];
-    sequence.copy_from_slice(&frame[..8]);
-    let sequence = u64::from_be_bytes(sequence);
-
-    let mut complement = [0; 8];
-    complement.copy_from_slice(&frame[8..]);
-    let complement = u64::from_be_bytes(complement);
+    let (sequence, complement) = frame.split_first_chunk::<8>()?;
+    let sequence = u64::from_be_bytes(*sequence);
+    let complement = u64::from_be_bytes(*complement.first_chunk::<8>()?);
     (complement == !sequence).then_some(sequence)
 }

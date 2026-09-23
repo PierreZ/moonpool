@@ -3,6 +3,7 @@
 //! These tests verify that `StorageConfiguration` presets and customization
 //! work correctly, following the same pattern as network configuration tests.
 
+use crate::local_runtime;
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration, set_sim_seed};
 use std::time::Duration;
 
@@ -18,15 +19,6 @@ fn assert_f64_eq(left: f64, right: f64) {
         right.to_bits(),
         "{left} != {right} (bit comparison)"
     );
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
 }
 
 /// Test that `fast_local()` configuration has expected values

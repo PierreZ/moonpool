@@ -7,6 +7,7 @@
 //! - Add extra latency to sleep operations
 //! - Are deterministic across runs with the same seed
 
+use super::local_runtime;
 use async_trait::async_trait;
 use moonpool_sim::{
     Chaos, ChaosMode, NetworkConfiguration, NetworkFault, NetworkFaultMask, SimContext, SimWorld,
@@ -128,13 +129,7 @@ async fn test_buggified_delay_power_law_distribution() {
 #[test]
 fn test_buggified_delay_deterministic() {
     let run_simulation = || -> Vec<Duration> {
-        let local_runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .expect("Failed to build local runtime");
-
-        local_runtime.block_on(async move {
+        local_runtime().block_on(async move {
             moonpool_sim::set_sim_seed(42);
 
             let mut config = NetworkConfiguration::fast_local();

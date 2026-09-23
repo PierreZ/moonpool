@@ -62,6 +62,27 @@ impl Latencies {
         self.histogram.saturating_record(nanos.max(LOWEST_NANOS));
     }
 
+    /// Run `operation` `warmup` times unrecorded, then `samples` times,
+    /// recording the duration each recorded run returns.
+    ///
+    /// # Errors
+    ///
+    /// Stops at, and returns, the first error `operation` reports.
+    pub fn measure(
+        &mut self,
+        warmup: u64,
+        samples: u64,
+        mut operation: impl FnMut() -> std::io::Result<Duration>,
+    ) -> std::io::Result<()> {
+        for _ in 0..warmup {
+            operation()?;
+        }
+        for _ in 0..samples {
+            self.record(operation()?);
+        }
+        Ok(())
+    }
+
     /// Number of recorded samples.
     #[must_use]
     pub fn count(&self) -> u64 {

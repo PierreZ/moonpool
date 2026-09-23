@@ -175,15 +175,31 @@ mod proto {
 
 use proto::{WorkReply, WorkRequest};
 
-/// Whole milliseconds of simulated time, the unit every reservation uses.
+/// Whole milliseconds of a duration, the unit every reservation uses.
+fn ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Whole milliseconds of simulated time.
 fn millis(time: &SimTimeProvider) -> u64 {
-    u64::try_from(time.now().as_millis()).unwrap_or(u64::MAX)
+    ms(time.now())
 }
 
 /// Widen a count to `f64`. Every count here is bounded by the run length times
 /// the request rate, far inside `u32`.
-fn wide(value: u64) -> f64 {
-    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+fn wide(value: impl TryInto<u32>) -> f64 {
+    f64::from(value.try_into().unwrap_or(u32::MAX))
+}
+
+/// This node's metrics source, with room for every point a storm records.
+fn metrics_source(ctx: &SimContext) -> SimulationResult<Arc<PrometheusSource>> {
+    let source = ctx
+        .metrics::<PrometheusSource>()
+        .ok_or_else(|| SimulationError::InvalidState("no metrics factory".to_owned()))?;
+    // A storm records far more points than the default cap holds, and a
+    // truncated series would silently flatten the interesting part.
+    source.set_series_capacity(Some(1_000_000));
+    Ok(source)
 }
 
 // ===========================================================================
@@ -208,16 +224,14 @@ struct Capacity {
 
 impl Capacity {
     fn new() -> Self {
-        let service_ms = u64::try_from(SERVICE_TIME.as_millis()).unwrap_or(u64::MAX);
         Self {
             free_at: Mutex::new(vec![0; usize::try_from(WORKERS).unwrap_or(1)]),
-            service_ms: AtomicU64::new(service_ms),
+            service_ms: AtomicU64::new(ms(SERVICE_TIME)),
         }
     }
 
     fn set_service_time(&self, service: Duration) {
-        let ms = u64::try_from(service.as_millis()).unwrap_or(u64::MAX);
-        self.service_ms.store(ms, Ordering::Relaxed);
+        self.service_ms.store(ms(service), Ordering::Relaxed);
     }
 
     /// Reserve the next free worker for one request; returns the instant the
@@ -236,7 +250,7 @@ impl Capacity {
     /// Fraction of workers busy at `now_ms`, in `0.0..=1.0`.
     fn busy_fraction(&self, now_ms: u64) -> f64 {
         let busy = self.lock().iter().filter(|at| **at > now_ms).count();
-        wide(u64::try_from(busy).unwrap_or(0)) / wide(WORKERS)
+        wide(busy) / wide(WORKERS)
     }
 
     /// Seconds a request arriving at `now_ms` would wait before a worker takes
@@ -369,13 +383,7 @@ impl Process for WorkServer {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let source = ctx
-            .metrics::<PrometheusSource>()
-            .ok_or_else(|| SimulationError::InvalidState("no metrics factory".to_owned()))?;
-        // A storm records far more points than the default cap holds, and a
-        // truncated series would silently flatten the interesting part.
-        source.set_series_capacity(Some(1_000_000));
-
+        let source = metrics_source(ctx)?;
         let capacity = Arc::new(Capacity::new());
         let service = WorkService(WorkHandler {
             capacity: capacity.clone(),
@@ -483,10 +491,7 @@ impl Workload for StormWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let source = ctx
-            .metrics::<PrometheusSource>()
-            .ok_or_else(|| SimulationError::InvalidState("no metrics factory".to_owned()))?;
-        source.set_series_capacity(Some(1_000_000));
+        let source = metrics_source(ctx)?;
         let metrics = Arc::new(ClientMetrics::resolve(&source)?);
 
         let server_ip = ctx
@@ -730,8 +735,8 @@ struct Panel {
 
 /// Turn one run's recorded series into the panels the graph draws.
 fn panels(metrics: &SimulationMetrics, seed: u64) -> (Vec<Panel>, usize) {
-    let end_ms = u64::try_from(metrics.simulated_time.as_millis()).unwrap_or(u64::MAX);
-    let bucket_ms = u64::try_from(BUCKET.as_millis()).unwrap_or(1);
+    let end_ms = ms(metrics.simulated_time);
+    let bucket_ms = ms(BUCKET);
     let columns = usize::try_from(end_ms / bucket_ms).unwrap_or(0);
     let snapshot = MetricSnapshot::from_run(&metrics.app_metrics, &metrics.app_series, end_ms);
 
@@ -803,11 +808,11 @@ fn draw(panel: &Panel, columns: usize) -> String {
         .filter_map(|v| *v)
         .fold(0.0_f64, f64::max)
         .max(f64::MIN_POSITIVE);
-    let height = wide(u64::try_from(PANEL_HEIGHT).unwrap_or(1));
+    let height = wide(PANEL_HEIGHT);
 
     let mut out = format!("{:<54}peak {}\n", panel.title, tick(top, top).trim_start());
     for row in (1..=PANEL_HEIGHT).rev() {
-        let row_index = wide(u64::try_from(row).unwrap_or(0));
+        let row_index = wide(row);
         // A column fills this row when its value clears the row below it, so
         // any non-zero value shows up on the bottom row.
         let floor = top * (row_index - 1.0) / height;
@@ -875,9 +880,8 @@ fn time_ruler(columns: usize) -> String {
 
 /// The whole graph for one seed.
 fn render(seed: u64, panels: &[Panel], columns: usize) -> String {
-    let capacity =
-        wide(WORKERS) * 1000.0 / wide(u64::try_from(SERVICE_TIME.as_millis()).unwrap_or(1));
-    let offered = 1000.0 / wide(u64::try_from(ARRIVAL_INTERVAL.as_millis()).unwrap_or(1));
+    let capacity = wide(WORKERS) * 1000.0 / wide(ms(SERVICE_TIME));
+    let offered = 1000.0 / wide(ms(ARRIVAL_INTERVAL));
     let mut out = format!(
         "\nMetastable gRPC retry storm — seed {seed}\n\
          \x20 server   {WORKERS} workers x {} ms  => capacity {capacity:.0} rpc/s\n\
@@ -947,7 +951,15 @@ fn window_mean(panel: &Panel, from: usize, to: usize) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
-    values.iter().sum::<f64>() / wide(u64::try_from(values.len()).unwrap_or(1))
+    values.iter().sum::<f64>() / wide(values.len())
+}
+
+/// [`window_mean`] of the panel called `name`, or zero when there is none.
+fn series_mean(panels: &[Panel], name: &str, from: usize, to: usize) -> f64 {
+    panels
+        .iter()
+        .find(|p| p.name == name)
+        .map_or(0.0, |p| window_mean(p, from, to))
 }
 
 /// Run a range of seeds and print one line each, so a human can pick one.
@@ -969,12 +981,7 @@ fn search(from: u64, to: u64) {
         let (panels, _columns) = panels(&metrics, seed);
         let pre = column_of(TRIGGER_START);
         let (tail, tail_end) = tail_window();
-        let series = |name: &str, from, to| {
-            panels
-                .iter()
-                .find(|p| p.name == name)
-                .map_or(0.0, |p| window_mean(p, from, to))
-        };
+        let series = |name, from, to| series_mean(&panels, name, from, to);
         println!(
             "{seed:>6}  {:>10.1}  {:>10.1}  {:>10.2}  {:>10.1}  {:>10.2}",
             series("goodput", 2, pre),
@@ -1060,12 +1067,7 @@ mod tests {
 
         let (on, _off) = trigger_columns();
         let (tail, tail_end) = tail_window();
-        let mean = |name: &str, from, to| {
-            panels
-                .iter()
-                .find(|p| p.name == name)
-                .map_or(0.0, |p| window_mean(p, from, to))
-        };
+        let mean = |name, from, to| series_mean(&panels, name, from, to);
 
         assert!(
             mean("goodput", 2, on) > 45.0,

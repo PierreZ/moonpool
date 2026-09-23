@@ -6,7 +6,6 @@
 //! actually about: what throughput did it sustain, and how bad did the tail
 //! latency get.
 
-use std::process;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,14 +49,5 @@ fn main() {
         .set_iterations(10)
         .run();
 
-    report.eprint();
-
-    if !report.seeds_failing.is_empty() {
-        eprintln!(
-            "ERROR: {} seeds failed: {:?}",
-            report.seeds_failing.len(),
-            report.seeds_failing
-        );
-        process::exit(1);
-    }
+    moonpool_sim_examples::support::finish_or_exit_on_failing_seeds(&report);
 }

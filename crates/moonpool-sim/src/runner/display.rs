@@ -36,6 +36,11 @@ mod ansi {
     pub const BOLD_CYAN: &str = "\x1b[1;36m";
 }
 
+/// `code` when colour is on, nothing otherwise.
+fn paint(code: &'static str, color: bool) -> &'static str {
+    if color { code } else { "" }
+}
+
 /// Whether to emit ANSI color codes.
 fn use_color() -> bool {
     std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none()
@@ -67,7 +72,7 @@ fn progress_bar(fraction: f64, color: bool) -> String {
     } else {
         ansi::RED
     };
-    let reset = if color { ansi::RESET } else { "" };
+    let reset = paint(ansi::RESET, color);
 
     format!(
         "{}{}{}{}  {:.1}%",
@@ -97,19 +102,12 @@ fn section_header(w: &mut impl Write, title: &str, color: bool, style: &str) {
         3
     };
 
-    if color {
-        let _ = write!(w, "\n{style}{prefix}{title} ");
-        for _ in 0..trail {
-            let _ = write!(w, "{suffix_char}");
-        }
-        let _ = writeln!(w, "{}", ansi::RESET);
-    } else {
-        let _ = write!(w, "\n{prefix}{title} ");
-        for _ in 0..trail {
-            let _ = write!(w, "{suffix_char}");
-        }
-        let _ = writeln!(w);
+    let style = if color { style } else { "" };
+    let _ = write!(w, "\n{style}{prefix}{title} ");
+    for _ in 0..trail {
+        let _ = write!(w, "{suffix_char}");
     }
+    let _ = writeln!(w, "{}", paint(ansi::RESET, color));
 }
 
 // ---------------------------------------------------------------------------
@@ -188,29 +186,17 @@ fn write_report_summary(w: &mut impl Write, report: &SimulationReport, color: bo
         ("✗", ansi::BOLD_RED)
     };
 
-    if color {
-        let _ = writeln!(
-            w,
-            "  {} iterations   {} passed   {} failed   {rate_color}{rate_icon} {rate:.1}%{reset}",
-            report.iterations,
-            report.successful_runs,
-            report.failed_runs,
-            rate_color = rate_color,
-            rate_icon = rate_icon,
-            rate = rate,
-            reset = ansi::RESET,
-        );
-    } else {
-        let _ = writeln!(
-            w,
-            "  {} iterations   {} passed   {} failed   {rate_icon} {rate:.1}%",
-            report.iterations,
-            report.successful_runs,
-            report.failed_runs,
-            rate_icon = rate_icon,
-            rate = rate,
-        );
-    }
+    let _ = writeln!(
+        w,
+        "  {} iterations   {} passed   {} failed   {rate_color}{rate_icon} {rate:.1}%{reset}",
+        report.iterations,
+        report.successful_runs,
+        report.failed_runs,
+        rate_color = paint(rate_color, color),
+        rate_icon = rate_icon,
+        rate = rate,
+        reset = paint(ansi::RESET, color),
+    );
 }
 
 fn write_report_timing(w: &mut impl Write, report: &SimulationReport) {
@@ -238,11 +224,12 @@ fn write_report_faulty_seeds(w: &mut impl Write, report: &SimulationReport, colo
         return;
     }
     let _ = writeln!(w);
-    if color {
-        let _ = write!(w, "  {}Faulty seeds:{} ", ansi::BOLD_RED, ansi::RESET);
-    } else {
-        let _ = write!(w, "  Faulty seeds: ");
-    }
+    let _ = write!(
+        w,
+        "  {}Faulty seeds:{} ",
+        paint(ansi::BOLD_RED, color),
+        paint(ansi::RESET, color)
+    );
     let _ = writeln!(w, "{:?}", report.seeds_failing);
 }
 
@@ -271,11 +258,12 @@ pub(crate) fn write_report(w: &mut impl Write, report: &SimulationReport, color:
     if !report.assertion_violations.is_empty() {
         section_header(w, "Violations", color, ansi::BOLD_RED);
         for v in &report.assertion_violations {
-            if color {
-                let _ = writeln!(w, "  {}✗{}  {}", ansi::BOLD_RED, ansi::RESET, v);
-            } else {
-                let _ = writeln!(w, "  ✗  {v}");
-            }
+            let _ = writeln!(
+                w,
+                "  {}✗{}  {v}",
+                paint(ansi::BOLD_RED, color),
+                paint(ansi::RESET, color)
+            );
         }
     }
 
@@ -283,11 +271,12 @@ pub(crate) fn write_report(w: &mut impl Write, report: &SimulationReport, color:
     if !report.coverage_violations.is_empty() {
         section_header(w, "Coverage Gaps", color, ansi::BOLD_YELLOW);
         for v in &report.coverage_violations {
-            if color {
-                let _ = writeln!(w, "  {}○{}  {}", ansi::YELLOW, ansi::RESET, v);
-            } else {
-                let _ = writeln!(w, "  ○  {v}");
-            }
+            let _ = writeln!(
+                w,
+                "  {}○{}  {v}",
+                paint(ansi::YELLOW, color),
+                paint(ansi::RESET, color)
+            );
         }
     }
 
@@ -364,16 +353,12 @@ fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
     section_header(w, "Exploration", color, ansi::BOLD_CYAN);
 
     if exp.converged {
-        if color {
-            let _ = writeln!(
-                w,
-                "  Status       {}CONVERGED{}",
-                ansi::BOLD_GREEN,
-                ansi::RESET
-            );
-        } else {
-            let _ = writeln!(w, "  Status       CONVERGED");
-        }
+        let _ = writeln!(
+            w,
+            "  Status       {}CONVERGED{}",
+            paint(ansi::BOLD_GREEN, color),
+            paint(ansi::RESET, color)
+        );
     }
 
     let _ = writeln!(
@@ -414,11 +399,12 @@ fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
     // Bug recipes
     if !exp.bug_recipes.is_empty() {
         let _ = writeln!(w);
-        if color {
-            let _ = writeln!(w, "  {}Bug Recipes{}", ansi::BOLD, ansi::RESET);
-        } else {
-            let _ = writeln!(w, "  Bug Recipes");
-        }
+        let _ = writeln!(
+            w,
+            "  {}Bug Recipes{}",
+            paint(ansi::BOLD, color),
+            paint(ansi::RESET, color)
+        );
         for br in &exp.bug_recipes {
             let _ = writeln!(w, "    seed={}: {}", br.seed, format_recipe(&br.recipe));
         }
@@ -590,8 +576,8 @@ fn write_app_metrics(w: &mut impl Write, report: &SimulationReport, color: bool)
     }
 
     if metrics.len() > MAX_METRIC_ROWS {
-        let dim = if color { ansi::DIM } else { "" };
-        let reset = if color { ansi::RESET } else { "" };
+        let dim = paint(ansi::DIM, color);
+        let reset = paint(ansi::RESET, color);
         let _ = writeln!(
             w,
             "  {dim}... {} more series (see SimulationReport::app_metrics){reset}",
@@ -619,9 +605,9 @@ fn write_metric_queries(w: &mut impl Write, queries: &[MetricQueryReport], color
         ansi::BOLD_CYAN,
     );
 
-    let dim = if color { ansi::DIM } else { "" };
-    let bold = if color { ansi::BOLD } else { "" };
-    let reset = if color { ansi::RESET } else { "" };
+    let dim = paint(ansi::DIM, color);
+    let bold = paint(ansi::BOLD, color);
+    let reset = paint(ansi::RESET, color);
 
     for (i, query) in queries.iter().enumerate() {
         if i > 0 {
@@ -690,8 +676,8 @@ fn window_label(window: &MetricWindowSummary) -> String {
 /// why they are printed for a percentile-derived query too: `p95` here names
 /// the 95th-percentile *run*, not a percentile of the observations beneath it.
 fn write_query_stats(w: &mut impl Write, window: &MetricWindowSummary, indent: &str, color: bool) {
-    let dim = if color { ansi::DIM } else { "" };
-    let reset = if color { ansi::RESET } else { "" };
+    let dim = paint(ansi::DIM, color);
+    let reset = paint(ansi::RESET, color);
     let _ = writeln!(
         w,
         "{indent}min   {:>14}   {dim}seed={}{reset}",
@@ -742,8 +728,8 @@ fn truncate_key(key: &str, width: usize) -> String {
 fn write_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
     section_header(w, "Seeds", color, ansi::BOLD_CYAN);
 
-    let dim = if color { ansi::DIM } else { "" };
-    let reset = if color { ansi::RESET } else { "" };
+    let dim = paint(ansi::DIM, color);
+    let reset = paint(ansi::RESET, color);
 
     let per_seed_tl = report.exploration.as_ref().map(|e| &e.per_seed_timelines);
 
@@ -753,47 +739,29 @@ fn write_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
                 .and_then(|v| v.get(i))
                 .map(|t| format!("   {} timelines", fmt_num(*t)))
                 .unwrap_or_default();
-            let is_failed = report.seeds_failing.contains(seed);
-            if is_failed && color {
-                let _ = writeln!(
-                    w,
-                    "  {red}#{:<3}  seed={:<14}  {}   {} sim   {} events{tl}{reset}",
-                    i + 1,
-                    seed,
-                    fmt_duration(m.wall_time),
-                    fmt_duration(m.simulated_time),
-                    fmt_num(m.events_processed),
-                    tl = tl_suffix,
-                    red = ansi::RED,
-                    reset = ansi::RESET,
-                );
+            let style = if report.seeds_failing.contains(seed) {
+                paint(ansi::RED, color)
             } else {
-                let _ = writeln!(
-                    w,
-                    "  {dim}#{:<3}  seed={:<14}  {}   {} sim   {} events{tl}{reset}",
-                    i + 1,
-                    seed,
-                    fmt_duration(m.wall_time),
-                    fmt_duration(m.simulated_time),
-                    fmt_num(m.events_processed),
-                    tl = tl_suffix,
-                    dim = dim,
-                    reset = reset,
-                );
-            }
+                dim
+            };
+            let _ = writeln!(
+                w,
+                "  {style}#{:<3}  seed={:<14}  {}   {} sim   {} events{tl}{reset}",
+                i + 1,
+                seed,
+                fmt_duration(m.wall_time),
+                fmt_duration(m.simulated_time),
+                fmt_num(m.events_processed),
+                tl = tl_suffix,
+            );
         } else if let Some(Err(_)) = report.individual_metrics.get(i) {
-            if color {
-                let _ = writeln!(
-                    w,
-                    "  {red}#{:<3}  seed={:<14}  FAILED{reset}",
-                    i + 1,
-                    seed,
-                    red = ansi::BOLD_RED,
-                    reset = ansi::RESET,
-                );
-            } else {
-                let _ = writeln!(w, "  #{:<3}  seed={:<14}  FAILED", i + 1, seed);
-            }
+            let _ = writeln!(
+                w,
+                "  {red}#{:<3}  seed={:<14}  FAILED{reset}",
+                i + 1,
+                seed,
+                red = paint(ansi::BOLD_RED, color),
+            );
         }
     }
 }

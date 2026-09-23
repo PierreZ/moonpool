@@ -3,13 +3,10 @@
 //! Runs a 3-datacenter × 3-zone × 3-machine cluster (two processes per machine)
 //! under machine-scoped attrition, so collocated processes reboot together.
 
-use std::process;
 use std::time::Duration;
 
-use moonpool_sim::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, LocalityConfig,
-    SimulationBuilder,
-};
+use moonpool_sim::{AttritionScope, LocalityConfig, SimulationBuilder};
+use moonpool_sim_examples::support::{finish_or_exit_on_failing_seeds, reboot_attrition};
 use moonpool_sim_examples::topology::{PROCESSES_PER_MACHINE, TopologyProcess, TopologyWorkload};
 
 fn main() {
@@ -20,31 +17,13 @@ fn main() {
             Box::new(TopologyProcess)
         })
         .workload(TopologyWorkload)
-        .enable_chaos([Chaos::Attrition {
-            config: Attrition {
-                max_dead: PROCESSES_PER_MACHINE,
-                prob_graceful: 0.3,
-                prob_crash: 0.5,
-                prob_wipe: 0.2,
-                recovery_delay_ms: None,
-                grace_period_ms: None,
-                scope: AttritionScope::PerMachine,
-                victims: AttritionVictims::Any,
-            },
-            mode: ChaosMode::Random,
-        }])
+        .enable_chaos([reboot_attrition(
+            PROCESSES_PER_MACHINE,
+            AttritionScope::PerMachine,
+        )])
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(20)
         .run();
 
-    report.eprint();
-
-    if !report.seeds_failing.is_empty() {
-        eprintln!(
-            "ERROR: {} seeds failed: {:?}",
-            report.seeds_failing.len(),
-            report.seeds_failing
-        );
-        process::exit(1);
-    }
+    finish_or_exit_on_failing_seeds(&report);
 }

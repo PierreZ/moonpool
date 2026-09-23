@@ -19,6 +19,16 @@ impl SimBinary {
         }
     }
 
+    /// A binary of the `moonpool-sim-examples` package, instrumenting that crate.
+    const fn example(name: &'static str) -> Self {
+        Self::new(name, SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE)
+    }
+
+    /// A binary of the `moonpool-rpc-sim` package, instrumenting the RPC crates.
+    const fn rpc(name: &'static str) -> Self {
+        Self::new(name, "moonpool-rpc-sim", "moonpool_rpc,moonpool_rpc_sim")
+    }
+
     /// Display name without the `sim-` prefix.
     fn display_name(&self) -> &str {
         self.name.strip_prefix("sim-").unwrap_or(self.name)
@@ -30,40 +40,20 @@ const SIM_EXAMPLES_PACKAGE: &str = "moonpool-sim-examples";
 const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
 
 const SIM_BINARIES: &[SimBinary] = &[
-    SimBinary::new("sim-maze-explore", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
-    SimBinary::new(
-        "sim-dungeon-explore",
-        SIM_EXAMPLES_PACKAGE,
-        SIM_EXAMPLES_CRATE,
-    ),
+    SimBinary::example("sim-maze-explore"),
+    SimBinary::example("sim-dungeon-explore"),
     SimBinary::new(
         "sim-frontier-explore",
         "moonpool-explorer",
         "moonpool_explorer",
     ),
-    SimBinary::new("sim-axum-web", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
-    SimBinary::new(
-        "sim-metrics-service",
-        SIM_EXAMPLES_PACKAGE,
-        SIM_EXAMPLES_CRATE,
-    ),
-    SimBinary::new("sim-topology", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
-    SimBinary::new("sim-tonic-grpc", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
-    SimBinary::new(
-        "sim-rpc-foundations",
-        "moonpool-rpc-sim",
-        "moonpool_rpc,moonpool_rpc_sim",
-    ),
-    SimBinary::new(
-        "sim-rpc-delivery",
-        "moonpool-rpc-sim",
-        "moonpool_rpc,moonpool_rpc_sim",
-    ),
-    SimBinary::new(
-        "sim-rpc-interfaces",
-        "moonpool-rpc-sim",
-        "moonpool_rpc,moonpool_rpc_sim",
-    ),
+    SimBinary::example("sim-axum-web"),
+    SimBinary::example("sim-metrics-service"),
+    SimBinary::example("sim-topology"),
+    SimBinary::example("sim-tonic-grpc"),
+    SimBinary::rpc("sim-rpc-foundations"),
+    SimBinary::rpc("sim-rpc-delivery"),
+    SimBinary::rpc("sim-rpc-interfaces"),
 ];
 
 fn main() -> ExitCode {
@@ -232,7 +222,6 @@ fn run_binaries(binaries: &[SimBinary], extra_args: &[String]) -> bool {
     eprintln!();
 
     let total_start = Instant::now();
-    let mut passed = 0;
     let mut failed = Vec::new();
 
     for bin in binaries {
@@ -242,19 +231,13 @@ fn run_binaries(binaries: &[SimBinary], extra_args: &[String]) -> bool {
 
         // Use a separate target dir so cargo does not serve a cached
         // non-instrumented build (`SANCOV_CRATES` is not in its fingerprint).
-        let mut cmd = simulation_command(bin, extra_args);
-
-        match cmd.status() {
-            Ok(status) if status.success() => {
-                eprintln!("--- {name} --- ({})\n", fmt_duration(bin_start.elapsed()));
-                passed += 1;
-            }
+        let status = simulation_command(bin, extra_args).status();
+        let elapsed = fmt_duration(bin_start.elapsed());
+        match status {
+            Ok(status) if status.success() => eprintln!("--- {name} --- ({elapsed})\n"),
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
-                eprintln!(
-                    "{name}: exited with code {code} ({})\n",
-                    fmt_duration(bin_start.elapsed())
-                );
+                eprintln!("{name}: exited with code {code} ({elapsed})\n");
                 failed.push(name);
             }
             Err(e) => {
@@ -269,7 +252,7 @@ fn run_binaries(binaries: &[SimBinary], extra_args: &[String]) -> bool {
     eprintln!("=== Summary ===");
     eprintln!(
         "{} passed, {} failed, {} total ({})",
-        passed,
+        binaries.len() - failed.len(),
         failed.len(),
         binaries.len(),
         fmt_duration(total_elapsed),

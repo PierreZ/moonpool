@@ -15,10 +15,9 @@
 //! canary armed.
 
 use std::{
-    future::Future,
     io,
     net::IpAddr,
-    pin::{Pin, pin},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -30,7 +29,7 @@ use std::{
 use async_trait::async_trait;
 use futures::{
     future::poll_fn,
-    io::{AsyncRead, AsyncReadExt, AsyncWrite},
+    io::{AsyncReadExt, AsyncWrite},
     task::noop_waker,
 };
 use moonpool_sim::{
@@ -40,7 +39,13 @@ use moonpool_sim::{
     buggify_reset, network::sim::SimTcpStream,
 };
 
-const MAX_DRIVER_STEPS: usize = 100_000;
+#[path = "common/drive.rs"]
+mod driver;
+#[path = "common/poll_io.rs"]
+mod poll_io;
+
+use driver::{MAX_DRIVER_STEPS, drive};
+use poll_io::{poll_read_once, poll_write_once};
 
 fn client_ip() -> IpAddr {
     "10.0.1.1".parse().expect("valid test IP")
@@ -50,23 +55,6 @@ fn server_ip() -> IpAddr {
     "10.0.1.2".parse().expect("valid test IP")
 }
 
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        assert!(
-            sim.has_pending_events(),
-            "simulation-backed future stalled without a pending event"
-        );
-        sim.step();
-    }
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
-}
-
 fn poll_write_with(
     stream: &mut (impl AsyncWrite + Unpin),
     data: &[u8],
@@ -74,19 +62,6 @@ fn poll_write_with(
 ) -> Poll<io::Result<usize>> {
     let mut context = Context::from_waker(waker);
     Pin::new(stream).poll_write(&mut context, data)
-}
-
-fn poll_write_once(stream: &mut (impl AsyncWrite + Unpin), data: &[u8]) -> Poll<io::Result<usize>> {
-    poll_write_with(stream, data, &noop_waker())
-}
-
-fn poll_read_once(
-    stream: &mut (impl AsyncRead + Unpin),
-    data: &mut [u8],
-) -> Poll<io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    Pin::new(stream).poll_read(&mut context, data)
 }
 
 fn poll_close_once(stream: &mut (impl AsyncWrite + Unpin)) -> Poll<io::Result<()>> {

@@ -3,52 +3,11 @@
 //! These tests verify that the fault injection mechanisms work correctly
 //! for various failure modes.
 
+use crate::{fast_sim, local_runtime, run_storage_test, step_until_done, test_ip};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimFaultEvent, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Helper to run an async storage test with proper simulation stepping.
-async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked")
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-/// Create a `SimWorld` with fast storage configuration.
-fn fast_sim() -> SimWorld {
-    let mut sim = SimWorld::new();
-    sim.set_storage_config(StorageConfiguration::fast_local());
-    sim
-}
 
 #[test]
 fn test_read_corruption_fault() {
@@ -213,14 +172,9 @@ fn test_misdirected_read_fault() {
             Ok::<_, std::io::Error>(buf)
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let data = handle.await.expect("task panicked").expect("test failed");
+        let data = step_until_done(&mut sim, handle)
+            .await
+            .expect("test failed");
 
         assert_ne!(&data, b"AA", "100% misdirection must read another offset");
         let faults = sim.take_faults();
@@ -334,13 +288,7 @@ fn test_crash_torn_writes() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Simulate crash - this should apply torn write simulation
         sim.simulate_crash_for_process(test_ip(), true);
@@ -438,14 +386,7 @@ fn test_mixed_low_fault_probabilities() {
                 Ok::<_, std::io::Error>(())
             });
 
-            while !handle.is_finished() {
-                while sim.pending_event_count() > 0 {
-                    sim.step();
-                }
-                tokio::task::yield_now().await;
-            }
-
-            match handle.await.expect("task panicked") {
+            match step_until_done(&mut sim, handle).await {
                 Ok(()) => write_successes += 1,
                 Err(_) => write_failures += 1,
             }
@@ -549,14 +490,9 @@ fn test_combined_fault_types() {
             Ok::<_, std::io::Error>(results)
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let results = handle.await.expect("task panicked").expect("test failed");
+        let results = step_until_done(&mut sim, handle)
+            .await
+            .expect("test failed");
 
         let writes_ok = results.iter().filter(|(w, _)| *w).count();
         let reads_ok = results.iter().filter(|(_, r)| *r).count();
@@ -618,14 +554,7 @@ fn test_fault_determinism_same_seed() {
             results
         });
 
-        while !handle.is_finished() {
-            while sim1.pending_event_count() > 0 {
-                sim1.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let results1 = handle.await.expect("task panicked");
+        let results1 = step_until_done(&mut sim1, handle).await;
 
         // Run again with same seed
         set_sim_seed(seed);
@@ -660,14 +589,7 @@ fn test_fault_determinism_same_seed() {
             results
         });
 
-        while !handle.is_finished() {
-            while sim2.pending_event_count() > 0 {
-                sim2.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let results2 = handle.await.expect("task panicked");
+        let results2 = step_until_done(&mut sim2, handle).await;
 
         println!("Run 1: {results1:?}");
         println!("Run 2: {results2:?}");
@@ -727,14 +649,7 @@ fn test_fault_injection_produces_mixed_results() {
             (corrupted_count, intact_count)
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let (corrupted, intact) = handle.await.expect("task panicked");
+        let (corrupted, intact) = step_until_done(&mut sim, handle).await;
 
         println!("Fault injection results: {corrupted} corrupted, {intact} intact out of 20");
 
@@ -787,14 +702,7 @@ fn test_corruption_content_deterministic() {
                 Ok::<_, std::io::Error>(buf)
             });
 
-            while !handle.is_finished() {
-                while sim.pending_event_count() > 0 {
-                    sim.step();
-                }
-                tokio::task::yield_now().await;
-            }
-
-            handle.await.expect("task panicked").expect("io error")
+            step_until_done(&mut sim, handle).await.expect("io error")
         };
 
         let corrupted1 = run_corruption_test().await;
@@ -874,14 +782,7 @@ fn test_per_process_storage_config_isolation() {
             Ok::<_, std::io::Error>((buf1, buf2))
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let (buf1, buf2) = handle.await.expect("task panicked").expect("io error");
+        let (buf1, buf2) = step_until_done(&mut sim, handle).await.expect("io error");
 
         assert_ne!(
             &buf1[..],
@@ -927,13 +828,7 @@ fn test_simulate_crash_for_process_isolation() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Crash only IP1
         sim.simulate_crash_for_process(ip1, true);
@@ -996,13 +891,7 @@ fn test_wipe_storage_for_process() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Wipe only IP1's storage
         sim.wipe_storage_for_process(ip1);
@@ -1096,14 +985,7 @@ fn test_per_process_sync_failure_isolation() {
             Ok::<_, std::io::Error>((sync_result1, sync_result2))
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let (sync1, sync2) = handle.await.expect("task panicked").expect("io error");
+        let (sync1, sync2) = step_until_done(&mut sim, handle).await.expect("io error");
         assert!(
             sync1.is_err(),
             "IP1 sync should fail (100% sync_failure_probability)"
@@ -1159,13 +1041,7 @@ fn test_per_process_phantom_write_isolation() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Crash both to reveal phantom writes
         sim.simulate_crash_for_process(ip1, false);
@@ -1191,14 +1067,7 @@ fn test_per_process_phantom_write_isolation() {
             Ok::<_, std::io::Error>((buf1, buf2))
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let (buf1, buf2) = handle.await.expect("task panicked").expect("io error");
+        let (buf1, buf2) = step_until_done(&mut sim, handle).await.expect("io error");
         // IP1: phantom writes mean data was never actually written
         assert_ne!(
             &buf1[..],
@@ -1247,14 +1116,7 @@ fn test_default_config_fallback() {
             Ok::<_, std::io::Error>(buf)
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let buf = handle.await.expect("task panicked").expect("io error");
+        let buf = step_until_done(&mut sim, handle).await.expect("io error");
         assert_ne!(
             &buf[..],
             original.as_slice(),
@@ -1283,13 +1145,7 @@ fn test_wipe_then_recreate() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Wipe storage
         sim.wipe_storage_for_process(ip);
@@ -1319,14 +1175,7 @@ fn test_wipe_then_recreate() {
             Ok::<_, std::io::Error>(buf)
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let buf = handle.await.expect("task panicked").expect("io error");
+        let buf = step_until_done(&mut sim, handle).await.expect("io error");
         assert_eq!(
             &buf[..],
             b"recreated",
@@ -1360,13 +1209,7 @@ fn test_dynamic_config_change() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
 
         // Now change config to 100% read faults — file is already created
         let mut faulty_config = StorageConfiguration::fast_local();
@@ -1383,14 +1226,7 @@ fn test_dynamic_config_change() {
             Ok::<_, std::io::Error>(buf)
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-
-        let buf = handle.await.expect("task panicked").expect("io error");
+        let buf = step_until_done(&mut sim, handle).await.expect("io error");
         assert_ne!(
             &buf[..],
             original.as_slice(),

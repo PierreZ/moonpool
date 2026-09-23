@@ -3,66 +3,10 @@
 //! These tests verify that the storage simulation produces deterministic
 //! behavior when run with the same seed.
 
+use crate::{local_runtime, run_and_measure_time, run_storage_test};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
-use std::net::IpAddr;
-use std::time::Duration;
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Helper to run an async storage test with proper simulation stepping.
-async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked")
-}
-
-/// Run a storage test and return the simulation time elapsed.
-async fn run_and_measure_time<F, Fut>(mut sim: SimWorld, f: F) -> Duration
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = std::io::Result<()>> + Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked").expect("io error");
-    sim.current_time()
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
 
 #[test]
 fn test_same_seed_same_timing() {

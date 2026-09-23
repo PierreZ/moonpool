@@ -5,8 +5,6 @@
 //! 1 controller + `workers` short-lived worker processes, however deep the
 //! dungeon exploration goes.
 
-use std::process;
-
 fn main() {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
 
@@ -22,14 +20,5 @@ fn main() {
         .set_iterations(3)
         .run();
 
-    report.eprint();
-
-    if report
-        .exploration
-        .as_ref()
-        .is_some_and(|e| e.total_timelines == 0)
-    {
-        eprintln!("ERROR: no timelines explored");
-        process::exit(1);
-    }
+    moonpool_sim_examples::support::finish_or_exit_if_unexplored(&report);
 }

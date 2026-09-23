@@ -74,6 +74,24 @@ impl SimStorageFile {
         }
     }
 
+    /// Mark the handle closed exactly once: cancel whatever stream operation
+    /// is still pending and release the handle in the engine.
+    fn close(&mut self) {
+        if !self.closed.swap(true, Ordering::Relaxed)
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            if let Some((operation_id, ..)) = self.pending_read {
+                sim.cancel_storage_operation(operation_id);
+            }
+            if let Some((operation_id, ..)) = self.pending_write {
+                sim.cancel_storage_operation(operation_id);
+            }
+            sim.close_storage_handle(self.handle_id);
+        }
+        self.pending_read = None;
+        self.pending_write = None;
+    }
+
     fn ensure_open(&self) -> io::Result<()> {
         if self.closed.load(Ordering::Relaxed) {
             Err(io::Error::new(io::ErrorKind::BrokenPipe, "file is closed"))
@@ -91,8 +109,7 @@ impl StorageFile for SimStorageFile {
 
     async fn sync_data(&self) -> io::Result<()> {
         // Simulation treats sync_all and sync_data identically
-        self.ensure_open()?;
-        SyncFuture::new(self.sim.clone(), self.handle_id).await
+        self.sync_all().await
     }
 
     fn constraints(&self) -> IoConstraints {
@@ -273,20 +290,7 @@ impl AsyncWrite for SimStorageFile {
     }
 
     fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if !this.closed.swap(true, Ordering::Relaxed)
-            && let Ok(sim) = this.sim.upgrade()
-        {
-            if let Some((operation_id, ..)) = this.pending_read {
-                sim.cancel_storage_operation(operation_id);
-            }
-            if let Some((operation_id, ..)) = this.pending_write {
-                sim.cancel_storage_operation(operation_id);
-            }
-            sim.close_storage_handle(this.handle_id);
-        }
-        this.pending_read = None;
-        this.pending_write = None;
+        self.get_mut().close();
         Poll::Ready(Ok(()))
     }
 }
@@ -333,16 +337,6 @@ impl AsyncSeek for SimStorageFile {
 
 impl Drop for SimStorageFile {
     fn drop(&mut self) {
-        if !self.closed.swap(true, Ordering::Relaxed)
-            && let Ok(sim) = self.sim.upgrade()
-        {
-            if let Some((operation_id, ..)) = self.pending_read {
-                sim.cancel_storage_operation(operation_id);
-            }
-            if let Some((operation_id, ..)) = self.pending_write {
-                sim.cancel_storage_operation(operation_id);
-            }
-            sim.close_storage_handle(self.handle_id);
-        }
+        self.close();
     }
 }

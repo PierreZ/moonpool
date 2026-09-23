@@ -18,6 +18,8 @@
 use std::io;
 use std::ops::{Deref, DerefMut};
 
+use super::invalid_input;
+
 /// The I/O alignment an opened file requires of its callers.
 ///
 /// Obtained from [`StorageFile::constraints`](super::StorageFile::constraints).
@@ -133,32 +135,23 @@ impl IoConstraints {
             return Ok(());
         }
         if !offset.is_multiple_of(self.offset) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "offset {offset} is not a multiple of the required offset alignment {}",
-                    self.offset
-                ),
-            ));
+            return Err(invalid_input(format!(
+                "offset {offset} is not a multiple of the required offset alignment {}",
+                self.offset
+            )));
         }
         if !buf.len().is_multiple_of(self.length) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "transfer length {} is not a multiple of the required length alignment {}",
-                    buf.len(),
-                    self.length
-                ),
-            ));
+            return Err(invalid_input(format!(
+                "transfer length {} is not a multiple of the required length alignment {}",
+                buf.len(),
+                self.length
+            )));
         }
         if !(buf.as_ptr() as usize).is_multiple_of(self.memory) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "buffer address is not aligned to the required memory alignment {}",
-                    self.memory
-                ),
-            ));
+            return Err(invalid_input(format!(
+                "buffer address is not aligned to the required memory alignment {}",
+                self.memory
+            )));
         }
         Ok(())
     }

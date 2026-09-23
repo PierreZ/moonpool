@@ -4,20 +4,9 @@
 //! scenario (see `moonpool_explorer::simulations`). Since worker mode uses
 //! `fork()`, each test must run in its own process (nextest default).
 
-use moonpool_explorer::ExplorationConfig;
 use moonpool_explorer::simulations::{
-    LADDER_FLOORS, ladder_replay_reproduces, run_frontier_ladder,
+    LADDER_FLOORS, LADDER_MAX_RUNS, ladder_config, ladder_replay_reproduces, run_frontier_ladder,
 };
-
-fn ladder_config(workers: usize) -> ExplorationConfig {
-    ExplorationConfig {
-        workers,
-        max_runs_per_seed: 2000,
-        branching_factor: 4,
-        max_frontier: 256,
-        max_recipe_len: 32,
-    }
-}
 
 /// In-process mode climbs the whole ladder within budget: deep progress is
 /// achievable with exactly one live process.
@@ -25,7 +14,10 @@ fn ladder_config(workers: usize) -> ExplorationConfig {
 fn in_process_reaches_deep_floor() {
     let outcome = run_frontier_ladder(42, ladder_config(0)).expect("scenario runs");
 
-    assert!(outcome.stats.total_timelines <= 2000, "budget exceeded");
+    assert!(
+        outcome.stats.total_timelines <= LADDER_MAX_RUNS,
+        "budget exceeded"
+    );
     assert_eq!(
         outcome.stats.max_active_workers, 0,
         "in-process mode must not fork workers"
@@ -74,7 +66,10 @@ fn workers_are_bounded_and_recipes_replay() {
         outcome.stats.max_active_workers > 0,
         "worker mode should have forked at least one worker"
     );
-    assert!(outcome.stats.total_timelines <= 2000, "budget exceeded");
+    assert!(
+        outcome.stats.total_timelines <= LADDER_MAX_RUNS,
+        "budget exceeded"
+    );
     assert_eq!(
         u64::try_from(outcome.deepest_floor).expect("floor is non-negative"),
         LADDER_FLOORS,

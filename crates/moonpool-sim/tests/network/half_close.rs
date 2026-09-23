@@ -8,23 +8,14 @@
 //! request/response protocol that works in production lost its reply in
 //! simulation.
 
-use futures::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    task::noop_waker,
-};
+use crate::poll_io::{poll_read_once, poll_write_once};
+use crate::sync_drive::drive;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
     NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait, buggify_reset,
     network::sim::SimTcpStream,
 };
-use std::{
-    future::Future,
-    io,
-    net::IpAddr,
-    pin::{Pin, pin},
-    task::{Context, Poll},
-};
-
-const MAX_DRIVER_STEPS: usize = 10_000;
+use std::{io, net::IpAddr, task::Poll};
 
 fn client_ip() -> IpAddr {
     "10.0.1.1".parse().expect("valid test IP")
@@ -32,39 +23,6 @@ fn client_ip() -> IpAddr {
 
 fn server_ip() -> IpAddr {
     "10.0.1.2".parse().expect("valid test IP")
-}
-
-/// Poll a simulation-backed future, advancing virtual time whenever it parks.
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        assert!(
-            sim.has_pending_events(),
-            "simulation-backed future stalled without a pending event"
-        );
-        sim.step();
-    }
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
-}
-
-fn poll_write_once(stream: &mut (impl AsyncWrite + Unpin), data: &[u8]) -> Poll<io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    Pin::new(stream).poll_write(&mut context, data)
-}
-
-fn poll_read_once(
-    stream: &mut (impl AsyncRead + Unpin),
-    data: &mut [u8],
-) -> Poll<io::Result<usize>> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    Pin::new(stream).poll_read(&mut context, data)
 }
 
 /// An established, settled connection between `10.0.1.1` and `10.0.1.2`.

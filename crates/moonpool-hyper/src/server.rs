@@ -166,12 +166,7 @@ impl<P: Providers> H2Server<P> {
         HyperExecutor<P::Task>:
             Http2ServerConnExec<TowerToHyperServiceFuture<Svc, Request<Incoming>>, B>,
     {
-        let connection = self.connection(stream, service);
-        async move {
-            let result = connection.await;
-            report(&result, false);
-            result
-        }
+        self.serve_connection_with_shutdown(stream, service, std::future::pending())
     }
 
     /// Serve one accepted connection, draining it when `shutdown` resolves.
@@ -209,7 +204,10 @@ impl<P: Providers> H2Server<P> {
         HyperExecutor<P::Task>:
             Http2ServerConnExec<TowerToHyperServiceFuture<Svc, Request<Incoming>>, B>,
     {
-        let connection = self.connection(stream, service);
+        let io = HyperIo::new(stream).with_vectored_writes(self.config.vectored_writes);
+        let connection = self
+            .builder()
+            .serve_connection(io, TowerToHyperService::new(service));
         async move {
             let connection = std::pin::pin!(connection);
             let shutdown = std::pin::pin!(shutdown);
@@ -230,26 +228,6 @@ impl<P: Providers> H2Server<P> {
                 }
             }
         }
-    }
-
-    /// Bind a stream and a service into a hyper connection.
-    fn connection<S, Svc, B>(
-        &self,
-        stream: S,
-        service: Svc,
-    ) -> http2::Connection<HyperIo<S>, TowerToHyperService<Svc>, HyperExecutor<P::Task>>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        Svc: tower_service::Service<Request<Incoming>, Response = Response<B>> + Clone,
-        Svc::Error: Into<Box<dyn Error + Send + Sync>>,
-        B: Body + 'static,
-        B::Error: Into<Box<dyn Error + Send + Sync>>,
-        HyperExecutor<P::Task>:
-            Http2ServerConnExec<TowerToHyperServiceFuture<Svc, Request<Incoming>>, B>,
-    {
-        let io = HyperIo::new(stream).with_vectored_writes(self.config.vectored_writes);
-        self.builder()
-            .serve_connection(io, TowerToHyperService::new(service))
     }
 }
 

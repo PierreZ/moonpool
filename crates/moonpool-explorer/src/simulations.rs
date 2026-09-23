@@ -30,10 +30,14 @@ pub fn rng_count() -> u64 {
     CALL_COUNT.with(Cell::get)
 }
 
+/// xorshift64 requires non-zero state.
+fn nonzero_state(seed: u64) -> u64 {
+    if seed == 0 { 1 } else { seed }
+}
+
 /// Reset the RNG to `seed` with an empty breakpoint queue.
 pub fn rng_reset(seed: u64) {
-    // xorshift64 requires non-zero state.
-    RNG_STATE.with(|c| c.set(if seed == 0 { 1 } else { seed }));
+    RNG_STATE.with(|c| c.set(nonzero_state(seed)));
     CALL_COUNT.with(|c| c.set(0));
     BREAKPOINTS.with(|b| b.borrow_mut().clear());
 }
@@ -54,7 +58,7 @@ pub fn rng_next() -> u64 {
         while let Some(&(target, new_seed)) = breakpoints.front() {
             if CALL_COUNT.with(Cell::get) > target {
                 breakpoints.pop_front();
-                RNG_STATE.with(|c| c.set(if new_seed == 0 { 1 } else { new_seed }));
+                RNG_STATE.with(|c| c.set(nonzero_state(new_seed)));
                 CALL_COUNT.with(|c| c.set(1));
             } else {
                 break;
@@ -119,6 +123,22 @@ fn run_ladder() -> bool {
     floor >= LADDER_FLOORS
 }
 
+/// Per-seed run budget of [`ladder_config`].
+pub const LADDER_MAX_RUNS: u64 = 2000;
+
+/// The exploration config the ladder scenarios run under, with `workers`
+/// forked workers (`0` = in-process).
+#[must_use]
+pub fn ladder_config(workers: usize) -> ExplorationConfig {
+    ExplorationConfig {
+        workers,
+        max_runs_per_seed: LADDER_MAX_RUNS,
+        branching_factor: 4,
+        max_frontier: 256,
+        max_recipe_len: 32,
+    }
+}
+
 /// Outcome of a [`run_frontier_ladder`] scenario.
 #[derive(Debug, Clone)]
 pub struct LadderOutcome {
@@ -172,11 +192,7 @@ pub fn run_frontier_ladder(
     explorer.observe_root_run(root_failed);
 
     // Exploration runs.
-    explorer.explore(|job| {
-        rng_reset(root_seed);
-        rng_set_breakpoints(job.recipe.clone());
-        run_ladder()
-    });
+    explorer.explore(|job| run_ladder_timeline(root_seed, &job.recipe));
 
     let deepest_floor = crate::each_bucket_read_all()
         .iter()
@@ -202,6 +218,11 @@ pub fn run_frontier_ladder(
 /// hooks), so the assertion calls inside the ladder are no-ops.
 #[must_use]
 pub fn ladder_replay_reproduces(root_seed: u64, recipe: &Recipe) -> bool {
+    run_ladder_timeline(root_seed, recipe)
+}
+
+/// Run the ladder timeline `recipe` names under `root_seed`.
+fn run_ladder_timeline(root_seed: u64, recipe: &Recipe) -> bool {
     rng_reset(root_seed);
     rng_set_breakpoints(recipe.clone());
     run_ladder()

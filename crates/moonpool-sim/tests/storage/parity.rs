@@ -18,44 +18,12 @@
 //! before the operating system sees it, and the simulator used to honor the
 //! truncation on the way to a successful open.
 
+use crate::{local_runtime, run_storage_test};
 use futures::io::{AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{DirectIo, OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
-use std::net::IpAddr;
 use tempfile::TempDir;
-
-fn test_ip() -> IpAddr {
-    "127.0.0.1".parse().expect("valid IP")
-}
-
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-/// Run one storage scenario, stepping the world until the task finishes.
-async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked")
-}
 
 /// What one step did, in terms both backends can report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -489,6 +457,20 @@ async fn path_contract<P: StorageProvider>(
     file.write_at(0, SEED_BYTES).await?;
     drop(file);
 
+    alias_and_missing_parent_contract(&provider, &prefix, &mut log).await;
+    directory_contract(&provider, &prefix, &mut log).await?;
+    file_as_parent_contract(&provider, &prefix, &mut log).await?;
+    invalid_name_contract(&provider, &prefix, &mut log).await;
+    Ok(log)
+}
+
+/// Dot aliases and paths under a missing parent.
+async fn alias_and_missing_parent_contract<P: StorageProvider>(
+    provider: &P,
+    prefix: &str,
+    log: &mut Vec<(&'static str, PathOutcome)>,
+) {
+    let path = |name: &str| format!("{prefix}{name}");
     log.push((
         "dot alias open",
         applied(
@@ -529,7 +511,15 @@ async fn path_contract<P: StorageProvider>(
         "missing before dotdot exists",
         existence(provider.exists(&path("missing/../seed")).await),
     ));
+}
 
+/// Directory creation, aliasing, and the file-only operations a directory refuses.
+async fn directory_contract<P: StorageProvider>(
+    provider: &P,
+    prefix: &str,
+    log: &mut Vec<(&'static str, PathOutcome)>,
+) -> std::io::Result<()> {
+    let path = |name: &str| format!("{prefix}{name}");
     log.push((
         "mkdir nested",
         applied(provider.create_dir_all(&path("db/nested")).await),
@@ -596,7 +586,16 @@ async fn path_contract<P: StorageProvider>(
         provider.exists(&path("db/nested")).await?,
         "nested directory survived"
     );
+    Ok(())
+}
 
+/// A regular file where a directory is expected.
+async fn file_as_parent_contract<P: StorageProvider>(
+    provider: &P,
+    prefix: &str,
+    log: &mut Vec<(&'static str, PathOutcome)>,
+) -> std::io::Result<()> {
+    let path = |name: &str| format!("{prefix}{name}");
     let regular = provider
         .open(&path("regular"), OpenOptions::create_new_write())
         .await?;
@@ -641,7 +640,16 @@ async fn path_contract<P: StorageProvider>(
                 .await,
         ),
     ));
+    Ok(())
+}
 
+/// Empty and NUL names, then the seed file still in place.
+async fn invalid_name_contract<P: StorageProvider>(
+    provider: &P,
+    prefix: &str,
+    log: &mut Vec<(&'static str, PathOutcome)>,
+) {
+    let path = |name: &str| format!("{prefix}{name}");
     log.push((
         "empty open",
         applied(provider.open("", OpenOptions::create_write()).await),
@@ -660,7 +668,6 @@ async fn path_contract<P: StorageProvider>(
         "seed still exists",
         existence(provider.exists(&path("seed")).await),
     ));
-    Ok(log)
 }
 
 #[test]

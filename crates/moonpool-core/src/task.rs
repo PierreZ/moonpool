@@ -88,13 +88,13 @@ impl Future for TokioJoinHandle {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        use std::task::Poll;
-        match std::pin::Pin::new(&mut self.0).poll(cx) {
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) if e.is_cancelled() => Poll::Ready(Err(JoinError::Cancelled)),
-            Poll::Ready(Err(_)) => Poll::Ready(Err(JoinError::Panicked)),
-            Poll::Pending => Poll::Pending,
-        }
+        std::pin::Pin::new(&mut self.0).poll(cx).map_err(|e| {
+            if e.is_cancelled() {
+                JoinError::Cancelled
+            } else {
+                JoinError::Panicked
+            }
+        })
     }
 }
 

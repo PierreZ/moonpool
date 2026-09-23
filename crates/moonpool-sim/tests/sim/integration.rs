@@ -1,29 +1,6 @@
-use std::future::Future;
-use std::pin::pin;
-use std::task::{Context, Poll};
-
-use futures::{io::AsyncWriteExt, task::noop_waker};
+use crate::sync_drive::drive;
+use futures::io::AsyncWriteExt;
 use moonpool_sim::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
-
-const MAX_DRIVER_STEPS: usize = 100_000;
-
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        assert!(
-            sim.has_pending_events(),
-            "simulation-backed future stalled without a pending event"
-        );
-        sim.step();
-    }
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events");
-}
 
 #[test]
 fn test_basic_simulation_bind() {

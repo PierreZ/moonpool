@@ -28,28 +28,37 @@ thread_local! {
     static HEAP_OWNED: Cell<bool> = const { Cell::new(false) };
 }
 
-fn table_layout() -> Layout {
+/// Layout of a region of `size` bytes.
+fn layout(size: usize) -> Layout {
     // Infallible: size is a compile-time constant and align is a power of two.
-    Layout::from_size_align(ASSERTION_TABLE_MEM_SIZE, REGION_ALIGN)
-        .expect("assertion table layout: const size, power-of-two align")
+    Layout::from_size_align(size, REGION_ALIGN)
+        .expect("region layout: const size, power-of-two align")
 }
 
-fn bucket_layout() -> Layout {
-    // Infallible: size is a compile-time constant and align is a power of two.
-    Layout::from_size_align(EACH_BUCKET_MEM_SIZE, REGION_ALIGN)
-        .expect("each-bucket layout: const size, power-of-two align")
+/// Both regions with their sizes: the assertion table, then the each-buckets.
+fn regions() -> [(*mut u8, usize); 2] {
+    [
+        (assertion_table_ptr(), ASSERTION_TABLE_MEM_SIZE),
+        (each_bucket_ptr(), EACH_BUCKET_MEM_SIZE),
+    ]
+}
+
+fn set_regions(table: *mut u8, buckets: *mut u8, heap_owned: bool) {
+    ASSERTION_TABLE.set(table);
+    EACH_BUCKET_PTR.set(buckets);
+    HEAP_OWNED.set(heap_owned);
 }
 
 /// Get the raw pointer to the assertion table region (null if uninitialized).
 #[must_use]
 pub fn assertion_table_ptr() -> *mut u8 {
-    ASSERTION_TABLE.with(Cell::get)
+    ASSERTION_TABLE.get()
 }
 
 /// Get the raw pointer to the each-bucket region (null if uninitialized).
 #[must_use]
 pub fn each_bucket_ptr() -> *mut u8 {
-    EACH_BUCKET_PTR.with(Cell::get)
+    EACH_BUCKET_PTR.get()
 }
 
 /// Allocate the regions on the heap (zeroed). Idempotent: a no-op if a region is
@@ -58,20 +67,21 @@ pub fn init() {
     if !assertion_table_ptr().is_null() {
         return;
     }
-    // Safety: layouts have non-zero size; alloc_zeroed returns zeroed memory of the
-    // requested size/alignment, matching the
-    // `[count: u32, dropped_allocations: u32, slots..]` layout.
-    let table = unsafe { alloc_zeroed(table_layout()) };
-    if table.is_null() {
-        std::alloc::handle_alloc_error(table_layout());
-    }
-    let buckets = unsafe { alloc_zeroed(bucket_layout()) };
-    if buckets.is_null() {
-        std::alloc::handle_alloc_error(bucket_layout());
-    }
-    ASSERTION_TABLE.with(|c| c.set(table));
-    EACH_BUCKET_PTR.with(|c| c.set(buckets));
-    HEAP_OWNED.with(|c| c.set(true));
+    let alloc = |size| {
+        // Safety: layouts have non-zero size; alloc_zeroed returns zeroed memory
+        // of the requested size/alignment, matching the
+        // `[count: u32, header: u32, entries..]` layout.
+        let region = unsafe { alloc_zeroed(layout(size)) };
+        if region.is_null() {
+            std::alloc::handle_alloc_error(layout(size));
+        }
+        region
+    };
+    set_regions(
+        alloc(ASSERTION_TABLE_MEM_SIZE),
+        alloc(EACH_BUCKET_MEM_SIZE),
+        true,
+    );
 }
 
 /// Point accounting at caller-owned regions (e.g. `MAP_SHARED` memory from an
@@ -88,9 +98,7 @@ pub fn init() {
 /// calls may access them.
 pub unsafe fn install_region(table: *mut u8, buckets: *mut u8) {
     free_heap_regions();
-    ASSERTION_TABLE.with(|c| c.set(table));
-    EACH_BUCKET_PTR.with(|c| c.set(buckets));
-    HEAP_OWNED.with(|c| c.set(false));
+    set_regions(table, buckets, false);
 }
 
 /// Drop this crate's view of the regions. Frees heap regions it owns; for
@@ -98,38 +106,29 @@ pub unsafe fn install_region(table: *mut u8, buckets: *mut u8) {
 /// its own memory.
 pub fn clear() {
     free_heap_regions();
-    ASSERTION_TABLE.with(|c| c.set(std::ptr::null_mut()));
-    EACH_BUCKET_PTR.with(|c| c.set(std::ptr::null_mut()));
+    set_regions(std::ptr::null_mut(), std::ptr::null_mut(), false);
 }
 
 fn free_heap_regions() {
-    if !HEAP_OWNED.with(Cell::get) {
+    if !HEAP_OWNED.get() {
         return;
     }
-    let table = assertion_table_ptr();
-    if !table.is_null() {
-        // Safety: heap-owned table was allocated by init() with table_layout().
-        unsafe { dealloc(table, table_layout()) };
+    for (region, size) in regions() {
+        if !region.is_null() {
+            // Safety: heap-owned regions were allocated by init() with layout(size).
+            unsafe { dealloc(region, layout(size)) };
+        }
     }
-    let buckets = each_bucket_ptr();
-    if !buckets.is_null() {
-        // Safety: heap-owned buckets were allocated by init() with bucket_layout().
-        unsafe { dealloc(buckets, bucket_layout()) };
-    }
-    HEAP_OWNED.with(|c| c.set(false));
+    HEAP_OWNED.set(false);
 }
 
 /// Zero both regions for a between-run reset. No-op if not initialized.
 pub fn reset() {
-    let table = assertion_table_ptr();
-    if !table.is_null() {
-        // Safety: region is ASSERTION_TABLE_MEM_SIZE bytes (heap or installed).
-        unsafe { std::ptr::write_bytes(table, 0, ASSERTION_TABLE_MEM_SIZE) };
-    }
-    let buckets = each_bucket_ptr();
-    if !buckets.is_null() {
-        // Safety: region is EACH_BUCKET_MEM_SIZE bytes (heap or installed).
-        unsafe { std::ptr::write_bytes(buckets, 0, EACH_BUCKET_MEM_SIZE) };
+    for (region, size) in regions() {
+        if !region.is_null() {
+            // Safety: the region is `size` bytes (heap or installed).
+            unsafe { std::ptr::write_bytes(region, 0, size) };
+        }
     }
 }
 

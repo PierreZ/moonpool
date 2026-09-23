@@ -101,31 +101,17 @@ pub fn measure(path: &Path, samples: u64, warmup: u64) -> std::io::Result<Storag
     };
 
     let mut checksum = 0_u64;
-
-    for _ in 0..warmup {
-        checksum ^= read_once(&mut file, blocks.next(), &mut buffer)?.1;
-    }
-    for _ in 0..samples {
+    measurements.read.measure(warmup, samples, || {
         let (elapsed, folded) = read_once(&mut file, blocks.next(), &mut buffer)?;
-        measurements.read.record(elapsed);
         checksum ^= folded;
-    }
-
-    for _ in 0..warmup {
-        write_once(&mut file, blocks.next(), &payload)?;
-    }
-    for _ in 0..samples {
-        let elapsed = write_once(&mut file, blocks.next(), &payload)?;
-        measurements.write.record(elapsed);
-    }
-
-    for _ in 0..warmup {
-        sync_once(&mut file, blocks.next(), &payload)?;
-    }
-    for _ in 0..samples {
-        let elapsed = sync_once(&mut file, blocks.next(), &payload)?;
-        measurements.sync.record(elapsed);
-    }
+        Ok(elapsed)
+    })?;
+    measurements.write.measure(warmup, samples, || {
+        write_once(&mut file, blocks.next(), &payload)
+    })?;
+    measurements.sync.measure(warmup, samples, || {
+        sync_once(&mut file, blocks.next(), &payload)
+    })?;
 
     // Keep the read work observable so the optimiser cannot elide it.
     std::hint::black_box(checksum);

@@ -8,6 +8,7 @@
 //! - Can be disabled via configuration
 //! - Is deterministic with fixed seeds
 
+use super::local_runtime;
 use moonpool_sim::{NetworkConfiguration, SimTimeProvider, SimWorld, TimeProvider, set_sim_seed};
 use std::time::Duration;
 
@@ -183,13 +184,7 @@ fn test_time_provider_clock_drift() {
 /// Test clock drift with time advancement
 #[test]
 fn test_clock_drift_with_time_advance() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         set_sim_seed(42);
         let mut sim = SimWorld::new();
         let time_provider = SimTimeProvider::new(sim.downgrade());

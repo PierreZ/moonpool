@@ -256,8 +256,7 @@ impl Explorer {
         self.continuation_round = 0;
         self.stats = ExplorationStats::default();
         self.bug_recipes.clear();
-        journal::clear();
-        crate::sancov::reset_bss_counters();
+        begin_run();
     }
 
     /// Consume the root run's journal and seed the frontier from it.
@@ -267,11 +266,7 @@ impl Explorer {
     /// into the exploration bug list.
     pub fn observe_root_run(&mut self, failed: bool) {
         self.runs_started += 1;
-        let events = journal::take();
-        // The novelty check doubles as the merge into the sancov history.
-        crate::sancov::copy_counters_to_shared();
-        let _ = crate::sancov::has_new_sancov_coverage();
-        self.process_result(&ExploreJob { recipe: Vec::new() }, &events, failed, false);
+        self.finish_in_process_run(&ExploreJob { recipe: Vec::new() }, failed, false);
     }
 
     /// Drive exploration until the frontier is exhausted or the per-seed run
@@ -363,13 +358,18 @@ impl Explorer {
         job: &ExploreJob,
         run_one: &mut impl FnMut(&ExploreJob) -> bool,
     ) {
-        journal::clear();
-        crate::sancov::reset_bss_counters();
+        begin_run();
         let failed = run_one(job);
+        self.finish_in_process_run(job, failed, true);
+    }
+
+    /// Collect an in-process run's journal and coverage, then consume them.
+    fn finish_in_process_run(&mut self, job: &ExploreJob, failed: bool, from_exploration: bool) {
         let events = journal::take();
+        // The novelty check doubles as the merge into the sancov history.
         crate::sancov::copy_counters_to_shared();
         let _ = crate::sancov::has_new_sancov_coverage();
-        self.process_result(job, &events, failed, true);
+        self.process_result(job, &events, failed, from_exploration);
     }
 
     /// Fork one worker for `job`. The child runs exactly one timeline, writes
@@ -393,8 +393,7 @@ impl Explorer {
             }
             0 => {
                 worker::enter_worker();
-                journal::clear();
-                crate::sancov::reset_bss_counters();
+                begin_run();
                 crate::sancov::redirect_transfer_to_pool_slot(slot);
                 let failed = run_one(&job);
                 let events = journal::take();
@@ -498,10 +497,7 @@ impl Explorer {
     fn register_state(&mut self, recipe: &Recipe, event: &DiscoveryEvent) {
         let idx = if let Some(&idx) = self.state_index.get(&event.state_id) {
             idx
-        } else {
-            if self.states.len() >= MAX_TRACKED_STATES {
-                return;
-            }
+        } else if self.states.len() < MAX_TRACKED_STATES {
             let idx = self.states.len();
             self.states.push(StateEntry {
                 state_id: event.state_id,
@@ -512,6 +508,8 @@ impl Explorer {
             });
             self.state_index.insert(event.state_id, idx);
             idx
+        } else {
+            return;
         };
         let state = &mut self.states[idx];
         state.progress |= event.is_progress();
@@ -603,6 +601,12 @@ impl Explorer {
         );
         !self.frontier.is_empty()
     }
+}
+
+/// Start a timeline with an empty journal and zeroed sancov counters.
+fn begin_run() {
+    journal::clear();
+    crate::sancov::reset_bss_counters();
 }
 
 /// Derive a child continuation seed deterministically from its coordinates.

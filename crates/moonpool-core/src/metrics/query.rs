@@ -93,7 +93,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use super::{MetricPoint, MetricSample, u64_to_f64_exact};
+use super::{MetricPoint, MetricSample, cmp_f64, series_identity, u64_to_f64_exact};
 
 // ---------------------------------------------------------------------------
 // Series identity
@@ -175,18 +175,7 @@ impl SeriesKey {
 
 impl fmt::Display for SeriesKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.metric)?;
-        if self.labels.is_empty() {
-            return Ok(());
-        }
-        f.write_str("{")?;
-        for (i, (k, v)) in self.labels.iter().enumerate() {
-            if i > 0 {
-                f.write_str(",")?;
-            }
-            write!(f, "{k}=\"{v}\"")?;
-        }
-        f.write_str("}")
+        f.write_str(&series_identity(&self.metric, &self.labels))
     }
 }
 
@@ -316,7 +305,7 @@ impl Aggregator {
             Self::Mean => mean(values),
             Self::Percentile(p) => {
                 let mut sorted = values.to_vec();
-                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|a, b| cmp_f64(*a, *b));
                 percentile_of_sorted(&sorted, p)
             }
         })
@@ -986,6 +975,18 @@ struct Window {
     value: f64,
 }
 
+impl Window {
+    /// The `index`-th `every_ms`-wide bucket of the grid, holding `value`.
+    fn bucket(index: u64, every_ms: u64, value: f64) -> Self {
+        let start_ms = index.saturating_mul(every_ms);
+        Self {
+            start_ms,
+            end_ms: start_ms.saturating_add(every_ms),
+            value,
+        }
+    }
+}
+
 /// One logical series while a query runs.
 #[derive(Debug, Clone)]
 struct EvalSeries {
@@ -1033,42 +1034,38 @@ impl EvalState {
     }
 
     fn apply(&mut self, op: &QueryOp) {
+        let end_time_ms = self.end_time_ms;
         match op {
             QueryOp::Rate => {
-                for s in &mut self.series {
-                    s.windows = rate(&s.windows);
-                }
+                self.map_windows(rate);
                 self.grid = None;
             }
             QueryOp::Bucketize { every_ms, agg } => {
-                for s in &mut self.series {
-                    s.windows = bucketize(&s.windows, *every_ms, *agg);
-                }
+                self.map_windows(|w| bucketize(w, *every_ms, *agg));
                 self.grid = Some(*every_ms);
             }
-            QueryOp::Map { window, agg } => {
-                for s in &mut self.series {
-                    s.windows = rolling_map(&s.windows, *window, *agg);
-                }
-            }
+            QueryOp::Map { window, agg } => self.map_windows(|w| rolling_map(w, *window, *agg)),
             QueryOp::Reduce { by, agg } => self.reduce(by.as_deref(), *agg),
+            // Without a grid there are no empty buckets to fill.
             QueryOp::Fill { policy } => {
-                // Without a grid there are no empty buckets to fill.
                 if let Some(every_ms) = self.grid {
-                    for s in &mut self.series {
-                        s.windows = fill_gaps(&s.windows, every_ms, self.end_time_ms, *policy);
-                    }
+                    self.map_windows(|w| fill_gaps(w, every_ms, end_time_ms, *policy));
                 }
             }
             QueryOp::Interpolate => {
                 if let Some(every_ms) = self.grid {
-                    for s in &mut self.series {
-                        s.windows = interpolate_gaps(&s.windows, every_ms, self.end_time_ms);
-                    }
+                    self.map_windows(|w| interpolate_gaps(w, every_ms, end_time_ms));
                 }
             }
         }
         self.series.retain(|s| !s.windows.is_empty());
+    }
+
+    /// Replace every series' windows with `f` of them.
+    fn map_windows(&mut self, f: impl Fn(&[Window]) -> Vec<Window>) {
+        for s in &mut self.series {
+            s.windows = f(&s.windows);
+        }
     }
 
     fn reduce(&mut self, by: Option<&str>, agg: Aggregator) {
@@ -1078,13 +1075,14 @@ impl EvalState {
             let group = match by {
                 None => None,
                 Some(label) => {
-                    let Some(key) = s.group.as_ref().map(|g| SeriesKey::parse(g)) else {
+                    let Some(value) = s
+                        .group
+                        .as_deref()
+                        .and_then(|g| SeriesKey::parse(g).label(label).map(str::to_owned))
+                    else {
                         continue;
                     };
-                    let Some(value) = key.label(label) else {
-                        continue;
-                    };
-                    Some(value.to_owned())
+                    Some(value)
                 }
             };
             groups.entry(group).or_default().push(s);
@@ -1207,12 +1205,8 @@ fn bucketize(windows: &[Window], every_ms: u64, agg: Aggregator) -> Vec<Window> 
     buckets
         .into_iter()
         .filter_map(|(index, values)| {
-            let start_ms = index.saturating_mul(every_ms);
-            agg.apply(&values).map(|value| Window {
-                start_ms,
-                end_ms: start_ms.saturating_add(every_ms),
-                value,
-            })
+            agg.apply(&values)
+                .map(|value| Window::bucket(index, every_ms, value))
         })
         .collect()
 }
@@ -1252,12 +1246,7 @@ fn regrid(
                 Some(value) => Some(*value),
                 None => value_for(&known, index),
             }?;
-            let start_ms = index.saturating_mul(every_ms);
-            Some(Window {
-                start_ms,
-                end_ms: start_ms.saturating_add(every_ms),
-                value,
-            })
+            Some(Window::bucket(index, every_ms, value))
         })
         .collect()
 }
@@ -1422,21 +1411,14 @@ impl MetricQueryReport {
         let runs = rows.iter().map(|r| r.seed).collect::<BTreeSet<_>>().len();
 
         // Rows are sorted by (group, window), so equal keys are contiguous.
-        let mut windows = Vec::new();
-        let mut start = 0usize;
-        while start < rows.len() {
-            let head = &rows[start];
-            let mut end = start + 1;
-            while end < rows.len()
-                && rows[end].group == head.group
-                && rows[end].bucket_start_ms == head.bucket_start_ms
-                && rows[end].bucket_end_ms == head.bucket_end_ms
-            {
-                end += 1;
-            }
-            windows.push(summarize_window(&rows[start..end]));
-            start = end;
-        }
+        let windows = rows
+            .chunk_by(|a, b| {
+                a.group == b.group
+                    && a.bucket_start_ms == b.bucket_start_ms
+                    && a.bucket_end_ms == b.bucket_end_ms
+            })
+            .map(summarize_window)
+            .collect();
 
         Self {
             name: plan.name.clone(),
@@ -1472,7 +1454,7 @@ fn summarize_window(rows: &[MetricQueryRow]) -> MetricWindowSummary {
     }
 
     let mut values: Vec<f64> = rows.iter().map(|r| r.value).collect();
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    values.sort_by(|a, b| cmp_f64(*a, *b));
 
     MetricWindowSummary {
         group: head.group.clone(),
@@ -1531,6 +1513,34 @@ mod tests {
             );
         }
         snap
+    }
+
+    /// Every series named `metric`, as per-minute means.
+    fn per_minute(metric: &str) -> MetricQuery<Scalar> {
+        MetricQuery::select(metric).bucketize(Duration::from_mins(1), Mean)
+    }
+
+    /// The per-second rates of every series named `metric` in `snap`.
+    fn rates(metric: &str, snap: &MetricSnapshot) -> Vec<MetricQueryRow> {
+        MetricQuery::select(metric)
+            .rate()
+            .named("r")
+            .evaluate(snap, 1, 1)
+    }
+
+    /// Evaluate `plan` once per `(seed, snapshot)`, as one exploration would.
+    fn across_seeds(
+        plan: &MetricQueryPlan,
+        runs: impl IntoIterator<Item = (u64, MetricSnapshot)>,
+    ) -> Vec<MetricQueryRow> {
+        runs.into_iter()
+            .flat_map(|(seed, snap)| plan.evaluate(&snap, 7, seed))
+            .collect()
+    }
+
+    /// A row's window, as `(start, end)`.
+    fn bounds(row: &MetricQueryRow) -> (u64, u64) {
+        (row.bucket_start_ms, row.bucket_end_ms)
     }
 
     // --- series identity -------------------------------------------------
@@ -1671,18 +1681,12 @@ mod tests {
     fn rate_divides_by_simulated_time() {
         // 10 increments over 1s starting from an implicit zero at t=0.
         let snap = snapshot(&[("hits_total", &[(1_000, 10.0), (3_000, 30.0)])], 3_000);
-        let rows = MetricQuery::select("hits_total")
-            .rate()
-            .named("r")
-            .evaluate(&snap, 1, 1);
+        let rows = rates("hits_total", &snap);
 
         assert_eq!(rows.len(), 2, "origin point makes the first interval real");
-        assert_eq!((rows[0].bucket_start_ms, rows[0].bucket_end_ms), (0, 1_000));
+        assert_eq!(bounds(&rows[0]), (0, 1_000));
         assert!(is_close(rows[0].value, 10.0), "10 over 1s");
-        assert_eq!(
-            (rows[1].bucket_start_ms, rows[1].bucket_end_ms),
-            (1_000, 3_000)
-        );
+        assert_eq!(bounds(&rows[1]), (1_000, 3_000));
         assert!(is_close(rows[1].value, 10.0), "20 over 2s");
     }
 
@@ -1700,16 +1704,10 @@ mod tests {
             &[("hits_total", &[(1_000, 10.0), (end, gap_increments)])],
             end,
         );
-        let rows = MetricQuery::select("hits_total")
-            .rate()
-            .named("r")
-            .evaluate(&snap, 1, 1);
+        let rows = rates("hits_total", &snap);
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(
-            (rows[1].bucket_start_ms, rows[1].bucket_end_ms),
-            (1_000, end)
-        );
+        assert_eq!(bounds(&rows[1]), (1_000, end));
         assert!(
             is_close(rows[1].value, 1.0),
             "1/s across 60 days, got {}",
@@ -1725,10 +1723,7 @@ mod tests {
             &[("hits_total", &[(1_000, 1.0), (1_000, 2.0), (1_000, 3.0)])],
             1_000,
         );
-        let rows = MetricQuery::select("hits_total")
-            .rate()
-            .named("r")
-            .evaluate(&snap, 1, 1);
+        let rows = rates("hits_total", &snap);
         assert_eq!(rows.len(), 1);
         assert!(is_close(rows[0].value, 3.0));
     }
@@ -1737,10 +1732,7 @@ mod tests {
     fn rate_reads_a_drop_as_a_counter_reset() {
         // 0 → 10 → (reset) → 4: the last interval contributes 4, not -6.
         let snap = snapshot(&[("hits_total", &[(1_000, 10.0), (2_000, 4.0)])], 2_000);
-        let rows = MetricQuery::select("hits_total")
-            .rate()
-            .named("r")
-            .evaluate(&snap, 1, 1);
+        let rows = rates("hits_total", &snap);
         assert_eq!(rows.len(), 2);
         assert!(is_close(rows[1].value, 4.0), "reset, not a negative rate");
     }
@@ -1750,10 +1742,7 @@ mod tests {
         // Same counter, no rate(): the mean of the cumulative readings, which
         // is honestly not a throughput.
         let snap = snapshot(&[("hits_total", &[(1_000, 10.0), (3_000, 30.0)])], 3_000);
-        let rows = MetricQuery::select("hits_total")
-            .bucketize(Duration::from_mins(1), Mean)
-            .named("m")
-            .evaluate(&snap, 1, 1);
+        let rows = per_minute("hits_total").named("m").evaluate(&snap, 1, 1);
         assert_eq!(rows.len(), 1);
         assert!(is_close(rows[0].value, 20.0));
     }
@@ -1775,56 +1764,34 @@ mod tests {
             )],
             180_000,
         );
-        let rows = MetricQuery::select("latency")
-            .bucketize(Duration::from_mins(1), Mean)
-            .named("b")
-            .evaluate(&snap, 1, 1);
+        let rows = per_minute("latency").named("b").evaluate(&snap, 1, 1);
 
         assert_eq!(rows.len(), 3, "the empty 120-180s bucket is omitted");
-        assert_eq!(
-            (rows[0].bucket_start_ms, rows[0].bucket_end_ms),
-            (0, 60_000)
-        );
+        assert_eq!(bounds(&rows[0]), (0, 60_000));
         assert!(is_close(rows[0].value, 2.0), "1 and 3, not 100");
-        assert_eq!(
-            (rows[1].bucket_start_ms, rows[1].bucket_end_ms),
-            (60_000, 120_000)
-        );
+        assert_eq!(bounds(&rows[1]), (60_000, 120_000));
         assert!(is_close(rows[1].value, 150.0));
-        assert_eq!(
-            (rows[2].bucket_start_ms, rows[2].bucket_end_ms),
-            (180_000, 240_000)
-        );
+        assert_eq!(bounds(&rows[2]), (180_000, 240_000));
     }
 
     #[test]
     fn bucketize_supports_min_mean_max_and_percentile() {
+        fn bucketed<A: ValidOn<Observations>>(agg: A) -> MetricQueryPlan {
+            MetricQuery::select("v")
+                .bucketize(Duration::from_mins(1), agg)
+                .named("q")
+        }
+
         let points: Vec<(u64, f64)> = (1u32..=100).map(|i| (u64::from(i), f64::from(i))).collect();
         let snap = snapshot(&[("v", points.as_slice())], 100);
-        let value = |agg: Aggregator| {
-            let plan = match agg {
-                Aggregator::Min => MetricQuery::select("v")
-                    .bucketize(Duration::from_mins(1), Min)
-                    .named("q"),
-                Aggregator::Mean => MetricQuery::select("v")
-                    .bucketize(Duration::from_mins(1), Mean)
-                    .named("q"),
-                Aggregator::Max => MetricQuery::select("v")
-                    .bucketize(Duration::from_mins(1), Max)
-                    .named("q"),
-                Aggregator::Percentile(p) => MetricQuery::select("v")
-                    .bucketize(Duration::from_mins(1), Percentile(p))
-                    .named("q"),
-            };
-            plan.evaluate(&snap, 1, 1)[0].value
-        };
+        let value = |plan: MetricQueryPlan| plan.evaluate(&snap, 1, 1)[0].value;
 
-        assert!(is_close(value(Aggregator::Min), 1.0));
-        assert!(is_close(value(Aggregator::Max), 100.0));
-        assert!(is_close(value(Aggregator::Mean), 50.5));
+        assert!(is_close(value(bucketed(Min)), 1.0));
+        assert!(is_close(value(bucketed(Max)), 100.0));
+        assert!(is_close(value(bucketed(Mean)), 50.5));
         // Linear interpolation on rank p*(n-1): 0.99 * 99 = 98.01.
-        assert!(is_close(value(Aggregator::Percentile(0.99)), 99.01));
-        assert!(is_close(value(Aggregator::Percentile(0.5)), 50.5));
+        assert!(is_close(value(bucketed(Percentile(0.99))), 99.01));
+        assert!(is_close(value(bucketed(Percentile(0.5))), 50.5));
     }
 
     // --- fill ------------------------------------------------------------
@@ -1836,12 +1803,7 @@ mod tests {
     }
 
     fn filled(policy: Fill) -> Vec<(u64, f64)> {
-        buckets_of(
-            &MetricQuery::select("v")
-                .bucketize(Duration::from_mins(1), Mean)
-                .fill(policy)
-                .named("q"),
-        )
+        buckets_of(&per_minute("v").fill(policy).named("q"))
     }
 
     fn buckets_of(plan: &MetricQueryPlan) -> Vec<(u64, f64)> {
@@ -1853,10 +1815,7 @@ mod tests {
 
     #[test]
     fn without_fill_a_gap_stays_a_gap() {
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
-            .named("q")
-            .evaluate(&gapped(), 1, 1);
+        let rows = per_minute("v").named("q").evaluate(&gapped(), 1, 1);
         assert_eq!(
             rows.iter()
                 .map(|r| r.bucket_start_ms / 60_000)
@@ -1876,8 +1835,7 @@ mod tests {
 
         // Bucket 0 empty: nothing precedes it, so it stays empty.
         let late = snapshot(&[("v", &[(120_000, 7.0)])], 180_000);
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let rows = per_minute("v")
             .fill(Fill::Previous)
             .named("q")
             .evaluate(&late, 1, 1);
@@ -1911,12 +1869,7 @@ mod tests {
     #[test]
     fn interpolate_computes_only_between_known_values() {
         assert_eq!(
-            buckets_of(
-                &MetricQuery::select("v")
-                    .bucketize(Duration::from_mins(1), Mean)
-                    .interpolate()
-                    .named("q")
-            ),
+            buckets_of(&per_minute("v").interpolate().named("q")),
             vec![(0, 10.0), (1, 20.0), (2, 30.0), (3, 40.0)],
             "linear between bucket 0 and bucket 3; nothing to interpolate after"
         );
@@ -1928,8 +1881,7 @@ mod tests {
         // trailing gap needs a fill — and the two ops apply in call order.
         assert_eq!(
             buckets_of(
-                &MetricQuery::select("v")
-                    .bucketize(Duration::from_mins(1), Mean)
+                &per_minute("v")
                     .interpolate()
                     .fill(Fill::Value(0.0))
                     .named("q")
@@ -1945,8 +1897,7 @@ mod tests {
         // each gap looks back at bucket 0 rather than at the value just
         // synthesized for the bucket before it.
         let snap = snapshot(&[("v", &[(0, 0.0), (240_000, 100.0)])], 240_000);
-        let values: Vec<f64> = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let values: Vec<f64> = per_minute("v")
             .interpolate()
             .named("q")
             .evaluate(&snap, 1, 1)
@@ -1964,8 +1915,7 @@ mod tests {
     fn fill_extends_the_grid_to_the_end_of_the_run() {
         // All the data is in the first minute, but the run lasted five.
         let snap = snapshot(&[("v", &[(0, 3.0)])], 300_000);
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let rows = per_minute("v")
             .fill(Fill::Value(0.0))
             .named("q")
             .evaluate(&snap, 1, 1);
@@ -1979,8 +1929,7 @@ mod tests {
         // No observations at all: there is nothing to have holes in, and a
         // policy alone must not conjure a series the run never touched.
         let snap = snapshot(&[("other", &[(0, 1.0)])], 120_000);
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let rows = per_minute("v")
             .fill(Fill::Value(0.0))
             .named("q")
             .evaluate(&snap, 1, 1);
@@ -2020,21 +1969,19 @@ mod tests {
         );
     }
 
+    /// Two seeds busy in different minutes of a three-minute run.
+    fn two_seeds_busy_apart(plan: &MetricQueryPlan) -> Vec<MetricQueryRow> {
+        across_seeds(
+            plan,
+            [(1, 0), (2, 120_000)]
+                .map(|(seed, at_ms)| (seed, snapshot(&[("v", &[(at_ms, 5.0)])], 180_000))),
+        )
+    }
+
     #[test]
     fn filling_puts_every_seed_on_the_same_windows() {
-        let plan = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
-            .fill(Fill::Value(0.0))
-            .named("q");
-        // Two seeds busy in different minutes of a three-minute run.
-        let rows: Vec<MetricQueryRow> = [(1u64, 0u64), (2, 120_000)]
-            .iter()
-            .flat_map(|(seed, at_ms)| {
-                let snap = snapshot(&[("v", &[(*at_ms, 5.0)])], 180_000);
-                plan.evaluate(&snap, 7, *seed)
-            })
-            .collect();
-        let report = MetricQueryReport::from_rows(&plan, rows);
+        let plan = per_minute("v").fill(Fill::Value(0.0)).named("q");
+        let report = MetricQueryReport::from_rows(&plan, two_seeds_busy_apart(&plan));
 
         assert_eq!(report.windows.len(), 4, "one window per bucket of the grid");
         assert!(
@@ -2052,17 +1999,8 @@ mod tests {
     fn unfilled_windows_fragment_the_summary() {
         // The same two seeds without a fill: each bucket has one run in it,
         // which is exactly the reporting problem fill exists to solve.
-        let plan = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
-            .named("q");
-        let rows: Vec<MetricQueryRow> = [(1u64, 0u64), (2, 120_000)]
-            .iter()
-            .flat_map(|(seed, at_ms)| {
-                let snap = snapshot(&[("v", &[(*at_ms, 5.0)])], 180_000);
-                plan.evaluate(&snap, 7, *seed)
-            })
-            .collect();
-        let report = MetricQueryReport::from_rows(&plan, rows);
+        let plan = per_minute("v").named("q");
+        let report = MetricQueryReport::from_rows(&plan, two_seeds_busy_apart(&plan));
         assert_eq!(report.windows.len(), 2);
         assert!(report.windows.iter().all(|w| w.runs == 1));
     }
@@ -2085,7 +2023,7 @@ mod tests {
         assert!(is_close(rows[1].value, 5.0));
         assert!(is_close(rows[2].value, 9.0));
         assert_eq!(
-            (rows[0].bucket_start_ms, rows[0].bucket_end_ms),
+            bounds(&rows[0]),
             (0, 1_000),
             "the window spans its first point to its last"
         );
@@ -2097,17 +2035,13 @@ mod tests {
             &[("v", &[(0, 1.0), (60_000, 2.0), (120_000, 30.0)])],
             180_000,
         );
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let rows = per_minute("v")
             .map(2, Mean)
             .named("smoothed")
             .evaluate(&snap, 1, 1);
 
         assert_eq!(rows.len(), 2);
-        assert_eq!(
-            (rows[0].bucket_start_ms, rows[0].bucket_end_ms),
-            (0, 120_000)
-        );
+        assert_eq!(bounds(&rows[0]), (0, 120_000));
         assert!(is_close(rows[0].value, 1.5));
         assert!(is_close(rows[1].value, 16.0));
     }
@@ -2133,8 +2067,7 @@ mod tests {
             ],
             120_000,
         );
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let rows = per_minute("v")
             .reduce(Max)
             .named("worst_node")
             .evaluate(&snap, 1, 1);
@@ -2164,7 +2097,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(is_close(rows[0].value, 2.5), "median of 1,2,3,4");
         assert_eq!(
-            (rows[0].bucket_start_ms, rows[0].bucket_end_ms),
+            bounds(&rows[0]),
             (WHOLE_RUN_MS, WHOLE_RUN_MS),
             "a pooled reduce covers the run, not the span its points occupied"
         );
@@ -2177,13 +2110,15 @@ mod tests {
         let plan = MetricQuery::select("latency")
             .reduce(Percentile(0.99))
             .named("global_p99");
-        let rows: Vec<MetricQueryRow> = [(1u64, 5u64), (2, 900)]
-            .iter()
-            .flat_map(|(seed, last_ms)| {
-                let snap = snapshot(&[("latency", &[(1, 1.0), (*last_ms, 2.0)])], 1_000);
-                plan.evaluate(&snap, 7, *seed)
-            })
-            .collect();
+        let rows = across_seeds(
+            &plan,
+            [(1, 5), (2, 900)].map(|(seed, last_ms)| {
+                (
+                    seed,
+                    snapshot(&[("latency", &[(1, 1.0), (last_ms, 2.0)])], 1_000),
+                )
+            }),
+        );
         let report = MetricQueryReport::from_rows(&plan, rows);
 
         assert_eq!(report.windows.len(), 1, "one window, not one per seed");
@@ -2201,8 +2136,7 @@ mod tests {
             ],
             60_000,
         );
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let rows = per_minute("v")
             .reduce_by("zone", Mean)
             .named("per_zone")
             .evaluate(&snap, 1, 1);
@@ -2219,8 +2153,7 @@ mod tests {
     #[test]
     fn every_row_carries_its_run_id_and_seed() {
         let snap = snapshot(&[("v", &[(0, 1.0), (60_000, 2.0)])], 120_000);
-        let rows = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
+        let rows = per_minute("v")
             .named("q")
             .evaluate(&snap, 0xDEAD_BEEF, 9182);
 
@@ -2270,17 +2203,13 @@ mod tests {
     // --- cross-run summary -----------------------------------------------
 
     fn multi_seed_rows(values: &[(u64, f64)]) -> (MetricQueryPlan, Vec<MetricQueryRow>) {
-        let plan = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
-            .reduce(Mean)
-            .named("throughput");
-        let rows = values
-            .iter()
-            .flat_map(|(seed, value)| {
-                let snap = snapshot(&[("v", &[(0, *value)])], 60_000);
-                plan.evaluate(&snap, 7, *seed)
-            })
-            .collect();
+        let plan = per_minute("v").reduce(Mean).named("throughput");
+        let rows = across_seeds(
+            &plan,
+            values
+                .iter()
+                .map(|(seed, value)| (*seed, snapshot(&[("v", &[(0, *value)])], 60_000))),
+        );
         (plan, rows)
     }
 
@@ -2311,15 +2240,12 @@ mod tests {
 
     #[test]
     fn summary_windows_are_deterministically_ordered() {
-        let plan = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
-            .reduce_by("zone", Mean)
-            .named("per_zone");
+        let plan = per_minute("v").reduce_by("zone", Mean).named("per_zone");
 
         let build = |seeds: &[u64]| {
-            let rows: Vec<MetricQueryRow> = seeds
-                .iter()
-                .flat_map(|seed| {
+            let rows = across_seeds(
+                &plan,
+                seeds.iter().map(|seed| {
                     let snap = snapshot(
                         &[
                             (r#"v{zone="us"}"#, &[(0, 2.0), (60_000, 4.0)]),
@@ -2327,9 +2253,9 @@ mod tests {
                         ],
                         120_000,
                     );
-                    plan.evaluate(&snap, 7, *seed)
-                })
-                .collect();
+                    (*seed, snap)
+                }),
+            );
             MetricQueryReport::from_rows(&plan, rows)
                 .windows
                 .iter()
@@ -2353,16 +2279,16 @@ mod tests {
 
     #[test]
     fn a_bucketed_query_summarizes_each_bucket_separately() {
-        let plan = MetricQuery::select("v")
-            .bucketize(Duration::from_mins(1), Mean)
-            .named("bucketed");
-        let rows: Vec<MetricQueryRow> = [(1u64, 1.0), (2, 3.0)]
-            .iter()
-            .flat_map(|(seed, base)| {
-                let snap = snapshot(&[("v", &[(0, *base), (60_000, base * 10.0)])], 120_000);
-                plan.evaluate(&snap, 7, *seed)
-            })
-            .collect();
+        let plan = per_minute("v").named("bucketed");
+        let rows = across_seeds(
+            &plan,
+            [(1, 1.0), (2, 3.0)].map(|(seed, base)| {
+                (
+                    seed,
+                    snapshot(&[("v", &[(0, base), (60_000, base * 10.0)])], 120_000),
+                )
+            }),
+        );
         let report = MetricQueryReport::from_rows(&plan, rows);
 
         assert_eq!(report.windows.len(), 2);

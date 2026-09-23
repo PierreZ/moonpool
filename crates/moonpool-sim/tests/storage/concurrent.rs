@@ -4,32 +4,9 @@
 //! without interference, similar to how network tests verify multiple
 //! connections work independently.
 
+use crate::{fast_sim, local_runtime, step_until_done, test_ip};
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{SimWorld, StorageConfiguration};
-use std::net::IpAddr;
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-/// Create a `SimWorld` with fast storage configuration.
-fn fast_sim() -> SimWorld {
-    let mut sim = SimWorld::new();
-    sim.set_storage_config(StorageConfiguration::fast_local());
-    sim
-}
 
 /// Test opening multiple files simultaneously
 #[test]
@@ -56,13 +33,7 @@ fn test_multiple_files_open_simultaneously() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -115,13 +86,7 @@ fn test_interleaved_writes() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -160,13 +125,7 @@ fn concurrent_append_handles_preserve_both_writes() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -203,13 +162,7 @@ fn read_completion_precedes_later_write_before_repoll() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -260,13 +213,7 @@ fn test_write_one_read_another() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -307,13 +254,7 @@ fn test_sequential_opens_same_file() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -376,13 +317,7 @@ fn test_file_independence() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -422,13 +357,7 @@ fn test_independent_file_positions() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -479,13 +408,7 @@ fn test_many_files() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -528,13 +451,7 @@ fn test_sequential_reads_same_file() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -576,13 +493,7 @@ fn same_file_handles_have_independent_positions() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -618,13 +529,7 @@ fn concurrent_same_file_writes_keep_operation_identity() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
 
@@ -651,12 +556,6 @@ fn close_is_handle_local_and_enforced() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("io error");
+        step_until_done(&mut sim, handle).await.expect("io error");
     });
 }

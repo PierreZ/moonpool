@@ -4,7 +4,7 @@
 //! storage operations that don't fit into the standard AsyncRead/AsyncWrite
 //! traits.
 
-use crate::sim::WeakSimWorld;
+use crate::sim::{SimWorld, WeakSimWorld};
 use crate::storage::sim::{HandleId, OperationId, StorageCompletion};
 use std::cell::Cell;
 use std::future::Future;
@@ -14,26 +14,80 @@ use std::task::{Context, Poll};
 
 use super::sim_shutdown_error;
 
-/// Future for `sync_all` and `sync_data` operations.
+/// The schedule → wait → complete state every storage future shares.
 ///
-/// Follows the schedule → wait → complete pattern:
-/// 1. First poll: Schedule sync with `SimWorld`, store `op_seq`
-/// 2. Subsequent polls: Check completion, return Pending until done
-/// 3. Final poll: Clear state, return Ok(())
-pub struct SyncFuture {
+/// 1. First poll: schedule the operation with `SimWorld`, store its id
+/// 2. Subsequent polls: check completion, return Pending until done
+/// 3. Final poll: clear state, map the completion to the future's output
+///
+/// Dropping it while an operation is pending cancels that operation.
+struct PendingOperation {
     sim: WeakSimWorld,
-    handle_id: HandleId,
-    /// Pending operation sequence number
     pending_op: Cell<Option<OperationId>>,
+}
+
+impl PendingOperation {
+    fn new(sim: WeakSimWorld) -> Self {
+        Self {
+            sim,
+            pending_op: Cell::new(None),
+        }
+    }
+
+    /// Drive one poll: `schedule` starts the operation on the first poll,
+    /// `complete` maps its completion (`None` means the engine answered with
+    /// the wrong kind of completion, reported as `mismatch`).
+    fn poll<T>(
+        &self,
+        cx: &Context<'_>,
+        schedule: impl FnOnce(&SimWorld) -> io::Result<OperationId>,
+        complete: impl FnOnce(StorageCompletion) -> Option<T>,
+        mismatch: &'static str,
+    ) -> Poll<io::Result<T>> {
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+
+        if let Some(operation_id) = self.pending_op.get() {
+            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
+                self.pending_op.set(None);
+                return Poll::Ready(match result {
+                    Ok(completion) => {
+                        complete(completion).ok_or_else(|| io::Error::other(mismatch))
+                    }
+                    Err(error) => Err(error.into()),
+                });
+            }
+            return Poll::Pending;
+        }
+
+        let operation_id = schedule(&sim)?;
+        self.pending_op.set(Some(operation_id));
+        let _ = sim.poll_storage_operation(operation_id, cx.waker());
+        Poll::Pending
+    }
+}
+
+impl Drop for PendingOperation {
+    fn drop(&mut self) {
+        if let Some(operation_id) = self.pending_op.get()
+            && let Ok(sim) = self.sim.upgrade()
+        {
+            sim.cancel_storage_operation(operation_id);
+        }
+    }
+}
+
+/// Future for `sync_all` and `sync_data` operations.
+pub struct SyncFuture {
+    op: PendingOperation,
+    handle_id: HandleId,
 }
 
 impl SyncFuture {
     /// Create a new sync future.
     pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId) -> Self {
         Self {
-            sim,
+            op: PendingOperation::new(sim),
             handle_id,
-            pending_op: Cell::new(None),
         }
     }
 }
@@ -42,71 +96,30 @@ impl Future for SyncFuture {
     type Output = io::Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-
-        // Check for pending operation
-        if let Some(operation_id) = self.pending_op.get() {
-            // Check if operation is complete
-            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
-                // Clear pending state
-                self.pending_op.set(None);
-                return Poll::Ready(match result {
-                    Ok(StorageCompletion::Unit) => Ok(()),
-                    Ok(_) => Err(io::Error::other(
-                        "sync operation returned a value completion",
-                    )),
-                    Err(error) => Err(error.into()),
-                });
-            }
-            return Poll::Pending;
-        }
-
-        // No pending operation - start a new one
-        let operation_id = sim.schedule_sync(self.handle_id)?;
-
-        // Store pending state
-        self.pending_op.set(Some(operation_id));
-
-        // Register waker
-        let _ = sim.poll_storage_operation(operation_id, cx.waker());
-
-        Poll::Pending
-    }
-}
-
-impl Drop for SyncFuture {
-    fn drop(&mut self) {
-        if let Some(operation_id) = self.pending_op.get()
-            && let Ok(sim) = self.sim.upgrade()
-        {
-            sim.cancel_storage_operation(operation_id);
-        }
+        self.op.poll(
+            cx,
+            |sim| Ok(sim.schedule_sync(self.handle_id)?),
+            |completion| matches!(completion, StorageCompletion::Unit).then_some(()),
+            "sync operation returned a value completion",
+        )
     }
 }
 
 /// Future for `set_len` operations.
-///
-/// Follows the schedule → wait → complete pattern:
-/// 1. First poll: Schedule `set_len` with `SimWorld`, store `op_seq`
-/// 2. Subsequent polls: Check completion, return Pending until done
-/// 3. Final poll: Clear state, return Ok(())
 pub struct SetLenFuture {
-    sim: WeakSimWorld,
+    op: PendingOperation,
     handle_id: HandleId,
     /// The new length to set the file to.
     new_len: u64,
-    /// Pending operation sequence number
-    pending_op: Cell<Option<OperationId>>,
 }
 
 impl SetLenFuture {
     /// Create a new `set_len` future.
     pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId, new_len: u64) -> Self {
         Self {
-            sim,
+            op: PendingOperation::new(sim),
             handle_id,
             new_len,
-            pending_op: Cell::new(None),
         }
     }
 }
@@ -115,45 +128,12 @@ impl Future for SetLenFuture {
     type Output = io::Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-
-        // Check for pending operation
-        if let Some(operation_id) = self.pending_op.get() {
-            // Check if operation is complete
-            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
-                // Clear pending state
-                self.pending_op.set(None);
-                return Poll::Ready(match result {
-                    Ok(StorageCompletion::Unit) => Ok(()),
-                    Ok(_) => Err(io::Error::other(
-                        "set_len operation returned a value completion",
-                    )),
-                    Err(error) => Err(error.into()),
-                });
-            }
-            return Poll::Pending;
-        }
-
-        // No pending operation - start a new one
-        let operation_id = sim.schedule_set_len(self.handle_id, self.new_len)?;
-
-        // Store pending state
-        self.pending_op.set(Some(operation_id));
-
-        // Register waker
-        let _ = sim.poll_storage_operation(operation_id, cx.waker());
-
-        Poll::Pending
-    }
-}
-
-impl Drop for SetLenFuture {
-    fn drop(&mut self) {
-        if let Some(operation_id) = self.pending_op.get()
-            && let Ok(sim) = self.sim.upgrade()
-        {
-            sim.cancel_storage_operation(operation_id);
-        }
+        self.op.poll(
+            cx,
+            |sim| Ok(sim.schedule_set_len(self.handle_id, self.new_len)?),
+            |completion| matches!(completion, StorageCompletion::Unit).then_some(()),
+            "set_len operation returned a value completion",
+        )
     }
 }
 
@@ -162,21 +142,19 @@ impl Drop for SetLenFuture {
 /// Same schedule → wait → complete pattern as [`SyncFuture`], but the
 /// completion carries bytes and the handle's stream cursor is never touched.
 pub struct ReadAtFuture {
-    sim: WeakSimWorld,
+    op: PendingOperation,
     handle_id: HandleId,
     offset: u64,
     len: usize,
-    pending_op: Cell<Option<OperationId>>,
 }
 
 impl ReadAtFuture {
     pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId, offset: u64, len: usize) -> Self {
         Self {
-            sim,
+            op: PendingOperation::new(sim),
             handle_id,
             offset,
             len,
-            pending_op: Cell::new(None),
         }
     }
 }
@@ -185,57 +163,34 @@ impl Future for ReadAtFuture {
     type Output = io::Result<Vec<u8>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-
-        if let Some(operation_id) = self.pending_op.get() {
-            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
-                self.pending_op.set(None);
-                return Poll::Ready(match result {
-                    Ok(StorageCompletion::Read(data)) => Ok(data),
-                    Ok(_) => Err(io::Error::other(
-                        "read operation returned a non-read completion",
-                    )),
-                    Err(error) => Err(error.into()),
-                });
-            }
-            return Poll::Pending;
-        }
-
-        let operation_id = sim.schedule_positioned_read(self.handle_id, self.offset, self.len)?;
-        self.pending_op.set(Some(operation_id));
-        let _ = sim.poll_storage_operation(operation_id, cx.waker());
-        Poll::Pending
-    }
-}
-
-impl Drop for ReadAtFuture {
-    fn drop(&mut self) {
-        if let Some(operation_id) = self.pending_op.get()
-            && let Ok(sim) = self.sim.upgrade()
-        {
-            sim.cancel_storage_operation(operation_id);
-        }
+        self.op.poll(
+            cx,
+            |sim| Ok(sim.schedule_positioned_read(self.handle_id, self.offset, self.len)?),
+            |completion| match completion {
+                StorageCompletion::Read(data) => Some(data),
+                _ => None,
+            },
+            "read operation returned a non-read completion",
+        )
     }
 }
 
 /// Future for one positioned write (`write_at`).
 pub struct WriteAtFuture {
-    sim: WeakSimWorld,
+    op: PendingOperation,
     handle_id: HandleId,
     offset: u64,
     /// Taken on the first poll, when the operation is scheduled.
     data: Cell<Option<Vec<u8>>>,
-    pending_op: Cell<Option<OperationId>>,
 }
 
 impl WriteAtFuture {
     pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId, offset: u64, data: Vec<u8>) -> Self {
         Self {
-            sim,
+            op: PendingOperation::new(sim),
             handle_id,
             offset,
             data: Cell::new(Some(data)),
-            pending_op: Cell::new(None),
         }
     }
 }
@@ -244,40 +199,19 @@ impl Future for WriteAtFuture {
     type Output = io::Result<usize>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-
-        if let Some(operation_id) = self.pending_op.get() {
-            if let Poll::Ready(result) = sim.poll_storage_operation(operation_id, cx.waker()) {
-                self.pending_op.set(None);
-                return Poll::Ready(match result {
-                    Ok(StorageCompletion::Write { len, .. }) => Ok(len),
-                    Ok(_) => Err(io::Error::other(
-                        "write operation returned a non-write completion",
-                    )),
-                    Err(error) => Err(error.into()),
-                });
-            }
-            return Poll::Pending;
-        }
-
-        let Some(data) = self.data.take() else {
-            return Poll::Ready(Err(io::Error::other(
-                "positioned write polled after completion",
-            )));
-        };
-        let operation_id = sim.schedule_positioned_write(self.handle_id, self.offset, data)?;
-        self.pending_op.set(Some(operation_id));
-        let _ = sim.poll_storage_operation(operation_id, cx.waker());
-        Poll::Pending
-    }
-}
-
-impl Drop for WriteAtFuture {
-    fn drop(&mut self) {
-        if let Some(operation_id) = self.pending_op.get()
-            && let Ok(sim) = self.sim.upgrade()
-        {
-            sim.cancel_storage_operation(operation_id);
-        }
+        self.op.poll(
+            cx,
+            |sim| {
+                let Some(data) = self.data.take() else {
+                    return Err(io::Error::other("positioned write polled after completion"));
+                };
+                Ok(sim.schedule_positioned_write(self.handle_id, self.offset, data)?)
+            },
+            |completion| match completion {
+                StorageCompletion::Write { len, .. } => Some(len),
+                _ => None,
+            },
+            "write operation returned a non-write completion",
+        )
     }
 }

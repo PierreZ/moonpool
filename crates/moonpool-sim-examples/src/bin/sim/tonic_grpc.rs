@@ -3,10 +3,10 @@
 //! Runs a tonic-based gRPC echo service over hyper HTTP/2 under deterministic
 //! simulation, with network chaos plus Attrition (server crash/reboot).
 
-use std::process;
 use std::time::Duration;
 
-use moonpool_sim::{Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode};
+use moonpool_sim::AttritionScope;
+use moonpool_sim_examples::support::{finish_or_exit_on_failing_seeds, reboot_attrition};
 
 fn main() {
     moonpool_sim::init_sim_tracing(tracing::Level::WARN);
@@ -19,31 +19,10 @@ fn main() {
         // On top of the default network chaos, kill and restart the gRPC
         // server while the workload runs: rounds must survive dead servers,
         // reconnects, and fresh process state.
-        .enable_chaos([Chaos::Attrition {
-            config: Attrition {
-                max_dead: 1,
-                prob_graceful: 0.3,
-                prob_crash: 0.5,
-                prob_wipe: 0.2,
-                recovery_delay_ms: None,
-                grace_period_ms: None,
-                scope: AttritionScope::PerProcess,
-                victims: AttritionVictims::Any,
-            },
-            mode: ChaosMode::Random,
-        }])
+        .enable_chaos([reboot_attrition(1, AttritionScope::PerProcess)])
         .chaos_duration(Duration::from_secs(10))
         .set_iterations(50)
         .run();
 
-    report.eprint();
-
-    if !report.seeds_failing.is_empty() {
-        eprintln!(
-            "ERROR: {} seeds failed: {:?}",
-            report.seeds_failing.len(),
-            report.seeds_failing
-        );
-        process::exit(1);
-    }
+    finish_or_exit_on_failing_seeds(&report);
 }

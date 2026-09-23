@@ -4,49 +4,11 @@
 //! actually wants — read and write at an explicit offset, with no shared seek
 //! cursor and no pretence of being `read_exact`/`write_all`.
 
+use crate::{fast_sim, local_runtime, run_storage_test, step_until_done, test_ip};
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{AlignedBuf, DirectIo, OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
-use std::net::IpAddr;
-
-fn test_ip() -> IpAddr {
-    "127.0.0.1".parse().expect("valid IP")
-}
-
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-fn fast_sim() -> SimWorld {
-    let mut sim = SimWorld::new();
-    sim.set_storage_config(StorageConfiguration::fast_local());
-    sim
-}
-
-/// Run one storage scenario, stepping the world until the task finishes.
-async fn run_storage_test<F, Fut, T>(mut sim: SimWorld, f: F) -> T
-where
-    F: FnOnce(moonpool_sim::SimStorageProvider) -> Fut,
-    Fut: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let provider = sim.storage_provider(test_ip());
-    let handle = tokio::spawn(f(provider));
-
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-
-    handle.await.expect("task panicked")
-}
 
 /// Read back exactly what a positioned write put down.
 #[test]
@@ -413,13 +375,9 @@ fn direct_io_writes_still_need_a_sync() {
             Ok::<_, std::io::Error>(())
         });
 
-        while !handle.is_finished() {
-            while sim.pending_event_count() > 0 {
-                sim.step();
-            }
-            tokio::task::yield_now().await;
-        }
-        handle.await.expect("task panicked").expect("write failed");
+        step_until_done(&mut sim, handle)
+            .await
+            .expect("write failed");
     });
 }
 

@@ -7,6 +7,7 @@
 //! - Respects cooldown periods
 //! - Can be disabled via configuration
 
+use super::local_runtime;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
     NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait, buggify_init,
@@ -16,13 +17,7 @@ use std::time::Duration;
 /// Test that bit flipping is disabled when probability is 0.0
 #[test]
 fn test_bit_flip_disabled_with_zero_probability() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.bit_flip_probability = 0.0; // Explicitly disable
 
@@ -58,13 +53,7 @@ fn test_bit_flip_disabled_with_zero_probability() {
 /// Test that bit flipping chaos is active with high probability
 #[test]
 fn test_bit_flip_injection_with_high_probability() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         // Enable buggify for chaos testing
         buggify_init(1.0);
 
@@ -105,13 +94,7 @@ fn test_bit_flip_injection_with_high_probability() {
 /// Test that cooldown prevents excessive bit flipping
 #[test]
 fn test_bit_flip_cooldown() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
@@ -145,13 +128,7 @@ fn test_bit_flip_cooldown() {
 /// Test that peer layer handles checksum errors gracefully
 #[test]
 fn test_peer_checksum_error_recovery() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();
@@ -183,13 +160,7 @@ fn test_peer_checksum_error_recovery() {
 /// Test bit flipping with realistic message exchange
 #[test]
 fn test_bit_flip_with_message_exchange() {
-    let local_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime");
-
-    local_runtime.block_on(async move {
+    local_runtime().block_on(async move {
         buggify_init(1.0);
 
         let mut config = NetworkConfiguration::fast_local();

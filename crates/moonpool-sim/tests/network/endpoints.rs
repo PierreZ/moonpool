@@ -8,22 +8,13 @@
 //! behaviour every startup, shutdown and misconfiguration path depends on
 //! never happened in simulation.
 
-use futures::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    task::noop_waker,
-};
+use crate::sync_drive::drive;
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_sim::{
     NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait, buggify_reset,
 };
-use std::{
-    future::Future,
-    io,
-    net::IpAddr,
-    pin::pin,
-    task::{Context, Poll},
-};
+use std::{io, net::IpAddr};
 
-const MAX_DRIVER_STEPS: usize = 10_000;
 const SERVER: &str = "10.0.1.2:8080";
 
 fn client_ip() -> IpAddr {
@@ -32,23 +23,6 @@ fn client_ip() -> IpAddr {
 
 fn server_ip() -> IpAddr {
     "10.0.1.2".parse().expect("valid test IP")
-}
-
-fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for _ in 0..MAX_DRIVER_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        assert!(
-            sim.has_pending_events(),
-            "simulation-backed future stalled without a pending event"
-        );
-        sim.step();
-    }
-    panic!("simulation-backed future exceeded {MAX_DRIVER_STEPS} events")
 }
 
 fn world() -> SimWorld {

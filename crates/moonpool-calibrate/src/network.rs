@@ -95,16 +95,11 @@ pub fn measure(address: &str, samples: u64, warmup: u64) -> std::io::Result<Late
 
     let mut latencies = Latencies::new("rtt");
     let mut sequence = 0_u64;
-
-    for _ in 0..warmup {
-        round_trip(&mut stream, sequence)?;
-        sequence += 1;
-    }
-    for _ in 0..samples {
+    latencies.measure(warmup, samples, || {
         let elapsed = round_trip(&mut stream, sequence)?;
-        latencies.record(elapsed);
         sequence += 1;
-    }
+        Ok(elapsed)
+    })?;
 
     Ok(latencies)
 }

@@ -13,5 +13,6 @@ pub mod axum_web;
 pub mod dungeon;
 pub mod maze;
 pub mod metrics_service;
+pub mod support;
 pub mod tonic_grpc;
 pub mod topology;

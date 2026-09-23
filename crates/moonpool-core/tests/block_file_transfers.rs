@@ -188,11 +188,32 @@ impl AsyncSeek for AwkwardFile {
     }
 }
 
-fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build runtime")
+/// The block size every test here uses: a multiple of all three alignments.
+const BLOCK: usize = 8192;
+
+/// A block view over an awkward file of `size` bytes, plus a handle on the
+/// same file to inspect what it was asked.
+fn awkward_blocks(size: usize) -> (AwkwardFile, BlockFile<AwkwardFile>) {
+    let file = AwkwardFile::new(size);
+    let recorder = file.clone();
+    let blocks = BlockFile::new(file, BLOCK).expect("8192 is a multiple of every alignment");
+    (recorder, blocks)
+}
+
+/// `len` bytes of a pattern whose period (251, a prime) lines up with no
+/// alignment, so a misplaced sector cannot compare equal by accident.
+fn pattern(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|index| u8::try_from(index % 251).expect("modulo fits in u8"))
+        .collect()
+}
+
+fn assert_every_request_aligned(state: &FakeState) {
+    assert!(
+        state.requests.iter().all(|request| request.aligned),
+        "every request must satisfy all three alignments: {:?}",
+        state.requests
+    );
 }
 
 /// 8192 asked for, 512 returned, and the continuation must still be legal.
@@ -200,182 +221,149 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Naively resuming at offset 512 would break the 4 KiB offset alignment; the
 /// fake would refuse it and the write would fail. `BlockFile` instead resumes
 /// from the boundary below the frontier and rewrites those 512 bytes.
-#[test]
-fn a_short_write_is_completed_without_an_invalid_request() {
-    runtime().block_on(async {
-        let file = AwkwardFile::new(0);
-        let recorder = file.clone();
-        let blocks = BlockFile::new(file, 8192).expect("8192 is a multiple of every alignment");
+#[tokio::test]
+async fn a_short_write_is_completed_without_an_invalid_request() {
+    let (recorder, blocks) = awkward_blocks(0);
 
-        let mut page = blocks.buffer(1).expect("buffer allocation");
-        for (index, byte) in page.as_mut_slice().iter_mut().enumerate() {
-            *byte = u8::try_from(index % 251).expect("modulo fits in u8");
-        }
-        blocks
-            .write_blocks(0, page.as_slice())
-            .await
-            .expect("the short write must be completed, not failed");
+    let mut page = blocks.buffer(1).expect("buffer allocation");
+    page.as_mut_slice().copy_from_slice(&pattern(BLOCK));
+    blocks
+        .write_blocks(0, page.as_slice())
+        .await
+        .expect("the short write must be completed, not failed");
 
-        let state = recorder.state();
-        assert!(
-            state.requests.iter().all(|request| request.aligned),
-            "every request must satisfy all three alignments: {:?}",
-            state.requests
-        );
-        assert_eq!(
-            state.requests.len(),
-            2,
-            "one short transfer, then one that completes it: {:?}",
-            state.requests
-        );
-        assert_eq!(
-            state.requests[1].offset, 0,
-            "the retry resumes from the aligned boundary below the frontier"
-        );
-        assert_eq!(state.bytes, page.as_slice(), "every byte must have landed");
-    });
+    let state = recorder.state();
+    assert_every_request_aligned(&state);
+    assert_eq!(
+        state.requests.len(),
+        2,
+        "one short transfer, then one that completes it: {:?}",
+        state.requests
+    );
+    assert_eq!(
+        state.requests[1].offset, 0,
+        "the retry resumes from the aligned boundary below the frontier"
+    );
+    assert_eq!(state.bytes, page.as_slice(), "every byte must have landed");
 }
 
 /// The same for reads, and the bytes must be the file's, not a partially
 /// filled buffer.
-#[test]
-fn a_short_read_is_completed_without_an_invalid_request() {
-    runtime().block_on(async {
-        let expected: Vec<u8> = (0..8192)
-            .map(|index| u8::try_from(index % 251).expect("modulo fits in u8"))
-            .collect();
-        let file = AwkwardFile::new(0);
-        file.state().bytes = expected.clone();
-        let recorder = file.clone();
-        let blocks = BlockFile::new(file, 8192).expect("wrap failed");
+#[tokio::test]
+async fn a_short_read_is_completed_without_an_invalid_request() {
+    let expected = pattern(BLOCK);
+    let (recorder, blocks) = awkward_blocks(0);
+    recorder.state().bytes = expected.clone();
 
-        let mut page = blocks.buffer(1).expect("buffer allocation");
-        blocks
-            .read_blocks(0, page.as_mut_slice())
-            .await
-            .expect("the short read must be completed, not failed");
+    let mut page = blocks.buffer(1).expect("buffer allocation");
+    blocks
+        .read_blocks(0, page.as_mut_slice())
+        .await
+        .expect("the short read must be completed, not failed");
 
-        assert_eq!(page.as_slice(), expected, "every byte must have arrived");
-        let state = recorder.state();
-        assert!(
-            state.requests.iter().all(|request| request.aligned),
-            "every request must satisfy all three alignments: {:?}",
-            state.requests
-        );
-        assert_eq!(state.requests.len(), 2, "{:?}", state.requests);
-    });
+    assert_eq!(page.as_slice(), expected, "every byte must have arrived");
+    let state = recorder.state();
+    assert_every_request_aligned(&state);
+    assert_eq!(state.requests.len(), 2, "{:?}", state.requests);
 }
 
 /// A transfer that starts at a later block still resumes on a boundary the
 /// file accepts — the frontier is relative to the transfer, the alignment is
 /// absolute.
-#[test]
-fn a_short_transfer_mid_file_resumes_on_an_absolute_boundary() {
-    runtime().block_on(async {
-        let file = AwkwardFile::new(0);
-        let recorder = file.clone();
-        let blocks = BlockFile::new(file, 8192).expect("wrap failed");
-        blocks.grow_to_blocks(4).await.expect("grow failed");
+#[tokio::test]
+async fn a_short_transfer_mid_file_resumes_on_an_absolute_boundary() {
+    let (recorder, blocks) = awkward_blocks(0);
+    blocks.grow_to_blocks(4).await.expect("grow failed");
 
-        let mut page = blocks.buffer(2).expect("buffer allocation");
-        page.as_mut_slice().fill(0x5C);
-        blocks
-            .write_blocks(2, page.as_slice())
-            .await
-            .expect("write failed");
+    let mut page = blocks.buffer(2).expect("buffer allocation");
+    page.as_mut_slice().fill(0x5C);
+    blocks
+        .write_blocks(2, page.as_slice())
+        .await
+        .expect("write failed");
 
-        let state = recorder.state();
-        assert!(state.requests.iter().all(|request| request.aligned));
-        assert_eq!(
-            state.requests[0].offset,
-            2 * 8192,
-            "the first request starts at the block's own offset"
-        );
-        assert_eq!(
-            state.requests[1].offset,
-            2 * 8192,
-            "and the retry resumes from the same aligned boundary"
-        );
-    });
+    let state = recorder.state();
+    assert_every_request_aligned(&state);
+    assert_eq!(
+        state.requests[0].offset,
+        2 * 8192,
+        "the first request starts at the block's own offset"
+    );
+    assert_eq!(
+        state.requests[1].offset,
+        2 * 8192,
+        "and the retry resumes from the same aligned boundary"
+    );
 }
 
 /// A caller's own buffer must satisfy the file's memory alignment, and is
 /// told so before any request is issued rather than by the device afterwards.
-#[test]
-fn a_misaligned_caller_buffer_is_refused_up_front() {
-    runtime().block_on(async {
-        let file = AwkwardFile::new(8192);
-        let recorder = file.clone();
-        let blocks = BlockFile::new(file, 8192).expect("wrap failed");
+#[tokio::test]
+async fn a_misaligned_caller_buffer_is_refused_up_front() {
+    let (recorder, blocks) = awkward_blocks(BLOCK);
 
-        // Aligned length, deliberately misaligned address.
-        let backing = AlignedBuf::zeroed(8192 + MEMORY_ALIGNMENT, MEMORY_ALIGNMENT);
-        let misaligned = &backing.as_slice()[1..8193];
-        let error = blocks
-            .write_blocks(0, misaligned)
-            .await
-            .expect_err("a misaligned buffer must be refused");
+    // Aligned length, deliberately misaligned address.
+    let backing = AlignedBuf::zeroed(8192 + MEMORY_ALIGNMENT, MEMORY_ALIGNMENT);
+    let misaligned = &backing.as_slice()[1..8193];
+    let error = blocks
+        .write_blocks(0, misaligned)
+        .await
+        .expect_err("a misaligned buffer must be refused");
 
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(
-            recorder.state().requests.is_empty(),
-            "the file must never see the request"
-        );
-    });
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    assert!(
+        recorder.state().requests.is_empty(),
+        "the file must never see the request"
+    );
 }
 
 /// Block arithmetic is checked at every conversion. None of these may wrap:
 /// a wrapped offset addresses the wrong part of the file, and a wrapped
 /// allocation hands back a buffer of the wrong size — both silent in release
 /// builds, where the debug-mode overflow panic does not fire.
-#[test]
-fn block_arithmetic_is_checked_at_every_boundary() {
-    runtime().block_on(async {
-        const BLOCK: usize = 8192;
-        let file = AwkwardFile::new(BLOCK);
-        let recorder = file.clone();
-        let blocks = BlockFile::new(file, BLOCK).expect("wrap failed");
+#[tokio::test]
+async fn block_arithmetic_is_checked_at_every_boundary() {
+    let (recorder, blocks) = awkward_blocks(BLOCK);
 
-        // An allocation whose byte count overflows `usize`.
-        let error = blocks
-            .buffer(usize::MAX)
-            .expect_err("a buffer that cannot fit in memory must be refused");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    // An allocation whose byte count overflows `usize`.
+    let error = blocks
+        .buffer(usize::MAX)
+        .expect_err("a buffer that cannot fit in memory must be refused");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
-        let mut page = blocks.buffer(1).expect("buffer allocation");
+    let mut page = blocks.buffer(1).expect("buffer allocation");
 
-        // A block index whose byte offset overflows `u64`.
-        let error = blocks
-            .read_blocks(u64::MAX, page.as_mut_slice())
-            .await
-            .expect_err("an unaddressable block index must be refused");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    // A block index whose byte offset overflows `u64`.
+    let error = blocks
+        .read_blocks(u64::MAX, page.as_mut_slice())
+        .await
+        .expect_err("an unaddressable block index must be refused");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
-        // An index that *does* fit, naming a range whose end does not: the
-        // second check, which a single multiplication guard would miss.
-        let last = u64::MAX / BLOCK as u64;
-        assert!(last.checked_mul(BLOCK as u64).is_some(), "the offset fits");
-        let error = blocks
-            .read_blocks(last, page.as_mut_slice())
-            .await
-            .expect_err("a transfer running past the address space must be refused");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        let error = blocks
-            .write_blocks(last, page.as_slice())
-            .await
-            .expect_err("a transfer running past the address space must be refused");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    // An index that *does* fit, naming a range whose end does not: the
+    // second check, which a single multiplication guard would miss.
+    let last = u64::MAX / BLOCK as u64;
+    assert!(last.checked_mul(BLOCK as u64).is_some(), "the offset fits");
+    let error = blocks
+        .read_blocks(last, page.as_mut_slice())
+        .await
+        .expect_err("a transfer running past the address space must be refused");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    let error = blocks
+        .write_blocks(last, page.as_slice())
+        .await
+        .expect_err("a transfer running past the address space must be refused");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
-        // Growing past the address space is refused the same way.
-        let error = blocks
-            .grow_to_blocks(u64::MAX)
-            .await
-            .expect_err("an unaddressable length must be refused");
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    // Growing past the address space is refused the same way.
+    let error = blocks
+        .grow_to_blocks(u64::MAX)
+        .await
+        .expect_err("an unaddressable length must be refused");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
-        assert!(
-            recorder.state().requests.is_empty(),
-            "no arithmetic failure may reach the file as a request"
-        );
-    });
+    assert!(
+        recorder.state().requests.is_empty(),
+        "no arithmetic failure may reach the file as a request"
+    );
 }

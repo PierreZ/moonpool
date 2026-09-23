@@ -4,46 +4,10 @@
 //! across crash scenarios, following patterns from `TigerBeetle` and
 //! `FoundationDB`'s crash consistency testing.
 
+use crate::{fast_sim, local_runtime, step_until_done, test_ip};
 use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
-use std::net::IpAddr;
-
-const TEST_IP_STR: &str = "127.0.0.1";
-
-fn test_ip() -> IpAddr {
-    TEST_IP_STR.parse().expect("valid IP")
-}
-
-/// Create a local tokio runtime for tests.
-fn local_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .enable_time()
-        .build()
-        .expect("Failed to build local runtime")
-}
-
-/// Create a `SimWorld` with fast storage configuration.
-fn fast_sim() -> SimWorld {
-    let mut sim = SimWorld::new();
-    sim.set_storage_config(StorageConfiguration::fast_local());
-    sim
-}
-
-/// Helper to run storage operations with simulation stepping.
-async fn step_until_done<T: Send + 'static>(
-    sim: &mut SimWorld,
-    handle: tokio::task::JoinHandle<std::io::Result<T>>,
-) -> std::io::Result<T> {
-    while !handle.is_finished() {
-        while sim.pending_event_count() > 0 {
-            sim.step();
-        }
-        tokio::task::yield_now().await;
-    }
-    handle.await.expect("task panicked")
-}
 
 /// Test: Write, sync, crash, recover - data should be intact
 #[test]
