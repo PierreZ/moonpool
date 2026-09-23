@@ -84,7 +84,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 ## Part V: Raw Network Simulation
 
 - [Simulating the Network](./part4-networking/01-simulating-network.md) — Provider-backed TCP streams, connection-level faults, partial I/O, and the boundary between simulation and the kernel
-  - [Typed RPC with moonpool-rpc](./part4-networking/02-rpc.md) — Dynamic endpoints, checked identity, at-most-once attempts with honest execution knowledge, checksummed framing, and the receipt-ledger campaign
+  - [Typed RPC with moonpool-rpc](./part4-networking/02-rpc.md) — Dynamic endpoints, checked identity, delivery modes with honest execution knowledge, peer recovery and the failure monitor, bootstrap names, checksummed framing, and the ledger campaigns
 
 ## Part VI: Building on Top
 

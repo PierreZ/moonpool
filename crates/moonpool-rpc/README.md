@@ -11,13 +11,17 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 |------|------|
 | `RpcDriver<P, U>` | the owned runtime: listener, connections, registry, pending calls; poll `run()`, drop to shut down |
 | `Connector` / `Acceptor` / `Plaintext` / `PeerContext` | the session upgrade seam (plaintext by default; TLS later) |
-| `RpcHandle<P>` | weak, cloneable handle: `register(AccessClass)`, `stats`, `probe` |
+| `RpcHandle<P>` | weak, cloneable handle: `register(AccessClass)`, `register_well_known`, `failure_monitor`, `stats`, `probe` |
 | `RpcMethod` | one method: `Request`/`Reply` types plus explicit `u32` `MethodId` and `u16` `SchemaVersion` |
 | `Wire` / `CodecId` | the body codec seam; every `prost::Message` is `Wire` (default `prost` feature) |
 | `ServiceRef<M>` | plain, runtime-free reference: resolved `ip:port`, 128-bit incarnation, 64-bit token + generation, method, schema, codecs, access class |
-| `ServiceClient<P, M>` | a reference bound to a runtime; `try_get_reply` / `try_get_reply_within` are one at-most-once attempt |
+| `ServiceClient<P, M>` | a reference bound to a runtime: `send` (one-way), `attempt` / `try_get_reply` / `try_get_reply_within` (one at-most-once attempt), `get_reply` (reliable, may duplicate), `get_reply_unless_failed_for` |
+| `ReplyAttempt<P, M>` | one attempt as a future: keep it for a late outcome, `cancel()` for execution knowledge |
+| `PeerPolicy` | plain-data reconnect backoff, ping, idle and failure-detection timing (`RpcConfig::peer`) |
+| `FailureMonitor<P>` | address availability, disconnect events and permanent endpoint failures, with race-free waits |
+| `WellKnownId` / `WellKnownRef<M>` / `BootstrapClient<P, R>` / `RetryPolicy` | bootstrap endpoints that survive restarts, hostname resolution through a `moonpool_core::Resolver`, explicit retries |
 | `RequestStream<M>` | the owned receiver; dropping it destroys the endpoint |
-| `ReplyHandle<M>` | one-shot, session-bound responder; dropping it is a broken promise |
+| `ReplyHandle<M>` | one-shot, session-bound responder; dropping it is a broken promise, `never_reply()` is not |
 | `RpcError` = `ErrorReason` + `Execution` | the failure reason, and what it proves (`NotAdmitted`, `MaybeExecuted`, `Executed`) |
 
 ## Wire format
@@ -26,7 +30,8 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 payload is a hand-written, versioned envelope (kind, reply route, incarnation,
 token, method, schema, codec, reserved metadata) followed by the opaque body.
 Each session opens with a `Hello` carrying the supported version range, the
-runtime incarnation and reserved feature bits. See the `protocol`
+runtime incarnation, reserved feature bits, the frame limit and the listen
+address (protocol version 2); `PING`/`PONG` frames carry liveness. See the `protocol`
 and `codec` module docs.
 
 ## Features
