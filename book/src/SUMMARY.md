@@ -81,6 +81,7 @@
 # Part V: Raw Network Simulation
 
 - [Simulating the Network](./part4-networking/01-simulating-network.md)
+  - [Typed RPC with moonpool-rpc](./part4-networking/02-rpc.md)
 
 ---
 

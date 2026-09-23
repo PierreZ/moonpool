@@ -49,6 +49,21 @@ const SIM_BINARIES: &[SimBinary] = &[
     ),
     SimBinary::new("sim-topology", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
     SimBinary::new("sim-tonic-grpc", SIM_EXAMPLES_PACKAGE, SIM_EXAMPLES_CRATE),
+    SimBinary::new(
+        "sim-rpc-foundations",
+        "moonpool-rpc-sim",
+        "moonpool_rpc,moonpool_rpc_sim",
+    ),
+    SimBinary::new(
+        "sim-rpc-delivery",
+        "moonpool-rpc-sim",
+        "moonpool_rpc,moonpool_rpc_sim",
+    ),
+    SimBinary::new(
+        "sim-rpc-interfaces",
+        "moonpool-rpc-sim",
+        "moonpool_rpc,moonpool_rpc_sim",
+    ),
 ];
 
 fn main() -> ExitCode {

@@ -1,0 +1,241 @@
+//! One-shot reply handles and their peer-relative routes.
+
+use std::marker::PhantomData;
+use std::sync::{Arc, Weak};
+
+use crate::codec::{Wire, encode_to_vec};
+use crate::protocol::{
+    RpcMethod, WireError, WireMessage, WireOutcome, encode_frame, encode_message,
+    reply_envelope_len,
+};
+use crate::stats::Counters;
+use crate::transport::connection::{CloseReason, Connection};
+use crate::transport::upgrade::PeerContext;
+
+/// Completes local calls: implemented by the runtime's shared state.
+pub(crate) trait LocalSink: Send + Sync {
+    fn complete_local(&self, call_id: u64, outcome: WireOutcome);
+}
+
+/// Where a reply goes. A remote route is bound to the one connection
+/// (session) that delivered the request: if that connection is gone the
+/// reply is dropped, never redirected to a newer connection or another
+/// process that happens to reuse the address.
+pub(crate) enum ReplyRoute {
+    /// Back over the delivering connection, under the caller's call id.
+    Remote {
+        connection: Weak<Connection>,
+        call_id: u64,
+        /// Counts the reply as owed on that connection until the route is
+        /// used or dropped (an owed reply keeps the connection from idling).
+        _outstanding: Outstanding,
+    },
+    /// Straight to a pending call of this runtime.
+    Local {
+        sink: Weak<dyn LocalSink>,
+        call_id: u64,
+    },
+    /// A one-way request: nothing is ever sent back.
+    Discard,
+}
+
+/// One reply owed on a connection, for as long as this value lives.
+pub(crate) struct Outstanding(Weak<Connection>);
+
+impl Outstanding {
+    pub(crate) fn new(connection: &Arc<Connection>) -> Self {
+        connection.begin_outstanding();
+        Self(Arc::downgrade(connection))
+    }
+}
+
+impl Drop for Outstanding {
+    fn drop(&mut self) {
+        if let Some(connection) = self.0.upgrade() {
+            connection.end_outstanding();
+        }
+    }
+}
+
+/// Everything a reply needs besides its value.
+pub(crate) struct ReplyContext {
+    pub(crate) route: ReplyRoute,
+    pub(crate) counters: Arc<Counters>,
+    pub(crate) max_frame_bytes: u32,
+    /// Where the request came from (`None` for a local caller).
+    pub(crate) peer: Option<PeerContext>,
+}
+
+impl ReplyContext {
+    /// Deliver an outcome along the route. Returns whether a live route
+    /// accepted it.
+    pub(crate) fn deliver(self, outcome: WireOutcome) -> bool {
+        let delivered = match self.route {
+            // Nothing to send and nobody to tell: neither sent nor dropped.
+            ReplyRoute::Discard => return false,
+            ReplyRoute::Local { sink, call_id } => match sink.upgrade() {
+                Some(sink) => {
+                    // Local replies obey the local frame limit, as a remote
+                    // caller with the same limit would.
+                    let outcome = bounded(outcome, self.max_frame_bytes);
+                    sink.complete_local(call_id, outcome);
+                    true
+                }
+                None => false,
+            },
+            ReplyRoute::Remote {
+                connection,
+                call_id,
+                _outstanding,
+            } => match connection.upgrade() {
+                Some(connection) => {
+                    // The session limit is the smaller of ours and the
+                    // peer's: an oversized reply fails its own call with
+                    // ReplyTooLarge and the session stays up.
+                    let limit = connection
+                        .peer_hello()
+                        .map_or(self.max_frame_bytes, |hello| {
+                            hello.max_frame_bytes.min(self.max_frame_bytes)
+                        });
+                    let outcome = bounded(outcome, limit);
+                    let payload = encode_message(&WireMessage::Reply { call_id, outcome });
+                    if let Ok(frame) = encode_frame(&payload, limit) {
+                        connection.push_control(frame)
+                    } else {
+                        // Not even a rejection fits the frame limit: close
+                        // the session so the caller observes a disconnect
+                        // rather than waiting on a reply that never comes.
+                        let _ = connection.close(CloseReason::Local);
+                        false
+                    }
+                }
+                None => false,
+            },
+        };
+        if delivered {
+            Counters::bump(&self.counters.replies_sent);
+        } else {
+            Counters::bump(&self.counters.replies_dropped);
+        }
+        delivered
+    }
+}
+
+/// Replace an ok outcome that would not fit `limit` with `ReplyTooLarge`.
+fn bounded(outcome: WireOutcome, limit: u32) -> WireOutcome {
+    match outcome {
+        WireOutcome::Ok { body, .. }
+            if reply_envelope_len(body.len()) as u64 > u64::from(limit) =>
+        {
+            WireOutcome::Err(WireError::ReplyTooLarge)
+        }
+        outcome => outcome,
+    }
+}
+
+/// The one-shot responder for one admitted request.
+///
+/// Reply with [`send`](Self::send). Dropping the handle without replying
+/// completes the call with [`ErrorReason::BrokenPromise`](crate::ErrorReason::BrokenPromise):
+/// the caller learns the request was admitted and abandoned. To decline to
+/// answer on purpose, call [`never_reply`](Self::never_reply): nothing is
+/// sent, and the caller keeps waiting under its own deadline, failure bound
+/// or cancellation.
+///
+/// A reply handle is not a service reference: it has no byte form and
+/// cannot be forwarded to a third party. Its route is the connection
+/// (session) the request arrived on, or the local caller, fixed when the
+/// request was decoded.
+#[must_use = "dropping a reply handle without replying breaks the caller's promise"]
+pub struct ReplyHandle<M: RpcMethod> {
+    context: Option<ReplyContext>,
+    _method: PhantomData<fn(M::Reply)>,
+}
+
+impl<M: RpcMethod> ReplyHandle<M> {
+    pub(crate) fn new(context: ReplyContext) -> Self {
+        Self {
+            context: Some(context),
+            _method: PhantomData,
+        }
+    }
+
+    /// What the session upgrade established about the peer whose
+    /// connection delivered the request, or `None` for a caller in this
+    /// runtime.
+    #[must_use]
+    pub fn peer(&self) -> Option<&PeerContext> {
+        self.context
+            .as_ref()
+            .and_then(|context| context.peer.as_ref())
+    }
+
+    /// Whether anyone waits for a reply: `false` for a one-way request.
+    #[must_use]
+    pub fn expects_reply(&self) -> bool {
+        self.context
+            .as_ref()
+            .is_some_and(|context| !matches!(context.route, ReplyRoute::Discard))
+    }
+
+    /// Finish without replying and without breaking the promise.
+    ///
+    /// Nothing is sent. The caller is not told the request was abandoned: it
+    /// keeps waiting until its own deadline, failure bound or cancellation
+    /// ends the call (a caller without one waits until its connection
+    /// ends). Use it for requests that are answered some other way, or
+    /// deliberately never.
+    pub fn never_reply(mut self) {
+        if let Some(context) = self.context.take() {
+            Counters::bump(&context.counters.explicit_no_replies);
+            // Dropping the context releases the owed-reply count.
+            drop(context);
+        }
+    }
+
+    /// Reply to the caller.
+    ///
+    /// Returns whether the reply was handed to a live route. `true` is not a
+    /// delivery acknowledgement: the connection may still fail before the
+    /// caller reads it. `false` means the route was already gone (the caller
+    /// disconnected or its runtime stopped) or the request was one-way.
+    pub fn send(mut self, reply: &M::Reply) -> bool {
+        let Some(context) = self.context.take() else {
+            return false;
+        };
+        let outcome = match encode_to_vec(reply) {
+            Ok(body) => WireOutcome::Ok {
+                codec: <M::Reply as Wire>::CODEC,
+                body,
+            },
+            Err(_) => WireOutcome::Err(WireError::ReplyEncodeFailed),
+        };
+        context.deliver(outcome)
+    }
+
+    /// Detach the context without replying (admission refused the request).
+    pub(crate) fn defuse(mut self) -> Option<ReplyContext> {
+        self.context.take()
+    }
+}
+
+impl<M: RpcMethod> Drop for ReplyHandle<M> {
+    fn drop(&mut self) {
+        if let Some(context) = self.context.take() {
+            if matches!(context.route, ReplyRoute::Discard) {
+                return;
+            }
+            Counters::bump(&context.counters.broken_promises);
+            context.deliver(WireOutcome::Err(WireError::BrokenPromise));
+        }
+    }
+}
+
+impl<M: RpcMethod> std::fmt::Debug for ReplyHandle<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplyHandle")
+            .field("method", &M::NAME)
+            .field("pending", &self.context.is_some())
+            .finish()
+    }
+}

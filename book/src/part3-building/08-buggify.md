@@ -135,6 +135,8 @@ SimulationBuilder::new()
     .run();
 ```
 
+On the network surface the knobs include clog, partition, random-close and black-hole rates, and the in-flight bit-flip rate, which a seed can push from FoundationDB's rare 0.01% to around 1% of sends, enough for an integrity check above the transport to meet corruption within a bounded run.
+
 `Chaos::BuggifyKnobs` is a modifier, not a surface of its own. It only perturbs knobs on surfaces we already enabled, so it never silently switches on a fault family we left off. Like every other buggify decision, each spike is deterministic per seed, so a failing seed replays exactly.
 
 ## Probability Calibration

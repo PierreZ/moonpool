@@ -1,0 +1,44 @@
+[package]
+name = "moonpool-rpc-sim"
+version.workspace = true
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic-simulation harness, oracles and campaigns for moonpool-rpc"
+
+# The simulation side of moonpool-rpc lives here so the published crate never
+# depends on moonpool-sim, even through a feature.
+[dependencies]
+# `derive`: the interfaces campaign serves its role interface through the
+# generated dispatcher, next to hand-written well-known endpoints.
+moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0", features = ["derive"] }
+moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
+
+async-trait = "0.1"
+futures = "0.3"
+# `#[derive(prost::Message)]` expands to `::prost` paths.
+prost = "0.14"
+tracing = "0.1"
+
+[dev-dependencies]
+# The real-TCP example runs the same RPC code on the production providers.
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+
+[[bin]]
+name = "sim-rpc-foundations"
+path = "src/bin/sim/rpc_foundations.rs"
+
+[[bin]]
+name = "sim-rpc-delivery"
+path = "src/bin/sim/rpc_delivery.rs"
+
+[[bin]]
+name = "sim-rpc-interfaces"
+path = "src/bin/sim/rpc_interfaces.rs"
+
+[lints]
+workspace = true

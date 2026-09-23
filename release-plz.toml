@@ -36,6 +36,19 @@ version_group = "moonpool"
 name = "moonpool-hyper"
 version_group = "moonpool"
 
+# The optional typed-interface attribute of moonpool-rpc; no moonpool
+# dependencies, so it publishes before moonpool-rpc.
+[[package]]
+name = "moonpool-rpc-derive"
+version_group = "moonpool"
+
+# Typed dynamic-endpoint RPC over the provider traits; depends only on
+# moonpool-core (and the optional moonpool-rpc-derive), so it publishes in
+# the same tier as moonpool-hyper.
+[[package]]
+name = "moonpool-rpc"
+version_group = "moonpool"
+
 # Prometheus registry adapter for simulation metrics; depends only on
 # moonpool-core, so it publishes in the same tier as moonpool-hyper.
 [[package]]
@@ -78,6 +91,11 @@ publish = false
 
 [[package]]
 name = "moonpool-sim-examples"
+release = false
+publish = false
+
+[[package]]
+name = "moonpool-rpc-sim"
 release = false
 publish = false
 

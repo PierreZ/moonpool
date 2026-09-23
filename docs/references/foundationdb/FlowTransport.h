@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,10 +24,11 @@
 
 #include <algorithm>
 #include <map>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "fdbrpc/DDSketch.h"
-#include "fdbrpc/HealthMonitor.h"
-#include "flow/genericactors.actor.h"
+#include "flow/genericactors.h"
 #include "flow/network.h"
 #include "flow/FileIdentifier.h"
 #include "flow/ProtocolVersion.h"
@@ -37,19 +38,22 @@
 
 class IConnection;
 
+// WL: Well-known
 enum { WLTOKEN_ENDPOINT_NOT_FOUND = 0, WLTOKEN_PING_PACKET, WLTOKEN_UNAUTHORIZED_ENDPOINT, WLTOKEN_FIRST_AVAILABLE };
 
-#pragma pack(push, 4)
 class Endpoint {
 public:
 	// Endpoint represents a particular service (e.g. a serialized Promise<T> or PromiseStream<T>)
 	// An endpoint is either "local" (used for receiving data) or "remote" (used for sending data)
+	// FIXME: confirm if there is one endpoint per client and one per server.  Also,
+	// what if it's the same process talking to itself, does that change anything?
+	// Consider linking to a diagram on a web site.
 	constexpr static FileIdentifier file_identifier = 10618805;
 	using Token = UID;
 	NetworkAddressList addresses;
 	Token token{};
 
-	Endpoint() {}
+	Endpoint() = default;
 	Endpoint(const NetworkAddressList& addresses, Token token) : addresses(addresses), token(token) {
 		choosePrimaryAddress();
 	}
@@ -115,7 +119,6 @@ public:
 		}
 	}
 };
-#pragma pack(pop)
 
 namespace std {
 template <>
@@ -192,6 +195,8 @@ struct Peer : public ReferenceCounted<Peer> {
 
 class IPAllowList;
 
+// FIXME: describe what FlowTransport represents.  Is it everything
+// for a given process?  Is it some subset of what a process uses?
 class FlowTransport : NonCopyable {
 public:
 	FlowTransport(uint64_t transportId, int maxWellKnownEndpoints, IPAllowList const* allowList);
@@ -220,16 +225,13 @@ public:
 	// to avoid unnecessary calls to toString() and fmt overhead.
 	Standalone<StringRef> getLocalAddressAsString() const;
 
-	// Returns first local NetworkAddress.
-	void setLocalAddress(NetworkAddress const&);
-
 	// Returns all local NetworkAddress.
 	NetworkAddressList getLocalAddresses() const;
 
 	// Returns all peers that the FlowTransport is monitoring.
 	const std::unordered_map<NetworkAddress, Reference<Peer>>& getAllPeers() const;
 
-	// Returns the same of all peers that have attempted to connect, but have incompatible protocol versions
+	// Returns the set of all peers that have attempted to connect, but have incompatible protocol versions
 	std::map<NetworkAddress, std::pair<uint64_t, double>>* getIncompatiblePeers();
 
 	// Returns when getIncompatiblePeers has at least one peer which is incompatible.
@@ -292,7 +294,8 @@ public:
 	Endpoint loadedEndpoint(const UID& token);
 	Future<Void> loadedDisconnect();
 
-	HealthMonitor* healthMonitor();
+	// Returns peers whose recent failed connections have already been evicted from the transport peer map.
+	std::unordered_set<NetworkAddress> getRecentClosedPeers();
 
 	bool currentDeliveryPeerIsTrusted() const;
 	NetworkAddress currentDeliveryPeerAddress() const;

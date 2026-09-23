@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ struct ReliablePacket : FastAllocated<ReliablePacket> {
 	    *next; // Linked list of reliable packets on the same connection (only for the first packet in the cont chain)
 	int begin, end;
 
-	ReliablePacket() {}
+	ReliablePacket() = default;
 
 	void insertBefore(ReliablePacket* p);
 	void remove(); // Deletes this and cont chain, unlinks prev and next

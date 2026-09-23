@@ -272,6 +272,13 @@ impl<'a> ProcessManager<'a> {
         }
     }
 
+    /// Whether a boot of the process at `ip` is live (neither killed nor
+    /// finished aborting).
+    pub(crate) fn is_running(&self, ip: std::net::IpAddr) -> bool {
+        self.index_for_ip(ip)
+            .is_some_and(|index| self.handles[index].is_some())
+    }
+
     pub(crate) fn abort_process(&mut self, ip: std::net::IpAddr) {
         let Some(index) = self.index_for_ip(ip) else {
             tracing::warn!(%ip, "ProcessForceKill for unknown IP");

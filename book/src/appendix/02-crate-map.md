@@ -23,6 +23,9 @@ usually need.
                     |                       libc       |
                     +----------------------------------+
 
+  moonpool-rpc            (typed RPC over moonpool-core; depends on no sim crate)
+  moonpool-rpc-derive     (optional typed-interface attribute for moonpool-rpc)
+  moonpool-rpc-sim        (RPC simulation campaigns and oracles)
   moonpool-sim-examples  (raw TCP, axum, tonic, topology)
   moonpool-wasm-demo      (browser simulation over raw TCP)
   moonpool-calibrate      (measures the real host; depends on no moonpool crate)
@@ -51,6 +54,8 @@ select only `tokio`, then add `hyper` if it speaks HTTP or gRPC.
 - `RandomProvider` for runtime-controlled randomness
 - `StorageProvider` for file operations
 - `Providers` for carrying the five implementations as one bundle
+- `Resolver`, outside the bundle, for `host:port` name resolution
+  (`TokioResolver`; the simulation's `ScriptedResolver`)
 
 The Tokio implementations provide real production I/O. Simulation supplies
 deterministic implementations of the same traits.
@@ -117,6 +122,28 @@ moonpool-explorer. Disable it for `wasm32-unknown-unknown`.
 Client and server features are individually selectable. The featureless crate
 contains only the runtime adapters.
 
+### moonpool-rpc
+
+**Role**: Typed request/reply RPC between dynamically allocated endpoints,
+over provider TCP. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.md).
+
+**Key types**:
+
+- `RpcDriver` owns the listener, connections, registry and pending calls
+- `RpcHandle` registers endpoints and endpoint groups (`ServiceGroup`)
+- `ServiceRef` / `InterfaceRef` are protobuf-encoded references, decodable
+  without a runtime and embeddable in application messages
+- `ServiceClient::try_get_reply` is one at-most-once attempt
+- `RequestStream`, `IncomingRequest` and `ReplyHandle` are the serving side
+- `RpcError` pairs an `ErrorReason` with `Execution` knowledge
+- `Wire` / `CodecId` is the body codec seam (prost by default)
+- `Connector` / `Acceptor` / `Plaintext` is the session upgrade seam
+
+It depends only on moonpool-core, never on moonpool-sim, and builds for wasm
+with or without its `prost` feature. The optional `derive` feature adds
+`#[moonpool_rpc::service]` (the `moonpool-rpc-derive` proc-macro crate), which
+generates typed interfaces on top of the manual API.
+
 ### moonpool-prometheus
 
 **Role**: Report the metrics your application already keeps as simulation
@@ -151,6 +178,13 @@ the simulation runtime can build on wasm.
 Runnable examples cover raw TCP topology, axum over HTTP/1, tonic over HTTP/2,
 and exploration workloads. They are demonstration binaries, not library
 dependencies.
+
+### moonpool-rpc-sim
+
+The simulation harness for moonpool-rpc: process and workload definitions, the
+receipt-ledger oracle, the `sim-rpc-foundations`, `sim-rpc-delivery` and
+`sim-rpc-interfaces` campaigns and a real-TCP example. Not published, so the RPC crate never
+depends on the simulator.
 
 ### moonpool-wasm-demo
 

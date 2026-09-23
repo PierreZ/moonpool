@@ -67,6 +67,16 @@ jobs:
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-wasm-demo
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-rpc
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-rpc --no-default-features
+      - name: moonpool-rpc without its codec feature
+        run: nix develop --command cargo clippy -p moonpool-rpc --no-default-features --all-targets -- --deny warnings
+      - name: moonpool-rpc with its optional derive
+        run: nix develop --command cargo clippy -p moonpool-rpc -p moonpool-rpc-derive --features moonpool-rpc/derive --all-targets -- --deny warnings
+      # nextest skips doctests; the RPC crate's examples and compile-fail
+      # doctests (derive included) run here.
+      - name: moonpool-rpc doctests
+        run: nix develop --command cargo test -p moonpool-rpc --features derive --doc
       - name: Build without any rustflags (no tokio_unstable required)
         run: |
           # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml
@@ -78,6 +88,8 @@ jobs:
             -p moonpool-explorer \
             -p moonpool-hyper \
             -p moonpool-prometheus \
+            -p moonpool-rpc \
+            -p moonpool-rpc-derive \
             -p moonpool-sim \
             -p moonpool
       - name: Lean production dependency tree excludes sim/explorer
@@ -96,6 +108,21 @@ jobs:
             echo "::error::lean production build pulled in prometheus"
             exit 1
           fi
+      - name: moonpool-rpc production tree excludes sim/explorer
+        run: |
+          for features in "--no-default-features" ""; do
+            tree=$(nix develop --command cargo tree -p moonpool-rpc $features -e no-dev)
+            echo "$tree"
+            if echo "$tree" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-assertions|moonpool-buggify|tokio v"; then
+              echo "::error::moonpool-rpc ($features) pulled in a sim/explorer crate or a tokio runtime"
+              exit 1
+            fi
+            # The derive is opt-in: no proc-macro crate of ours by default.
+            if echo "$tree" | grep -qE "moonpool-rpc-derive"; then
+              echo "::error::moonpool-rpc ($features) pulled in the optional derive"
+              exit 1
+            fi
+          done
 
   # The fork-based explorer must keep working on macOS, not just Linux: same
   # POSIX surface (fork/waitpid/mmap MAP_SHARED), but darwin is the platform
@@ -127,6 +154,9 @@ jobs:
           - metrics-service
           - topology
           - tonic-grpc
+          - rpc-foundations
+          - rpc-delivery
+          - rpc-interfaces
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main

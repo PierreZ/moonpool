@@ -1,0 +1,18 @@
+error[E0277]: the trait bound `Other: InterfaceMethod<Kv>` is not satisfied
+  --> tests/ui/foreign_interface_method.rs:21:52
+   |
+21 |     let _ = InterfaceRef::<Kv>::default().method::<Other>();
+   |                                           ------   ^^^^^ unsatisfied trait bound
+   |                                           |
+   |                                           required by a bound introduced by this call
+   |
+help: the trait `InterfaceMethod<Kv>` is not implemented for `Other`
+  --> tests/ui/foreign_interface_method.rs:11:1
+   |
+11 | struct Other;
+   | ^^^^^^^^^^^^
+note: required by a bound in `InterfaceRef::<I>::method`
+  --> $WORKSPACE/crates/moonpool-rpc/src/interface/reference.rs
+   |
+   |     pub fn method<M: InterfaceMethod<I>>(&self) -> Result<ServiceRef<M>, DecodeError> {
+   |                      ^^^^^^^^^^^^^^^^^^ required by this bound in `InterfaceRef::<I>::method`

@@ -80,7 +80,7 @@
 //!
 //! - Random close: FDB sim2.actor.cpp:580-605
 //! - Partitions: FDB SimClogging, TigerBeetle partition modes
-//! - Bit flips: FDB FlowTransport.actor.cpp:1297
+//! - Bit flips: FDB FlowTransport.cpp:1326 (`scanPackets`, `buggify(0.0001)`)
 //! - Clock drift: FDB sim2.actor.cpp:1058-1064
 //! - Connect failures: FDB sim2.actor.cpp:1243-1250
 
@@ -621,6 +621,19 @@ impl ChaosConfiguration {
         self.random_close_probability =
             crate::buggify_knob!(self.random_close_probability, 0.01..0.1);
         self.black_hole_probability = crate::buggify_knob!(self.black_hole_probability, 0.01..0.1);
+        // Bit flips are spiked only where the seed enabled them, so a swarm
+        // seed without the family never gains it. The sampled rate
+        // (0.001%–0.02% per send) is too rare for integrity checks above the
+        // transport (checksummed framing) to see corruption in a bounded run;
+        // the spike makes it a per-seed extreme instead. This call site is one
+        // more buggify draw on seeds with bit flips enabled, so it shifts the
+        // draw schedule (and so which seeds hit what) for every downstream
+        // user of `Chaos::BuggifyKnobs`; it never changes whether a seed
+        // replays identically.
+        if self.bit_flip_probability > 0.0 {
+            self.bit_flip_probability =
+                crate::buggify_knob!(self.bit_flip_probability, 0.001..0.01);
+        }
     }
 
     /// Turn every network fault family off, leaving performance shaping alone.
@@ -1047,6 +1060,31 @@ mod swarm_tests {
         reset_sim_rng();
         set_sim_seed(seed);
         NetworkConfiguration::swarm_for_seed()
+    }
+
+    /// The bit-flip knob spikes the rate on some seeds and never switches
+    /// the family on for a seed that left it off.
+    #[test]
+    fn bit_flip_knob_spikes_only_enabled_bit_flips() {
+        let mut spiked = false;
+        for seed in 0..400_u64 {
+            reset_sim_rng();
+            set_sim_seed(seed);
+            crate::chaos::buggify_init(0.5);
+            let mut config = NetworkConfiguration::swarm_for_seed();
+            let enabled = config.chaos.bit_flip_probability > 0.0;
+            config.chaos.apply_buggify_knobs();
+            if enabled {
+                spiked |= config.chaos.bit_flip_probability >= 0.001;
+            } else {
+                assert!(
+                    config.chaos.bit_flip_probability.abs() < f64::EPSILON,
+                    "seed {seed}: the knob enabled a disabled family"
+                );
+            }
+        }
+        crate::chaos::buggify_reset();
+        assert!(spiked, "no seed spiked the bit-flip rate");
     }
 
     #[test]

@@ -19,6 +19,19 @@ test-threads = "num-cpus"
 filter = 'binary(metastable_grpc_retry_storm)'
 slow-timeout = { period = "10s", terminate-after = 6 }
 
+# The bounded RPC campaigns run tens of seeds of full client/server traffic
+# (the bit-flip scenario eighty, each thousands of frames) in the debug
+# profile.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim)'
+slow-timeout = { period = "10s", terminate-after = 6 }
+
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"
+
+# The compile-fail cases build moonpool-rpc and its dependencies in their
+# own trybuild workspace on the first run: give them minutes, not seconds.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-derive) and binary(compile_fail)'
+slow-timeout = { period = "60s", terminate-after = 10 }

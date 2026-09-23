@@ -20,8 +20,11 @@ Reading order:
    virtual time, `Sim2Conn`, reboot and kill mechanics), `Net2.actor.cpp` and
    `Net2Packet.h` (real networking and packet queuing), `sim2-file.actor.cpp`,
    `AsyncFileNonDurable.actor.h`, `AsyncFileChaos.h`, `IAsyncFile.h` (the
-   file stack), `Buggify.h`, `FlowTransport.actor.cpp`, `FailureMonitor`,
-   `LoadBalance`, `lost-response.md`.
+   file stack), `Buggify.h`, `lost-response.md`. The RPC layer
+   (`FlowTransport.cpp`, `fdbrpc.h`, `genericactors.h`, `FailureMonitor`,
+   `LoadBalance`, `QueueModel`, `TLSConfig`, ...) is a newer snapshot than the
+   sim files; `docs/references/foundationdb/README.md` says which file comes
+   from which upstream SHA, so never combine behaviour across the two.
 3. `docs/references/tigerbeetle/` (`packet_simulator.zig`, `storage.zig`,
    `storage_checker.zig`, `storage_fuzz.zig`, `testing-storage.zig`) for the
    packet-level and storage-fuzzing view, and `docs/references/orleans/MessageCenter.cs`

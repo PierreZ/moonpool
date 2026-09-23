@@ -3,7 +3,7 @@
  *
  * This source file is part of the FoundationDB open source project
  *
- * Copyright 2013-2024 Apple Inc. and the FoundationDB project authors
+ * Copyright 2013-2026 Apple Inc. and the FoundationDB project authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ ERROR( end_of_stream, 1, "End of stream" )
 ERROR( operation_failed, 1000, "Operation failed")
 ERROR( wrong_shard_server, 1001, "Shard is not available from this server")
 ERROR( operation_obsolete, 1002, "Operation result no longer necessary")
-ERROR( cold_cache_server, 1003, "Cache server is not warm for this range")
+// 1003 removed
 ERROR( timed_out, 1004, "Operation timed out" )
 ERROR( coordinated_state_conflict, 1005, "Conflict occurred while changing coordination information" )
 ERROR( all_alternatives_failed, 1006, "All alternatives failed" )
@@ -78,17 +78,16 @@ ERROR( dd_not_found, 1053, "Data distributor not found")
 ERROR( wrong_connection_file, 1054, "Connection file mismatch")
 ERROR( version_already_compacted, 1055, "The requested changes have been compacted away")
 ERROR( local_config_changed, 1056, "Local configuration file has changed. Restart and apply these changes" )
-ERROR( failed_to_reach_quorum, 1057, "Failed to reach quorum from configuration database nodes. Retry sending these requests" )
 ERROR( unsupported_format_version, 1058, "Format version not supported" )
 ERROR( unknown_change_feed, 1059, "Change feed not found" )
 ERROR( change_feed_not_registered, 1060, "Change feed not registered" )
-ERROR( granule_assignment_conflict, 1061, "Conflicting attempts to assign blob granules" )
+// 1061 removed
 ERROR( change_feed_cancelled, 1062, "Change feed was cancelled" )
-ERROR( blob_granule_file_load_error, 1063, "Error loading a blob file during granule materialization" )
-ERROR( blob_granule_transaction_too_old, 1064, "Read version is older than blob granule history supports" )
-ERROR( blob_manager_replaced, 1065, "This blob manager has been replaced." )
+// 1063 removed
+// 1064 removed
+// 1065 removed
 ERROR( change_feed_popped, 1066, "Tried to read a version older than what has been popped from the change feed" )
-ERROR( remote_kvs_cancelled, 1067, "The remote key-value store is cancelled" )
+// 1067 removed
 ERROR( page_header_wrong_page_id, 1068, "Page header does not match location on disk" )
 ERROR( page_header_checksum_failed, 1069, "Page header checksum failed" )
 ERROR( page_header_version_not_supported, 1070, "Page header version is not supported" )
@@ -98,9 +97,9 @@ ERROR( unexpected_encoding_type, 1073, "Page content decoding failed" )
 ERROR( encryption_key_not_found, 1074, "Encryption key not found" )
 ERROR( data_move_cancelled, 1075, "Data move was cancelled" )
 ERROR( data_move_dest_team_not_found, 1076, "Dest team was not found for data move" )
-ERROR( blob_worker_full, 1077, "Blob worker cannot take on more granule assignments" )
+// 1077 removed
 ERROR( grv_proxy_memory_limit_exceeded, 1078, "GetReadVersion proxy memory limit exceeded" )
-ERROR( blob_granule_request_failed, 1079, "BlobGranule request failed" )
+// 1079 removed
 ERROR( storage_too_many_feed_streams, 1080, "Too many feed streams to a single storage server" )
 ERROR( storage_engine_not_initialized, 1081, "Storage engine was never successfully initialized." )
 ERROR( unknown_storage_engine, 1082, "Storage engine type is not recognized." )
@@ -140,9 +139,9 @@ ERROR( please_reboot_kv_store, 1219, "Need to reboot the storage engine")
 ERROR( incompatible_software_version, 1220, "Current software does not support database format" )
 ERROR( audit_storage_failed, 1221, "Validate storage consistency operation failed" )
 ERROR( audit_storage_exceeded_request_limit, 1222, "Exceeded the max number of allowed concurrent audit storage requests" )
-ERROR( proxy_tag_throttled, 1223, "Exceeded maximum proxy tag throttling duration" )
+// 1223 removed
 ERROR( key_value_store_deadline_exceeded, 1224, "Exceeded maximum time allowed to read or write.")
-ERROR( storage_quota_exceeded, 1225, "Exceeded the maximum storage quota allocated to the tenant.")
+// 1225 has been removed
 ERROR( audit_storage_error, 1226, "Found data corruption" )
 ERROR( master_failed, 1227, "Cluster recovery terminating because master has failed")
 ERROR( test_failed, 1228, "Test failed" )
@@ -166,6 +165,12 @@ ERROR( bulkload_manifest_decode_error, 1246, "Bulkload manifest string is failed
 ERROR( range_lock_reject, 1247, "Range lock is rejected" )
 ERROR( range_unlock_reject, 1248, "Range unlock is rejected" )
 ERROR( bulkload_dataset_not_cover_required_range, 1249, "Bulkload dataset does not cover the required range" )
+ERROR( bulkload_invalid_configuration, 1250, "BulkLoad requires cluster configuration with both shard_encode_location_metadata=1 and enable_read_lock_on_range=1" )
+ERROR( transaction_grv_queue_rejected, 1251, "GRV request rejected because estimated queue wait exceeds transaction limit" )
+ERROR( finish_move_keys_too_many_retries, 1252, "finishMoveKeys exceeded retry limit" )
+ERROR( start_move_keys_too_many_retries, 1253, "startMoveKeys exceeded retry limit" )
+ERROR( cdc_proxy_failed, 1254, "Cluster recovery terminating because a CDCProxy failed" )
+ERROR( cdc_tlog_peek_reply_too_large, 1255, "TLog CDC peek reply exceeds configured byte limit" )
 
 // 15xx Platform errors
 ERROR( platform_error, 1500, "Platform error" )
@@ -226,17 +231,14 @@ ERROR( transaction_read_only, 2023, "Attempted to commit a transaction specified
 ERROR( invalid_cache_eviction_policy, 2024, "Invalid cache eviction policy, only random and lru are supported" )
 ERROR( network_cannot_be_restarted, 2025, "Network can only be started once" )
 ERROR( blocked_from_network_thread, 2026, "Detected a deadlock in a callback called from the network thread" )
-ERROR( invalid_config_db_range_read, 2027, "Invalid configuration database range read" )
-ERROR( invalid_config_db_key, 2028, "Invalid configuration database key provided" )
-ERROR( invalid_config_path, 2029, "Invalid configuration path" )
 ERROR( mapper_bad_index, 2030, "The index in K[] or V[] is not a valid number or out of range" )
 ERROR( mapper_no_such_key, 2031, "A mapped key is not set in database" )
 ERROR( mapper_bad_range_decriptor, 2032, "\"{...}\" must be the last element of the mapper tuple" )
 ERROR( quick_get_key_values_has_more, 2033, "One of the mapped range queries is too large" )
 ERROR( quick_get_value_miss, 2034, "Found a mapped key that is not served in the same SS" )
 ERROR( quick_get_key_values_miss, 2035, "Found a mapped range that is not served in the same SS" )
-ERROR( blob_granule_no_ryw, 2036, "Blob Granule Read Transactions must be specified as ryw-disabled" )
-ERROR( blob_granule_not_materialized, 2037, "Blob Granule Read was not materialized" )
+// 2036 removed
+// 2037 removed
 ERROR( get_mapped_key_values_has_more, 2038, "getMappedRange does not support continuation for now" )
 ERROR( get_mapped_range_reads_your_writes, 2039, "getMappedRange tries to read data that were previously written in the transaction" )
 ERROR( checkpoint_not_found, 2040, "Checkpoint not found" )
@@ -244,7 +246,7 @@ ERROR( key_not_tuple, 2041, "The key cannot be parsed as a tuple" );
 ERROR( value_not_tuple, 2042, "The value cannot be parsed as a tuple" );
 ERROR( mapper_not_tuple, 2043, "The mapper cannot be parsed as a tuple" );
 ERROR( invalid_checkpoint_format, 2044, "Invalid checkpoint format" )
-ERROR( invalid_throttle_quota_value, 2045, "Invalid quota value. Note that reserved_throughput cannot exceed total_throughput" )
+// 2045 removed
 ERROR( failed_to_create_checkpoint, 2046, "Failed to create a checkpoint" )
 ERROR( failed_to_restore_checkpoint, 2047, "Failed to restore a checkpoint" )
 ERROR( failed_to_create_checkpoint_shard_metadata, 2048, "Failed to dump shard metadata for a checkpoint to a sst file" )
@@ -267,7 +269,7 @@ ERROR( special_keys_no_module_found, 2113, "Special key space range read does no
 ERROR( special_keys_write_disabled, 2114, "Special Key space is not allowed to write by default. Refer to the `special_key_space_enable_writes` transaction option for more details." )
 ERROR( special_keys_no_write_module_found, 2115, "Special key space key or keyrange in set or clear does not intersect a module" )
 ERROR( special_keys_cross_module_clear, 2116, "Special key space clear crosses modules" )
-ERROR( special_keys_api_failure, 2117, "Api call through special keys failed. For more information, call get on special key 0xff0xff/error_message to get a json string of the error message." )
+ERROR( special_keys_api_failure, 2117, "Api call through special keys failed. For more information, call get - within the same transaction - on special key 0xff0xff/error_message to get a json string of the error message." )
 ERROR( client_lib_invalid_metadata, 2118, "Invalid client library metadata." )
 ERROR( client_lib_already_exists, 2119, "Client library with same identifier already exists on the cluster." )
 ERROR( client_lib_not_found, 2120, "Client library for the given identifier not found." )
@@ -277,37 +279,7 @@ ERROR( no_external_client_provided, 2123, "No external client library provided."
 ERROR( all_external_clients_failed, 2124, "All external clients have failed." )
 ERROR( incompatible_client, 2125, "None of the available clients match the protocol version of the cluster." )
 
-ERROR( tenant_name_required, 2130, "Tenant name must be specified to access data in the cluster" )
-ERROR( tenant_not_found, 2131, "Tenant does not exist" )
-ERROR( tenant_already_exists, 2132, "A tenant with the given name already exists" )
-ERROR( tenant_not_empty, 2133, "Cannot delete a non-empty tenant" )
-ERROR( invalid_tenant_name, 2134, "Tenant name cannot begin with \\xff" )
-ERROR( tenant_prefix_allocator_conflict, 2135, "The database already has keys stored at the prefix allocated for the tenant" )
-ERROR( tenants_disabled, 2136, "Tenants have been disabled in the cluster" )
-ERROR( illegal_tenant_access, 2138, "Illegal tenant access" )
-ERROR( invalid_tenant_group_name, 2139, "Tenant group name cannot begin with \\xff" )
-ERROR( invalid_tenant_configuration, 2140, "Tenant configuration is invalid" )
-ERROR( cluster_no_capacity, 2141, "Cluster does not have capacity to perform the specified operation" )
-ERROR( tenant_removed, 2142, "The tenant was removed" )
-ERROR( invalid_tenant_state, 2143, "Operation cannot be applied to tenant in its current state" )
-ERROR( tenant_locked, 2144, "Tenant is locked" )
-
-ERROR( invalid_cluster_name, 2160, "Data cluster name cannot begin with \\xff" )
-ERROR( invalid_metacluster_operation, 2161, "Metacluster operation performed on non-metacluster" )
-ERROR( cluster_already_exists, 2162, "A data cluster with the given name already exists" )
-ERROR( cluster_not_found, 2163, "Data cluster does not exist" )
-ERROR( cluster_not_empty, 2164, "Cluster must be empty" )
-ERROR( cluster_already_registered, 2165, "Data cluster is already registered with a metacluster" )
-ERROR( metacluster_no_capacity, 2166, "Metacluster does not have capacity to create new tenants" )
-ERROR( management_cluster_invalid_access, 2167, "Standard transactions cannot be run against the management cluster" )
-ERROR( tenant_creation_permanently_failed, 2168, "The tenant creation did not complete in a timely manner and has permanently failed" )
-ERROR( cluster_removed, 2169, "The cluster is being removed from the metacluster" )
-ERROR( cluster_restoring, 2170, "The cluster is being restored to the metacluster" )
-ERROR( invalid_data_cluster, 2171, "The data cluster being restored has no record of its metacluster" )
-ERROR( metacluster_mismatch, 2172, "The cluster does not have the expected name or is associated with a different metacluster" )
-ERROR( conflicting_restore, 2173, "Another restore is running for the same data cluster" )
-ERROR( invalid_metacluster_configuration, 2174, "Metacluster configuration is invalid" )
-ERROR( unsupported_metacluster_version, 2175, "Client is not compatible with the metacluster" )
+// 2130 to 2175 have been removed
 
 // 2200 - errors from bindings and official APIs
 ERROR( api_version_unset, 2200, "API version is not set" )
@@ -353,7 +325,6 @@ ERROR( backup_does_not_exist, 2319, "Backup does not exist")
 ERROR( backup_not_filterable_with_key_ranges, 2320, "Backup before 6.3 cannot be filtered with key ranges")
 ERROR( backup_not_overlapped_with_keys_filter, 2321, "Backup key ranges doesn't overlap with key ranges filter")
 ERROR( bucket_not_in_url, 2322, "bucket is not in the URL for backup" )
-ERROR( backup_parse_s3_response_failure, 2323, "cannot parse s3 response properly" )
 ERROR( restore_invalid_version, 2361, "Invalid restore version")
 ERROR( restore_corrupted_data, 2362, "Corrupted backup data")
 ERROR( restore_missing_data, 2363, "Missing backup data")
@@ -374,6 +345,10 @@ ERROR( blob_restore_invalid_manifest_url, 2386, "Invalid manifest URL" )
 ERROR( blob_restore_corrupted_manifest, 2387, "Corrupted manifest" )
 ERROR( blob_restore_missing_manifest, 2388, "Missing manifest" )
 ERROR( blob_migrator_replaced, 2389, "Blob migrator is replaced")
+ERROR( restore_bulkload_dataset_incomplete, 2390, "BulkDump dataset incomplete. Use --rangefile flag")
+ERROR( restore_bulkload_failed, 2391, "BulkLoad operation failed")
+ERROR( backup_bulkdump_timeout, 2392, "BulkDump operation timed out")
+ERROR( backup_bulkdump_failed, 2393, "BulkDump operation failed")
 
 ERROR( key_not_found, 2400, "Expected key is missing")
 ERROR( json_malformed, 2401, "JSON string was malformed")

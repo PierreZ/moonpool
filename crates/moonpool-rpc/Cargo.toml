@@ -1,0 +1,59 @@
+[package]
+name = "moonpool-rpc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed dynamic-endpoint RPC over the moonpool provider traits"
+documentation = "https://docs.rs/moonpool-rpc"
+readme = "README.md"
+keywords = ["rpc", "simulation", "distributed-systems", "deterministic"]
+categories = ["network-programming"]
+
+[features]
+# The crate is generic over `moonpool_core::Providers` and ships no providers of
+# its own. Features only choose payload codecs; the frame envelope is
+# hand-written and codec-independent, so `--no-default-features` is still a
+# working transport (applications implement `Wire` themselves) and builds for
+# wasm32-unknown-unknown.
+default = ["prost"]
+# Protobuf payloads (the codec): every `prost::Message + Default` type is a
+# `Wire` message, with Rust-defined `#[derive(prost::Message)]` structs.
+prost = ["dep:prost"]
+# `#[moonpool_rpc::service]`: typed interfaces, dispatchers and clients
+# generated from a trait, on top of the manual API. Off by default so the
+# production tree stays free of proc-macro dependencies unless asked for.
+derive = ["dep:moonpool-rpc-derive"]
+
+[dependencies]
+# Only the provider traits. Never moonpool-sim or moonpool-explorer: the
+# simulation harness lives in the non-published moonpool-rpc-sim crate.
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+
+futures = "0.3"
+moonpool-rpc-derive = { path = "../moonpool-rpc-derive", version = "0.8.0", optional = true }
+# The payload codec. See `codec` for the selection record.
+prost = { version = "0.14", default-features = false, features = ["std", "derive"], optional = true }
+thiserror = "2.0"
+tracing = "0.1"
+# Frame checksums: XXH3-64, the hash FDB's FlowTransport uses for the same
+# purpose. Pure Rust, no C toolchain, builds for wasm32.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+# The generated interface is tested next to the manual one (tests/derive.rs)
+# without turning the `derive` feature on for every test build.
+moonpool-rpc-derive = { path = "../moonpool-rpc-derive", version = "0.8.0" }
+# Real TCP: the production providers on both Tokio runtime flavors.
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
+# `#[derive(prost::Message)]` in tests expands to `::prost` paths.
+prost = "0.14"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
+
+[[example]]
+name = "recruitment"
+required-features = ["prost"]
+
+[lints]
+workspace = true

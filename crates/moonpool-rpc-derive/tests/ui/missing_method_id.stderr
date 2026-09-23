@@ -1,0 +1,5 @@
+error: a service method needs an explicit `id = ...`: ids are never derived from names or order
+ --> tests/ui/missing_method_id.rs:4:14
+  |
+4 |     async fn get(&self, key: String) -> String;
+  |              ^^^

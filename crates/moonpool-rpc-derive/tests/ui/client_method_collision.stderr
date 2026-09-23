@@ -1,0 +1,5 @@
+error: a method named `bind` would collide with the generated client's `bind`
+ --> tests/ui/client_method_collision.rs:4:14
+  |
+4 |     async fn bind(&self, key: String) -> String;
+  |              ^^^^
