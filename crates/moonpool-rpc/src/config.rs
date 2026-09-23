@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use crate::endpoint::Incarnation;
 use crate::protocol::{
-    HELLO_ENVELOPE_LEN, REJECTION_ENVELOPE_LEN, STREAM_END_ENVELOPE_LEN, request_envelope_len,
-    stream_item_frame_len, stream_request_envelope_len,
+    CREDENTIALS_VERSION, HELLO_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION,
+    REJECTION_ENVELOPE_LEN, STREAM_END_ENVELOPE_LEN, request_envelope_len, stream_item_frame_len,
+    stream_request_envelope_len,
 };
 
 /// The smallest accepted [`RpcConfig::max_frame_bytes`]: every fixed
@@ -88,6 +89,18 @@ pub struct RpcConfig {
     pub limits: ResourceLimits,
     /// Reply stream credit and stream budgets.
     pub streams: StreamPolicy,
+    /// The protocol versions this runtime speaks, within
+    /// [`MIN_PROTOCOL_VERSION`](crate::protocol::MIN_PROTOCOL_VERSION)`..=`[`PROTOCOL_VERSION`](crate::protocol::PROTOCOL_VERSION)
+    /// (the default: all of them). Each session runs at the highest version
+    /// both sides speak; a peer with none in common is refused at the
+    /// handshake. Narrow it to pin a version during a rolling upgrade. A
+    /// runtime whose [`security`](Self::security) verifies credentials
+    /// speaks version 2 and up only (see [`advertised_versions`](Self::advertised_versions)).
+    pub protocol_versions: std::ops::RangeInclusive<u16>,
+    /// Who may call this runtime's endpoints and what its own calls carry.
+    /// The default verifies nothing, so private endpoints refuse every
+    /// caller; see [`SecurityConfig`](crate::security::SecurityConfig).
+    pub security: crate::security::SecurityConfig,
 }
 
 /// Admission and buffering budgets: what one runtime admits, queues and
@@ -462,9 +475,51 @@ impl RpcConfig {
         if let Some((name, _)) = zero {
             return Err(InvalidConfig(format!("{name} must be positive")));
         }
+        self.validate_versions()?;
         self.peer.validate()?;
         self.limits.validate()?;
         self.streams.validate()
+    }
+
+    fn validate_versions(&self) -> Result<(), InvalidConfig> {
+        let (low, high) = (
+            *self.protocol_versions.start(),
+            *self.protocol_versions.end(),
+        );
+        if low > high || low < MIN_PROTOCOL_VERSION || high > PROTOCOL_VERSION {
+            return Err(InvalidConfig(format!(
+                "protocol_versions {low}..={high} outside the supported \
+                 {MIN_PROTOCOL_VERSION}..={PROTOCOL_VERSION}"
+            )));
+        }
+        if self.security.verifies_credentials() && high < CREDENTIALS_VERSION {
+            return Err(InvalidConfig(format!(
+                "credentials are verified, which needs protocol version \
+                 {CREDENTIALS_VERSION}, but protocol_versions ends at {high}"
+            )));
+        }
+        if self.security.max_credential_bytes() > usize::from(u16::MAX) {
+            return Err(InvalidConfig(
+                "security.max_credential_bytes above the 65535-byte metadata section".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The version range this runtime announces in its handshake:
+    /// [`protocol_versions`](Self::protocol_versions), raised to start at
+    /// version 2 when credentials are verified (a version 1 peer cannot
+    /// carry one, so it is refused at the handshake rather than admitted
+    /// anonymously: no silent downgrade).
+    #[must_use]
+    pub fn advertised_versions(&self) -> (u16, u16) {
+        let low = *self.protocol_versions.start();
+        let low = if self.security.verifies_credentials() {
+            low.max(CREDENTIALS_VERSION)
+        } else {
+            low
+        };
+        (low, *self.protocol_versions.end())
     }
 }
 
@@ -486,6 +541,8 @@ impl Default for RpcConfig {
             peer: PeerPolicy::default(),
             limits: ResourceLimits::default(),
             streams: StreamPolicy::default(),
+            protocol_versions: MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION,
+            security: crate::security::SecurityConfig::default(),
         }
     }
 }

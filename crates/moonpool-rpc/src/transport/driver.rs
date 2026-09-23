@@ -21,7 +21,7 @@ use super::peer::jittered;
 use super::upgrade::{Acceptor, Connector, Plaintext};
 use super::{Command, Listener, SessionUpgrade, Shared, Stream};
 use crate::config::RpcConfig;
-use crate::protocol::decode_message;
+use crate::protocol::{PROTOCOL_VERSION, decode_message_at};
 use crate::stats::{Counters, TaskGuard};
 
 type ChildFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -150,12 +150,14 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
         RpcHandle::new(&self.shared)
     }
 
-    /// Drive the runtime; drop it to shut down.
+    /// Drive the runtime; drop it to shut down at once.
     ///
     /// Completes only when the listener fails fatally (see
     /// [`is_transient_accept_error`]), returning that error; transient accept
     /// errors are retried with bounded backoff on provider time. A
-    /// client-only runtime never completes.
+    /// client-only runtime never completes. For a graceful shutdown, keep
+    /// polling it next to [`RpcHandle::shutdown`] and drop it once that
+    /// resolves.
     pub async fn run(self) -> io::Error {
         let Self {
             shared,
@@ -187,6 +189,11 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
                     }
                     Command::Accepted(connection, stream) => {
                         Box::pin(drive_inbound(shared, upgrade, connection, stream))
+                    }
+                    Command::StopAccepting => {
+                        // A graceful shutdown began: close the listener.
+                        acceptor = None;
+                        continue;
                     }
                 };
                 children.push(child);
@@ -366,14 +373,27 @@ where
         shared.config.read_chunk_bytes,
         batch,
         |payload| {
-            let message = decode_message(&payload)
+            // Before the handshake only a Hello is valid, whose layout every
+            // version shares; after it, the negotiated version decides.
+            let version = connection
+                .peer_hello()
+                .map_or(PROTOCOL_VERSION, |hello| hello.version);
+            let message = decode_message_at(&payload, version)
                 .map_err(|error| CloseReason::Protocol(format!("bad envelope: {error}")))?;
             shared.on_message(connection, message)
         },
     );
-    let write = write_loop(connection, writer, batch, |call_id, frame_len| {
-        shared.admit_transmit(connection, call_id, frame_len)
-    });
+    let write = write_loop(
+        connection,
+        writer,
+        batch,
+        |call_id, frame_len| shared.admit_transmit(connection, call_id, frame_len),
+        // A session closed from this side closes its stream (a TLS
+        // close_notify), for at most the handshake budget.
+        || async {
+            let _ = shared.time().sleep(shared.config.handshake_timeout).await;
+        },
+    );
     let deadline = handshake_deadline(shared, connection, shared.config.handshake_timeout);
     let liveness = monitor(shared, connection);
     futures::pin_mut!(read, write, deadline, liveness);

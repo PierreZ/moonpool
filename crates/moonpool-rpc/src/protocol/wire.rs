@@ -73,13 +73,35 @@
 //! (detail: the application's code), `14` stream protocol violation (a
 //! regressing, excess or misaligned acknowledgement), `15` streaming
 //! mismatch (a stream request for a unary method or the reverse; detail:
-//! `1` when the endpoint streams). Detail is `0` when it carries nothing.
+//! `1` when the endpoint streams). Version 2 adds `16` unauthenticated
+//! (detail: the [`CredentialError`] code), `17` permission denied and `18`
+//! shutting down (the server's runtime is draining). Detail is `0` when it
+//! carries nothing.
 //!
-//! Version 1 is unreleased and was extended in place by the packages that
-//! built it (the reply stream frames, flag and statuses 13–15 arrived with
-//! #216); the golden vectors in the tests pin version 1 as it stands. Once
-//! released, changing this layout, adding a kind or a status code requires
-//! a new [`PROTOCOL_VERSION`].
+//! # Versions
+//!
+//! | Version | Adds |
+//! |---|---|
+//! | 1 | everything above except what version 2 adds: handshake, requests, replies, liveness, reply streams (stream frames, flag and statuses 13–15 were added to version 1 in place by #216, before any release) |
+//! | 2 | the metadata section carries credentials ([`metadata`](super::metadata)) and the server verifies them; statuses 16–18 |
+//!
+//! Every frame layout is identical in both versions: version 2 changes
+//! what the metadata section means and adds status codes. The rule that
+//! keeps an older peer safe: **nothing introduced after the negotiated
+//! version is ever sent**. A rejection a version 1 peer cannot decode is
+//! sent as the version 1 status that proves the same about execution
+//! ([`WireError::for_version`]: a denial becomes "endpoint not found", as
+//! `FoundationDB`'s unauthorized-endpoint notice marks the endpoint failed
+//! for its caller; shutting down becomes "overloaded"), and a version 1
+//! session ignores credentials, as version 1 specifies. A server that
+//! verifies credentials speaks only version 2, so an older client is
+//! refused at the handshake rather than let through without one. The
+//! decoder is version-aware too ([`decode_message_at`]): a status newer
+//! than the session's version is a protocol violation, never guessed at.
+//!
+//! The golden vectors of both versions are in `tests/fixtures/wire-v1.txt`
+//! and `tests/fixtures/wire-v2.txt`. Changing a layout, a kind or a status
+//! code requires a new [`PROTOCOL_VERSION`].
 
 use thiserror::Error;
 
@@ -88,19 +110,24 @@ use super::schema::{MethodId, SchemaVersion};
 use crate::codec::CodecId;
 use crate::endpoint::{EndpointToken, Incarnation};
 use crate::interface::InterfaceId;
+use crate::security::CredentialError;
 
 /// Magic number opening every connection's first frame (`"MPRC"`).
 pub const PROTOCOL_MAGIC: u32 = 0x4d50_5243;
 
-/// The newest envelope layout version this build speaks.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// The newest envelope version this build speaks.
+pub const PROTOCOL_VERSION: u16 = 2;
 
-/// The oldest envelope layout version this build speaks.
+/// The oldest envelope version this build speaks: the supported window
+/// for rolling upgrades is `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION`.
 ///
-/// A peer whose announced range does not overlap
-/// `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION` is refused before any request
-/// is admitted. Supporting a wider window for rolling upgrades is #218.
+/// A peer whose announced range does not overlap the runtime's
+/// [`RpcConfig::protocol_versions`](crate::RpcConfig::protocol_versions)
+/// (within this window) is refused before any request is admitted.
 pub const MIN_PROTOCOL_VERSION: u16 = 1;
+
+/// The first version whose sessions carry verified credentials.
+pub const CREDENTIALS_VERSION: u16 = 2;
 
 /// The highest version both ranges contain, if any.
 #[must_use]
@@ -298,9 +325,49 @@ pub enum WireError {
         /// Whether the endpoint's method streams its replies.
         endpoint_streams: bool,
     },
+    /// The caller is not (validly) authenticated for the endpoint
+    /// (version 2).
+    Unauthenticated {
+        /// Why its credential was not accepted.
+        reason: CredentialError,
+    },
+    /// The caller is authenticated but not allowed to call the endpoint
+    /// (version 2).
+    PermissionDenied,
+    /// The server's runtime is shutting down and admits nothing new
+    /// (version 2).
+    ShuttingDown,
 }
 
 impl WireError {
+    /// The first protocol version that defines this status.
+    #[must_use]
+    pub const fn since(self) -> u16 {
+        match self {
+            Self::Unauthenticated { .. } | Self::PermissionDenied | Self::ShuttingDown => 2,
+            _ => 1,
+        }
+    }
+
+    /// This rejection as a session at `version` can carry it: unchanged
+    /// when the version defines it, else the closest status of that
+    /// version that proves the same about execution (every one of these is
+    /// a refusal before admission). A denial becomes
+    /// [`EndpointNotFound`](Self::EndpointNotFound) (the endpoint is out
+    /// of reach for that caller, as `FoundationDB`'s unauthorized-endpoint
+    /// notice tells its failure monitor), shutting down becomes
+    /// [`Overloaded`](Self::Overloaded).
+    #[must_use]
+    pub const fn for_version(self, version: u16) -> Self {
+        if self.since() <= version {
+            return self;
+        }
+        match self {
+            Self::ShuttingDown => Self::Overloaded,
+            _ => Self::EndpointNotFound,
+        }
+    }
+
     fn status_and_detail(self) -> (u8, u64) {
         match self {
             Self::EndpointNotFound => (1, 0),
@@ -323,6 +390,9 @@ impl WireError {
             Self::StreamFailed { code } => (13, code),
             Self::StreamProtocol => (14, 0),
             Self::StreamingMismatch { endpoint_streams } => (15, u64::from(endpoint_streams)),
+            Self::Unauthenticated { reason } => (16, u64::from(reason.code())),
+            Self::PermissionDenied => (17, 0),
+            Self::ShuttingDown => (18, 0),
         }
     }
 
@@ -369,6 +439,14 @@ impl WireError {
                     _ => return Err(EnvelopeError::InvalidField("streaming")),
                 },
             },
+            16 => Self::Unauthenticated {
+                reason: u8::try_from(detail)
+                    .ok()
+                    .and_then(CredentialError::from_code)
+                    .ok_or(EnvelopeError::InvalidField("credential error"))?,
+            },
+            17 => Self::PermissionDenied,
+            18 => Self::ShuttingDown,
             other => return Err(EnvelopeError::UnknownStatus(other)),
         })
     }
@@ -575,13 +653,44 @@ pub const STREAM_END_ENVELOPE_LEN: usize = 1 + 8 + 8 + 1 + 8;
 /// signal).
 pub const STREAM_ACK_ENVELOPE_LEN: usize = 1 + 8 + 8;
 
-/// Decode one frame payload.
+/// Decode one frame payload of the newest version ([`PROTOCOL_VERSION`]).
 ///
 /// # Errors
 ///
 /// An [`EnvelopeError`] for anything that is not exactly one well-formed
-/// message of this version.
+/// message.
 pub fn decode_message(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
+    decode_message_at(payload, PROTOCOL_VERSION)
+}
+
+/// Decode one frame payload received on a session running `version`.
+///
+/// # Errors
+///
+/// An [`EnvelopeError`] for anything that is not exactly one well-formed
+/// message of that version: a status introduced by a later version is
+/// [`EnvelopeError::UnknownStatus`], as an older build would see it.
+pub fn decode_message_at(payload: &[u8], version: u16) -> Result<WireMessage, EnvelopeError> {
+    let message = decode_any(payload)?;
+    let error = match &message {
+        WireMessage::Reply {
+            outcome: WireOutcome::Err(error),
+            ..
+        }
+        | WireMessage::StreamEnd {
+            error: Some(error), ..
+        } => Some(*error),
+        _ => None,
+    };
+    if let Some(error) = error
+        && error.since() > version
+    {
+        return Err(EnvelopeError::UnknownStatus(error.status_and_detail().0));
+    }
+    Ok(message)
+}
+
+fn decode_any(payload: &[u8]) -> Result<WireMessage, EnvelopeError> {
     let mut input = Reader::new(payload);
     let kind = input.u8().ok_or(EnvelopeError::Empty)?;
     let truncated = || EnvelopeError::Truncated;
@@ -764,13 +873,14 @@ fn decode_listen(
 mod tests {
     use super::{
         EnvelopeError, HELLO_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION,
-        WireError, WireMessage, WireOutcome, decode_message, encode_message, negotiate,
-        reply_envelope_len, request_envelope_len,
+        WireError, WireMessage, WireOutcome, decode_message, decode_message_at, encode_message,
+        negotiate, reply_envelope_len, request_envelope_len,
     };
     use crate::codec::CodecId;
     use crate::endpoint::{EndpointToken, Incarnation};
     use crate::interface::InterfaceId;
     use crate::protocol::{MethodId, SchemaVersion};
+    use crate::security::CredentialError;
 
     fn request() -> WireMessage {
         WireMessage::Request {
@@ -829,7 +939,8 @@ mod tests {
     /// protocol version bump, not a fixture update.
     #[test]
     fn golden_encodings() {
-        let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 1, 0, 1, 0, 1];
+        // Versions 1..=2: the layout is version 1's, only the range grew.
+        let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 1, 0, 2, 0, 1];
         expected.extend([0; 15]);
         expected.extend([0; 8]);
         expected.extend([0, 0, 1, 0]);
@@ -1082,6 +1193,11 @@ mod tests {
             WireError::StreamingMismatch {
                 endpoint_streams: false,
             },
+            WireError::Unauthenticated {
+                reason: CredentialError::Expired,
+            },
+            WireError::PermissionDenied,
+            WireError::ShuttingDown,
         ];
         for error in errors {
             let message = WireMessage::Reply {
@@ -1090,6 +1206,80 @@ mod tests {
             };
             assert_eq!(decode_message(&encode_message(&message)), Ok(message));
         }
+    }
+
+    /// Version 2 statuses: fixed codes, refused by a version 1 decoder,
+    /// downgraded (never sent) to a version 1 peer with the same execution
+    /// meaning.
+    #[test]
+    fn version_two_statuses_are_never_seen_by_a_version_one_session() {
+        let denied = WireMessage::Reply {
+            call_id: 2,
+            outcome: WireOutcome::Err(WireError::Unauthenticated {
+                reason: CredentialError::UnknownKey,
+            }),
+        };
+        let bytes = encode_message(&denied);
+        assert_eq!(
+            bytes,
+            [0x03, 2, 0, 0, 0, 0, 0, 0, 0, 16, 5, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(decode_message_at(&bytes, 2), Ok(denied));
+        assert_eq!(
+            decode_message_at(&bytes, 1),
+            Err(EnvelopeError::UnknownStatus(16))
+        );
+        for (error, status) in [
+            (WireError::PermissionDenied, 17),
+            (WireError::ShuttingDown, 18),
+        ] {
+            let reply = encode_message(&WireMessage::Reply {
+                call_id: 0,
+                outcome: WireOutcome::Err(error),
+            });
+            assert_eq!(reply[9], status);
+            assert_eq!(
+                decode_message_at(&reply, 1),
+                Err(EnvelopeError::UnknownStatus(status))
+            );
+            assert_eq!(error.since(), 2);
+            assert_eq!(error.for_version(2), error);
+            assert_eq!(error.for_version(1).since(), 1);
+        }
+        assert_eq!(
+            WireError::PermissionDenied.for_version(1),
+            WireError::EndpointNotFound
+        );
+        assert_eq!(
+            WireError::ShuttingDown.for_version(1),
+            WireError::Overloaded
+        );
+        assert_eq!(
+            WireError::Overloaded.for_version(1),
+            WireError::Overloaded,
+            "a version 1 status is never rewritten"
+        );
+        // A stream end carrying a version 2 status is refused the same way.
+        let end = encode_message(&WireMessage::StreamEnd {
+            call_id: 1,
+            items: 0,
+            error: Some(WireError::ShuttingDown),
+        });
+        assert_eq!(
+            decode_message_at(&end, 1),
+            Err(EnvelopeError::UnknownStatus(18))
+        );
+        // An unknown credential code is invalid, never mapped to another.
+        let mut unknown = bytes.clone();
+        unknown[10] = 200;
+        assert_eq!(
+            decode_message(&unknown),
+            Err(EnvelopeError::InvalidField("credential error"))
+        );
+        for error in CredentialError::all() {
+            assert_eq!(CredentialError::from_code(error.code()), Some(*error));
+        }
+        assert_eq!(CredentialError::from_code(0), None);
     }
 
     #[test]

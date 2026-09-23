@@ -157,7 +157,9 @@ mod endpoint;
 mod error;
 mod failure;
 pub mod interface;
+pub mod observability;
 pub mod protocol;
+pub mod security;
 mod stats;
 pub mod stream;
 
@@ -184,7 +186,9 @@ pub use protocol::{MethodId, RpcMethod, SchemaVersion};
 pub use stats::{ResourceProbe, RpcStats};
 pub use stream::{ReplyStream, SendError, StreamProducer};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
-pub use transport::{RpcDriver, RpcHandle, SessionUpgrade, is_transient_accept_error};
+pub use transport::{
+    RpcDriver, RpcHandle, SessionUpgrade, ShutdownReport, is_transient_accept_error,
+};
 
 /// Generate a typed interface from a trait (feature `derive`).
 ///

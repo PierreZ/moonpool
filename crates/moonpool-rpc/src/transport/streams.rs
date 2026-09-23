@@ -20,6 +20,7 @@ use crate::error::{CallIdentity, ErrorReason, RpcError};
 use crate::protocol::{
     HEADER_LEN, REQUEST_FLAG_STREAM, WireError, stream_item_frame_len, stream_request_envelope_len,
 };
+use crate::security::CredentialSource;
 use crate::stats::Counters;
 use crate::stream::consumer::{AckRoute, ConsumerCore, Intook};
 use crate::stream::producer::{
@@ -37,10 +38,16 @@ impl<P: Providers> Shared<P> {
         identity: CallIdentity,
         body: Vec<u8>,
         window: u64,
+        credentials: Option<Arc<dyn CredentialSource>>,
     ) -> Result<StartedStream, RpcError> {
+        let (_, metadata) = self.call_credentials(credentials, endpoint)?;
         let local = self.address == Some(endpoint.address());
         let mut state = self.lock();
-        self.precheck(&state, endpoint, stream_request_envelope_len(body.len()))?;
+        self.precheck(
+            &state,
+            endpoint,
+            stream_request_envelope_len(body.len()) + metadata.len(),
+        )?;
         if state.pending.len() >= self.config.max_pending_calls {
             return Err(overloaded());
         }
@@ -72,6 +79,7 @@ impl<P: Providers> Shared<P> {
                     transmitted: true,
                     earlier_transmitted: false,
                     retained: None,
+                    credentials: None,
                     completion: completion(),
                 },
             );
@@ -90,6 +98,7 @@ impl<P: Providers> Shared<P> {
                     token: endpoint.token(),
                     identity,
                     stream_window: Some(window),
+                    metadata: Some(&metadata),
                     body: &body,
                 },
                 context,
@@ -105,6 +114,7 @@ impl<P: Providers> Shared<P> {
                 flags: REQUEST_FLAG_STREAM,
                 stream_window: window,
             },
+            metadata,
             body,
             self.config.max_frame_bytes,
         )?;
@@ -125,6 +135,7 @@ impl<P: Providers> Shared<P> {
                 transmitted: false,
                 earlier_transmitted: false,
                 retained: None,
+                credentials: None,
                 completion: completion(),
             },
         );

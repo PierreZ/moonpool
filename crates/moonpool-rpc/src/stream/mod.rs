@@ -130,7 +130,7 @@ pub enum SendError {
 /// [`send`](Self::send) items in order, then [`finish`](Self::finish) (a
 /// normal end) or [`fail`](Self::fail) with an application code. Dropping
 /// the producer without either ends the stream as a broken promise
-/// ([`ErrorReason::BrokenPromise`](crate::ErrorReason::BrokenPromise)).
+/// ([`ErrorReason::BrokenPromise`]).
 /// Every item already sent is delivered before the end, and the end needs
 /// no credit.
 ///
@@ -235,7 +235,7 @@ impl<M: RpcMethod> StreamProducer<M> {
 
     /// End the stream with an application error `code`, after every item
     /// already sent; the consumer gets
-    /// [`ErrorReason::StreamFailed`](crate::ErrorReason::StreamFailed).
+    /// [`ErrorReason::StreamFailed`].
     /// Returns whether the end was emitted.
     #[must_use = "`false` means the stream was already over"]
     pub fn fail(mut self, code: u64) -> bool {

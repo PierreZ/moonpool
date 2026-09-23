@@ -856,16 +856,27 @@ async fn yield_now() {
 /// written and decides whether it goes out (from then on the server may
 /// execute it); a refused frame is skipped and its call completed by the
 /// callback.
-pub(crate) async fn write_loop<W: AsyncWrite + Unpin>(
+pub(crate) async fn write_loop<W, B>(
     connection: &Connection,
     mut writer: W,
     batch: usize,
     admit_transmit: impl Fn(Option<u64>, usize) -> bool,
-) -> CloseReason {
+    close_bound: impl FnOnce() -> B,
+) -> CloseReason
+where
+    W: AsyncWrite + Unpin,
+    B: std::future::Future<Output = ()>,
+{
     let mut written = 0usize;
     loop {
         let next = futures::future::poll_fn(|cx| connection.poll_next(cx)).await;
         let Some(outgoing) = next else {
+            // Closed from this side: close the stream too (a TLS session
+            // sends its close_notify, TCP its FIN), within `close_bound`, so
+            // the peer sees an orderly end rather than a truncation.
+            let bound = close_bound();
+            futures::pin_mut!(bound);
+            let _ = futures::future::select(writer.close(), bound).await;
             return CloseReason::Local;
         };
         let admitted = match outgoing.kind {

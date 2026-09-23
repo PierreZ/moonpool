@@ -10,6 +10,7 @@ use crate::protocol::{
     RpcMethod, WireError, WireMessage, WireOutcome, encode_frame, encode_message,
     reply_envelope_len,
 };
+use crate::security::Principal;
 use crate::stats::Counters;
 use crate::stream::producer::StreamCore;
 use crate::stream::{SendError, StreamProducer};
@@ -102,6 +103,9 @@ pub(crate) struct ReplyContext {
     pub(crate) max_frame_bytes: u32,
     /// Where the request came from (`None` for a local caller).
     pub(crate) peer: Option<PeerContext>,
+    /// The caller the security check verified (`None`: anonymous or a
+    /// trusted network).
+    pub(crate) principal: Option<Arc<Principal>>,
     /// The reply owed (`None` for a one-way request, and for a stream,
     /// whose producer holds it instead).
     pub(crate) outstanding: Option<Outstanding>,
@@ -159,6 +163,14 @@ impl ReplyContext {
                         hello.max_frame_bytes.min(max_frame_bytes)
                     });
                     let outcome = bounded(outcome, limit);
+                    // Nothing newer than the session's version is sent: an
+                    // older peer gets the rejection it can decode.
+                    let outcome = match (outcome, connection.peer_hello()) {
+                        (WireOutcome::Err(error), Some(hello)) => {
+                            WireOutcome::Err(error.for_version(hello.version))
+                        }
+                        (outcome, _) => outcome,
+                    };
                     let payload = encode_message(&WireMessage::Reply { call_id, outcome });
                     match (encode_frame(&payload, limit), outstanding) {
                         (Ok(frame), Some(owed)) if admitted => {
@@ -239,6 +251,17 @@ impl<M: RpcMethod> ReplyHandle<M> {
         self.context
             .as_ref()
             .and_then(|context| context.peer.as_ref())
+    }
+
+    /// The caller the server's security check verified from the request's
+    /// credential, or `None` for an anonymous caller (or on a
+    /// [trusted network](crate::security::SecurityConfig::trusted_network)).
+    /// Local callers are verified the same way as remote ones.
+    #[must_use]
+    pub fn principal(&self) -> Option<&Principal> {
+        self.context
+            .as_ref()
+            .and_then(|context| context.principal.as_deref())
     }
 
     /// Whether anyone waits for a reply: `false` for a one-way request.

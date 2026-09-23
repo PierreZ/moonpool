@@ -140,6 +140,18 @@ pub enum ErrorReason {
     /// disagrees with the items received, or a consumption acknowledgement
     /// the producer refused. The stream ended; nothing is resumed.
     StreamProtocol(String),
+    /// The server refused the request before admission: the caller is not
+    /// (validly) authenticated for the endpoint. Never executed. Not
+    /// terminal for the reference: a fresh credential, or the server's new
+    /// keys, may change the answer.
+    Unauthenticated(crate::security::CredentialError),
+    /// The server refused the request before admission: the caller is
+    /// authenticated, but its policy does not allow this call. Never
+    /// executed; not terminal for the reference (policies change).
+    PermissionDenied,
+    /// The server's runtime is shutting down gracefully and admitted
+    /// nothing new. Never executed.
+    ServerShuttingDown,
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -209,6 +221,9 @@ impl std::fmt::Display for ErrorReason {
                 write!(f, "the producer failed the stream (code {code})")
             }
             Self::StreamProtocol(detail) => write!(f, "stream protocol violation: {detail}"),
+            Self::Unauthenticated(reason) => write!(f, "unauthenticated: {reason}"),
+            Self::PermissionDenied => f.write_str("permission denied"),
+            Self::ServerShuttingDown => f.write_str("the server is shutting down"),
         }
     }
 }
@@ -333,6 +348,9 @@ impl RpcError {
             WireError::StreamingMismatch { endpoint_streams } => {
                 ErrorReason::StreamingMismatch { endpoint_streams }
             }
+            WireError::Unauthenticated { reason } => ErrorReason::Unauthenticated(reason),
+            WireError::PermissionDenied => ErrorReason::PermissionDenied,
+            WireError::ShuttingDown => ErrorReason::ServerShuttingDown,
         };
         // Every other server-side rejection happens before admission.
         Self::not_admitted(reason)
@@ -418,6 +436,24 @@ mod tests {
         );
         assert_eq!(mismatch.execution(), Execution::NotAdmitted);
         assert!(mismatch.is_terminal_for_reference());
+        for (error, reason) in [
+            (
+                WireError::Unauthenticated {
+                    reason: crate::security::CredentialError::Expired,
+                },
+                ErrorReason::Unauthenticated(crate::security::CredentialError::Expired),
+            ),
+            (WireError::PermissionDenied, ErrorReason::PermissionDenied),
+            (WireError::ShuttingDown, ErrorReason::ServerShuttingDown),
+        ] {
+            let refused = RpcError::from_wire(error, called);
+            assert_eq!(refused.reason(), &reason);
+            assert_eq!(refused.execution(), Execution::NotAdmitted);
+            assert!(
+                !refused.is_terminal_for_reference(),
+                "keys, credentials and policies change: never a dead reference"
+            );
+        }
         let stale = RpcError::from_wire(WireError::StaleIncarnation, called);
         assert!(stale.is_terminal_for_reference());
         assert_eq!(stale.reason(), &ErrorReason::StaleIncarnation);

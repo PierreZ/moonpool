@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::Weak;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -14,6 +14,7 @@ use crate::codec::{Wire, encode_to_vec};
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
 use crate::interface::ServiceRef;
 use crate::protocol::RpcMethod;
+use crate::security::CredentialSource;
 use crate::stream::ReplyStream;
 use crate::transport::{Delivery, ReplyBytes, RpcHandle};
 
@@ -25,6 +26,7 @@ use crate::transport::{Delivery, ReplyBytes, RpcHandle};
 pub struct ServiceClient<P: Providers, M: RpcMethod> {
     rpc: RpcHandle<P>,
     target: ServiceRef<M>,
+    credentials: Option<Arc<dyn CredentialSource>>,
 }
 
 impl<P: Providers, M: RpcMethod> Clone for ServiceClient<P, M> {
@@ -32,6 +34,7 @@ impl<P: Providers, M: RpcMethod> Clone for ServiceClient<P, M> {
         Self {
             rpc: self.rpc.clone(),
             target: self.target.clone(),
+            credentials: self.credentials.clone(),
         }
     }
 }
@@ -46,7 +49,23 @@ impl<P: Providers, M: RpcMethod> std::fmt::Debug for ServiceClient<P, M> {
 
 impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
     pub(crate) fn new(rpc: RpcHandle<P>, target: ServiceRef<M>) -> Self {
-        Self { rpc, target }
+        Self {
+            rpc,
+            target,
+            credentials: None,
+        }
+    }
+
+    /// This client, attaching credentials from `source` to every request
+    /// instead of the runtime's
+    /// [`SecurityConfig::with_credentials`](crate::security::SecurityConfig::with_credentials).
+    /// The source is asked again for every attempt, retransmissions of
+    /// reliable calls included. Local calls carry the credential too: they
+    /// pass the same security check as remote ones.
+    #[must_use]
+    pub fn with_credentials(mut self, source: impl CredentialSource) -> Self {
+        self.credentials = Some(Arc::new(source));
+        self
     }
 
     /// The reference this client calls.
@@ -87,8 +106,13 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
             .rpc
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
-        let (receiver, guard) =
-            shared.start_call(&self.target.endpoint(), identity, body, delivery)?;
+        let (receiver, guard) = shared.start_call(
+            &self.target.endpoint(),
+            identity,
+            body,
+            delivery,
+            self.credentials.clone(),
+        )?;
         Ok(ReplyAttempt {
             receiver,
             guard: Some(guard),
@@ -174,7 +198,12 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
         self.rpc
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?
-            .send_one_way(&self.target.endpoint(), identity, body)
+            .send_one_way(
+                &self.target.endpoint(),
+                identity,
+                body,
+                self.credentials.clone(),
+            )
     }
 
     /// Reliable delivery: keep the request while waiting and send it again
@@ -260,7 +289,13 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
             .rpc
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
-        let (core, guard) = shared.start_stream(&self.target.endpoint(), identity, body, window)?;
+        let (core, guard) = shared.start_stream(
+            &self.target.endpoint(),
+            identity,
+            body,
+            window,
+            self.credentials.clone(),
+        )?;
         Ok(ReplyStream::new(core, guard))
     }
 

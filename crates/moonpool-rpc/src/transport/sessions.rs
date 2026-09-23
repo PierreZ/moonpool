@@ -13,8 +13,8 @@ use crate::call::reply::{Outstanding, ReplyRoute};
 use crate::config::{InboundSharing, MIN_FRAME_BYTES};
 use crate::error::CallIdentity;
 use crate::protocol::{
-    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, REQUEST_FLAG_ONE_WAY,
-    REQUEST_FLAG_STREAM, WireMessage, encode_frame, encode_message, negotiate,
+    CREDENTIALS_VERSION, PROTOCOL_MAGIC, REQUEST_FLAG_ONE_WAY, REQUEST_FLAG_STREAM, WireMessage,
+    encode_frame, encode_message, negotiate,
 };
 use crate::stats::Counters;
 use crate::stream::consumer::AckRoute;
@@ -108,9 +108,7 @@ impl<P: Providers> Shared<P> {
             codec,
             flags,
             stream_window,
-            // Reserved for request credentials (#218): carried, never
-            // interpreted or handed to user code by this version.
-            metadata: _,
+            metadata,
             body,
         } = request
         else {
@@ -135,6 +133,11 @@ impl<P: Providers> Shared<P> {
             Counters::bump(&self.counters.one_way_received);
             self.context(ReplyRoute::Discard, connection.peer_context(), None)
         };
+        // Credentials count only on a session that negotiated them; version
+        // 1 carries the section and ignores it, as version 1 specifies.
+        let carries_credentials = connection
+            .peer_hello()
+            .is_some_and(|hello| hello.version >= CREDENTIALS_VERSION);
         self.admit(
             &Admission {
                 incarnation,
@@ -146,6 +149,7 @@ impl<P: Providers> Shared<P> {
                     codec,
                 },
                 stream_window: stream.then_some(stream_window),
+                metadata: carries_credentials.then_some(metadata.as_slice()),
                 body: &body,
             },
             context,
@@ -214,13 +218,11 @@ impl<P: Providers> Shared<P> {
         if magic != PROTOCOL_MAGIC {
             return Err(CloseReason::Protocol(format!("bad magic {magic:#x}")));
         }
-        let Some(version) = negotiate(
-            (MIN_PROTOCOL_VERSION, PROTOCOL_VERSION),
-            (min_version, max_version),
-        ) else {
+        let ours = self.config.advertised_versions();
+        let Some(version) = negotiate(ours, (min_version, max_version)) else {
             return Err(CloseReason::Version(format!(
-                "peer speaks {min_version}..={max_version}, \
-                 this build {MIN_PROTOCOL_VERSION}..={PROTOCOL_VERSION}"
+                "peer speaks {min_version}..={max_version}, this runtime {}..={}",
+                ours.0, ours.1
             )));
         };
         if max_frame_bytes < MIN_FRAME_BYTES {

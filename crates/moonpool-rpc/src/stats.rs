@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use crate::security::{CredentialError, Denial};
+
 /// A snapshot of one runtime's counters and gauges.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RpcStats {
@@ -142,6 +144,20 @@ pub struct RpcStats {
     /// Of `queued_bytes`, the bytes of queued requests (what the queue
     /// budgets refuse).
     pub queued_request_bytes: u64,
+    /// Requests whose credential verified into a principal.
+    pub requests_authenticated: u64,
+    /// Requests refused as unauthenticated (every [`CredentialError`](crate::security::CredentialError)).
+    pub requests_unauthenticated: u64,
+    /// Requests refused by the access policy (authenticated, not allowed).
+    pub requests_permission_denied: u64,
+    /// Accepted connections refused by the address allow list.
+    pub connections_refused_by_policy: u64,
+    /// Credentials this runtime attached to its own requests.
+    pub credentials_attached: u64,
+    /// Requests refused because a graceful shutdown was under way.
+    pub shutdown_refusals: u64,
+    /// Calls and streams a graceful shutdown ended at its deadline.
+    pub calls_ended_by_shutdown: u64,
 }
 
 /// The runtime's counters, shared by everything that updates them.
@@ -208,11 +224,42 @@ pub(crate) struct Counters {
     pub(crate) queued_request_bytes: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
     pub(crate) live_connections: AtomicUsize,
+    pub(crate) requests_authenticated: AtomicU64,
+    pub(crate) requests_permission_denied: AtomicU64,
+    /// Unauthenticated refusals by [`CredentialError`] code (index code − 1):
+    /// a fixed, bounded label set.
+    pub(crate) denials_by_reason: [AtomicU64; crate::security::CREDENTIAL_ERRORS],
+    pub(crate) connections_refused_by_policy: AtomicU64,
+    pub(crate) credentials_attached: AtomicU64,
+    pub(crate) shutdown_refusals: AtomicU64,
+    pub(crate) calls_ended_by_shutdown: AtomicU64,
 }
 
 impl Counters {
     pub(crate) fn bump(counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one security refusal.
+    pub(crate) fn count_denial(&self, denial: Denial) {
+        match denial {
+            Denial::Unauthenticated(reason) => {
+                if let Some(counter) = self
+                    .denials_by_reason
+                    .get(usize::from(reason.code()).saturating_sub(1))
+                {
+                    Self::bump(counter);
+                }
+            }
+            Denial::PermissionDenied => Self::bump(&self.requests_permission_denied),
+        }
+    }
+
+    /// Unauthenticated refusals with `reason`.
+    pub(crate) fn denials(&self, reason: CredentialError) -> u64 {
+        self.denials_by_reason
+            .get(usize::from(reason.code()).saturating_sub(1))
+            .map_or(0, |counter| counter.load(Ordering::Relaxed))
     }
 
     pub(crate) fn snapshot(
@@ -288,6 +335,13 @@ impl Counters {
             stream_window_reserved: self.stream_window_reserved.load(Ordering::Relaxed),
             producer_window_reserved: self.producer_window_reserved.load(Ordering::Relaxed),
             queued_request_bytes: self.queued_request_bytes.load(Ordering::Relaxed),
+            requests_authenticated: load(&self.requests_authenticated),
+            requests_unauthenticated: self.denials_by_reason.iter().map(load).sum(),
+            requests_permission_denied: load(&self.requests_permission_denied),
+            connections_refused_by_policy: load(&self.connections_refused_by_policy),
+            credentials_attached: load(&self.credentials_attached),
+            shutdown_refusals: load(&self.shutdown_refusals),
+            calls_ended_by_shutdown: load(&self.calls_ended_by_shutdown),
         }
     }
 }

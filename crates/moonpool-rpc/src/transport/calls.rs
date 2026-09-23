@@ -18,9 +18,13 @@ use crate::protocol::{
     HEADER_LEN, REQUEST_FLAG_ONE_WAY, WireMessage, WireOutcome, encode_frame, encode_message,
     request_envelope_len,
 };
+use crate::security::CredentialSource;
 use crate::stats::Counters;
 use crate::stream::consumer::AckRoute;
 use crate::stream::producer::Terminal;
+
+/// Where a call's credentials come from, if anywhere.
+pub(super) type Source = Option<Arc<dyn CredentialSource>>;
 
 /// A started call: its single completion and the guard that releases it.
 pub(crate) type Started = (oneshot::Receiver<Result<ReplyBytes, RpcError>>, CallGuard);
@@ -48,6 +52,7 @@ pub(super) fn request_frame(
     endpoint: &Endpoint,
     identity: CallIdentity,
     kind: RequestKind,
+    metadata: Vec<u8>,
     body: Vec<u8>,
     max_frame_bytes: u32,
 ) -> Result<Vec<u8>, RpcError> {
@@ -62,7 +67,7 @@ pub(super) fn request_frame(
         codec: identity.codec,
         flags: kind.flags,
         stream_window: kind.stream_window,
-        metadata: Vec::new(),
+        metadata,
         body,
     });
     encode_frame(&payload, max_frame_bytes).map_err(|_| {
@@ -103,6 +108,51 @@ impl<P: Providers> Shared<P> {
         Ok(())
     }
 
+    /// The credential source a call uses: the client's own, else the
+    /// runtime's.
+    pub(super) fn credential_source(
+        &self,
+        client: Option<Arc<dyn CredentialSource>>,
+    ) -> Option<Arc<dyn CredentialSource>> {
+        client.or_else(|| self.config.security.credentials().cloned())
+    }
+
+    /// What every new call checks and asks first: the runtime is not
+    /// shutting down; then the call's credential source and its first
+    /// attempt's credential section.
+    pub(super) fn call_credentials(
+        &self,
+        client: Option<Arc<dyn CredentialSource>>,
+        endpoint: &Endpoint,
+    ) -> Result<(Source, Vec<u8>), RpcError> {
+        self.refuse_if_closing()?;
+        let source = self.credential_source(client);
+        // Asked outside the state lock: the source is application code.
+        let section = self.credential_section(source.as_ref(), endpoint)?;
+        Ok((source, section))
+    }
+
+    /// The credential section of one attempt to `endpoint`, asked from
+    /// `source` now. Empty without a source or a credential.
+    pub(super) fn credential_section(
+        &self,
+        source: Option<&Arc<dyn CredentialSource>>,
+        endpoint: &Endpoint,
+    ) -> Result<Vec<u8>, RpcError> {
+        let Some(credential) = source.and_then(|source| source.credential(endpoint)) else {
+            return Ok(Vec::new());
+        };
+        let section =
+            crate::protocol::metadata::encode_bearer(credential.expose()).ok_or_else(|| {
+                RpcError::not_admitted(ErrorReason::Encode(format!(
+                    "a {}-byte credential does not fit the metadata section",
+                    credential.len()
+                )))
+            })?;
+        Counters::bump(&self.counters.credentials_attached);
+        Ok(section)
+    }
+
     /// Start one call. The returned receiver completes exactly once.
     pub(crate) fn start_call(
         &self,
@@ -110,11 +160,17 @@ impl<P: Providers> Shared<P> {
         identity: CallIdentity,
         body: Vec<u8>,
         delivery: Delivery,
+        credentials: Option<Arc<dyn CredentialSource>>,
     ) -> Result<Started, RpcError> {
+        let (credentials, metadata) = self.call_credentials(credentials, endpoint)?;
         let local = self.address == Some(endpoint.address());
         let (sender, receiver) = oneshot::channel();
         let mut state = self.lock();
-        self.precheck(&state, endpoint, request_envelope_len(body.len()))?;
+        self.precheck(
+            &state,
+            endpoint,
+            request_envelope_len(body.len()) + metadata.len(),
+        )?;
         if state.pending.len() >= self.config.max_pending_calls {
             return Err(overloaded());
         }
@@ -150,6 +206,7 @@ impl<P: Providers> Shared<P> {
                     transmitted: true,
                     earlier_transmitted: false,
                     retained: None,
+                    credentials: None,
                     completion: Completion::Reply(sender),
                 },
             );
@@ -157,8 +214,9 @@ impl<P: Providers> Shared<P> {
             let guard = self.call_guard(call_id);
             Counters::bump(&self.counters.calls_started);
             let sink: Weak<dyn LocalSink> = self.this.clone();
-            // The same bytes, validation order, admission and frame limit as
-            // the remote path; only the socket is skipped.
+            // The same bytes, validation order, security check, admission
+            // and frame limit as the remote path; only the socket is
+            // skipped.
             let context = self.context(
                 ReplyRoute::Local { sink, call_id },
                 None,
@@ -170,6 +228,7 @@ impl<P: Providers> Shared<P> {
                     token: endpoint.token(),
                     identity,
                     stream_window: None,
+                    metadata: Some(&metadata),
                     body: &body,
                 },
                 context,
@@ -183,6 +242,7 @@ impl<P: Providers> Shared<P> {
             endpoint,
             identity,
             RequestKind::TWO_WAY,
+            metadata,
             body,
             self.config.max_frame_bytes,
         )?;
@@ -203,6 +263,7 @@ impl<P: Providers> Shared<P> {
                 transmitted: false,
                 earlier_transmitted: false,
                 retained,
+                credentials: credentials.filter(|_| delivery == Delivery::Reliable),
                 completion: Completion::Reply(sender),
             },
         );
@@ -229,10 +290,16 @@ impl<P: Providers> Shared<P> {
         endpoint: &Endpoint,
         identity: CallIdentity,
         body: Vec<u8>,
+        credentials: Option<Arc<dyn CredentialSource>>,
     ) -> Result<(), RpcError> {
+        let (_, metadata) = self.call_credentials(credentials, endpoint)?;
         let local = self.address == Some(endpoint.address());
         let mut state = self.lock();
-        self.precheck(&state, endpoint, request_envelope_len(body.len()))?;
+        self.precheck(
+            &state,
+            endpoint,
+            request_envelope_len(body.len()) + metadata.len(),
+        )?;
         if local {
             drop(state);
             Counters::bump(&self.counters.one_way_sent);
@@ -243,6 +310,7 @@ impl<P: Providers> Shared<P> {
                     token: endpoint.token(),
                     identity,
                     stream_window: None,
+                    metadata: Some(&metadata),
                     body: &body,
                 },
                 context,
@@ -254,6 +322,7 @@ impl<P: Providers> Shared<P> {
             endpoint,
             identity,
             RequestKind::ONE_WAY,
+            metadata,
             body,
             self.config.max_frame_bytes,
         )?;
@@ -529,14 +598,22 @@ impl<P: Providers> Shared<P> {
                 continue;
             }
             let body = call.retained.clone().unwrap_or_default();
-            let frame = request_frame(
-                call_id,
-                &call.endpoint,
-                call.identity,
-                RequestKind::TWO_WAY,
-                body,
-                self.config.max_frame_bytes,
-            );
+            // Each copy asks for its credential again: a token refreshed
+            // since the last copy is the one sent. (The source runs under
+            // the state lock here; it must not call back into the runtime.)
+            let frame = self
+                .credential_section(call.credentials.as_ref(), &call.endpoint)
+                .and_then(|metadata| {
+                    request_frame(
+                        call_id,
+                        &call.endpoint,
+                        call.identity,
+                        RequestKind::TWO_WAY,
+                        metadata,
+                        body,
+                        self.config.max_frame_bytes,
+                    )
+                });
             // A retained request was admitted once already: it is queued
             // regardless of the connection's request cap (the pending-call
             // budget bounds it), never refused as overloaded on the way.
