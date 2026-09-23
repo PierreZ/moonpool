@@ -401,3 +401,62 @@ fn short_rsa_keys_are_refused() {
     assert_eq!(super::modulus_bits(&[0x80, 0]), 16);
     assert_eq!(super::modulus_bits(&[]), 0);
 }
+
+/// Seeded mutations of a valid token (bit flips, byte overwrites,
+/// truncations, insertions, swapped segments, random bytes): never a
+/// panic, never a principal other than the signed one, and the cache stays
+/// within its bound whatever arrives.
+#[test]
+fn mutated_tokens_never_panic_nor_verify_as_someone_else() {
+    let (ed, jwk) = ed_key(9, "k");
+    let verifier = verifier(vec![jwk], |config| config.cache_capacity = 8);
+    let valid = token(&ed, Algorithm::EdDSA, Some("k"), &claims(NOW + 600));
+    let mut state = 0x5eed_0006_u64;
+    let mut next = |bound: usize| -> usize {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        usize::try_from(state % u64::try_from(bound.max(1)).unwrap_or(1)).unwrap_or(0)
+    };
+    let mut refused = 0;
+    for _ in 0..1000 {
+        let mut input = valid.clone();
+        match next(6) {
+            0 => {
+                let at = next(input.len());
+                input[at] ^= 1 << next(8);
+            }
+            1 => {
+                let at = next(input.len());
+                input[at] = u8::try_from(next(256)).unwrap_or(0);
+            }
+            2 => input.truncate(next(input.len())),
+            3 => {
+                let at = next(input.len());
+                let byte = [b'.', b'=', b'A', 0, 0xff][next(5)];
+                input.insert(at, byte);
+            }
+            4 => {
+                // Swap two of the three segments.
+                let text = String::from_utf8(input.clone()).unwrap_or_default();
+                let mut parts: Vec<&str> = text.split('.').collect();
+                if parts.len() == 3 {
+                    let (a, b) = (next(3), next(3));
+                    parts.swap(a, b);
+                }
+                input = parts.join(".").into_bytes();
+            }
+            _ => {
+                input = (0..next(300))
+                    .map(|_| u8::try_from(next(256)).unwrap_or(0))
+                    .collect();
+            }
+        }
+        match check(&verifier, &input, NOW) {
+            Ok(subject) => assert_eq!(subject, "alice", "only the signed claims verify"),
+            Err(_) => refused += 1,
+        }
+        assert!(verifier.cached() <= 8, "the cache stays bounded");
+    }
+    assert!(refused > 750, "mutations are refused: {refused}");
+}
