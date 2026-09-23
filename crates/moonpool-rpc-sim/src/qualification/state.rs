@@ -12,8 +12,9 @@
 //! Streams are judged by the streams campaign's producer/consumer ledger
 //! ([`crate::streams::state::StreamLedger`]) and credentials by the
 //! security campaign's issue/receipt ledger
-//! ([`crate::security::state::Ledger`]); balanced attempts by the workload's
-//! own observation-hook ledger.
+//! ([`crate::security::state::Ledger`]); balanced calls by the executions
+//! their policy allows (the observation hook, the balancer's own account,
+//! only tightens that bound).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

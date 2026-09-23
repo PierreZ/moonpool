@@ -35,8 +35,10 @@
 //! **Oracles** (written by application code only, never read from the
 //! transport): the qualification ledger ([`state::QualLedger`]: boots,
 //! publications, executions), the streams campaign's producer/consumer
-//! ledger, the security campaign's issue/receipt ledger and the workload's
-//! own balanced-attempt ledger (fed by the observation hook). Handlers
+//! ledger and the security campaign's issue/receipt ledger; a balanced
+//! call is judged against the executions its policy alone allows (the
+//! attempts the balancer reports through its observation hook only
+//! tighten that bound). Handlers
 //! assert on the spot that a request ran only in the boot and instance its
 //! reference named and that no handler of an ended boot runs: a stale I1
 //! never reaches I2, whatever carried it (a retained reliable call, a
