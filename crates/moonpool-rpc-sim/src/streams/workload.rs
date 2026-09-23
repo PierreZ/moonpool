@@ -28,7 +28,7 @@ use super::state::{
     FAULTS_DONE_KEY, PRODUCER_BOOTS_KEY, PRODUCER_LABEL, ProducerEnd, REBOOT_REQUESTS_KEY,
     StreamLedger, WORKLOAD_LABEL,
 };
-use super::{RPC_PORT, StreamsRecord, StreamsRecords, report_stats};
+use super::{RPC_PORT, StreamsRecord, StreamsRecords, pause, report_stats};
 use crate::foundations::state::Board;
 
 /// One operation of the workload's alphabet.
@@ -269,7 +269,9 @@ impl StreamsWorkload {
                     return found;
                 }
                 Err(_) => {
-                    let _ = ctx.time().sleep(Duration::from_millis(100)).await;
+                    if pause(ctx, Duration::from_millis(100)).await.is_err() {
+                        return None;
+                    }
                 }
             }
         }
@@ -341,8 +343,10 @@ impl StreamsWorkload {
                     let size = stream_item_frame_len(prost::Message::encoded_len(&chunk));
                     self.ledger.consume(id, chunk.seq, size, chunk.boot);
                     taken += 1;
-                    if let Pace::Slow(pause) = pace {
-                        let _ = ctx.time().sleep(pause).await;
+                    if let Pace::Slow(delay) = pace
+                        && pause(ctx, delay).await.is_err()
+                    {
+                        return Read::Timeout;
                     }
                 }
             }
@@ -406,7 +410,9 @@ impl StreamsWorkload {
                 scan.first_delay_ms = random.random_range(50..400);
                 let hold = Duration::from_millis(random.random_range(0..40));
                 if let Some(stream) = self.open(streams, rpc, &scan, Self::window(64, 4), op) {
-                    let _ = ctx.time().sleep(hold).await;
+                    if pause(ctx, hold).await.is_err() {
+                        return;
+                    }
                     if stream.received() == 0 {
                         assert_reachable!("rpc stream abandoned before its first item");
                     }
@@ -569,7 +575,9 @@ impl StreamsWorkload {
             {
                 break;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(10)).await;
+            if pause(ctx, Duration::from_millis(10)).await.is_err() {
+                return;
+            }
         }
         let exhausted = self.ledger.produced(scan.id).is_some_and(|produced| {
             produced.end == Some(ProducerEnd::Failed(scan.code))
@@ -604,10 +612,15 @@ impl StreamsWorkload {
                 open.push((scan.id, stream));
             }
         }
-        let _ = ctx
-            .time()
-            .sleep(Duration::from_millis(ctx.random().random_range(100..300)))
-            .await;
+        if pause(
+            ctx,
+            Duration::from_millis(ctx.random().random_range(100..300)),
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
         let saturated = open.iter().all(|(id, stream)| {
             self.ledger.produced(*id).is_some_and(|produced| {
                 produced.end.is_none()
@@ -656,7 +669,9 @@ impl StreamsWorkload {
                     }
                     break;
                 }
-                let _ = ctx.time().sleep(Duration::from_millis(10)).await;
+                if pause(ctx, Duration::from_millis(10)).await.is_err() {
+                    return;
+                }
             }
         }
         // Reading resumes: the blocked producers wake and send more.
@@ -808,7 +823,9 @@ impl StreamsWorkload {
             if ctx.state().get::<bool>(FAULTS_DONE_KEY).unwrap_or(false) {
                 break;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(500)).await;
+            if pause(ctx, Duration::from_millis(500)).await.is_err() {
+                return;
+            }
         }
         let mut recovered = false;
         for _ in 0..10 {
@@ -844,7 +861,9 @@ impl StreamsWorkload {
                 recovered = true;
                 break;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(300)).await;
+            if pause(ctx, Duration::from_millis(300)).await.is_err() {
+                return;
+            }
         }
         self.history.push(format!("recovered {recovered}"));
         assert_always!(
@@ -868,7 +887,9 @@ impl StreamsWorkload {
             if !running {
                 return;
             }
-            let _ = ctx.time().sleep(Duration::from_millis(50)).await;
+            if pause(ctx, Duration::from_millis(50)).await.is_err() {
+                return;
+            }
         }
     }
 
@@ -901,7 +922,7 @@ impl StreamsWorkload {
         self.settle(ctx).await;
         // Let the producer publish its counters after the last ends were
         // written (it reports every 100 ms).
-        let _ = ctx.time().sleep(Duration::from_millis(350)).await;
+        pause(ctx, Duration::from_millis(350)).await?;
         Ok(())
     }
 }

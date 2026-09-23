@@ -21,7 +21,7 @@ use super::messages::{
 };
 use super::policy::streams_config;
 use super::state::{PRODUCER_BOOTS_KEY, PRODUCER_LABEL, ProducerEnd, StreamLedger};
-use super::{RPC_PORT, report_stats};
+use super::{RPC_PORT, pause, report_stats};
 use crate::foundations::state::{Board, bump};
 
 /// The producer role: a fresh incarnation per boot, at the same address.
@@ -84,12 +84,12 @@ impl Process for StreamsProducer {
             ctx.shutdown().cancelled().await;
             // The handlers fail their streams on the same signal; keep the
             // runtime running a moment so those ends are written.
-            let _ = ctx.time().sleep(SHUTDOWN_GRACE).await;
+            pause(ctx, SHUTDOWN_GRACE).await
         };
         moonpool_sim::select! {
             error = driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             () = serve => Ok(()),
-            () = graceful => Ok(()),
+            result = graceful => result,
         }
     }
 }
@@ -122,8 +122,10 @@ async fn serve_pings(mut stream: RequestStream<Ping>, ledger: &StreamLedger, ctx
                     ledger.probe(request.id);
                     replies.push(async move {
                         let hold = Duration::from_millis(u64::from(request.hold_ms));
-                        if !hold.is_zero() {
-                            let _ = ctx.time().sleep(hold).await;
+                        if !hold.is_zero() && pause(ctx, hold).await.is_err() {
+                            // The simulation is going away; so is the reply.
+                            reply.never_reply();
+                            return;
                         }
                         let _ = reply.send(&request);
                     });
@@ -193,16 +195,18 @@ async fn produce(
         } else {
             request.delay_ms
         };
-        let pause = async {
-            if delay > 0 {
-                let _ = ctx
-                    .time()
-                    .sleep(Duration::from_millis(u64::from(delay)))
-                    .await;
+        let paced = async {
+            if delay == 0 {
+                return true;
             }
+            pause(ctx, Duration::from_millis(u64::from(delay)))
+                .await
+                .is_ok()
         };
+        // A failed sleep means the simulation is going away: stop like on
+        // a shutdown.
         let shutdown = moonpool_sim::select! {
-            () = pause => false,
+            slept = paced => !slept,
             () = ctx.shutdown().cancelled() => true,
         };
         if shutdown {

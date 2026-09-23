@@ -56,6 +56,18 @@ pub use workload::{StreamOp, StreamsConfig, StreamsWorkload};
 
 pub(crate) use crate::foundations::{RPC_PORT, report_stats};
 
+/// Sleep on simulation time; an error means the simulation is going away.
+pub(crate) async fn pause(
+    ctx: &moonpool_sim::SimContext,
+    duration: Duration,
+) -> moonpool_sim::SimulationResult<()> {
+    moonpool_sim::TimeProvider::sleep(ctx.time(), duration)
+        .await
+        .map_err(|error| {
+            moonpool_sim::SimulationError::InvalidState(format!("sleep failed: {error}"))
+        })
+}
+
 /// One finished run as the workload saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamsRecord {
