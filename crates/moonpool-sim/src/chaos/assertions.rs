@@ -275,6 +275,13 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
         ));
     }
 
+    let dropped_buckets = moonpool_assertions::each_bucket_dropped_allocations();
+    if dropped_buckets > 0 {
+        always_violations.push(format!(
+            "each-bucket table overflowed: {dropped_buckets} sometimes_each observations could not be tracked"
+        ));
+    }
+
     for slot in &slots {
         let total = slot.pass_count.saturating_add(slot.fail_count);
         let kind = moonpool_assertions::AssertKind::from_u8(slot.kind);
@@ -801,6 +808,26 @@ mod tests {
         assert_eq!(
             always,
             vec!["assertion slot table overflowed: 1 evaluations could not be tracked"]
+        );
+        moonpool_assertions::clear();
+    }
+
+    #[test]
+    fn bucket_overflow_is_an_always_violation() {
+        moonpool_assertions::init();
+        moonpool_assertions::reset();
+
+        for index in 0..=moonpool_assertions::MAX_EACH_BUCKETS {
+            let key = i64::try_from(index).expect("small index");
+            moonpool_assertions::assertion_sometimes_each("overflow bucket", &[("key", key)], &[]);
+        }
+
+        let (always, _) = validate_assertion_contracts();
+        assert_eq!(
+            always,
+            vec![
+                "each-bucket table overflowed: 1 sometimes_each observations could not be tracked"
+            ]
         );
         moonpool_assertions::clear();
     }

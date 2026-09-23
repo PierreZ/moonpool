@@ -576,7 +576,8 @@ The shared tables are bounded: 2048 assertion sites and 256
 values affect the bucket hash but are not retained for display. Never bucket
 unbounded keys, request IDs, ballots, or log slots. Bucket them into a finite
 range first. Once a shared table is full, additional sites or buckets are not
-tracked, so table exhaustion silently destroys guidance.
+tracked and the run reports an always-violation naming the overflowed table:
+exhaustion destroys guidance, so it is never silent.
 
 Quality always maximizes, supports at most four values, and packs the low 16
 bits of each value in order. Normalize values into `0..=32767`, put the most

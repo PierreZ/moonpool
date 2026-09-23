@@ -30,7 +30,7 @@ mod table;
 
 pub use buckets::{
     EACH_BUCKET_MEM_SIZE, EachBucket, MAX_EACH_BUCKETS, assertion_sometimes_each,
-    each_bucket_read_all, unpack_quality,
+    each_bucket_dropped_allocations, each_bucket_read_all, unpack_quality,
 };
 pub use hooks::{DiscoveryHooks, DiscoveryKind, clear_discovery_hooks, set_discovery_hooks};
 pub use region::{assertion_table_ptr, clear, each_bucket_ptr, init, install_region, reset};
