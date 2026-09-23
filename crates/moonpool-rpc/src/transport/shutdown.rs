@@ -96,6 +96,11 @@ impl<P: Providers> Shared<P> {
             ended.push((call, RpcError::new(ErrorReason::Shutdown, execution)));
         }
         let connections: Vec<_> = state.connections.values().cloned().collect();
+        // Every endpoint closes: its queued, never-received requests are
+        // dropped (their callers' sessions close below) and its receivers
+        // see the end of their stream.
+        let mut registrations = state.registry.drain();
+        registrations.extend(std::mem::take(&mut state.well_known).into_values());
         drop(state);
         report.calls_ended = ended.len();
         report.connections_closed = connections.len();
@@ -108,7 +113,16 @@ impl<P: Providers> Shared<P> {
             // fail) and ends the streams it produced.
             let _ = connection.close(CloseReason::Local);
         }
+        // After the sessions closed, so nothing (a broken promise) is
+        // written for the dropped requests.
+        drop(registrations);
         self.watch.notify();
+    }
+
+    fn lock_report(&self) -> std::sync::MutexGuard<'_, Option<ShutdownReport>> {
+        self.shutdown_report
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
     }
 
     /// Whether every driver child (listener, connections) ended.
@@ -127,12 +141,23 @@ pub(super) async fn shutdown<P: Providers>(
         report.already_stopped = true;
         return report;
     };
-    if shared.lifecycle.load(Ordering::Acquire) == TERMINATED {
-        report.already_stopped = true;
-        return report;
-    }
-    shared.begin_shutdown();
     let time = shared.time().clone();
+    if !shared.begin_shutdown() {
+        // Another shutdown runs (or ran): its deadline governs; report its
+        // outcome.
+        drop(shared);
+        loop {
+            let Some(shared) = weak.upgrade() else {
+                report.already_stopped = true;
+                return report;
+            };
+            if let Some(outcome) = *shared.lock_report() {
+                return outcome;
+            }
+            drop(shared);
+            let _ = time.sleep(DRAIN_POLL).await;
+        }
+    }
     let close_bound = shared.config.handshake_timeout;
     // Never hold the runtime across a wait: dropping the driver must still
     // drop it (an abrupt shutdown overtakes a graceful one).
@@ -175,10 +200,12 @@ pub(super) async fn shutdown<P: Providers>(
         };
         if shared.quiet() {
             report.closed_cleanly = true;
+            *shared.lock_report() = Some(report);
             return report;
         }
         let elapsed = time.now().saturating_sub(closing);
         if elapsed >= close_bound {
+            *shared.lock_report() = Some(report);
             return report;
         }
         drop(shared);

@@ -107,10 +107,14 @@ impl<K> RotatingKeys<K> {
             generation,
             keys: keys.into_iter().collect(),
         });
+        let count = current.keys.len();
+        // Traced after the write lock is released: a subscriber must never
+        // run while verifiers are blocked.
+        drop(current);
         tracing::info!(
             target: "moonpool_rpc::audit",
             generation,
-            keys = current.keys.len(),
+            keys = count,
             "rpc_verification_keys_replaced"
         );
         generation
@@ -120,6 +124,23 @@ impl<K> RotatingKeys<K> {
 #[cfg(test)]
 mod tests {
     use super::RotatingKeys;
+
+    /// Regression: the replacement was traced while the write lock was held,
+    /// so a subscriber (here: its writer) that reads the keys deadlocked.
+    #[test]
+    fn the_replacement_event_is_emitted_outside_the_lock() {
+        let keys = RotatingKeys::new([("a".to_string(), 1)]);
+        let observer = keys.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || {
+                let _ = observer.current();
+                std::io::sink()
+            })
+            .finish();
+        let generation =
+            tracing::subscriber::with_default(subscriber, || keys.replace([("b".to_string(), 2)]));
+        assert_eq!(generation, 2);
+    }
 
     #[test]
     fn replacement_swaps_the_whole_set_and_bumps_the_generation() {

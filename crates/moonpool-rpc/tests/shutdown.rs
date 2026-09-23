@@ -290,6 +290,99 @@ async fn a_callers_shutdown_ends_its_calls_multi_thread() {
     a_callers_shutdown_ends_its_calls_with_what_it_knows().await;
 }
 
+/// Termination closes every endpoint: a request still queued, never
+/// received, is not handed to its handler afterwards (its caller's session
+/// ended), and the receiver sees the end of its stream. Regression: the
+/// inboxes stayed open and kept handing out requests after termination.
+async fn termination_closes_every_endpoint() {
+    let (server, server_driver) = server(trusted()).await;
+    let (service, mut stream) = server.register::<Slow>(AccessClass::Private).expect("reg");
+    let (client, client_driver) = client();
+    let queued = call(&client, &service);
+    tokio::time::timeout(CALL, async {
+        while server
+            .stats()
+            .is_some_and(|stats| stats.requests_admitted == 0)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("admitted into the queue");
+    let report = server.shutdown(Duration::from_millis(50)).await;
+    assert!(!report.drained);
+    assert!(
+        tokio::time::timeout(CALL, stream.recv())
+            .await
+            .expect("the stream answers")
+            .is_none(),
+        "no request is handed out after termination"
+    );
+    let error = queued.await.expect("join").expect_err("ended");
+    assert_eq!(error.execution(), Execution::MaybeExecuted, "{error}");
+    client_driver.abort();
+    server_driver.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn termination_closes_every_endpoint_current_thread() {
+    termination_closes_every_endpoint().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn termination_closes_every_endpoint_multi_thread() {
+    termination_closes_every_endpoint().await;
+}
+
+/// Two shutdowns at once: the first one's deadline governs, the second
+/// waits for it and reports the same outcome; nothing is terminated twice.
+/// Regression: the second (with a zero grace) terminated at once, cutting
+/// the first one's drain short.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_shutdowns_share_one_termination() {
+    let (server, server_driver) = server(trusted()).await;
+    let (service, stream) = server.register::<Slow>(AccessClass::Private).expect("reg");
+    let (client, client_driver) = client();
+    let queued = call(&client, &service);
+    tokio::time::timeout(CALL, async {
+        while server
+            .stats()
+            .is_some_and(|stats| stats.requests_admitted == 0)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("admitted");
+    let first = {
+        let server = server.clone();
+        tokio::spawn(async move { server.shutdown(Duration::from_millis(800)).await })
+    };
+    while !server.is_shutting_down() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let started = std::time::Instant::now();
+    let second = server.shutdown(Duration::ZERO).await;
+    assert!(
+        started.elapsed() >= Duration::from_millis(500),
+        "the second shutdown waited for the first one's deadline"
+    );
+    let first = first.await.expect("join");
+    assert_eq!(first, second, "one outcome, reported to both");
+    assert_eq!(first.replies_abandoned, 1);
+    assert_eq!(
+        server
+            .stats()
+            .expect("still referenced")
+            .calls_ended_by_shutdown,
+        0
+    );
+    let _ = queued.await;
+    drop(stream);
+    client_driver.abort();
+    server_driver.abort();
+}
+
 /// Streams: a stream that finishes within the grace drains; one still
 /// producing at the deadline ends on both sides, after every item that
 /// arrived.

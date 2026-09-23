@@ -288,6 +288,9 @@ pub(crate) struct Shared<P: Providers> {
     inbound_sharing: crate::config::InboundSharing,
     /// [`RUNNING`], [`DRAINING`] or [`TERMINATED`] (graceful shutdown).
     lifecycle: std::sync::atomic::AtomicU8,
+    /// The graceful shutdown's outcome, once it finished: every other
+    /// caller of `shutdown` gets this one.
+    shutdown_report: Mutex<Option<ShutdownReport>>,
     this: Weak<Shared<P>>,
 }
 
@@ -356,6 +359,7 @@ impl<P: Providers> Shared<P> {
             alive: Arc::new(()),
             inbound_sharing,
             lifecycle: std::sync::atomic::AtomicU8::new(RUNNING),
+            shutdown_report: Mutex::new(None),
             this: this.clone(),
         })
     }
