@@ -1150,7 +1150,21 @@ impl StorageEngine {
             .ok_or(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
             })?;
-        let sectors = sector_range(pending.offset, pending.len);
+        // The length was clamped to the end of file when the read was
+        // submitted, but another handle may have truncated the file while it
+        // was in flight. Reconcile with the end of file *now*: the bytes that
+        // are gone read as a short read (or EOF), exactly as they would on a
+        // real file, never as an error no injected fault explains.
+        let len = usize::try_from(file_size.saturating_sub(pending.offset))
+            .unwrap_or(usize::MAX)
+            .min(pending.len);
+        if len < pending.len {
+            assert_reachable!("disk: in-flight read shortened by a truncation");
+        }
+        if len == 0 {
+            return Ok(StorageCompletion::Read(Vec::new()));
+        }
+        let sectors = sector_range(pending.offset, len);
 
         // EIO: a targeted injection fires unconditionally; the random family
         // is rolled first, then gated by the eligibility mask, so installing a
@@ -1196,33 +1210,18 @@ impl StorageEngine {
             self.record(&path, StorageFaultKind::ReadCorruption, Some(sectors));
         }
 
-        let max_offset = file_size.saturating_sub(pending.len as u64);
-        let mut read_offset = pending.offset;
-        let mut misdirected = false;
-        if config.misdirect_read_probability > 0.0
-            && sim_random::<f64>() < config.misdirect_read_probability
-            && max_offset > 0
-        {
-            let positions = max_offset + 1;
-            let original_position = pending.offset % positions;
-            let delta = sim_random_range(1..positions);
-            read_offset = if original_position >= positions - delta {
-                original_position - (positions - delta)
-            } else {
-                original_position + delta
-            };
-            misdirected = read_offset != pending.offset;
-        }
+        let read_offset = misdirected_read_offset(&config, pending.offset, len, file_size);
+        let misdirected = read_offset != pending.offset;
         if misdirected {
             assert_reachable!("disk fault: read served from the wrong offset");
             self.record(
                 &path,
                 StorageFaultKind::MisdirectedRead,
-                Some(sector_range(read_offset, pending.len)),
+                Some(sector_range(read_offset, len)),
             );
         }
 
-        let mut data = vec![0; pending.len];
+        let mut data = vec![0; len];
         let file =
             self.state
                 .files
@@ -1905,6 +1904,32 @@ impl StorageEngine {
             }) => steady.saturating_add(expires_at.saturating_sub(now)),
             _ => steady,
         }
+    }
+}
+
+/// Where a `len`-byte read at `offset` is actually served from: `offset`
+/// itself, or — when the misdirected-read coin lands — any other offset the
+/// read fits at in a `file_size`-byte file.
+fn misdirected_read_offset(
+    config: &StorageConfiguration,
+    offset: u64,
+    len: usize,
+    file_size: u64,
+) -> u64 {
+    let max_offset = file_size.saturating_sub(len as u64);
+    if config.misdirect_read_probability <= 0.0
+        || sim_random::<f64>() >= config.misdirect_read_probability
+        || max_offset == 0
+    {
+        return offset;
+    }
+    let positions = max_offset + 1;
+    let original_position = offset % positions;
+    let delta = sim_random_range(1..positions);
+    if original_position >= positions - delta {
+        original_position - (positions - delta)
+    } else {
+        original_position + delta
     }
 }
 
