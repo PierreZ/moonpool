@@ -871,7 +871,8 @@ impl SimulationBuilder {
     /// Run until the system is saturated: every observed
     /// `assert_sometimes!` / `assert_reachable!` assertion has fired **and**
     /// code coverage has not grown for `plateau_seeds` consecutive seeds
-    /// (capped at `max_iterations`).
+    /// (capped at `max_iterations`). A simulation with no coverage assertion
+    /// saturates on the plateau alone (with a warning).
     ///
     /// Uses real LLVM sancov code coverage when the binary is instrumented
     /// (built via `cargo xtask sim run`); otherwise falls back to assertion-slot
@@ -1335,7 +1336,8 @@ impl SimulationBuilder {
     /// the progress signal (real code coverage when sancov is available, else
     /// the reached-assertion count) has not grown for `plateau_seeds`
     /// consecutive seeds. Both signals are monotonic non-decreasing, so
-    /// `current == prev` marks a quiet seed.
+    /// `current == prev` marks a quiet seed. A run that observes no coverage
+    /// assertion at all is vacuously "all reached" and stops on the plateau.
     fn check_convergence_or_plateau(state: ConvergenceState<'_>) -> bool {
         let ConvergenceState {
             iteration_control,
@@ -1375,7 +1377,9 @@ impl SimulationBuilder {
             *prev_signal = current;
         }
 
-        let all_reached = all_sometimes_count > 0 && reached_sometimes.len() >= all_sometimes_count;
+        // With no coverage assertion observed there is nothing left to reach:
+        // the plateau alone decides (otherwise such a run could never converge).
+        let all_reached = reached_sometimes.len() >= all_sometimes_count;
 
         let edges_total = crate::chaos::exploration_glue::code_coverage_total().unwrap_or_default();
         *saturation = Some(super::report::SaturationReport {
@@ -1398,6 +1402,13 @@ impl SimulationBuilder {
             plateau_seeds,
         );
         if *plateau_count >= *plateau_seeds && all_reached {
+            if all_sometimes_count == 0 {
+                tracing::warn!(
+                    "no assert_sometimes!/assert_reachable! was observed: saturation was judged \
+                     on the {:?} plateau alone",
+                    signal,
+                );
+            }
             tracing::info!(
                 "Saturated after {} seeds: all {} sometimes reached, {:?} stable ({}) for {} seeds",
                 iteration_count,
