@@ -31,7 +31,7 @@ payload is a hand-written, versioned envelope (kind, reply route, incarnation,
 token, method, schema, codec, reserved metadata) followed by the opaque body.
 Each session opens with a `Hello` carrying the supported version range, the
 runtime incarnation, reserved feature bits, the frame limit and the listen
-address (protocol version 2); `PING`/`PONG` frames carry liveness. See the `protocol`
+address; `PING`/`PONG` frames carry liveness. See the `protocol`
 and `codec` module docs.
 
 ## Features

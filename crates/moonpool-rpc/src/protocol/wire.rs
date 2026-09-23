@@ -60,17 +60,14 @@ use crate::endpoint::{EndpointToken, Incarnation};
 pub const PROTOCOL_MAGIC: u32 = 0x4d50_5243;
 
 /// The newest envelope layout version this build speaks.
-///
-/// Version 1 was the unreleased first-package layout (no listen address,
-/// request flags or liveness frames); nothing speaks it any more.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 1;
 
 /// The oldest envelope layout version this build speaks.
 ///
 /// A peer whose announced range does not overlap
 /// `MIN_PROTOCOL_VERSION..=PROTOCOL_VERSION` is refused before any request
 /// is admitted. Supporting a wider window for rolling upgrades is #218.
-pub const MIN_PROTOCOL_VERSION: u16 = 2;
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
 
 /// The highest version both ranges contain, if any.
 #[must_use]
@@ -547,7 +544,7 @@ mod tests {
     /// protocol version bump, not a fixture update.
     #[test]
     fn golden_encodings() {
-        let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 2, 0, 2, 0, 1];
+        let mut expected = vec![0x01, 0x43, 0x52, 0x50, 0x4d, 1, 0, 1, 0, 1];
         expected.extend([0; 15]);
         expected.extend([0; 8]);
         expected.extend([0, 0, 1, 0]);
