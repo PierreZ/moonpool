@@ -1764,9 +1764,25 @@ impl SimulationBuilder {
         self.stage_replay_recipe();
         let (outcome, _start) =
             self.run_orchestrator_for_iteration(state, obs_handle, seed, iteration_count);
-        if let Ok(output) = outcome {
-            self.return_entries(state, output.workloads);
-        }
+        // The replay is a full run of the seed and is judged like one: a
+        // workload error, an always-violation or a deadlock fails the seed even
+        // when the draw fingerprints matched.
+        let replay_failure = match outcome {
+            Ok(output) => {
+                let errors = output.results.iter().filter(|r| r.is_err()).count();
+                self.return_entries(state, output.workloads);
+                if errors > 0 {
+                    Some(format!(
+                        "determinism canary: the replay's workloads failed ({errors} error(s))"
+                    ))
+                } else if crate::chaos::has_always_violations() {
+                    Some("determinism canary: the replay violated an always-assertion".to_string())
+                } else {
+                    None
+                }
+            }
+            Err(_) => Some("determinism canary: the replay deadlocked".to_string()),
+        };
         let verdict = crate::sim::finish_determinism_check();
         let matched = verdict.is_ok();
         let detail = match &verdict {
@@ -1782,6 +1798,10 @@ impl SimulationBuilder {
             state
                 .metrics_collector
                 .mark_current_iteration_failed(seed, "determinism canary: the replay diverged");
+        } else if let Some(reason) = replay_failure {
+            state
+                .metrics_collector
+                .mark_current_iteration_failed(seed, &reason);
         }
     }
 

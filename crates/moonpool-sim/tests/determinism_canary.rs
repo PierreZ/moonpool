@@ -251,6 +251,50 @@ fn early_exit_after_a_matching_prefix_trips_the_canary() {
     );
 }
 
+/// Draws exactly like [`Honest`] on every run, but its `check()` reads a
+/// process-wide counter the seed does not control and fails on the replay.
+/// The fingerprints match; the replay's own failure must still fail the seed.
+struct FailsOnReplay {
+    runs: &'static AtomicUsize,
+}
+
+#[async_trait]
+impl Workload for FailsOnReplay {
+    fn name(&self) -> &'static str {
+        "client"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        Honest.run(ctx).await
+    }
+
+    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        if self.runs.fetch_add(1, Ordering::SeqCst) % 2 == 1 {
+            return Err(moonpool_sim::SimulationError::InvalidState(
+                "leaked static changed the verdict".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn replay_failure_with_matching_draws_fails_the_seed() {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let report = SimulationBuilder::new()
+        .check_determinism()
+        .set_iterations(1)
+        .set_debug_seeds(vec![13])
+        .workload_factory(|| Box::new(FailsOnReplay { runs: &RUNS }))
+        .run();
+
+    assert_eq!(report.iterations, 1);
+    assert_eq!(canary_pass_count(&report), 1, "the draws did replay");
+    assert!(!canary_violated(&report));
+    assert_eq!(report.failed_runs, 1, "the replay's failure fails the seed");
+    assert_eq!(report.seeds_failing, vec![13]);
+}
+
 #[test]
 #[should_panic(expected = "check_determinism runs a seed more than once")]
 fn instance_workloads_are_rejected() {
