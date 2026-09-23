@@ -2186,7 +2186,7 @@ fn build_bucket_summaries(
     use super::report::BucketSiteSummary;
     use std::collections::BTreeMap;
 
-    let mut sites: BTreeMap<u32, BucketSiteSummary> = BTreeMap::new();
+    let mut sites: BTreeMap<u64, BucketSiteSummary> = BTreeMap::new();
 
     for bucket in buckets {
         let entry = sites

@@ -10,7 +10,7 @@ turns them into `assertion_violations` / `coverage_violations`.
   `MAP_SHARED` region and a discovery hook on top of the heap table this crate
   provides by default.
 - **Budgets are constants here and a contract everywhere**:
-  `MAX_ASSERTION_SLOTS = 512` (`slots.rs`), message truncation at
+  `MAX_ASSERTION_SLOTS = 2048` (`slots.rs`), message truncation at
   `SLOT_MSG_LEN = 64`, `MAX_EACH_BUCKETS = 256` and `MAX_EACH_KEYS = 6`
   (`buckets.rs`). A slot's identity is the hash of its message; changing how
   the hash or the truncation works resets every campaign's saturation
