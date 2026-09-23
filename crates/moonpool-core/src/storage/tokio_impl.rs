@@ -292,7 +292,7 @@ fn direct_io_constraints(file: &tokio::fs::File) -> Option<IoConstraints> {
 /// that asked for it.
 ///
 /// An append file therefore gets a genuinely separate open, without
-/// `O_APPEND`, addressed by descriptor so it is unambiguously the same file.
+/// `O_APPEND`, of unambiguously the same file (see [`reopen_same_file`]).
 /// Without append the clone carries identical flags and is exactly
 /// equivalent, so it is kept — one fewer open, and no dependency on the
 /// descriptor path.
@@ -307,10 +307,56 @@ async fn positioned_descriptor(
     // Append implies write access; the read side is carried over as asked for,
     // so a file opened without read still refuses `read_at`.
     let positioned = OpenOptions::new().read(options.is_read()).write(true);
-    let reopened = open_options(&positioned, opened.direct)
-        .open(descriptor_path(&opened.file, path))
-        .await?;
+    let reopened = reopen_same_file(&opened.file, path, &positioned, opened.direct).await?;
     Ok(reopened.into_std().await)
+}
+
+/// Open `file` — the file this descriptor already holds — a second time with
+/// `options`, never whatever `path` happens to name by now.
+///
+/// Where the system has descriptor paths (Linux with `/proc` mounted) the
+/// reopen goes through [`descriptor_path`] and cannot pick up another file.
+/// Elsewhere it has to go by name, so on Unix it then checks that both
+/// descriptors hold the same inode (device and inode number) and fails with
+/// [`io::ErrorKind::Other`] if a concurrent rename replaced the file between
+/// the two opens: one handle must never silently read and write two files.
+///
+/// On a platform that is neither (Windows), the standard library exposes no
+/// stable file identity, so the reopen by name is unchecked. That is a known
+/// limitation: a rename over `path` racing the open itself can leave the
+/// stream and positioned sides of one append handle on different files.
+async fn reopen_same_file(
+    file: &tokio::fs::File,
+    path: &str,
+    options: &OpenOptions,
+    direct: bool,
+) -> io::Result<tokio::fs::File> {
+    if descriptor_paths_available() {
+        return open_options(options, direct)
+            .open(descriptor_path(file, path))
+            .await;
+    }
+    let reopened = open_options(options, direct).open(path).await?;
+    if !same_file(&file.metadata().await?, &reopened.metadata().await?) {
+        return Err(io::Error::other(format!(
+            "{path} was replaced while it was being opened; \
+             the positioned descriptor would address a different file"
+        )));
+    }
+    Ok(reopened)
+}
+
+/// Whether two descriptors' metadata name the same file.
+#[cfg(unix)]
+fn same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    a.dev() == b.dev() && a.ino() == b.ino()
+}
+
+/// No stable file identity outside Unix: see [`reopen_same_file`].
+#[cfg(not(unix))]
+fn same_file(_a: &std::fs::Metadata, _b: &std::fs::Metadata) -> bool {
+    true
 }
 
 /// The path that reopens *this exact file*, rather than whatever the original
@@ -328,8 +374,8 @@ fn descriptor_path(file: &tokio::fs::File, _path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 
-/// Unreachable in practice: the upgrade only runs where direct I/O is
-/// supported, which is Linux only. Present so the branch compiles elsewhere.
+/// Never called: every caller first checks [`descriptor_paths_available`],
+/// which is `false` off Linux. Present so those branches compile elsewhere.
 #[cfg(not(target_os = "linux"))]
 fn descriptor_path(_file: &tokio::fs::File, path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(path)

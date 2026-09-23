@@ -356,6 +356,74 @@ async fn positioned_writes_ignore_append_on_a_real_file() {
     );
 }
 
+/// The stream and positioned sides of one append handle address the *same*
+/// file, even after another process renames a replacement over its path.
+///
+/// An append handle holds two descriptors (see `positioned_descriptor`), and
+/// the second must be a reopen of the file the first holds, never of whatever
+/// the name points at: otherwise stream writes would go to one file while
+/// `read_at` / `write_at` target its replacement.
+#[tokio::test]
+async fn an_append_handle_stays_on_one_file_across_a_rename_over_its_path() {
+    use futures::io::AsyncWriteExt;
+
+    let dir = TempDir::new().expect("temp dir");
+    let path = &scratch_file(&dir, "append.db");
+    let replacement = &scratch_file(&dir, "replacement.db");
+    let provider = TokioStorageProvider::new();
+
+    let seed = provider
+        .open(path, OpenOptions::create_write())
+        .await
+        .expect("open failed");
+    seed.write_at(0, b"AAAA").await.expect("seed write");
+    drop(seed);
+
+    let mut file = provider
+        .open(path, OpenOptions::new().read(true).write(true).append(true))
+        .await
+        .expect("open failed");
+
+    // Someone renames a different file over the name.
+    let other = provider
+        .open(replacement, OpenOptions::create_write())
+        .await
+        .expect("open failed");
+    other.write_at(0, b"ZZZZ").await.expect("write failed");
+    drop(other);
+    provider
+        .rename(replacement, path)
+        .await
+        .expect("rename failed");
+
+    // Both sides of the handle keep working on the original file.
+    file.write_all(b"SS").await.expect("stream write failed");
+    file.flush().await.expect("flush failed");
+    assert_eq!(file.write_at(0, b"P").await.expect("write_at failed"), 1);
+    let mut buf = [0u8; 6];
+    assert_eq!(file.read_at(0, &mut buf).await.expect("read_at failed"), 6);
+    assert_eq!(
+        &buf, b"PAAASS",
+        "stream and positioned writes landed in the same file"
+    );
+
+    // And the replacement at the path was touched by neither.
+    let now_at_path = provider
+        .open(path, OpenOptions::read_only())
+        .await
+        .expect("open failed");
+    let mut replaced = [0u8; 4];
+    assert_eq!(
+        now_at_path
+            .read_at(0, &mut replaced)
+            .await
+            .expect("read_at failed"),
+        4
+    );
+    assert_eq!(&replaced, b"ZZZZ");
+    assert_eq!(now_at_path.size().await.expect("size failed"), 4);
+}
+
 /// `Required` opens a file that already exists, and applies the lifecycle it
 /// deferred once direct I/O is secured. Runs wherever direct I/O works.
 #[tokio::test]
