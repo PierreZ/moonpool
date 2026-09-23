@@ -116,14 +116,27 @@ impl std::fmt::Debug for Credential {
 ///
 /// Asked again for **every** attempt, including each retransmission of a
 /// reliable call, so a refreshed token is picked up without restarting the
-/// call. Keep it quick and self-contained: a retransmission asks it while
-/// the runtime holds its internal lock, so it must never call back into
-/// the RPC runtime.
+/// call. It is never called with a runtime lock held, so it may use the
+/// runtime (a handle's stats, another call's outcome), but it runs inline
+/// on the call path and on the connection's teardown: keep it quick.
 ///
 /// The credential is attached when the request is framed, before the
-/// runtime knows which session will carry it: a runtime that attaches
-/// bearer credentials should dial only over TLS (or run on a trusted
-/// network), or they travel in the clear.
+/// session that carries it is known. The runtime therefore checks again at
+/// the last moment, when the frame is about to be written: a request
+/// carrying a credential is written only on an encrypted session (unless
+/// this runtime opted into
+/// [`SecurityConfig::send_credentials_over_plaintext`]), never on a
+/// protocol version 1 session and never on an accepted session whose
+/// dialer was not authenticated; otherwise the call fails with
+/// [`ErrorReason::CredentialWithheld`](crate::ErrorReason::CredentialWithheld)
+/// and the credential never leaves the process.
+///
+/// A bearer credential is replayable by whoever receives it: any server
+/// that accepts the same issuer and audience accepts a token presented to
+/// another. Scope audiences per service, and call only servers you trust
+/// with the token (a reference taken from a peer names an address the
+/// peer chose; TLS proves the server behind it, not that it is the one
+/// you meant).
 pub trait CredentialSource: Send + Sync + 'static {
     /// The credential for a request to `target`, or `None` to call
     /// anonymously.
@@ -446,6 +459,7 @@ pub struct SecurityConfig {
     credentials: Option<Arc<dyn CredentialSource>>,
     max_credential_bytes: usize,
     plaintext_credentials: bool,
+    send_plaintext: bool,
 }
 
 impl Default for SecurityConfig {
@@ -461,6 +475,7 @@ impl Default for SecurityConfig {
             credentials: None,
             max_credential_bytes: DEFAULT_MAX_CREDENTIAL_BYTES,
             plaintext_credentials: false,
+            send_plaintext: false,
         }
     }
 }
@@ -541,6 +556,33 @@ impl SecurityConfig {
     pub fn accept_credentials_over_plaintext(mut self) -> Self {
         self.plaintext_credentials = true;
         self
+    }
+
+    /// Let this runtime's own requests carry their credentials over
+    /// sessions that are not encrypted.
+    ///
+    /// By default a request carrying a credential is written only on an
+    /// encrypted session (a TLS dial); on any other session it fails with
+    /// [`ErrorReason::CredentialWithheld`](crate::ErrorReason::CredentialWithheld)
+    /// and the credential never leaves the process. Opt in here (the
+    /// client-side mirror of
+    /// [`accept_credentials_over_plaintext`](Self::accept_credentials_over_plaintext))
+    /// for simulations and trusted networks; a
+    /// [`trusted_network`](Self::trusted_network) runtime is opted in. A
+    /// credential is never written on a protocol version 1 session nor on
+    /// an accepted session whose dialer was not authenticated, opt-in or
+    /// not.
+    #[must_use]
+    pub fn send_credentials_over_plaintext(mut self) -> Self {
+        self.send_plaintext = true;
+        self
+    }
+
+    /// Whether this runtime's requests may carry credentials over
+    /// unencrypted sessions.
+    #[must_use]
+    pub fn sends_credentials_over_plaintext(&self) -> bool {
+        self.trusted || self.send_plaintext
     }
 
     /// Whether this is [`trusted_network`](Self::trusted_network).
@@ -633,6 +675,7 @@ impl std::fmt::Debug for SecurityConfig {
             .field("attaches_credentials", &self.credentials.is_some())
             .field("max_credential_bytes", &self.max_credential_bytes)
             .field("plaintext_credentials", &self.plaintext_credentials)
+            .field("send_plaintext", &self.send_plaintext)
             .finish_non_exhaustive()
     }
 }
@@ -660,6 +703,7 @@ impl PartialEq for SecurityConfig {
             }
             && self.max_credential_bytes == other.max_credential_bytes
             && self.plaintext_credentials == other.plaintext_credentials
+            && self.send_plaintext == other.send_plaintext
     }
 }
 

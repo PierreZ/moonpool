@@ -94,6 +94,7 @@ impl<P: Providers> Shared<P> {
             );
             self.admit(
                 &Admission {
+                    local: true,
                     incarnation: endpoint.incarnation(),
                     token: endpoint.token(),
                     identity,

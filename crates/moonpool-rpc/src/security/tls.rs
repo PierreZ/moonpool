@@ -388,6 +388,10 @@ where
 {
     type Stream = futures_rustls::client::TlsStream<S>;
 
+    fn authenticates_server(&self) -> bool {
+        self.client.is_some()
+    }
+
     async fn connect(&self, stream: S, peer: &str) -> io::Result<(Self::Stream, PeerContext)> {
         let client = self.client.as_ref().ok_or_else(|| {
             io::Error::new(

@@ -860,7 +860,7 @@ pub(crate) async fn write_loop<W, B>(
     connection: &Connection,
     mut writer: W,
     batch: usize,
-    admit_transmit: impl Fn(Option<u64>, usize) -> bool,
+    admit_transmit: impl Fn(Option<u64>, &[u8]) -> bool,
     close_bound: impl FnOnce() -> B,
 ) -> CloseReason
 where
@@ -881,7 +881,7 @@ where
         };
         let admitted = match outgoing.kind {
             FrameKind::Control | FrameKind::Data => true,
-            FrameKind::Request(call_id) => admit_transmit(call_id, outgoing.bytes.len()),
+            FrameKind::Request(call_id) => admit_transmit(call_id, &outgoing.bytes),
         };
         if admitted && let Err(error) = writer.write_all(&outgoing.bytes).await {
             return CloseReason::Io(error.to_string());

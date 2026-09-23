@@ -99,6 +99,20 @@ pub trait Connector<S>: Send + Sync + 'static {
         stream: S,
         peer: &str,
     ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>> + Send;
+
+    /// Whether [`connect`](Self::connect) authenticates the server it
+    /// reaches (as a TLS client verifying a certificate does). Default:
+    /// `false`.
+    ///
+    /// When it does, the runtime never adopts an accepted session as its
+    /// connection to the address that session's dialer claims (inbound
+    /// sharing is forced off, whatever
+    /// [`PeerPolicy::share_inbound_sessions`](crate::PeerPolicy::share_inbound_sessions)
+    /// says): an accepted session never authenticated its dialer, so using
+    /// it for calls would bypass the authentication our own dial performs.
+    fn authenticates_server(&self) -> bool {
+        false
+    }
 }
 
 /// Upgrades an accepted provider stream `S` into a session stream.

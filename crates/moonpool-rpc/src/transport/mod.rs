@@ -283,6 +283,9 @@ pub(crate) struct Shared<P: Providers> {
     /// Published after every failure-monitor change; closed on drop.
     watch: Arc<Watch>,
     alive: Arc<()>,
+    /// How accepted sessions may be shared: the configured mode, or
+    /// `Disabled` when the session upgrade authenticates servers.
+    inbound_sharing: crate::config::InboundSharing,
     /// [`RUNNING`], [`DRAINING`] or [`TERMINATED`] (graceful shutdown).
     lifecycle: std::sync::atomic::AtomicU8,
     this: Weak<Shared<P>>,
@@ -310,7 +313,18 @@ impl<P: Providers> Shared<P> {
         config: RpcConfig,
         address: Option<SocketAddr>,
         commands: mpsc::UnboundedSender<Command<P>>,
+        authenticates_server: bool,
     ) -> Arc<Self> {
+        let inbound_sharing = if authenticates_server {
+            if config.peer.share_inbound_sessions != crate::config::InboundSharing::Disabled {
+                tracing::debug!(
+                    "rpc inbound session sharing off: the session upgrade authenticates servers"
+                );
+            }
+            crate::config::InboundSharing::Disabled
+        } else {
+            config.peer.share_inbound_sessions
+        };
         // Protocol identifiers come from the provider's random source (seeded
         // in simulation, OS entropy in production) unless the caller supplies
         // one. Never an authentication.
@@ -340,6 +354,7 @@ impl<P: Providers> Shared<P> {
             counters: Arc::new(Counters::default()),
             watch: Arc::new(Watch::default()),
             alive: Arc::new(()),
+            inbound_sharing,
             lifecycle: std::sync::atomic::AtomicU8::new(RUNNING),
             this: this.clone(),
         })
@@ -409,9 +424,9 @@ impl<P: Providers> Shared<P> {
             max_frame_bytes: self.config.max_frame_bytes,
             // Announced only when this runtime shares sessions: a peer then
             // knows the tie-break applies on both sides.
-            listen: self.address.filter(|_| {
-                self.config.peer.share_inbound_sessions != crate::config::InboundSharing::Disabled
-            }),
+            listen: self
+                .address
+                .filter(|_| self.inbound_sharing != crate::config::InboundSharing::Disabled),
         });
         // A handshake is a few dozen bytes and exempt from the configured
         // frame limit, which only bounds what peers may send us.
@@ -505,6 +520,11 @@ impl<P: Providers> Shared<P> {
     /// a handler or a queue.
     fn admit(&self, request: &Admission<'_>, mut context: ReplyContext) {
         let token = request.token;
+        if request.local && request.metadata.is_some_and(|section| !section.is_empty()) {
+            // A local caller's credential: it reached admission without
+            // crossing a session.
+            Counters::bump(&self.counters.credentials_attached);
+        }
         if self.is_closing() {
             Counters::bump(&self.counters.shutdown_refusals);
             Counters::bump(&self.counters.requests_rejected);
@@ -590,10 +610,15 @@ impl<P: Providers> Shared<P> {
         context: &mut ReplyContext,
     ) -> Result<(), Denial> {
         let security = &self.config.security;
-        let origin = context
-            .peer
-            .as_ref()
-            .map_or(RequestOrigin::Local, RequestOrigin::Remote);
+        // The admission site says where the request came from; a remote
+        // request whose session context is missing is judged as an
+        // unencrypted, unauthenticated peer (fail closed).
+        let unknown = PeerContext::new("unknown");
+        let origin = if request.local {
+            RequestOrigin::Local
+        } else {
+            RequestOrigin::Remote(context.peer.as_ref().unwrap_or(&unknown))
+        };
         let check = AccessRequest {
             origin,
             access,
@@ -809,6 +834,9 @@ impl<P: Providers> EndpointOwner for Shared<P> {
 
 /// One request presented for admission, from either route.
 struct Admission<'a> {
+    /// A caller in this runtime (as opposed to one over a session): set by
+    /// the admission site itself, never inferred.
+    local: bool,
     incarnation: Incarnation,
     token: EndpointToken,
     identity: CallIdentity,

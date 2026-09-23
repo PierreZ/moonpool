@@ -46,6 +46,6 @@ pub use wire::{
     MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, REJECTION_ENVELOPE_LEN,
     REQUEST_FLAG_ONE_WAY, REQUEST_FLAG_STREAM, STREAM_ACK_ENVELOPE_LEN, STREAM_END_ENVELOPE_LEN,
     WireError, WireMessage, WireOutcome, decode_message, decode_message_at, encode_message,
-    negotiate, reply_envelope_len, request_envelope_len, stream_item_envelope_len,
-    stream_item_frame_len, stream_request_envelope_len,
+    negotiate, reply_envelope_len, request_envelope_len, request_metadata_len,
+    stream_item_envelope_len, stream_item_frame_len, stream_request_envelope_len,
 };

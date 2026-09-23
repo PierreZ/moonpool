@@ -84,7 +84,8 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
         upgrade: U,
     ) -> (Self, RpcHandle<P>) {
         let (sender, commands) = mpsc::unbounded();
-        let shared = Shared::new(providers, config, address, sender);
+        let authenticates_server = Connector::<Stream<P>>::authenticates_server(&upgrade);
+        let shared = Shared::new(providers, config, address, sender, authenticates_server);
         let handle = RpcHandle::new(&shared);
         (
             Self {
@@ -387,7 +388,7 @@ where
         connection,
         writer,
         batch,
-        |call_id, frame_len| shared.admit_transmit(connection, call_id, frame_len),
+        |call_id, frame| shared.admit_transmit(connection, call_id, frame),
         // A session closed from this side closes its stream (a TLS
         // close_notify), for at most the handshake budget.
         || async {

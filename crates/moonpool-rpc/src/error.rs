@@ -152,6 +152,13 @@ pub enum ErrorReason {
     /// The server's runtime is shutting down gracefully and admitted
     /// nothing new. Never executed.
     ServerShuttingDown,
+    /// The request carried a credential and was not written: the session
+    /// that would have carried it is unencrypted (and this runtime did not
+    /// opt into
+    /// [`send_credentials_over_plaintext`](crate::security::SecurityConfig::send_credentials_over_plaintext)),
+    /// runs protocol version 1, or is an accepted session that never
+    /// authenticated its dialer. The credential never left this process.
+    CredentialWithheld(String),
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -224,6 +231,7 @@ impl std::fmt::Display for ErrorReason {
             Self::Unauthenticated(reason) => write!(f, "unauthenticated: {reason}"),
             Self::PermissionDenied => f.write_str("permission denied"),
             Self::ServerShuttingDown => f.write_str("the server is shutting down"),
+            Self::CredentialWithheld(why) => write!(f, "credential withheld: {why}"),
         }
     }
 }

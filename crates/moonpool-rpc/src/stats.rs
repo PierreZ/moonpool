@@ -152,7 +152,8 @@ pub struct RpcStats {
     pub requests_permission_denied: u64,
     /// Accepted connections refused by the address allow list.
     pub connections_refused_by_policy: u64,
-    /// Credentials this runtime attached to its own requests.
+    /// Requests of this runtime that left (or reached local admission)
+    /// carrying a credential.
     pub credentials_attached: u64,
     /// Requests refused because a graceful shutdown was under way.
     pub shutdown_refusals: u64,

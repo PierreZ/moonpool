@@ -140,6 +140,7 @@ impl<P: Providers> Shared<P> {
             .is_some_and(|hello| hello.version >= CREDENTIALS_VERSION);
         self.admit(
             &Admission {
+                local: false,
                 incarnation,
                 token,
                 identity: CallIdentity {
@@ -302,7 +303,7 @@ impl<P: Providers> Shared<P> {
         if listen == local {
             return;
         }
-        match self.config.peer.share_inbound_sessions {
+        match self.inbound_sharing {
             InboundSharing::Disabled => return,
             InboundSharing::Trusted => {}
             InboundSharing::SameIp => {

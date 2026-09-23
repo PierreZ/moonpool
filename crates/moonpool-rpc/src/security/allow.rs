@@ -218,7 +218,13 @@ mod tests {
         // Every prefix against every kind of peer: no panic, whatever the
         // answer.
         let nets = ["::ffff:10.0.0.0", "10.0.0.0", "2001:db8::", "::"];
-        let peers = ["10.1.2.3", "::ffff:10.1.2.3", "2001:db8::1", "::1", "0.0.0.0"];
+        let peers = [
+            "10.1.2.3",
+            "::ffff:10.1.2.3",
+            "2001:db8::1",
+            "::1",
+            "0.0.0.0",
+        ];
         for net in nets {
             for prefix in 0..=130u8 {
                 let Ok(subnet) = Subnet::parse(&format!("{net}/{prefix}")) else {

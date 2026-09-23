@@ -653,6 +653,25 @@ pub const STREAM_END_ENVELOPE_LEN: usize = 1 + 8 + 8 + 1 + 8;
 /// signal).
 pub const STREAM_ACK_ENVELOPE_LEN: usize = 1 + 8 + 8;
 
+/// The length of a request envelope's metadata (credential) section,
+/// read without decoding the rest; `None` for anything but a well-formed
+/// request prefix.
+#[must_use]
+pub fn request_metadata_len(payload: &[u8]) -> Option<usize> {
+    let mut input = Reader::new(payload);
+    if input.u8()? != KIND_REQUEST {
+        return None;
+    }
+    // call id, incarnation, token, interface, interface version, method,
+    // schema, codec.
+    input.slice(8 + 16 + 8 + 4 + 4 + 2 + 4 + 2 + 2)?;
+    let flags = input.u8()?;
+    if flags & REQUEST_FLAG_STREAM != 0 {
+        input.u64()?;
+    }
+    input.u16().map(usize::from)
+}
+
 /// Decode one frame payload of the newest version ([`PROTOCOL_VERSION`]).
 ///
 /// # Errors
@@ -1095,6 +1114,40 @@ mod tests {
             decode_message(&[0x08, 1, 0, 0, 0, 0, 0, 0, 0, 1]),
             Err(EnvelopeError::Truncated)
         );
+    }
+
+    #[test]
+    fn the_metadata_length_is_read_without_decoding() {
+        let mut with_metadata = request();
+        if let WireMessage::Request { metadata, .. } = &mut with_metadata {
+            *metadata = vec![1, 2, 3];
+        }
+        assert_eq!(
+            super::request_metadata_len(&encode_message(&with_metadata)),
+            Some(3)
+        );
+        assert_eq!(
+            super::request_metadata_len(&encode_message(&request())),
+            Some(0)
+        );
+        if let WireMessage::Request {
+            flags,
+            stream_window,
+            ..
+        } = &mut with_metadata
+        {
+            *flags = super::REQUEST_FLAG_STREAM;
+            *stream_window = 9;
+        }
+        assert_eq!(
+            super::request_metadata_len(&encode_message(&with_metadata)),
+            Some(3)
+        );
+        assert_eq!(
+            super::request_metadata_len(&encode_message(&WireMessage::Ping { nonce: 1 })),
+            None
+        );
+        assert_eq!(super::request_metadata_len(&[0x02, 1]), None);
     }
 
     #[test]

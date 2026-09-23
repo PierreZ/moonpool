@@ -14,8 +14,8 @@ use moonpool_core::TokioProviders;
 use moonpool_core::metrics::MetricsSource;
 use moonpool_rpc::observability::RpcMetrics;
 use moonpool_rpc::security::{
-    AccessPolicy, AccessRequest, Credential, CredentialError, Denial, IpAllowList, Principal,
-    RequestVerifier, SecurityConfig,
+    AccessPolicy, AccessRequest, Credential, CredentialError, CredentialSource, Denial,
+    IpAllowList, Principal, RequestVerifier, SecurityConfig,
 };
 use moonpool_rpc::{
     AccessClass, ErrorReason, Execution, IncomingRequest, MethodId, RequestStream, RpcConfig,
@@ -99,9 +99,11 @@ async fn server(security: SecurityConfig) -> (RpcHandle<TokioProviders>, Driver)
     (rpc, tokio::spawn(driver.run()))
 }
 
+/// A client runtime that may send credentials over these plaintext test
+/// sessions (the explicit opt-in: by default it would withhold them).
 fn client(security: SecurityConfig) -> (RpcHandle<TokioProviders>, Driver) {
     let config = RpcConfig {
-        security,
+        security: security.send_credentials_over_plaintext(),
         ..RpcConfig::default()
     };
     let (driver, rpc) = RpcDriver::client_only(TokioProviders::new(), config).expect("config");
@@ -337,6 +339,161 @@ async fn bearer_credentials_over_plaintext_need_an_explicit_opt_in() {
     remote_driver.abort();
     server_driver.abort();
     handler.abort();
+}
+
+/// Without the opt-in a client never writes a credential on a plaintext
+/// session: the call fails before anything leaves, and the server never
+/// sees the credential (no verification, no denial, no execution).
+async fn credentials_are_withheld_from_plaintext_sessions() {
+    let security = SecurityConfig::enforced(Tokens).accept_credentials_over_plaintext();
+    let (server, server_driver) = server(security).await;
+    let receipts = Receipts::default();
+    let (private, stream) = server.register::<Echo>(AccessClass::Private).expect("reg");
+    let handler = serve(stream, &receipts);
+    let (driver, strict) =
+        RpcDriver::client_only(TokioProviders::new(), RpcConfig::default()).expect("config");
+    let strict_driver = tokio::spawn(driver.run());
+    let withheld = call(&strict, &private, Some(SECRET))
+        .await
+        .expect_err("withheld");
+    assert!(
+        matches!(withheld.reason(), ErrorReason::CredentialWithheld(_)),
+        "{withheld}"
+    );
+    assert_eq!(withheld.execution(), Execution::NotAdmitted);
+    // One-way: dropped before writing, never run.
+    private
+        .bind(&strict)
+        .with_credentials(Credential::bearer(SECRET))
+        .send(&text("one-way"))
+        .expect("queued");
+    // An anonymous call on the same session still goes out (and is
+    // refused by the private endpoint).
+    assert_eq!(
+        denied(&call(&strict, &private, None).await),
+        Some(ErrorReason::Unauthenticated(CredentialError::Missing))
+    );
+    let stats = server.stats().expect("running");
+    assert_eq!(stats.requests_authenticated, 0);
+    assert_eq!(stats.requests_unauthenticated, 1, "only the anonymous call");
+    assert_eq!(strict.stats().expect("running").credentials_attached, 0);
+    assert_eq!(receipts.executed(), 0);
+    strict_driver.abort();
+    server_driver.abort();
+    handler.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn credentials_are_withheld_from_plaintext_sessions_current_thread() {
+    credentials_are_withheld_from_plaintext_sessions().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn credentials_are_withheld_from_plaintext_sessions_multi_thread() {
+    credentials_are_withheld_from_plaintext_sessions().await;
+}
+
+/// A credential source that uses the runtime (here: reads its stats and
+/// shutdown state) while a reliable call is retransmitted after a
+/// disconnect. Regression: the source ran under the runtime's state lock
+/// and deadlocked it.
+struct Introspecting {
+    rpc: Mutex<Option<RpcHandle<TokioProviders>>>,
+    asks: Arc<AtomicU32>,
+}
+
+impl CredentialSource for Introspecting {
+    fn credential(&self, _target: &moonpool_rpc::Endpoint) -> Option<Credential> {
+        self.asks.fetch_add(1, Ordering::SeqCst);
+        if let Some(rpc) = self
+            .rpc
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .as_ref()
+        {
+            let _ = rpc.stats();
+            let _ = rpc.is_shutting_down();
+        }
+        Some(Credential::bearer(SECRET))
+    }
+}
+
+async fn a_credential_source_may_use_the_runtime_during_retransmission() {
+    let security = SecurityConfig::enforced(Tokens).accept_credentials_over_plaintext();
+    let (server, server_driver) = server(security).await;
+    let (private, mut stream) = server.register::<Echo>(AccessClass::Private).expect("reg");
+    let received = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&received);
+    let holder = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(request) = stream.recv().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            held.push(request);
+        }
+    });
+    let (client, client_driver) = client(SecurityConfig::default());
+    let asks = Arc::new(AtomicU32::new(0));
+    let source = Arc::new(Introspecting {
+        rpc: Mutex::new(Some(client.clone())),
+        asks: Arc::clone(&asks),
+    });
+    struct Shared(Arc<Introspecting>);
+    impl CredentialSource for Shared {
+        fn credential(&self, target: &moonpool_rpc::Endpoint) -> Option<Credential> {
+            self.0.credential(target)
+        }
+    }
+    let reliable = {
+        let client = private
+            .bind(&client)
+            .with_credentials(Shared(Arc::clone(&source)));
+        tokio::spawn(async move { client.get_reply(&text("held")).await })
+    };
+    tokio::time::timeout(CALL, async {
+        while received.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first copy arrived");
+    // The server goes away: the session ends and the call is sent again,
+    // asking the source (which uses the runtime) for a fresh credential.
+    server_driver.abort();
+    let _ = server_driver.await;
+    holder.abort();
+    tokio::time::timeout(CALL, async {
+        while asks.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the retransmission asked the source again");
+    tokio::time::timeout(CALL, async {
+        while client
+            .stats()
+            .is_some_and(|stats| stats.retransmissions == 0)
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the runtime is not deadlocked and requeued the call");
+    reliable.abort();
+    *source
+        .rpc
+        .lock()
+        .expect("Mutex poisoned: prior task panicked") = None;
+    client_driver.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_credential_source_may_use_the_runtime_during_retransmission_current_thread() {
+    a_credential_source_may_use_the_runtime_during_retransmission().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credential_source_may_use_the_runtime_during_retransmission_multi_thread() {
+    a_credential_source_may_use_the_runtime_during_retransmission().await;
 }
 
 /// A stream request passes the same check before any item is produced.

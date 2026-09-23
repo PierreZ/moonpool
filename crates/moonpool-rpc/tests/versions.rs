@@ -475,9 +475,9 @@ async fn old_client_new_server_multi_thread() {
     old_client_new_server().await;
 }
 
-/// A new client (with a credential) and an old trusted server: version 1,
-/// the credential is carried and ignored as version 1 specifies, the call
-/// works.
+/// A new client and an old trusted server: version 1. A request carrying a
+/// credential is never written on a version 1 session (which could not
+/// carry it); an anonymous one works.
 async fn new_client_old_server() {
     let (server, server_driver) = server(RpcConfig {
         security: SecurityConfig::trusted_network(),
@@ -487,14 +487,25 @@ async fn new_client_old_server() {
     let (service, stream) = server.register::<Echo>(AccessClass::Private).expect("reg");
     let handler = serve(stream);
     let (new, new_driver) = client(RpcConfig {
-        security: SecurityConfig::default().with_credentials(Credential::bearer("valid")),
+        security: SecurityConfig::default().send_credentials_over_plaintext(),
         ..RpcConfig::default()
     });
+    let withheld = service
+        .bind(&new)
+        .with_credentials(Credential::bearer("valid"))
+        .try_get_reply_within(&text("hi"), CALL)
+        .await
+        .expect_err("no credential on a version 1 session");
+    assert!(
+        matches!(withheld.reason(), ErrorReason::CredentialWithheld(_)),
+        "{withheld}"
+    );
+    assert_eq!(withheld.execution(), Execution::NotAdmitted);
     let reply = service
         .bind(&new)
         .try_get_reply_within(&text("hi"), CALL)
         .await
-        .expect("call");
+        .expect("anonymous call");
     assert_eq!(reply.text, "hi");
     assert_eq!(server.stats().expect("running").requests_authenticated, 0);
     drop(service);
@@ -543,7 +554,9 @@ async fn a_verifying_server_refuses_version_one_clients() {
     );
     assert_eq!(refused.execution(), Execution::NotAdmitted);
     let (new, new_driver) = client(RpcConfig {
-        security: SecurityConfig::default().with_credentials(Credential::bearer("valid")),
+        security: SecurityConfig::default()
+            .with_credentials(Credential::bearer("valid"))
+            .send_credentials_over_plaintext(),
         ..RpcConfig::default()
     });
     let reply = service

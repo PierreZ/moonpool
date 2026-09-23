@@ -351,6 +351,131 @@ async fn credentials_over_tls_and_downgrade_rejection_multi_thread() {
     credentials_over_tls_and_downgrade_rejection().await;
 }
 
+/// A TLS runtime whose connector claims it does not authenticate servers,
+/// so it keeps announcing a listen address: the impostor's build.
+#[derive(Clone)]
+struct Impostor(Tls);
+
+impl<S> moonpool_rpc::Connector<S> for Impostor
+where
+    S: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = <Tls as moonpool_rpc::Connector<S>>::Stream;
+
+    async fn connect(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> std::io::Result<(Self::Stream, moonpool_rpc::PeerContext)> {
+        moonpool_rpc::Connector::connect(&self.0, stream, peer).await
+    }
+}
+
+impl<S> moonpool_rpc::Acceptor<S> for Impostor
+where
+    S: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send + 'static,
+{
+    type Stream = <Tls as moonpool_rpc::Acceptor<S>>::Stream;
+
+    async fn accept(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> std::io::Result<(Self::Stream, moonpool_rpc::PeerContext)> {
+        moonpool_rpc::Acceptor::accept(&self.0, stream, peer).await
+    }
+}
+
+/// An impostor on A's host dials B over TLS (as any client may) and claims
+/// A's listen address. B must never adopt that session as its connection
+/// to A: B's calls to A, bearer token included, must reach A through B's
+/// own server-authenticating dial, and nothing may reach the impostor.
+async fn an_impostor_claiming_a_peer_address_gets_nothing() {
+    let authority = Authority::new("sharing ca");
+    let tls = |now| {
+        let (chain, key) = authority.leaf();
+        Tls::new(
+            TlsClient::new([authority.root.clone()], clock(now)).expect("client"),
+            TlsServer::new(chain, key, clock(now)).expect("server"),
+        )
+    };
+    let listen = |upgrade: Tls, config: RpcConfig| async move {
+        let (driver, rpc) =
+            RpcDriver::listen_with(TokioProviders::new(), "127.0.0.1:0", config, upgrade)
+                .await
+                .expect("bind");
+        (rpc, tokio::spawn(driver.run()))
+    };
+    // A: the real peer, verifying tokens.
+    let (a, a_driver) = listen(
+        tls(JUNE_2030),
+        RpcConfig {
+            security: SecurityConfig::enforced(OneToken),
+            ..RpcConfig::default()
+        },
+    )
+    .await;
+    let executed = Arc::new(AtomicU32::new(0));
+    let (a_service, a_stream) = a.register::<Echo>(AccessClass::Private).expect("reg");
+    let a_handler = serve(a_stream, &executed);
+    // B: calls A with a bearer token; serves a public echo anyone may call.
+    let (b, b_driver) = listen(tls(JUNE_2030), RpcConfig::default()).await;
+    let (b_service, b_stream) = b.register::<Echo>(AccessClass::Public).expect("reg");
+    let b_handler = serve(b_stream, &Arc::new(AtomicU32::new(0)));
+    // M: same host, advertises A's address, dials B first.
+    let a_address = a.address().expect("listening");
+    let (m_driver, m) = RpcDriver::listen_with(
+        TokioProviders::new(),
+        "127.0.0.1:0",
+        RpcConfig {
+            advertised_address: Some(a_address),
+            security: SecurityConfig::trusted_network(),
+            ..RpcConfig::default()
+        },
+        Impostor(tls(JUNE_2030)),
+    )
+    .await
+    .expect("bind");
+    let m_driver = tokio::spawn(m_driver.run());
+    assert!(call(&m, &b_service).await.is_ok(), "M reached B over TLS");
+
+    let reply = a_service
+        .bind(&b)
+        .with_credentials(Credential::bearer("right"))
+        .try_get_reply_within(
+            &Text {
+                text: "for A".into(),
+            },
+            CALL,
+        )
+        .await
+        .expect("B's call reaches A");
+    assert_eq!(reply.text, "for A");
+    assert_eq!(executed.load(Ordering::SeqCst), 1, "A ran it");
+    let m_stats = m.stats().expect("running");
+    assert_eq!(
+        m_stats.requests_admitted + m_stats.requests_rejected,
+        0,
+        "nothing (and no token) reached the impostor: {m_stats:?}"
+    );
+    assert_eq!(b.stats().expect("running").adopted_connections, 0);
+    for driver in [a_driver, b_driver, m_driver] {
+        driver.abort();
+    }
+    a_handler.abort();
+    b_handler.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_impostor_claiming_a_peer_address_gets_nothing_current_thread() {
+    an_impostor_claiming_a_peer_address_gets_nothing().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_impostor_claiming_a_peer_address_gets_nothing_multi_thread() {
+    an_impostor_claiming_a_peer_address_gets_nothing().await;
+}
+
 /// A graceful shutdown closes TLS sessions in order: the client sees the
 /// session end (its call fails as a disconnect), not a protocol error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

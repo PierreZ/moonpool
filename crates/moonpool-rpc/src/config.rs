@@ -361,10 +361,18 @@ pub struct PeerPolicy {
 /// When an accepted session may carry this runtime's own calls to its
 /// dialer.
 ///
-/// Each `Hello` may name the sender's listen address. With plaintext
-/// sessions that claim is self-asserted: a runtime that adopts it routes
-/// its calls to that address, including retained reliable requests, over
-/// the claimant's connection, and counts the address as available.
+/// Each `Hello` may name the sender's listen address. That claim is always
+/// self-asserted: a runtime that adopts it routes its calls to that
+/// address, including retained reliable requests, over the claimant's
+/// connection, and counts the address as available.
+///
+/// **With a session upgrade that authenticates servers (TLS), sharing is
+/// always off**, whatever this says: our own dial would have verified the
+/// server's certificate, an accepted session verified nothing about its
+/// dialer, so adopting it would let any client that can reach us pose as
+/// the peer and receive our calls (and their credentials). And a request
+/// carrying a credential is never written on an accepted session whose
+/// dialer was not authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InboundSharing {
     /// Never share: announce no listen address, adopt nothing. Two
