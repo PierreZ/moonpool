@@ -2,7 +2,7 @@
 
 Build a fresh, functionally rich Rust RPC stack inspired by FoundationDB fdbrpc on Moonpool providers. Dynamic service incarnations, transportable interfaces, reply promises, delivery modes, failure monitoring, streaming/credit, load balancing and operational/security contracts are first-class. Native RPC uses TCP directly; it is not an HTTP/2 layer or a restoration of moonpool-transport.
 
-**Tracking issue:** [#212](https://github.com/PierreZ/moonpool/issues/212). GitHub issues are the execution source of truth. [Architecture](architecture.md) records decisions; [parity](parity.md) maps observable contracts to exact source anchors and owning issues. No implementation or placeholder crate is created by this planning change.
+**Tracking issue:** [#212](https://github.com/PierreZ/moonpool/issues/212). GitHub issues are the execution source of truth. [Architecture](architecture.md) records decisions; [parity](parity.md) maps observable contracts to exact source anchors and owning issues; [qualification](qualification.md) is the release-readiness record (#219): every row's evidence, the combined campaign, mutation checks, measurements, residuals and non-claims. No implementation or placeholder crate is created by this planning change.
 
 ## Source baseline
 

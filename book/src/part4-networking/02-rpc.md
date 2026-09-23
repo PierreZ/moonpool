@@ -326,3 +326,11 @@ The `sim-rpc-security` campaign puts all of the above under faults. A verifying 
 ```bash
 cargo xtask sim run rpc-security
 ```
+
+Only the foundations campaign draws the simulator's in-flight bit flips (beside its own corrupting session upgrade): corruption is one explicit experiment, whose contract is that a checksum catches it and closes the session. Every other campaign masks that family (`NetworkFaultMask::all().without(NetworkFault::BitFlip)`) and runs on partitions, clogs, random closes, connect failures, black holes, latency and clock drift, so none of them mistakes corruption for message loss on healthy TCP.
+
+The `sim-rpc-qualification` campaign runs all of it at once: the interfaces campaign's same-address reboots and third-party interfaces, the delivery campaign's reliable ambiguity, the streams campaign's producers and consumers, the balance campaign's permissions, the security campaign's key rotations and UTC transitions, a version 1 peer, graceful shutdowns under held work and overload bursts, with three client lanes and five processes. Its oracles are the other campaigns' ledgers, unchanged, plus its own boot, publication and execution ledger; a handler asserts as it runs that the reference named its own boot and instance, so a stale I1 never reaches I2 whether it arrived as a direct call, a retained reliable call, a stream, a balanced set, a stored blob or a forwarded callback. After the faults, every service must come back within a declared bound; every stream of a current boot must end; and every runtime, of every boot and of the client lanes, must be back at its resource baseline (`ResourceProbe::is_at_baseline`: no task, connection, owed reply, queued byte, reserved window or buffered stream byte left). A seed must replay the same history, ledger and captured trace, in a fresh process or after other runs, and with every poll slowed on the host. [What moonpool-rpc Promises](./03-rpc-guarantees.md) states the resulting contract.
+
+```bash
+cargo xtask sim run rpc-qualification
+```
