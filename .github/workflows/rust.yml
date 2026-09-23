@@ -143,6 +143,7 @@ jobs:
           - topology
           - tonic-grpc
           - rpc-foundations
+          - rpc-delivery
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main

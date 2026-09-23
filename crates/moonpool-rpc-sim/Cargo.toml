@@ -30,5 +30,9 @@ tracing = "0.1"
 name = "sim-rpc-foundations"
 path = "src/bin/sim/rpc_foundations.rs"
 
+[[bin]]
+name = "sim-rpc-delivery"
+path = "src/bin/sim/rpc_delivery.rs"
+
 [lints]
 workspace = true

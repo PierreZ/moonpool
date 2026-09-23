@@ -79,7 +79,7 @@ async fn listen(
 }
 
 /// Publish a runtime's counters to the board every 100 ms of sim time.
-async fn report_stats(
+pub(crate) async fn report_stats(
     rpc: &RpcHandle<SimProviders>,
     board: &state::Board,
     label: &str,

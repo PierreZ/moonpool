@@ -120,6 +120,18 @@ impl Board {
             .collect()
     }
 
+    /// The latest counters of every runtime whose label starts with
+    /// `prefix`.
+    #[must_use]
+    pub fn stats_with_prefix(&self, prefix: &str) -> Vec<(String, RpcStats)> {
+        lock(&self.inner)
+            .stats
+            .iter()
+            .filter(|(label, _)| label.starts_with(prefix))
+            .map(|(label, stats)| (label.clone(), *stats))
+            .collect()
+    }
+
     /// Counters summed over every runtime ever reported.
     #[must_use]
     pub fn totals(&self) -> RpcStats {
