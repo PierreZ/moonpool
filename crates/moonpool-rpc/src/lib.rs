@@ -131,6 +131,7 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+pub mod balance;
 pub mod codec;
 mod config;
 mod endpoint;
