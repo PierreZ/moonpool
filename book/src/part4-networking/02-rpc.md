@@ -32,7 +32,7 @@ Serving is pull-style: `requests.recv().await` yields an `IncomingRequest` with 
 
 ## What Admission Checks, and When
 
-Before a single byte of the body reaches the codec, the server checks the incarnation, the token (slot and generation), the method, the schema version and the codec, in that order. A restarted process at the same `ip:port` rejects its predecessor's references with `StaleIncarnation`. A reused slot never answers an old token. A caller compiled against schema v2 gets `SchemaMismatch` instead of garbage. Local calls go through the same admission path, same bytes, same limits, so a caller cannot tell a local endpoint from a remote one except by latency.
+Before a single byte of the body reaches the codec, the server checks the incarnation, the token (slot and generation), the method, the schema version and the codec, in that order, and then **who is calling** (see [Who May Call What](#who-may-call-what)). A restarted process at the same `ip:port` rejects its predecessor's references with `StaleIncarnation`. A reused slot never answers an old token. A caller compiled against schema v2 gets `SchemaMismatch` instead of garbage. Local calls go through the same admission path, same bytes, same limits and the same security check, so a caller cannot tell a local endpoint from a remote one except by latency.
 
 ## Every Failure Says What It Proves
 
@@ -48,7 +48,7 @@ The runtime earns those claims. Requests wait for the peer's handshake before th
 
 ## The Wire
 
-Every frame is `u32 length | u64 XXH3-64 checksum | payload`, all little-endian. Like FoundationDB's `scanPackets`, the length is bounded before the payload is buffered, and the checksum, which also covers the length, is verified before anything is parsed. A mismatch closes the session: we never try to resynchronise a byte stream whose framing we no longer trust. The payload is a hand-written, versioned envelope carrying the routing fields and a codec id, so the transport can route, bound and reject a request without understanding its body. Bodies are protobuf through prost by default, behind the `Wire` trait. Sessions pass through a `Connector`/`Acceptor` upgrade seam (plaintext today) and open with a `Hello` carrying the supported protocol version range and each side's frame limit. That last field matters more than it looks: without it, a reply one byte over the caller's limit would make the caller tear down a session shared by every other call to that process. With it, the oversized reply fails only its own call, as `ReplyTooLarge`, and everything else keeps flowing.
+Every frame is `u32 length | u64 XXH3-64 checksum | payload`, all little-endian. Like FoundationDB's `scanPackets`, the length is bounded before the payload is buffered, and the checksum, which also covers the length, is verified before anything is parsed. A mismatch closes the session: we never try to resynchronise a byte stream whose framing we no longer trust. The payload is a hand-written, versioned envelope carrying the routing fields and a codec id, so the transport can route, bound and reject a request without understanding its body. Bodies are protobuf through prost by default, behind the `Wire` trait. Sessions pass through a `Connector`/`Acceptor` upgrade seam (plaintext by default, TLS with the `tls` feature) and open with a `Hello` carrying the supported protocol version range and each side's frame limit. That last field matters more than it looks: without it, a reply one byte over the caller's limit would make the caller tear down a session shared by every other call to that process. With it, the oversized reply fails only its own call, as `ReplyTooLarge`, and everything else keeps flowing.
 
 ## Choosing a Delivery Mode
 
@@ -239,6 +239,50 @@ Every started attempt holds one `Reservation` in the model and gives it back exa
 
 Hooks let the application teach the balancer its own vocabulary without teaching it storage semantics: `classify` turns a reply into accept, temporarily behind or overloaded, `wants_comparison` asks for a second copy whose reply `compare` checks against the winner's, and `observe` sees every attempt start and end. A comparison copy still needs the duplicate permission and a budget unit, a failed comparison fails the call as executed, and when every primary attempt fails or is declined an accepted comparison reply wins instead of being thrown away. A failed call's `BalanceError` keeps every attempt and summarizes them honestly: executed only if something with an effect ran, otherwise ambiguous if anything may have run, and a reply the classifier declined counts as no effect.
 
+## Who May Call What
+
+An address is not an identity, and neither is an endpoint token: both are routing data anyone can copy. `moonpool-rpc` therefore separates three questions. **Who is the server?** Server-authenticated TLS answers it. **Who is the client?** A credential attached to each request answers it, verified by the server. **May this client call this endpoint?** An access policy answers it, per request, in admission: after the identity and contract checks, before the body is decoded, before any handler or queue sees the request. The same check runs for a caller in the same runtime, with the same credential, so there is no local backdoor.
+
+Every endpoint is registered `Public` or `Private`. **Private endpoints fail closed.** The default `SecurityConfig` verifies nothing, so public endpoints answer anyone and private ones refuse everyone:
+
+```rust
+// Verify bearer tokens; a verified principal may call private endpoints.
+let keys = JwksKeys::from_json(&jwks_document)?;                   // feature `jwt`
+let verifier = JwtVerifier::new(keys.clone(), JwtConfig::new("issuer", "rpc"))?;
+let config = RpcConfig {
+    security: SecurityConfig::enforced(verifier).with_clock(SystemUtc),
+    ..RpcConfig::default()
+};
+// Callers attach a credential per runtime or per client.
+let client = service_ref.bind(&rpc).with_credentials(Credential::bearer(token));
+```
+
+A deployment that trusts its network says so explicitly with `SecurityConfig::trusted_network()`, which admits everything and claims nothing: no confidentiality, no authentication. That is FoundationDB's plaintext default (every peer is trusted); here it is a choice, never an accident. An `IpAllowList` (FoundationDB's `IPAllowList`: subnets, empty means everyone) refuses connections before a byte is read, but it restricts reachability only: an allowed address still needs a valid credential for a private endpoint.
+
+Refusals are `Unauthenticated(reason)` (missing, malformed, expired, unknown key, bad signature, wrong issuer or audience, a symmetric algorithm presented against a public key, no UTC to check against, ...) or `PermissionDenied` (verified, but the policy says no). Both are `NotAdmitted` and neither is terminal for the reference, because keys, tokens and policies change. The handler sees the verified caller through `ReplyHandle::principal()`; what a subject or a scope *means* stays the application's. Denials are audit events (target `moonpool_rpc::audit`, after FoundationDB's `AttemptedRPCToPrivatePrevented`) that name the endpoint, the peer and the reason, never the credential.
+
+**JWT/JWKS** (feature `jwt`). `JwtVerifier` checks, in order: size, header and algorithm allow list (public-key algorithms only, so the classic HS256 confusion is refused), the key id in the **current** key set, the signature, issuer and audience, then `exp`/`nbf`. Rotation replaces the whole set, as FoundationDB's `applyPublicKeySet` does: a key left out is revoked at once. Verified tokens are cached, bounded, keyed by the whole token and the key set's generation, and re-checked against the time on every hit.
+
+**TLS** (feature `tls`). `Tls` is a session upgrade over the provider's own streams (rustls through `futures-rustls`, TLS 1.3, the `ring` provider): the client verifies the server's chain and the name it expects (by default the IP it dialed), so an untrusted, expired or wrongly named certificate fails the connect and every call waiting on it as `NotAdmitted`. The server's certificate and the client's roots rotate for new sessions; resumption is off so every session sees them. Bearer credentials are accepted only over encrypted sessions unless the server opts out (`accept_credentials_over_plaintext`, which the simulation uses). **Mutual TLS is not provided**: clients are authenticated by their request credentials, not their certificates.
+
+**Two clocks, two kinds of randomness.** `TimeProvider::now` is scheduling time, never Unix time, so credential and certificate validity read a separate `UtcClock`: `SystemUtc` in production, a scripted `FixedUtc` in tests and simulation. The default knows no time at all, so an expiring credential fails closed until a clock is chosen, and nothing here reads the host clock behind our back. Cryptographic randomness comes from rustls and `ring`; the `RandomProvider` only draws protocol values. A simulation therefore replays trust *decisions* exactly, and makes no claim about TLS ciphertext.
+
+The TLS and JWT adapters are native-only features (their entropy does not build for `wasm32-unknown-unknown`); the policy itself (`SecurityConfig`, `AccessPolicy`, `RequestVerifier`, allow lists, key rotation, the clocks) is always compiled, so simulations and wasm builds exercise the same trust decisions.
+
+## Protocol Versions and Rolling Upgrades
+
+Each runtime announces the protocol versions it speaks (`RpcConfig::protocol_versions`, `1..=2` by default) and each session runs at the highest one both sides speak; a peer with none in common is refused at the handshake, observably (`version_rejections`). Version 2 changes no frame layout: it gives the request's metadata section its credential meaning and adds three reply statuses (unauthenticated, permission denied, shutting down). The rule that keeps an old peer safe is simple: **nothing newer than the negotiated version is ever sent, and nothing newer is ever decoded**. A refusal a version 1 peer could not decode reaches it as the version 1 status that proves the same (never admitted), and a version 1 session carries no credential. A server that verifies credentials speaks only version 2, so an old client is refused at the handshake instead of being let in anonymously: downgrade is observable, never silent.
+
+Golden hex fixtures (`tests/fixtures/wire-v1.txt`, `wire-v2.txt`, next to the stored-reference fixtures) pin every envelope of both versions, and real-TCP tests pair old and new clients and servers (a runtime pinned to `1..=1` is the old build). Message evolution stays the application's, with prost's rules: never reuse a tag, add optional fields, and bump the method's schema version for anything incompatible, which the server refuses before decoding.
+
+## Shutting Down Gracefully
+
+Dropping the driver is the abrupt shutdown: everything closes at once. `RpcHandle::shutdown(grace)` is the graceful one, with the driver still being polled: admission closes (peers get `ServerShuttingDown`, local calls and new registrations `Shutdown`, the listener closes, nothing is re-dialed), admitted work may finish within `grace` of provider time, and then whatever is left ends with the execution knowledge it has: a call that was sent is `MaybeExecuted`, a request still queued behind the handshake is withdrawn and `NotAdmitted`, a caller owed a reply sees its session end after admission. Every session is then closed from our side (a TLS session sends its `close_notify`), and the returned `ShutdownReport` says whether the work drained, what was cut short and whether every connection closed cleanly.
+
+## Metrics and Audit
+
+`RpcMetrics` turns a runtime's counters and gauges (calls, admissions, refusals by reason, connections, peers, pending and retained calls, streams, queued bytes) into a `MetricsSource`, so the simulation scrapes them into its report and a production adapter can export them. Its labels come from closed sets only, the credential error names: a million peers or tokens add no series, and no label ever carries an address, a token or a principal. Per-peer detail belongs in `tracing`.
+
 ## Testing It the Way It Fails
 
 The `sim-rpc-foundations` campaign in `moonpool-rpc-sim` runs a server group, a relay group that calls the server itself, and a surviving client workload, under swarm network chaos with `Chaos::BuggifyKnobs` (which spikes the bit-flip rate on some seeds), a scripted crash right after a handler receives a request, raw malformed sessions, forged references and destroyed endpoints. The oracle is deliberately **outside the transport**: handlers write a receipt ledger keyed by workload-generated request ids before replying, and at the end the workload judges its own outcomes against it. At most one receipt per id, exactly one for a reply, none for anything reported `NotAdmitted`. It never asks the RPC runtime what it thinks happened.
@@ -271,4 +315,10 @@ The `sim-rpc-streams` campaign streams under all of that. A producer process ser
 
 ```bash
 cargo xtask sim run rpc-streams
+```
+
+The `sim-rpc-security` campaign puts all of the above under faults. A verifying server checks real JWTs with the production adapter against a key set the fault script rotates, at a scripted UTC the script moves forward in steps and jumps and sometimes makes unknown; it serves private and public endpoints, a private stream and a private one-way endpoint, and calls itself locally with drawn credentials. A legacy server is pinned to version 1. The workload draws a credential for every request (none, valid, short-lived, not yet valid, from a retired key, forged, from an unknown key, for the wrong audience or issuer, symmetric, garbage), calls through a runtime that speaks both versions and one pinned to version 1, reuses tokens across time and rotation, holds reliable calls whose source mints a fresh token for each retransmission while the script cuts the session, and sends into a server draining for a graceful shutdown; the script also crashes and gracefully reboots the server. The oracle is an issue/receipt ledger: callers record each request and its credential before it leaves, handlers record each receipt with the principal the server verified, and a receipt is allowed only if the credential could have been accepted at some moment between sending and receipt (the script's UTC only moves forward, key sets change by replacement). **No unauthorized execution, ever**, on any route; every refusal must name what is actually wrong with its credential. Its first runs caught two wrong oracles, not transport bugs: a reliable call refused on its retransmission is honestly `MaybeExecuted`, because an earlier copy may have run; and a token naming a key that rotated out twice while its request waited for a session is refused as an unknown key before its wrong audience is ever looked at, which is the verifier's documented order.
+
+```bash
+cargo xtask sim run rpc-security
 ```
