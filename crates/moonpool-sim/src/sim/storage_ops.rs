@@ -345,6 +345,7 @@ impl SimWorld {
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip_all)]
     pub fn set_storage_eligibility_mask(&self, mask: crate::storage::StorageEligibilityMask) {
         self.inner.write().storage.set_eligibility_mask(Some(mask));
     }
@@ -354,6 +355,7 @@ impl SimWorld {
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
     pub fn clear_storage_eligibility_mask(&self) {
         self.inner.write().storage.set_eligibility_mask(None);
     }
@@ -390,6 +392,7 @@ impl SimWorld {
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
     pub fn corrupt_file(
         &self,
         path: &str,
@@ -409,6 +412,7 @@ impl SimWorld {
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
     pub fn fail_file_with_eio(
         &self,
         path: &str,
@@ -430,6 +434,7 @@ impl SimWorld {
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
     pub fn clear_file_eio(
         &self,
         path: &str,
@@ -452,6 +457,7 @@ impl SimWorld {
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
     pub fn corrupt_durable_out_of_band(&self, path: &str, sector: u64) -> Result<(), StorageError> {
         self.inner
             .write()

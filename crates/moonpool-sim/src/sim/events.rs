@@ -9,6 +9,7 @@ use std::{
 };
 
 use serde::Serialize;
+use tracing::instrument;
 
 use crate::network::sim::NetworkEvent;
 pub use crate::storage::StorageOperation;
@@ -218,6 +219,7 @@ impl<E> Scheduler<E> {
     /// Returns [`ScheduleError::TimeOverflow`] if `delay` would exceed the
     /// representable duration, or [`ScheduleError::SequenceOverflow`] if every
     /// schedule identifier has been consumed.
+    #[instrument(level = "trace", skip(self, value))]
     pub fn schedule_after(
         &mut self,
         delay: Duration,
@@ -238,6 +240,7 @@ impl<E> Scheduler<E> {
     ///
     /// Returns [`ScheduleError::SequenceOverflow`] if every schedule identifier
     /// has been consumed.
+    #[instrument(level = "trace", skip(self, value))]
     pub fn schedule_at(&mut self, time: Duration, value: E) -> Result<ScheduleId, ScheduleError> {
         let time = time.max(self.now);
 
@@ -255,6 +258,7 @@ impl<E> Scheduler<E> {
     /// Cancels a live scheduled item.
     ///
     /// Returns `true` only when the identifier still referred to a queued item.
+    #[instrument(level = "trace", skip(self))]
     pub fn cancel(&mut self, id: ScheduleId) -> bool {
         if self.live.remove(&id) {
             self.heap.retain(|scheduled| scheduled.id != id);
@@ -268,6 +272,7 @@ impl<E> Scheduler<E> {
     ///
     /// The new time is also published to the simulation stream's logical
     /// clock, the time half of a determinism-canary fingerprint.
+    #[instrument(level = "trace", skip(self))]
     pub fn pop(&mut self) -> Option<Scheduled<E>> {
         let scheduled = self.heap.pop()?;
         self.live.remove(&scheduled.id);

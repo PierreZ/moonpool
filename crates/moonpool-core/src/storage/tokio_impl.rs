@@ -29,6 +29,7 @@ impl TokioStorageProvider {
 impl StorageProvider for TokioStorageProvider {
     type File = TokioStorageFile;
 
+    #[instrument(skip(self))]
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
         let opened = open_file(path, &options).await?;
         let positioned = positioned_descriptor(&opened, path, &options).await?;
@@ -44,10 +45,12 @@ impl StorageProvider for TokioStorageProvider {
         tokio::fs::try_exists(path).await
     }
 
+    #[instrument(skip(self))]
     async fn delete(&self, path: &str) -> io::Result<()> {
         tokio::fs::remove_file(path).await
     }
 
+    #[instrument(skip(self))]
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         tokio::fs::rename(from, to).await
     }
@@ -57,6 +60,7 @@ impl StorageProvider for TokioStorageProvider {
         tokio::fs::create_dir_all(path).await
     }
 
+    #[instrument(skip(self))]
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
         sync_dir_impl(path).await
     }

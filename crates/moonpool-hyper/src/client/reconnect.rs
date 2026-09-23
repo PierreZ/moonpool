@@ -346,6 +346,7 @@ impl<P: Providers, B> ReconnectingChannel<P, B> {
     /// In-flight request futures, pending and future readiness checks, and
     /// future calls fail with [`ChannelError::Closed`]. Repeated calls are
     /// harmless.
+    #[instrument(skip(self), fields(addr = %self.addr()))]
     pub fn close(&self) {
         self.shared.close();
     }

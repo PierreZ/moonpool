@@ -190,6 +190,7 @@ impl SimWorld {
 
     /// Creates a simulation with custom network configuration and seed.
     #[must_use]
+    #[instrument(level = "debug", skip(config))]
     pub fn new_with_network_config_and_seed(config: NetworkConfiguration, seed: u64) -> Self {
         Self::create(config, seed)
     }
@@ -276,6 +277,7 @@ impl SimWorld {
     }
 
     /// Processes queued workload events until stalled.
+    #[instrument(level = "debug", skip(self))]
     pub fn run_until_empty(&mut self) {
         while self.step() {
             let inner = self.inner.read();
@@ -325,11 +327,13 @@ impl SimWorld {
     }
 
     /// Schedules an event after a relative delay.
+    #[instrument(level = "trace", skip(self))]
     pub fn schedule_event(&self, event: Event, delay: Duration) {
         self.inner.write().schedule_after(event, delay);
     }
 
     /// Schedules an event at an absolute logical time.
+    #[instrument(level = "trace", skip(self))]
     pub fn schedule_event_at(&self, event: Event, time: Duration) {
         self.inner.write().schedule_at(event, time);
     }
@@ -407,6 +411,7 @@ impl SimWorld {
     /// no-new-faults promise survives a later reconfiguration. Performance
     /// knobs (IOPS, bandwidth, latencies, throttle multipliers) are installed
     /// as given.
+    #[instrument(level = "debug", skip_all)]
     pub fn set_storage_config(&mut self, mut config: crate::storage::StorageConfiguration) {
         let mut inner = self.inner.write();
         if inner.recovery_mode() {
@@ -575,6 +580,7 @@ impl SimWorld {
     /// # Panics
     ///
     /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
     pub fn enter_recovery_mode(&mut self) {
         let mut inner = self.inner.write();
         if inner.recovery_mode {
@@ -619,6 +625,7 @@ impl SimWorld {
     }
 
     /// Schedules a process restart.
+    #[instrument(level = "debug", skip(self))]
     pub fn schedule_process_restart(&self, ip: IpAddr, recovery_delay: Duration) {
         self.schedule_event(Event::ProcessRestart { ip }, recovery_delay);
     }

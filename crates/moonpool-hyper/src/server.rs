@@ -146,6 +146,7 @@ impl<P: Providers> H2Server<P> {
 
     /// Replace the configuration.
     #[must_use]
+    #[instrument(level = "debug", skip_all)]
     pub fn with_config(mut self, config: H2ServerConfig) -> Self {
         self.config = config;
         self
