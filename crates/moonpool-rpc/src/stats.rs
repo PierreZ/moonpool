@@ -136,6 +136,12 @@ pub struct RpcStats {
     pub inflight_requests: usize,
     /// Sum of the windows of the streams this runtime consumes.
     pub stream_window_reserved: u64,
+    /// Sum of the windows of the streams this runtime produces (reserved
+    /// from the producer budgets).
+    pub producer_window_reserved: u64,
+    /// Of `queued_bytes`, the bytes of queued requests (what the queue
+    /// budgets refuse).
+    pub queued_request_bytes: u64,
 }
 
 /// The runtime's counters, shared by everything that updates them.
@@ -198,6 +204,8 @@ pub(crate) struct Counters {
     pub(crate) queued_bytes: AtomicU64,
     pub(crate) inflight_requests: AtomicUsize,
     pub(crate) stream_window_reserved: AtomicU64,
+    pub(crate) producer_window_reserved: AtomicU64,
+    pub(crate) queued_request_bytes: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
     pub(crate) live_connections: AtomicUsize,
 }
@@ -278,6 +286,8 @@ impl Counters {
             queued_bytes: self.queued_bytes.load(Ordering::Relaxed),
             inflight_requests: self.inflight_requests.load(Ordering::Relaxed),
             stream_window_reserved: self.stream_window_reserved.load(Ordering::Relaxed),
+            producer_window_reserved: self.producer_window_reserved.load(Ordering::Relaxed),
+            queued_request_bytes: self.queued_request_bytes.load(Ordering::Relaxed),
         }
     }
 }

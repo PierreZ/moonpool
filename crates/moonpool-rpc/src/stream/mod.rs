@@ -393,6 +393,11 @@ impl<M: RpcMethod> ReplyStream<M> {
         if self.core.received() > 0 {
             return Execution::Executed;
         }
+        // Already ended (a refusal before admission, a disconnect): that
+        // outcome says what is known.
+        if let Some(execution) = self.core.terminal_execution() {
+            return execution;
+        }
         match transmitted {
             Some(false) => Execution::NotAdmitted,
             _ => Execution::MaybeExecuted,

@@ -105,6 +105,7 @@ pub struct RpcConfig {
 /// | [`max_inflight_per_connection`](Self::max_inflight_per_connection) | connection | a two-way or stream request is admitted | refused `Overloaded` |
 /// | [`max_inflight_requests`](Self::max_inflight_requests) | runtime | same | same |
 /// | [`StreamPolicy::max_streams_per_connection`], [`StreamPolicy::max_streams`] | connection, runtime | a stream request is admitted | refused `Overloaded` |
+/// | [`StreamPolicy::max_producer_bytes_per_connection`], [`StreamPolicy::max_producer_bytes`] | connection, runtime | a stream request is admitted (its window is reserved) | refused `Overloaded` |
 /// | [`RpcConfig::max_queued_requests`], [`max_queued_bytes_per_connection`](Self::max_queued_bytes_per_connection) | connection | a caller queues a request | the call fails `Overloaded` |
 /// | [`max_queued_bytes`](Self::max_queued_bytes) | runtime | same | same |
 /// | [`RpcConfig::max_pending_calls`] | runtime | a call or stream starts | fails `Overloaded` |
@@ -125,9 +126,11 @@ pub struct ResourceLimits {
     pub max_inflight_per_connection: usize,
     /// The same over every connection and local caller of the runtime.
     pub max_inflight_requests: usize,
-    /// Bytes (whole frames) of requests, replies and stream items queued
-    /// unwritten on one connection above which new outgoing requests on it
-    /// are refused.
+    /// Bytes (whole frames) of requests queued unwritten on one connection
+    /// above which new outgoing requests on it are refused. Replies and
+    /// stream items are not counted: they are bounded by the in-flight
+    /// budgets and the reserved stream windows, and a stream backlog to one
+    /// slow peer never refuses calls to another.
     pub max_queued_bytes_per_connection: u64,
     /// The same over every connection.
     pub max_queued_bytes: u64,
@@ -223,6 +226,13 @@ pub struct StreamPolicy {
     /// The sum of the windows of the streams this runtime consumes at once:
     /// the most it may ever buffer for its own callers.
     pub max_buffered_bytes: u64,
+    /// The sum of the windows of the streams produced over one connection:
+    /// the most this runtime may have to queue for one peer's streams. A
+    /// stream whose window does not fit is refused `Overloaded` before
+    /// admission.
+    pub max_producer_bytes_per_connection: u64,
+    /// The same over every connection and local caller.
+    pub max_producer_bytes: u64,
 }
 
 impl Default for StreamPolicy {
@@ -233,6 +243,8 @@ impl Default for StreamPolicy {
             max_streams_per_connection: 1024,
             max_streams: 16 * 1024,
             max_buffered_bytes: 256 << 20,
+            max_producer_bytes_per_connection: 64 << 20,
+            max_producer_bytes: 1 << 30,
         }
     }
 }
@@ -253,6 +265,14 @@ impl StreamPolicy {
         if self.max_buffered_bytes < self.window_bytes {
             return Err(InvalidConfig(
                 "streams.max_buffered_bytes below streams.window_bytes".into(),
+            ));
+        }
+        if self.max_producer_bytes_per_connection < smallest
+            || self.max_producer_bytes < self.max_producer_bytes_per_connection
+        {
+            return Err(InvalidConfig(
+                "streams producer budgets must hold an item, per connection below per runtime"
+                    .into(),
             ));
         }
         if self.max_streams == 0 || self.max_streams_per_connection == 0 {

@@ -17,10 +17,14 @@ use crate::call::reply::{LocalSink, Outstanding, ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
 use crate::endpoint::Endpoint;
 use crate::error::{CallIdentity, ErrorReason, RpcError};
-use crate::protocol::{HEADER_LEN, REQUEST_FLAG_STREAM, WireError, stream_request_envelope_len};
+use crate::protocol::{
+    HEADER_LEN, REQUEST_FLAG_STREAM, WireError, stream_item_frame_len, stream_request_envelope_len,
+};
 use crate::stats::Counters;
 use crate::stream::consumer::{AckRoute, ConsumerCore, Intook};
-use crate::stream::producer::{AckEffect, CoreRoute, LocalStreamSink, StreamCore, StreamSlot};
+use crate::stream::producer::{
+    AckEffect, CoreRoute, LocalStreamSink, StreamCore, StreamSlot, WindowHold,
+};
 
 /// A started stream: its consumer and the guard that abandons it.
 pub(crate) type StartedStream = (Arc<ConsumerCore>, CallGuard);
@@ -138,12 +142,18 @@ impl<P: Providers> Shared<P> {
         context: &mut ReplyContext,
         window: u64,
     ) -> Result<(), WireError> {
+        // A window that holds no item would make every send `TooLarge` and
+        // `ready()` never resolve: a malformed request, refused.
+        if window < stream_item_frame_len(0) {
+            return Err(WireError::MalformedRequest);
+        }
         let window = window.min(self.config.streams.max_window_bytes);
         let Some(slot) = StreamSlot::acquire(&self.counters, self.config.streams.max_streams)
         else {
             Counters::bump(&self.counters.overload_refusals);
             return Err(WireError::Overloaded);
         };
+        let policy = &self.config.streams;
         let owed = context.outstanding.take();
         let ours = u64::from(self.config.max_frame_bytes);
         let core = match &context.route {
@@ -154,10 +164,25 @@ impl<P: Providers> Shared<P> {
                 let Some(live) = connection.upgrade() else {
                     return Err(WireError::Overloaded);
                 };
-                if live.stream_count() >= self.config.streams.max_streams_per_connection {
+                if live.stream_count() >= policy.max_streams_per_connection {
                     Counters::bump(&self.counters.overload_refusals);
                     return Err(WireError::Overloaded);
                 }
+                // The window is what this side may have to queue for the
+                // stream: reserve it from the connection's and the
+                // runtime's producer budgets, or refuse before admission.
+                let Some(reserved) = WindowHold::reserve(
+                    &self.counters,
+                    Some((
+                        live.stream_windows(),
+                        policy.max_producer_bytes_per_connection,
+                    )),
+                    policy.max_producer_bytes,
+                    window,
+                ) else {
+                    Counters::bump(&self.counters.overload_refusals);
+                    return Err(WireError::Overloaded);
+                };
                 let limit = live
                     .peer_hello()
                     .map_or(ours, |hello| u64::from(hello.max_frame_bytes).min(ours));
@@ -167,7 +192,7 @@ impl<P: Providers> Shared<P> {
                     window,
                     limit + HEADER_LEN as u64,
                     &self.counters,
-                    Box::new((owed, slot)),
+                    Box::new((owed, slot, reserved)),
                 );
                 if !live.register_stream(*call_id, &core) {
                     return Err(WireError::Overloaded);
@@ -175,6 +200,12 @@ impl<P: Providers> Shared<P> {
                 core
             }
             ReplyRoute::Local { call_id, .. } => {
+                let Some(reserved) =
+                    WindowHold::reserve(&self.counters, None, policy.max_producer_bytes, window)
+                else {
+                    Counters::bump(&self.counters.overload_refusals);
+                    return Err(WireError::Overloaded);
+                };
                 let sink: Weak<dyn LocalStreamSink> = self.this.clone();
                 let core = StreamCore::new(
                     *call_id,
@@ -182,7 +213,7 @@ impl<P: Providers> Shared<P> {
                     window,
                     ours + HEADER_LEN as u64,
                     &self.counters,
-                    Box::new((owed, slot)),
+                    Box::new((owed, slot, reserved)),
                 );
                 // The local consumer acknowledges and cancels straight to it.
                 let consumer = self

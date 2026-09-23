@@ -75,8 +75,11 @@
 //! mismatch (a stream request for a unary method or the reverse; detail:
 //! `1` when the endpoint streams). Detail is `0` when it carries nothing.
 //!
-//! Changing this layout, adding a kind or a status code requires a new
-//! [`PROTOCOL_VERSION`]; the golden vectors in the tests pin version 1.
+//! Version 1 is unreleased and was extended in place by the packages that
+//! built it (the reply stream frames, flag and statuses 13–15 arrived with
+//! #216); the golden vectors in the tests pin version 1 as it stands. Once
+//! released, changing this layout, adding a kind or a status code requires
+//! a new [`PROTOCOL_VERSION`].
 
 use thiserror::Error;
 

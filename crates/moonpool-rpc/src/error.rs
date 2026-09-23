@@ -322,7 +322,11 @@ impl RpcError {
             }
             WireError::StreamProtocol => {
                 return Self::new(
-                    ErrorReason::StreamProtocol("the producer refused an acknowledgement".into()),
+                    ErrorReason::StreamProtocol(
+                        "the producer ended the stream for a protocol violation \
+                         (an acknowledgement it refused, or a counter overflow)"
+                            .into(),
+                    ),
                     Execution::MaybeExecuted,
                 );
             }

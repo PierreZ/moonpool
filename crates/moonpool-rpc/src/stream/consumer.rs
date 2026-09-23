@@ -2,11 +2,13 @@
 //! buffer, consumption acknowledgements and the single terminal outcome.
 //!
 //! Acknowledgements follow `FoundationDB`'s
-//! `NetNotifiedQueueWithAcknowledgements`: an item handed straight to a
-//! consumer that is already waiting is acknowledged on arrival (it is
-//! being consumed now, and will never sit in the queue); an item that
-//! arrives while nobody waits is queued and acknowledged when the
-//! application pops it. Reading bytes off the socket never earns credit.
+//! `NetNotifiedQueueWithAcknowledgements`: an item that arrives while the
+//! application waits for it is handed straight to it, and one that arrives
+//! while nobody waits is queued and popped later. Either way the item is
+//! acknowledged only when the application's poll actually returns it:
+//! a waiting poll that was abandoned (a dropped `next()` future, a lost
+//! `select!` branch) takes nothing and earns nothing. Reading bytes off the
+//! socket never earns credit.
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
@@ -30,8 +32,9 @@ pub(crate) enum AckRoute {
     Local(Weak<StreamCore>),
 }
 
-/// One received item: its codec, body and accounted size.
-type Item = (CodecId, Vec<u8>, u64);
+/// One received item: its codec, body, accounted size, and whether a
+/// waiting reader was handed it on arrival.
+type Item = (CodecId, Vec<u8>, u64, bool);
 
 /// What the consumer yields: an item's codec and body, the terminal error
 /// once, then `None`.
@@ -40,9 +43,8 @@ pub(crate) type Next = Option<Result<(CodecId, Vec<u8>), RpcError>>;
 struct ConsumerState {
     intake: Intake,
     items: VecDeque<Item>,
-    /// An item handed to the waiting consumer on arrival (acknowledged).
-    handoff: Option<(CodecId, Vec<u8>)>,
-    /// The consumer polled with nothing to take and waits.
+    /// The consumer polled with nothing to take and waits (it may have
+    /// stopped waiting since: nothing is acknowledged until it takes).
     waiting: bool,
     waker: Option<Waker>,
     route: Option<AckRoute>,
@@ -81,7 +83,6 @@ impl ConsumerCore {
             state: Mutex::new(ConsumerState {
                 intake: Intake::new(window),
                 items: VecDeque::new(),
-                handoff: None,
                 waiting: false,
                 waker: None,
                 route: None,
@@ -159,27 +160,13 @@ impl ConsumerCore {
         self.counters
             .stream_buffered_bytes
             .fetch_add(size, Ordering::Relaxed);
-        let immediate = state.waiting && state.handoff.is_none() && state.items.is_empty();
-        let ack = if immediate {
-            // Handed to a consumer that is waiting for it: consumed now.
-            state.handoff = Some((codec, body));
-            state.waiting = false;
-            let consumed = state.intake.consume(size);
-            self.counters
-                .stream_buffered_bytes
-                .fetch_sub(size, Ordering::Relaxed);
-            Some(consumed)
-        } else {
-            state.items.push_back((codec, body, size));
-            None
-        };
-        let route = state.route.clone();
+        // Handed to a reader waiting for it, or queued for a later pop;
+        // acknowledged only once the reader takes it.
+        let immediate = state.waiting && state.items.is_empty();
+        state.waiting = false;
+        state.items.push_back((codec, body, size, immediate));
         let waker = state.waker.take();
         drop(state);
-        if let (Some(consumed), Some(route)) = (ack, route) {
-            Counters::bump(&self.counters.stream_acks_immediate);
-            self.acknowledge(&route, consumed);
-        }
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -246,6 +233,14 @@ impl ConsumerCore {
         }
     }
 
+    /// What the terminal error proves about execution, once known.
+    pub(crate) fn terminal_execution(&self) -> Option<Execution> {
+        match &self.lock().terminal {
+            Some(Err(error)) => Some(error.execution()),
+            _ => None,
+        }
+    }
+
     /// Whether the terminal outcome is known.
     pub(crate) fn is_terminated(&self) -> bool {
         self.lock().terminal.is_some()
@@ -254,18 +249,20 @@ impl ConsumerCore {
     /// The next item, the terminal error once, then `None`.
     pub(crate) fn poll_next(&self, cx: &mut Context<'_>) -> Poll<Next> {
         let mut state = self.lock();
-        if let Some(item) = state.handoff.take() {
-            return Poll::Ready(Some(Ok(item)));
-        }
-        if let Some((codec, body, size)) = state.items.pop_front() {
+        if let Some((codec, body, size, immediate)) = state.items.pop_front() {
             let consumed = state.intake.consume(size);
             let route = state.route.clone();
+            state.waiting = false;
             drop(state);
             self.counters
                 .stream_buffered_bytes
                 .fetch_sub(size, Ordering::Relaxed);
             if let Some(route) = route {
-                Counters::bump(&self.counters.stream_acks_popped);
+                Counters::bump(if immediate {
+                    &self.counters.stream_acks_immediate
+                } else {
+                    &self.counters.stream_acks_popped
+                });
                 self.acknowledge(&route, consumed);
             }
             return Poll::Ready(Some(Ok((codec, body))));
@@ -290,9 +287,8 @@ impl ConsumerCore {
     /// End the stream on this side after an item that did not decode.
     pub(crate) fn fail_locally(&self, error: RpcError) {
         let mut state = self.lock();
-        let dropped: u64 = state.items.iter().map(|(_, _, size)| size).sum();
+        let dropped: u64 = state.items.iter().map(|(_, _, size, _)| size).sum();
         state.items.clear();
-        state.handoff = None;
         state.terminal = Some(Err(error));
         state.finished = true;
         drop(state);
@@ -321,7 +317,7 @@ impl ConsumerCore {
 impl Drop for ConsumerCore {
     fn drop(&mut self) {
         if let Ok(state) = self.state.get_mut() {
-            let buffered: u64 = state.items.iter().map(|(_, _, size)| size).sum();
+            let buffered: u64 = state.items.iter().map(|(_, _, size, _)| size).sum();
             self.counters
                 .stream_buffered_bytes
                 .fetch_sub(buffered, Ordering::Relaxed);

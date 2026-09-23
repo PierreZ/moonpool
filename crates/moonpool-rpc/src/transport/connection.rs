@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -148,6 +148,9 @@ struct QueueState {
     server_streams: BTreeMap<u64, Arc<StreamCore>>,
     /// Bytes of queued requests, replies and stream frames.
     queued_bytes: u64,
+    /// Of those, bytes of queued requests: the only data this side's
+    /// callers can add at will, so the only bytes the queue budgets refuse.
+    request_bytes: u64,
     /// Requests are written only once the peer's handshake was accepted, so
     /// a session refused at the handshake never carried a request.
     established: bool,
@@ -184,6 +187,7 @@ impl QueueState {
         self.signals.clear();
         self.turns.clear();
         self.queued_bytes = 0;
+        self.request_bytes = 0;
         (
             std::mem::take(&mut self.requests),
             std::mem::take(&mut self.replies),
@@ -234,6 +238,9 @@ pub(crate) struct Connection {
     /// Requests admitted from this connection whose reply (or stream end)
     /// is still owed or queued.
     outstanding: AtomicUsize,
+    /// Windows of the streams produced on this connection, reserved from
+    /// its producer budget.
+    stream_windows: Arc<AtomicU64>,
     counters: Arc<Counters>,
 }
 
@@ -264,6 +271,7 @@ impl Connection {
                 turns: VecDeque::new(),
                 server_streams: BTreeMap::new(),
                 queued_bytes: 0,
+                request_bytes: 0,
                 established: false,
                 closed: None,
                 peer_context: None,
@@ -280,6 +288,7 @@ impl Connection {
             },
             waker: AtomicWaker::new(),
             outstanding: AtomicUsize::new(0),
+            stream_windows: Arc::new(AtomicU64::new(0)),
             counters: Arc::clone(counters),
         }
     }
@@ -302,25 +311,52 @@ impl Connection {
             .expect("Mutex poisoned: prior task panicked")
     }
 
-    fn add_bytes(&self, queue: &mut QueueState, bytes: usize) {
+    fn add_bytes(&self, queue: &mut QueueState, bytes: usize, request: bool) {
         let bytes = bytes as u64;
         queue.queued_bytes = queue.queued_bytes.saturating_add(bytes);
         self.counters
             .queued_bytes
             .fetch_add(bytes, Ordering::Relaxed);
+        if request {
+            queue.request_bytes = queue.request_bytes.saturating_add(bytes);
+            self.counters
+                .queued_request_bytes
+                .fetch_add(bytes, Ordering::Relaxed);
+        }
     }
 
-    fn sub_bytes(&self, queue: &mut QueueState, bytes: u64) {
-        let bytes = bytes.min(queue.queued_bytes);
-        queue.queued_bytes -= bytes;
+    fn sub_bytes(&self, queue: &mut QueueState, bytes: u64, request: bool) {
+        let total = bytes.min(queue.queued_bytes);
+        queue.queued_bytes -= total;
         self.counters
             .queued_bytes
-            .fetch_sub(bytes, Ordering::Relaxed);
+            .fetch_sub(total, Ordering::Relaxed);
+        if request {
+            let bytes = bytes.min(queue.request_bytes);
+            queue.request_bytes -= bytes;
+            self.counters
+                .queued_request_bytes
+                .fetch_sub(bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Give back every byte still counted (closing, or dropped).
+    fn forget_bytes(&self, queue: &mut QueueState) {
+        self.counters
+            .queued_bytes
+            .fetch_sub(queue.queued_bytes, Ordering::Relaxed);
+        self.counters
+            .queued_request_bytes
+            .fetch_sub(queue.request_bytes, Ordering::Relaxed);
+        queue.queued_bytes = 0;
+        queue.request_bytes = 0;
     }
 
     /// Queue a request frame (`call_id` `None` for a one-way request),
     /// within the request count and the connection's and runtime's queued
-    /// byte budgets.
+    /// request byte budgets. Replies and stream items do not count against
+    /// these budgets (their own admission bounds them), so a backlog of
+    /// streams to one slow peer never refuses calls to another.
     pub(crate) fn push_request(
         &self,
         frame: Vec<u8>,
@@ -332,14 +368,14 @@ impl Connection {
             return Err(QueueRefusal::Closed);
         }
         let len = frame.len() as u64;
-        let runtime = self.counters.queued_bytes.load(Ordering::Relaxed);
+        let runtime = self.counters.queued_request_bytes.load(Ordering::Relaxed);
         if queue.requests.len() >= self.limits.requests
-            || queue.queued_bytes.saturating_add(len) > self.limits.bytes
+            || queue.request_bytes.saturating_add(len) > self.limits.bytes
             || runtime.saturating_add(len) > self.limits.runtime_bytes
         {
             return Err(QueueRefusal::Full);
         }
-        self.add_bytes(&mut queue, frame.len());
+        self.add_bytes(&mut queue, frame.len(), true);
         queue.requests.push_back((frame, call_id));
         queue.enlist(Source::Requests);
         queue.last_used = queue.last_used.max(now);
@@ -358,7 +394,7 @@ impl Connection {
             return false;
         }
         for (frame, call_id) in moved {
-            self.add_bytes(&mut queue, frame.len());
+            self.add_bytes(&mut queue, frame.len(), true);
             queue.requests.push_back((frame, call_id));
         }
         if !queue.requests.is_empty() {
@@ -375,7 +411,7 @@ impl Connection {
         let mut queue = self.lock();
         let taken: Vec<QueuedRequest> = queue.requests.drain(..).collect();
         let bytes = taken.iter().map(|(frame, _)| frame.len() as u64).sum();
-        self.sub_bytes(&mut queue, bytes);
+        self.sub_bytes(&mut queue, bytes, true);
         queue.turns.retain(|source| *source != Source::Requests);
         taken
     }
@@ -409,7 +445,7 @@ impl Connection {
         if queue.closed.is_some() {
             return Err(release);
         }
-        self.add_bytes(&mut queue, frame.len());
+        self.add_bytes(&mut queue, frame.len(), false);
         queue.replies.push_back((frame, release));
         queue.enlist(Source::Replies);
         drop(queue);
@@ -419,24 +455,32 @@ impl Connection {
 
     /// Queue a frame of the stream `call_id` produced on this connection,
     /// after its earlier frames. Never refused while open: the stream's
-    /// window bounds its items. Returns whether it was queued.
-    pub(crate) fn push_stream_frame(&self, call_id: u64, frame: StreamFrame) -> bool {
+    /// window, reserved at admission, bounds its items. The frame comes
+    /// back once the connection is closed. The writer is not woken: the
+    /// producer calls [`wake_writer`](Self::wake_writer) once it released
+    /// its own locks.
+    pub(crate) fn push_stream_frame(
+        &self,
+        call_id: u64,
+        frame: StreamFrame,
+    ) -> Result<(), StreamFrame> {
         let mut queue = self.lock();
         if queue.closed.is_some() {
-            drop(queue);
-            drop(frame);
-            return false;
+            return Err(frame);
         }
-        self.add_bytes(&mut queue, frame.bytes.len());
+        self.add_bytes(&mut queue, frame.bytes.len(), false);
         queue
             .stream_out
             .entry(call_id)
             .or_default()
             .push_back(frame);
         queue.enlist(Source::Stream(call_id));
-        drop(queue);
+        Ok(())
+    }
+
+    /// Wake the writer (after frames were queued without waking it).
+    pub(crate) fn wake_writer(&self) {
         self.waker.wake();
-        true
     }
 
     /// Record a produced stream admitted on this connection. `false` when
@@ -460,6 +504,11 @@ impl Connection {
         self.lock().server_streams.get(&call_id).cloned()
     }
 
+    /// The windows reserved by streams produced on this connection.
+    pub(crate) fn stream_windows(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.stream_windows)
+    }
+
     /// Produced streams live on the connection.
     pub(crate) fn stream_count(&self) -> usize {
         self.lock().server_streams.len()
@@ -480,7 +529,7 @@ impl Connection {
             .map(Vec::from)
             .unwrap_or_default();
         let bytes = frames.iter().map(|frame| frame.bytes.len() as u64).sum();
-        self.sub_bytes(&mut queue, bytes);
+        self.sub_bytes(&mut queue, bytes, false);
         queue
             .turns
             .retain(|source| *source != Source::Stream(call_id));
@@ -642,7 +691,7 @@ impl Connection {
         if bytes == 0 {
             return false;
         }
-        self.sub_bytes(&mut queue, bytes);
+        self.sub_bytes(&mut queue, bytes, true);
         if queue.requests.is_empty() {
             queue.turns.retain(|source| *source != Source::Requests);
         }
@@ -656,10 +705,7 @@ impl Connection {
     pub(crate) fn close(&self, reason: CloseReason) -> CloseReason {
         let mut queue = self.lock();
         let reason = queue.closed.get_or_insert(reason).clone();
-        let bytes = queue.queued_bytes;
-        self.counters
-            .queued_bytes
-            .fetch_sub(bytes, Ordering::Relaxed);
+        self.forget_bytes(&mut queue);
         let discarded = queue.drain_all();
         drop(queue);
         drop(discarded);
@@ -694,7 +740,13 @@ impl Connection {
                     consumed: signal.ack.unwrap_or(0),
                 }
             };
-            let bytes = encode_frame(&encode_message(&message), u32::MAX).unwrap_or_default();
+            let Ok(bytes) = encode_frame(&encode_message(&message), u32::MAX) else {
+                // A fixed 17-byte envelope always frames. Never send a
+                // silently empty signal: end the session instead.
+                tracing::error!(peer = %self.peer, call_id, "rpc stream signal could not be framed");
+                queue.closed.get_or_insert(CloseReason::Local);
+                return Poll::Ready(None);
+            };
             return Poll::Ready(Some(Outgoing {
                 bytes,
                 kind: FrameKind::Control,
@@ -737,7 +789,8 @@ impl Connection {
             if more {
                 queue.turns.push_back(source);
             }
-            self.sub_bytes(&mut queue, bytes.len() as u64);
+            let request = matches!(kind, FrameKind::Request(_));
+            self.sub_bytes(&mut queue, bytes.len() as u64, request);
             return Poll::Ready(Some(Outgoing {
                 bytes,
                 kind,
@@ -763,12 +816,16 @@ impl Drop for Connection {
         self.counters
             .live_connections
             .fetch_sub(1, Ordering::Relaxed);
+        let counters = Arc::clone(&self.counters);
         if let Ok(queue) = self.queue.get_mut() {
-            let bytes = queue.queued_bytes;
-            self.counters
+            counters
                 .queued_bytes
-                .fetch_sub(bytes, Ordering::Relaxed);
+                .fetch_sub(queue.queued_bytes, Ordering::Relaxed);
+            counters
+                .queued_request_bytes
+                .fetch_sub(queue.request_bytes, Ordering::Relaxed);
             queue.queued_bytes = 0;
+            queue.request_bytes = 0;
             // The runtime is gone: wake every producer of this connection.
             for core in std::mem::take(&mut queue.server_streams).into_values() {
                 core.terminate(Terminal::Shutdown);

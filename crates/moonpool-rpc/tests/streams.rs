@@ -902,3 +902,202 @@ async fn a_full_request_queue_refuses_calls_instead_of_stalling() {
     driver.abort();
     holder.abort();
 }
+
+/// Hello, then one stream request announcing `window` for `target`.
+fn raw_stream_opening(target: &ServiceRef<ScanMethod>, request: &Scan, window: u64) -> Vec<u8> {
+    let hello = WireMessage::Hello {
+        magic: PROTOCOL_MAGIC,
+        min_version: PROTOCOL_VERSION,
+        max_version: PROTOCOL_VERSION,
+        incarnation: moonpool_rpc::Incarnation::from_raw(9),
+        features: 0,
+        max_frame_bytes: 1 << 20,
+        listen: None,
+    };
+    let endpoint = target.endpoint();
+    let open = WireMessage::Request {
+        call_id: 1,
+        incarnation: endpoint.incarnation(),
+        token: endpoint.token(),
+        interface: moonpool_rpc::InterfaceId::new(0),
+        interface_version: SchemaVersion::new(0),
+        method: ScanMethod::METHOD,
+        schema: ScanMethod::SCHEMA,
+        codec: moonpool_rpc::CodecId::PROST,
+        flags: moonpool_rpc::protocol::REQUEST_FLAG_STREAM,
+        stream_window: window,
+        metadata: Vec::new(),
+        body: prost::Message::encode_to_vec(request),
+    };
+    let mut bytes = encode_frame(&encode_message(&hello), u32::MAX).expect("frame");
+    bytes.extend(encode_frame(&encode_message(&open), u32::MAX).expect("frame"));
+    bytes
+}
+
+/// A stream request whose window holds no item is refused as malformed,
+/// before any handler, instead of admitting a stream that can never send.
+#[tokio::test(flavor = "current_thread")]
+async fn a_window_that_holds_no_item_is_refused() {
+    use tokio::io::AsyncReadExt;
+    let rig = Rig::defaults().await;
+    let address = rig.server.address().expect("listening");
+    let mut socket = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect");
+    let request = scan(80, 1, 1);
+    socket
+        .write_all(&raw_stream_opening(&rig.scan, &request, 10))
+        .await
+        .expect("send");
+    let mut decoder = moonpool_rpc::protocol::FrameDecoder::new(1 << 20);
+    let mut chunk = vec![0; 4096];
+    let outcome = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let read = socket.read(&mut chunk).await.expect("read");
+            assert!(read > 0, "the server closed the session");
+            decoder.feed(&chunk[..read]);
+            while let Some(payload) = decoder.next_frame().expect("frames") {
+                if let Ok(WireMessage::Reply {
+                    call_id: 1,
+                    outcome,
+                }) = moonpool_rpc::protocol::decode_message(&payload)
+                {
+                    return outcome;
+                }
+            }
+        }
+    })
+    .await
+    .expect("a rejection arrives");
+    assert_eq!(
+        outcome,
+        moonpool_rpc::protocol::WireOutcome::Err(
+            moonpool_rpc::protocol::WireError::MalformedRequest
+        )
+    );
+    assert!(produced(&rig.ledger, 80).is_none(), "no handler ran");
+    rig.stop();
+}
+
+/// Producer budgets: each admitted stream reserves its window from the
+/// connection's producer budget, and a stream whose window does not fit is
+/// refused before admission. Cancelling that refused stream reports what
+/// the refusal proved.
+#[tokio::test(flavor = "current_thread")]
+async fn producer_windows_are_reserved_from_a_budget() {
+    let window = 256 << 10;
+    let server_config = RpcConfig {
+        streams: StreamPolicy {
+            max_producer_bytes_per_connection: 2 * window + window / 2,
+            ..StreamPolicy::default()
+        },
+        ..RpcConfig::default()
+    };
+    let rig = Rig::new(server_config, RpcConfig::default()).await;
+    let client = rig.scan.bind(&rig.client);
+    let mut open = Vec::new();
+    for id in 0..2 {
+        let mut request = scan(90 + id, 0, 1);
+        request.end = 3;
+        let mut stream = client
+            .get_reply_stream_with_window(&request, window)
+            .expect("opens");
+        stream.next().await.expect("item").expect("ok");
+        open.push(stream);
+    }
+    assert_eq!(
+        rig.server
+            .stats()
+            .expect("running")
+            .producer_window_reserved,
+        2 * window
+    );
+    let third = client
+        .get_reply_stream_with_window(&scan(92, 1, 1), window)
+        .expect("sent");
+    assert!(eventually(|| third.is_terminated()).await);
+    assert_eq!(
+        third.cancel(),
+        Execution::NotAdmitted,
+        "a refusal before admission proves it never ran"
+    );
+    assert!(produced(&rig.ledger, 92).is_none());
+    drop(open);
+    assert!(
+        eventually(|| rig
+            .server
+            .stats()
+            .is_some_and(|stats| stats.producer_window_reserved == 0))
+        .await,
+        "windows are released when the streams end"
+    );
+    rig.stop();
+}
+
+/// A stream backlog to a peer that stopped reading is bounded by the
+/// window reserved for it, and never makes the producer's own calls to
+/// another peer fail `Overloaded`: stream frames do not count against the
+/// request queue budgets.
+async fn a_stream_backlog_does_not_starve_unrelated_calls() {
+    let limits = ResourceLimits {
+        max_queued_bytes_per_connection: 256 << 10,
+        max_queued_bytes: 256 << 10,
+        ..ResourceLimits::default()
+    };
+    let server_config = RpcConfig {
+        limits,
+        ..RpcConfig::default()
+    };
+    let rig = Rig::new(server_config, RpcConfig::default()).await;
+    // Another runtime the producer calls.
+    let (other_driver, other) =
+        RpcDriver::listen(TokioProviders::new(), "127.0.0.1:0", RpcConfig::default())
+            .await
+            .expect("bind");
+    let (echo_elsewhere, echoes) = other
+        .register::<Echo>(AccessClass::Public)
+        .expect("register");
+    let echo_task = serve_echo(echoes);
+    let other_driver = tokio::spawn(other_driver.run());
+    // A raw peer opens a 16 MiB-window stream of 64 KiB items and never
+    // reads a byte.
+    let address = rig.server.address().expect("listening");
+    let mut stalled = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect");
+    let mut request = scan(100, 0, 64 * 1024);
+    request.end = 3;
+    stalled
+        .write_all(&raw_stream_opening(&rig.scan, &request, 16 << 20))
+        .await
+        .expect("send");
+    assert!(
+        eventually(|| rig
+            .server
+            .stats()
+            .is_some_and(|stats| stats.queued_bytes > 1 << 20))
+        .await,
+        "the producer's writer backed up behind the stalled reader"
+    );
+    let stats = rig.server.stats().expect("running");
+    assert!(stats.queued_bytes <= (16 << 20) + (1 << 20), "{stats:?}");
+    assert_eq!(stats.producer_window_reserved, 16 << 20);
+    // The producer's own calls elsewhere are not refused.
+    let caller = echo_elsewhere.bind(&rig.server);
+    for id in 0..5 {
+        let reply = caller
+            .try_get_reply_within(&chunk(id, id, 1024), Duration::from_secs(5))
+            .await
+            .expect("an unrelated call succeeds beside the backlog");
+        assert_eq!(reply.seq, id);
+    }
+    drop(stalled);
+    echo_task.abort();
+    other_driver.abort();
+    rig.stop();
+}
+both_flavors!(
+    a_stream_backlog_does_not_starve_unrelated_calls,
+    stream_backlog_current_thread,
+    stream_backlog_multi_thread
+);

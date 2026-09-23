@@ -290,21 +290,22 @@ fn the_two_acknowledgement_paths_return_credit_on_consumption() {
     assert_eq!(core.in_flight(), 0, "taken from the queue: acknowledged");
     assert_eq!(counters.stream_acks_popped.load(Ordering::Relaxed), 1);
 
-    // The reader waits: the next item is handed over and acknowledged on
-    // arrival.
+    // The reader waits: the next item is handed over, and acknowledged
+    // once the woken reader takes it.
     assert!(consumer.poll_next(&mut cx).is_pending());
     assert_eq!(Pending::new(10).poll(&core), Poll::Ready(Ok(())));
     assert!(matches!(
         consumer.on_item(&route, 1, CodecId::PROST, vec![0; 10]),
         Intook::Accepted
     ));
-    assert_eq!(core.in_flight(), 0);
-    assert_eq!(counters.stream_acks_immediate.load(Ordering::Relaxed), 1);
     assert_eq!(flag.woken(), 1);
+    assert_eq!(core.in_flight(), item, "not taken yet: no credit");
     assert!(matches!(
         consumer.poll_next(&mut cx),
         Poll::Ready(Some(Ok(_)))
     ));
+    assert_eq!(core.in_flight(), 0);
+    assert_eq!(counters.stream_acks_immediate.load(Ordering::Relaxed), 1);
 
     // Out of sequence: refused, never skipped, and the stream ends after
     // what was received.
@@ -353,4 +354,113 @@ fn received_items_stay_observable_before_the_terminal_error() {
     let short = ConsumerCore::new(2, 1000, &counters);
     let _ = short.on_item(&route, 0, CodecId::PROST, vec![1]);
     assert!(matches!(short.on_end(2, None), Intook::Violation(_)));
+}
+
+/// A reader that waited and then gave up (its `next()` future dropped by a
+/// timeout or a lost `select!` branch) takes nothing, so the item that
+/// arrives next earns no credit until someone actually takes it.
+#[test]
+fn an_abandoned_wait_acknowledges_nothing() {
+    let item = stream_item_frame_len(10);
+    let (_sink, core) = producer(2 * item);
+    let counters = Arc::new(Counters::default());
+    counters
+        .stream_window_reserved
+        .fetch_add(2 * item, Ordering::Relaxed);
+    let consumer = ConsumerCore::new(1, 2 * item, &counters);
+    let route = AckRoute::Local(Arc::downgrade(&core));
+    let flag = Arc::new(Flag::default());
+    let waker = flag.waker();
+    let mut cx = Context::from_waker(&waker);
+    // The reader waits, then its future is dropped (never polled again).
+    assert!(consumer.poll_next(&mut cx).is_pending());
+    assert_eq!(Pending::new(10).poll(&core), Poll::Ready(Ok(())));
+    let _ = consumer.on_item(&route, 0, CodecId::PROST, vec![0; 10]);
+    assert_eq!(
+        core.in_flight(),
+        item,
+        "an unconsumed item returns no credit"
+    );
+    assert_eq!(counters.stream_acks_immediate.load(Ordering::Relaxed), 0);
+    // A second item cannot be a hand-off: nobody is waiting any more.
+    assert_eq!(Pending::new(10).poll(&core), Poll::Ready(Ok(())));
+    let _ = consumer.on_item(&route, 1, CodecId::PROST, vec![0; 10]);
+    assert_eq!(core.in_flight(), 2 * item);
+    // Taking them returns the credit, in order.
+    for _ in 0..2 {
+        assert!(matches!(
+            consumer.poll_next(&mut cx),
+            Poll::Ready(Some(Ok(_)))
+        ));
+    }
+    assert_eq!(core.in_flight(), 0);
+    assert_eq!(counters.stream_acks_immediate.load(Ordering::Relaxed), 1);
+    assert_eq!(counters.stream_acks_popped.load(Ordering::Relaxed), 1);
+}
+
+/// `ready()` must not sleep through the moment the last waiting sender
+/// leaves the line with credit free: nothing else would ever wake it.
+#[test]
+fn ready_wakes_when_the_last_waiting_sender_leaves() {
+    // Window 300, 200 in flight.
+    let (_sink, core) = producer(300);
+    let mut first = Pending {
+        ticket: None,
+        item: Some((CodecId::PROST, Vec::new())),
+        size: 200,
+        flag: Arc::new(Flag::default()),
+    };
+    assert_eq!(first.poll(&core), Poll::Ready(Ok(())));
+    // A sends 150 and waits.
+    let mut waiting = Pending {
+        ticket: None,
+        item: Some((CodecId::PROST, Vec::new())),
+        size: 150,
+        flag: Arc::new(Flag::default()),
+    };
+    assert!(waiting.poll(&core).is_pending());
+    // B asks for readiness: not ready while A waits.
+    let ready = Arc::new(Flag::default());
+    let ready_waker = ready.waker();
+    let mut ready_cx = Context::from_waker(&ready_waker);
+    assert!(core.poll_ready(&mut ready_cx).is_pending());
+    // The acknowledgement wakes both; B polls first and waits again (A is
+    // still in line).
+    assert_eq!(core.on_ack(200), AckEffect::Advanced);
+    assert_eq!(ready.woken(), 1);
+    assert!(core.poll_ready(&mut ready_cx).is_pending());
+    // A gives up. Nothing is in flight and no acknowledgement will ever
+    // come: B must be woken now, and be ready.
+    core.abandon_send(&mut waiting.ticket);
+    assert_eq!(ready.woken(), 2);
+    assert_eq!(core.poll_ready(&mut ready_cx), Poll::Ready(Ok(())));
+
+    // The same when the last waiter is refused as too large after the
+    // window shrank.
+    let (_sink, core) = producer(300);
+    let mut first = Pending {
+        ticket: None,
+        item: Some((CodecId::PROST, Vec::new())),
+        size: 200,
+        flag: Arc::new(Flag::default()),
+    };
+    assert_eq!(first.poll(&core), Poll::Ready(Ok(())));
+    let mut large = Pending {
+        ticket: None,
+        item: Some((CodecId::PROST, Vec::new())),
+        size: 250,
+        flag: Arc::new(Flag::default()),
+    };
+    assert!(large.poll(&core).is_pending());
+    let ready = Arc::new(Flag::default());
+    let ready_waker = ready.waker();
+    let mut ready_cx = Context::from_waker(&ready_waker);
+    assert!(core.poll_ready(&mut ready_cx).is_pending());
+    core.limit_window(240);
+    assert!(matches!(
+        large.poll(&core),
+        Poll::Ready(Err(SendError::TooLarge { .. }))
+    ));
+    assert_eq!(ready.woken(), 1, "credit is free and nobody waits");
+    assert_eq!(core.poll_ready(&mut ready_cx), Poll::Ready(Ok(())));
 }

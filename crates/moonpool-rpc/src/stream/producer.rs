@@ -10,7 +10,7 @@
 //! connection's.
 
 use std::collections::VecDeque;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
@@ -19,7 +19,7 @@ use super::credit::{AckOutcome, AckViolation, Credit, Refusal};
 use crate::codec::CodecId;
 use crate::protocol::{WireError, WireMessage, encode_frame, encode_message};
 use crate::stats::Counters;
-use crate::transport::connection::{Connection, Release, StreamFrame};
+use crate::transport::connection::{CloseReason, Connection, Release, StreamFrame};
 
 /// Why a stream stopped producing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +93,67 @@ impl Drop for StreamSlot {
     }
 }
 
+/// A produced stream's window, reserved from the producer budgets (per
+/// connection and per runtime) until the stream ends: the most this side
+/// may have to queue for it.
+pub(crate) struct WindowHold {
+    connection: Option<Arc<AtomicU64>>,
+    counters: Arc<Counters>,
+    bytes: u64,
+}
+
+impl WindowHold {
+    /// Reserve `bytes` if the connection's reservations stay within its
+    /// budget and the runtime's within `max`.
+    pub(crate) fn reserve(
+        counters: &Arc<Counters>,
+        connection: Option<(Arc<AtomicU64>, u64)>,
+        max: u64,
+        bytes: u64,
+    ) -> Option<Self> {
+        let runtime = &counters.producer_window_reserved;
+        if runtime
+            .fetch_add(bytes, Ordering::Relaxed)
+            .saturating_add(bytes)
+            > max
+        {
+            runtime.fetch_sub(bytes, Ordering::Relaxed);
+            return None;
+        }
+        let connection = match connection {
+            Some((reserved, budget)) => {
+                if reserved
+                    .fetch_add(bytes, Ordering::Relaxed)
+                    .saturating_add(bytes)
+                    > budget
+                {
+                    reserved.fetch_sub(bytes, Ordering::Relaxed);
+                    runtime.fetch_sub(bytes, Ordering::Relaxed);
+                    return None;
+                }
+                Some(reserved)
+            }
+            None => None,
+        };
+        Some(Self {
+            connection,
+            counters: Arc::clone(counters),
+            bytes,
+        })
+    }
+}
+
+impl Drop for WindowHold {
+    fn drop(&mut self) {
+        if let Some(reserved) = &self.connection {
+            reserved.fetch_sub(self.bytes, Ordering::Relaxed);
+        }
+        self.counters
+            .producer_window_reserved
+            .fetch_sub(self.bytes, Ordering::Relaxed);
+    }
+}
+
 /// An acknowledgement's effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AckEffect {
@@ -136,6 +197,29 @@ impl CoreState {
         self.waiters.front().map(|waiter| waiter.waker.clone())
     }
 
+    /// Wakers to run after a sender left the line (sent, refused or
+    /// abandoned): the new head of the line, and, once nobody waits and
+    /// credit is free, every `ready()` caller (otherwise they would sleep
+    /// until an acknowledgement that may never come).
+    fn turn_passed(&mut self) -> Vec<Waker> {
+        let mut wakers: Vec<Waker> = self.head().into_iter().collect();
+        if self.waiters.is_empty() && self.credit.has_room() {
+            wakers.append(&mut self.ready_waiters);
+        }
+        wakers
+    }
+
+    /// Mark the stream ended with `terminal` (if it was not) and hand back
+    /// what it held; its waiters' wakers go to `effects`.
+    fn stop(&mut self, terminal: Terminal, effects: &mut Effects) -> Option<Release> {
+        if self.terminal.is_some() {
+            return None;
+        }
+        self.terminal = Some(terminal);
+        effects.wakers.extend(self.all());
+        self.hold.take()
+    }
+
     /// Every waiting waker (the stream ended).
     fn all(&mut self) -> Vec<Waker> {
         let mut wakers: Vec<Waker> = self.waiters.drain(..).map(|waiter| waiter.waker).collect();
@@ -147,6 +231,27 @@ impl CoreState {
 fn wake(wakers: impl IntoIterator<Item = Waker>) {
     for waker in wakers {
         waker.wake();
+    }
+}
+
+/// What a locked section leaves to do once every lock is released: wake
+/// tasks, wake the connection's writer, drop what the stream held.
+#[derive(Default)]
+struct Effects {
+    wakers: Vec<Waker>,
+    writer: bool,
+    hold: Option<Release>,
+}
+
+impl Effects {
+    fn apply(self, connection: Option<&Connection>) {
+        drop(self.hold);
+        if self.writer
+            && let Some(connection) = connection
+        {
+            connection.wake_writer();
+        }
+        wake(self.wakers);
     }
 }
 
@@ -229,6 +334,16 @@ impl StreamCore {
         state.credit.window().min(self.frame_cap)
     }
 
+    /// The live connection of a remote route. Taken before any stream lock
+    /// and dropped after them: dropping the last reference to a connection
+    /// ends its streams, which takes their locks.
+    fn connection(&self) -> Option<Arc<Connection>> {
+        match &self.route {
+            CoreRoute::Remote(connection) => connection.upgrade(),
+            CoreRoute::Local(_) => None,
+        }
+    }
+
     /// Try to send one item: reserve its credit (first come, first served)
     /// and queue it, or register to be woken. `ticket` is this send's place
     /// in line, `item` its encoded body (taken once sent).
@@ -239,6 +354,22 @@ impl StreamCore {
         item: &mut Option<(CodecId, Vec<u8>)>,
         size: u64,
     ) -> Poll<Result<(), SendError>> {
+        let connection = self.connection();
+        let mut effects = Effects::default();
+        let outcome = self.send_locked(cx, ticket, item, size, connection.as_deref(), &mut effects);
+        effects.apply(connection.as_deref());
+        outcome
+    }
+
+    fn send_locked(
+        self: &Arc<Self>,
+        cx: &mut Context<'_>,
+        ticket: &mut Option<u64>,
+        item: &mut Option<(CodecId, Vec<u8>)>,
+        size: u64,
+        connection: Option<&Connection>,
+        effects: &mut Effects,
+    ) -> Poll<Result<(), SendError>> {
         let _emit = self.emission();
         let mut state = self.lock();
         if let Some(terminal) = state.terminal {
@@ -248,9 +379,7 @@ impl StreamCore {
         let cap = self.cap(&state);
         if size > cap {
             state.leave(ticket);
-            let head = state.head();
-            drop(state);
-            wake(head);
+            effects.wakers.extend(state.turn_passed());
             Counters::bump(&self.counters.stream_items_refused);
             return Poll::Ready(Err(SendError::TooLarge { size, limit: cap }));
         }
@@ -263,21 +392,28 @@ impl StreamCore {
             match state.credit.reserve(size) {
                 Ok(sequence) => {
                     state.leave(ticket);
-                    let head = state.head();
+                    effects.wakers.extend(state.turn_passed());
                     let Some((codec, body)) = item.take() else {
                         return Poll::Ready(Err(SendError::Ended));
                     };
-                    let sent = self.emit_item(state, sequence, codec, body);
-                    wake(head);
-                    return Poll::Ready(sent);
+                    return Poll::Ready(
+                        self.emit_item(state, sequence, codec, body, connection, effects),
+                    );
                 }
                 Err(Refusal::TooLarge { size, limit }) => {
                     state.leave(ticket);
+                    effects.wakers.extend(state.turn_passed());
                     return Poll::Ready(Err(SendError::TooLarge { size, limit }));
                 }
                 Err(Refusal::Overflow) => {
                     state.leave(ticket);
-                    self.end_with(state, Terminal::Protocol, Some(WireError::StreamProtocol));
+                    self.end_with(
+                        state,
+                        Terminal::Protocol,
+                        Some(WireError::StreamProtocol),
+                        connection,
+                        effects,
+                    );
                     return Poll::Ready(Err(SendError::Protocol(
                         "stream byte counter overflow".into(),
                     )));
@@ -306,39 +442,61 @@ impl StreamCore {
         Poll::Pending
     }
 
-    /// Queue an item whose credit was just reserved (`state` still held).
+    /// Queue an item whose credit was just reserved (`state` still held,
+    /// and the emission lock).
     fn emit_item(
         self: &Arc<Self>,
-        state: std::sync::MutexGuard<'_, CoreState>,
+        mut state: std::sync::MutexGuard<'_, CoreState>,
         sequence: u64,
         codec: CodecId,
         body: Vec<u8>,
+        connection: Option<&Connection>,
+        effects: &mut Effects,
     ) -> Result<(), SendError> {
         match &self.route {
-            CoreRoute::Remote(connection) => {
+            CoreRoute::Remote(_) => {
                 let payload = encode_message(&WireMessage::StreamItem {
                     call_id: self.call_id,
                     sequence,
                     codec,
                     body,
                 });
-                // Already bounded by the session frame limit (`frame_cap`).
-                let bytes = encode_frame(&payload, u32::MAX).unwrap_or_default();
-                let queued = connection.upgrade().is_some_and(|connection| {
-                    connection.push_stream_frame(
-                        self.call_id,
-                        StreamFrame {
-                            bytes,
-                            release: None,
-                        },
-                    )
+                // Bounded by the session frame limit (`frame_cap`), so this
+                // cannot fail; if it did, the reserved credit and sequence
+                // would be a lie: end the stream instead of sending nothing.
+                let Ok(bytes) = encode_frame(&payload, u32::MAX) else {
+                    tracing::error!(
+                        call_id = self.call_id,
+                        "rpc stream item could not be framed"
+                    );
+                    self.end_with(
+                        state,
+                        Terminal::Protocol,
+                        Some(WireError::StreamProtocol),
+                        connection,
+                        effects,
+                    );
+                    return Err(SendError::Protocol(
+                        "stream item could not be framed".into(),
+                    ));
+                };
+                let queued = connection.is_some_and(|connection| {
+                    connection
+                        .push_stream_frame(
+                            self.call_id,
+                            StreamFrame {
+                                bytes,
+                                release: None,
+                            },
+                        )
+                        .is_ok()
                 });
-                drop(state);
                 if queued {
+                    effects.writer = true;
                     Counters::bump(&self.counters.stream_items_sent);
                     Ok(())
                 } else {
-                    self.terminate(Terminal::Disconnected);
+                    effects.hold = state.stop(Terminal::Disconnected, effects);
                     Err(SendError::Disconnected)
                 }
             }
@@ -383,9 +541,9 @@ impl StreamCore {
         }
         let mut state = self.lock();
         state.leave(ticket);
-        let head = state.head();
+        let wakers = state.turn_passed();
         drop(state);
-        wake(head);
+        wake(wakers);
     }
 
     /// End the stream: `error` `None` is a normal end. Emitted after every
@@ -401,17 +559,26 @@ impl StreamCore {
     }
 
     fn end_locked(self: &Arc<Self>, terminal: Terminal, error: Option<WireError>) -> bool {
-        let _emit = self.emission();
-        let state = self.lock();
-        self.end_with(state, terminal, error)
+        let connection = self.connection();
+        let mut effects = Effects::default();
+        let ended = {
+            let _emit = self.emission();
+            let state = self.lock();
+            self.end_with(state, terminal, error, connection.as_deref(), &mut effects)
+        };
+        effects.apply(connection.as_deref());
+        ended
     }
 
-    /// End with the emission lock held by the caller.
+    /// End with the emission lock held by the caller; wakeups are left in
+    /// `effects` for the caller to run once every lock is released.
     fn end_with(
         self: &Arc<Self>,
         mut state: std::sync::MutexGuard<'_, CoreState>,
         terminal: Terminal,
         error: Option<WireError>,
+        connection: Option<&Connection>,
+        effects: &mut Effects,
     ) -> bool {
         if state.terminal.is_some() {
             return false;
@@ -419,26 +586,39 @@ impl StreamCore {
         state.terminal = Some(terminal);
         let items = state.credit.items();
         let hold = state.hold.take();
-        let wakers = state.all();
+        effects.wakers.extend(state.all());
         match &self.route {
-            CoreRoute::Remote(connection) => {
+            CoreRoute::Remote(_) => {
                 let payload = encode_message(&WireMessage::StreamEnd {
                     call_id: self.call_id,
                     items,
                     error,
                 });
-                let bytes = encode_frame(&payload, u32::MAX).unwrap_or_default();
-                if let Some(connection) = connection.upgrade() {
-                    // Forgotten at once: a late acknowledgement or cancel is
-                    // ignored; the end still follows every queued item.
-                    let _ = connection.remove_stream(self.call_id, false);
-                    let _ = connection.push_stream_frame(
-                        self.call_id,
-                        StreamFrame {
-                            bytes,
-                            release: hold,
-                        },
-                    );
+                match (connection, encode_frame(&payload, u32::MAX)) {
+                    (Some(connection), Ok(bytes)) => {
+                        // Forgotten at once: a late acknowledgement or cancel
+                        // is ignored; the end still follows every queued item.
+                        let _ = connection.remove_stream(self.call_id, false);
+                        match connection.push_stream_frame(
+                            self.call_id,
+                            StreamFrame {
+                                bytes,
+                                release: hold,
+                            },
+                        ) {
+                            Ok(()) => effects.writer = true,
+                            Err(frame) => effects.hold = frame.release,
+                        }
+                    }
+                    (Some(connection), Err(error)) => {
+                        // A fixed 26-byte envelope always frames; never send
+                        // a silently empty end: fail the session instead.
+                        tracing::error!(%error, call_id = self.call_id, "rpc stream end could not be framed");
+                        let _ = connection.remove_stream(self.call_id, false);
+                        let _ = connection.close(CloseReason::Local);
+                        effects.hold = hold;
+                    }
+                    (None, _) => effects.hold = hold,
                 }
                 drop(state);
             }
@@ -447,11 +627,10 @@ impl StreamCore {
                 if let Some(sink) = sink.upgrade() {
                     sink.local_end(self.call_id, items, error);
                 }
-                drop(hold);
+                effects.hold = hold;
             }
         }
         Counters::bump(&self.counters.streams_ended);
-        wake(wakers);
         true
     }
 
@@ -477,39 +656,32 @@ impl StreamCore {
     /// The consumer abandoned the stream: stop, drop what was not written,
     /// release everything. Returns whether it was still running.
     pub(crate) fn cancel(&self) -> bool {
-        let mut state = self.lock();
-        if state.terminal.is_some() {
-            return false;
-        }
-        state.terminal = Some(Terminal::Cancelled);
-        let hold = state.hold.take();
-        let wakers = state.all();
-        let discarded = match &self.route {
-            CoreRoute::Remote(connection) => connection
-                .upgrade()
+        let connection = self.connection();
+        let mut effects = Effects::default();
+        let discarded = {
+            let mut state = self.lock();
+            if state.terminal.is_some() {
+                return false;
+            }
+            effects.hold = state.stop(Terminal::Cancelled, &mut effects);
+            connection
+                .as_deref()
                 .map(|connection| connection.remove_stream(self.call_id, true))
-                .unwrap_or_default(),
-            CoreRoute::Local(_) => Vec::new(),
+                .unwrap_or_default()
         };
-        drop(state);
         drop(discarded);
-        drop(hold);
-        wake(wakers);
+        effects.apply(connection.as_deref());
         true
     }
 
     /// The route is gone (connection ended, runtime shut down): stop and
     /// release everything; nothing more can be emitted.
     pub(crate) fn terminate(&self, terminal: Terminal) {
-        let mut state = self.lock();
-        if state.terminal.is_some() {
-            return;
+        let mut effects = Effects::default();
+        {
+            let mut state = self.lock();
+            effects.hold = state.stop(terminal, &mut effects);
         }
-        state.terminal = Some(terminal);
-        let hold = state.hold.take();
-        let wakers = state.all();
-        drop(state);
-        drop(hold);
-        wake(wakers);
+        effects.apply(None);
     }
 }
