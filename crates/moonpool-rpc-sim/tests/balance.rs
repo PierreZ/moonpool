@@ -72,6 +72,8 @@ fn bounded_campaign_hits_every_required_scenario() {
         // A destroyed endpoint next to healthy alternatives.
         "rpc balance server destroyed its endpoint and republished",
         "rpc balance destroyed endpoint skipped for a healthy one",
+        // A stale incarnation (a restarted server) mixed with live ones.
+        "rpc balance stale incarnation skipped for a healthy one",
         // Cancellation in the first and in the second attempt.
         "rpc balance call cancelled during its first attempt",
         "rpc balance call cancelled during its hedge",

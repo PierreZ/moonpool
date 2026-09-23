@@ -436,6 +436,12 @@ impl BalanceWorkload {
             "rpc balance destroyed endpoint skipped for a healthy one"
         );
         assert_sometimes!(
+            any(
+                &|outcome| matches!(outcome, AttemptOutcome::Failed(error) if *error.reason() == ErrorReason::StaleIncarnation)
+            ),
+            "rpc balance stale incarnation skipped for a healthy one"
+        );
+        assert_sometimes!(
             any(&|outcome| *outcome == AttemptOutcome::Declined),
             "rpc balance temporarily-behind reply failed over"
         );

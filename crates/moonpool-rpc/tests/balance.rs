@@ -12,8 +12,9 @@ use std::time::Duration;
 use moonpool_core::{Providers, TimeProvider, TokioProviders};
 use moonpool_rpc::balance::{
     Alternative, AlternativeSet, AttemptKind, AttemptOutcome, BalanceConfig, BalanceFailure,
-    BalanceHooks, BalancePolicy, BalancedClient, DuplicatePolicy, Duplicates, Feedback,
-    HedgeBudget, Locality, ModelConfig, QueueModel, ReplaceError, Retry, SetVersion, Verdict,
+    BalanceHooks, BalancePolicy, BalancedClient, BusyScoreSelector, DuplicatePolicy, Duplicates,
+    Feedback, HedgeBudget, Locality, ModelConfig, QueueModel, ReplaceError, Retry, SetVersion,
+    Verdict,
 };
 use moonpool_rpc::{
     AccessClass, ErrorReason, Execution, IncomingRequest, MethodId, RpcConfig, RpcDriver, RpcError,
@@ -623,6 +624,54 @@ async fn an_exhausted_budget_stops_hedging() {
     assert!(model.stats().copies_denied >= 1);
     assert_eq!(fast.receipts().len() + slow.receipts().len(), 3);
     collector.abort();
+}
+
+/// Reports the "busy" server's replies with a high busy score.
+struct BusyHooks;
+
+impl BalanceHooks<Work> for BusyHooks {
+    fn classify(&self, reply: &Done) -> Verdict {
+        Verdict::Accept(Feedback {
+            penalty: None,
+            busy: Some(if reply.server == "busy" { 5000 } else { 0 }),
+        })
+    }
+}
+
+/// Busy-score selection: once scores arrive, the idle server takes nearly
+/// every call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_scores_steer_selection() {
+    let busy = Server::start("busy", Mode::Fast).await;
+    let idle = Server::start("idle", Mode::Fast).await;
+    let (rpc, _driver) = client();
+    let model = model(0.0);
+    let balanced = BalancedClient::new(&rpc, set(1, &busy, &[&idle]), model.clone(), config())
+        .expect("valid")
+        .with_hooks(BusyHooks)
+        .with_selector(BusyScoreSelector::default());
+    // Learn both scores first: unknown scores count as idle, so both get
+    // picked early on.
+    let mut id = 0;
+    while (busy.receipts().is_empty() || idle.receipts().is_empty()) && id < 64 {
+        balanced
+            .call(Job { id }, &BalancePolicy::default())
+            .await
+            .expect("answered");
+        id += 1;
+    }
+    let (busy_before, idle_before) = (busy.receipts().len(), idle.receipts().len());
+    for id in 100..160 {
+        balanced
+            .call(Job { id }, &BalancePolicy::default())
+            .await
+            .expect("answered");
+    }
+    let busy_calls = busy.receipts().len() - busy_before;
+    let idle_calls = idle.receipts().len() - idle_before;
+    assert_eq!(busy_calls + idle_calls, 60);
+    assert!(busy_calls <= 3, "busy {busy_calls}, idle {idle_calls}");
+    assert!(settled(&model).await);
 }
 
 /// Comparison copies are opt-in, need the duplicate permission and the

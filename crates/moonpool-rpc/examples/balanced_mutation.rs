@@ -170,7 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(driver.run());
     let journal = Arc::new(Mutex::new(Journal::default()));
     let broken = replica(Replica::LosesReplies, Arc::clone(&journal)).await?;
-    let healthy = replica(Replica::Slow(Duration::from_millis(5)), Arc::clone(&journal)).await?;
+    let healthy = replica(
+        Replica::Slow(Duration::from_millis(5)),
+        Arc::clone(&journal),
+    )
+    .await?;
     let balanced = client(&rpc, &broken, &healthy)?;
     let blind = Deposit {
         id: 0,
@@ -219,7 +223,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(balance(&journal), 40);
 
     // 4. Hedging: A is slow now, B fast; both run the blind deposit.
-    let slow = replica(Replica::Slow(Duration::from_millis(200)), Arc::clone(&journal)).await?;
+    let slow = replica(
+        Replica::Slow(Duration::from_millis(200)),
+        Arc::clone(&journal),
+    )
+    .await?;
     let fast = replica(Replica::Slow(Duration::ZERO), Arc::clone(&journal)).await?;
     let hedging = client(&rpc, &slow, &fast)?;
     let blind = Deposit {
