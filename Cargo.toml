@@ -10,6 +10,7 @@ members = [
     "crates/moonpool-hyper",
     "crates/moonpool-prometheus",
     "crates/moonpool-rpc",
+    "crates/moonpool-rpc-derive",
     "crates/moonpool-rpc-sim",
     "crates/moonpool-sim",
     "crates/moonpool-sim-examples",

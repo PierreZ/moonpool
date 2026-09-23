@@ -1,0 +1,27 @@
+[package]
+name = "moonpool-rpc-derive"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional typed-interface generation for moonpool-rpc"
+documentation = "https://docs.rs/moonpool-rpc-derive"
+readme = "README.md"
+keywords = ["rpc", "macro", "distributed-systems"]
+categories = ["network-programming"]
+
+# Ergonomics only: the generated code is plain moonpool-rpc manual API
+# (groups, request streams, reply handles, bound clients). It owns no
+# registry, protocol, delivery or retry semantics. Reached through
+# moonpool-rpc's optional `derive` feature.
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+[lints]
+workspace = true

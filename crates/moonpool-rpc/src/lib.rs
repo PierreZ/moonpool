@@ -48,6 +48,12 @@
 //! needs no runtime and keeps nothing alive. A restarted process publishes
 //! fresh references and callers learn them explicitly; a reference to the
 //! previous incarnation is refused, never redirected. See [`interface`].
+//!
+//! The optional `derive` feature adds `#[moonpool_rpc::service]`, which
+//! generates the interface and method markers, a dispatcher over the
+//! request streams and a typed client from one trait. It is built on the
+//! manual API above and owns no protocol state; the manual API stays
+//! first-class.
 //! The optional `derive` feature generates the typed interface, dispatcher
 //! and client from a trait, on top of the same manual API.
 //!
@@ -156,3 +162,49 @@ pub use protocol::{MethodId, RpcMethod, SchemaVersion};
 pub use stats::{ResourceProbe, RpcStats};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
 pub use transport::{RpcDriver, RpcHandle, SessionUpgrade, is_transient_accept_error};
+
+/// Generate a typed interface from a trait (feature `derive`).
+///
+/// ```
+/// # #[cfg(feature = "prost")] {
+/// #[moonpool_rpc::service(id = 0x6b76_0001, version = 1)]
+/// pub trait Kv {
+///     /// Read a key.
+///     #[method(id = 1, schema = 1)]
+///     async fn get(&self, key: String) -> String;
+///     /// Write a key; nothing to answer.
+///     #[method(id = 2, schema = 1)]
+///     async fn put(&self, entry: String);
+/// }
+///
+/// // Generated: KvInterface, KvGet, KvPut, KvRef, KvClient<P>, KvRequest,
+/// // KvServer — all plain manual-API types underneath.
+/// use moonpool_rpc::{RpcInterface, RpcMethod};
+/// assert_eq!(KvInterface::INTERFACE.get(), 0x6b76_0001);
+/// assert_eq!(KvPut::METHOD.get(), 2);
+/// # }
+/// ```
+///
+/// Ids are explicit; a duplicate method id is a compile error, also when
+/// it hides behind a constant:
+///
+/// ```compile_fail
+/// const GET: u32 = 1;
+/// #[moonpool_rpc::service(id = 1, version = 1)]
+/// pub trait Kv {
+///     #[method(id = GET, schema = 1)]
+///     async fn get(&self, key: String) -> String;
+///     #[method(id = 1, schema = 1)]
+///     async fn put(&self, entry: String);
+/// }
+/// ```
+///
+/// See the `moonpool-rpc-derive` crate docs for every generated item.
+#[cfg(feature = "derive")]
+pub use moonpool_rpc_derive::service;
+
+/// Paths the `derive` feature's generated code uses. Not an API.
+#[doc(hidden)]
+pub mod __private {
+    pub use moonpool_core::Providers;
+}

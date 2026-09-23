@@ -114,5 +114,26 @@ pub trait RpcInterface: Send + Sync + 'static {
 ///
 /// Membership is what [`InterfaceRef::method`] and [`ServiceGroup::serve`]
 /// check at compile time; the method's own [`MethodId`](crate::MethodId) is
-/// what the server checks at admission.
+/// what the server checks at admission. A reference cannot be adjusted to
+/// a method of another interface:
+///
+/// ```compile_fail
+/// # use moonpool_rpc::*;
+/// # struct A;
+/// # impl RpcInterface for A {
+/// #     const INTERFACE: InterfaceId = InterfaceId::new(1);
+/// #     const VERSION: SchemaVersion = SchemaVersion::new(1);
+/// #     const NAME: &'static str = "a";
+/// # }
+/// # struct Other;
+/// # impl RpcMethod for Other {
+/// #     type Request = String;
+/// #     type Reply = String;
+/// #     const METHOD: MethodId = MethodId::new(1);
+/// #     const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+/// #     const NAME: &'static str = "other";
+/// # }
+/// // `Other` is not an `InterfaceMethod<A>`.
+/// let _ = InterfaceRef::<A>::default().method::<Other>();
+/// ```
 pub trait InterfaceMethod<I: RpcInterface>: RpcMethod {}
