@@ -398,13 +398,13 @@ mod tests {
         );
         assert!(ledger.receive(minted, receipt(START_UTC + 1), &trust));
         trust.advance(10_000);
-        let stale = issue();
+        let lapsed = issue();
         // Its only token had expired when it was sent (a source handing
         // out a stale token): never acceptable, whenever it arrived.
         let mut old = trust.mint(Kind::Refreshing, "refresher", 120, 0);
         old.not_before = START_UTC;
         old.expires = START_UTC + 60;
-        ledger.mint(stale, old, trust.utc(), trust.generation());
-        assert!(!ledger.receive(stale, receipt(START_UTC + 20_000), &trust));
+        ledger.mint(lapsed, old, trust.utc(), trust.generation());
+        assert!(!ledger.receive(lapsed, receipt(START_UTC + 20_000), &trust));
     }
 }

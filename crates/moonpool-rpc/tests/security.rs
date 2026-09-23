@@ -418,6 +418,15 @@ impl CredentialSource for Introspecting {
     }
 }
 
+/// Shares one [`Introspecting`] between the client and the test.
+struct SharedIntrospecting(Arc<Introspecting>);
+
+impl CredentialSource for SharedIntrospecting {
+    fn credential(&self, target: &moonpool_rpc::Endpoint) -> Option<Credential> {
+        self.0.credential(target)
+    }
+}
+
 async fn a_credential_source_may_use_the_runtime_during_retransmission() {
     let security = SecurityConfig::enforced(Tokens).accept_credentials_over_plaintext();
     let (server, server_driver) = server(security).await;
@@ -437,16 +446,10 @@ async fn a_credential_source_may_use_the_runtime_during_retransmission() {
         rpc: Mutex::new(Some(client.clone())),
         asks: Arc::clone(&asks),
     });
-    struct Shared(Arc<Introspecting>);
-    impl CredentialSource for Shared {
-        fn credential(&self, target: &moonpool_rpc::Endpoint) -> Option<Credential> {
-            self.0.credential(target)
-        }
-    }
     let reliable = {
         let client = private
             .bind(&client)
-            .with_credentials(Shared(Arc::clone(&source)));
+            .with_credentials(SharedIntrospecting(Arc::clone(&source)));
         tokio::spawn(async move { client.get_reply(&text("held")).await })
     };
     tokio::time::timeout(CALL, async {
