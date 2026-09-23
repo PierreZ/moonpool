@@ -117,6 +117,16 @@ impl RpcMethod for Flow {
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
+/// Every call's deadline: a hung call fails the run instead of hanging it.
+const CALL_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How soon after an overload burst drained the session must serve again.
+/// A smoke invariant, not a latency target: it must hold for a debug
+/// build on a loaded shared CI runner (macOS included), where the burst's
+/// 8,000 refusals alone take seconds; release runs recover in about
+/// 100 µs (see qualification.md).
+const RECOVERY_BOUND: Duration = Duration::from_secs(30);
+
 /// A server and a client runtime on one session, with their probes.
 struct Pair {
     server: RpcHandle<TokioProviders>,
@@ -315,7 +325,7 @@ async fn unary_load(pair: &Pair, load: &UnaryLoad, seconds: u64) -> UnaryResult 
             let sender = sender.clone();
             tokio::spawn(async move {
                 let call = Instant::now();
-                let outcome = client.try_get_reply(&request).await;
+                let outcome = client.try_get_reply_within(&request, CALL_DEADLINE).await;
                 let latency = call.elapsed();
                 in_flight.fetch_sub(1, Ordering::Relaxed);
                 match outcome {
@@ -406,11 +416,14 @@ async fn overload(pair: &Pair, calls: u64) -> (u64, u64, Duration, Peaks) {
             let client = client.clone();
             async move {
                 client
-                    .try_get_reply(&Blob {
-                        id,
-                        payload: Vec::new(),
-                        hold_ms: 200,
-                    })
+                    .try_get_reply_within(
+                        &Blob {
+                            id,
+                            payload: Vec::new(),
+                            hold_ms: 200,
+                        },
+                        CALL_DEADLINE,
+                    )
                     .await
             }
         }))
@@ -424,13 +437,16 @@ async fn overload(pair: &Pair, calls: u64) -> (u64, u64, Duration, Peaks) {
         let served = outcomes.iter().filter(|outcome| outcome.is_ok()).count() as u64;
         let recovery = Instant::now();
         let mut recovered = Duration::MAX;
-        for _ in 0..1000 {
+        while recovery.elapsed() < RECOVERY_BOUND {
             if client
-                .try_get_reply(&Blob {
-                    id: u64::MAX,
-                    payload: Vec::new(),
-                    hold_ms: 0,
-                })
+                .try_get_reply_within(
+                    &Blob {
+                        id: u64::MAX,
+                        payload: Vec::new(),
+                        hold_ms: 0,
+                    },
+                    CALL_DEADLINE,
+                )
                 .await
                 .is_ok()
             {
@@ -618,7 +634,7 @@ async fn soak_overload(options: &Options, flavor: &str) -> Result<bool, Error> {
         peaks.tasks,
         mib(peaks.heap)
     );
-    Ok(refused > 0 && served > 0 && recovered < Duration::from_secs(5) && baseline)
+    Ok(refused > 0 && served > 0 && recovered < RECOVERY_BOUND && baseline)
 }
 
 fn main() -> Result<(), Error> {
