@@ -389,8 +389,10 @@ impl FaultContext {
     /// Schedules a `ProcessRestart` event: the orchestrator boots a fresh
     /// instance from the process factory and the process leaves
     /// [`dead_count`](Self::dead_count). Restarting a process that is still
-    /// running aborts it first and boots a fresh instance (a zero-downtime
-    /// reboot).
+    /// running kills it first, like a force kill (its task, its spawned
+    /// tasks and its connections), and boots the fresh instance one tick
+    /// later, once the old boot is dropped: an immediate reboot at the same
+    /// address, never two boots of one process side by side.
     ///
     /// # Errors
     ///

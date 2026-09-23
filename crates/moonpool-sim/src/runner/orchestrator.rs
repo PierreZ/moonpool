@@ -1575,6 +1575,24 @@ impl WorkloadOrchestrator {
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
+                if process_manager.is_running(ip) {
+                    // Restarting a running process is a kill, then a boot.
+                    // Killing cancels the root task, but the executor drops
+                    // a cancelled future only when it next runs it; booting
+                    // the replacement in the same step could poll it first,
+                    // beside the old boot's live state (a listener, a
+                    // registry, open connections). Kill now, like a force
+                    // kill, and boot one tick later, after the executor
+                    // has drained the old boot: two boots of one process
+                    // never overlap.
+                    process_manager.abort_process(ip);
+                    sim.abort_all_connections_for_ip(ip);
+                    sim.schedule_process_restart(ip, Duration::from_nanos(1));
+                    assert_reachable!(
+                        "process_manager: running process stopped before its restart"
+                    );
+                    return;
+                }
                 let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
                 obs.record_sim_fault(Self::sim_now_ms(sim), &event);
                 let weak_sim = sim.downgrade();

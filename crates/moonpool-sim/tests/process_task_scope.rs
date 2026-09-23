@@ -147,3 +147,89 @@ fn a_crash_stops_the_tasks_the_process_spawned() {
     );
     assert_eq!(report.successful_runs, 3);
 }
+
+/// Owns a guard for as long as its boot lives, and on every boot requires
+/// the previous boot's guard to be gone: a restart never overlaps two
+/// boots of one process.
+struct GuardedProcess;
+
+/// The previous boot's guard, as a weak reference.
+#[derive(Clone)]
+struct BootGuard(std::sync::Weak<()>);
+
+#[async_trait]
+impl Process for GuardedProcess {
+    fn name(&self) -> &'static str {
+        "guarded_process"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let key = format!("boot_guard:{}", ctx.my_ip());
+        if let Some(BootGuard(previous)) = ctx.state().get::<BootGuard>(&key) {
+            assert_always!(
+                previous.strong_count() == 0,
+                "a restarted process never runs beside its previous boot"
+            );
+        }
+        let boots_key = format!("boots:{}", ctx.my_ip());
+        let boots: u64 = ctx.state().get(&boots_key).unwrap_or(0);
+        ctx.state().publish(&boots_key, boots + 1);
+        let guard = std::sync::Arc::new(());
+        ctx.state()
+            .publish(&key, BootGuard(std::sync::Arc::downgrade(&guard)));
+        // Keep the task busy (scheduled) so a kill finds it runnable.
+        loop {
+            if ctx.shutdown().is_cancelled() {
+                break;
+            }
+            if ctx.time().sleep(Duration::from_millis(1)).await.is_err() {
+                break;
+            }
+        }
+        drop(guard);
+        Ok(())
+    }
+}
+
+/// Restarts the running process in place, again and again.
+struct RestartInPlace;
+
+#[async_trait]
+impl FaultInjector for RestartInPlace {
+    fn name(&self) -> &'static str {
+        "restart_in_place"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let target = ctx.process_ips()[0].clone();
+        for _ in 0..40 {
+            if !CrashAndWatchWorker::pause(ctx, 3).await? {
+                break;
+            }
+            ctx.restart(&target)?;
+        }
+        Ok(())
+    }
+}
+
+/// A restart of a running process stops the old boot — its root future,
+/// its task scope and its connections — before the new boot's first poll,
+/// as a real process is gone before its replacement starts.
+#[test]
+fn an_in_place_restart_never_overlaps_two_boots() {
+    let report = SimulationBuilder::new()
+        .processes(1, || Box::new(GuardedProcess))
+        .workload_factory(|| Box::new(PatientWorkload))
+        .fault_factory(|| Box::new(RestartInPlace))
+        .chaos_duration(Duration::from_secs(30))
+        .set_iterations(5)
+        .set_debug_seeds(vec![1, 2, 3, 4, 5])
+        .run();
+    assert_eq!(report.iterations, 5);
+    assert!(
+        report.assertion_violations.is_empty(),
+        "{:?}",
+        report.assertion_violations
+    );
+    assert_eq!(report.failed_runs, 0, "two boots of one process overlapped");
+}

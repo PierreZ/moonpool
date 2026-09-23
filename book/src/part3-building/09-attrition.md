@@ -235,7 +235,7 @@ The `FaultContext` provides access to process reboots, network partitions, and t
 `reboot()` combines the kill with a timer-based restart, which is right for random attrition but cannot express a scripted sequence like "crash node X, let the workload make progress, then bring X back". For that, `FaultContext` splits the primitives:
 
 - **`ctx.crash(ip)`** force-kills the process **without scheduling a restart**. The node stays down — no application work runs — until an explicit restart.
-- **`ctx.restart(ip)`** boots a fresh instance from the process factory, ending the hold-down.
+- **`ctx.restart(ip)`** boots a fresh instance from the process factory, ending the hold-down. On a process that is still running it is an immediate reboot at the same address: the old boot is killed like a force kill (task, spawned tasks, connections) and dropped before the new boot's first poll, so two boots of one process never overlap.
 - **`ctx.state()`** exposes the same per-iteration `StateHandle` that workloads and processes see, so the injector can wait on a deterministic workload milestone (an operation counter, a published flag) instead of a wall of sleeps.
 
 ```rust
