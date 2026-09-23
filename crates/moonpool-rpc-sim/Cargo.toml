@@ -11,7 +11,9 @@ description = "Deterministic-simulation harness, oracles and campaigns for moonp
 # The simulation side of moonpool-rpc lives here so the published crate never
 # depends on moonpool-sim, even through a feature.
 [dependencies]
-moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0" }
+# `derive`: the interfaces campaign serves its role interface through the
+# generated dispatcher, next to hand-written well-known endpoints.
+moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0", features = ["derive"] }
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
 
 async-trait = "0.1"
@@ -33,6 +35,10 @@ path = "src/bin/sim/rpc_foundations.rs"
 [[bin]]
 name = "sim-rpc-delivery"
 path = "src/bin/sim/rpc_delivery.rs"
+
+[[bin]]
+name = "sim-rpc-interfaces"
+path = "src/bin/sim/rpc_interfaces.rs"
 
 [lints]
 workspace = true

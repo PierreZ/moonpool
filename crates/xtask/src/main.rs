@@ -59,6 +59,11 @@ const SIM_BINARIES: &[SimBinary] = &[
         "moonpool-rpc-sim",
         "moonpool_rpc,moonpool_rpc_sim",
     ),
+    SimBinary::new(
+        "sim-rpc-interfaces",
+        "moonpool-rpc-sim",
+        "moonpool_rpc,moonpool_rpc_sim",
+    ),
 ];
 
 fn main() -> ExitCode {

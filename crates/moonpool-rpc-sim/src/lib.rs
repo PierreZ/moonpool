@@ -11,8 +11,13 @@
 //! - [`delivery`]: the `sim-rpc-delivery` campaign (#214): every delivery
 //!   mode, lost replies, crashes, simultaneous connects, bootstrap names
 //!   and failure-monitor transitions, judged by an execution ledger.
+//! - [`interfaces`]: the `sim-rpc-interfaces` campaign (#215): interfaces
+//!   published, stored, recruited and forwarded to a third participant
+//!   across repeated same-address restarts, judged by boot, publication
+//!   and execution ledgers.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
 pub mod delivery;
 pub mod foundations;
+pub mod interfaces;
