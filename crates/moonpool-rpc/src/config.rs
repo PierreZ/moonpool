@@ -4,7 +4,10 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::endpoint::Incarnation;
-use crate::protocol::{HELLO_ENVELOPE_LEN, REJECTION_ENVELOPE_LEN, request_envelope_len};
+use crate::protocol::{
+    HELLO_ENVELOPE_LEN, REJECTION_ENVELOPE_LEN, STREAM_END_ENVELOPE_LEN, request_envelope_len,
+    stream_item_frame_len, stream_request_envelope_len,
+};
 
 /// The smallest accepted [`RpcConfig::max_frame_bytes`]: every fixed
 /// envelope (handshake, empty request, rejection) must fit a frame.
@@ -13,7 +16,9 @@ pub const MIN_FRAME_BYTES: u32 = 64;
 const _: () = assert!(
     request_envelope_len(0) <= MIN_FRAME_BYTES as usize
         && HELLO_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize
-        && REJECTION_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize,
+        && REJECTION_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize
+        && stream_request_envelope_len(0) <= MIN_FRAME_BYTES as usize
+        && STREAM_END_ENVELOPE_LEN <= MIN_FRAME_BYTES as usize,
     "MIN_FRAME_BYTES must hold every fixed envelope"
 );
 
@@ -28,9 +33,9 @@ pub struct InvalidConfig(pub String);
 
 /// Hard limits and settings of one RPC runtime.
 ///
-/// Every queue the transport owns is bounded by one of these. The numbers
-/// are conservative defaults for the first package; the resource-control
-/// package (#216) measures and freezes them.
+/// Every queue the transport owns is bounded by one of these, by
+/// [`ResourceLimits`] or by [`StreamPolicy`]; see [`ResourceLimits`] for
+/// the whole table and what happens at each limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcConfig {
     /// Largest frame payload accepted or produced, in bytes. A peer
@@ -48,10 +53,17 @@ pub struct RpcConfig {
     pub max_connections: usize,
     /// Request frames one connection may queue for writing.
     pub max_queued_requests: usize,
-    /// Control frames (handshake, replies, rejections) one connection may
-    /// queue, reserved separately so request traffic cannot starve them.
-    /// A connection that would exceed it is closed rather than dropping a
-    /// reply silently.
+    /// Control frames (handshake, pings, pongs and admission rejections)
+    /// one connection may queue. They are written before any data frame,
+    /// so request, reply and stream traffic cannot starve them. Replies to
+    /// admitted requests are not control frames: their room is reserved at
+    /// admission ([`ResourceLimits::max_inflight_per_connection`]), and
+    /// stream acknowledgements and cancellations are coalesced per stream.
+    /// A peer whose pipelined rejected requests and pings exceed this
+    /// reserve while this side cannot write is closed rather than answered
+    /// silently; a peer with default limits (at most
+    /// [`max_pending_calls`](Self::max_pending_calls) outstanding calls)
+    /// cannot.
     pub reserved_control_frames: usize,
     /// Budget for connecting and upgrading one outbound connection, on
     /// provider time.
@@ -71,6 +83,172 @@ pub struct RpcConfig {
     pub incarnation: Option<Incarnation>,
     /// Reconnect, liveness, idle and failure-detection timing.
     pub peer: PeerPolicy,
+    /// Admission and buffering budgets per endpoint, per connection and
+    /// per runtime.
+    pub limits: ResourceLimits,
+    /// Reply stream credit and stream budgets.
+    pub streams: StreamPolicy,
+}
+
+/// Admission and buffering budgets: what one runtime admits, queues and
+/// retains, per endpoint, per connection (peer) and in total.
+///
+/// Every budget is enforced where the work would enter, and a refusal
+/// there is reported as [`ErrorReason::Overloaded`](crate::ErrorReason::Overloaded)
+/// with [`Execution::NotAdmitted`](crate::Execution::NotAdmitted): nothing
+/// was queued, sent or handed to a handler. Nothing already admitted is
+/// dropped or failed to make room.
+///
+/// | Budget | Scope | Checked when | At the limit |
+/// |---|---|---|---|
+/// | [`RpcConfig::endpoint_queue_capacity`], [`endpoint_queue_bytes`](Self::endpoint_queue_bytes) | endpoint | a request is admitted | refused `Overloaded` |
+/// | [`max_inflight_per_connection`](Self::max_inflight_per_connection) | connection | a two-way or stream request is admitted | refused `Overloaded` |
+/// | [`max_inflight_requests`](Self::max_inflight_requests) | runtime | same | same |
+/// | [`StreamPolicy::max_streams_per_connection`], [`StreamPolicy::max_streams`] | connection, runtime | a stream request is admitted | refused `Overloaded` |
+/// | [`RpcConfig::max_queued_requests`], [`max_queued_bytes_per_connection`](Self::max_queued_bytes_per_connection) | connection | a caller queues a request | the call fails `Overloaded` |
+/// | [`max_queued_bytes`](Self::max_queued_bytes) | runtime | same | same |
+/// | [`RpcConfig::max_pending_calls`] | runtime | a call or stream starts | fails `Overloaded` |
+/// | [`max_retained_bytes`](Self::max_retained_bytes) | runtime | a reliable call starts | fails `Overloaded` |
+/// | [`StreamPolicy::max_buffered_bytes`] | runtime | a caller opens a stream | fails `Overloaded` |
+/// | the stream's window | stream | the producer sends an item | the producer waits for credit |
+/// | [`RpcConfig::reserved_control_frames`] | connection | a control frame is queued | the connection closes |
+///
+/// Replies to admitted requests and items of admitted streams are never
+/// refused: an in-flight budget reserved their room at admission, and a
+/// stream's window bounds its items. A slow writer therefore pushes back
+/// on admission (new requests are refused, `NotAdmitted`) instead of
+/// closing the session and failing unrelated calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceLimits {
+    /// Admitted requests (two-way and streams) arriving on one connection
+    /// whose reply or stream end is still owed or queued unwritten.
+    pub max_inflight_per_connection: usize,
+    /// The same over every connection and local caller of the runtime.
+    pub max_inflight_requests: usize,
+    /// Bytes (whole frames) of requests, replies and stream items queued
+    /// unwritten on one connection above which new outgoing requests on it
+    /// are refused.
+    pub max_queued_bytes_per_connection: u64,
+    /// The same over every connection.
+    pub max_queued_bytes: u64,
+    /// Request bodies retained for retransmission by reliable calls, in
+    /// bytes, over the whole runtime.
+    pub max_retained_bytes: u64,
+    /// Encoded request bytes one endpoint may queue unread.
+    pub endpoint_queue_bytes: u64,
+    /// Frames one connection reads (or writes) in a batch before it yields
+    /// to the other connections and tasks of its executor.
+    pub max_frames_per_batch: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_inflight_per_connection: 1024,
+            max_inflight_requests: 16 * 1024,
+            max_queued_bytes_per_connection: 16 << 20,
+            max_queued_bytes: 256 << 20,
+            max_retained_bytes: 64 << 20,
+            endpoint_queue_bytes: 16 << 20,
+            max_frames_per_batch: 64,
+        }
+    }
+}
+
+impl ResourceLimits {
+    fn validate(&self) -> Result<(), InvalidConfig> {
+        let counts = [
+            (
+                "limits.max_inflight_per_connection",
+                self.max_inflight_per_connection,
+            ),
+            ("limits.max_inflight_requests", self.max_inflight_requests),
+            ("limits.max_frames_per_batch", self.max_frames_per_batch),
+        ];
+        let bytes = [
+            (
+                "limits.max_queued_bytes_per_connection",
+                self.max_queued_bytes_per_connection,
+            ),
+            ("limits.max_queued_bytes", self.max_queued_bytes),
+            ("limits.max_retained_bytes", self.max_retained_bytes),
+            ("limits.endpoint_queue_bytes", self.endpoint_queue_bytes),
+        ];
+        if let Some((name, _)) = counts.iter().find(|(_, value)| *value == 0) {
+            return Err(InvalidConfig(format!("{name} must be positive")));
+        }
+        if let Some((name, _)) = bytes.iter().find(|(_, value)| *value == 0) {
+            return Err(InvalidConfig(format!("{name} must be positive")));
+        }
+        Ok(())
+    }
+}
+
+/// Reply stream credit and stream budgets.
+///
+/// A caller announces a **window** when it opens a stream: the bytes it is
+/// willing to hold received but not yet consumed by its application,
+/// counted in accounted item sizes
+/// ([`stream_item_frame_len`](crate::protocol::stream_item_frame_len): an
+/// item's whole frame). The producer may have at most that many bytes sent
+/// and unacknowledged, and the caller acknowledges an item only when its
+/// application takes it, never merely because it was read off the socket
+/// (`FoundationDB`'s `ReplyPromiseStream` acknowledgements).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPolicy {
+    /// The window this runtime announces for the streams it opens, unless
+    /// the caller picks one
+    /// ([`ServiceClient::get_reply_stream_with_window`](crate::ServiceClient::get_reply_stream_with_window)).
+    /// An item larger than the window can never be sent: the producer is
+    /// told so ([`SendError::TooLarge`](crate::SendError::TooLarge)).
+    pub window_bytes: u64,
+    /// The largest window this runtime honours as a producer; a caller
+    /// announcing more is held to this.
+    pub max_window_bytes: u64,
+    /// Streams one connection may have open on this (producing) side.
+    pub max_streams_per_connection: usize,
+    /// Streams this runtime may produce at once, over every connection.
+    pub max_streams: usize,
+    /// The sum of the windows of the streams this runtime consumes at once:
+    /// the most it may ever buffer for its own callers.
+    pub max_buffered_bytes: u64,
+}
+
+impl Default for StreamPolicy {
+    fn default() -> Self {
+        Self {
+            window_bytes: 256 << 10,
+            max_window_bytes: 16 << 20,
+            max_streams_per_connection: 1024,
+            max_streams: 16 * 1024,
+            max_buffered_bytes: 256 << 20,
+        }
+    }
+}
+
+impl StreamPolicy {
+    fn validate(&self) -> Result<(), InvalidConfig> {
+        let smallest = stream_item_frame_len(0);
+        if self.window_bytes < smallest {
+            return Err(InvalidConfig(format!(
+                "streams.window_bytes below the {smallest}-byte smallest item"
+            )));
+        }
+        if self.max_window_bytes < self.window_bytes {
+            return Err(InvalidConfig(
+                "streams.max_window_bytes below streams.window_bytes".into(),
+            ));
+        }
+        if self.max_buffered_bytes < self.window_bytes {
+            return Err(InvalidConfig(
+                "streams.max_buffered_bytes below streams.window_bytes".into(),
+            ));
+        }
+        if self.max_streams == 0 || self.max_streams_per_connection == 0 {
+            return Err(InvalidConfig("stream budgets must be positive".into()));
+        }
+        Ok(())
+    }
 }
 
 /// How a runtime keeps, probes, abandons and re-opens connections to its
@@ -247,10 +425,12 @@ impl RpcConfig {
         ]
         .into_iter()
         .find(|(_, value)| *value == 0);
-        match zero {
-            Some((name, _)) => Err(InvalidConfig(format!("{name} must be positive"))),
-            None => self.peer.validate(),
+        if let Some((name, _)) = zero {
+            return Err(InvalidConfig(format!("{name} must be positive")));
         }
+        self.peer.validate()?;
+        self.limits.validate()?;
+        self.streams.validate()
     }
 }
 
@@ -263,13 +443,15 @@ impl Default for RpcConfig {
             max_pending_calls: 4096,
             max_connections: 512,
             max_queued_requests: 1024,
-            reserved_control_frames: 1024,
+            reserved_control_frames: 8 * 1024,
             connect_timeout: Duration::from_secs(5),
             handshake_timeout: Duration::from_secs(5),
             read_chunk_bytes: 16 * 1024,
             advertised_address: None,
             incarnation: None,
             peer: PeerPolicy::default(),
+            limits: ResourceLimits::default(),
+            streams: StreamPolicy::default(),
         }
     }
 }

@@ -90,6 +90,52 @@ pub struct RpcStats {
     pub accepted_over_stalled_dial: u64,
     /// Accepted sessions served only because the peer table was full.
     pub peer_table_full: u64,
+    /// Requests, calls or streams refused `Overloaded` by an in-flight, retention, stream or buffer budget (the endpoint queue and request-queue refusals are counted as rejections and call failures).
+    pub overload_refusals: u64,
+    /// Connections closed because their control reserve overflowed.
+    pub control_reserve_closes: u64,
+    /// Reply streams this runtime opened as a caller.
+    pub streams_opened: u64,
+    /// Reply streams this runtime admitted as a producer.
+    pub streams_admitted: u64,
+    /// Stream items queued by producers of this runtime.
+    pub stream_items_sent: u64,
+    /// Stream items refused as larger than their window or the frame limit.
+    pub stream_items_refused: u64,
+    /// Stream sends that had to wait for credit.
+    pub stream_credit_waits: u64,
+    /// Stream items acknowledged on arrival, handed to a consumer that was already waiting.
+    pub stream_acks_immediate: u64,
+    /// Stream items acknowledged when the application took them from the queue.
+    pub stream_acks_popped: u64,
+    /// Acknowledgements that returned credit to a producer of this runtime.
+    pub stream_acks_received: u64,
+    /// Stream acknowledgements and cancels ignored: repeated, or for a stream already over.
+    pub stream_acks_ignored: u64,
+    /// Stream protocol violations detected (sequence, window, item count or acknowledgement).
+    pub stream_violations: u64,
+    /// Streams ended by their producer (normal end, error or broken promise).
+    pub streams_ended: u64,
+    /// Produced streams stopped because their consumer abandoned them.
+    pub streams_cancelled: u64,
+    /// Consumed streams this runtime abandoned after its request may have left.
+    pub streams_abandoned: u64,
+    /// Produced streams ended because their connection ended.
+    pub streams_disconnected: u64,
+    /// Stream items or ends that arrived for a stream no longer consumed here.
+    pub late_stream_frames: u64,
+    /// Reply streams this runtime consumes right now.
+    pub streams_consuming: usize,
+    /// Reply streams this runtime produces right now.
+    pub streams_producing: usize,
+    /// Accounted stream bytes received and not yet taken by applications.
+    pub stream_buffered_bytes: u64,
+    /// Bytes of requests, replies and stream frames queued unwritten on every connection.
+    pub queued_bytes: u64,
+    /// Admitted requests whose reply or stream end is owed or queued.
+    pub inflight_requests: usize,
+    /// Sum of the windows of the streams this runtime consumes.
+    pub stream_window_reserved: u64,
 }
 
 /// The runtime's counters, shared by everything that updates them.
@@ -130,6 +176,28 @@ pub(crate) struct Counters {
     pub(crate) unverified_listen_addresses: AtomicU64,
     pub(crate) accepted_over_stalled_dial: AtomicU64,
     pub(crate) peer_table_full: AtomicU64,
+    pub(crate) overload_refusals: AtomicU64,
+    pub(crate) control_reserve_closes: AtomicU64,
+    pub(crate) streams_opened: AtomicU64,
+    pub(crate) streams_admitted: AtomicU64,
+    pub(crate) stream_items_sent: AtomicU64,
+    pub(crate) stream_items_refused: AtomicU64,
+    pub(crate) stream_credit_waits: AtomicU64,
+    pub(crate) stream_acks_immediate: AtomicU64,
+    pub(crate) stream_acks_popped: AtomicU64,
+    pub(crate) stream_acks_received: AtomicU64,
+    pub(crate) stream_acks_ignored: AtomicU64,
+    pub(crate) stream_violations: AtomicU64,
+    pub(crate) streams_ended: AtomicU64,
+    pub(crate) streams_cancelled: AtomicU64,
+    pub(crate) streams_abandoned: AtomicU64,
+    pub(crate) streams_disconnected: AtomicU64,
+    pub(crate) late_stream_frames: AtomicU64,
+    pub(crate) live_server_streams: AtomicUsize,
+    pub(crate) stream_buffered_bytes: AtomicU64,
+    pub(crate) queued_bytes: AtomicU64,
+    pub(crate) inflight_requests: AtomicUsize,
+    pub(crate) stream_window_reserved: AtomicU64,
     pub(crate) live_tasks: AtomicUsize,
     pub(crate) live_connections: AtomicUsize,
 }
@@ -187,6 +255,29 @@ impl Counters {
             unverified_listen_addresses: load(&self.unverified_listen_addresses),
             accepted_over_stalled_dial: load(&self.accepted_over_stalled_dial),
             peer_table_full: load(&self.peer_table_full),
+            overload_refusals: load(&self.overload_refusals),
+            control_reserve_closes: load(&self.control_reserve_closes),
+            streams_opened: load(&self.streams_opened),
+            streams_admitted: load(&self.streams_admitted),
+            stream_items_sent: load(&self.stream_items_sent),
+            stream_items_refused: load(&self.stream_items_refused),
+            stream_credit_waits: load(&self.stream_credit_waits),
+            stream_acks_immediate: load(&self.stream_acks_immediate),
+            stream_acks_popped: load(&self.stream_acks_popped),
+            stream_acks_received: load(&self.stream_acks_received),
+            stream_acks_ignored: load(&self.stream_acks_ignored),
+            stream_violations: load(&self.stream_violations),
+            streams_ended: load(&self.streams_ended),
+            streams_cancelled: load(&self.streams_cancelled),
+            streams_abandoned: load(&self.streams_abandoned),
+            streams_disconnected: load(&self.streams_disconnected),
+            late_stream_frames: load(&self.late_stream_frames),
+            streams_consuming: 0,
+            streams_producing: self.live_server_streams.load(Ordering::Relaxed),
+            stream_buffered_bytes: self.stream_buffered_bytes.load(Ordering::Relaxed),
+            queued_bytes: self.queued_bytes.load(Ordering::Relaxed),
+            inflight_requests: self.inflight_requests.load(Ordering::Relaxed),
+            stream_window_reserved: self.stream_window_reserved.load(Ordering::Relaxed),
         }
     }
 }

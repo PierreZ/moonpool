@@ -359,17 +359,19 @@ where
 {
     Counters::bump(&shared.counters.connections_opened);
     let (reader, writer) = stream.split();
+    let batch = shared.config.limits.max_frames_per_batch;
     let read = read_loop(
         reader,
         shared.config.max_frame_bytes,
         shared.config.read_chunk_bytes,
+        batch,
         |payload| {
             let message = decode_message(&payload)
                 .map_err(|error| CloseReason::Protocol(format!("bad envelope: {error}")))?;
             shared.on_message(connection, message)
         },
     );
-    let write = write_loop(connection, writer, |call_id, frame_len| {
+    let write = write_loop(connection, writer, batch, |call_id, frame_len| {
         shared.admit_transmit(connection, call_id, frame_len)
     });
     let deadline = handshake_deadline(shared, connection, shared.config.handshake_timeout);

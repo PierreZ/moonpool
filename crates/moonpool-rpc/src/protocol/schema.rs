@@ -100,4 +100,15 @@ pub trait RpcMethod: Send + Sync + 'static {
     const SCHEMA: SchemaVersion;
     /// A human-readable name for traces and errors. Never sent on the wire.
     const NAME: &'static str;
+    /// Whether the method answers with a **reply stream** of `Reply` items
+    /// instead of one reply (`false` by default).
+    ///
+    /// A streaming method is called with
+    /// [`ServiceClient::get_reply_stream`](crate::ServiceClient::get_reply_stream)
+    /// and served through [`ReplyHandle::into_stream`](crate::ReplyHandle::into_stream).
+    /// It is part of the endpoint's contract: the server refuses a stream
+    /// request for a unary method, and a unary request for a streaming one,
+    /// with [`ErrorReason::StreamingMismatch`](crate::ErrorReason::StreamingMismatch)
+    /// before any handler runs.
+    const STREAMING: bool = false;
 }

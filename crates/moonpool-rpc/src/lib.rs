@@ -145,6 +145,7 @@ mod failure;
 pub mod interface;
 pub mod protocol;
 mod stats;
+pub mod stream;
 
 pub(crate) mod call;
 pub(crate) mod transport;
@@ -155,7 +156,8 @@ pub use call::{
 };
 pub use codec::{CodecId, DecodeError, EncodeError, Wire};
 pub use config::{
-    InboundSharing, InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy, RpcConfig,
+    InboundSharing, InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy, ResourceLimits,
+    RpcConfig, StreamPolicy,
 };
 pub use endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 pub use error::{ErrorReason, Execution, RpcError};
@@ -166,6 +168,7 @@ pub use interface::{
 };
 pub use protocol::{MethodId, RpcMethod, SchemaVersion};
 pub use stats::{ResourceProbe, RpcStats};
+pub use stream::{ReplyStream, SendError, StreamProducer};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
 pub use transport::{RpcDriver, RpcHandle, SessionUpgrade, is_transient_accept_error};
 

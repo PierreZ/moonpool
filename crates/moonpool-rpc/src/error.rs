@@ -121,6 +121,25 @@ pub enum ErrorReason {
     /// sustained-failure bound, or failed permanently, before a reply came.
     /// An observation, not proof that the server is gone.
     PeerFailed,
+    /// A stream request for a method that answers once, or a unary request
+    /// for a streaming method ([`RpcMethod::STREAMING`](crate::RpcMethod::STREAMING));
+    /// refused before any handler ran. Terminal for this reference.
+    StreamingMismatch {
+        /// Whether the endpoint's method streams its replies.
+        endpoint_streams: bool,
+    },
+    /// The producer ended the reply stream with this application error
+    /// code ([`StreamProducer::fail`](crate::StreamProducer::fail)); every
+    /// item it sent before was delivered first.
+    StreamFailed {
+        /// The application's code.
+        code: u64,
+    },
+    /// The reply stream broke its protocol: an item out of sequence, more
+    /// unconsumed bytes than the announced window, an end whose item count
+    /// disagrees with the items received, or a consumption acknowledgement
+    /// the producer refused. The stream ended; nothing is resumed.
+    StreamProtocol(String),
 }
 
 impl std::fmt::Display for ErrorReason {
@@ -179,6 +198,17 @@ impl std::fmt::Display for ErrorReason {
             Self::AlreadyRegistered => f.write_str("the well-known id is already registered"),
             Self::LookupFailed(detail) => write!(f, "lookup failed: {detail}"),
             Self::PeerFailed => f.write_str("the endpoint was observed failed"),
+            Self::StreamingMismatch { endpoint_streams } => {
+                if *endpoint_streams {
+                    f.write_str("the endpoint streams its replies; call it as a stream")
+                } else {
+                    f.write_str("the endpoint answers once; it cannot open a reply stream")
+                }
+            }
+            Self::StreamFailed { code } => {
+                write!(f, "the producer failed the stream (code {code})")
+            }
+            Self::StreamProtocol(detail) => write!(f, "stream protocol violation: {detail}"),
         }
     }
 }
@@ -249,6 +279,7 @@ impl RpcError {
                 | ErrorReason::InterfaceMismatch { .. }
                 | ErrorReason::SchemaMismatch { .. }
                 | ErrorReason::CodecMismatch { .. }
+                | ErrorReason::StreamingMismatch { .. }
         )
     }
 
@@ -285,6 +316,18 @@ impl RpcError {
             }
             WireError::ReplyEncodeFailed => {
                 return Self::new(ErrorReason::ReplyEncodeFailed, Execution::Executed);
+            }
+            WireError::StreamFailed { code } => {
+                return Self::new(ErrorReason::StreamFailed { code }, Execution::Executed);
+            }
+            WireError::StreamProtocol => {
+                return Self::new(
+                    ErrorReason::StreamProtocol("the producer refused an acknowledgement".into()),
+                    Execution::MaybeExecuted,
+                );
+            }
+            WireError::StreamingMismatch { endpoint_streams } => {
+                ErrorReason::StreamingMismatch { endpoint_streams }
             }
         };
         // Every other server-side rejection happens before admission.
@@ -343,6 +386,22 @@ mod tests {
         assert_eq!(knowledge(WireError::ReplyTooLarge), Execution::Executed);
         assert_eq!(knowledge(WireError::ReplyEncodeFailed), Execution::Executed);
         assert_eq!(knowledge(WireError::MethodNotFound), Execution::NotAdmitted);
+        assert_eq!(
+            knowledge(WireError::StreamFailed { code: 3 }),
+            Execution::Executed
+        );
+        assert_eq!(
+            knowledge(WireError::StreamProtocol),
+            Execution::MaybeExecuted
+        );
+        let mismatch = RpcError::from_wire(
+            WireError::StreamingMismatch {
+                endpoint_streams: true,
+            },
+            called,
+        );
+        assert_eq!(mismatch.execution(), Execution::NotAdmitted);
+        assert!(mismatch.is_terminal_for_reference());
         assert!(
             !RpcError::from_wire(WireError::MethodNotFound, called).is_terminal_for_reference(),
             "a group may serve the method later"

@@ -7,11 +7,11 @@ use moonpool_core::Providers;
 
 use super::connection::{CloseReason, Connection, QueueRefusal};
 use super::{
-    Admission, Delivery, Origin, PendingCall, ReplyBytes, Shared, State, permanent_failure,
-    permanent_reason,
+    Admission, Completion, Delivery, Origin, PendingCall, ReplyBytes, Shared, State,
+    permanent_failure, permanent_reason,
 };
 use crate::call::client::{CallGuard, CallOwner};
-use crate::call::reply::{LocalSink, ReplyRoute};
+use crate::call::reply::{LocalSink, Outstanding, ReplyRoute};
 use crate::endpoint::Endpoint;
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
 use crate::protocol::{
@@ -19,15 +19,35 @@ use crate::protocol::{
     request_envelope_len,
 };
 use crate::stats::Counters;
+use crate::stream::consumer::AckRoute;
+use crate::stream::producer::Terminal;
 
 /// A started call: its single completion and the guard that releases it.
 pub(crate) type Started = (oneshot::Receiver<Result<ReplyBytes, RpcError>>, CallGuard);
 
-fn request_frame(
+/// The flags and stream window of one request frame.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RequestKind {
+    pub(super) flags: u8,
+    pub(super) stream_window: u64,
+}
+
+impl RequestKind {
+    pub(super) const TWO_WAY: Self = Self {
+        flags: 0,
+        stream_window: 0,
+    };
+    pub(super) const ONE_WAY: Self = Self {
+        flags: REQUEST_FLAG_ONE_WAY,
+        stream_window: 0,
+    };
+}
+
+pub(super) fn request_frame(
     call_id: u64,
     endpoint: &Endpoint,
     identity: CallIdentity,
-    flags: u8,
+    kind: RequestKind,
     body: Vec<u8>,
     max_frame_bytes: u32,
 ) -> Result<Vec<u8>, RpcError> {
@@ -40,7 +60,8 @@ fn request_frame(
         method: identity.method,
         schema: identity.schema,
         codec: identity.codec,
-        flags,
+        flags: kind.flags,
+        stream_window: kind.stream_window,
         metadata: Vec::new(),
         body,
     });
@@ -52,21 +73,21 @@ fn request_frame(
     })
 }
 
-fn overloaded() -> RpcError {
+pub(super) fn overloaded() -> RpcError {
     RpcError::not_admitted(ErrorReason::Overloaded)
 }
 
 impl<P: Providers> Shared<P> {
     /// The checks every outgoing request passes before anything is queued:
     /// the frame limit and the failure monitor's permanent verdicts.
-    fn precheck(
+    pub(super) fn precheck(
         &self,
         state: &State,
         endpoint: &Endpoint,
-        body_len: usize,
+        envelope_len: usize,
     ) -> Result<(), RpcError> {
         // Same frame limit on both routes: nothing oversized is admitted.
-        let size = request_envelope_len(body_len) as u64;
+        let size = envelope_len as u64;
         if size > u64::from(self.config.max_frame_bytes) {
             return Err(RpcError::not_admitted(ErrorReason::FrameTooLarge {
                 size,
@@ -93,9 +114,21 @@ impl<P: Providers> Shared<P> {
         let local = self.address == Some(endpoint.address());
         let (sender, receiver) = oneshot::channel();
         let mut state = self.lock();
-        self.precheck(&state, endpoint, body.len())?;
+        self.precheck(&state, endpoint, request_envelope_len(body.len()))?;
         if state.pending.len() >= self.config.max_pending_calls {
             return Err(overloaded());
+        }
+        if delivery == Delivery::Reliable {
+            let retained: u64 = state
+                .pending
+                .values()
+                .filter_map(|call| call.retained.as_ref())
+                .map(|body| body.len() as u64)
+                .sum();
+            if retained.saturating_add(body.len() as u64) > self.config.limits.max_retained_bytes {
+                Counters::bump(&self.counters.overload_refusals);
+                return Err(overloaded());
+            }
         }
         let call_id = state.next_call_id;
         state.next_call_id = call_id.checked_add(1).ok_or_else(overloaded)?;
@@ -116,7 +149,7 @@ impl<P: Providers> Shared<P> {
                     transmitted: true,
                     earlier_transmitted: false,
                     retained: None,
-                    sender,
+                    completion: Completion::Reply(sender),
                 },
             );
             drop(state);
@@ -124,15 +157,20 @@ impl<P: Providers> Shared<P> {
             let sink: Weak<dyn LocalSink> = self.this.clone();
             // The same bytes, validation order, admission and frame limit as
             // the remote path; only the socket is skipped.
+            let context = self.context(
+                ReplyRoute::Local { sink, call_id },
+                None,
+                Some(Outstanding::local(&self.counters)),
+            );
             self.admit(
                 &Admission {
                     incarnation: endpoint.incarnation(),
                     token: endpoint.token(),
                     identity,
+                    stream_window: None,
                     body: &body,
                 },
-                ReplyRoute::Local { sink, call_id },
-                None,
+                context,
             );
             return Ok((receiver, guard));
         }
@@ -142,7 +180,7 @@ impl<P: Providers> Shared<P> {
             call_id,
             endpoint,
             identity,
-            0,
+            RequestKind::TWO_WAY,
             body,
             self.config.max_frame_bytes,
         )?;
@@ -163,7 +201,7 @@ impl<P: Providers> Shared<P> {
                 transmitted: false,
                 earlier_transmitted: false,
                 retained,
-                sender,
+                completion: Completion::Reply(sender),
             },
         );
         drop(state);
@@ -184,19 +222,20 @@ impl<P: Providers> Shared<P> {
     ) -> Result<(), RpcError> {
         let local = self.address == Some(endpoint.address());
         let mut state = self.lock();
-        self.precheck(&state, endpoint, body.len())?;
+        self.precheck(&state, endpoint, request_envelope_len(body.len()))?;
         if local {
             drop(state);
             Counters::bump(&self.counters.one_way_sent);
+            let context = self.context(ReplyRoute::Discard, None, None);
             self.admit(
                 &Admission {
                     incarnation: endpoint.incarnation(),
                     token: endpoint.token(),
                     identity,
+                    stream_window: None,
                     body: &body,
                 },
-                ReplyRoute::Discard,
-                None,
+                context,
             );
             return Ok(());
         }
@@ -204,7 +243,7 @@ impl<P: Providers> Shared<P> {
             0,
             endpoint,
             identity,
-            REQUEST_FLAG_ONE_WAY,
+            RequestKind::ONE_WAY,
             body,
             self.config.max_frame_bytes,
         )?;
@@ -253,7 +292,7 @@ impl<P: Providers> Shared<P> {
                     } else {
                         RpcError::not_admitted(error)
                     };
-                    let _ = call.sender.send(Err(error));
+                    call.completion.finish(Err(error));
                 }
                 None if call_id.is_none() => Counters::bump(&self.counters.one_way_dropped),
                 None => {}
@@ -313,9 +352,9 @@ impl<P: Providers> Shared<P> {
                 })
             }
         };
-        let _ = call.sender.send(result);
+        call.completion.finish(result);
         for (call, error) in released {
-            let _ = call.sender.send(Err(error));
+            call.completion.finish(Err(error));
         }
     }
 
@@ -408,7 +447,7 @@ impl<P: Providers> Shared<P> {
             let Some(call) = state.pending.remove(&call_id) else {
                 continue;
             };
-            if call.retained.is_some() && address.is_some() {
+            if call.retained.is_some() && address.is_some() && call.stream().is_none() {
                 resend.push((call_id, call));
             } else {
                 let error = disconnect_error(&reason, established, &call);
@@ -430,7 +469,12 @@ impl<P: Providers> Shared<P> {
             self.watch.notify();
         }
         for (call, error) in failed {
-            let _ = call.sender.send(Err(error));
+            call.completion.finish(Err(error));
+        }
+        // Streams produced over this session end with it; never resumed.
+        for stream in connection.take_streams() {
+            stream.terminate(Terminal::Disconnected);
+            Counters::bump(&self.counters.streams_disconnected);
         }
     }
 
@@ -479,7 +523,7 @@ impl<P: Providers> Shared<P> {
                 call_id,
                 &call.endpoint,
                 call.identity,
-                0,
+                RequestKind::TWO_WAY,
                 body,
                 self.config.max_frame_bytes,
             );
@@ -579,7 +623,36 @@ impl<P: Providers> CallOwner for Shared<P> {
                     .get(&id)
                     .is_none_or(|connection| !connection.retract(call_id)),
             };
+        // A stream whose request may have reached the server is cancelled
+        // there: the producer stops and its unwritten items are dropped.
+        let cancel = match (call.stream(), call.origin) {
+            (Some(_), Origin::Connection(id)) if transmitted => state
+                .connections
+                .get(&id)
+                .cloned()
+                .map(|connection| AckRoute::Remote(Arc::downgrade(&connection))),
+            (Some(stream), Origin::Local) => stream.route(),
+            _ => None,
+        };
         drop(state);
+        match cancel {
+            Some(AckRoute::Remote(connection)) => {
+                if let Some(connection) = connection.upgrade() {
+                    connection.signal_cancel(call_id);
+                }
+                Counters::bump(&self.counters.streams_abandoned);
+            }
+            Some(AckRoute::Local(producer)) => {
+                if let Some(producer) = producer.upgrade()
+                    && producer.cancel()
+                {
+                    Counters::bump(&self.counters.streams_cancelled);
+                }
+                Counters::bump(&self.counters.streams_abandoned);
+            }
+            None => {}
+        }
+        drop(call);
         Counters::bump(&self.counters.calls_abandoned);
         tracing::debug!(call_id, transmitted, "rpc call abandoned by its caller");
         Some(transmitted)

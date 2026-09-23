@@ -14,6 +14,7 @@ use crate::codec::{Wire, encode_to_vec};
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
 use crate::interface::ServiceRef;
 use crate::protocol::RpcMethod;
+use crate::stream::ReplyStream;
 use crate::transport::{Delivery, ReplyBytes, RpcHandle};
 
 /// A [`ServiceRef`] bound to a runtime: the calling side.
@@ -199,6 +200,68 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
     /// reply problems), a terminal endpoint failure, or shutdown.
     pub async fn get_reply(&self, request: &M::Request) -> Result<M::Reply, RpcError> {
         self.start(request, Delivery::Reliable)?.await
+    }
+
+    /// Open a reply stream (`FoundationDB`'s `getReplyStream`) announcing
+    /// this runtime's default window
+    /// ([`StreamPolicy::window_bytes`](crate::StreamPolicy::window_bytes)).
+    ///
+    /// One registration attempt: the request is sent once, never
+    /// retransmitted, and the stream is never resumed on another
+    /// connection. Failures after this returns (a rejection, a disconnect,
+    /// the producer's error) arrive as the stream's terminal `Err`; see
+    /// [`stream`](crate::stream) for ordering, credit and cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Refusals before anything was queued, all [`Execution::NotAdmitted`]:
+    /// a unary method ([`ErrorReason::StreamingMismatch`]), encoding, the
+    /// frame limit, the pending-call or stream buffer budget
+    /// ([`ErrorReason::Overloaded`]), a known-dead endpoint, shutdown.
+    pub fn get_reply_stream(&self, request: &M::Request) -> Result<ReplyStream<M>, RpcError> {
+        let window = self
+            .rpc
+            .upgrade()
+            .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?
+            .config()
+            .streams
+            .window_bytes;
+        self.get_reply_stream_with_window(request, window)
+    }
+
+    /// [`get_reply_stream`](Self::get_reply_stream) announcing `window`
+    /// accounted bytes: the most this caller buffers unconsumed, and so
+    /// the largest item it can ever receive. The producer's runtime may
+    /// hold the stream to a smaller window.
+    ///
+    /// # Errors
+    ///
+    /// As for [`get_reply_stream`](Self::get_reply_stream), plus
+    /// [`ErrorReason::InvalidReference`] for a window below the smallest
+    /// possible item.
+    pub fn get_reply_stream_with_window(
+        &self,
+        request: &M::Request,
+        window: u64,
+    ) -> Result<ReplyStream<M>, RpcError> {
+        if !M::STREAMING {
+            return Err(RpcError::not_admitted(ErrorReason::StreamingMismatch {
+                endpoint_streams: false,
+            }));
+        }
+        let smallest = crate::protocol::stream_item_frame_len(0);
+        if window < smallest {
+            return Err(RpcError::not_admitted(ErrorReason::InvalidReference(
+                format!("a stream window of {window} bytes holds no item (at least {smallest})"),
+            )));
+        }
+        let (body, identity) = self.encode(request)?;
+        let shared = self
+            .rpc
+            .upgrade()
+            .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
+        let (core, guard) = shared.start_stream(&self.target.endpoint(), identity, body, window)?;
+        Ok(ReplyStream::new(core, guard))
     }
 
     /// Reliable delivery bounded by observed failure
@@ -408,7 +471,7 @@ impl CallGuard {
 
     /// Abandon now and report whether the request had begun transmission;
     /// `None` when the call already completed or the runtime is gone.
-    fn expire(mut self) -> Option<bool> {
+    pub(crate) fn expire(mut self) -> Option<bool> {
         self.armed = false;
         self.owner.upgrade()?.abandon(self.call_id)
     }

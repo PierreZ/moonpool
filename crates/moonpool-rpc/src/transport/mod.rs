@@ -55,6 +55,7 @@ mod driver;
 mod handle;
 pub(crate) mod peer;
 mod sessions;
+mod streams;
 pub mod upgrade;
 
 use std::collections::BTreeMap;
@@ -64,11 +65,11 @@ use std::sync::{Arc, Mutex, Weak};
 use futures::channel::{mpsc, oneshot};
 use moonpool_core::{NetworkProvider, Providers, RandomProvider};
 
-use self::connection::{Connection, Direction};
+use self::connection::{Connection, Direction, QueueLimits};
 use self::peer::Peer;
 use self::upgrade::{Acceptor, Connector, PeerContext};
 use crate::call::receiver::{EndpointOwner, Inbox, RequestStream, endpoint_pair};
-use crate::call::reply::{ReplyContext, ReplyRoute};
+use crate::call::reply::{Outstanding, ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
 use crate::config::RpcConfig;
 use crate::endpoint::registry::{Registry, RegistryError};
@@ -79,9 +80,10 @@ use crate::failure::{MonitorState, PermanentFailure};
 use crate::interface::{InterfaceId, RpcInterface, ServiceGroup, ServiceRef};
 use crate::protocol::{
     MIN_PROTOCOL_VERSION, MethodId, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, SchemaVersion,
-    WireError, WireMessage, WireOutcome, encode_frame, encode_message,
+    WireError, WireMessage, encode_frame, encode_message,
 };
 use crate::stats::{Counters, RpcStats};
+use crate::stream::consumer::ConsumerCore;
 
 pub use self::driver::{RpcDriver, is_transient_accept_error};
 pub use self::handle::RpcHandle;
@@ -135,13 +137,64 @@ struct PendingCall {
     earlier_transmitted: bool,
     /// The request body, kept for retransmission (reliable calls only).
     retained: Option<Vec<u8>>,
-    sender: oneshot::Sender<Result<ReplyBytes, RpcError>>,
+    completion: Completion,
 }
 
 impl PendingCall {
     /// Whether any attempt of this call may have reached a handler.
     fn may_have_executed(&self) -> bool {
         self.transmitted || self.earlier_transmitted
+    }
+
+    /// The consumer, for a call that opened a reply stream.
+    fn stream(&self) -> Option<&Arc<ConsumerCore>> {
+        match &self.completion {
+            Completion::Reply(_) => None,
+            Completion::Stream(stream) => Some(&stream.0),
+        }
+    }
+}
+
+/// How a pending call completes.
+enum Completion {
+    /// One reply, through a one-shot channel.
+    Reply(oneshot::Sender<Result<ReplyBytes, RpcError>>),
+    /// A reply stream: the call stays pending while items arrive, and its
+    /// outcome here is only a failure before the stream's own end.
+    Stream(StreamCompletion),
+}
+
+impl Completion {
+    /// Complete with `result`.
+    fn finish(self, result: Result<ReplyBytes, RpcError>) {
+        match self {
+            Self::Reply(sender) => {
+                let _ = sender.send(result);
+            }
+            Self::Stream(stream) => stream.0.terminate(result.map_or_else(
+                |error| error,
+                |_| {
+                    RpcError::new(
+                        ErrorReason::StreamProtocol("a single reply answered a stream".into()),
+                        crate::error::Execution::Executed,
+                    )
+                },
+            )),
+        }
+    }
+}
+
+/// A pending stream's consumer. Dropped with its runtime (or its call) it
+/// ends the stream as shut down, so no consumer waits forever; when the
+/// stream already ended that is a no-op.
+struct StreamCompletion(Arc<ConsumerCore>);
+
+impl Drop for StreamCompletion {
+    fn drop(&mut self) {
+        self.0.terminate(RpcError::new(
+            ErrorReason::Shutdown,
+            crate::error::Execution::MaybeExecuted,
+        ));
     }
 }
 
@@ -281,6 +334,10 @@ impl<P: Providers> Shared<P> {
         self.providers.time()
     }
 
+    pub(crate) fn config(&self) -> &RpcConfig {
+        &self.config
+    }
+
     pub(crate) fn random(&self) -> &P::Random {
         self.providers.random()
     }
@@ -321,12 +378,19 @@ impl<P: Providers> Shared<P> {
         encode_frame(&payload, u32::MAX).unwrap_or_default()
     }
 
-    fn context(&self, route: ReplyRoute, peer: Option<PeerContext>) -> ReplyContext {
+    fn context(
+        &self,
+        route: ReplyRoute,
+        peer: Option<PeerContext>,
+        outstanding: Option<Outstanding>,
+    ) -> ReplyContext {
         ReplyContext {
             route,
             counters: Arc::clone(&self.counters),
             max_frame_bytes: self.config.max_frame_bytes,
             peer,
+            outstanding,
+            stream: None,
         }
     }
 
@@ -338,7 +402,7 @@ impl<P: Providers> Shared<P> {
         let address = self
             .address
             .ok_or(RpcError::not_admitted(ErrorReason::NotListening))?;
-        let (inbox, receiver) = endpoint_pair::<M>(self.config.endpoint_queue_capacity);
+        let (inbox, receiver) = endpoint_pair::<M>(self.queue_capacity());
         let token = self.insert(Registration::single(inbox, access), well_known)?;
         let endpoint = Endpoint::new(address, self.incarnation, token);
         let owner: Weak<dyn EndpointOwner> = self.this.clone();
@@ -389,9 +453,8 @@ impl<P: Providers> Shared<P> {
 
     /// Validate and hand one request to its receiver. Local and remote
     /// admissions both come through here. Every rejection is delivered
-    /// along `route` before returning.
-    fn admit(&self, request: &Admission<'_>, route: ReplyRoute, peer: Option<PeerContext>) {
-        let context = self.context(route, peer);
+    /// along the context's route before returning.
+    fn admit(&self, request: &Admission<'_>, mut context: ReplyContext) {
         let token = request.token;
         // A well-known endpoint answers in every incarnation; a dynamic one
         // only in the incarnation that registered it.
@@ -419,6 +482,24 @@ impl<P: Providers> Shared<P> {
                     WireError::SchemaMismatch { registered: schema }
                 } else if codec != request.identity.codec {
                     WireError::CodecMismatch { registered: codec }
+                } else if inbox.streaming() != request.stream_window.is_some() {
+                    WireError::StreamingMismatch {
+                        endpoint_streams: inbox.streaming(),
+                    }
+                } else if context
+                    .outstanding
+                    .as_ref()
+                    .is_some_and(|owed| owed.over(&self.config.limits))
+                {
+                    // Every admitted request reserves the room of its reply:
+                    // beyond the in-flight budget, push back before any
+                    // handler sees it.
+                    Counters::bump(&self.counters.overload_refusals);
+                    WireError::Overloaded
+                } else if let Some(window) = request.stream_window
+                    && let Err(refusal) = self.open_stream(&mut context, window)
+                {
+                    refusal
                 } else {
                     match inbox.deliver(request.body, context) {
                         Ok(()) => Counters::bump(&self.counters.requests_admitted),
@@ -433,7 +514,15 @@ impl<P: Providers> Shared<P> {
         };
         Counters::bump(&self.counters.requests_rejected);
         tracing::debug!(error = ?rejection, %token, "rpc request refused");
-        context.deliver(WireOutcome::Err(rejection));
+        context.reject(rejection);
+    }
+
+    /// The per-endpoint queue budget: requests and bytes.
+    fn queue_capacity(&self) -> (usize, u64) {
+        (
+            self.config.endpoint_queue_capacity,
+            self.config.limits.endpoint_queue_bytes,
+        )
     }
 
     /// The live selected connection to `address`, opening one if needed.
@@ -503,10 +592,12 @@ impl<P: Providers> Shared<P> {
             peer,
             direction,
             self.hello(),
-            (
-                self.config.max_queued_requests,
-                self.config.reserved_control_frames,
-            ),
+            QueueLimits {
+                requests: self.config.max_queued_requests,
+                control: self.config.reserved_control_frames,
+                bytes: self.config.limits.max_queued_bytes_per_connection,
+                runtime_bytes: self.config.limits.max_queued_bytes,
+            },
             self.now(),
             &self.counters,
         ));
@@ -538,10 +629,16 @@ impl<P: Providers> Shared<P> {
             .values()
             .filter(|call| call.retained.is_some())
             .count();
+        let consuming = state
+            .pending
+            .values()
+            .filter(|call| call.stream().is_some())
+            .count();
         let mut snapshot = self
             .counters
             .snapshot(endpoints, state.pending.len(), retained);
         snapshot.peers = state.peers.len();
+        snapshot.streams_consuming = consuming;
         snapshot
     }
 }
@@ -586,8 +683,8 @@ impl<P: Providers> EndpointOwner for Shared<P> {
         Ok(())
     }
 
-    fn queue_capacity(&self) -> usize {
-        self.config.endpoint_queue_capacity
+    fn queue_capacity(&self) -> (usize, u64) {
+        Shared::queue_capacity(self)
     }
 }
 
@@ -596,6 +693,8 @@ struct Admission<'a> {
     incarnation: Incarnation,
     token: EndpointToken,
     identity: CallIdentity,
+    /// The caller's credit window, for a request that opens a stream.
+    stream_window: Option<u64>,
     body: &'a [u8],
 }
 

@@ -13,10 +13,11 @@ use crate::call::reply::{Outstanding, ReplyRoute};
 use crate::config::{InboundSharing, MIN_FRAME_BYTES};
 use crate::error::CallIdentity;
 use crate::protocol::{
-    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, REQUEST_FLAG_ONE_WAY, WireMessage,
-    encode_frame, encode_message, negotiate,
+    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, REQUEST_FLAG_ONE_WAY,
+    REQUEST_FLAG_STREAM, WireMessage, encode_frame, encode_message, negotiate,
 };
 use crate::stats::Counters;
+use crate::stream::consumer::AckRoute;
 
 /// The fields of a peer's `Hello`.
 #[derive(Clone, Copy)]
@@ -65,48 +66,9 @@ impl<P: Providers> Shared<P> {
                 )
             }
             _ if !established => Err(CloseReason::Protocol("frame before handshake".into())),
-            WireMessage::Request {
-                call_id,
-                incarnation,
-                token,
-                interface,
-                interface_version,
-                method,
-                schema,
-                codec,
-                flags,
-                // Reserved for request credentials (#218): carried, never
-                // interpreted or handed to user code by this version.
-                metadata: _,
-                body,
-            } => {
+            request @ WireMessage::Request { .. } => {
                 connection.note_used(now);
-                let route = if flags & REQUEST_FLAG_ONE_WAY == 0 {
-                    ReplyRoute::Remote {
-                        connection: Arc::downgrade(connection),
-                        call_id,
-                        _outstanding: Outstanding::new(connection),
-                    }
-                } else {
-                    Counters::bump(&self.counters.one_way_received);
-                    ReplyRoute::Discard
-                };
-                self.admit(
-                    &Admission {
-                        incarnation,
-                        token,
-                        identity: CallIdentity {
-                            interface: (interface, interface_version),
-                            method,
-                            schema,
-                            codec,
-                        },
-                        body: &body,
-                    },
-                    route,
-                    connection.peer_context(),
-                );
-                Ok(())
+                self.on_request(connection, request)
             }
             WireMessage::Reply { call_id, outcome } => {
                 connection.note_used(now);
@@ -121,6 +83,121 @@ impl<P: Providers> Shared<P> {
             }
             // Any frame is liveness; the pong carries nothing else.
             WireMessage::Pong { .. } => Ok(()),
+            stream => {
+                self.on_stream_frame(connection, stream, now);
+                Ok(())
+            }
+        }
+    }
+
+    /// A request frame: build its reply context and present it for
+    /// admission.
+    fn on_request(
+        &self,
+        connection: &Arc<Connection>,
+        request: WireMessage,
+    ) -> Result<(), CloseReason> {
+        let WireMessage::Request {
+            call_id,
+            incarnation,
+            token,
+            interface,
+            interface_version,
+            method,
+            schema,
+            codec,
+            flags,
+            stream_window,
+            // Reserved for request credentials (#218): carried, never
+            // interpreted or handed to user code by this version.
+            metadata: _,
+            body,
+        } = request
+        else {
+            return Ok(());
+        };
+        let stream = flags & REQUEST_FLAG_STREAM != 0;
+        if stream && connection.has_stream(call_id) {
+            return Err(CloseReason::Protocol(format!(
+                "stream id {call_id} reused while live"
+            )));
+        }
+        let context = if flags & REQUEST_FLAG_ONE_WAY == 0 {
+            self.context(
+                ReplyRoute::Remote {
+                    connection: Arc::downgrade(connection),
+                    call_id,
+                },
+                connection.peer_context(),
+                Some(Outstanding::remote(connection, &self.counters)),
+            )
+        } else {
+            Counters::bump(&self.counters.one_way_received);
+            self.context(ReplyRoute::Discard, connection.peer_context(), None)
+        };
+        self.admit(
+            &Admission {
+                incarnation,
+                token,
+                identity: CallIdentity {
+                    interface: (interface, interface_version),
+                    method,
+                    schema,
+                    codec,
+                },
+                stream_window: stream.then_some(stream_window),
+                body: &body,
+            },
+            context,
+        );
+        Ok(())
+    }
+
+    /// A reply stream frame, in either direction.
+    fn on_stream_frame(
+        &self,
+        connection: &Arc<Connection>,
+        message: WireMessage,
+        now: std::time::Duration,
+    ) {
+        match message {
+            WireMessage::StreamItem {
+                call_id,
+                sequence,
+                codec,
+                body,
+            } => {
+                connection.note_used(now);
+                let route = AckRoute::Remote(Arc::downgrade(connection));
+                self.stream_item(
+                    Origin::Connection(connection.id()),
+                    &route,
+                    call_id,
+                    sequence,
+                    codec,
+                    body,
+                );
+            }
+            WireMessage::StreamEnd {
+                call_id,
+                items,
+                error,
+            } => {
+                connection.note_used(now);
+                self.stream_end(Origin::Connection(connection.id()), call_id, items, error);
+            }
+            WireMessage::StreamAck { call_id, consumed } => {
+                self.stream_ack(connection, call_id, consumed);
+            }
+            WireMessage::StreamCancel { call_id } => {
+                self.stream_cancel(connection, call_id);
+            }
+            // Handled by `on_message`.
+            WireMessage::Hello { .. }
+            | WireMessage::Request { .. }
+            | WireMessage::Reply { .. }
+            | WireMessage::Ping { .. }
+            | WireMessage::Pong { .. } => {}
         }
     }
 

@@ -1,7 +1,7 @@
 //! One TCP session: its bounded outbound queues, its liveness bookkeeping and
 //! its read/write loops.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,9 @@ use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use futures::task::AtomicWaker;
 
 use super::upgrade::PeerContext;
+use crate::protocol::{WireMessage, encode_frame, encode_message};
 use crate::stats::Counters;
+use crate::stream::producer::{StreamCore, Terminal};
 
 /// Why a connection ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,16 +65,25 @@ pub(crate) enum Direction {
 /// What a queued frame is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FrameKind {
-    /// Handshake, reply, rejection, ping or pong.
+    /// Handshake, rejection, ping, pong or a stream acknowledgement/cancel.
     Control,
     /// A request: of the given pending call, or one-way (`None`).
     Request(Option<u64>),
+    /// A reply to an admitted request, or a stream item or end.
+    Data,
 }
+
+/// Something released once its frame left the queue (written, or discarded
+/// with the connection): the room an admitted request reserved, a stream
+/// slot. Dropped outside every lock.
+pub(crate) type Release = Box<dyn Send>;
 
 /// A frame queued for writing.
 pub(crate) struct Outgoing {
     pub(crate) bytes: Vec<u8>,
     pub(crate) kind: FrameKind,
+    /// Released after the frame was written.
+    pub(crate) release: Option<Release>,
 }
 
 /// Why a frame could not be queued.
@@ -85,9 +96,58 @@ pub(crate) enum QueueRefusal {
 /// A queued request frame and the call it belongs to (`None`: one-way).
 pub(crate) type QueuedRequest = (Vec<u8>, Option<u64>);
 
+/// A data source the writer serves in turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Requests,
+    Replies,
+    Stream(u64),
+}
+
+/// A caller's pending stream signals, coalesced: only the latest
+/// cumulative acknowledgement matters, and a cancel supersedes it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Signal {
+    ack: Option<u64>,
+    cancel: bool,
+}
+
+/// One frame of a produced stream's outbound queue.
+pub(crate) struct StreamFrame {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) release: Option<Release>,
+}
+
+/// The bounds of one connection's outbound queues.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QueueLimits {
+    /// Request frames queued unwritten.
+    pub(crate) requests: usize,
+    /// Control frames queued unwritten (the handshake is extra).
+    pub(crate) control: usize,
+    /// Queued data bytes above which new requests are refused.
+    pub(crate) bytes: u64,
+    /// The same over the whole runtime.
+    pub(crate) runtime_bytes: u64,
+}
+
 struct QueueState {
     control: VecDeque<Vec<u8>>,
     requests: VecDeque<QueuedRequest>,
+    /// Replies to admitted requests; each carries the room its admission
+    /// reserved.
+    replies: VecDeque<(Vec<u8>, Release)>,
+    /// Produced streams' items and ends, per stream, in order.
+    stream_out: BTreeMap<u64, VecDeque<StreamFrame>>,
+    /// Consumed streams' acknowledgements and cancels, coalesced.
+    signals: BTreeMap<u64, Signal>,
+    /// Data sources with queued frames, in the order the writer serves them.
+    turns: VecDeque<Source>,
+    /// Streams produced for requests that arrived on this connection, by
+    /// the caller's call id (the stream id on this session).
+    server_streams: BTreeMap<u64, Arc<StreamCore>>,
+    /// Bytes of queued requests, replies and stream frames.
+    queued_bytes: u64,
     /// Requests are written only once the peer's handshake was accepted, so
     /// a session refused at the handshake never carried a request.
     established: bool,
@@ -110,7 +170,36 @@ struct QueueState {
     last_used: Duration,
 }
 
-/// What a peer announced in its `Hello`, as accepted by this side.
+impl QueueState {
+    /// Put `source` in the writer's rotation if it is not there yet.
+    fn enlist(&mut self, source: Source) {
+        if !self.turns.contains(&source) {
+            self.turns.push_back(source);
+        }
+    }
+
+    /// Everything queued, taken out so it can be dropped outside the lock.
+    fn drain_all(&mut self) -> Discarded {
+        self.control.clear();
+        self.signals.clear();
+        self.turns.clear();
+        self.queued_bytes = 0;
+        (
+            std::mem::take(&mut self.requests),
+            std::mem::take(&mut self.replies),
+            std::mem::take(&mut self.stream_out),
+        )
+    }
+}
+
+/// Frames taken off a closed connection, dropped outside its lock.
+type Discarded = (
+    VecDeque<QueuedRequest>,
+    VecDeque<(Vec<u8>, Release)>,
+    BTreeMap<u64, VecDeque<StreamFrame>>,
+);
+
+/// What the peer announced in its `Hello`, as accepted by this side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PeerHello {
     /// The peer runtime's incarnation.
@@ -123,16 +212,27 @@ pub(crate) struct PeerHello {
 
 /// One session's shared half: what callers and responders queue into and
 /// what the connection's driver writes out.
+///
+/// # Write order
+///
+/// Control frames first (handshake, pings, pongs, rejections), then the
+/// coalesced acknowledgements and cancels of the streams this side
+/// consumes, then one data frame per source in turn: the request queue,
+/// the reply queue and each produced stream's queue. A busy stream or a
+/// deep request queue therefore delays another stream's next item by at
+/// most one frame per source, never by its whole backlog, and control
+/// frames wait for at most the one data frame being written (bounded by
+/// the frame limit): TCP keeps one byte stream, so that head-of-line wait
+/// cannot be removed, only bounded.
 pub(crate) struct Connection {
     id: u64,
     peer: String,
     direction: Direction,
     queue: Mutex<QueueState>,
-    max_requests: usize,
-    max_control: usize,
+    limits: QueueLimits,
     waker: AtomicWaker,
-    /// Requests admitted from this connection whose reply handle has not
-    /// finished yet.
+    /// Requests admitted from this connection whose reply (or stream end)
+    /// is still owed or queued.
     outstanding: AtomicUsize,
     counters: Arc<Counters>,
 }
@@ -144,11 +244,10 @@ impl Connection {
         peer: String,
         direction: Direction,
         hello: Vec<u8>,
-        limits: (usize, usize),
+        limits: QueueLimits,
         now: Duration,
         counters: &Arc<Counters>,
     ) -> Self {
-        let (max_requests, max_control) = limits;
         counters.live_connections.fetch_add(1, Ordering::Relaxed);
         let mut control = VecDeque::new();
         control.push_back(hello);
@@ -159,6 +258,12 @@ impl Connection {
             queue: Mutex::new(QueueState {
                 control,
                 requests: VecDeque::new(),
+                replies: VecDeque::new(),
+                stream_out: BTreeMap::new(),
+                signals: BTreeMap::new(),
+                turns: VecDeque::new(),
+                server_streams: BTreeMap::new(),
+                queued_bytes: 0,
                 established: false,
                 closed: None,
                 peer_context: None,
@@ -168,9 +273,11 @@ impl Connection {
                 last_received: now,
                 last_used: now,
             }),
-            max_requests,
-            // The handshake frame does not count against the reserve.
-            max_control: max_control.saturating_add(1),
+            limits: QueueLimits {
+                // The handshake frame does not count against the reserve.
+                control: limits.control.saturating_add(1),
+                ..limits
+            },
             waker: AtomicWaker::new(),
             outstanding: AtomicUsize::new(0),
             counters: Arc::clone(counters),
@@ -195,7 +302,25 @@ impl Connection {
             .expect("Mutex poisoned: prior task panicked")
     }
 
-    /// Queue a request frame (`call_id` `None` for a one-way request).
+    fn add_bytes(&self, queue: &mut QueueState, bytes: usize) {
+        let bytes = bytes as u64;
+        queue.queued_bytes = queue.queued_bytes.saturating_add(bytes);
+        self.counters
+            .queued_bytes
+            .fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    fn sub_bytes(&self, queue: &mut QueueState, bytes: u64) {
+        let bytes = bytes.min(queue.queued_bytes);
+        queue.queued_bytes -= bytes;
+        self.counters
+            .queued_bytes
+            .fetch_sub(bytes, Ordering::Relaxed);
+    }
+
+    /// Queue a request frame (`call_id` `None` for a one-way request),
+    /// within the request count and the connection's and runtime's queued
+    /// byte budgets.
     pub(crate) fn push_request(
         &self,
         frame: Vec<u8>,
@@ -206,10 +331,17 @@ impl Connection {
         if queue.closed.is_some() {
             return Err(QueueRefusal::Closed);
         }
-        if queue.requests.len() >= self.max_requests {
+        let len = frame.len() as u64;
+        let runtime = self.counters.queued_bytes.load(Ordering::Relaxed);
+        if queue.requests.len() >= self.limits.requests
+            || queue.queued_bytes.saturating_add(len) > self.limits.bytes
+            || runtime.saturating_add(len) > self.limits.runtime_bytes
+        {
             return Err(QueueRefusal::Full);
         }
+        self.add_bytes(&mut queue, frame.len());
         queue.requests.push_back((frame, call_id));
+        queue.enlist(Source::Requests);
         queue.last_used = queue.last_used.max(now);
         drop(queue);
         self.waker.wake();
@@ -218,13 +350,20 @@ impl Connection {
 
     /// Queue frames that were admitted once already (moved from a replaced
     /// connection, or retained requests sent again), without the request
-    /// cap: they must not be refused now. Returns `false` once closed.
+    /// cap or byte budgets: they must not be refused now. Returns `false`
+    /// once closed.
     pub(crate) fn adopt_requests(&self, moved: Vec<QueuedRequest>, now: Duration) -> bool {
         let mut queue = self.lock();
         if queue.closed.is_some() {
             return false;
         }
-        queue.requests.extend(moved);
+        for (frame, call_id) in moved {
+            self.add_bytes(&mut queue, frame.len());
+            queue.requests.push_back((frame, call_id));
+        }
+        if !queue.requests.is_empty() {
+            queue.enlist(Source::Requests);
+        }
         queue.last_used = queue.last_used.max(now);
         drop(queue);
         self.waker.wake();
@@ -233,27 +372,154 @@ impl Connection {
 
     /// Take every request frame not yet written, in order.
     pub(crate) fn take_requests(&self) -> Vec<QueuedRequest> {
-        self.lock().requests.drain(..).collect()
+        let mut queue = self.lock();
+        let taken: Vec<QueuedRequest> = queue.requests.drain(..).collect();
+        let bytes = taken.iter().map(|(frame, _)| frame.len() as u64).sum();
+        self.sub_bytes(&mut queue, bytes);
+        queue.turns.retain(|source| *source != Source::Requests);
+        taken
     }
 
-    /// Queue a control frame (reply, rejection, ping, pong). Returns whether
-    /// it was queued. Exceeding the control reserve closes the connection:
-    /// a reply is never dropped while the session looks healthy.
+    /// Queue a control frame (rejection, ping, pong). Returns whether it
+    /// was queued. Exceeding the control reserve closes the connection: a
+    /// rejection is never dropped while the session looks healthy.
     pub(crate) fn push_control(&self, frame: Vec<u8>) -> bool {
         let mut queue = self.lock();
         if queue.closed.is_some() {
             return false;
         }
-        if queue.control.len() >= self.max_control {
+        if queue.control.len() >= self.limits.control {
             drop(queue);
             tracing::warn!(peer = %self.peer, "rpc control reserve exhausted, closing connection");
-            self.close(CloseReason::Local);
+            Counters::bump(&self.counters.control_reserve_closes);
+            let _ = self.close(CloseReason::Local);
             return false;
         }
         queue.control.push_back(frame);
         drop(queue);
         self.waker.wake();
         true
+    }
+
+    /// Queue the reply to an admitted request. Never refused while open:
+    /// `release` is the room its admission reserved, freed once written.
+    /// Returns the release back when the connection is closed.
+    pub(crate) fn push_reply(&self, frame: Vec<u8>, release: Release) -> Result<(), Release> {
+        let mut queue = self.lock();
+        if queue.closed.is_some() {
+            return Err(release);
+        }
+        self.add_bytes(&mut queue, frame.len());
+        queue.replies.push_back((frame, release));
+        queue.enlist(Source::Replies);
+        drop(queue);
+        self.waker.wake();
+        Ok(())
+    }
+
+    /// Queue a frame of the stream `call_id` produced on this connection,
+    /// after its earlier frames. Never refused while open: the stream's
+    /// window bounds its items. Returns whether it was queued.
+    pub(crate) fn push_stream_frame(&self, call_id: u64, frame: StreamFrame) -> bool {
+        let mut queue = self.lock();
+        if queue.closed.is_some() {
+            drop(queue);
+            drop(frame);
+            return false;
+        }
+        self.add_bytes(&mut queue, frame.bytes.len());
+        queue
+            .stream_out
+            .entry(call_id)
+            .or_default()
+            .push_back(frame);
+        queue.enlist(Source::Stream(call_id));
+        drop(queue);
+        self.waker.wake();
+        true
+    }
+
+    /// Record a produced stream admitted on this connection. `false` when
+    /// the connection closed, or the caller reused a live stream's id.
+    pub(crate) fn register_stream(&self, call_id: u64, core: &Arc<StreamCore>) -> bool {
+        let mut queue = self.lock();
+        if queue.closed.is_some() || queue.server_streams.contains_key(&call_id) {
+            return false;
+        }
+        queue.server_streams.insert(call_id, Arc::clone(core));
+        true
+    }
+
+    /// Whether a produced stream with this id is live on the connection.
+    pub(crate) fn has_stream(&self, call_id: u64) -> bool {
+        self.lock().server_streams.contains_key(&call_id)
+    }
+
+    /// The live produced stream with this id.
+    pub(crate) fn stream(&self, call_id: u64) -> Option<Arc<StreamCore>> {
+        self.lock().server_streams.get(&call_id).cloned()
+    }
+
+    /// Produced streams live on the connection.
+    pub(crate) fn stream_count(&self) -> usize {
+        self.lock().server_streams.len()
+    }
+
+    /// Forget a produced stream; with `discard`, also drop its frames not
+    /// yet written (a cancelled stream). The removed frames are returned so
+    /// they are dropped outside the lock.
+    pub(crate) fn remove_stream(&self, call_id: u64, discard: bool) -> Vec<StreamFrame> {
+        let mut queue = self.lock();
+        queue.server_streams.remove(&call_id);
+        if !discard {
+            return Vec::new();
+        }
+        let frames: Vec<StreamFrame> = queue
+            .stream_out
+            .remove(&call_id)
+            .map(Vec::from)
+            .unwrap_or_default();
+        let bytes = frames.iter().map(|frame| frame.bytes.len() as u64).sum();
+        self.sub_bytes(&mut queue, bytes);
+        queue
+            .turns
+            .retain(|source| *source != Source::Stream(call_id));
+        frames
+    }
+
+    /// Take every produced stream (the connection ended).
+    pub(crate) fn take_streams(&self) -> Vec<Arc<StreamCore>> {
+        std::mem::take(&mut self.lock().server_streams)
+            .into_values()
+            .collect()
+    }
+
+    /// Acknowledge `consumed` bytes of the consumed stream `call_id`
+    /// (coalesced with any acknowledgement not yet written).
+    pub(crate) fn signal_ack(&self, call_id: u64, consumed: u64) {
+        let mut queue = self.lock();
+        if queue.closed.is_some() {
+            return;
+        }
+        let signal = queue.signals.entry(call_id).or_default();
+        if !signal.cancel {
+            signal.ack = Some(signal.ack.map_or(consumed, |ack| ack.max(consumed)));
+        }
+        drop(queue);
+        self.waker.wake();
+    }
+
+    /// Tell the producer the consumed stream `call_id` was abandoned.
+    pub(crate) fn signal_cancel(&self, call_id: u64) {
+        let mut queue = self.lock();
+        if queue.closed.is_some() {
+            return;
+        }
+        let signal = queue.signals.entry(call_id).or_default();
+        signal.cancel = true;
+        signal.ack = None;
+        drop(queue);
+        self.waker.wake();
     }
 
     /// Record what the upgrade established about the peer.
@@ -302,7 +568,7 @@ impl Connection {
         queue.last_received = queue.last_received.max(now);
     }
 
-    /// A request or reply went through at `now` (not a ping).
+    /// A request, reply or stream frame went through at `now` (not a ping).
     pub(crate) fn note_used(&self, now: Duration) {
         let mut queue = self.lock();
         queue.last_used = queue.last_used.max(now);
@@ -313,21 +579,21 @@ impl Connection {
         self.lock().received
     }
 
-    /// One more admitted request awaits its reply handle.
-    pub(crate) fn begin_outstanding(&self) {
-        self.outstanding.fetch_add(1, Ordering::Relaxed);
+    /// One more admitted request awaits its reply; returns the new count.
+    pub(crate) fn begin_outstanding(&self) -> usize {
+        self.outstanding.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// An admitted request's reply handle finished.
+    /// An admitted request's reply was written or discarded.
     pub(crate) fn end_outstanding(&self) {
         self.outstanding.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Close if idle at `now`: nothing queued to write, no reply owed, and
-    /// no traffic for `idle` — measured from the last request or reply
-    /// when `selected`, from the last received frame otherwise (an inbound
-    /// session this side only serves). The caller has checked that no
-    /// pending call rides on it. Returns whether it closed.
+    /// Close if idle at `now`: nothing queued to write, no reply or stream
+    /// owed, and no traffic for `idle` — measured from the last request or
+    /// reply when `selected`, from the last received frame otherwise (an
+    /// inbound session this side only serves). The caller has checked that
+    /// no pending call rides on it. Returns whether it closed.
     pub(crate) fn close_if_idle(&self, now: Duration, idle: Duration, selected: bool) -> bool {
         let mut queue = self.lock();
         let since = if selected {
@@ -338,6 +604,10 @@ impl Connection {
         let idle_now = queue.closed.is_none()
             && queue.established
             && queue.requests.is_empty()
+            && queue.replies.is_empty()
+            && queue.stream_out.is_empty()
+            && queue.signals.is_empty()
+            && queue.server_streams.is_empty()
             && self.outstanding.load(Ordering::Relaxed) == 0
             && now.saturating_sub(since) >= idle;
         if idle_now {
@@ -356,22 +626,38 @@ impl Connection {
     /// session closed), so it may have been transmitted.
     pub(crate) fn retract(&self, call_id: u64) -> bool {
         let mut queue = self.lock();
-        let before = queue.requests.len();
-        queue
-            .requests
-            .retain(|(_, queued)| *queued != Some(call_id));
-        queue.requests.len() != before
+        let mut bytes = 0;
+        queue.requests.retain(|(frame, queued)| {
+            let keep = *queued != Some(call_id);
+            if !keep {
+                bytes += frame.len() as u64;
+            }
+            keep
+        });
+        if bytes == 0 {
+            return false;
+        }
+        self.sub_bytes(&mut queue, bytes);
+        if queue.requests.is_empty() {
+            queue.turns.retain(|source| *source != Source::Requests);
+        }
+        true
     }
 
     /// Close the session for `reason`: no more frames are accepted and the
     /// writer stops. Returns the reason it is closed for, which is the
-    /// first one recorded.
+    /// first one recorded. Produced streams stay registered until
+    /// [`take_streams`](Self::take_streams) ends them.
     pub(crate) fn close(&self, reason: CloseReason) -> CloseReason {
         let mut queue = self.lock();
         let reason = queue.closed.get_or_insert(reason).clone();
-        queue.control.clear();
-        queue.requests.clear();
+        let bytes = queue.queued_bytes;
+        self.counters
+            .queued_bytes
+            .fetch_sub(bytes, Ordering::Relaxed);
+        let discarded = queue.drain_all();
         drop(queue);
+        drop(discarded);
         self.waker.wake();
         reason
     }
@@ -380,7 +666,7 @@ impl Connection {
         self.lock().closed.is_some()
     }
 
-    /// Next frame to write, control first; `None` once closed.
+    /// Next frame to write (see the write order); `None` once closed.
     fn poll_next(&self, cx: &mut Context<'_>) -> Poll<Option<Outgoing>> {
         self.waker.register(cx.waker());
         let mut queue = self.lock();
@@ -391,15 +677,66 @@ impl Connection {
             return Poll::Ready(Some(Outgoing {
                 bytes,
                 kind: FrameKind::Control,
+                release: None,
             }));
         }
-        if !queue.established {
-            return Poll::Pending;
-        }
-        if let Some((bytes, call_id)) = queue.requests.pop_front() {
+        if let Some((call_id, signal)) = queue.signals.pop_first() {
+            let message = if signal.cancel {
+                WireMessage::StreamCancel { call_id }
+            } else {
+                WireMessage::StreamAck {
+                    call_id,
+                    consumed: signal.ack.unwrap_or(0),
+                }
+            };
+            let bytes = encode_frame(&encode_message(&message), u32::MAX).unwrap_or_default();
             return Poll::Ready(Some(Outgoing {
                 bytes,
-                kind: FrameKind::Request(call_id),
+                kind: FrameKind::Control,
+                release: None,
+            }));
+        }
+        for _ in 0..queue.turns.len() {
+            let Some(source) = queue.turns.pop_front() else {
+                break;
+            };
+            let next = match source {
+                Source::Requests if !queue.established => {
+                    queue.turns.push_back(source);
+                    continue;
+                }
+                Source::Requests => queue.requests.pop_front().map(|(bytes, call_id)| {
+                    let more = !queue.requests.is_empty();
+                    (bytes, FrameKind::Request(call_id), None, more)
+                }),
+                Source::Replies => queue.replies.pop_front().map(|(bytes, release)| {
+                    let more = !queue.replies.is_empty();
+                    (bytes, FrameKind::Data, Some(release), more)
+                }),
+                Source::Stream(call_id) => {
+                    let frames = queue.stream_out.get_mut(&call_id);
+                    let frame = frames.and_then(VecDeque::pop_front);
+                    let more = queue
+                        .stream_out
+                        .get(&call_id)
+                        .is_some_and(|frames| !frames.is_empty());
+                    if !more {
+                        queue.stream_out.remove(&call_id);
+                    }
+                    frame.map(|frame| (frame.bytes, FrameKind::Data, frame.release, more))
+                }
+            };
+            let Some((bytes, kind, release, more)) = next else {
+                continue;
+            };
+            if more {
+                queue.turns.push_back(source);
+            }
+            self.sub_bytes(&mut queue, bytes.len() as u64);
+            return Poll::Ready(Some(Outgoing {
+                bytes,
+                kind,
+                release,
             }));
         }
         Poll::Pending
@@ -408,7 +745,11 @@ impl Connection {
     /// Nothing is ready to write right now (requests wait for the handshake).
     fn is_drained(&self) -> bool {
         let queue = self.lock();
-        queue.control.is_empty() && (queue.requests.is_empty() || !queue.established)
+        queue.control.is_empty()
+            && queue.signals.is_empty()
+            && queue.replies.is_empty()
+            && queue.stream_out.is_empty()
+            && (queue.requests.is_empty() || !queue.established)
     }
 }
 
@@ -417,10 +758,37 @@ impl Drop for Connection {
         self.counters
             .live_connections
             .fetch_sub(1, Ordering::Relaxed);
+        if let Ok(queue) = self.queue.get_mut() {
+            let bytes = queue.queued_bytes;
+            self.counters
+                .queued_bytes
+                .fetch_sub(bytes, Ordering::Relaxed);
+            queue.queued_bytes = 0;
+            // The runtime is gone: wake every producer of this connection.
+            for core in std::mem::take(&mut queue.server_streams).into_values() {
+                core.terminate(Terminal::Shutdown);
+            }
+        }
     }
 }
 
-/// Write queued frames until the connection is closed or a write fails.
+/// Resolve after being polled once: lets the executor run other tasks.
+async fn yield_now() {
+    let mut yielded = false;
+    futures::future::poll_fn(|cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+/// Write queued frames until the connection is closed or a write fails,
+/// yielding after every `batch` frames written back to back.
 ///
 /// `admit_transmit` runs for a request frame before its first byte is
 /// written and decides whether it goes out (from then on the server may
@@ -429,40 +797,57 @@ impl Drop for Connection {
 pub(crate) async fn write_loop<W: AsyncWrite + Unpin>(
     connection: &Connection,
     mut writer: W,
+    batch: usize,
     admit_transmit: impl Fn(Option<u64>, usize) -> bool,
 ) -> CloseReason {
+    let mut written = 0usize;
     loop {
         let next = futures::future::poll_fn(|cx| connection.poll_next(cx)).await;
         let Some(outgoing) = next else {
             return CloseReason::Local;
         };
         let admitted = match outgoing.kind {
-            FrameKind::Control => true,
+            FrameKind::Control | FrameKind::Data => true,
             FrameKind::Request(call_id) => admit_transmit(call_id, outgoing.bytes.len()),
         };
         if admitted && let Err(error) = writer.write_all(&outgoing.bytes).await {
             return CloseReason::Io(error.to_string());
         }
+        // The frame left the queue: release what its admission reserved.
+        drop(outgoing.release);
         // Flush whenever nothing else is ready, including after a skipped
         // frame, so earlier writes never sit in a buffer.
-        if connection.is_drained()
-            && let Err(error) = writer.flush().await
-        {
-            return CloseReason::Io(error.to_string());
+        if connection.is_drained() {
+            if let Err(error) = writer.flush().await {
+                return CloseReason::Io(error.to_string());
+            }
+            written = 0;
+        } else {
+            written += 1;
+            if written >= batch.max(1) {
+                written = 0;
+                yield_now().await;
+            }
         }
     }
 }
 
 /// Read and hand every complete frame payload to `on_frame` until the
-/// stream ends or a frame is refused.
+/// stream ends or a frame is refused, yielding after every `batch` frames.
+///
+/// `on_frame` never waits: every frame is handled (queued, answered,
+/// refused) synchronously, so a full application queue can never stall
+/// the reader or the control frames behind it.
 pub(crate) async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: R,
     max_frame_bytes: u32,
     chunk_bytes: usize,
+    batch: usize,
     mut on_frame: impl FnMut(Vec<u8>) -> Result<(), CloseReason>,
 ) -> CloseReason {
     let mut decoder = crate::protocol::FrameDecoder::new(max_frame_bytes);
     let mut chunk = vec![0; chunk_bytes.max(1)];
+    let mut handled = 0usize;
     loop {
         let read = match reader.read(&mut chunk).await {
             Ok(read) => read,
@@ -484,6 +869,11 @@ pub(crate) async fn read_loop<R: AsyncRead + Unpin>(
                 Ok(Some(payload)) => {
                     if let Err(reason) = on_frame(payload) {
                         return reason;
+                    }
+                    handled += 1;
+                    if handled >= batch.max(1) {
+                        handled = 0;
+                        yield_now().await;
                     }
                 }
                 Ok(None) => break,
