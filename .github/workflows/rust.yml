@@ -150,7 +150,7 @@ jobs:
             echo "::error::the rpc facade feature did not pull in moonpool-rpc"
             exit 1
           fi
-          if echo "$rpc" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-hyper|moonpool-rpc-derive|rustls|jsonwebtoken"; then
+          if echo "$rpc" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-hyper|moonpool-rpc-derive|rustls|ring v|jsonwebtoken"; then
             echo "::error::the rpc facade feature pulled in more than moonpool-rpc"
             exit 1
           fi

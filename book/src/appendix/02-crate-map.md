@@ -37,10 +37,17 @@ usually need.
 ### moonpool
 
 **Role**: Facade crate. It re-exports core provider traits and, behind features,
-the simulation runtime and the namespaced hyper integration.
+the simulation runtime, the namespaced hyper integration and typed RPC.
 
 Use the default feature set for simulation work. A production application can
 select only `tokio`, then add `hyper` if it speaks HTTP or gRPC.
+
+| Feature | Adds |
+|---------|------|
+| `rpc` | `moonpool::rpc` (moonpool-rpc with its prost codec) |
+| `rpc-derive` | `#[moonpool::rpc::service]` generated interfaces |
+| `rpc-tls` | server-authenticated TLS sessions (rustls + ring, native only) |
+| `rpc-jwt` | JWT/JWKS request verification (jsonwebtoken, native only) |
 
 ### moonpool-core
 
@@ -133,6 +140,12 @@ over provider TCP. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.
 - `RpcHandle` registers endpoints and endpoint groups (`ServiceGroup`)
 - `ServiceRef` / `InterfaceRef` are protobuf-encoded references, decodable
   without a runtime and embeddable in application messages
+- `SecurityConfig`, `AccessPolicy`, `RequestVerifier` and `UtcClock` decide
+  who may call what (always compiled, wasm included)
+
+Features: `prost` (default codec), `derive`, and the native-only `tls`
+(`security::tls`, rustls + ring) and `jwt` (`security::jwt`, jsonwebtoken).
+Without `tls` and `jwt` the crate builds for `wasm32-unknown-unknown`.
 - `ServiceClient::try_get_reply` is one at-most-once attempt
 - `RequestStream`, `IncomingRequest` and `ReplyHandle` are the serving side
 - `RpcError` pairs an `ErrorReason` with `Execution` knowledge
@@ -183,7 +196,8 @@ dependencies.
 
 The simulation harness for moonpool-rpc: process and workload definitions, the
 receipt-ledger oracle, the `sim-rpc-foundations`, `sim-rpc-delivery`,
-`sim-rpc-interfaces` and `sim-rpc-balance` campaigns and real-TCP examples
+`sim-rpc-interfaces`, `sim-rpc-balance`, `sim-rpc-streams` and
+`sim-rpc-security` campaigns and real-TCP examples
 (including the `balance_latency` comparison). Not published, so the RPC crate never
 depends on the simulator.
 

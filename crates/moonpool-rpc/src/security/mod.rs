@@ -45,7 +45,11 @@
 //! logs credential bytes, principals or tokens. Denials are traced as audit
 //! events (target `moonpool_rpc::audit`, `rpc_request_denied`, after
 //! `FoundationDB`'s `AttemptedRPCToPrivatePrevented`) naming the endpoint,
-//! the access class, the peer address and the reason code.
+//! the access class, the peer address and the reason code. There is one
+//! `warn` event per denial and no built-in throttling: aggregate through the
+//! `moonpool_rpc_requests_denied_total{reason}` counter of
+//! [`RpcMetrics`](crate::observability::RpcMetrics), and rate-limit a noisy peer in the
+//! tracing subscriber.
 
 mod allow;
 mod clock;
@@ -404,6 +408,16 @@ pub trait RequestVerifier: Send + Sync + 'static {
 }
 
 /// Decides whether a (possibly anonymous) caller may call an endpoint.
+///
+/// # Version 1 callers
+///
+/// A version 1 session carries no credential, so its caller is always
+/// anonymous, and a refusal reaches it as the version 1 status that proves
+/// the same thing: endpoint not found. Its failure monitor treats that as
+/// permanent for the reference. A policy whose answer depends on the time
+/// or on state (a schedule, a revocation list, a quota) therefore refuses a
+/// version 1 caller for good, until it resolves the reference again, even
+/// when it would admit it a moment later.
 pub trait AccessPolicy: Send + Sync + 'static {
     /// Allow or refuse `request` from `principal` (`None`: anonymous).
     ///

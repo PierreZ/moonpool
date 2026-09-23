@@ -71,6 +71,7 @@ libraries present are the ones tokio itself needs for real sockets and files.
 | `tokio` | `TokioProviders` | Application code runs on real time, tasks, TCP, randomness, and files |
 | `hyper` | hyper runtime adapters, h2 channel, serve helper | The application uses hyper, axum, or tonic |
 | `prometheus` | `PrometheusSource` and the instrumented handles (`moonpool::prometheus`) | The application keeps a `prometheus::Registry` you want scraped into the simulation report |
+| `rpc` | typed RPC (`moonpool::rpc`); add `rpc-tls` and `rpc-jwt` for TLS sessions and JWT verification, `rpc-derive` for generated interfaces | Processes call each other through dynamically allocated endpoints |
 | `sim` | the simulation runtime + explorer | Tests, benchmarks, local dev (default) |
 
 Keep `sim` on as a `dev-dependency` feature and off in your release profile, and
@@ -86,6 +87,18 @@ calendar. If you need a wall-clock timestamp for logging or persistence, reach
 for `std::time::SystemTime` directly at that call site. Everything that drives
 sleeps, timeouts, and backoff should keep going through the provider so it stays
 testable.
+
+## Securing RPC in production
+
+The simulation runs RPC with scripted trust: a `FixedUtc` clock and
+`accept_credentials_over_plaintext` / `send_credentials_over_plaintext`, so it
+can replay every decision without certificates. Production flips each of those
+choices. Give the server `SecurityConfig::enforced(verifier).with_clock(SystemUtc)`
+(the default `NoUtc` refuses every expiring credential), wrap the transport in
+the `rpc-tls` session upgrade so clients authenticate the server before a
+credential leaves, and leave both plaintext opt-ins off. A deployment that
+really does trust its network says so with `SecurityConfig::trusted_network()`.
+See [Who May Call What](../part4-networking/02-rpc.md#who-may-call-what).
 
 ## Where it runs
 
