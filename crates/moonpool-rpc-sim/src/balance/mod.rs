@@ -28,7 +28,8 @@
 //! **Faults** ([`BalanceFaults`]): every alternative taken away and
 //! restored (a partition that keeps incarnations, or a crash of every
 //! server that does not), single-server crashes, destroyed endpoints next
-//! to healthy ones, swarm network chaos with knob spikes.
+//! to healthy ones, swarm network chaos with knob spikes (bit flips
+//! masked: [`crate::without_corruption`]).
 
 mod faults;
 pub mod messages;
@@ -73,5 +74,6 @@ pub fn balance_campaign(
         .workload_factory(move || Box::new(BalanceWorkload::new(config.clone(), records.clone())))
         .fault_factory(|| Box::new(BalanceFaults))
         .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])
+        .network_fault_mask(crate::without_corruption())
         .chaos_duration(Duration::from_secs(10))
 }

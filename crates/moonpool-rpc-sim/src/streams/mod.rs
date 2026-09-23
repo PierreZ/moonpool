@@ -36,7 +36,7 @@
 //! happened (the clog scenario reads the producer's reported queue only to
 //! know that its writer really backed up).
 //!
-//! **Faults.** Swarm network chaos with knob spikes, the delivery
+//! **Faults.** Swarm network chaos (bit flips masked: [`crate::without_corruption`]) with knob spikes, the delivery
 //! campaign's buggified peer policy, squeezed admission and stream budgets
 //! ([`streams_config`]), and a script ([`StreamsFaults`]) that crashes the
 //! producer or shuts it down gracefully when the workload asks, mid-stream.
@@ -95,5 +95,6 @@ pub fn streams_campaign(config: StreamsConfig, records: &StreamsRecords) -> Simu
         })
         .fault_factory(|| Box::new(StreamsFaults::default()))
         .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])
+        .network_fault_mask(crate::without_corruption())
         .chaos_duration(Duration::from_secs(8))
 }

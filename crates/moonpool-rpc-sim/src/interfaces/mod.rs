@@ -32,7 +32,7 @@
 //! at their own address all through the chaos window (held-down crashes,
 //! in-place reboots, graceful shutdowns); participants may delay their
 //! registrations after a boot (BUGGIFY); swarm network chaos with knob
-//! spikes.
+//! spikes (bit flips masked: [`crate::without_corruption`]).
 
 mod faults;
 pub mod messages;
@@ -81,5 +81,6 @@ pub fn interfaces_campaign(
         })
         .fault_factory(|| Box::new(InterfaceFaults))
         .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])
+        .network_fault_mask(crate::without_corruption())
         .chaos_duration(Duration::from_secs(8))
 }

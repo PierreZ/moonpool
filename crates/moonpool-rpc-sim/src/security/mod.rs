@@ -33,7 +33,7 @@
 //! cryptographic interoperability (TLS, key types) is tested separately on
 //! real TCP; this campaign's evidence is the trust policy's.
 //!
-//! **Faults.** Swarm network chaos and a script ([`SecurityFaults`]) that
+//! **Faults.** Swarm network chaos (bit flips masked: [`crate::without_corruption`]) and a script ([`SecurityFaults`]) that
 //! advances the UTC (steps and jumps), rotates keys, makes the server lose
 //! the time, and crashes or gracefully reboots the server.
 
@@ -81,5 +81,6 @@ pub fn security_campaign(config: SecurityConfig, records: &SecurityRecords) -> S
         })
         .fault_factory(|| Box::new(SecurityFaults::default()))
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+        .network_fault_mask(crate::without_corruption())
         .chaos_duration(Duration::from_secs(8))
 }

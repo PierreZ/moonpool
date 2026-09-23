@@ -27,6 +27,10 @@
 //!   verification and endpoint access under key rotation, UTC transitions,
 //!   crashes, graceful shutdowns and mixed protocol versions, judged by an
 //!   issue/receipt ledger: no unauthorized execution, ever.
+//!
+//! Only the foundations campaign draws the simulator's bit flips (next to
+//! its own corrupting wire): it is the corruption suite. Every other
+//! campaign runs [`without_corruption`].
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
@@ -36,3 +40,19 @@ pub mod foundations;
 pub mod interfaces;
 pub mod security;
 pub mod streams;
+
+use moonpool_sim::{NetworkFault, NetworkFaultMask};
+
+/// Every network fault family except in-flight bit flips.
+///
+/// Corruption is a separate, explicit network-model campaign (the
+/// foundations campaign's corrupting wire and its
+/// `network_bit_flips_are_caught_by_frame_checksums` suite), never
+/// arbitrary message loss on healthy TCP: the campaigns that judge
+/// delivery, interfaces, streams, balancing, security and qualification
+/// run on every other family (partitions, clogs, random closes, connect
+/// failures, black holes, latency, clock drift) and mask this one.
+#[must_use]
+pub fn without_corruption() -> NetworkFaultMask {
+    NetworkFaultMask::all().without(NetworkFault::BitFlip)
+}
