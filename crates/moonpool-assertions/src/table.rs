@@ -90,10 +90,33 @@ pub(crate) trait Entry: Sized {
 pub(crate) enum Claim<E> {
     /// A published entry with the requested identity.
     Entry(*mut E),
-    /// Another claimant is still initializing the identity.
+    /// Another claimant claimed the identity and never finished initializing
+    /// it within the bounded wait: it most likely died mid-initialization.
     Busy,
     /// The table is full.
     Full,
+}
+
+/// How many times [`claim`] re-reads the publication byte of an entry that
+/// another claimant is still initializing before it gives up on it.
+///
+/// An initializer holds an entry for a handful of plain stores, so a live one
+/// publishes long before this runs out. Only an initializer that died between
+/// claiming and publishing (a forked worker killed mid-store) exhausts it, and
+/// the caller then counts the observation as dropped rather than hanging.
+const BUSY_SPINS: u32 = 1 << 12;
+
+/// Wait, bounded by [`BUSY_SPINS`], for `published` to leave the
+/// initializing state, and return the state it settled in.
+fn await_published(published: &AtomicU8) -> u8 {
+    for _ in 0..BUSY_SPINS {
+        let state = published.load(Ordering::Acquire);
+        if state != INITIALIZING {
+            return state;
+        }
+        std::hint::spin_loop();
+    }
+    published.load(Ordering::Acquire)
 }
 
 /// The claimed-entry count, clamped to the table capacity, and the entry base.
@@ -125,12 +148,17 @@ pub(crate) unsafe fn claim<E: Entry>(
         // release-stores below, making immutable metadata safe to read.
         for i in 0..count {
             let entry = base.add(i);
-            let state = atomic(E::published(entry)).load(Ordering::Acquire);
+            let published = atomic(E::published(entry));
+            let state = published.load(Ordering::Acquire);
             if state != UNUSED && E::load_id(entry) == id {
-                return if state == READY {
-                    Claim::Entry(entry)
-                } else {
-                    Claim::Busy
+                // An entry still being initialized is waited for, not skipped:
+                // dropping the observation would silently lose accounting.
+                return match await_published(published) {
+                    READY => Claim::Entry(entry),
+                    // The initializer lost a claim race and released the
+                    // entry: the winner is published elsewhere, so search again.
+                    UNUSED => claim(region, id, init),
+                    _ => Claim::Busy,
                 };
             }
         }
@@ -161,10 +189,9 @@ pub(crate) unsafe fn claim<E: Entry>(
             }
             E::store_id(entry, E::Id::default());
             published.store(UNUSED, Ordering::Release);
-            return if state == READY {
-                Claim::Entry(existing)
-            } else {
-                Claim::Busy
+            return match await_published(atomic(E::published(existing))) {
+                READY => Claim::Entry(existing),
+                _ => Claim::Busy,
             };
         }
 

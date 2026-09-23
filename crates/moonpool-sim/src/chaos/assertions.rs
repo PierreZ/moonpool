@@ -254,6 +254,49 @@ pub fn reset_assertion_results() {
     }
 }
 
+/// Violations of the accounting itself rather than of any one assertion:
+/// evaluations the tables dropped, and slots or buckets a second, mismatched
+/// call site reached.
+fn table_integrity_violations(
+    slots: &[moonpool_assertions::AssertionSlotSnapshot],
+    always_violations: &mut Vec<String>,
+) {
+    let dropped_allocations = moonpool_assertions::assertion_dropped_allocations();
+    if dropped_allocations > 0 {
+        always_violations.push(format!(
+            "assertion slot table dropped {dropped_allocations} evaluations (table full, or a slot never finished initializing)"
+        ));
+    }
+
+    let dropped_buckets = moonpool_assertions::each_bucket_dropped_allocations();
+    if dropped_buckets > 0 {
+        always_violations.push(format!(
+            "each-bucket table dropped {dropped_buckets} sometimes_each observations (table full, or a bucket never finished initializing)"
+        ));
+    }
+
+    // A slot or bucket reached by a second call site that does not match it
+    // (another kind, another watermark direction, or a colliding message or
+    // key set) was not accounted: report it rather than evaluating one site
+    // under the other's contract.
+    for slot in slots.iter().filter(|slot| slot.conflicted) {
+        always_violations.push(format!(
+            "assertion '{}' is shared by call sites of different kinds or by a colliding message",
+            slot.msg
+        ));
+    }
+    for bucket in moonpool_assertions::each_bucket_read_all()
+        .iter()
+        .filter(|bucket| bucket.conflicted != 0)
+    {
+        always_violations.push(format!(
+            "assert_sometimes_each!('{}') bucket {:?} collides with another key set",
+            bucket.msg_str(),
+            &bucket.key_values[..usize::from(bucket.num_keys)]
+        ));
+    }
+}
+
 /// Validate all assertion contracts based on their kind.
 ///
 /// Returns two vectors:
@@ -268,19 +311,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
     let mut coverage_violations = Vec::new();
     let slots = moonpool_assertions::assertion_read_all();
 
-    let dropped_allocations = moonpool_assertions::assertion_dropped_allocations();
-    if dropped_allocations > 0 {
-        always_violations.push(format!(
-            "assertion slot table overflowed: {dropped_allocations} evaluations could not be tracked"
-        ));
-    }
-
-    let dropped_buckets = moonpool_assertions::each_bucket_dropped_allocations();
-    if dropped_buckets > 0 {
-        always_violations.push(format!(
-            "each-bucket table overflowed: {dropped_buckets} sometimes_each observations could not be tracked"
-        ));
-    }
+    table_integrity_violations(&slots, &mut always_violations);
 
     for slot in &slots {
         let total = slot.pass_count.saturating_add(slot.fail_count);
@@ -807,7 +838,9 @@ mod tests {
         let (always, _) = validate_assertion_contracts();
         assert_eq!(
             always,
-            vec!["assertion slot table overflowed: 1 evaluations could not be tracked"]
+            vec![
+                "assertion slot table dropped 1 evaluations (table full, or a slot never finished initializing)"
+            ]
         );
         moonpool_assertions::clear();
     }
@@ -826,7 +859,28 @@ mod tests {
         assert_eq!(
             always,
             vec![
-                "each-bucket table overflowed: 1 sometimes_each observations could not be tracked"
+                "each-bucket table dropped 1 sometimes_each observations (table full, or a bucket never finished initializing)"
+            ]
+        );
+        moonpool_assertions::clear();
+    }
+
+    /// An `assert_always!` and an `assert_sometimes!` sharing one message
+    /// used to share one slot, so the always-failure below was evaluated
+    /// under the sometimes contract and passed. It is now a violation (#260).
+    #[test]
+    fn a_message_shared_by_two_kinds_is_an_always_violation() {
+        moonpool_assertions::init();
+        moonpool_assertions::reset();
+
+        crate::assert_sometimes!(true, "quorum lost");
+        crate::assert_always!(false, "quorum lost");
+
+        let (always, _) = validate_assertion_contracts();
+        assert_eq!(
+            always,
+            vec![
+                "assertion 'quorum lost' is shared by call sites of different kinds or by a colliding message"
             ]
         );
         moonpool_assertions::clear();

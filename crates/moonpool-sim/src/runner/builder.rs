@@ -2263,6 +2263,7 @@ mod tests {
             combinations_seen: 3,
             frontier: 2,
             frontier_target: 3,
+            conflicted: false,
         };
 
         let details = build_assertion_details(std::slice::from_ref(&partial));
