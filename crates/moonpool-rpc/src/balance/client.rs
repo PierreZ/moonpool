@@ -19,7 +19,7 @@ use super::hooks::{
     Selector, Verdict,
 };
 use super::locality::Distance;
-use super::model::{LagEnd, ModelOutcome, QueueModel};
+use super::model::{Feedback, LagEnd, ModelOutcome, QueueModel};
 use super::policy::{BalanceConfig, BalancePolicy, HedgeTiming, Retry};
 use super::set::{AlternativeSet, ReplaceError, SetStatus, SetVersion};
 use crate::call::ServiceClient;
@@ -147,11 +147,7 @@ pub struct BalanceError {
 
 impl BalanceError {
     fn new(failure: BalanceFailure, version: SetVersion, attempts: Vec<AttemptRecord>) -> Self {
-        let execution = attempts
-            .iter()
-            .map(|record| record.outcome.execution())
-            .max()
-            .unwrap_or(Execution::NotAdmitted);
+        let execution = summarize(&attempts);
         Self {
             failure,
             execution,
@@ -166,8 +162,17 @@ impl BalanceError {
         &self.failure
     }
 
-    /// The strongest execution knowledge over every attempt: never
-    /// [`Execution::NotAdmitted`] if any attempt may have run.
+    /// What the call as a whole may have done, over every attempt:
+    ///
+    /// - [`Execution::Executed`] when an attempt with an effect executed
+    ///   (a reply was accepted, or an error proves execution);
+    /// - otherwise [`Execution::MaybeExecuted`] when any attempt may have
+    ///   run (ambiguous, or still in flight);
+    /// - otherwise [`Execution::NotAdmitted`]: every attempt was refused
+    ///   before admission or declined by the classifier. A declined
+    ///   attempt ran its handler, but by the application's own account
+    ///   without effect, so it never hides another attempt's ambiguity;
+    ///   its own record still says [`AttemptOutcome::Declined`].
     #[must_use]
     pub fn execution(&self) -> Execution {
         self.execution
@@ -200,6 +205,19 @@ impl std::fmt::Display for BalanceError {
 }
 
 impl std::error::Error for BalanceError {}
+
+/// The call-level execution summary (see [`BalanceError::execution`]).
+fn summarize(attempts: &[AttemptRecord]) -> Execution {
+    let effect = |record: &&AttemptRecord| match &record.outcome {
+        AttemptOutcome::Declined => Execution::NotAdmitted,
+        other => other.execution(),
+    };
+    attempts
+        .iter()
+        .map(|record| effect(&record))
+        .max()
+        .unwrap_or(Execution::NotAdmitted)
+}
 
 /// The installed set with what the client derived from it.
 struct Snapshot<P: Providers, M: RpcMethod> {
@@ -322,6 +340,8 @@ struct Active {
     alternative: usize,
     endpoint: Endpoint,
     kind: AttemptKind,
+    /// Copies the call had started when this attempt started.
+    copies_before: u32,
 }
 
 /// A call's attempts. Whatever is still in flight when the call finishes
@@ -366,11 +386,14 @@ impl<P: Providers, R: Send + 'static> Flights<P, R> {
 impl<P: Providers, R: Send + 'static> Drop for Flights<P, R> {
     fn drop(&mut self) {
         self.late.store(true, Ordering::Release);
-        let timeout = self.model.config().lagging_timeout;
+        // The deadline runs from the hand-off, on provider time, however
+        // late the collector first polls the entry.
+        let deadline = self.time.now() + self.model.config().lagging_timeout;
         for flight in std::mem::take(&mut self.pending) {
             let time = self.time.clone();
             self.model.push_lagging(Box::pin(async move {
-                match time.timeout(timeout, flight).await {
+                let left = deadline.saturating_sub(time.now());
+                match time.timeout(left, flight).await {
                     Ok(_) => LagEnd::Completed,
                     Err(_) => LagEnd::Expired,
                 }
@@ -684,9 +707,12 @@ fn snapshot_of<P: Providers, M: RpcMethod>(
     }
 }
 
-/// The comparison copy's outcome, once it arrived.
+/// The call's comparison copy: where it went and its outcome, once it
+/// arrived (with whether the classifier accepted it).
 struct Comparison<R> {
+    alternative: usize,
     outcome: Option<Result<R, RpcError>>,
+    accepted: bool,
 }
 
 type Timer = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -815,7 +841,13 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
     }
 
     /// Start one attempt: reserve, report, send.
-    fn start(&self, flights: &mut Flights<P, M::Reply>, alternative: usize, kind: AttemptKind) {
+    fn start(
+        &self,
+        flights: &mut Flights<P, M::Reply>,
+        alternative: usize,
+        kind: AttemptKind,
+        copies_before: u32,
+    ) {
         let client = &self.snapshot.clients[alternative];
         let endpoint = client.target().endpoint();
         let hooks = Arc::clone(&self.client.hooks);
@@ -850,12 +882,11 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
             };
             let verdict = outcome.as_ref().ok().map(|reply| hooks.classify(reply));
             let model_outcome = match (&outcome, verdict) {
-                (Ok(_), Some(Verdict::Accept(feedback) | Verdict::Overloaded(feedback))) => {
-                    ModelOutcome::Clean(feedback)
-                }
+                (Ok(_), Some(Verdict::Accept(feedback))) => ModelOutcome::Clean(feedback),
+                (Ok(_), Some(Verdict::Overloaded(feedback))) => ModelOutcome::Overloaded(feedback),
                 (Ok(_), Some(Verdict::Behind) | None) => ModelOutcome::Behind,
                 (Err(error), _) if *error.reason() == ErrorReason::Overloaded => {
-                    ModelOutcome::Behind
+                    ModelOutcome::Overloaded(Feedback::default())
                 }
                 (Err(_), _) => ModelOutcome::Failed,
             };
@@ -876,6 +907,7 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
                 alternative,
                 endpoint,
                 kind,
+                copies_before,
             },
         );
     }
@@ -886,7 +918,24 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
     ) -> Result<(M::Reply, usize), BalanceFailure> {
         loop {
             if progress.flights.primaries() == 0 {
-                self.next_attempt(progress).await?;
+                // No primary attempt can win any more. A permitted copy
+                // that already produced a usable reply wins instead
+                // (uncompared: there is nothing left to compare it with).
+                if let Some(comparison) = progress.comparison.take_if(|comparison| {
+                    comparison.accepted && comparison.outcome.as_ref().is_some_and(Result::is_ok)
+                }) && let Some(Ok(reply)) = comparison.outcome
+                {
+                    return Ok((reply, comparison.alternative));
+                }
+                // After an ambiguous attempt without retry permission,
+                // nothing new starts, but a copy in flight may still win.
+                let copy_pending = progress
+                    .comparison
+                    .as_ref()
+                    .is_some_and(|comparison| comparison.outcome.is_none());
+                if !(progress.blocked.is_some() && copy_pending) {
+                    self.next_attempt(progress).await?;
+                }
             }
             match next_event(&mut progress.flights.pending, &mut progress.hedge).await {
                 None => {}
@@ -933,7 +982,14 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
                         // every alternative for good.
                         progress.probed = true;
                         match self.choose(&mut progress.dead, true) {
-                            Choice::Ordered(order) => order,
+                            Choice::Ordered(order) => {
+                                // Alternatives tried earlier in this call
+                                // are probed too; only one already in
+                                // flight is skipped.
+                                let flights = &progress.flights;
+                                progress.tried.retain(|index| flights.in_flight(*index));
+                                order
+                            }
                             Choice::Dead => return Err(BalanceFailure::StaleAlternatives),
                             Choice::Unreachable => {
                                 return Err(BalanceFailure::AllAlternativesFailed);
@@ -961,7 +1017,7 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
             };
             progress.sequential += 1;
             progress.tried.insert(target);
-            self.start(&mut progress.flights, target, kind);
+            self.start(&mut progress.flights, target, kind, progress.copies);
             if kind == AttemptKind::First {
                 self.arm_copies(progress, &order, target);
             }
@@ -984,8 +1040,17 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         {
             progress.copies += 1;
             progress.tried.insert(second);
-            self.start(&mut progress.flights, second, AttemptKind::Comparison);
-            progress.comparison = Some(Comparison { outcome: None });
+            self.start(
+                &mut progress.flights,
+                second,
+                AttemptKind::Comparison,
+                progress.copies,
+            );
+            progress.comparison = Some(Comparison {
+                alternative: second,
+                outcome: None,
+                accepted: false,
+            });
         }
         if let Some(timing) = copies.hedge
             && progress.copies < copies.max_copies
@@ -1008,7 +1073,11 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
             let delay = hedge_delay(&timing, model.multiplier(), latency(target), latency(next));
             let time = self.env.time.clone();
             progress.hedge = Some(Box::pin(async move {
-                let _ = time.sleep(delay).await;
+                // A failed sleep (the time provider is gone) never makes a
+                // hedge due.
+                if time.sleep(delay).await.is_err() {
+                    futures::future::pending::<()>().await;
+                }
             }));
         }
     }
@@ -1033,7 +1102,12 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         {
             progress.copies += 1;
             progress.tried.insert(target);
-            self.start(&mut progress.flights, target, AttemptKind::Hedge);
+            self.start(
+                &mut progress.flights,
+                target,
+                AttemptKind::Hedge,
+                progress.copies,
+            );
         }
     }
 
@@ -1046,12 +1120,19 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         let Some(active) = progress.flights.active.remove(&landed.id) else {
             return Ok(None);
         };
-        if active.kind == AttemptKind::First {
+        // FDB grows `secondBudget` (and decays the multiplier) when a
+        // request lands while it is alone, before any second request of
+        // its round was sent; not for copies, winners' siblings or late
+        // losers.
+        if matches!(active.kind, AttemptKind::First | AttemptKind::Retry)
+            && progress.copies == active.copies_before
+        {
             self.client.model.first_response();
         }
         if active.kind == AttemptKind::Comparison {
             progress.records.push(active.record(&landed));
             if let Some(comparison) = progress.comparison.as_mut() {
+                comparison.accepted = matches!(landed.verdict, Some(Verdict::Accept(_)));
                 comparison.outcome = Some(landed.outcome);
             }
             return Ok(None);
@@ -1135,6 +1216,7 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
             if active.kind == AttemptKind::Comparison
                 && let Some(comparison) = progress.comparison.as_mut()
             {
+                comparison.accepted = matches!(landed.verdict, Some(Verdict::Accept(_)));
                 comparison.outcome = Some(landed.outcome);
             }
         }
@@ -1315,12 +1397,43 @@ mod tests {
             vec![record(AttemptOutcome::Lagging), refused.clone()],
         );
         assert_eq!(lagging.execution(), Execution::MaybeExecuted);
+        // Every server said "behind": nothing took effect.
         let declined = BalanceError::new(
             BalanceFailure::Declined,
             SetVersion::new(1),
-            vec![refused, record(AttemptOutcome::Declined)],
+            vec![
+                refused.clone(),
+                record(AttemptOutcome::Declined),
+                record(AttemptOutcome::Declined),
+            ],
         );
-        assert_eq!(declined.execution(), Execution::Executed);
-        assert_eq!(declined.attempts().len(), 2);
+        assert_eq!(declined.execution(), Execution::NotAdmitted);
+        assert_eq!(declined.attempts().len(), 3);
+        assert_eq!(
+            declined.attempts()[1].outcome.execution(),
+            Execution::Executed,
+            "the record itself still says the handler ran"
+        );
+        // A declined, then B timed out after sending: the ambiguity shows.
+        let timed_out = record(AttemptOutcome::Failed(RpcError::new(
+            ErrorReason::Timeout,
+            Execution::MaybeExecuted,
+        )));
+        let ambiguous = BalanceError::new(
+            BalanceFailure::Rejected(RpcError::new(
+                ErrorReason::Timeout,
+                Execution::MaybeExecuted,
+            )),
+            SetVersion::new(1),
+            vec![record(AttemptOutcome::Declined), timed_out.clone()],
+        );
+        assert_eq!(ambiguous.execution(), Execution::MaybeExecuted);
+        // An effectful execution outranks ambiguity.
+        let executed = BalanceError::new(
+            BalanceFailure::Comparison("differs".into()),
+            SetVersion::new(1),
+            vec![timed_out, record(AttemptOutcome::Replied), refused],
+        );
+        assert_eq!(executed.execution(), Execution::Executed);
     }
 }

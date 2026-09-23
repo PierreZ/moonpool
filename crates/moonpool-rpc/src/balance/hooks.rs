@@ -27,8 +27,10 @@ pub enum Verdict {
     /// not caught up yet): exclude it for a growing backoff and try
     /// another alternative.
     Behind,
-    /// The server declined without effect for load: record its feedback
-    /// (a penalty) and try another alternative.
+    /// The server declined without effect for load: exclude it like
+    /// [`Behind`](Self::Behind), record its feedback (a penalty), and try
+    /// another alternative. The same as the transport's
+    /// [`ErrorReason::Overloaded`](crate::ErrorReason::Overloaded) refusal.
     Overloaded(Feedback),
 }
 
@@ -41,8 +43,10 @@ pub enum AttemptKind {
     Retry,
     /// A concurrent copy of a slow attempt.
     Hedge,
-    /// A concurrent copy requested by [`BalanceHooks::wants_comparison`];
-    /// it never completes the caller.
+    /// A concurrent copy requested by [`BalanceHooks::wants_comparison`].
+    /// It completes the caller only when no primary attempt can: once
+    /// every primary attempt failed or was declined, an accepted
+    /// comparison reply is the winner (uncompared).
     Comparison,
 }
 
@@ -121,6 +125,10 @@ pub trait BalanceHooks<M: RpcMethod>: Send + Sync + 'static {
     /// Compare the winning reply with the comparison copy's outcome
     /// (`None`: it did not arrive within
     /// [`DuplicatePolicy::compare_within`](super::DuplicatePolicy::compare_within)).
+    /// A call has at most one comparison copy, started next to its first
+    /// attempt; the winner may be that attempt or a later retry or hedge.
+    /// All of them carry the same request, so the comparison is between
+    /// two answers to one request whichever round won.
     /// An error fails the call with
     /// [`BalanceFailure::Comparison`](super::BalanceFailure::Comparison).
     ///
@@ -156,7 +164,9 @@ pub struct Candidate {
     /// Its distance from the caller.
     pub distance: Distance,
     /// Its address is not known to be failed. Unavailable candidates are
-    /// shown so a selector can count them as bad, but never tried.
+    /// shown so a selector can count them as bad. They are tried only as a
+    /// probe, once per call, when no alternative looks reachable after the
+    /// bounded wait (a failed address only changes on a new connection).
     pub available: bool,
     /// Temporarily excluded (behind or overloaded). Still tried when
     /// nothing better is left.
@@ -184,9 +194,10 @@ impl Candidate {
 /// `candidates` lists every alternative not known to be permanently gone;
 /// `draw(n)` is a uniform provider-RNG draw in `0..n` (`n > 0`). Return
 /// alternative indices, best first. The balancer tries them in that
-/// order, skips indices that are unknown, unavailable or already in
-/// flight for the call, and appends any available candidate the selector
-/// left out, so no selector can starve a reachable alternative.
+/// order, skips indices that are unknown, unavailable (except in the
+/// probe, where every candidate is usable) or already in flight for the
+/// call, and appends any usable candidate the selector left out, so no
+/// selector can starve a reachable alternative.
 pub trait Selector: Send + Sync + 'static {
     /// The preference order.
     fn order(&self, candidates: &[Candidate], draw: &mut dyn FnMut(u64) -> u64) -> Vec<usize>;

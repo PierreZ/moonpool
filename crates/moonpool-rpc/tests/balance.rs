@@ -563,9 +563,100 @@ async fn temporarily_behind_is_classified_and_backed_off() {
         .await
         .expect_err("declined");
     assert_eq!(error.failure(), &BalanceFailure::Declined);
-    assert_eq!(error.execution(), Execution::Executed);
+    // The handler ran twice, but declined without effect both times.
+    assert_eq!(error.execution(), Execution::NotAdmitted);
+    assert!(
+        error
+            .attempts()
+            .iter()
+            .all(|attempt| attempt.outcome == AttemptOutcome::Declined)
+    );
     assert_eq!(behind.receipts(), vec![1, 3, 3]);
     assert!(settled(&model).await);
+}
+
+/// When every alternative looks failed, the call still probes each one
+/// once after the bounded wait, including one it already tried in this
+/// call, before reporting that all alternatives failed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unreachable_alternatives_are_probed_before_giving_up() {
+    let gone = Server::start("gone", Mode::Fast).await;
+    gone.stop();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (driver, rpc) = RpcDriver::client_only(
+        TokioProviders::new(),
+        RpcConfig {
+            peer: moonpool_rpc::PeerPolicy {
+                // The first refused dial marks the address failed.
+                failure_detection_delay: Duration::ZERO,
+                ..moonpool_rpc::PeerPolicy::default()
+            },
+            ..RpcConfig::default()
+        },
+    )
+    .expect("valid");
+    let _driver = tokio::spawn(async move {
+        let _ = driver.run().await;
+    });
+    let balanced = BalancedClient::new(
+        &rpc,
+        set_of(1, &gone),
+        model(0.0),
+        BalanceConfig {
+            all_failed_wait: Duration::from_millis(50),
+            ..config()
+        },
+    )
+    .expect("valid");
+    let error = balanced
+        .call(Job { id: 1 }, &BalancePolicy::default())
+        .await
+        .expect_err("nothing answers");
+    assert_eq!(error.failure(), &BalanceFailure::AllAlternativesFailed);
+    // The first attempt, then the probe of the same (already tried)
+    // alternative; both refused before admission.
+    assert_eq!(error.attempts().len(), 2, "{:?}", error.attempts());
+    assert_eq!(error.execution(), Execution::NotAdmitted);
+    assert!(balanced.status().all_failed);
+}
+
+/// Under the duplicate permission, an accepted comparison copy wins when
+/// the primary attempt ends ambiguously: nothing new is sent, and the
+/// usable reply is not thrown away.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_accepted_comparison_copy_wins_when_the_primary_cannot() {
+    let dropping = Server::start("dropping", Mode::DropReply).await;
+    let fast = Server::start("fast", Mode::Slow(Duration::from_millis(50))).await;
+    let (rpc, _driver) = client();
+    let model = model(2.0);
+    let collector = tokio::spawn(model.collect_lagging());
+    let hooks = Hooks {
+        compare: true,
+        ..Hooks::default()
+    };
+    let compared = Arc::clone(&hooks.compared);
+    let balanced = BalancedClient::new(&rpc, set(1, &dropping, &[&fast]), model.clone(), config())
+        .expect("valid")
+        .with_hooks(hooks);
+    let policy = BalancePolicy {
+        duplicates: Duplicates::Permitted(DuplicatePolicy {
+            max_copies: 1,
+            hedge: None,
+            compare_within: Duration::from_secs(2),
+        }),
+        ..BalancePolicy::default()
+    };
+    let done = balanced
+        .call(Job { id: 1 }, &policy)
+        .await
+        .expect("the copy answers");
+    assert_eq!(done.reply.server, "fast");
+    assert_eq!(done.alternative, 1);
+    assert_eq!(dropping.receipts(), vec![1]);
+    assert_eq!(fast.receipts(), vec![1], "no retry was sent");
+    assert_eq!(*compared.lock().expect("compared"), 0, "nothing to compare");
+    assert!(settled(&model).await);
+    collector.abort();
 }
 
 /// Cancelling a call in flight hands its attempt to the late-loser

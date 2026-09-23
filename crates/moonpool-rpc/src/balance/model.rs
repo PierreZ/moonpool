@@ -38,7 +38,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct HedgeBudget {
     /// Budget when the model is created (`FoundationDB` starts at 0).
     pub initial: f64,
-    /// Added whenever a first attempt answers (`SECOND_REQUEST_BUDGET_GROWTH`, 0.05).
+    /// Added whenever a primary attempt lands (reply or error) before any
+    /// concurrent copy of its call was sent, as in `loadBalance`'s
+    /// single-request wait (`SECOND_REQUEST_BUDGET_GROWTH`, 0.05).
     pub growth: f64,
     /// Upper bound (`SECOND_REQUEST_MAX_BUDGET`, 100).
     pub max: f64,
@@ -64,7 +66,7 @@ pub struct ModelConfig {
     /// Growth of the second-request multiplier per copy sent
     /// (`SECOND_REQUEST_MULTIPLIER_GROWTH`, 0.01).
     pub multiplier_growth: f64,
-    /// Its decay per first response (`SECOND_REQUEST_MULTIPLIER_DECAY`,
+    /// Its decay at each budget growth (`SECOND_REQUEST_MULTIPLIER_DECAY`,
     /// 0.00025); it never falls below 1.
     pub multiplier_decay: f64,
     /// Temporary exclusion of an endpoint that is behind or refused for
@@ -74,10 +76,14 @@ pub struct ModelConfig {
     /// Late losers kept at once; the oldest is dropped (and its
     /// reservation released) past this bound.
     pub max_lagging: usize,
-    /// How long a late loser is waited for before it is dropped.
+    /// How long a late loser is waited for, on provider time from the
+    /// moment its call handed it over, before it is dropped. Enforced by
+    /// [`QueueModel::collect_lagging`]; see there for an unpolled
+    /// collector.
     pub lagging_timeout: Duration,
     /// Endpoints tracked at once; idle ones are forgotten, least recently
-    /// used first.
+    /// used first. Forgetting scans the table (linear in this bound), and
+    /// happens only when the table is full and a new endpoint appears.
     pub max_tracked_endpoints: usize,
 }
 
@@ -149,9 +155,14 @@ pub enum ModelOutcome {
     /// A response: the latency sample replaces the previous one, the
     /// exclusion backoff resets and the feedback is recorded.
     Clean(Feedback),
-    /// The endpoint is temporarily behind (or refused for overload):
-    /// exclude it for a growing, jittered backoff.
+    /// The endpoint is temporarily behind: exclude it for a growing,
+    /// jittered backoff. Not a clean sample: the backoff does not reset.
     Behind,
+    /// The endpoint refused for load (the application's classifier, or
+    /// the transport's [`ErrorReason::Overloaded`](crate::ErrorReason::Overloaded)
+    /// refusal with no feedback): excluded like [`Behind`](Self::Behind),
+    /// and its feedback (a penalty) is recorded.
+    Overloaded(Feedback),
     /// No usable response (disconnect, timeout, error): the latency can
     /// only grow.
     Failed,
@@ -408,7 +419,8 @@ impl QueueModel {
         }
     }
 
-    /// A first attempt answered: grow the budget, decay the multiplier.
+    /// A primary attempt landed alone (no concurrent copy of its call was
+    /// sent): grow the budget, decay the multiplier.
     pub fn first_response(&self) {
         let mut state = lock(&self.state);
         state.budget =
@@ -483,10 +495,14 @@ impl QueueModel {
     /// their reservations are released with a latency sample.
     ///
     /// Poll it next to the application for the model's whole life, like
-    /// [`RpcDriver::run`](crate::RpcDriver::run); it never completes. If it
-    /// is not polled, late losers still end within the bounds: past
-    /// [`ModelConfig::max_lagging`] the oldest are dropped, and dropping
-    /// the model drops them all, each releasing its reservation once.
+    /// [`RpcDriver::run`](crate::RpcDriver::run); it never completes. Each
+    /// late loser ends when its outcome arrives or when
+    /// [`ModelConfig::lagging_timeout`] has passed since its hand-off,
+    /// whichever comes first. If the collector is not polled, only the
+    /// count bound holds: past [`ModelConfig::max_lagging`] the oldest are
+    /// dropped, the others wait (their outcomes unobserved, their
+    /// reservations held) until the collector runs or the model is
+    /// dropped. Every one still releases its reservation exactly once.
     pub fn collect_lagging(&self) -> impl Future<Output = ()> + Send + 'static {
         let lagging = Arc::clone(&self.lagging);
         let max = self.config.max_lagging;
@@ -606,17 +622,11 @@ impl Reservation {
                 data.latency = sample;
                 data.backoff = Duration::ZERO;
                 data.increase_backoff_at = Duration::ZERO;
-                if let Some(penalty) = feedback.penalty
-                    && penalty.is_finite()
-                    && penalty > 0.0
-                {
-                    data.penalty = penalty.clamp(1.0, MAX_PENALTY);
-                }
-                if let Some(busy) = feedback.busy {
-                    data.busy = Some((busy, now));
-                }
+                record_feedback(data, feedback, now);
             }
-            ModelOutcome::Behind => {
+            ModelOutcome::Behind | ModelOutcome::Overloaded(_) => {
+                // Not a clean sample: the latency can only grow, and the
+                // exclusion backoff keeps growing until a clean reply.
                 data.latency = data.latency.max(sample);
                 if now >= data.increase_backoff_at {
                     data.backoff = config.exclusion.next(data.backoff);
@@ -624,6 +634,9 @@ impl Reservation {
                 }
                 data.excluded_until = now + config.exclusion.jittered(data.backoff, draw);
                 excluded = true;
+                if let ModelOutcome::Overloaded(feedback) = outcome {
+                    record_feedback(data, feedback, now);
+                }
             }
             ModelOutcome::Failed => {
                 data.latency = data.latency.max(sample);
@@ -632,6 +645,18 @@ impl Reservation {
         if excluded {
             state.exclusions += 1;
         }
+    }
+}
+
+fn record_feedback(data: &mut QueueData, feedback: Feedback, now: Duration) {
+    if let Some(penalty) = feedback.penalty
+        && penalty.is_finite()
+        && penalty > 0.0
+    {
+        data.penalty = penalty.clamp(1.0, MAX_PENALTY);
+    }
+    if let Some(busy) = feedback.busy {
+        data.busy = Some((busy, now));
     }
 }
 
@@ -770,6 +795,39 @@ mod tests {
             0.0,
         );
         assert!((model.measurement(&a, ms(7)).penalty - 1000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn overload_excludes_records_the_penalty_and_is_not_a_clean_sample() {
+        let model = model();
+        let a = endpoint(1, 1);
+        let r = model.reserve(a, ms(0));
+        r.release(ms(40), ModelOutcome::Clean(Feedback::default()), 0.0);
+        let r = model.reserve(a, ms(100));
+        r.release(
+            ms(105),
+            ModelOutcome::Overloaded(Feedback {
+                penalty: Some(4.0),
+                busy: None,
+            }),
+            0.0,
+        );
+        let measurement = model.measurement(&a, ms(105));
+        assert_eq!(measurement.excluded_until, Some(ms(1105)));
+        assert!((measurement.penalty - 4.0).abs() < 1e-9);
+        assert_eq!(
+            measurement.latency,
+            ms(40),
+            "a fast refusal is no clean sample"
+        );
+        // A second overload grows the backoff instead of resetting it; the
+        // transport's refusal (no feedback) keeps the penalty.
+        let r = model.reserve(a, ms(1200));
+        r.release(ms(1200), ModelOutcome::Overloaded(Feedback::default()), 0.0);
+        let measurement = model.measurement(&a, ms(1200));
+        assert_eq!(measurement.excluded_until, Some(ms(3200)));
+        assert!((measurement.penalty - 4.0).abs() < 1e-9);
+        assert_eq!(model.stats().exclusions, 2);
     }
 
     #[test]

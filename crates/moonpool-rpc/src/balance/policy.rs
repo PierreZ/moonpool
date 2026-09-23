@@ -40,8 +40,8 @@ pub enum Retry {
 /// The hedge goes out after `multiplier × latency(second choice) + base`,
 /// or at once when the first choice's measured latency is already more
 /// than `instant_factor` times that. `multiplier` is the model's adaptive
-/// second-request multiplier (it grows with every hedge and decays with
-/// every first response; see [`ModelConfig`](super::ModelConfig)).
+/// second-request multiplier (it grows with every copy and decays with
+/// every attempt that lands alone; see [`ModelConfig`](super::ModelConfig)).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HedgeTiming {
     /// Added to the scaled latency (`BASE_SECOND_REQUEST_TIME`, 0.5 ms).
