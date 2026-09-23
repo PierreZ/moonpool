@@ -1193,22 +1193,26 @@ impl SimulationBuilder {
     ///
     /// The Swarm network subset (if any) draws from the simulation stream
     /// before the storage subset, keeping the per-seed draw order fixed and
-    /// reproducible.
+    /// reproducible (see the draw-order contract on [`ChaosMode::resolve`]).
     /// The caller's [`NetworkFaultMask`](crate::NetworkFaultMask) is applied
     /// afterward and consumes no draws.
     fn build_sim_for_iteration(&self, seed: u64) -> crate::sim::SimWorld {
         let network_chaos = self.network_chaos;
         let storage_chaos = self.storage_chaos;
-        let mut network_config = match network_chaos {
-            Some(ChaosMode::Swarm) => crate::NetworkConfiguration::swarm_for_seed(),
-            Some(ChaosMode::Random) => crate::NetworkConfiguration::random_for_seed(),
-            None => crate::NetworkConfiguration::default(),
-        };
-        let mut storage_config = match storage_chaos {
-            Some(ChaosMode::Swarm) => crate::storage::StorageConfiguration::swarm_for_seed(),
-            Some(ChaosMode::Random) => crate::storage::StorageConfiguration::random_for_seed(),
-            None => crate::storage::StorageConfiguration::default(),
-        };
+        // Network before storage, both before the world resets the stream
+        // (the draw-order contract on `ChaosMode::resolve`).
+        let mut network_config = ChaosMode::resolve(
+            network_chaos,
+            crate::NetworkConfiguration::default,
+            crate::NetworkConfiguration::random_for_seed,
+            crate::NetworkConfiguration::swarm_for_seed,
+        );
+        let mut storage_config = ChaosMode::resolve(
+            storage_chaos,
+            crate::storage::StorageConfiguration::default,
+            crate::storage::StorageConfiguration::random_for_seed,
+            crate::storage::StorageConfiguration::swarm_for_seed,
+        );
         // Buggify value-perturbation is a modifier layered on top of an enabled
         // surface — only spike knobs where chaos is actually on, so it never
         // silently switches on a fault family that wasn't enabled. Draws from
@@ -1971,18 +1975,25 @@ impl SimulationBuilder {
         let start_time = Instant::now();
         // Derive the per-seed attrition regimes, in registration order: `Swarm`
         // draws a fresh reboot regime from the simulation stream (after the
-        // network/storage masks, keeping the draw order fixed); `Random` uses
-        // the configured weights as written.
+        // reset and the breakpoints — the draw-order contract on
+        // `ChaosMode::resolve`); `Random` uses the configured weights as
+        // written. An attrition entry is always enabled, so `off` never runs.
         let attritions: Vec<Attrition> = self
             .attritions
             .iter()
-            .map(|(base, mode)| match mode {
-                ChaosMode::Swarm => base.swarm_for_seed_with_topology(
-                    process_config
-                        .as_ref()
-                        .map(|config| &config.machine_registry),
-                ),
-                ChaosMode::Random => base.clone(),
+            .map(|(base, mode)| {
+                ChaosMode::resolve(
+                    Some(*mode),
+                    || base.clone(),
+                    || base.clone(),
+                    || {
+                        base.swarm_for_seed_with_topology(
+                            process_config
+                                .as_ref()
+                                .map(|config| &config.machine_registry),
+                        )
+                    },
+                )
             })
             .collect();
         let fault_injectors = Self::collect_fault_injectors(&self.fault_factories, attritions);

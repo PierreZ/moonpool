@@ -64,8 +64,13 @@ mod tests {
     use super::*;
     use crate::sim::SimWorld;
 
-    #[tokio::test]
-    async fn test_sim_time_provider_basic() {
+    #[test]
+    fn test_sim_time_provider_basic() {
+        // Simulated providers run on the moonpool executor, never on tokio.
+        crate::executor::Executor::new(0).block_on(sim_time_provider_basic());
+    }
+
+    async fn sim_time_provider_basic() {
         let sim = SimWorld::new();
         let time_provider = SimTimeProvider::new(sim.downgrade());
 

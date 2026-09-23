@@ -1030,10 +1030,8 @@ mod tests {
 
     #[test]
     fn network_can_be_reused_after_shutdown() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("test runtime");
-        runtime.block_on(async {
+        // Simulated providers run on the moonpool executor, never on tokio.
+        crate::executor::Executor::new(0).block_on(async {
             let mut sim = SimWorld::new();
             let provider = sim.network_provider(IpAddr::from([127, 0, 0, 1]));
             let _old_listener = drive(&mut sim, provider.bind("after-shutdown"))
