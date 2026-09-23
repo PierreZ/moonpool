@@ -385,6 +385,37 @@ fn test_disk_stall_inflates_elapsed_time() {
     });
 }
 
+/// `set_len` honours a disk stall like reads, writes and syncs do: a stalled
+/// disk must not complete truncations and preallocations promptly while every
+/// other operation is frozen (issue #255).
+#[test]
+fn test_disk_stall_freezes_set_len() {
+    local_runtime().block_on(async {
+        let stall_config = StorageConfiguration {
+            disk_stall_probability: 1.0,
+            disk_stall_duration: Duration::from_millis(50),
+            ..StorageConfiguration::fast_local()
+        };
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(stall_config);
+        let stalled = run_and_measure_time(sim, |provider| async move {
+            let file = provider
+                .open("set_len.txt", OpenOptions::create_write())
+                .await?;
+            for len in 1..=5 {
+                file.set_len(len * 4096).await?;
+            }
+            Ok(())
+        })
+        .await;
+
+        assert!(
+            stalled >= Duration::from_millis(200),
+            "set_len on a stalled disk should wait out the stall, got {stalled:?}"
+        );
+    });
+}
+
 /// Stall timing is deterministic: the same seed replays the same episodes.
 #[test]
 fn test_disk_stall_deterministic_per_seed() {

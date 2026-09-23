@@ -978,7 +978,9 @@ impl StorageEngine {
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
         }
-        let latency = sample_latency(&self.state.config_for(owner_ip).write_latency);
+        // A length change is a metadata write: it honours the disk's
+        // degradation episode (and may enter one) exactly like its siblings.
+        let latency = self.transfer_latency(owner_ip, 0, true, now);
         self.schedule_operation(
             pending,
             StorageOperation::SetLenComplete { new_len },
