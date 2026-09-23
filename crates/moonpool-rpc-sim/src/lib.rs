@@ -23,6 +23,10 @@
 //! - [`streams`]: the `sim-rpc-streams` campaign (#216): reply streams with
 //!   consumption-based credit, abandonment, saturation, bounded admission
 //!   and producer reboots, judged by producer and consumer ledgers.
+//! - [`security`]: the `sim-rpc-security` campaign (#218): credential
+//!   verification and endpoint access under key rotation, UTC transitions,
+//!   crashes, graceful shutdowns and mixed protocol versions, judged by an
+//!   issue/receipt ledger: no unauthorized execution, ever.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
@@ -30,4 +34,5 @@ pub mod balance;
 pub mod delivery;
 pub mod foundations;
 pub mod interfaces;
+pub mod security;
 pub mod streams;
