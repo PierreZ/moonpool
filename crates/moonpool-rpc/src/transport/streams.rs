@@ -12,7 +12,7 @@ use super::connection::{Connection, QueueRefusal};
 use super::{
     Admission, Completion, Origin, PendingCall, Shared, StreamCompletion, permanent_failure,
 };
-use crate::call::client::{CallGuard, CallOwner};
+use crate::call::client::CallGuard;
 use crate::call::reply::{LocalSink, Outstanding, ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
 use crate::endpoint::Endpoint;
@@ -56,8 +56,6 @@ impl<P: Providers> Shared<P> {
         let call_id = state.next_call_id;
         let consumer = ConsumerCore::new(call_id, window, &self.counters);
         state.next_call_id = call_id.checked_add(1).ok_or_else(overloaded)?;
-        let owner: Weak<dyn CallOwner> = self.this.clone();
-        let guard = CallGuard::new(owner, call_id);
         let completion = || Completion::Stream(StreamCompletion(Arc::clone(&consumer)));
 
         if local {
@@ -74,6 +72,7 @@ impl<P: Providers> Shared<P> {
                 },
             );
             drop(state);
+            let guard = self.call_guard(call_id);
             Counters::bump(&self.counters.streams_opened);
             let sink: Weak<dyn LocalSink> = self.this.clone();
             let context = self.context(
@@ -126,6 +125,7 @@ impl<P: Providers> Shared<P> {
             },
         );
         drop(state);
+        let guard = self.call_guard(call_id);
         Counters::bump(&self.counters.streams_opened);
         Ok((consumer, guard))
     }

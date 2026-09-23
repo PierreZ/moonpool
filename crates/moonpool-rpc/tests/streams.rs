@@ -20,8 +20,9 @@ use moonpool_rpc::protocol::{
     stream_item_frame_len,
 };
 use moonpool_rpc::{
-    AccessClass, ErrorReason, Execution, IncomingRequest, MethodId, RequestStream, ResourceLimits,
-    RpcConfig, RpcDriver, RpcHandle, RpcMethod, SchemaVersion, SendError, ServiceRef, StreamPolicy,
+    AccessClass, ErrorReason, Execution, IncomingRequest, MethodId, PeerPolicy, RequestStream,
+    ResourceLimits, RpcConfig, RpcDriver, RpcHandle, RpcMethod, SchemaVersion, SendError,
+    ServiceRef, StreamPolicy,
 };
 use tokio::io::AsyncWriteExt;
 
@@ -789,4 +790,115 @@ async fn stream_budgets_refuse_before_admission() {
     ));
     drop(open);
     rig.stop();
+}
+
+/// Pings, pongs and acknowledgements keep flowing while eight streams keep
+/// the session's writer busy: no ping times out, the session is never
+/// replaced, and the producers keep being paced by consumption.
+async fn control_frames_progress_beside_saturated_streams() {
+    let peer = PeerPolicy {
+        // A ping every 50 ms plus the 500 ms answer window: each ping must
+        // be answered within 500 ms while the writer is saturated.
+        ping_interval: Duration::from_millis(50),
+        ping_timeout: Duration::from_millis(500),
+        ..PeerPolicy::default()
+    };
+    let config = RpcConfig {
+        peer,
+        ..RpcConfig::default()
+    };
+    let rig = Rig::new(config.clone(), config).await;
+    let client = rig.scan.bind(&rig.client);
+    let mut consumers = Vec::new();
+    for id in 0..8 {
+        let mut request = scan(100 + id, 0, 16 * 1024);
+        request.end = 3;
+        let mut stream = client
+            .get_reply_stream_with_window(&request, 1 << 20)
+            .expect("stream opens");
+        consumers.push(tokio::spawn(async move {
+            let mut taken = 0u64;
+            while let Some(Ok(_)) = stream.next().await {
+                taken += 1;
+            }
+            taken
+        }));
+    }
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let client_stats = rig.client.stats().expect("running");
+    let server_stats = rig.server.stats().expect("running");
+    assert!(client_stats.pings_sent >= 4, "{client_stats:?}");
+    assert_eq!(client_stats.ping_timeouts, 0, "{client_stats:?}");
+    assert_eq!(server_stats.ping_timeouts, 0, "{server_stats:?}");
+    assert_eq!(
+        client_stats.connections_opened, 1,
+        "the session was never replaced"
+    );
+    assert!(server_stats.stream_acks_received > 0);
+    for consumer in &consumers {
+        consumer.abort();
+    }
+    rig.stop();
+}
+both_flavors!(
+    control_frames_progress_beside_saturated_streams,
+    control_progress_current_thread,
+    control_progress_multi_thread
+);
+
+/// A caller whose request queue is full is refused `Overloaded` at once,
+/// for calls and streams alike. (The refusal used to drop the call's guard
+/// while the runtime's state was locked, and the guard re-locked it: a
+/// self-deadlock on the first full queue.)
+#[tokio::test(flavor = "current_thread")]
+async fn a_full_request_queue_refuses_calls_instead_of_stalling() {
+    // A listener that accepts and never answers the handshake: requests
+    // stay queued behind it.
+    let silent = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = silent.local_addr().expect("address");
+    let holder = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = silent.accept().await {
+            held.push(socket);
+        }
+    });
+    let config = RpcConfig {
+        max_queued_requests: 4,
+        ..RpcConfig::default()
+    };
+    let (driver, client) =
+        RpcDriver::client_only(TokioProviders::new(), config).expect("valid config");
+    let driver = tokio::spawn(driver.run());
+    let endpoint = moonpool_rpc::Endpoint::new(
+        address,
+        moonpool_rpc::Incarnation::from_raw(1),
+        moonpool_rpc::EndpointToken::from_parts(1, 1),
+    );
+    let echo = ServiceRef::<Echo>::new(endpoint, AccessClass::Public);
+    let scans = ServiceRef::<ScanMethod>::new(endpoint, AccessClass::Public);
+    let mut attempts = Vec::new();
+    let mut refused = 0;
+    for id in 0..8 {
+        match echo.bind(&client).attempt(&chunk(id, id, 1)) {
+            Ok(attempt) => attempts.push(attempt),
+            Err(error) => {
+                assert_eq!(error.reason(), &ErrorReason::Overloaded);
+                assert_eq!(error.execution(), Execution::NotAdmitted);
+                refused += 1;
+            }
+        }
+    }
+    assert_eq!((attempts.len(), refused), (4, 4));
+    let stream = scans.bind(&client).get_reply_stream(&scan(1, 1, 1));
+    assert!(matches!(
+        stream.map(|_| ()),
+        Err(error) if error.reason() == &ErrorReason::Overloaded
+    ));
+    for attempt in attempts {
+        assert_eq!(attempt.cancel(), Execution::NotAdmitted, "withdrawn unsent");
+    }
+    driver.abort();
+    holder.abort();
 }

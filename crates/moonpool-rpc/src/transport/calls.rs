@@ -132,8 +132,9 @@ impl<P: Providers> Shared<P> {
         }
         let call_id = state.next_call_id;
         state.next_call_id = call_id.checked_add(1).ok_or_else(overloaded)?;
-        let owner: Weak<dyn CallOwner> = self.this.clone();
-        let guard = CallGuard::new(owner, call_id);
+        // The call's guard is created only once the call is registered and
+        // the state lock released: a guard dropped by an early error return
+        // would abandon the call by locking the state it is still holding.
 
         if local {
             // Admission below is synchronous: once it returns, the request
@@ -153,6 +154,7 @@ impl<P: Providers> Shared<P> {
                 },
             );
             drop(state);
+            let guard = self.call_guard(call_id);
             Counters::bump(&self.counters.calls_started);
             let sink: Weak<dyn LocalSink> = self.this.clone();
             // The same bytes, validation order, admission and frame limit as
@@ -205,11 +207,19 @@ impl<P: Providers> Shared<P> {
             },
         );
         drop(state);
+        let guard = self.call_guard(call_id);
         Counters::bump(&self.counters.calls_started);
         if delivery == Delivery::Reliable {
             Counters::bump(&self.counters.reliable_calls_started);
         }
         Ok((receiver, guard))
+    }
+
+    /// The guard that abandons pending call `call_id` if its caller stops
+    /// waiting. Create it only after the state lock is released.
+    pub(super) fn call_guard(&self, call_id: u64) -> CallGuard {
+        let owner: Weak<dyn CallOwner> = self.this.clone();
+        CallGuard::new(owner, call_id)
     }
 
     /// Queue one one-way request. Success means it was handed to a
