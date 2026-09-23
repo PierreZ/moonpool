@@ -76,7 +76,7 @@ Reads are the mirror image: a read returns a random prefix of what is buffered (
 
 ### Bit Flips
 
-Packet data is corrupted with random bit flips at low probability (0.01% by default). The number of flipped bits follows a power-law distribution between 1 and 32. This tests checksum validation and corruption detection. Without bit-flip injection, corruption bugs only surface in production when cosmic rays or faulty NICs flip bits for you.
+Packet data is corrupted with random bit flips at low probability. The family is off in the default configuration and sampled by the `Random` and `Swarm` network chaos profiles (0.001% to 0.02% of sends): TCP itself delivers what was written, so only a protocol that checksums its own frames can tell a flipped bit from data. That is also how FoundationDB scopes it: `FlowTransport` flips bits only where it verifies a packet checksum. Mask the family with `NetworkFaultMask::all().without(NetworkFault::BitFlip)` when the protocol under test has no checksum (HTTP/2, gRPC). The number of flipped bits follows a power-law distribution between 1 and 32. This tests checksum validation and corruption detection. Without bit-flip injection, corruption bugs only surface in production when cosmic rays or faulty NICs flip bits for you.
 
 ### Clock Drift
 

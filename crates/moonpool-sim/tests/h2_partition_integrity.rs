@@ -9,6 +9,11 @@
 //! The transport may stall the stream or break the connection — a failed
 //! request is an accepted outcome here. Serving *different* bytes than the
 //! peer wrote is not.
+//!
+//! In-flight bit flips are not part of this run: they are off in the default
+//! network configuration, because TCP delivers what was written and h2 has no
+//! checksum that could tell a flipped bit from data (#272 was exactly that
+//! default leaking into this test, not a partition altering bytes).
 
 use std::error::Error;
 use std::future::Future;
@@ -165,14 +170,19 @@ impl Workload for MultiplexedClient {
             },
         );
 
+        // A round counts only once its requests were actually sent: one whose
+        // readiness failed under a partition sent nothing and is retried with
+        // the same tags.
         let mut completed = 0;
-        for round in 0..ROUNDS {
-            moonpool_sim::select! {
+        while completed < ROUNDS {
+            let sent = moonpool_sim::select! {
                 biased;
-                outcome = round_of_requests(&channel, &server_ip, round) => outcome?,
+                outcome = round_of_requests(&channel, &server_ip, completed) => outcome?,
                 () = ctx.shutdown().cancelled() => break,
+            };
+            if sent == RoundOutcome::Sent {
+                completed += 1;
             }
-            completed += 1;
         }
 
         // Every partition in this run heals, so every round must get through.
@@ -187,13 +197,23 @@ impl Workload for MultiplexedClient {
     }
 }
 
+/// Whether a round's requests went out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoundOutcome {
+    /// Every request was sent (each may still have failed in flight).
+    Sent,
+    /// The channel refused readiness before the requests were sent: nothing
+    /// went out, so the round proved nothing.
+    NotReady,
+}
+
 /// Send `CONCURRENCY` requests on the shared connection and validate every
 /// response body.
 async fn round_of_requests(
     channel: &ReconnectingChannel<SimProviders, Full<Bytes>>,
     server_ip: &str,
     round: u8,
-) -> SimulationResult<()> {
+) -> SimulationResult<RoundOutcome> {
     let uri = format!("http://{server_ip}/echo");
     let mut in_flight = Vec::new();
 
@@ -211,7 +231,7 @@ async fn round_of_requests(
         .is_err()
         {
             assert_sometimes!(true, "h2_channel_readiness_failed_under_partition");
-            return Ok(());
+            return Ok(RoundOutcome::NotReady);
         }
 
         let request = Request::builder()
@@ -252,7 +272,7 @@ async fn round_of_requests(
             }
         }
     }
-    Ok(())
+    Ok(RoundOutcome::Sent)
 }
 
 // ============================================================================

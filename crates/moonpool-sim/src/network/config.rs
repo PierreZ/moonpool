@@ -334,7 +334,12 @@ pub struct ChaosConfiguration {
     /// Duration range for network partitions
     pub partition_duration: Range<Duration>,
 
-    /// Bit flip probability for packet corruption (0.0 - 1.0)
+    /// Bit flip probability for in-flight data corruption (0.0 - 1.0).
+    ///
+    /// Zero by default: TCP delivers what was written, and only a protocol
+    /// that checksums its own frames can tell a flipped bit from data. Enable
+    /// it (or a Random / Swarm network chaos profile) to test such a
+    /// checksum; mask it with [`NetworkFaultMask`] for protocols without one.
     pub bit_flip_probability: f64,
     /// Minimum number of bits to flip (power-law distribution lower bound)
     pub bit_flip_min_bits: u32,
@@ -447,7 +452,14 @@ impl Default for ChaosConfiguration {
             clog_duration: Duration::from_millis(100)..Duration::from_millis(300),
             partition_probability: 0.0,
             partition_duration: Duration::from_millis(200)..Duration::from_secs(2),
-            bit_flip_probability: 0.0001, // 0.01% - matches FDB's BUGGIFY_WITH_PROB(0.0001)
+            // Off by default: opt-in, like clogs, partitions and black holes.
+            // FDB flips bits only where the protocol checksums its packets
+            // (`FlowTransport` under `checksumEnabled`, while connection
+            // failures are enabled), so a flip is always caught. A raw TCP
+            // stream carrying a protocol with no checksum (HTTP/2, gRPC)
+            // would serve the flipped bytes as data. The Random and Swarm
+            // profiles still sample it; `NetworkFaultMask` removes it there.
+            bit_flip_probability: 0.0,
             bit_flip_min_bits: 1,
             bit_flip_max_bits: 32,
             bit_flip_cooldown: Duration::ZERO, // No cooldown by default for maximum chaos

@@ -262,7 +262,7 @@ Each ordered IP pair samples one fixed latency from this range at first contact 
 
 | Field | Type | Default |
 |-------|------|---------|
-| `bit_flip_probability` | `f64` | 0.0001 (0.01%) |
+| `bit_flip_probability` | `f64` | 0.0 (off; Random/Swarm profiles sample it) |
 | `bit_flip_min_bits` | `u32` | 1 |
 | `bit_flip_max_bits` | `u32` | 32 |
 | `bit_flip_cooldown` | `Duration` | 0 |
