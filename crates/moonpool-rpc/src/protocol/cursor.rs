@@ -82,15 +82,6 @@ impl<'a> Reader<'a> {
         self.take().map(u128::from_le_bytes)
     }
 
-    pub(crate) fn socket_addr(&mut self) -> Option<std::net::SocketAddr> {
-        let ip = match self.u8()? {
-            4 => std::net::IpAddr::from(self.take::<4>()?),
-            6 => std::net::IpAddr::from(self.take::<16>()?),
-            _ => return None,
-        };
-        Some(std::net::SocketAddr::new(ip, self.u16()?))
-    }
-
     pub(crate) fn slice(&mut self, len: usize) -> Option<&'a [u8]> {
         if self.0.len() < len {
             return None;

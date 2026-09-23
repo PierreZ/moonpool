@@ -37,7 +37,6 @@ pub mod frame;
 mod schema;
 pub mod wire;
 
-pub(crate) use cursor::{Reader, Writer};
 pub use frame::{FrameDecoder, FrameError, HEADER_LEN, encode_frame};
 pub use schema::{MethodId, RpcMethod, SchemaVersion};
 pub use wire::{

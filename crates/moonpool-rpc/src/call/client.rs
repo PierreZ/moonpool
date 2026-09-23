@@ -1,4 +1,4 @@
-//! Serialisable service references and explicitly bound clients.
+//! Explicitly bound clients of service references.
 
 use std::future::Future;
 use std::marker::PhantomData;
@@ -10,181 +10,11 @@ use std::time::Duration;
 use futures::channel::oneshot;
 use moonpool_core::{Providers, TimeProvider};
 
-use crate::codec::{CodecId, DecodeError, EncodeError, Wire, encode_to_vec};
-use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation};
+use crate::codec::{Wire, encode_to_vec};
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
-use crate::protocol::{MethodId, Reader, RpcMethod, SchemaVersion, Writer};
+use crate::interface::ServiceRef;
+use crate::protocol::RpcMethod;
 use crate::transport::{Delivery, ReplyBytes, RpcHandle};
-
-/// Version byte of the [`ServiceRef`] byte layout.
-const SERVICE_REF_VERSION: u8 = 1;
-
-/// A typed reference to a dynamic endpoint serving method `M`.
-///
-/// Plain routing data: it keeps nothing alive and needs no runtime to
-/// exist, be stored or be decoded. Its byte form ([`to_bytes`](Self::to_bytes),
-/// also its [`Wire`] encoding under [`CodecId::RPC`], so a reference can be
-/// a request or reply body) is a fixed little-endian layout owned by this
-/// crate:
-///
-/// ```text
-/// version u8 = 1 | method u32 | schema u16 | request codec u16 | reply codec u16
-///   | access u8 | incarnation u128 | token.index u64 | token.generation u32
-///   | address: family u8 (4 or 6) | ip (4 or 16 bytes) | port u16
-/// ```
-///
-/// Decoding checks the method, schema and both codecs against `M`, so a
-/// reference cannot be decoded as the wrong method type. Bind it to a runtime
-/// with [`bind`](Self::bind) to call it.
-pub struct ServiceRef<M: RpcMethod> {
-    endpoint: Endpoint,
-    access: AccessClass,
-    _method: PhantomData<fn() -> M>,
-}
-
-impl<M: RpcMethod> ServiceRef<M> {
-    /// Claim that `endpoint` serves `M` with the given access class.
-    ///
-    /// Nothing is checked locally: the server validates the incarnation,
-    /// token, method, schema and codec of every request before any byte
-    /// reaches a handler.
-    #[must_use]
-    pub fn new(endpoint: Endpoint, access: AccessClass) -> Self {
-        Self {
-            endpoint,
-            access,
-            _method: PhantomData,
-        }
-    }
-
-    /// The addressed endpoint.
-    #[must_use]
-    pub fn endpoint(&self) -> &Endpoint {
-        &self.endpoint
-    }
-
-    /// The access class the endpoint was registered with.
-    #[must_use]
-    pub fn access(&self) -> AccessClass {
-        self.access
-    }
-
-    /// Bind to a runtime, producing a client that calls through it.
-    #[must_use]
-    pub fn bind<P: Providers>(&self, rpc: &RpcHandle<P>) -> ServiceClient<P, M> {
-        ServiceClient {
-            rpc: rpc.clone(),
-            target: self.clone(),
-        }
-    }
-
-    /// The reference's byte form (see the type docs for the layout).
-    #[must_use]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Writer::new();
-        out.u8(SERVICE_REF_VERSION)
-            .u32(M::METHOD.get())
-            .u16(M::SCHEMA.get())
-            .u16(<M::Request as Wire>::CODEC.get())
-            .u16(<M::Reply as Wire>::CODEC.get())
-            .u8(self.access.to_byte())
-            .u128(self.endpoint.incarnation().get())
-            .u64(self.endpoint.token().index())
-            .u32(self.endpoint.token().generation())
-            .socket_addr(self.endpoint.address());
-        out.0
-    }
-
-    /// Decode a reference, checking that it serves `M`.
-    ///
-    /// # Errors
-    ///
-    /// A [`DecodeError`] for a malformed layout, an unknown version, or a
-    /// method, schema or codec that is not `M`'s.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, DecodeError> {
-        let truncated = || DecodeError("truncated service reference".into());
-        let mut input = Reader::new(bytes);
-        let version = input.u8().ok_or_else(truncated)?;
-        if version != SERVICE_REF_VERSION {
-            return Err(DecodeError(format!(
-                "unknown service reference version {version}"
-            )));
-        }
-        let method = MethodId::new(input.u32().ok_or_else(truncated)?);
-        let schema = SchemaVersion::new(input.u16().ok_or_else(truncated)?);
-        let request_codec = CodecId::new(input.u16().ok_or_else(truncated)?);
-        let reply_codec = CodecId::new(input.u16().ok_or_else(truncated)?);
-        if method != M::METHOD
-            || schema != M::SCHEMA
-            || request_codec != <M::Request as Wire>::CODEC
-            || reply_codec != <M::Reply as Wire>::CODEC
-        {
-            return Err(DecodeError(format!(
-                "service reference serves {method}/{schema} ({request_codec}->{reply_codec}), \
-                 not {} ({}/{})",
-                M::NAME,
-                M::METHOD,
-                M::SCHEMA
-            )));
-        }
-        let access = AccessClass::from_byte(input.u8().ok_or_else(truncated)?)
-            .ok_or_else(|| DecodeError("unknown access class".into()))?;
-        let incarnation = Incarnation::from_raw(input.u128().ok_or_else(truncated)?);
-        let index = input.u64().ok_or_else(truncated)?;
-        let generation = input.u32().ok_or_else(truncated)?;
-        let address = input
-            .socket_addr()
-            .ok_or_else(|| DecodeError("invalid service reference address".into()))?;
-        if !input.is_empty() {
-            return Err(DecodeError("trailing bytes after service reference".into()));
-        }
-        Ok(Self::new(
-            Endpoint::new(
-                address,
-                incarnation,
-                EndpointToken::from_parts(index, generation),
-            ),
-            access,
-        ))
-    }
-}
-
-impl<M: RpcMethod> Wire for ServiceRef<M> {
-    const CODEC: CodecId = CodecId::RPC;
-
-    fn encode(&self, buf: &mut Vec<u8>) -> Result<(), EncodeError> {
-        buf.extend_from_slice(&self.to_bytes());
-        Ok(())
-    }
-
-    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        Self::from_bytes(bytes)
-    }
-}
-
-impl<M: RpcMethod> Clone for ServiceRef<M> {
-    fn clone(&self) -> Self {
-        Self::new(self.endpoint, self.access)
-    }
-}
-
-impl<M: RpcMethod> PartialEq for ServiceRef<M> {
-    fn eq(&self, other: &Self) -> bool {
-        self.endpoint == other.endpoint && self.access == other.access
-    }
-}
-
-impl<M: RpcMethod> Eq for ServiceRef<M> {}
-
-impl<M: RpcMethod> std::fmt::Debug for ServiceRef<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServiceRef")
-            .field("method", &M::NAME)
-            .field("endpoint", &self.endpoint)
-            .field("access", &self.access)
-            .finish()
-    }
-}
 
 /// A [`ServiceRef`] bound to a runtime: the calling side.
 ///
@@ -214,13 +44,22 @@ impl<P: Providers, M: RpcMethod> std::fmt::Debug for ServiceClient<P, M> {
 }
 
 impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
+    pub(crate) fn new(rpc: RpcHandle<P>, target: ServiceRef<M>) -> Self {
+        Self { rpc, target }
+    }
+
     /// The reference this client calls.
     #[must_use]
     pub fn target(&self) -> &ServiceRef<M> {
         &self.target
     }
 
-    fn encode(request: &M::Request) -> Result<(Vec<u8>, CallIdentity), RpcError> {
+    fn encode(&self, request: &M::Request) -> Result<(Vec<u8>, CallIdentity), RpcError> {
+        // A reference decoded inside another message is checked here, before
+        // anything leaves: a wrong-typed or malformed one is never sent.
+        self.target
+            .check()
+            .map_err(|error| RpcError::not_admitted(ErrorReason::InvalidReference(error.0)))?;
         let body = encode_to_vec(request)
             .map_err(|error| RpcError::not_admitted(ErrorReason::Encode(error.0)))?;
         let identity = CallIdentity {
@@ -236,7 +75,7 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
         request: &M::Request,
         delivery: Delivery,
     ) -> Result<ReplyAttempt<P, M>, RpcError> {
-        let (body, identity) = Self::encode(request)?;
+        let (body, identity) = self.encode(request)?;
         // Hold the runtime only while starting the call: the wait must not
         // keep a dropped driver's state alive.
         let shared = self
@@ -244,7 +83,7 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
         let (receiver, guard) =
-            shared.start_call(self.target.endpoint(), identity, body, delivery)?;
+            shared.start_call(&self.target.endpoint(), identity, body, delivery)?;
         Ok(ReplyAttempt {
             receiver,
             guard: Some(guard),
@@ -326,11 +165,11 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
     /// limit, a full request queue, a connection already closed, an
     /// endpoint the failure monitor knows is gone, shutdown.
     pub fn send(&self, request: &M::Request) -> Result<(), RpcError> {
-        let (body, identity) = Self::encode(request)?;
+        let (body, identity) = self.encode(request)?;
         self.rpc
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?
-            .send_one_way(self.target.endpoint(), identity, body)
+            .send_one_way(&self.target.endpoint(), identity, body)
     }
 
     /// Reliable delivery: keep the request while waiting and send it again
@@ -384,7 +223,7 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
             .rpc
             .failure_monitor()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
-        let failed = monitor.on_failed_for(*self.target.endpoint(), sustained, slope);
+        let failed = monitor.on_failed_for(self.target.endpoint(), sustained, slope);
         let mut call = self.start(request, Delivery::Reliable)?;
         futures::pin_mut!(failed);
         match futures::future::select(&mut call, failed).await {

@@ -14,7 +14,7 @@
 //!  │ RequestStream<M>  ◄─ admit  │                  │ ServiceClient<P, M>    │
 //!  │   IncomingRequest ─ reply ─►│                  │   try_get_reply(req)   │
 //!  └─────────────────────────────┘                  └────────────────────────┘
-//!         ServiceRef<M>  ──── plain bytes, handed out by the application ───►
+//!   ServiceRef<M> / InterfaceRef<I> ── protobuf data, handed out by the app ──►
 //! ```
 //!
 //! ## The manual API
@@ -36,6 +36,20 @@
 //!    and calls [`ServiceClient::try_get_reply`] (or
 //!    [`ServiceClient::try_get_reply_within`] with a deadline): one
 //!    attempt, executed zero or one times, never retransmitted.
+//!
+//! ## Interfaces as data
+//!
+//! A service with several methods is an endpoint **group**
+//! ([`RpcHandle::register_group`], [`ServiceGroup`]): one slot, one
+//! incarnation, methods told apart by their explicit ids, named by an
+//! [`RpcInterface`] with its own [`InterfaceId`]. Its [`InterfaceRef`] and
+//! every [`ServiceRef`] are protobuf messages: embed them in requests and
+//! replies, store them, forward them to a third participant; decoding
+//! needs no runtime and keeps nothing alive. A restarted process publishes
+//! fresh references and callers learn them explicitly; a reference to the
+//! previous incarnation is refused, never redirected. See [`interface`].
+//! The optional `derive` feature generates the typed interface, dispatcher
+//! and client from a trait, on top of the same manual API.
 //!
 //! ## Delivery modes
 //!
@@ -84,7 +98,22 @@
 //!   references ([`ErrorReason::StaleIncarnation`]).
 //! - **Peer-relative replies.** A reply handle routes only to the
 //!   connection that delivered the request; it has no byte form and cannot
-//!   be forwarded.
+//!   be forwarded (a forwardable callback is an ordinary registered
+//!   endpoint whose [`ServiceRef`] travels in the request):
+//!
+//!   ```compile_fail
+//!   # use moonpool_rpc::{MethodId, ReplyHandle, RpcMethod, SchemaVersion, Wire};
+//!   # struct Echo;
+//!   # impl RpcMethod for Echo {
+//!   #     type Request = String;
+//!   #     type Reply = String;
+//!   #     const METHOD: MethodId = MethodId::new(1);
+//!   #     const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+//!   #     const NAME: &'static str = "echo";
+//!   # }
+//!   fn embed<T: Wire>() {}
+//!   embed::<ReplyHandle<Echo>>(); // a reply handle is not data
+//!   ```
 //! - **Owned lifetimes.** Handles, clients, receivers and reply handles hold
 //!   the runtime weakly; nothing but the driver keeps it serving.
 //! - **Bounded everything.** Frame size, queued requests, control frames,
@@ -101,6 +130,7 @@ mod config;
 mod endpoint;
 mod error;
 mod failure;
+pub mod interface;
 pub mod protocol;
 mod stats;
 
@@ -109,7 +139,7 @@ pub(crate) mod transport;
 
 pub use call::{
     BootstrapAddress, BootstrapClient, BootstrapStats, IncomingRequest, ReplyAttempt, ReplyHandle,
-    RequestStream, RetryPolicy, ServiceClient, ServiceRef, WellKnownRef,
+    RequestStream, RetryPolicy, ServiceClient, WellKnownRef,
 };
 pub use codec::{CodecId, DecodeError, EncodeError, Wire};
 pub use config::{
@@ -118,6 +148,10 @@ pub use config::{
 pub use endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 pub use error::{ErrorReason, Execution, RpcError};
 pub use failure::{AddressState, EndpointState, FailureMonitor};
+pub use interface::{
+    InterfaceClient, InterfaceId, InterfaceMethod, InterfaceRef, RpcInterface, ServiceGroup,
+    ServiceRef,
+};
 pub use protocol::{MethodId, RpcMethod, SchemaVersion};
 pub use stats::{ResourceProbe, RpcStats};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};

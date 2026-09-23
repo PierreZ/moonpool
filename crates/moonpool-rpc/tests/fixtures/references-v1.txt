@@ -1,0 +1,15 @@
+# Golden encodings of moonpool-rpc references (protobuf, protocol version 1).
+#
+# Independent of Rust: each line is `name hex`, and the bytes follow the
+# field tables in the `ServiceRef` / `InterfaceRef` docs (every field
+# always written, in tag order). A change to any line is a wire break.
+#
+# service: ServiceRef, method 0x6563686f, schema 1, codecs 1->1, public,
+#   incarnation 0x0102030405060708090a0b0c0d0e0f10, token 3#7, 10.0.1.1:4500
+service 08efd08dab06100118012001280131080706050403020139100f0e0d0c0b0a09410300000000000000480752040a000101589423
+# well-known: the same method, private, incarnation 0 (ignored at
+#   admission), token index 1<<63 | 42 (well-known id 42), generation 0
+well-known 08efd08dab061001180120012800310000000000000000390000000000000000412a00000000000080480052040a000101589423
+# interface: InterfaceRef, interface 0x6b760001 version 2, public,
+#   incarnation as above, token 5#1, [2001:db8::1]:4500
+interface 088180d8db061002280131080706050403020139100f0e0d0c0b0a094105000000000000004801521020010db8000000000000000000000001589423

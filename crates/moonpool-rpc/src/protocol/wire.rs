@@ -195,6 +195,8 @@ pub enum WireError {
     ReplyTooLarge,
     /// The handler's reply could not be encoded by its codec.
     ReplyEncodeFailed,
+    /// The endpoint is a group that does not serve the method.
+    MethodNotFound,
 }
 
 impl WireError {
@@ -210,6 +212,7 @@ impl WireError {
             Self::BrokenPromise => (8, 0),
             Self::ReplyTooLarge => (9, 0),
             Self::ReplyEncodeFailed => (10, 0),
+            Self::MethodNotFound => (11, 0),
         }
     }
 
@@ -237,6 +240,7 @@ impl WireError {
             8 => Self::BrokenPromise,
             9 => Self::ReplyTooLarge,
             10 => Self::ReplyEncodeFailed,
+            11 => Self::MethodNotFound,
             other => return Err(EnvelopeError::UnknownStatus(other)),
         })
     }
@@ -581,7 +585,7 @@ mod tests {
         let reply = WireMessage::Reply {
             call_id: 5,
             outcome: WireOutcome::Err(WireError::CodecMismatch {
-                registered: CodecId::RPC,
+                registered: CodecId::new(2),
             }),
         };
         assert_eq!(
@@ -684,6 +688,7 @@ mod tests {
             WireError::BrokenPromise,
             WireError::ReplyTooLarge,
             WireError::ReplyEncodeFailed,
+            WireError::MethodNotFound,
         ];
         for error in errors {
             let message = WireMessage::Reply {

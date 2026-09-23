@@ -17,9 +17,9 @@ use std::time::Duration;
 
 use moonpool_core::{Providers, RandomProvider, Resolver, TimeProvider};
 
-use super::client::ServiceRef;
 use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 use crate::error::{ErrorReason, Execution, RpcError};
+use crate::interface::ServiceRef;
 use crate::protocol::RpcMethod;
 use crate::transport::RpcHandle;
 
@@ -169,6 +169,8 @@ impl RetryPolicy {
         let contract = matches!(
             error.reason(),
             ErrorReason::MethodMismatch { .. }
+                | ErrorReason::MethodNotFound { .. }
+                | ErrorReason::InvalidReference(_)
                 | ErrorReason::SchemaMismatch { .. }
                 | ErrorReason::CodecMismatch { .. }
                 | ErrorReason::FrameTooLarge { .. }

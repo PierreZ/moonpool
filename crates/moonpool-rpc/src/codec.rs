@@ -46,16 +46,16 @@ use thiserror::Error;
 /// Carried in every request and reply envelope and in every published
 /// [`ServiceRef`](crate::ServiceRef). Values `1..=0x7FFF` are reserved for
 /// codecs defined by this crate; applications use `0x8000..=0xFFFF`. Zero is
-/// never a valid codec.
+/// never a valid codec, and `2` (a retired fixed reference layout) is never
+/// reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CodecId(u16);
 
 impl CodecId {
-    /// Protocol Buffers through prost.
+    /// Protocol Buffers: prost messages, and the references
+    /// ([`ServiceRef`](crate::ServiceRef), [`InterfaceRef`](crate::InterfaceRef)),
+    /// which encode as protobuf with or without the `prost` feature.
     pub const PROST: Self = Self(1);
-    /// This crate's own fixed layout (routing types such as
-    /// [`ServiceRef`](crate::ServiceRef)).
-    pub const RPC: Self = Self(2);
 
     /// Wrap a raw codec identifier.
     #[must_use]
@@ -74,7 +74,6 @@ impl std::fmt::Display for CodecId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             Self::PROST => f.write_str("prost"),
-            Self::RPC => f.write_str("rpc"),
             Self(other) => write!(f, "codec:{other:#06x}"),
         }
     }

@@ -430,7 +430,7 @@ impl FoundationsWorkload {
         let Ok(echo) = ServiceRef::<Echo>::from_bytes(bytes) else {
             return;
         };
-        let endpoint = *echo.endpoint();
+        let endpoint = echo.endpoint();
         let outcome: Result<Echoed, RpcError> = match ctx.random().random_range(0..3) {
             0 => {
                 ServiceRef::<EchoNextSchema>::new(endpoint, AccessClass::Public)

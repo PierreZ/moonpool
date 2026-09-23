@@ -7,6 +7,6 @@ pub(crate) mod receiver;
 pub(crate) mod reply;
 
 pub use bootstrap::{BootstrapAddress, BootstrapClient, BootstrapStats, RetryPolicy, WellKnownRef};
-pub use client::{ReplyAttempt, ServiceClient, ServiceRef};
+pub use client::{ReplyAttempt, ServiceClient};
 pub use receiver::{IncomingRequest, RequestStream};
 pub use reply::ReplyHandle;

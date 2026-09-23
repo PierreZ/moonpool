@@ -6,12 +6,12 @@ use std::sync::{Arc, Weak};
 use moonpool_core::Providers;
 
 use super::Shared;
-use crate::ServiceRef;
 use crate::call::client::ServiceClient;
 use crate::call::receiver::RequestStream;
 use crate::endpoint::{AccessClass, Incarnation, WellKnownId};
 use crate::error::{ErrorReason, RpcError};
 use crate::failure::FailureMonitor;
+use crate::interface::{RpcInterface, ServiceGroup, ServiceRef};
 use crate::protocol::RpcMethod;
 use crate::stats::{ResourceProbe, RpcStats};
 
@@ -72,6 +72,25 @@ impl<P: Providers> RpcHandle<P> {
         access: AccessClass,
     ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
         self.running()?.register::<M>(access, None)
+    }
+
+    /// Register a dynamic endpoint group serving interface `I`.
+    ///
+    /// The group is one registry slot in this incarnation; open each of
+    /// its methods with [`ServiceGroup::serve`] and publish
+    /// [`ServiceGroup::interface_ref`]. A request for a method the group
+    /// does not serve is refused with [`ErrorReason::MethodNotFound`].
+    /// Dropping the group destroys it for good, like dropping a
+    /// [`register`](Self::register) receiver.
+    ///
+    /// # Errors
+    ///
+    /// As for [`register`](Self::register).
+    pub fn register_group<I: RpcInterface>(
+        &self,
+        access: AccessClass,
+    ) -> Result<ServiceGroup<I>, RpcError> {
+        self.running()?.register_group::<I>(access)
     }
 
     /// Register `M` at the well-known id `id`.

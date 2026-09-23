@@ -67,7 +67,6 @@ use moonpool_core::{NetworkProvider, Providers, RandomProvider};
 use self::connection::{Connection, Direction};
 use self::peer::Peer;
 use self::upgrade::{Acceptor, Connector, PeerContext};
-use crate::ServiceRef;
 use crate::call::receiver::{EndpointOwner, Inbox, RequestStream, endpoint_pair};
 use crate::call::reply::{ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
@@ -77,9 +76,10 @@ use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKno
 use crate::error::{CallIdentity, ErrorReason, RpcError};
 use crate::failure::watch::Watch;
 use crate::failure::{MonitorState, PermanentFailure};
+use crate::interface::{RpcInterface, ServiceGroup, ServiceRef};
 use crate::protocol::{
-    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, WireError, WireMessage,
-    WireOutcome, encode_frame, encode_message,
+    MIN_PROTOCOL_VERSION, MethodId, PROTOCOL_MAGIC, PROTOCOL_VERSION, RpcMethod, WireError,
+    WireMessage, WireOutcome, encode_frame, encode_message,
 };
 use crate::stats::{Counters, RpcStats};
 
@@ -145,10 +145,39 @@ impl PendingCall {
     }
 }
 
+/// One registry entry: a single-method endpoint, or a group whose methods
+/// are told apart by their explicit ids.
 struct Registration {
-    inbox: Arc<dyn Inbox>,
+    methods: BTreeMap<MethodId, Arc<dyn Inbox>>,
+    /// A group (from `register_group`) rather than one method's endpoint.
+    grouped: bool,
     // Stored and carried now, enforced by the security package (#218).
     _access: AccessClass,
+}
+
+impl Registration {
+    fn single(inbox: Arc<dyn Inbox>, access: AccessClass) -> Self {
+        let (method, _, _) = inbox.identity();
+        Self {
+            methods: BTreeMap::from([(method, inbox)]),
+            grouped: false,
+            _access: access,
+        }
+    }
+
+    /// The inbox serving `method`, or the rejection that says why none
+    /// does.
+    fn route(&self, method: MethodId) -> Result<Arc<dyn Inbox>, WireError> {
+        if let Some(inbox) = self.methods.get(&method) {
+            return Ok(Arc::clone(inbox));
+        }
+        match (self.grouped, self.methods.keys().next()) {
+            (false, Some(registered)) => Err(WireError::MethodMismatch {
+                registered: *registered,
+            }),
+            _ => Err(WireError::MethodNotFound),
+        }
+    }
 }
 
 struct State {
@@ -295,33 +324,51 @@ impl<P: Providers> Shared<P> {
             .address
             .ok_or(RpcError::not_admitted(ErrorReason::NotListening))?;
         let (inbox, receiver) = endpoint_pair::<M>(self.config.endpoint_queue_capacity);
-        let registration = Registration {
-            inbox,
-            _access: access,
-        };
-        let token = {
-            let mut state = self.lock();
-            match well_known {
-                Some(id) => {
-                    if state.well_known.contains_key(&id) {
-                        return Err(RpcError::not_admitted(ErrorReason::AlreadyRegistered));
-                    }
-                    state.well_known.insert(id, registration);
-                    EndpointToken::well_known(id)
-                }
-                None => state
-                    .registry
-                    .insert(registration)
-                    .map_err(|RegistryError::Full| {
-                        RpcError::not_admitted(ErrorReason::Overloaded)
-                    })?,
-            }
-        };
+        let token = self.insert(Registration::single(inbox, access), well_known)?;
         let endpoint = Endpoint::new(address, self.incarnation, token);
         let owner: Weak<dyn EndpointOwner> = self.this.clone();
-        let stream = receiver.bind(ServiceRef::new(endpoint, access), owner);
+        let stream = receiver.bind(ServiceRef::new(endpoint, access), owner, false);
         tracing::debug!(method = M::NAME, %endpoint, ?access, "rpc endpoint registered");
         Ok((stream.service_ref().clone(), stream))
+    }
+
+    fn register_group<I: RpcInterface>(
+        &self,
+        access: AccessClass,
+    ) -> Result<ServiceGroup<I>, RpcError> {
+        let address = self
+            .address
+            .ok_or(RpcError::not_admitted(ErrorReason::NotListening))?;
+        let registration = Registration {
+            methods: BTreeMap::new(),
+            grouped: true,
+            _access: access,
+        };
+        let token = self.insert(registration, None)?;
+        let endpoint = Endpoint::new(address, self.incarnation, token);
+        tracing::debug!(interface = I::NAME, %endpoint, ?access, "rpc endpoint group registered");
+        Ok(ServiceGroup::new(endpoint, access, self.this.clone()))
+    }
+
+    fn insert(
+        &self,
+        registration: Registration,
+        well_known: Option<WellKnownId>,
+    ) -> Result<EndpointToken, RpcError> {
+        let mut state = self.lock();
+        match well_known {
+            Some(id) => {
+                if state.well_known.contains_key(&id) {
+                    return Err(RpcError::not_admitted(ErrorReason::AlreadyRegistered));
+                }
+                state.well_known.insert(id, registration);
+                Ok(EndpointToken::well_known(id))
+            }
+            None => state
+                .registry
+                .insert(registration)
+                .map_err(|RegistryError::Full| RpcError::not_admitted(ErrorReason::Overloaded)),
+        }
     }
 
     /// Validate and hand one request to its receiver. Local and remote
@@ -334,20 +381,21 @@ impl<P: Providers> Shared<P> {
         // only in the incarnation that registered it.
         let wrong_incarnation = !token.is_well_known() && request.incarnation != self.incarnation;
         let inbox = if wrong_incarnation {
-            None
+            Err(WireError::StaleIncarnation)
         } else {
             let state = self.lock();
             match token.well_known_id() {
                 Some(id) => state.well_known.get(&id),
                 None => state.registry.get(token),
             }
-            .map(|registration| Arc::clone(&registration.inbox))
+            .map_or(Err(WireError::EndpointNotFound), |registration| {
+                registration.route(request.identity.method)
+            })
         };
         // Checked in order, all before a single body byte is decoded.
         let rejection = match inbox {
-            _ if wrong_incarnation => WireError::StaleIncarnation,
-            None => WireError::EndpointNotFound,
-            Some(inbox) => {
+            Err(rejection) => rejection,
+            Ok(inbox) => {
                 let (method, schema, codec) = inbox.identity();
                 if method != request.identity.method {
                     WireError::MethodMismatch { registered: method }
@@ -483,17 +531,47 @@ impl<P: Providers> Shared<P> {
 }
 
 impl<P: Providers> EndpointOwner for Shared<P> {
-    fn unregister(&self, token: EndpointToken) {
-        let removed = {
-            let mut state = self.lock();
-            match token.well_known_id() {
+    fn unregister(&self, token: EndpointToken, method: Option<MethodId>) {
+        let mut state = self.lock();
+        let removed = match method {
+            None => match token.well_known_id() {
                 Some(id) => state.well_known.remove(&id),
                 None => state.registry.remove(token),
             }
+            .map(|registration| registration.methods),
+            Some(method) => state
+                .registry
+                .get_mut(token)
+                .and_then(|registration| registration.methods.remove(&method))
+                .map(|inbox| BTreeMap::from([(method, inbox)])),
         };
-        // Dropped outside the lock: closing the inbox breaks queued promises.
+        drop(state);
+        // Dropped outside the lock: closing an inbox breaks queued promises.
         drop(removed);
-        tracing::debug!(%token, "rpc endpoint destroyed");
+        tracing::debug!(%token, ?method, "rpc endpoint destroyed");
+    }
+
+    fn attach(
+        &self,
+        token: EndpointToken,
+        method: MethodId,
+        inbox: Arc<dyn Inbox>,
+    ) -> Result<(), ErrorReason> {
+        let mut state = self.lock();
+        let registration = state
+            .registry
+            .get_mut(token)
+            .filter(|registration| registration.grouped)
+            .ok_or(ErrorReason::EndpointNotFound)?;
+        if registration.methods.contains_key(&method) {
+            return Err(ErrorReason::AlreadyRegistered);
+        }
+        registration.methods.insert(method, inbox);
+        Ok(())
+    }
+
+    fn queue_capacity(&self) -> usize {
+        self.config.endpoint_queue_capacity
     }
 }
 

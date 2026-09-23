@@ -551,7 +551,7 @@ impl DeliveryWorkload {
         };
         let job = self.job(Mode::Reply, 0);
         let fast_before = rpc.stats().map_or(0, |stats| stats.calls_failed_fast);
-        let known = monitor.endpoint_state(old.endpoint()).is_permanent();
+        let known = monitor.endpoint_state(&old.endpoint()).is_permanent();
         let outcome = old
             .bind(rpc)
             .get_reply_unless_failed_for(&job, Duration::from_secs(10), 0.1)
@@ -565,7 +565,8 @@ impl DeliveryWorkload {
         {
             assert_sometimes!(true, "rpc stale dynamic reference failed terminally");
             assert_always!(
-                monitor.endpoint_state(old.endpoint()) == EndpointState::StaleIncarnation || !known,
+                monitor.endpoint_state(&old.endpoint()) == EndpointState::StaleIncarnation
+                    || !known,
                 "the failure monitor remembers a stale incarnation"
             );
             if known && rpc.stats().map_or(0, |stats| stats.calls_failed_fast) > fast_before {
@@ -602,7 +603,7 @@ impl DeliveryWorkload {
             }
             let rediscover = op == DeliveryOp::Rediscover
                 || self.dead.contains(&execute.to_bytes())
-                || monitor.endpoint_state(execute.endpoint()).is_permanent();
+                || monitor.endpoint_state(&execute.endpoint()).is_permanent();
             if rediscover && let Some(fresh) = self.discover(bootstrap).await {
                 execute = fresh;
             }

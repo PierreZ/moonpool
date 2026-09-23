@@ -388,7 +388,7 @@ async fn failure_monitor_separates_disconnects_addresses_and_endpoints() {
     assert_eq!(monitor.address_state(address), AddressState::Available);
 
     let disconnected = monitor.on_disconnect(address);
-    let failed = monitor.on_failed_for(*dynamic.endpoint(), Duration::ZERO, 0.0);
+    let failed = monitor.on_failed_for(dynamic.endpoint(), Duration::ZERO, 0.0);
     server_driver.abort();
     let _ = server_driver.await;
     tokio::time::timeout(Duration::from_secs(5), disconnected)
@@ -401,7 +401,7 @@ async fn failure_monitor_separates_disconnects_addresses_and_endpoints() {
         .expect("runtime alive");
     assert_eq!(monitor.address_state(address), AddressState::Failed);
     assert_eq!(
-        monitor.endpoint_state(dynamic.endpoint()),
+        monitor.endpoint_state(&dynamic.endpoint()),
         EndpointState::AddressFailed
     );
 
@@ -429,7 +429,7 @@ async fn failure_monitor_separates_disconnects_addresses_and_endpoints() {
     );
     assert_eq!(monitor.address_state(address), AddressState::Available);
     assert_eq!(
-        monitor.endpoint_state(dynamic.endpoint()),
+        monitor.endpoint_state(&dynamic.endpoint()),
         EndpointState::StaleIncarnation
     );
     // Remembered: the next call fails without a round trip.

@@ -43,5 +43,9 @@ moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tok
 prost = "0.14"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
 
+[[example]]
+name = "recruitment"
+required-features = ["prost"]
+
 [lints]
 workspace = true

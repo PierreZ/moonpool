@@ -8,10 +8,11 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use futures::task::AtomicWaker;
 
-use super::client::ServiceRef;
 use super::reply::{ReplyContext, ReplyHandle};
 use crate::codec::{CodecId, Wire};
 use crate::endpoint::EndpointToken;
+use crate::error::ErrorReason;
+use crate::interface::ServiceRef;
 use crate::protocol::{MethodId, RpcMethod, SchemaVersion, WireError, WireOutcome};
 
 /// Why a mailbox refused an item.
@@ -108,9 +109,23 @@ pub(crate) trait Inbox: Send + Sync {
     fn deliver(&self, body: &[u8], context: ReplyContext) -> Result<(), WireError>;
 }
 
-/// Unregisters an endpoint when its receiver is dropped.
+/// The runtime side of a registration: implemented by the runtime's
+/// shared state, held weakly by receivers and groups.
 pub(crate) trait EndpointOwner: Send + Sync {
-    fn unregister(&self, token: EndpointToken);
+    /// Destroy the registration under `token` (`method: None`), or only one
+    /// method of a group.
+    fn unregister(&self, token: EndpointToken, method: Option<MethodId>);
+
+    /// Add a method's inbox to the live group under `token`.
+    fn attach(
+        &self,
+        token: EndpointToken,
+        method: MethodId,
+        inbox: Arc<dyn Inbox>,
+    ) -> Result<(), ErrorReason>;
+
+    /// The capacity of each endpoint's request queue.
+    fn queue_capacity(&self) -> usize;
 }
 
 struct TypedInbox<M: RpcMethod> {
@@ -163,15 +178,20 @@ pub(crate) struct UnboundReceiver<M: RpcMethod> {
 
 impl<M: RpcMethod> UnboundReceiver<M> {
     /// Attach the registered identity.
+    ///
+    /// `grouped` streams remove only their own method when dropped; the
+    /// others destroy the whole registration.
     pub(crate) fn bind(
         self,
         service: ServiceRef<M>,
         owner: Weak<dyn EndpointOwner>,
+        grouped: bool,
     ) -> RequestStream<M> {
         RequestStream {
             mailbox: self.mailbox,
             service,
             owner,
+            grouped,
         }
     }
 }
@@ -185,17 +205,25 @@ pub(crate) fn endpoint_pair<M: RpcMethod>(capacity: usize) -> (Arc<dyn Inbox>, U
     (inbox, UnboundReceiver { mailbox })
 }
 
-/// The owned receiving side of one dynamic endpoint.
+/// The owned receiving side of one method of a dynamic endpoint: the
+/// pull-style handler primitive.
 ///
-/// Yields admitted requests in arrival order. Dropping it destroys the
+/// Yields admitted requests in arrival order, one-way requests included
+/// (their [`ReplyHandle::expects_reply`] is `false`). Dropping a stream
+/// from [`RpcHandle::register`](crate::RpcHandle::register) destroys the
 /// endpoint: the registration is removed at once, later requests for its
 /// token fail with [`ErrorReason::EndpointNotFound`](crate::ErrorReason::EndpointNotFound),
-/// and requests queued but not yet taken complete as broken promises. The
-/// stream ends when the owning runtime shuts down.
+/// and requests queued but not yet taken complete as broken promises.
+/// Dropping a stream from [`ServiceGroup::serve`](crate::ServiceGroup::serve)
+/// removes only its method from the group
+/// ([`ErrorReason::MethodNotFound`](crate::ErrorReason::MethodNotFound)
+/// afterwards). The stream ends when its group is dropped or the owning
+/// runtime shuts down.
 pub struct RequestStream<M: RpcMethod> {
     mailbox: Arc<Mailbox<IncomingRequest<M>>>,
     service: ServiceRef<M>,
     owner: Weak<dyn EndpointOwner>,
+    grouped: bool,
 }
 
 impl<M: RpcMethod> RequestStream<M> {
@@ -205,9 +233,16 @@ impl<M: RpcMethod> RequestStream<M> {
         &self.service
     }
 
-    /// Receive the next request; `None` once the runtime has shut down.
+    /// Receive the next request; `None` once the endpoint is gone (its
+    /// group was dropped or the runtime shut down).
     pub async fn recv(&mut self) -> Option<IncomingRequest<M>> {
         futures::StreamExt::next(self).await
+    }
+
+    /// Poll for the next request without pinning (the stream is `Unpin`):
+    /// the building block for dispatchers that multiplex several streams.
+    pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Option<IncomingRequest<M>>> {
+        self.mailbox.poll_recv(cx)
     }
 }
 
@@ -222,7 +257,8 @@ impl<M: RpcMethod> Stream for RequestStream<M> {
 impl<M: RpcMethod> Drop for RequestStream<M> {
     fn drop(&mut self) {
         if let Some(owner) = self.owner.upgrade() {
-            owner.unregister(self.service.endpoint().token());
+            let method = self.grouped.then_some(M::METHOD);
+            owner.unregister(self.service.endpoint().token(), method);
         }
         let queued = self.mailbox.close();
         drop(queued);
@@ -233,7 +269,7 @@ impl<M: RpcMethod> std::fmt::Debug for RequestStream<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RequestStream")
             .field("method", &M::NAME)
-            .field("endpoint", self.service.endpoint())
+            .field("endpoint", &self.service.endpoint())
             .finish_non_exhaustive()
     }
 }

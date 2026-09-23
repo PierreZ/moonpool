@@ -248,7 +248,7 @@ async fn admission_outcomes(
         .register::<Echo>(AccessClass::Private)
         .expect("register");
     let handler = serve_echo(stream);
-    let endpoint = *service.endpoint();
+    let endpoint = service.endpoint();
     let mut outcomes = Vec::new();
 
     let ok = service.bind(caller).try_get_reply(&ping(1)).await;

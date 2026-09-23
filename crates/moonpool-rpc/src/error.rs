@@ -38,6 +38,16 @@ pub enum ErrorReason {
         /// The method the endpoint was registered for.
         registered: MethodId,
     },
+    /// The endpoint is a group that does not serve the called method (it
+    /// never did, or its stream was dropped). Terminal for this reference.
+    MethodNotFound {
+        /// The method the caller invoked.
+        called: MethodId,
+    },
+    /// The reference itself is malformed or names another method or
+    /// interface than the one it is used as (see
+    /// [`ServiceRef::check`](crate::ServiceRef::check)); nothing was sent.
+    InvalidReference(String),
     /// The endpoint serves a different version of the method's contract.
     SchemaMismatch {
         /// The contract version the caller encoded with.
@@ -103,9 +113,14 @@ impl std::fmt::Display for ErrorReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EndpointNotFound => f.write_str("endpoint not found"),
-            Self::StaleIncarnation => {
-                f.write_str("endpoint belongs to a previous runtime incarnation")
+            Self::StaleIncarnation => f.write_str(
+                "endpoint belongs to a previous runtime incarnation at this address \
+                 (the reference is dead; requests sent through it earlier may have executed)",
+            ),
+            Self::MethodNotFound { called } => {
+                write!(f, "the endpoint group does not serve {called}")
             }
+            Self::InvalidReference(detail) => write!(f, "invalid reference: {detail}"),
             Self::MethodMismatch { called, registered } => {
                 write!(
                     f,
@@ -208,6 +223,8 @@ impl RpcError {
             ErrorReason::EndpointNotFound
                 | ErrorReason::StaleIncarnation
                 | ErrorReason::MethodMismatch { .. }
+                | ErrorReason::MethodNotFound { .. }
+                | ErrorReason::InvalidReference(_)
                 | ErrorReason::SchemaMismatch { .. }
                 | ErrorReason::CodecMismatch { .. }
         )
@@ -228,6 +245,9 @@ impl RpcError {
             WireError::CodecMismatch { registered } => ErrorReason::CodecMismatch {
                 sent: called.codec,
                 expected: registered,
+            },
+            WireError::MethodNotFound => ErrorReason::MethodNotFound {
+                called: called.method,
             },
             WireError::MalformedRequest => ErrorReason::MalformedRequest,
             WireError::Overloaded => ErrorReason::Overloaded,
@@ -291,6 +311,7 @@ mod tests {
         );
         assert_eq!(knowledge(WireError::ReplyTooLarge), Execution::Executed);
         assert_eq!(knowledge(WireError::ReplyEncodeFailed), Execution::Executed);
+        assert_eq!(knowledge(WireError::MethodNotFound), Execution::NotAdmitted);
         let stale = RpcError::from_wire(WireError::StaleIncarnation, called);
         assert!(stale.is_terminal_for_reference());
         assert_eq!(stale.reason(), &ErrorReason::StaleIncarnation);

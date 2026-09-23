@@ -184,8 +184,9 @@ impl AccessClass {
 /// A fully addressed dynamic endpoint: plain, runtime-free routing data.
 ///
 /// It holds no reference to a runtime and keeps nothing alive. It travels
-/// inside a [`ServiceRef`](crate::ServiceRef), whose byte layout is fixed by
-/// this crate.
+/// inside a [`ServiceRef`](crate::ServiceRef) or an
+/// [`InterfaceRef`](crate::InterfaceRef), whose protobuf encoding is fixed
+/// by this crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Endpoint {
     address: SocketAddr,

@@ -79,6 +79,15 @@ impl<T> Registry<T> {
         }
     }
 
+    pub(crate) fn get_mut(&mut self, token: EndpointToken) -> Option<&mut T> {
+        let slot = Self::slot_mut(&mut self.slots, token.index())?;
+        if slot.generation == token.generation() {
+            slot.value.as_mut()
+        } else {
+            None
+        }
+    }
+
     /// Remove the value registered under `token`; a stale token removes
     /// nothing. The slot's generation advances so the token never matches
     /// again; a slot whose generation cannot advance is retired, never
@@ -126,6 +135,18 @@ mod tests {
         assert_eq!(registry.get(first), None, "old token never aliases");
         assert_eq!(registry.remove(first), None, "stale remove is a no-op");
         assert_eq!(registry.get(second), Some(&"b"));
+    }
+
+    #[test]
+    fn mutable_access_never_reaches_a_reused_slot_through_an_old_token() {
+        let mut registry = Registry::new(4);
+        let old = registry.insert(vec![1]).expect("room");
+        registry.remove(old);
+        let new = registry.insert(vec![2]).expect("room");
+        assert_eq!(new.index(), old.index());
+        assert!(registry.get_mut(old).is_none(), "no ABA through get_mut");
+        registry.get_mut(new).expect("live").push(3);
+        assert_eq!(registry.get(new), Some(&vec![2, 3]));
     }
 
     #[test]
