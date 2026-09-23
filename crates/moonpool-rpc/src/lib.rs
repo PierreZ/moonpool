@@ -205,7 +205,7 @@ pub use interface::{
     ServiceRef,
 };
 pub use protocol::{MethodId, RpcMethod, SchemaVersion};
-pub use stats::{ResourceProbe, RpcStats};
+pub use stats::{Outstanding, ResourceProbe, RpcStats};
 pub use stream::{ReplyStream, SendError, StreamProducer};
 pub use transport::upgrade::{Acceptor, Connector, PeerContext, Plaintext};
 pub use transport::{

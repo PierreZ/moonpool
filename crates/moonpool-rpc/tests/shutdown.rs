@@ -497,6 +497,106 @@ async fn dropping_the_driver_overtakes_a_graceful_shutdown() {
     let error = waiting.await.expect("join").expect_err("gone");
     assert_eq!(error.reason(), &ErrorReason::Shutdown, "{error}");
     assert_ne!(error.execution(), Execution::Executed, "{error}");
-    assert!(probe.is_released());
+    assert!(probe.is_at_baseline(), "{:?}", probe.outstanding());
     assert!(server.shutdown(Duration::ZERO).await.already_stopped);
+}
+
+/// Every gauge a runtime accounts (owed replies, produced streams, queued
+/// bytes, reserved windows, buffered stream bytes) is held by an owner and
+/// returns to zero once that owner is gone, even after the driver was
+/// dropped under it: `ResourceProbe::is_at_baseline`.
+async fn every_gauge_returns_to_zero_once_its_owners_are_gone() {
+    let (server, server_driver) = server(trusted()).await;
+    let server_probe = server.probe().expect("running");
+    let (slow, mut slow_stream) = server.register::<Slow>(AccessClass::Public).expect("reg");
+    let (items, mut items_stream) = server.register::<Items>(AccessClass::Public).expect("reg");
+    // Owners the application keeps: a reply handle it never answers, and a
+    // producer that sends until its credit runs out.
+    let (held_tx, mut held_rx) = tokio::sync::mpsc::unbounded_channel();
+    let holder = tokio::spawn(async move {
+        while let Some(IncomingRequest { reply, .. }) = slow_stream.recv().await {
+            let _ = held_tx.send(reply);
+        }
+    });
+    let producer = tokio::spawn(async move {
+        let Some(IncomingRequest { reply, .. }) = items_stream.recv().await else {
+            return;
+        };
+        let Ok(producer) = reply.into_stream() else {
+            return;
+        };
+        for index in 0..10_000 {
+            if producer
+                .send(&text(&format!("item {index:05}")))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+    let (client, client_driver) = client();
+    let client_probe = client.probe().expect("running");
+    let stream = items
+        .bind(&client)
+        .get_reply_stream_with_window(&text("scan"), 4096)
+        .expect("opened");
+    let pending = {
+        let slow = slow.bind(&client);
+        tokio::spawn(async move { slow.try_get_reply_within(&text("held"), CALL).await })
+    };
+    let held = held_rx.recv().await.expect("the unary call was admitted");
+    loop {
+        let producing = server.stats().expect("running");
+        let consuming = client.stats().expect("running");
+        if producing.streams_producing == 1
+            && producing.inflight_requests >= 2
+            && consuming.stream_buffered_bytes > 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(!server_probe.outstanding().is_empty());
+    assert!(!client_probe.outstanding().is_empty());
+
+    // Abrupt: both drivers go while every owner is still alive.
+    server_driver.abort();
+    client_driver.abort();
+    let _ = server_driver.await;
+    let _ = client_driver.await;
+    let error = pending.await.expect("join").expect_err("driver gone");
+    assert_ne!(error.execution(), Execution::NotAdmitted, "{error}");
+    assert!(
+        !server_probe.is_at_baseline(),
+        "the held reply handle still accounts for its request: {:?}",
+        server_probe.outstanding()
+    );
+
+    drop(held);
+    producer.abort();
+    let _ = producer.await;
+    holder.abort();
+    let _ = holder.await;
+    drop(stream);
+    assert!(
+        server_probe.is_at_baseline(),
+        "{server_probe:?} {:?}",
+        server_probe.outstanding()
+    );
+    assert!(
+        client_probe.is_at_baseline(),
+        "{client_probe:?} {:?}",
+        client_probe.outstanding()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn every_gauge_returns_to_zero_once_its_owners_are_gone_current_thread() {
+    every_gauge_returns_to_zero_once_its_owners_are_gone().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_gauge_returns_to_zero_once_its_owners_are_gone_multi_thread() {
+    every_gauge_returns_to_zero_once_its_owners_are_gone().await;
 }

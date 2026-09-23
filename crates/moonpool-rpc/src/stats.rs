@@ -422,4 +422,63 @@ impl ResourceProbe {
     pub fn is_released(&self) -> bool {
         !self.runtime_alive() && self.live_tasks() == 0 && self.live_connections() == 0
     }
+
+    /// The work, bytes and windows the runtime still accounts for.
+    ///
+    /// Each gauge is held by an owner (a reply handle, a stream producer or
+    /// consumer, a connection's write queue) and given back exactly once
+    /// when that owner ends, so it keeps answering after the driver is
+    /// dropped: owners that outlive the runtime (a reply handle an
+    /// application still holds) keep their share until they go.
+    #[must_use]
+    pub fn outstanding(&self) -> Outstanding {
+        let counters = &self.counters;
+        Outstanding {
+            inflight_requests: counters.inflight_requests.load(Ordering::Relaxed),
+            producing_streams: counters.live_server_streams.load(Ordering::Relaxed),
+            queued_bytes: counters.queued_bytes.load(Ordering::Relaxed),
+            queued_request_bytes: counters.queued_request_bytes.load(Ordering::Relaxed),
+            stream_window_reserved: counters.stream_window_reserved.load(Ordering::Relaxed),
+            producer_window_reserved: counters.producer_window_reserved.load(Ordering::Relaxed),
+            stream_buffered_bytes: counters.stream_buffered_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Whether the runtime is released ([`is_released`](Self::is_released))
+    /// and every gauge it accounted is back to zero
+    /// ([`outstanding`](Self::outstanding)): nothing of it is left, not even
+    /// a reservation held by an owner that outlived it.
+    #[must_use]
+    pub fn is_at_baseline(&self) -> bool {
+        self.is_released() && self.outstanding().is_empty()
+    }
+}
+
+/// The gauges a runtime holds on behalf of in-flight work, from
+/// [`ResourceProbe::outstanding`]. All zero on an idle runtime and on one
+/// whose driver and every owner are gone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Outstanding {
+    /// Admitted requests whose reply or stream end is owed or queued.
+    pub inflight_requests: usize,
+    /// Reply streams produced (a producer or its registration exists).
+    pub producing_streams: usize,
+    /// Bytes of requests, replies and stream frames queued unwritten.
+    pub queued_bytes: u64,
+    /// Of `queued_bytes`, the bytes of queued requests.
+    pub queued_request_bytes: u64,
+    /// Windows of the streams consumed, as reserved from their budgets.
+    pub stream_window_reserved: u64,
+    /// Windows of the streams produced, as reserved from their budgets.
+    pub producer_window_reserved: u64,
+    /// Stream bytes received and not yet taken by applications.
+    pub stream_buffered_bytes: u64,
+}
+
+impl Outstanding {
+    /// Whether every gauge is zero.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
