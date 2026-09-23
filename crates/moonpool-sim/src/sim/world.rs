@@ -229,9 +229,14 @@ impl SimWorld {
                     super::storage_ops::handle_storage_event(&mut inner, event, &mut wakes);
                 }
                 Event::Shutdown => {
+                    // Every cancelled timer resolves, whether or not its sleep
+                    // was polled yet: a sleep constructed but not polled has a
+                    // schedule and no waker, and would otherwise pend forever
+                    // on a timer that no longer exists.
                     let timer_schedules = std::mem::take(&mut inner.timer_schedules);
-                    for schedule_id in timer_schedules.into_values() {
+                    for (task_id, schedule_id) in timer_schedules {
                         inner.scheduler.cancel(schedule_id);
+                        inner.awakened_tasks.insert(task_id);
                     }
                     let task_wakers = inner.wakers.tasks.drain().collect::<Vec<_>>();
                     for (task_id, waker) in task_wakers {
@@ -827,6 +832,31 @@ mod tests {
         assert!(!sim.register_clog_waker(client, &waiter));
         assert!(!sim.register_read_clog_waker(server, &waiter));
         assert!(!sim.register_send_buffer_waker(client, &waiter));
+        assert!(sim.inner.read().awakened_tasks.is_empty());
+    }
+
+    #[test]
+    fn shutdown_resolves_a_sleep_that_was_never_polled() {
+        let mut sim = SimWorld::new();
+        let mut polled = Box::pin(sim.sleep(Duration::from_mins(1)));
+        let mut stashed = Box::pin(sim.sleep(Duration::from_mins(1)));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(polled.as_mut().poll(&mut context).is_pending());
+
+        sim.schedule_event(Event::Shutdown, Duration::ZERO);
+        assert!(!sim.step());
+        assert!(sim.inner.read().timer_schedules.is_empty());
+
+        // The stashed sleep's timer was cancelled before it ever registered a
+        // waker; its first poll must still complete rather than pend forever.
+        assert!(matches!(
+            stashed.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            polled.as_mut().poll(&mut context),
+            Poll::Ready(Ok(()))
+        ));
         assert!(sim.inner.read().awakened_tasks.is_empty());
     }
 
