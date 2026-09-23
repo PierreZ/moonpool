@@ -223,7 +223,8 @@ struct Cached {
 /// `R` and caching answers for `ttl` of provider time.
 ///
 /// A cached answer is dropped early when a call through it fails to
-/// connect or loses its connection, so the next attempt resolves again
+/// connect, times out before any session came up (a black-holed address),
+/// or loses its connection, so the next attempt resolves again
 /// (`FoundationDB`'s `removeCachedDNS`). A lookup failure
 /// ([`ErrorReason::LookupFailed`]), a connection failure
 /// ([`ErrorReason::ConnectFailed`], [`ErrorReason::Disconnected`]) and an
@@ -371,12 +372,15 @@ impl<P: Providers, R: Resolver> BootstrapClient<P, R> {
             .try_get_reply_within(request, timeout)
             .await;
         if let (Err(error), BootstrapAddress::Host(host)) = (&outcome, target.address())
-            && matches!(
+            && (matches!(
                 error.reason(),
                 ErrorReason::ConnectFailed(_) | ErrorReason::Disconnected
-            )
+            ) || (*error.reason() == ErrorReason::Timeout
+                && error.execution() == Execution::NotAdmitted))
         {
-            // The address may have moved: resolve again next time.
+            // The address may have moved (or be black-holed: a timeout
+            // before the request left means no session came up): resolve
+            // again next time.
             self.invalidate(host);
         }
         outcome
@@ -424,7 +428,15 @@ impl<P: Providers, R: Resolver> BootstrapClient<P, R> {
             ambiguous |= error.execution() != Execution::NotAdmitted;
             self.counters.retries.fetch_add(1, Ordering::Relaxed);
             let (time, draw) = {
-                let shared = self.rpc.upgrade().ok_or_else(shutdown)?;
+                let Some(shared) = self.rpc.upgrade() else {
+                    // Shut down between attempts: an earlier one may still
+                    // have executed.
+                    return Err(if ambiguous {
+                        shutdown().at_least(Execution::MaybeExecuted)
+                    } else {
+                        shutdown()
+                    });
+                };
                 (shared.time().clone(), shared.random().random_ratio())
             };
             // A random share of the backoff keeps retrying clients apart.

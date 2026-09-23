@@ -33,6 +33,9 @@ enum FailedKey {
 struct AddressRecord {
     failed: bool,
     disconnects: u64,
+    /// The runtime-wide disconnect sequence of this address's latest
+    /// disconnect (0: none since the record was created).
+    last_disconnect: u64,
     /// When connections to the address started failing without a success
     /// since.
     failing_since: Option<Duration>,
@@ -49,6 +52,10 @@ pub(crate) struct MonitorState {
     order: VecDeque<FailedKey>,
     max_failed: usize,
     max_addresses: usize,
+    /// Runtime-wide, monotonic: bumped on every disconnect of any address.
+    /// Waiters compare against it, so forgetting an address record never
+    /// hides a later disconnect.
+    sequence: u64,
 }
 
 impl MonitorState {
@@ -59,6 +66,7 @@ impl MonitorState {
             order: VecDeque::new(),
             max_failed: max_failed.max(1),
             max_addresses: max_addresses.max(1),
+            sequence: 0,
         }
     }
 
@@ -70,7 +78,20 @@ impl MonitorState {
         }
     }
 
-    /// Disconnects of `address` observed so far.
+    /// The runtime-wide disconnect sequence so far.
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Whether `address` disconnected after the sequence value `since`.
+    pub(crate) fn disconnected_since(&self, address: SocketAddr, since: u64) -> bool {
+        self.addresses
+            .get(&address)
+            .is_some_and(|record| record.last_disconnect > since)
+    }
+
+    /// Disconnects of `address` observed since its record was created (a
+    /// forgotten address starts again from zero).
     pub(crate) fn disconnects(&self, address: SocketAddr) -> u64 {
         self.addresses
             .get(&address)
@@ -116,8 +137,9 @@ impl MonitorState {
     fn record(&mut self, address: SocketAddr) -> &mut AddressRecord {
         if !self.addresses.contains_key(&address) && self.addresses.len() >= self.max_addresses {
             // Forget an available, unwatched address: it answers the same
-            // (available, no failure run) once it is gone. The disconnect
-            // count restarts, which only makes a watcher wake spuriously.
+            // (available, no failure run) once it is gone. Its disconnect
+            // count restarts; waiters compare the runtime-wide sequence,
+            // which never goes back, so none of them misses a disconnect.
             let victim = self
                 .addresses
                 .iter()
@@ -150,8 +172,11 @@ impl MonitorState {
         now: Duration,
         delay: Duration,
     ) {
+        self.sequence += 1;
+        let sequence = self.sequence;
         let record = self.record(address);
         record.disconnects += 1;
+        record.last_disconnect = sequence;
         if failure {
             let since = *record.failing_since.get_or_insert(now);
             if now.saturating_sub(since) >= delay {
@@ -279,6 +304,26 @@ mod tests {
         );
         assert!(!monitor.endpoint_failed(&well_known, PermanentFailure::NotFound));
         assert_eq!(monitor.permanent_failure(&well_known), None);
+    }
+
+    #[test]
+    fn a_forgotten_address_never_hides_a_later_disconnect() {
+        let mut monitor = MonitorState::new(8, 2);
+        let watched = address();
+        let other: SocketAddr = "10.0.1.2:1".parse().expect("literal");
+        let third: SocketAddr = "10.0.1.3:1".parse().expect("literal");
+        monitor.disconnected(watched, false, Duration::ZERO, Duration::ZERO);
+        // A waiter registers here, after one disconnect.
+        let since = monitor.sequence();
+        assert!(!monitor.disconnected_since(watched, since));
+        // The table is full: touching two other addresses forgets it.
+        let _ = monitor.connected(other);
+        let _ = monitor.connected(third);
+        assert_eq!(monitor.disconnects(watched), 0, "record forgotten");
+        // Its next disconnect is still seen (a per-record count would read
+        // 1 again, equal to what the waiter captured, and miss it).
+        monitor.disconnected(watched, false, Duration::ZERO, Duration::ZERO);
+        assert!(monitor.disconnected_since(watched, since));
     }
 
     #[test]

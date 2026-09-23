@@ -11,7 +11,8 @@
 //!   and [`Available`](AddressState::Available) again as soon as a session
 //!   with it establishes. An address never contacted is available.
 //! - **Disconnect events.** Every end of a connection this runtime used to
-//!   call an address is counted at once, even while the address still
+//!   call an address is stamped at once with a runtime-wide, monotonic
+//!   sequence, even while the address still
 //!   counts as available: a call bound to the connection that died learns
 //!   of it without waiting for the failure delay.
 //! - **Permanent endpoint failure** ([`EndpointState::NotFound`],
@@ -155,7 +156,10 @@ impl<P: Providers> FailureMonitor<P> {
             })
     }
 
-    /// Disconnects of `address` observed so far.
+    /// Disconnects of `address` observed so far. The count restarts from
+    /// zero if the monitor forgot the address (see
+    /// [`PeerPolicy::max_tracked_addresses`](crate::PeerPolicy::max_tracked_addresses));
+    /// the `on_*` waits do not depend on it.
     #[must_use]
     pub fn disconnects(&self, address: SocketAddr) -> u64 {
         self.read(|monitor| monitor.disconnects(address))
@@ -213,8 +217,8 @@ impl<P: Providers> FailureMonitor<P> {
         &self,
         address: SocketAddr,
     ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
-        let base = self.disconnects(address);
-        self.wait_until(move |monitor| monitor.disconnects(address) != base)
+        let since = self.read(MonitorState::sequence);
+        self.wait_until(move |monitor| monitor.disconnected_since(address, since))
     }
 
     /// Resolves once `endpoint` is not [`EndpointState::Available`]: its
@@ -255,10 +259,10 @@ impl<P: Providers> FailureMonitor<P> {
         &self,
         endpoint: Endpoint,
     ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
-        let base = self.disconnects(endpoint.address());
+        let since = self.read(MonitorState::sequence);
         self.wait_until(move |monitor| {
             monitor.endpoint_state(&endpoint) != EndpointState::Available
-                || monitor.disconnects(endpoint.address()) != base
+                || monitor.disconnected_since(endpoint.address(), since)
         })
     }
 
