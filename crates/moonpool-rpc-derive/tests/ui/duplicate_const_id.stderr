@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: duplicate method id in service Kv
+ --> tests/ui/duplicate_const_id.rs:3:1
+  |
+3 | #[moonpool_rpc::service(id = 1, version = 1)]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed here

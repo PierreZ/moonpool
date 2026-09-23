@@ -1,0 +1,35 @@
+error[E0277]: the trait bound `ReplyHandle<Echo>: Wire` is not satisfied
+  --> tests/ui/reply_handle_not_wire.rs:16:13
+   |
+16 |     embed::<ReplyHandle<Echo>>();
+   |             ^^^^^^^^^^^^^^^^^ the trait `prost::message::Message` is not implemented for `ReplyHandle<Echo>`
+   |
+   = help: the following other types implement trait `prost::message::Message`:
+             ()
+             Box<M>
+             InterfaceRef<I>
+             ServiceRef<M>
+             String
+             Vec<u8>
+             bool
+             bytes::bytes::Bytes
+           and $N others
+   = note: required for `ReplyHandle<Echo>` to implement `Wire`
+note: required by a bound in `embed`
+  --> tests/ui/reply_handle_not_wire.rs:12:13
+   |
+12 | fn embed<T: Wire>() {}
+   |             ^^^^ required by this bound in `embed`
+
+error[E0277]: the trait bound `ReplyHandle<Echo>: Wire` is not satisfied
+  --> tests/ui/reply_handle_not_wire.rs:16:13
+   |
+16 |     embed::<ReplyHandle<Echo>>();
+   |             ^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `ReplyHandle<Echo>`
+   |
+   = note: required for `ReplyHandle<Echo>` to implement `Wire`
+note: required by a bound in `embed`
+  --> tests/ui/reply_handle_not_wire.rs:12:13
+   |
+12 | fn embed<T: Wire>() {}
+   |             ^^^^ required by this bound in `embed`

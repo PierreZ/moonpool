@@ -2,6 +2,7 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
+use syn::ext::IdentExt;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
@@ -13,6 +14,11 @@ use syn::{
 /// Names generated next to the trait; a method whose marker would collide
 /// with one of them is refused.
 const RESERVED_SUFFIXES: [&str; 5] = ["Interface", "Ref", "Client", "Server", "Request"];
+
+/// Methods the generated client already has (inherent, `Clone`, `Debug`);
+/// a service method of the same name would shadow or clash with them.
+const RESERVED_CLIENT_METHODS: [&str; 6] =
+    ["bind", "target", "inner", "clone", "clone_from", "fmt"];
 
 /// `key = value` arguments, each required exactly once.
 struct Args {
@@ -172,7 +178,16 @@ fn parse_method(service: &Ident, item: TraitItemFn) -> syn::Result<Method> {
         ReturnType::Default => syn::parse_quote!(()),
         ReturnType::Type(_, ty) => (**ty).clone(),
     };
-    let variant = format_ident!("{}", camel(&signature.ident.to_string()));
+    // `r#type` names the method `type`: strip the prefix for every
+    // generated name.
+    let plain = signature.ident.unraw().to_string();
+    if RESERVED_CLIENT_METHODS.contains(&plain.as_str()) {
+        return Err(syn::Error::new(
+            span,
+            format!("a method named `{plain}` would collide with the generated client's `{plain}`"),
+        ));
+    }
+    let variant = format_ident!("{}", camel(&plain));
     if RESERVED_SUFFIXES.contains(&variant.to_string().as_str()) {
         return Err(syn::Error::new(
             span,
@@ -184,7 +199,7 @@ fn parse_method(service: &Ident, item: TraitItemFn) -> syn::Result<Method> {
     }
     Ok(Method {
         marker: format_ident!("{service}{variant}"),
-        stream: format_ident!("stream_{}", signature.ident),
+        stream: format_ident!("stream_{}", plain),
         id: args.required("id", span, "a service method")?,
         schema: args.required("schema", span, "a service method")?,
         request_name: format_ident!("request"),
@@ -232,6 +247,20 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     }
     if methods.is_empty() {
         return Err(syn::Error::new(span, "a service needs at least one method"));
+    }
+    for (index, method) in methods.iter().enumerate() {
+        if let Some(first) = methods[..index]
+            .iter()
+            .find(|earlier| earlier.variant == method.variant)
+        {
+            return Err(syn::Error::new(
+                method.ident.span(),
+                format!(
+                    "`{}` and `{}` both generate `{}{}`",
+                    first.ident, method.ident, ident, method.variant
+                ),
+            ));
+        }
     }
     let mut literal_ids: Vec<(u64, &Ident)> = Vec::new();
     for method in &methods {
@@ -348,7 +377,7 @@ fn definitions(service: &Service, names: &Names, methods: &[Method]) -> TokenStr
             ..
         } = method;
         let doc = format!("The [`{ident}::{method_ident}`] method: its explicit id and schema.");
-        let label = format!("{name}.{method_ident}");
+        let label = format!("{name}.{}", method_ident.unraw());
         quote! {
             #[doc = #doc]
             #vis struct #marker;
@@ -385,13 +414,13 @@ fn definitions(service: &Service, names: &Names, methods: &[Method]) -> TokenStr
 
         // Method ids given as constants are checked here, at compile time.
         const _: () = {
-            let ids: [u32; #count] = [#(#ids),*];
+            let ids: [::core::primitive::u32; #count] = [#(#ids),*];
             let mut first = 0;
             while first < #count {
                 let mut second = first + 1;
                 while second < #count {
                     if ids[first] == ids[second] {
-                        panic!(#duplicate_message);
+                        ::core::panic!(#duplicate_message);
                     }
                     second += 1;
                 }
@@ -530,7 +559,7 @@ fn server(service: &Service, names: &Names, methods: &[Method]) -> TokenStream {
         #vis struct #server {
             group: #rpc::ServiceGroup<#interface>,
             #(#stream_fields,)*
-            cursor: usize,
+            cursor: ::core::primitive::usize,
         }
 
         impl #server {
@@ -881,6 +910,61 @@ mod tests {
             let message = error(quote!(id = 1, version = 1), item);
             assert!(message.contains(expected), "{expected}: {message}");
         }
+    }
+
+    #[test]
+    fn generated_names_never_collide() {
+        let clash = error(
+            quote!(id = 1, version = 1),
+            quote!(
+                trait Kv {
+                    #[method(id = 1, schema = 1)]
+                    async fn bind(&self, r: u64) -> u64;
+                }
+            ),
+        );
+        assert!(clash.contains("generated client's `bind`"), "{clash}");
+        let raw_clash = error(
+            quote!(id = 1, version = 1),
+            quote!(
+                trait Kv {
+                    #[method(id = 1, schema = 1)]
+                    async fn r#clone(&self, r: u64) -> u64;
+                }
+            ),
+        );
+        assert!(raw_clash.contains("`clone`"), "{raw_clash}");
+        let camel = error(
+            quote!(id = 1, version = 1),
+            quote! {
+                trait Kv {
+                    #[method(id = 1, schema = 1)]
+                    async fn put_many(&self, r: u64) -> u64;
+                    #[method(id = 2, schema = 1)]
+                    async fn put__many(&self, r: u64) -> u64;
+                }
+            },
+        );
+        assert!(camel.contains("both generate `KvPutMany`"), "{camel}");
+    }
+
+    #[test]
+    fn raw_identifiers_are_unraw_in_generated_names() {
+        let tokens = expand(
+            quote!(id = 1, version = 1),
+            quote!(
+                pub trait Kv {
+                    #[method(id = 1, schema = 1)]
+                    async fn r#type(&self, r: u64) -> u64;
+                }
+            ),
+        )
+        .expect("expands");
+        let text = tokens.to_string();
+        assert!(text.contains("KvType"), "{text}");
+        assert!(text.contains("stream_type"), "{text}");
+        assert!(text.contains("\"Kv.type\""), "{text}");
+        let _: syn::File = syn::parse2(tokens).expect("valid items");
     }
 
     #[test]

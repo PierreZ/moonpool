@@ -29,3 +29,9 @@ slow-timeout = { period = "10s", terminate-after = 6 }
 [profile.default.junit]
 # Store test results
 path = "target/nextest/default/junit.xml"
+
+# The compile-fail cases build moonpool-rpc and its dependencies in their
+# own trybuild workspace on the first run: give them minutes, not seconds.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-derive) and binary(compile_fail)'
+slow-timeout = { period = "60s", terminate-after = 10 }

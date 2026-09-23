@@ -1,0 +1,5 @@
+error: `put_many` and `put__many` both generate `KvPutMany`
+ --> tests/ui/camel_case_collision.rs:6:14
+  |
+6 |     async fn put__many(&self, entry: String);
+  |              ^^^^^^^^^

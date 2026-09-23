@@ -1,0 +1,5 @@
+error: a method named `clone` would collide with the generated client's `clone`
+ --> tests/ui/raw_identifier_collision.rs:4:14
+  |
+4 |     async fn r#clone(&self, key: String) -> String;
+  |              ^^^^^^^

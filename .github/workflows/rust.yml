@@ -73,6 +73,10 @@ jobs:
         run: nix develop --command cargo clippy -p moonpool-rpc --no-default-features --all-targets -- --deny warnings
       - name: moonpool-rpc with its optional derive
         run: nix develop --command cargo clippy -p moonpool-rpc -p moonpool-rpc-derive --features moonpool-rpc/derive --all-targets -- --deny warnings
+      # nextest skips doctests; the RPC crate's examples and compile-fail
+      # doctests (derive included) run here.
+      - name: moonpool-rpc doctests
+        run: nix develop --command cargo test -p moonpool-rpc --features derive --doc
       - name: Build without any rustflags (no tokio_unstable required)
         run: |
           # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml

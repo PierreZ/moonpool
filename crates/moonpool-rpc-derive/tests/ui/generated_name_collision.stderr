@@ -1,0 +1,5 @@
+error: a method named `client` would collide with the generated `KvClient`
+ --> tests/ui/generated_name_collision.rs:4:14
+  |
+4 |     async fn client(&self, key: String) -> String;
+  |              ^^^^^^
