@@ -1399,8 +1399,10 @@ impl StorageEngine {
             && misdirect_roll < config.misdirect_write_probability
         {
             let max_offset = file_size.saturating_sub(len as u64);
+            // Every offset a `len`-byte write fits at, `max_offset` included
+            // (the misdirected-read path draws the same range).
             let mistaken = if max_offset > 0 {
-                sim_random_range(0..max_offset)
+                sim_random_range(0..max_offset + 1)
             } else {
                 0
             };

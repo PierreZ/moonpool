@@ -420,7 +420,7 @@ impl FileImage {
                     protected,
                     eligible,
                 );
-                self.apply_outcome(sector, outcome);
+                let outcome = self.apply_outcome(sector, outcome);
                 note_outcome_reachable(outcome, self.fill.garbage);
                 report.resolutions.push(SectorResolution {
                     sector,
@@ -593,8 +593,13 @@ impl FileImage {
         self.lied.clear(index);
     }
 
-    /// Materialize one sector's crash resolution into the committed image.
-    fn apply_outcome(&mut self, sector: u64, outcome: CrashOutcome) {
+    /// Materialize one sector's crash resolution into the committed image,
+    /// returning the outcome actually applied.
+    ///
+    /// That differs from `outcome` only for a [`CrashOutcome::Shorn`] on a
+    /// sector with fewer than two shared bytes: there is nothing to tear, so it
+    /// resolves as [`CrashOutcome::KeptOld`] and is reported as such.
+    fn apply_outcome(&mut self, sector: u64, outcome: CrashOutcome) -> CrashOutcome {
         let index = as_index(sector);
         match outcome {
             CrashOutcome::KeptOld => {
@@ -625,21 +630,24 @@ impl FileImage {
             }
             CrashOutcome::Shorn => {
                 let range = self.shared_bounds(sector);
-                if range.len() > 1 {
-                    let split = sim_random_range(1..range.len());
-                    let prefix_new = sim_random::<bool>();
-                    let kept = if prefix_new {
-                        range.start..range.start + split
-                    } else {
-                        range.start + split..range.end
-                    };
-                    let bytes = self.visible[kept.clone()].to_vec();
-                    self.committed[kept].copy_from_slice(&bytes);
+                if range.len() <= 1 {
+                    // Nothing to tear: a plain rollback.
+                    return self.apply_outcome(sector, CrashOutcome::KeptOld);
                 }
+                let split = sim_random_range(1..range.len());
+                let prefix_new = sim_random::<bool>();
+                let kept = if prefix_new {
+                    range.start..range.start + split
+                } else {
+                    range.start + split..range.end
+                };
+                let bytes = self.visible[kept.clone()].to_vec();
+                self.committed[kept].copy_from_slice(&bytes);
                 self.dirty.clear(index);
                 self.lied.clear(index);
             }
         }
+        outcome
     }
 
     /// Verify that every sector a sync reported durable still holds what the
@@ -841,6 +849,39 @@ mod tests {
 
     fn always_eligible(_sector: u64) -> bool {
         true
+    }
+
+    /// A shorn outcome on a sector with a single shared byte has nothing to
+    /// tear: it must resolve as a rollback and be *reported* as one, not
+    /// recorded as `Shorn` while leaving the sector untouched (issue #258).
+    #[test]
+    fn a_one_byte_sector_is_never_reported_shorn() {
+        use crate::storage::CrashOutcome;
+        let config = StorageConfiguration {
+            clean_crash_probability: 0.0,
+            crash_lost_probability: 0.0,
+            crash_latent_fault_probability: 0.0,
+            shorn_write_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        };
+        for seed in 0..16_u64 {
+            seeded(seed);
+            let mut image = image(0);
+            image.write(0, b"a");
+            image.sync(&config, &always_eligible);
+            image.write(0, b"b");
+
+            let report = image.crash("f", &config, false, &always_eligible);
+            assert_eq!(report.resolutions.len(), 1, "seed {seed}");
+            assert_eq!(
+                report.resolutions[0].outcome,
+                CrashOutcome::KeptOld,
+                "seed {seed}: nothing to tear, so the report says rollback"
+            );
+            let mut buf = [0u8; 1];
+            image.read(0, &mut buf).expect("read failed");
+            assert_eq!(&buf, b"a", "seed {seed}: the sector rolled back");
+        }
     }
 
     #[test]
