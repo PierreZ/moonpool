@@ -47,15 +47,15 @@
 //! replies, store them, forward them to a third participant; decoding
 //! needs no runtime and keeps nothing alive. A restarted process publishes
 //! fresh references and callers learn them explicitly; a reference to the
-//! previous incarnation is refused, never redirected. See [`interface`].
+//! previous incarnation is refused, never redirected, and a reference to
+//! another interface is refused by the server before decoding. See
+//! [`interface`].
 //!
 //! The optional `derive` feature adds `#[moonpool_rpc::service]`, which
 //! generates the interface and method markers, a dispatcher over the
 //! request streams and a typed client from one trait. It is built on the
 //! manual API above and owns no protocol state; the manual API stays
 //! first-class.
-//! The optional `derive` feature generates the typed interface, dispatcher
-//! and client from a trait, on top of the same manual API.
 //!
 //! ## Delivery modes
 //!
