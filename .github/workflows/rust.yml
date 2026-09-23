@@ -44,6 +44,20 @@ jobs:
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
 
+  # moonpool-rpc over real localhost TCP on both Tokio flavors: open-loop
+  # unary load, reply streams, an overload burst and its recovery, every
+  # runtime back at its resource baseline. The smoke mode checks invariants,
+  # not latency (the full run's numbers are recorded in
+  # docs/plans/moonpool-rpc/qualification.md).
+  rpc-soak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: moonpool-rpc real-network soak (smoke)
+        run: nix develop --command cargo run -p moonpool-rpc-sim --example rpc_soak -- --smoke
+
   # The simulation must stay buildable without the fork-based explorer (libc) so
   # it can compile to wasm. Guards the explorer-optional path + the wasm target.
   portability:
@@ -176,6 +190,12 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run explorer and sim tests
         run: nix develop --command cargo nextest run -p moonpool-explorer -p moonpool-sim
+      # moonpool-rpc's real-network suites (both Tokio flavors) on darwin's
+      # socket stack: the platform half of the RPC qualification (#219).
+      - name: Run moonpool-rpc real-network tests
+        run: nix develop --command cargo nextest run -p moonpool-rpc
+      - name: moonpool-rpc real-network soak (smoke)
+        run: nix develop --command cargo run -p moonpool-rpc-sim --example rpc_soak -- --smoke
       - name: Run fork-based exploration simulation
         run: nix develop --command cargo xtask sim run frontier-explore
 
@@ -198,6 +218,7 @@ jobs:
           - rpc-balance
           - rpc-streams
           - rpc-security
+          - rpc-qualification
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
