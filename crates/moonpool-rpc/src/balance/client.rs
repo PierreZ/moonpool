@@ -615,6 +615,7 @@ impl<P: Providers, M: RpcMethod> BalancedClient<P, M> {
             comparison: None,
             last: None,
             blocked: None,
+            probed: false,
         };
         let outcome = call.run(&mut progress).await;
         let mut records = std::mem::take(&mut progress.records);
@@ -702,6 +703,8 @@ struct Progress<P: Providers, R: Send + 'static> {
     last: Option<BalanceFailure>,
     /// An ambiguous attempt without retry permission: nothing new starts.
     blocked: Option<RpcError>,
+    /// Alternatives believed unreachable were already probed.
+    probed: bool,
 }
 
 /// One running call.
@@ -714,8 +717,10 @@ struct Call<'a, P: Providers, M: RpcMethod> {
 }
 
 impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
-    /// Rank the alternatives not yet `dead` for this call.
-    fn choose(&self, dead: &mut BTreeSet<usize>) -> Choice {
+    /// Rank the alternatives not yet `dead` for this call; with `probe`,
+    /// alternatives whose address is believed failed are usable too (after
+    /// the reachable ones).
+    fn choose(&self, dead: &mut BTreeSet<usize>, probe: bool) -> Choice {
         let now = self.env.time.now();
         let model = &self.client.model;
         let monitor = &self.env.monitor;
@@ -751,20 +756,20 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         let random = self.env.random.clone();
         let mut draw = move |n: u64| random.random_range(0..n.max(1));
         let proposed = self.client.selector.order(&candidates, &mut draw);
-        let available: BTreeSet<usize> = candidates
+        let usable: BTreeSet<usize> = candidates
             .iter()
-            .filter(|candidate| candidate.available)
+            .filter(|candidate| candidate.available || probe)
             .map(|candidate| candidate.index)
             .collect();
-        let mut order = Vec::with_capacity(available.len());
+        let mut order = Vec::with_capacity(usable.len());
         let mut seen = BTreeSet::new();
         for index in proposed {
-            if available.contains(&index) && seen.insert(index) {
+            if usable.contains(&index) && seen.insert(index) {
                 order.push(index);
             }
         }
-        // No selector hides a reachable alternative.
-        for index in available {
+        // No selector hides a usable alternative.
+        for index in usable {
             if seen.insert(index) {
                 order.push(index);
             }
@@ -787,7 +792,7 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         loop {
             // Register before checking: no change is lost.
             let change = self.env.monitor.on_change();
-            match self.choose(dead) {
+            match self.choose(dead, false) {
                 Choice::Unreachable => {}
                 other => return Some(other),
             }
@@ -907,16 +912,30 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
                     .take()
                     .unwrap_or(BalanceFailure::AllAlternativesFailed));
             }
-            let order = match self.choose(&mut progress.dead) {
+            let order = match self.choose(&mut progress.dead, false) {
                 Choice::Dead => return Err(BalanceFailure::StaleAlternatives),
                 Choice::Ordered(order) => order,
                 Choice::Unreachable => match self.wait_reachable(&mut progress.dead).await {
                     None => return Err(BalanceFailure::Shutdown),
                     Some(Choice::Dead) => return Err(BalanceFailure::StaleAlternatives),
-                    Some(Choice::Unreachable) => {
+                    Some(Choice::Ordered(order)) => order,
+                    Some(Choice::Unreachable) if progress.probed => {
                         return Err(BalanceFailure::AllAlternativesFailed);
                     }
-                    Some(Choice::Ordered(order)) => order,
+                    Some(Choice::Unreachable) => {
+                        // A failed address is an observation that only a
+                        // new connection can change: probe with one
+                        // attempt before giving up, so no belief excludes
+                        // every alternative for good.
+                        progress.probed = true;
+                        match self.choose(&mut progress.dead, true) {
+                            Choice::Ordered(order) => order,
+                            Choice::Dead => return Err(BalanceFailure::StaleAlternatives),
+                            Choice::Unreachable => {
+                                return Err(BalanceFailure::AllAlternativesFailed);
+                            }
+                        }
+                    }
                 },
             };
             let Some(&target) = order.iter().find(|index| !progress.tried.contains(index)) else {
@@ -999,7 +1018,7 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         if progress.copies >= copies.max_copies || progress.blocked.is_some() {
             return;
         }
-        let target = match self.choose(&mut progress.dead) {
+        let target = match self.choose(&mut progress.dead, false) {
             Choice::Ordered(order) => order.into_iter().find(|index| {
                 !progress.flights.in_flight(*index) && !progress.tried.contains(index)
             }),
