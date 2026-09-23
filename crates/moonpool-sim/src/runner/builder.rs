@@ -55,9 +55,20 @@ struct RunOrchestratorInputs<'a> {
 /// Outcome of an orchestration attempt.
 type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
 
+/// Whether an iteration let the run loop continue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IterationOutcome {
+    /// The seed ran to completion (successfully or not).
+    Completed,
+    /// The seed deadlocked: the campaign stops and reports what it gathered.
+    Deadlocked,
+}
+
 /// Per-run outcomes passed into the final-report builder.
 struct FinalReportInputs {
     converged: bool,
+    /// The run stopped on a deadlocked seed rather than its iteration cap.
+    deadlocked: bool,
     /// Saturation outcome captured during the last scan (`UntilCoverageStable`).
     saturation: Option<super::report::SaturationReport>,
     /// The exploration summary, when exploration was configured.
@@ -1248,33 +1259,6 @@ impl SimulationBuilder {
         fault_injectors
     }
 
-    /// Build an early-exit report on deadlock: snapshot the assertion
-    /// state, reset buggify, and consume the metrics collector.
-    fn build_early_exit_report(
-        metrics_collector: MetricsCollector,
-        iteration_count: usize,
-        seeds_used: Vec<u64>,
-    ) -> SimulationReport {
-        let assertion_results = crate::chaos::assertion_results();
-        let (assertion_violations, coverage_violations) =
-            crate::chaos::validate_assertion_contracts();
-        let dropped_assertion_allocations = moonpool_assertions::assertion_dropped_allocations();
-        crate::chaos::buggify_reset();
-        metrics_collector.generate_report(GenerateReportInputs {
-            iteration_count,
-            seeds_used,
-            assertion_results,
-            assertion_violations,
-            dropped_assertion_allocations,
-            coverage_violations,
-            exploration: None,
-            assertion_details: Vec::new(),
-            bucket_summaries: Vec::new(),
-            convergence_timeout: false,
-            saturation: None,
-        })
-    }
-
     /// Refuse fault injectors that could never run: injectors (custom
     /// factories and attrition regimes) only run inside the chaos window, so
     /// without [`Self::chaos_duration`] they would be dropped unrun while the
@@ -1635,6 +1619,18 @@ impl SimulationBuilder {
         }
         let _select_reset = SelectOverrideReset;
 
+        // Free the assertion region on every exit path, including a panic:
+        // otherwise the next run() on this thread would inherit this run's
+        // counts and discovery latches. Idempotent, so the normal path's
+        // explicit cleanup in build_final_report is unaffected.
+        struct AssertionRegionCleanup;
+        impl Drop for AssertionRegionCleanup {
+            fn drop(&mut self) {
+                crate::chaos::exploration_glue::cleanup_assertion_region();
+            }
+        }
+        let _region_cleanup = AssertionRegionCleanup;
+
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.
         // All registered invariants live on the layer handle.
@@ -1655,9 +1651,13 @@ impl SimulationBuilder {
             state.explorer = explorer;
         }
 
+        // A deadlocked seed aborts the campaign, but the report still carries
+        // everything gathered so far (exploration, assertions, saturation).
+        let mut deadlocked = false;
         while state.iteration_manager.should_continue() {
-            if let Some(report) = self.execute_iteration(&mut state, &obs_handle) {
-                return report;
+            if self.execute_iteration(&mut state, &obs_handle) == IterationOutcome::Deadlocked {
+                deadlocked = true;
+                break;
             }
             if state.converged {
                 break;
@@ -1690,19 +1690,20 @@ impl SimulationBuilder {
             &self.iteration_control,
             FinalReportInputs {
                 converged: state.converged,
+                deadlocked,
                 saturation: state.saturation,
                 exploration,
             },
         )
     }
 
-    /// Execute one iteration of the run loop. Returns `Some(report)` when the
-    /// loop must terminate early (e.g. orchestrator deadlock).
+    /// Execute one iteration of the run loop. Returns
+    /// [`IterationOutcome::Deadlocked`] when the loop must stop early.
     fn execute_iteration(
         &mut self,
         state: &mut RunState,
         obs_handle: &SimulationLayerHandle,
-    ) -> Option<SimulationReport> {
+    ) -> IterationOutcome {
         let seed = state.iteration_manager.next_iteration();
         let iteration_count = state.iteration_manager.current_iteration();
 
@@ -1722,15 +1723,24 @@ impl SimulationBuilder {
             Err(_) => true,
         };
 
-        if let Err(report) = self.handle_orchestration_result(
+        if self.handle_orchestration_result(
             state,
             orchestration_result,
             seed,
             iteration_count,
             start_time,
-        ) {
+        ) == IterationOutcome::Deadlocked
+        {
             crate::sim::stop_determinism_canary();
-            return Some(*report);
+            // Keep the per-seed exploration series aligned with seeds_used.
+            #[cfg(feature = "exploration")]
+            if self.exploration_config.is_some() {
+                state
+                    .exploration_totals
+                    .accumulate(state.explorer.as_ref(), seed);
+            }
+            crate::chaos::buggify_reset();
+            return IterationOutcome::Deadlocked;
         }
 
         if self.check_determinism {
@@ -1741,7 +1751,7 @@ impl SimulationBuilder {
         self.run_exploration_phase(state, obs_handle, seed, iteration_count, root_failed);
 
         self.finish_iteration(state, seed, iteration_count);
-        None
+        IterationOutcome::Completed
     }
 
     /// The determinism canary's second pass (see
@@ -1980,7 +1990,7 @@ impl SimulationBuilder {
     }
 
     /// Process the orchestration outcome: route the success path back into
-    /// state, or build an early-exit report on deadlock.
+    /// state, or record the deadlocked seed as failed.
     fn handle_orchestration_result(
         &mut self,
         state: &mut RunState,
@@ -1988,9 +1998,8 @@ impl SimulationBuilder {
         seed: u64,
         iteration_count: usize,
         start_time: Instant,
-    ) -> Result<(), Box<SimulationReport>> {
+    ) -> IterationOutcome {
         let max_iterations = state.iteration_manager.max_iterations();
-        let seeds_used_snapshot = state.iteration_manager.seeds_used().to_vec();
         match result {
             Ok(OrchestrateOutput {
                 workloads: returned_workloads,
@@ -2011,22 +2020,14 @@ impl SimulationBuilder {
                     iteration_count,
                     max_iterations,
                 );
-                Ok(())
+                IterationOutcome::Completed
             }
             Err((faulty_seeds_from_deadlock, failed_count)) => {
                 state
                     .metrics_collector
                     .add_faulty_seeds(faulty_seeds_from_deadlock);
                 state.metrics_collector.add_failed_runs(failed_count);
-                let metrics_collector = std::mem::replace(
-                    &mut state.metrics_collector,
-                    MetricsCollector::new(0, Vec::new()),
-                );
-                Err(Box::new(Self::build_early_exit_report(
-                    metrics_collector,
-                    iteration_count,
-                    seeds_used_snapshot,
-                )))
+                IterationOutcome::Deadlocked
             }
         }
     }
@@ -2075,6 +2076,7 @@ impl SimulationBuilder {
     ) -> SimulationReport {
         let FinalReportInputs {
             converged,
+            deadlocked,
             saturation,
             exploration,
         } = inputs;
@@ -2096,11 +2098,13 @@ impl SimulationBuilder {
         let bucket_summaries = build_bucket_summaries(&raw_each_buckets);
         let iteration_count = iteration_manager.current_iteration();
 
-        // Detect saturation timeout: the cap was hit without saturating.
+        // Detect saturation timeout: the cap was hit without saturating. A
+        // deadlock stopped the run before the cap, which is not a timeout.
         let convergence_timeout = matches!(
             iteration_control,
             IterationControl::UntilCoverageStable { .. }
-        ) && !converged;
+        ) && !converged
+            && !deadlocked;
 
         crate::chaos::buggify_reset();
 

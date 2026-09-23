@@ -159,6 +159,8 @@ SimulationBuilder::new()
 
 `UntilCoverageStable` sets `report.convergence_timeout = true` when the safety cap is hit before the run saturates, so CI can fail loudly instead of silently treating "we ran out of seeds" as success.
 
+A seed that deadlocks stops the whole campaign, but not the report: the deadlocked seed is listed in `seeds_failing`, and everything the earlier seeds gathered (assertion details, bucket summaries, saturation, exploration recipes) is still there. A deadlock is not a saturation timeout, so `convergence_timeout` stays `false`.
+
 Each workload phase also has a generous virtual-time budget. It bounds a
 setup, run, or final check that keeps rearming timers without completing. The
 runner first requests shutdown, then rejects a phase that still cannot finish,
