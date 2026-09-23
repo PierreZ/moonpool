@@ -589,6 +589,10 @@ impl<P: Providers, M: RpcMethod> BalancedClient<P, M> {
                 Vec::new(),
             ));
         };
+        // `Wire` types are `Send` but not necessarily `Sync`; behind a
+        // mutex the request can be borrowed across awaits and the call
+        // future stays `Send`.
+        let request = Mutex::new(request);
         let call = Call {
             client: self,
             snapshot: &snapshot,
@@ -712,7 +716,7 @@ struct Call<'a, P: Providers, M: RpcMethod> {
     client: &'a BalancedClient<P, M>,
     snapshot: &'a Snapshot<P, M>,
     env: &'a Env<P>,
-    request: &'a M::Request,
+    request: &'a Mutex<M::Request>,
     policy: &'a BalancePolicy,
 }
 
@@ -822,7 +826,7 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
             kind,
         });
         tracing::debug!(method = M::NAME, alternative, ?kind, %endpoint, "rpc balance attempt started");
-        let started = client.attempt(self.request);
+        let started = client.attempt(&lock(self.request));
         let mut guard = EndGuard {
             hooks: Arc::clone(&hooks),
             alternative,
@@ -975,7 +979,7 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         let second = order.iter().copied().find(|index| *index != target);
         if progress.copies < copies.max_copies
             && let Some(second) = second
-            && self.client.hooks.wants_comparison(self.request)
+            && self.client.hooks.wants_comparison(&lock(self.request))
             && model.try_take_copy()
         {
             progress.copies += 1;
@@ -1056,7 +1060,17 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         match (landed.outcome, landed.verdict) {
             (Ok(reply), Some(Verdict::Accept(_))) => {
                 progress.hedge = None;
-                self.compare(progress, &reply).await?;
+                if progress.comparison.is_some() {
+                    self.await_comparison(progress).await;
+                    let copy = progress
+                        .comparison
+                        .as_ref()
+                        .and_then(|comparison| comparison.outcome.as_ref());
+                    self.client
+                        .hooks
+                        .compare(&reply, copy)
+                        .map_err(BalanceFailure::Comparison)?;
+                }
                 Ok(Some((reply, active.alternative)))
             }
             (Ok(_), _) => {
@@ -1088,15 +1102,10 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
         }
     }
 
-    /// Wait (bounded) for the comparison copy, then ask the hook.
-    async fn compare(
-        &self,
-        progress: &mut Progress<P, M::Reply>,
-        winner: &M::Reply,
-    ) -> Result<(), BalanceFailure> {
-        if progress.comparison.is_none() {
-            return Ok(());
-        }
+    /// Wait (bounded) for the comparison copy's outcome. Holds no
+    /// reference to the winner across the wait, so the call future needs
+    /// only `Send` replies.
+    async fn await_comparison(&self, progress: &mut Progress<P, M::Reply>) {
         let within = self
             .policy
             .duplicates
@@ -1129,14 +1138,6 @@ impl<P: Providers, M: RpcMethod> Call<'_, P, M> {
                 comparison.outcome = Some(landed.outcome);
             }
         }
-        let copy = progress
-            .comparison
-            .as_ref()
-            .and_then(|comparison| comparison.outcome.as_ref());
-        self.client
-            .hooks
-            .compare(winner, copy)
-            .map_err(BalanceFailure::Comparison)
     }
 }
 
@@ -1230,6 +1231,56 @@ mod tests {
             ErrorReason::Disconnected,
             Execution::MaybeExecuted
         )));
+    }
+
+    #[test]
+    fn a_call_future_is_send_even_when_the_request_is_not_sync() {
+        use std::cell::Cell;
+
+        use moonpool_core::TokioProviders;
+
+        use crate::balance::{
+            AlternativeSet, BalanceConfig, BalancePolicy, BalancedClient, ModelConfig, QueueModel,
+        };
+        use crate::codec::{CodecId, DecodeError, EncodeError, Wire};
+        use crate::protocol::{MethodId, RpcMethod, SchemaVersion};
+        use crate::{RpcConfig, RpcDriver};
+
+        struct NotSync(Cell<u8>);
+        impl Wire for NotSync {
+            const CODEC: CodecId = CodecId::new(0x8123);
+            fn encode(&self, buf: &mut Vec<u8>) -> Result<(), EncodeError> {
+                buf.push(self.0.get());
+                Ok(())
+            }
+            fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+                Ok(Self(Cell::new(bytes.first().copied().unwrap_or(0))))
+            }
+        }
+        struct Method;
+        impl RpcMethod for Method {
+            type Request = NotSync;
+            type Reply = NotSync;
+            const METHOD: MethodId = MethodId::new(1);
+            const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+            const NAME: &'static str = "not-sync";
+        }
+        fn assert_send<T: Send>(_: &T) {}
+
+        let (driver, rpc) =
+            RpcDriver::client_only(TokioProviders::new(), RpcConfig::default()).expect("valid");
+        let model = QueueModel::new(ModelConfig::default()).expect("valid");
+        let client = BalancedClient::<TokioProviders, Method>::new(
+            &rpc,
+            AlternativeSet::empty(SetVersion::new(0)),
+            model,
+            BalanceConfig::default(),
+        )
+        .expect("valid");
+        let policy = BalancePolicy::default();
+        let call = client.call(NotSync(Cell::new(1)), &policy);
+        assert_send(&call);
+        drop((call, driver));
     }
 
     #[test]
