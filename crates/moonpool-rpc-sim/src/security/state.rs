@@ -300,9 +300,13 @@ pub fn consistent_denial(
         (kind, CredentialError::NotYetValid) if kind.is_signed_by_the_issuer() => {
             minted.not_before > issued.utc_sent
         }
-        (kind, CredentialError::UnknownKey) if kind.is_signed_by_the_issuer() => minted
+        // The key is looked up before the signature, the issuer or the
+        // audience are checked: any token naming a key that is no longer
+        // published (two rotations can pass while a request waits for its
+        // session) meets this first. Only the algorithm comes earlier.
+        (kind, CredentialError::UnknownKey) if kind != Kind::Symmetric => minted
             .key
-            .is_none_or(|key| !trust.published_between(key, generation, generation)),
+            .is_some_and(|key| !trust.published_between(key, generation, generation)),
         _ => false,
     }
 }

@@ -253,7 +253,7 @@ fn denial_gate(kind: Kind, reason: CredentialError) {
         }
         (Kind::Garbage, _) => assert_sometimes!(true, "rpc security malformed credential refused"),
         (_, CredentialError::Expired) => {
-            assert_sometimes!(true, "rpc security expired token refused")
+            assert_sometimes!(true, "rpc security expired token refused");
         }
         (_, CredentialError::NotYetValid) => {
             assert_sometimes!(true, "rpc security not-yet-valid token refused");

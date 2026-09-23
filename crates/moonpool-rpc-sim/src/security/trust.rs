@@ -319,87 +319,16 @@ impl Trust {
                 ring.retired.last().copied(),
             )
         };
-        let (kind, signer, named, issuer, audience, not_before, expires) = match kind {
-            Kind::Anonymous => {
-                return Minted {
-                    kind,
-                    token: None,
-                    key: None,
-                    not_before: 0,
-                    expires: 0,
-                };
-            }
-            Kind::Garbage => {
-                return Minted {
-                    kind,
-                    token: Some(b"not a token".to_vec()),
-                    key: None,
-                    not_before: 0,
-                    expires: 0,
-                };
-            }
-            Kind::Valid | Kind::Refreshing => (
-                kind,
-                newest,
-                newest,
-                ISSUER,
-                AUDIENCE,
-                now - 5,
-                now + ttl.max(30),
-            ),
-            Kind::ShortLived => (
-                kind,
-                newest,
-                newest,
-                ISSUER,
-                AUDIENCE,
-                now - 5,
-                now + ttl.clamp(1, 8),
-            ),
-            Kind::NotYetValid => {
-                let from = now + delay.max(5);
-                (kind, newest, newest, ISSUER, AUDIENCE, from, from + 300)
-            }
-            Kind::RotatedOut => match retired {
-                Some(old) => (kind, old, old, ISSUER, AUDIENCE, now - 5, now + 300),
-                None => (
-                    Kind::UnknownKey,
-                    STRANGER,
-                    STRANGER,
-                    ISSUER,
-                    AUDIENCE,
-                    now - 5,
-                    now + 300,
-                ),
-            },
-            Kind::Forged => (kind, STRANGER, newest, ISSUER, AUDIENCE, now - 5, now + 300),
-            Kind::UnknownKey => (
-                kind,
-                STRANGER,
-                STRANGER,
-                ISSUER,
-                AUDIENCE,
-                now - 5,
-                now + 300,
-            ),
-            Kind::WrongAudience => (
-                kind,
-                newest,
-                newest,
-                ISSUER,
-                "elsewhere",
-                now - 5,
-                now + 300,
-            ),
-            Kind::WrongIssuer => (
-                kind,
-                newest,
-                newest,
-                "mallory",
-                AUDIENCE,
-                now - 5,
-                now + 300,
-            ),
+        let unsigned = |token: Option<Vec<u8>>| Minted {
+            kind,
+            token,
+            key: None,
+            not_before: 0,
+            expires: 0,
+        };
+        let plan = match kind {
+            Kind::Anonymous => return unsigned(None),
+            Kind::Garbage => return unsigned(Some(b"not a token".to_vec())),
             Kind::Symmetric => {
                 let mut header = Header::new(Algorithm::HS256);
                 header.kid = Some(kid(newest));
@@ -418,22 +347,104 @@ impl Trust {
                     expires: now + 300,
                 };
             }
+            _ => Plan::of(kind, now, newest, retired, ttl, delay),
         };
         let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some(kid(named));
+        header.kid = Some(kid(plan.named));
         let token = encode(
             &header,
-            &claims(subject, issuer, audience, not_before, expires),
-            &signing_key(signer),
+            &claims(
+                subject,
+                plan.issuer,
+                plan.audience,
+                plan.not_before,
+                plan.expires,
+            ),
+            &signing_key(plan.signer),
         )
         .ok()
         .map(String::into_bytes);
         Minted {
-            kind,
+            kind: plan.kind,
             token,
-            key: Some(named),
-            not_before,
-            expires,
+            key: Some(plan.named),
+            not_before: plan.not_before,
+            expires: plan.expires,
+        }
+    }
+}
+
+/// How an `EdDSA` token of some kind is signed and what it says.
+struct Plan {
+    kind: Kind,
+    signer: u32,
+    named: u32,
+    issuer: &'static str,
+    audience: &'static str,
+    not_before: u64,
+    expires: u64,
+}
+
+impl Plan {
+    fn of(kind: Kind, now: u64, newest: u32, retired: Option<u32>, ttl: u64, delay: u64) -> Self {
+        let proper = Self {
+            kind,
+            signer: newest,
+            named: newest,
+            issuer: ISSUER,
+            audience: AUDIENCE,
+            not_before: now - 5,
+            expires: now + 300,
+        };
+        match kind {
+            Kind::Valid | Kind::Refreshing => Self {
+                expires: now + ttl.max(30),
+                ..proper
+            },
+            Kind::ShortLived => Self {
+                expires: now + ttl.clamp(1, 8),
+                ..proper
+            },
+            Kind::NotYetValid => {
+                let from = now + delay.max(5);
+                Self {
+                    not_before: from,
+                    expires: from + 300,
+                    ..proper
+                }
+            }
+            // Before any rotation there is no retired key: an unknown one.
+            Kind::RotatedOut => match retired {
+                Some(old) => Self {
+                    signer: old,
+                    named: old,
+                    ..proper
+                },
+                None => Self {
+                    kind: Kind::UnknownKey,
+                    signer: STRANGER,
+                    named: STRANGER,
+                    ..proper
+                },
+            },
+            Kind::Forged => Self {
+                signer: STRANGER,
+                ..proper
+            },
+            Kind::UnknownKey => Self {
+                signer: STRANGER,
+                named: STRANGER,
+                ..proper
+            },
+            Kind::WrongAudience => Self {
+                audience: "elsewhere",
+                ..proper
+            },
+            Kind::WrongIssuer => Self {
+                issuer: "mallory",
+                ..proper
+            },
+            Kind::Anonymous | Kind::Garbage | Kind::Symmetric => proper,
         }
     }
 }
