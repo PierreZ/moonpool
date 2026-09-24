@@ -128,6 +128,26 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
         path: &str,
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;
 
+    /// List the names directly under the directory `path`, sorted.
+    ///
+    /// Returns bare names — no directory prefix — of files and
+    /// subdirectories alike, excluding `.` and `..`. This is the *visible*
+    /// namespace, what `readdir` sees: a name created since the last
+    /// [`sync_dir`](Self::sync_dir) is listed, and may still be gone after a
+    /// crash. It is how a storage engine that names its files by content
+    /// (log segments named after their first index, say) finds them again
+    /// without keeping a separate catalogue.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::NotFound`] if `path` does not exist,
+    /// [`io::ErrorKind::NotADirectory`] if it names a file, and
+    /// [`io::ErrorKind::InvalidData`] for a name that is not valid UTF-8.
+    fn list_dir(
+        &self,
+        path: &str,
+    ) -> impl std::future::Future<Output = io::Result<Vec<String>>> + Send;
+
     /// Make the *directory entries* under `path` durable.
     ///
     /// `path` must name an existing directory.

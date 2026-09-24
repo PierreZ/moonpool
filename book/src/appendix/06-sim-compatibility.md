@@ -56,7 +56,7 @@ The simulated stream overrides `poll_write_vectored`: each `IoSlice` becomes its
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `tokio::fs::*`, `std::fs::*` | `storage.create_dir_all(path)`, `storage.open(path, options)`, `storage.exists`, `storage.delete`, `storage.rename`, `storage.sync_dir(path)` |
+| `tokio::fs::*`, `std::fs::*` | `storage.create_dir_all(path)`, `storage.open(path, options)`, `storage.exists`, `storage.delete`, `storage.rename`, `storage.list_dir(path)`, `storage.sync_dir(path)` |
 | Direct file handles | `StorageFile` with `sync_all`, `sync_data`, `size`, `set_len` |
 
 Storage operations return `Poll::Pending` and require simulation stepping. See the **Storage Testing Patterns** section of the project `AGENTS.md` for the step-loop required when driving storage from a test.

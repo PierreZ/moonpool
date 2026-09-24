@@ -80,6 +80,10 @@ impl StorageProvider for SimStorageProvider {
         Ok(self.sim()?.create_dir_all(path, self.owner_ip)?)
     }
 
+    async fn list_dir(&self, path: &str) -> io::Result<Vec<String>> {
+        Ok(self.sim()?.list_dir(path, self.owner_ip)?)
+    }
+
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
         Ok(self.sim()?.sync_dir(path, self.owner_ip)?)
     }

@@ -110,6 +110,49 @@ fn file_sync_does_not_make_the_directory_entry_durable() {
     });
 }
 
+/// A listing is the visible namespace: it shows an unsynced name at once,
+/// and a crash takes that name out of the listing along with the entry.
+#[test]
+fn listing_shows_the_visible_namespace_and_follows_a_crash() {
+    local_runtime().block_on(async {
+        let mut sim = losing_sim();
+
+        let before = run_on(&mut sim, |provider| async move {
+            provider.create_dir_all("db").await.expect("create db");
+            provider.sync_dir(".").await.expect("durable db");
+            for name in ["db/seg-2", "db/seg-1"] {
+                let file = provider
+                    .open(name, OpenOptions::create_write())
+                    .await
+                    .expect("create segment");
+                file.sync_all().await.expect("sync segment");
+            }
+            provider.sync_dir("db").await.expect("durable segments");
+            provider.create_dir_all("db/sub").await.expect("create sub");
+            let file = provider
+                .open("db/seg-3", OpenOptions::create_write())
+                .await
+                .expect("create unsynced segment");
+            file.sync_all().await.expect("sync bytes, not the name");
+            provider.list_dir("db").await.expect("list db")
+        })
+        .await;
+        assert_eq!(before, ["seg-1", "seg-2", "seg-3", "sub"]);
+
+        sim.simulate_crash_for_process(test_ip(), true);
+
+        let after = run_on(&mut sim, |provider| async move {
+            provider.list_dir("db").await.expect("list db")
+        })
+        .await;
+        assert_eq!(
+            after,
+            ["seg-1", "seg-2"],
+            "names never made durable by sync_dir leave the listing"
+        );
+    });
+}
+
 /// The same run with a directory sync: the name survives too.
 #[test]
 fn a_synced_directory_entry_survives() {

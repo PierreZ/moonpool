@@ -1,7 +1,7 @@
 //! Storage state transitions and fault injection.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     ops::Range,
     task::{Poll, Waker},
@@ -609,6 +609,25 @@ impl StorageEngine {
     ///
     /// Namespace operations complete without a scheduled event, like `delete`
     /// and `rename`, so this one does too.
+    /// The visible names directly under `path`, sorted: every file and
+    /// directory whose parent is `path`, durable or not.
+    pub(crate) fn list_dir(
+        &self,
+        path: &str,
+        owner_ip: IpAddr,
+    ) -> Result<Vec<String>, StorageError> {
+        let (directory, _) = self.resolve_path(owner_ip, path, false)?;
+        self.require_directory(owner_ip, &directory)?;
+        let files = self.state.path_to_file.keys();
+        let directories = self.state.directories.iter();
+        let names: BTreeSet<String> = files
+            .chain(directories)
+            .filter(|(owner, entry)| *owner == owner_ip && parent_directory(entry) == directory)
+            .map(|(_, entry)| base_name(entry).to_string())
+            .collect();
+        Ok(names.into_iter().collect())
+    }
+
     pub(crate) fn sync_dir(
         &mut self,
         path: &str,
@@ -1950,6 +1969,11 @@ fn misdirected_read_offset(
     } else {
         original_position + delta
     }
+}
+
+/// The last component of a canonical path.
+fn base_name(path: &str) -> &str {
+    path.rfind('/').map_or(path, |index| &path[index + 1..])
 }
 
 /// The directory part of a canonical path, with distinct relative and

@@ -190,6 +190,8 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
 
     fn create_dir_all(&self, path: &str) -> impl Future<Output = io::Result<()>> + Send;
 
+    fn list_dir(&self, path: &str) -> impl Future<Output = io::Result<Vec<String>>> + Send;
+
     fn sync_dir(&self, path: &str) -> impl Future<Output = io::Result<()>> + Send;
 }
 
@@ -217,7 +219,7 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
 
 Storage is the newest provider, and the one with the richest fault model. The
 split is that the **provider owns the filesystem namespace** — open, exists,
-delete, rename, and the directory sync that makes those durable — while the
+delete, rename, listing, and the directory sync that makes those durable — while the
 **file owns already-open bytes**. The two never cross: a `delete`, or a
 `rename` over a name, removes the name and nothing else, so a file opened
 before it keeps reading and writing the same bytes, exactly as on Unix, and
@@ -228,6 +230,14 @@ provider is created for one process IP, so two processes opening `data.db`
 open two files on two disks, one node's `delete` or `rename` never reaches
 another's, and a `sync_dir` commits only the syncing node's directory
 entries, as it would on two machines.
+
+`list_dir` returns the sorted bare names directly under a directory, files
+and subdirectories alike — the *visible* namespace, what `readdir` sees. A
+name created since the last `sync_dir` is listed at once and may still be
+gone after a crash, so a listing is as durable as the directory syncs behind
+it. It is how an engine that names files by content (log segments named
+after their first index) finds them again without a separate catalogue; the
+simulator's listing is checked against Tokio's for the same tree.
 
 `OpenOptions` mirrors `std::fs::OpenOptions` with `read`, `write`, `create`,
 `truncate`, and `append`, plus the one thing a database needs that
