@@ -41,6 +41,7 @@ the whole thing:
 let server = H2Server::new(ctx.providers()).with_config(H2ServerConfig {
     keep_alive: Some(keep_alive()),
     vectored_writes: true,
+    ..H2ServerConfig::default()
 });
 
 loop {
@@ -86,6 +87,13 @@ connection, and the RPCs already in flight get to finish. The example asserts
 that this actually happens, with `assert_sometimes!(true,
 "grpc_server_drained_on_shutdown")` guarded on the token being cancelled when
 the connection ends.
+
+The drain is bounded. `H2ServerConfig::drain_timeout` (30 seconds by default)
+caps how long the in-flight streams get: a peer that stops reading cannot hold
+the connection future open forever, and when the deadline runs out the
+connection is dropped and the future resolves to `ServeError::DrainTimedOut`.
+Inside a simulation the process grace period usually ends the drain first, but
+a server run directly on the tokio providers has nothing else bounding it.
 
 ## Connecting: The Channel Owns the Connection
 

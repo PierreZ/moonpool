@@ -13,6 +13,7 @@
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::time::Duration;
 
 use futures::future::{Either, select};
 use futures::io::{AsyncRead, AsyncWrite};
@@ -20,7 +21,7 @@ use hyper::body::{Body, Incoming};
 use hyper::rt::bounds::Http2ServerConnExec;
 use hyper::server::conn::http2;
 use hyper::{Request, Response};
-use moonpool_core::Providers;
+use moonpool_core::{Providers, TimeProvider};
 use tracing::instrument;
 
 use crate::config::KeepAlive;
@@ -28,8 +29,13 @@ use crate::io::HyperIo;
 use crate::rt::{HyperExecutor, HyperTimer};
 use crate::service::{TowerToHyperService, TowerToHyperServiceFuture};
 
+/// The default [`H2ServerConfig::drain_timeout`]: long enough for any
+/// ordinary in-flight request, short enough that a stuck peer cannot hold a
+/// shutdown forever.
+pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// How an [`H2Server`] serves each connection.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct H2ServerConfig {
     /// h2 PING keepalive.
     ///
@@ -46,6 +52,47 @@ pub struct H2ServerConfig {
     /// `HyperIo`'s own default: futures-io cannot be asked whether the
     /// underlying stream really implements `poll_write_vectored`.
     pub vectored_writes: bool,
+
+    /// How long a graceful drain may take once shutdown is requested.
+    ///
+    /// When the in-flight streams have not finished by then (the peer stopped
+    /// reading, a partition, a clogged link), the connection is dropped —
+    /// resetting what is left — and
+    /// [`serve_connection_with_shutdown`](H2Server::serve_connection_with_shutdown)
+    /// resolves to [`ServeError::DrainTimedOut`]. `None` waits for the drain
+    /// without a bound, which is only safe where something else (such as the
+    /// simulation's process grace period) bounds it. Defaults to
+    /// [`DEFAULT_DRAIN_TIMEOUT`].
+    pub drain_timeout: Option<Duration>,
+}
+
+impl Default for H2ServerConfig {
+    fn default() -> Self {
+        Self {
+            keep_alive: None,
+            vectored_writes: false,
+            drain_timeout: Some(DEFAULT_DRAIN_TIMEOUT),
+        }
+    }
+}
+
+/// Why a served connection ended badly.
+#[derive(Debug, thiserror::Error)]
+pub enum ServeError {
+    /// The connection itself failed: an IO failure, a protocol error, or a
+    /// client that disappeared. Under simulated chaos that is an expected
+    /// outcome, not a bug.
+    #[error(transparent)]
+    Connection(#[from] hyper::Error),
+
+    /// Shutdown was requested and the graceful drain did not finish within
+    /// [`H2ServerConfig::drain_timeout`], so the connection was dropped with
+    /// streams still open.
+    #[error("graceful drain did not finish within {deadline:?}")]
+    DrainTimedOut {
+        /// The drain deadline that ran out.
+        deadline: Duration,
+    },
 }
 
 /// Serves h2 connections over the provider traits.
@@ -73,6 +120,7 @@ pub struct H2ServerConfig {
 pub struct H2Server<P: Providers> {
     executor: HyperExecutor<P::Task>,
     timer: HyperTimer<P::Time>,
+    time: P::Time,
     config: H2ServerConfig,
 }
 
@@ -91,12 +139,14 @@ impl<P: Providers> H2Server<P> {
         Self {
             executor: HyperExecutor::new(providers.task().clone()),
             timer: HyperTimer::new(providers.time().clone()),
+            time: providers.time().clone(),
             config: H2ServerConfig::default(),
         }
     }
 
     /// Replace the configuration.
     #[must_use]
+    #[instrument(level = "debug", skip_all)]
     pub fn with_config(mut self, config: H2ServerConfig) -> Self {
         self.config = config;
         self
@@ -144,14 +194,15 @@ impl<P: Providers> H2Server<P> {
     ///
     /// # Errors
     ///
-    /// The future resolves to [`hyper::Error`] when the connection ends badly:
-    /// an IO failure, a protocol error, or a client that disappears. Under
-    /// simulated chaos that is an expected outcome, not a bug.
+    /// The future resolves to [`ServeError::Connection`] when the connection
+    /// ends badly: an IO failure, a protocol error, or a client that
+    /// disappears. Under simulated chaos that is an expected outcome, not a
+    /// bug.
     pub fn serve_connection<S, Svc, B>(
         &self,
         stream: S,
         service: Svc,
-    ) -> impl Future<Output = Result<(), hyper::Error>> + Send + 'static
+    ) -> impl Future<Output = Result<(), ServeError>> + Send + 'static
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
         Svc: tower_service::Service<Request<Incoming>, Response = Response<B>>
@@ -178,17 +229,21 @@ impl<P: Providers> H2Server<P> {
     /// instead of resetting them. The future then resolves with the
     /// connection's own result.
     ///
+    /// The drain is bounded by [`H2ServerConfig::drain_timeout`]: a peer that
+    /// stops reading cannot hold the future open forever.
+    ///
     /// # Errors
     ///
     /// Same as [`serve_connection`](Self::serve_connection): the connection's
-    /// own [`hyper::Error`], whether or not a shutdown was requested. A drain
-    /// that cannot complete (the peer stops reading) surfaces here too.
+    /// own error, whether or not a shutdown was requested. A drain that does
+    /// not complete within the deadline resolves to
+    /// [`ServeError::DrainTimedOut`].
     pub fn serve_connection_with_shutdown<S, Svc, B, F>(
         &self,
         stream: S,
         service: Svc,
         shutdown: F,
-    ) -> impl Future<Output = Result<(), hyper::Error>> + Send + 'static
+    ) -> impl Future<Output = Result<(), ServeError>> + Send + 'static
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
         Svc: tower_service::Service<Request<Incoming>, Response = Response<B>>
@@ -208,6 +263,8 @@ impl<P: Providers> H2Server<P> {
         let connection = self
             .builder()
             .serve_connection(io, TowerToHyperService::new(service));
+        let time = self.time.clone();
+        let drain_timeout = self.config.drain_timeout;
         async move {
             let connection = std::pin::pin!(connection);
             let shutdown = std::pin::pin!(shutdown);
@@ -217,12 +274,21 @@ impl<P: Providers> H2Server<P> {
             // need for the seeded branch rotation.
             match select(connection, shutdown).await {
                 Either::Left((result, _shutdown)) => {
+                    let result = result.map_err(ServeError::from);
                     report(&result, false);
                     result
                 }
                 Either::Right(((), mut connection)) => {
                     connection.as_mut().graceful_shutdown();
-                    let result = connection.await;
+                    let result = match drain_timeout {
+                        None => connection.await.map_err(ServeError::from),
+                        // Dropping the connection on expiry closes the stream
+                        // and resets whatever the drain had left.
+                        Some(deadline) => match time.timeout(deadline, connection).await {
+                            Ok(result) => result.map_err(ServeError::from),
+                            Err(_) => Err(ServeError::DrainTimedOut { deadline }),
+                        },
+                    };
                     report(&result, true);
                     result
                 }
@@ -232,10 +298,16 @@ impl<P: Providers> H2Server<P> {
 }
 
 /// One event per connection, so a busy server does not drown the trace.
-fn report(result: &Result<(), hyper::Error>, graceful: bool) {
+fn report(result: &Result<(), ServeError>, graceful: bool) {
     match result {
         Ok(()) => tracing::info!(graceful, outcome = "ok", "h2_server_connection_finished"),
-        Err(error) => tracing::info!(
+        Err(error @ ServeError::DrainTimedOut { .. }) => tracing::info!(
+            graceful,
+            outcome = "drain_timed_out",
+            detail = %error,
+            "h2_server_connection_finished"
+        ),
+        Err(error @ ServeError::Connection(_)) => tracing::info!(
             graceful,
             outcome = "error",
             detail = %error,
@@ -311,6 +383,7 @@ mod tests {
         let config = H2ServerConfig::default();
         assert!(config.keep_alive.is_none());
         assert!(!config.vectored_writes);
+        assert_eq!(config.drain_timeout, Some(super::DEFAULT_DRAIN_TIMEOUT));
     }
 
     #[test]
@@ -322,12 +395,118 @@ mod tests {
                 while_idle: true,
             }),
             vectored_writes: true,
+            drain_timeout: None,
         });
 
         assert!(server.config().vectored_writes);
         assert!(server.config().keep_alive.is_some());
         // Cloning carries the configuration.
         assert!(server.clone().config().vectored_writes);
+    }
+
+    /// A service that takes the request and never answers: the stream stays
+    /// in flight for as long as the connection lives.
+    #[derive(Clone)]
+    struct NeverAnswers;
+
+    impl tower_service::Service<Request<Incoming>> for NeverAnswers {
+        type Response = Response<Full<Bytes>>;
+        type Error = Infallible;
+        type Future = std::future::Pending<Result<Self::Response, Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Request<Incoming>) -> Self::Future {
+            std::future::pending()
+        }
+    }
+
+    /// A client that opens one request stream and then goes silent: it sends
+    /// the preface, an empty SETTINGS frame and a `GET /` HEADERS frame, then
+    /// never sends another byte (not even a SETTINGS ack) nor closes. Writes
+    /// are swallowed.
+    struct SilentClient {
+        script: Cursor<Vec<u8>>,
+    }
+
+    impl SilentClient {
+        fn new() -> Self {
+            let mut script = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+            // SETTINGS: length 0, type 0x4, no flags, stream 0.
+            script.extend_from_slice(&[0, 0, 0, 0x4, 0, 0, 0, 0, 0]);
+            // HEADERS: length 3, type 0x1, END_STREAM | END_HEADERS, stream 1,
+            // then the HPACK static-table entries :method GET, :scheme http,
+            // :path /.
+            script.extend_from_slice(&[0, 0, 3, 0x1, 0x5, 0, 0, 0, 1, 0x82, 0x86, 0x84]);
+            Self {
+                script: Cursor::new(script),
+            }
+        }
+    }
+
+    impl futures::io::AsyncRead for SilentClient {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            match std::pin::Pin::new(&mut self.script).poll_read(cx, buf) {
+                // The script ran out: the client stays connected and silent.
+                Poll::Ready(Ok(0)) => Poll::Pending,
+                other => other,
+            }
+        }
+    }
+
+    impl futures::io::AsyncWrite for SilentClient {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A graceful drain that cannot finish (a stream is still in flight and
+    /// the peer is silent) resolves once the drain deadline runs out, instead
+    /// of holding the connection future open forever.
+    #[tokio::test]
+    async fn a_stuck_drain_times_out() {
+        let deadline = Duration::from_millis(50);
+        let server = H2Server::new(&TokioProviders::new()).with_config(H2ServerConfig {
+            drain_timeout: Some(deadline),
+            ..H2ServerConfig::default()
+        });
+        let connection = server.serve_connection_with_shutdown(
+            SilentClient::new(),
+            NeverAnswers,
+            tokio::time::sleep(Duration::from_millis(20)),
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(5), connection)
+            .await
+            .expect("the drain deadline must bound the connection future");
+        assert!(
+            matches!(outcome, Err(super::ServeError::DrainTimedOut { deadline: d }) if d == deadline),
+            "expected a drain timeout, got {outcome:?}"
+        );
     }
 
     #[test]

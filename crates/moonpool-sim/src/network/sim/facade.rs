@@ -1,6 +1,7 @@
 //! Thin locked facade over the scheduler-independent network engine.
 
 use std::{collections::BTreeMap, io, net::IpAddr, task::Waker, time::Duration};
+use tracing::instrument;
 
 use crate::{
     LocalityInfo, NetworkConfiguration, SimulationError, SimulationResult,
@@ -41,6 +42,7 @@ impl SimWorld {
     }
 
     /// Installs process localities in the network engine.
+    #[instrument(level = "debug", skip_all)]
     pub fn set_localities(&mut self, localities: BTreeMap<IpAddr, LocalityInfo>) {
         self.inner.write().network.set_localities(localities);
     }
@@ -59,6 +61,7 @@ impl SimWorld {
     /// families in `config` are stripped before it is installed, so the
     /// no-new-faults promise survives a later reconfiguration. Latency
     /// distributions and link shaping are installed as given.
+    #[instrument(level = "debug", skip_all)]
     pub fn set_network_config(&mut self, mut config: NetworkConfiguration) {
         self.network_transition_waking(|inner, now| {
             if inner.recovery_mode() {
@@ -274,6 +277,7 @@ impl SimWorld {
     }
 
     /// Starts a write clog.
+    #[instrument(level = "trace", skip(self))]
     pub fn clog_write(&self, id: ConnectionId) {
         self.network_transition(|inner, now| inner.network.clog_write(id, now));
     }
@@ -297,6 +301,7 @@ impl SimWorld {
     }
 
     /// Starts a read clog.
+    #[instrument(level = "trace", skip(self))]
     pub fn clog_read(&self, id: ConnectionId) {
         self.network_transition(|inner, now| inner.network.clog_read(id, now));
     }
@@ -388,23 +393,27 @@ impl SimWorld {
     }
 
     /// Gracefully closes a connection.
+    #[instrument(level = "debug", skip(self))]
     pub fn close_connection(&self, id: ConnectionId) {
         self.network_transition_waking(|inner, now| inner.network.close_graceful(id, now));
     }
 
     /// Shuts down the send direction of a connection (`shutdown(SHUT_WR)`):
     /// a FIN behind the queued bytes, the receive direction left open.
+    #[instrument(level = "debug", skip(self))]
     pub fn shutdown_send(&self, id: ConnectionId) {
         self.network_transition_waking(|inner, now| inner.network.shutdown_send(id, now));
     }
 
     /// Aborts a connection with RST semantics.
+    #[instrument(level = "debug", skip(self))]
     pub fn close_connection_abort(&self, id: ConnectionId) {
         let wakes = self.inner.write().network.close_aborted(id);
         wakes.wake();
     }
 
     /// Closes selected directions of a connection.
+    #[instrument(level = "debug", skip(self))]
     pub fn close_connection_asymmetric(
         &self,
         id: ConnectionId,
@@ -421,6 +430,7 @@ impl SimWorld {
 
     /// Injects a random asymmetric close when configured.
     #[must_use]
+    #[instrument(level = "trace", skip(self))]
     pub fn roll_random_close(&self, id: ConnectionId) -> Option<bool> {
         let (result, wakes) = {
             let mut inner = self.inner.write();
@@ -435,6 +445,7 @@ impl SimWorld {
 
     /// Rolls the black-hole coin for one I/O on `id` (see
     /// [`ChaosConfiguration::black_hole_probability`](crate::ChaosConfiguration::black_hole_probability)).
+    #[instrument(level = "trace", skip(self))]
     pub fn roll_black_hole(&self, id: ConnectionId) {
         self.network_transition(|inner, now| inner.network.roll_black_hole(id, now));
     }
@@ -447,6 +458,7 @@ impl SimWorld {
     /// [`ChaosConfiguration::black_hole_probability`](crate::ChaosConfiguration::black_hole_probability);
     /// it consumes no randomness, and a black hole is permanent for the
     /// connection's lifetime.
+    #[instrument(level = "debug", skip(self))]
     pub fn black_hole_connection(&self, id: ConnectionId, hole_send: bool, hole_recv: bool) {
         self.network_transition(|inner, _| inner.network.black_hole(id, hole_send, hole_recv));
     }
@@ -476,11 +488,13 @@ impl SimWorld {
     }
 
     /// Creates a directed pair partition.
+    #[instrument(level = "debug", skip(self))]
     pub fn partition_pair(&self, from: IpAddr, to: IpAddr, duration: Duration) {
         self.network_transition(|inner, now| inner.network.partition_pair(from, to, duration, now));
     }
 
     /// Blocks all sends from an IP.
+    #[instrument(level = "debug", skip(self))]
     pub fn partition_send_from(&self, ip: IpAddr, duration: Duration) {
         self.network_transition(|inner, now| {
             inner.network.insert_send_partition(ip, duration, now)
@@ -488,6 +502,7 @@ impl SimWorld {
     }
 
     /// Blocks all receives to an IP.
+    #[instrument(level = "debug", skip(self))]
     pub fn partition_recv_to(&self, ip: IpAddr, duration: Duration) {
         self.network_transition(|inner, now| {
             inner.network.insert_recv_partition(ip, duration, now)
@@ -495,6 +510,7 @@ impl SimWorld {
     }
 
     /// Restores pair partitions in both directions between two IPs.
+    #[instrument(level = "debug", skip(self))]
     pub fn restore_partition(&self, from: IpAddr, to: IpAddr) {
         self.network_transition(|inner, now| inner.network.restore_partition(from, to, now));
     }
@@ -507,6 +523,7 @@ impl SimWorld {
     }
 
     /// Aborts every connection involving an IP.
+    #[instrument(level = "debug", skip(self))]
     pub fn abort_all_connections_for_ip(&self, ip: IpAddr) {
         let wakes = {
             let mut inner = self.inner.write();

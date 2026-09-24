@@ -978,7 +978,9 @@ impl StorageEngine {
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
         }
-        let latency = sample_latency(&self.state.config_for(owner_ip).write_latency);
+        // A length change is a metadata write: it honours the disk's
+        // degradation episode (and may enter one) exactly like its siblings.
+        let latency = self.transfer_latency(owner_ip, 0, true, now);
         self.schedule_operation(
             pending,
             StorageOperation::SetLenComplete { new_len },
@@ -1148,7 +1150,21 @@ impl StorageEngine {
             .ok_or(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
             })?;
-        let sectors = sector_range(pending.offset, pending.len);
+        // The length was clamped to the end of file when the read was
+        // submitted, but another handle may have truncated the file while it
+        // was in flight. Reconcile with the end of file *now*: the bytes that
+        // are gone read as a short read (or EOF), exactly as they would on a
+        // real file, never as an error no injected fault explains.
+        let len = usize::try_from(file_size.saturating_sub(pending.offset))
+            .unwrap_or(usize::MAX)
+            .min(pending.len);
+        if len < pending.len {
+            assert_reachable!("disk: in-flight read shortened by a truncation");
+        }
+        if len == 0 {
+            return Ok(StorageCompletion::Read(Vec::new()));
+        }
+        let sectors = sector_range(pending.offset, len);
 
         // EIO: a targeted injection fires unconditionally; the random family
         // is rolled first, then gated by the eligibility mask, so installing a
@@ -1194,33 +1210,18 @@ impl StorageEngine {
             self.record(&path, StorageFaultKind::ReadCorruption, Some(sectors));
         }
 
-        let max_offset = file_size.saturating_sub(pending.len as u64);
-        let mut read_offset = pending.offset;
-        let mut misdirected = false;
-        if config.misdirect_read_probability > 0.0
-            && sim_random::<f64>() < config.misdirect_read_probability
-            && max_offset > 0
-        {
-            let positions = max_offset + 1;
-            let original_position = pending.offset % positions;
-            let delta = sim_random_range(1..positions);
-            read_offset = if original_position >= positions - delta {
-                original_position - (positions - delta)
-            } else {
-                original_position + delta
-            };
-            misdirected = read_offset != pending.offset;
-        }
+        let read_offset = misdirected_read_offset(&config, pending.offset, len, file_size);
+        let misdirected = read_offset != pending.offset;
         if misdirected {
             assert_reachable!("disk fault: read served from the wrong offset");
             self.record(
                 &path,
                 StorageFaultKind::MisdirectedRead,
-                Some(sector_range(read_offset, pending.len)),
+                Some(sector_range(read_offset, len)),
             );
         }
 
-        let mut data = vec![0; pending.len];
+        let mut data = vec![0; len];
         let file =
             self.state
                 .files
@@ -1398,8 +1399,10 @@ impl StorageEngine {
             && misdirect_roll < config.misdirect_write_probability
         {
             let max_offset = file_size.saturating_sub(len as u64);
+            // Every offset a `len`-byte write fits at, `max_offset` included
+            // (the misdirected-read path draws the same range).
             let mistaken = if max_offset > 0 {
-                sim_random_range(0..max_offset)
+                sim_random_range(0..max_offset + 1)
             } else {
                 0
             };
@@ -1597,6 +1600,16 @@ impl StorageEngine {
         actions
     }
 
+    /// Crash `ip`'s storage: resolve every unsynced write through the crash
+    /// model and fail the process's in-flight I/O.
+    ///
+    /// A crash reboots the process onto the *same* disk, so a disk-degradation
+    /// episode in force carries over: a stall that started before the crash
+    /// still has to be waited out after it. The failed-disk mark is the one
+    /// exception and is cleared: a failed disk has no expiry, and keeping it
+    /// would park every operation of the rebooted process forever — a
+    /// permanent partition rather than a fault. A wipe
+    /// ([`wipe_process`](Self::wipe_process)) replaces the disk and clears both.
     pub(crate) fn simulate_crash(&mut self, ip: IpAddr, close_files: bool) -> StorageActions {
         // The reboot replaces a failed disk; the operations it parked are
         // failed below with the rest of the process's in-flight I/O.
@@ -1656,8 +1669,15 @@ impl StorageEngine {
         actions
     }
 
+    /// Wipe `ip`'s storage: the process reboots onto a replacement disk.
+    ///
+    /// The replacement carries nothing of the old disk: every file, name and
+    /// directory is gone, and so are the failed-disk mark and any
+    /// disk-degradation episode in force (a crash, by contrast, keeps the
+    /// episode — see [`simulate_crash`](Self::simulate_crash)).
     pub(crate) fn wipe_process(&mut self, ip: IpAddr) -> StorageActions {
         self.state.failed_disks.remove(&ip);
+        self.state.disk_episodes.remove(&ip);
         let files = self
             .state
             .files
@@ -1903,6 +1923,32 @@ impl StorageEngine {
             }) => steady.saturating_add(expires_at.saturating_sub(now)),
             _ => steady,
         }
+    }
+}
+
+/// Where a `len`-byte read at `offset` is actually served from: `offset`
+/// itself, or — when the misdirected-read coin lands — any other offset the
+/// read fits at in a `file_size`-byte file.
+fn misdirected_read_offset(
+    config: &StorageConfiguration,
+    offset: u64,
+    len: usize,
+    file_size: u64,
+) -> u64 {
+    let max_offset = file_size.saturating_sub(len as u64);
+    if config.misdirect_read_probability <= 0.0
+        || sim_random::<f64>() >= config.misdirect_read_probability
+        || max_offset == 0
+    {
+        return offset;
+    }
+    let positions = max_offset + 1;
+    let original_position = offset % positions;
+    let delta = sim_random_range(1..positions);
+    if original_position >= positions - delta {
+        original_position - (positions - delta)
+    } else {
+        original_position + delta
     }
 }
 

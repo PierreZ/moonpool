@@ -32,6 +32,7 @@
 //! randomness comes from the simulation's one stream.
 
 use std::{collections::BTreeMap, ops::Range};
+use tracing::instrument;
 
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -283,6 +284,7 @@ impl FileImage {
     /// successful [`sync`](Self::sync). The written sectors lose any latent
     /// fault, any lie, and any durability stamp: overwriting destroys the
     /// guarantee the previous content carried.
+    #[instrument(level = "trace", skip(self, data), fields(len = data.len()))]
     pub fn write(&mut self, offset: u64, data: &[u8]) {
         let end = offset.saturating_add(data.len() as u64);
         if end > self.size() {
@@ -301,6 +303,7 @@ impl FileImage {
 
     /// Resize the visible image; the new length is durable only at the next
     /// sync.
+    #[instrument(level = "trace", skip(self))]
     pub fn set_len(&mut self, new_len: u64) {
         let old_len = self.size();
         let old_sectors = self.sectors();
@@ -320,6 +323,7 @@ impl FileImage {
     ///
     /// Returns the sectors this sync *lied* about — reported durable while
     /// leaving them volatile (the opt-in barrier-violation family).
+    #[instrument(level = "trace", skip_all)]
     pub fn sync(
         &mut self,
         config: &StorageConfiguration,
@@ -359,6 +363,7 @@ impl FileImage {
     /// Panics when a sector a sync reported durable changed across the crash
     /// while the barrier-violation family is not armed — that is a simulator
     /// bug, never legal disk behaviour.
+    #[instrument(level = "trace", skip(self, config, eligible))]
     pub fn crash(
         &mut self,
         path: &str,
@@ -420,7 +425,7 @@ impl FileImage {
                     protected,
                     eligible,
                 );
-                self.apply_outcome(sector, outcome);
+                let outcome = self.apply_outcome(sector, outcome);
                 note_outcome_reachable(outcome, self.fill.garbage);
                 report.resolutions.push(SectorResolution {
                     sector,
@@ -447,6 +452,7 @@ impl FileImage {
 
     /// Plant a latent read fault on `sectors`: reads return deterministically
     /// corrupted bytes until the sectors are rewritten.
+    #[instrument(level = "trace", skip(self))]
     pub fn corrupt(&mut self, sectors: Range<u64>) {
         for sector in sectors {
             self.faults.set(as_index(sector));
@@ -461,6 +467,7 @@ impl FileImage {
 
     /// Make reads and/or writes touching `sectors` fail with an I/O error
     /// until cleared.
+    #[instrument(level = "trace", skip(self))]
     pub fn fail_with_eio(&mut self, sectors: Range<u64>, target: EioTarget) {
         for sector in sectors {
             let index = as_index(sector);
@@ -474,6 +481,7 @@ impl FileImage {
     }
 
     /// Clear targeted EIO injections.
+    #[instrument(level = "trace", skip(self))]
     pub fn clear_eio(&mut self, target: EioTarget) {
         if matches!(target, EioTarget::Read | EioTarget::ReadWrite) {
             self.eio_read.clear_all();
@@ -488,6 +496,7 @@ impl FileImage {
     /// A simulator bug on purpose: the next crash must fail loudly unless the
     /// barrier-violation family is armed. Exists so the oracle itself can be
     /// tested.
+    #[instrument(level = "trace", skip(self))]
     pub fn corrupt_committed_out_of_band(&mut self, sector: u64) {
         let range = self.committed_bounds(sector);
         if !range.is_empty() {
@@ -593,8 +602,13 @@ impl FileImage {
         self.lied.clear(index);
     }
 
-    /// Materialize one sector's crash resolution into the committed image.
-    fn apply_outcome(&mut self, sector: u64, outcome: CrashOutcome) {
+    /// Materialize one sector's crash resolution into the committed image,
+    /// returning the outcome actually applied.
+    ///
+    /// That differs from `outcome` only for a [`CrashOutcome::Shorn`] on a
+    /// sector with fewer than two shared bytes: there is nothing to tear, so it
+    /// resolves as [`CrashOutcome::KeptOld`] and is reported as such.
+    fn apply_outcome(&mut self, sector: u64, outcome: CrashOutcome) -> CrashOutcome {
         let index = as_index(sector);
         match outcome {
             CrashOutcome::KeptOld => {
@@ -625,21 +639,24 @@ impl FileImage {
             }
             CrashOutcome::Shorn => {
                 let range = self.shared_bounds(sector);
-                if range.len() > 1 {
-                    let split = sim_random_range(1..range.len());
-                    let prefix_new = sim_random::<bool>();
-                    let kept = if prefix_new {
-                        range.start..range.start + split
-                    } else {
-                        range.start + split..range.end
-                    };
-                    let bytes = self.visible[kept.clone()].to_vec();
-                    self.committed[kept].copy_from_slice(&bytes);
+                if range.len() <= 1 {
+                    // Nothing to tear: a plain rollback.
+                    return self.apply_outcome(sector, CrashOutcome::KeptOld);
                 }
+                let split = sim_random_range(1..range.len());
+                let prefix_new = sim_random::<bool>();
+                let kept = if prefix_new {
+                    range.start..range.start + split
+                } else {
+                    range.start + split..range.end
+                };
+                let bytes = self.visible[kept.clone()].to_vec();
+                self.committed[kept].copy_from_slice(&bytes);
                 self.dirty.clear(index);
                 self.lied.clear(index);
             }
         }
+        outcome
     }
 
     /// Verify that every sector a sync reported durable still holds what the
@@ -841,6 +858,39 @@ mod tests {
 
     fn always_eligible(_sector: u64) -> bool {
         true
+    }
+
+    /// A shorn outcome on a sector with a single shared byte has nothing to
+    /// tear: it must resolve as a rollback and be *reported* as one, not
+    /// recorded as `Shorn` while leaving the sector untouched (issue #258).
+    #[test]
+    fn a_one_byte_sector_is_never_reported_shorn() {
+        use crate::storage::CrashOutcome;
+        let config = StorageConfiguration {
+            clean_crash_probability: 0.0,
+            crash_lost_probability: 0.0,
+            crash_latent_fault_probability: 0.0,
+            shorn_write_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        };
+        for seed in 0..16_u64 {
+            seeded(seed);
+            let mut image = image(0);
+            image.write(0, b"a");
+            image.sync(&config, &always_eligible);
+            image.write(0, b"b");
+
+            let report = image.crash("f", &config, false, &always_eligible);
+            assert_eq!(report.resolutions.len(), 1, "seed {seed}");
+            assert_eq!(
+                report.resolutions[0].outcome,
+                CrashOutcome::KeptOld,
+                "seed {seed}: nothing to tear, so the report says rollback"
+            );
+            let mut buf = [0u8; 1];
+            image.read(0, &mut buf).expect("read failed");
+            assert_eq!(&buf, b"a", "seed {seed}: the sector rolled back");
+        }
     }
 
     #[test]

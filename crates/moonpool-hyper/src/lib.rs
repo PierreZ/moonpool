@@ -58,5 +58,5 @@ pub use error::ChannelError;
 pub use io::HyperIo;
 pub use rt::{HyperExecutor, HyperTimer};
 #[cfg(feature = "server")]
-pub use server::{H2Server, H2ServerConfig};
+pub use server::{DEFAULT_DRAIN_TIMEOUT, H2Server, H2ServerConfig, ServeError};
 pub use service::{TowerToHyperService, TowerToHyperServiceFuture};

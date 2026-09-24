@@ -209,8 +209,9 @@ impl AsyncRead for SimStorageFile {
         }
 
         // Calculate bytes to read (don't read past EOF)
-        let remaining_in_file =
-            usize::try_from(file_size - position).expect("remaining bytes in file fit in usize");
+        // Saturating like `read_at`: on a 32-bit target a file past
+        // `usize::MAX` still reads, capped by the buffer below.
+        let remaining_in_file = usize::try_from(file_size - position).unwrap_or(usize::MAX);
         let len = buf.len().min(remaining_in_file);
 
         if len == 0 {

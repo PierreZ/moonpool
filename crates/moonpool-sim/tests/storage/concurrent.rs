@@ -559,3 +559,101 @@ fn close_is_handle_local_and_enforced() {
         step_until_done(&mut sim, handle).await.expect("io error");
     });
 }
+
+// =============================================================================
+// A truncation overtaking an in-flight read (issue #256)
+// =============================================================================
+
+/// A world whose reads are slow and whose writes and length changes are fast,
+/// so a `set_len` issued alongside a read completes while the read is still in
+/// flight.
+fn slow_read_sim() -> moonpool_sim::SimWorld {
+    let mut sim = moonpool_sim::SimWorld::new();
+    sim.set_storage_config(moonpool_sim::StorageConfiguration {
+        read_latency: moonpool_sim::LatencyDistribution::Uniform {
+            start: std::time::Duration::from_millis(100),
+            end: std::time::Duration::from_millis(101),
+        },
+        ..moonpool_sim::StorageConfiguration::fast_local()
+    });
+    sim
+}
+
+/// Write `len` bytes to `path` and sync them.
+async fn seed_file(
+    provider: &moonpool_sim::SimStorageProvider,
+    path: &str,
+    len: usize,
+) -> std::io::Result<()> {
+    let mut file = provider.open(path, OpenOptions::create_write()).await?;
+    file.write_all(&vec![7u8; len]).await?;
+    file.sync_all().await
+}
+
+/// Run one read on `reader` concurrently with `set_len(new_len)` on a second
+/// handle, returning what the read returned.
+fn race_read_against_truncation<R, Fut>(new_len: u64, read: R) -> std::io::Result<usize>
+where
+    R: FnOnce(moonpool_sim::storage::SimStorageFile) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::io::Result<usize>> + Send,
+{
+    local_runtime().block_on(async {
+        let mut sim = slow_read_sim();
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            seed_file(&provider, "race.bin", 8192).await?;
+            let reader = provider.open("race.bin", OpenOptions::read_only()).await?;
+            let truncator = provider.open("race.bin", OpenOptions::read_write()).await?;
+            let (read, truncated) =
+                futures::future::join(read(reader), truncator.set_len(new_len)).await;
+            truncated?;
+            read
+        });
+        step_until_done(&mut sim, handle).await
+    })
+}
+
+#[test]
+fn test_positioned_read_shortened_by_truncation() {
+    let read = race_read_against_truncation(1000, |reader| async move {
+        let mut buf = vec![0u8; 8192];
+        reader.read_at(0, &mut buf).await
+    })
+    .expect("a truncation shortens a read, it is not an I/O error");
+    assert_eq!(read, 1000, "the read returns the bytes that survived");
+}
+
+#[test]
+fn test_positioned_read_past_truncation_is_eof() {
+    let read = race_read_against_truncation(100, |reader| async move {
+        let mut buf = vec![0u8; 4096];
+        reader.read_at(4096, &mut buf).await
+    })
+    .expect("a read wholly past the new end of file is EOF, not an error");
+    assert_eq!(read, 0);
+}
+
+#[test]
+fn test_stream_read_shortened_by_truncation() {
+    let read = race_read_against_truncation(1000, |mut reader| async move {
+        let mut buf = vec![0u8; 8192];
+        let first = reader.read(&mut buf).await?;
+        // The cursor advanced by what was read, so the next read is EOF.
+        let second = reader.read(&mut buf).await?;
+        assert_eq!(second, 0, "the cursor sits at the new end of file");
+        Ok(first)
+    })
+    .expect("a truncation shortens a stream read, it is not an I/O error");
+    assert_eq!(read, 1000);
+}
+
+#[test]
+fn test_stream_read_past_truncation_is_eof() {
+    let read = race_read_against_truncation(100, |mut reader| async move {
+        reader.seek(std::io::SeekFrom::Start(4096)).await?;
+        let mut buf = vec![0u8; 4096];
+        reader.read(&mut buf).await
+    })
+    .expect("a stream read wholly past the new end of file is EOF");
+    assert_eq!(read, 0);
+}

@@ -176,8 +176,10 @@ These indicate real bugs and are safe to check regardless of iteration count.
 | `AlwaysOrUnreachable` | `fail_count > 0` (condition was false when reached) |
 | `Unreachable` | `pass_count > 0` (code path was reached) |
 | `NumericAlways` | `fail_count > 0` (comparison failed at least once) |
-| Slot table | `dropped_assertion_allocations > 0` (one or more evaluations could not be tracked) |
-| Each-bucket table | `each_bucket_dropped_allocations() > 0` (one or more `assert_sometimes_each!` observations found the 256-bucket table full) |
+| Slot table | `dropped_assertion_allocations > 0` (one or more evaluations could not be tracked: the table was full, or a slot's initializer never published it) |
+| Each-bucket table | `each_bucket_dropped_allocations() > 0` (one or more `assert_sometimes_each!` observations found the 256-bucket table full, or a bucket that was never published) |
+| Slot conflict | a message reached by call sites of different kinds (or watermark directions), or a message hash collision; the mismatched call is not accounted |
+| Bucket conflict | an `assert_sometimes_each!` identity whose hash collides with a different key set; the colliding observation is not accounted |
 
 ### Coverage violations (statistical)
 

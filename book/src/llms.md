@@ -566,8 +566,8 @@ moonpool_sim::assert_sometimes_each!(
 );
 ```
 
-Identity values, in their supplied order, decide which bucket this is; key
-names are descriptive and do not change identity. Quality keys rank better
+Identity keys, names and values in their supplied order, decide which bucket
+this is: the same values under different names are different buckets. Quality keys rank better
 exemplars inside that bucket. Keep identity coarse: phase, role, recovery mode,
 quorum shape, or fault regime. Put progress such as decided slots, inverse lag,
 or remaining health in quality.
@@ -579,6 +579,13 @@ unbounded keys, request IDs, ballots, or log slots. Bucket them into a finite
 range first. Once a shared table is full, additional sites or buckets are not
 tracked and the run reports an always-violation naming the overflowed table:
 exhaustion destroys guidance, so it is never silent.
+
+A message is a site's identity, so one message must belong to one kind of
+assertion. An `assert_always!` and an `assert_sometimes!` that share a message,
+or two numeric sites that disagree on the watermark direction, are not merged:
+the second call site is left unaccounted and the run reports an
+always-violation naming the message. The same applies to a bucket whose
+identity collides with a different key set.
 
 Quality always maximizes, supports at most four values, and packs the low 16
 bits of each value in order. Normalize values into `0..=32767`, put the most

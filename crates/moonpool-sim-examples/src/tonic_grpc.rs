@@ -222,6 +222,7 @@ impl Process for EchoProcess {
             // chaos; that path is unreachable while the IO layer reports no
             // vectored support.
             vectored_writes: true,
+            ..H2ServerConfig::default()
         });
         tracing::info!("grpc server listening");
 

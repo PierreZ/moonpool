@@ -834,11 +834,14 @@ impl NetworkSimulation {
             .map(|c| c.peer_address.clone())
     }
 
-    pub(crate) fn before_event(&mut self, now: Duration) -> (NetworkActions, WakeBatch) {
-        let mut wakes = WakeBatch::default();
-        self.clear_expired_write_clogs(now, &mut wakes);
-        let actions = self.randomly_trigger_partitions(now);
-        (actions, wakes)
+    /// Per-step network work done before the popped event is handled.
+    ///
+    /// Clog expiry is not swept here: `clog_write` and `clog_read` each
+    /// schedule their own `ClogClear` / `ReadClogClear` at the deadline, and
+    /// that event alone clears the clog and wakes its waiter, for both
+    /// directions alike.
+    pub(crate) fn before_event(&mut self, now: Duration) -> NetworkActions {
+        self.randomly_trigger_partitions(now)
     }
 
     pub(crate) fn handle_event(
@@ -920,19 +923,6 @@ impl NetworkSimulation {
         wakes: &mut WakeBatch,
     ) {
         wakes.push(registered.take(&id));
-    }
-
-    fn clear_expired_write_clogs(&mut self, now: Duration, wakes: &mut WakeBatch) {
-        let expired = self
-            .state
-            .connection_clogs
-            .iter()
-            .filter_map(|(id, state)| (now >= state.expires_at).then_some(*id))
-            .collect::<Vec<_>>();
-        for id in expired {
-            self.state.connection_clogs.remove(&id);
-            Self::take_waiter(&mut self.waiters.write_clogs, id, wakes);
-        }
     }
 
     /// Land every item at the head of `sender`'s flight whose delivery time
@@ -1340,7 +1330,10 @@ impl NetworkSimulation {
         // peer's application reads them.
         if crate::buggify!() && !data.is_empty() {
             let max_send = data.len().min(partial_max);
-            let truncate_to = sim_random_range(0..max_send + 1);
+            // At least one byte goes out: an empty chunk would consume a
+            // sequence number and a delivery event and wake the reader for
+            // nothing.
+            let truncate_to = sim_random_range(1..max_send + 1);
             if truncate_to < data.len() {
                 connection
                     .send_buffer
@@ -1972,29 +1965,10 @@ impl NetworkSimulation {
             return (None, NetworkActions::default(), WakeBatch::default());
         }
         self.state.last_random_close_time = now;
-        let paired = self.paired(id);
         let a = sim_random_f64();
         let close_recv = a < 0.66;
         let close_send = a > 0.33;
-        if close_send && let Some(c) = self.state.connections.get_mut(&id) {
-            c.flags.set_send_closed(true);
-        }
-        if close_send {
-            self.discard_send_queue(id);
-        }
-        if close_recv && let Some(c) = paired.and_then(|peer| self.state.connections.get_mut(&peer))
-        {
-            c.flags.set_recv_closed(true);
-        }
-        let mut wakes = WakeBatch::default();
-        if close_send {
-            wakes.push(self.waiters.reads.take(&id));
-            Self::take_waiter(&mut self.waiters.send_buffers, id, &mut wakes);
-        }
-        if close_recv && let Some(peer) = paired {
-            wakes.push(self.waiters.reads.take(&peer));
-            self.discard_receive_buffer(peer, &mut wakes);
-        }
+        let wakes = self.close_asymmetric(id, close_send, close_recv);
         let explicit = sim_random_f64() < self.state.config.chaos.random_close_explicit_ratio;
         let mut actions = NetworkActions::default();
         actions.record(SimFaultEvent::RandomClose {

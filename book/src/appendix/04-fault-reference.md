@@ -61,7 +61,7 @@ Manual partition methods are also available on `SimWorld`: `partition_pair()`, `
 
 | Fault | Config Field | Default | Real-World Scenario |
 |-------|-------------|---------|---------------------|
-| Bit flips | `bit_flip_probability` | 0.01% | CRC/checksum validation, data corruption detection |
+| Bit flips | `bit_flip_probability` | 0% (Random/Swarm profiles sample it) | CRC/checksum validation, data corruption detection |
 | Flip range | `bit_flip_min_bits` / `bit_flip_max_bits` | 1-32 bits | Power-law distribution of corruption severity |
 | Flip cooldown | `bit_flip_cooldown` | 0 (no cooldown) | Rate-limiting corruption events |
 | Partial writes | `partial_write_max_bytes` | 1000 bytes | TCP fragmentation, message framing |

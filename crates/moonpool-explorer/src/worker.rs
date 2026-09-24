@@ -160,20 +160,58 @@ impl SlotPool {
     }
 }
 
-/// Wait for any child process to exit, retrying on `EINTR`.
-///
-/// Returns `(pid, status)` or `None` if there are no children left.
+/// What one non-blocking look at a worker found.
 #[cfg(unix)]
-pub(crate) fn wait_any() -> Option<(libc::pid_t, libc::c_int)> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerState {
+    /// Still running.
+    Running,
+    /// Exited with this `waitpid` status; it has been reaped.
+    Exited(libc::c_int),
+    /// No such child of this process any more (reaped elsewhere): its
+    /// result is lost.
+    Gone,
+}
+
+/// Check one worker without blocking, retrying on `EINTR`.
+///
+/// Waits on `pid` specifically, never on `-1`: a controller embedded in a
+/// larger harness must not reap children it did not spawn.
+#[cfg(unix)]
+pub(crate) fn poll_worker(pid: libc::pid_t) -> WorkerState {
     let mut status: libc::c_int = 0;
     loop {
-        // Safety: waitpid with -1 waits for any child; status is a valid out-pointer.
-        let pid = unsafe { libc::waitpid(-1, &raw mut status, 0) };
-        if pid > 0 {
-            return Some((pid, status));
+        // Safety: waitpid on a specific pid with WNOHANG; status is a valid
+        // out-pointer.
+        let reaped = unsafe { libc::waitpid(pid, &raw mut status, libc::WNOHANG) };
+        if reaped == pid {
+            return WorkerState::Exited(status);
         }
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() != Some(libc::EINTR) {
+        if reaped == 0 {
+            return WorkerState::Running;
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return WorkerState::Gone;
+        }
+    }
+}
+
+/// Kill a worker with `SIGKILL` and reap it, returning its `waitpid` status
+/// (`None` if it was already gone).
+#[cfg(unix)]
+pub(crate) fn kill_worker(pid: libc::pid_t) -> Option<libc::c_int> {
+    // Safety: signalling a pid this controller forked and has not yet reaped,
+    // so the pid cannot have been recycled for another process.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    let mut status: libc::c_int = 0;
+    loop {
+        // Safety: blocking waitpid on the specific pid just killed; SIGKILL
+        // cannot be caught, so this returns promptly.
+        let reaped = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+        if reaped == pid {
+            return Some(status);
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
             return None;
         }
     }

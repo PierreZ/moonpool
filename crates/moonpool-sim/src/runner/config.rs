@@ -87,6 +87,47 @@ pub enum ChaosMode {
     Swarm,
 }
 
+impl ChaosMode {
+    /// Resolve one chaos surface's per-seed configuration from its mode: the
+    /// single dispatch every surface (network, storage, attrition) goes
+    /// through.
+    ///
+    /// `mode` is `None` for a surface that was not enabled, which takes `off`.
+    /// Exactly one of the three constructors runs, and only `swarm` and
+    /// `random` may draw from the simulation stream.
+    ///
+    /// # Draw-order contract
+    ///
+    /// The *call sites* of this function are load-bearing for replay and for
+    /// exploration recipes, because the constructors draw from `SIM_RNG` and
+    /// every draw's position is part of a seed's schedule:
+    ///
+    /// 1. network, then storage, in `build_sim_for_iteration`, **before**
+    ///    `SimWorld::new_with_network_config_and_seed` resets and reseeds the
+    ///    stream — so these draws are not counted in the run's
+    ///    `rng_call_count` and an exploration breakpoint can never land on
+    ///    them;
+    /// 2. then the operation-alphabet swarm mask and `set_rng_breakpoints`;
+    /// 3. then attrition, in registration order, in
+    ///    `run_orchestrator_for_iteration` — **after** the reset and the
+    ///    breakpoints, so its draws are counted and replayed.
+    ///
+    /// Moving a call across the reset, or reordering two calls, shifts every
+    /// seed and invalidates recorded recipes.
+    pub(crate) fn resolve<T>(
+        mode: Option<Self>,
+        off: impl FnOnce() -> T,
+        random: impl FnOnce() -> T,
+        swarm: impl FnOnce() -> T,
+    ) -> T {
+        match mode {
+            None => off(),
+            Some(Self::Random) => random(),
+            Some(Self::Swarm) => swarm(),
+        }
+    }
+}
+
 /// A chaos surface to enable and its per-seed sampling strategy.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Chaos {

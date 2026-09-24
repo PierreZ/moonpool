@@ -84,11 +84,13 @@ impl NetworkProvider for TokioNetworkProvider {
     type TcpStream = Compat<tokio::net::TcpStream>;
     type TcpListener = TokioTcpListener;
 
+    #[tracing::instrument(skip(self))]
     async fn bind(&self, addr: &str) -> io::Result<Self::TcpListener> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         Ok(TokioTcpListener { inner: listener })
     }
 
+    #[tracing::instrument(skip(self))]
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
         let stream = tokio::net::TcpStream::connect(addr).await?;
         disable_nagle(&stream);
@@ -116,6 +118,7 @@ pub struct TokioTcpListener {
 impl TcpListenerTrait for TokioTcpListener {
     type TcpStream = Compat<tokio::net::TcpStream>;
 
+    #[tracing::instrument(skip(self))]
     async fn accept(&self) -> io::Result<(Self::TcpStream, String)> {
         let (stream, addr) = self.inner.accept().await?;
         disable_nagle(&stream);

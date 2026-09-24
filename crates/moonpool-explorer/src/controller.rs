@@ -49,6 +49,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+use std::time::{Duration, Instant};
 
 use crate::journal::{self, DiscoveryEvent};
 use crate::replay::Recipe;
@@ -69,6 +70,27 @@ const MAX_EXEMPLARS_PER_STATE: usize = 3;
 /// Maximum bug recipes retained per seed. Failing runs cluster around the
 /// same frontier state, so a handful of reproducers is enough.
 const MAX_BUG_RECIPES: usize = 4;
+
+/// Default wall-clock ceiling for one forked worker's timeline.
+///
+/// A worker stuck outside the simulation (a tight loop in user code, a
+/// blocking syscall) is invisible to the in-simulation stall guards; past this
+/// ceiling the controller kills it and records the run as a crash, with a
+/// diagnostic, instead of blocking until the CI job's own timeout. Generous on
+/// purpose: a timeline is normally milliseconds to seconds.
+pub const DEFAULT_WORKER_TIMEOUT: Duration = Duration::from_mins(5);
+
+/// Polls of a busy worker pool that only yield before the controller starts
+/// sleeping between polls: short timelines finish within the yield phase, so
+/// the common case pays no sleep latency.
+const SPIN_POLLS: u32 = 2048;
+
+/// First sleep between polls once [`SPIN_POLLS`] ran out; each further
+/// empty poll doubles it, up to [`MAX_POLL_SLEEP`].
+const MIN_POLL_SLEEP: Duration = Duration::from_micros(10);
+
+/// Longest sleep between polls: a long timeline is noticed within this.
+const MAX_POLL_SLEEP: Duration = Duration::from_millis(1);
 
 /// Configuration for frontier-based exploration.
 #[derive(Debug, Clone)]
@@ -196,9 +218,26 @@ pub struct Explorer {
 
     // --- worker pool (None = in-process mode) ---
     slots: Option<SlotPool>,
+    /// Live workers: result slot, job, and when the worker was forked.
     #[cfg(unix)]
-    active: BTreeMap<libc::pid_t, (usize, ExploreJob)>,
+    active: BTreeMap<libc::pid_t, (usize, ExploreJob, Instant)>,
     free_slots: Vec<usize>,
+    /// Wall-clock ceiling for one worker (see [`DEFAULT_WORKER_TIMEOUT`]).
+    worker_timeout: Duration,
+}
+
+impl Drop for Explorer {
+    /// Kill and reap every live worker.
+    ///
+    /// A controller that unwinds (a panic in the policy code, an early return
+    /// by the embedding harness) must not orphan workers that keep running
+    /// full simulations while holding the shared assertion and sancov regions.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        for (pid, _) in std::mem::take(&mut self.active) {
+            let _ = worker::kill_worker(pid);
+        }
+    }
 }
 
 impl Explorer {
@@ -239,7 +278,15 @@ impl Explorer {
             #[cfg(unix)]
             active: BTreeMap::new(),
             free_slots,
+            worker_timeout: DEFAULT_WORKER_TIMEOUT,
         })
+    }
+
+    /// Replace the per-worker wall-clock ceiling (default
+    /// [`DEFAULT_WORKER_TIMEOUT`]). A worker still running past it is killed
+    /// and its run recorded as a crash.
+    pub fn set_worker_timeout(&mut self, timeout: Duration) {
+        self.worker_timeout = timeout;
     }
 
     /// Reset per-seed state and prepare for the root run of `seed`.
@@ -405,43 +452,95 @@ impl Explorer {
                 unsafe { libc::_exit(if failed { 42 } else { 0 }) }
             }
             child_pid => {
-                self.active.insert(child_pid, (slot, job));
+                self.active.insert(child_pid, (slot, job, Instant::now()));
                 self.stats.max_active_workers =
                     self.stats.max_active_workers.max(self.active.len());
             }
         }
     }
 
-    /// Reap one finished worker and feed its observations to the controller.
+    /// Wait for one worker to finish and feed its observations to the
+    /// controller.
+    ///
+    /// Polls the workers this controller forked, by pid and without blocking
+    /// (never `waitpid(-1)`, which would reap an embedding harness's own
+    /// children), and kills any worker past the wall-clock ceiling.
     fn reap_one_and_process(&mut self) {
         #[cfg(unix)]
         {
-            let Some((pid, status)) = worker::wait_any() else {
-                // No children left (ECHILD): drop any stale bookkeeping.
-                for (_, (slot, _)) in std::mem::take(&mut self.active) {
-                    self.free_slots.push(slot);
+            let mut polls = 0_u32;
+            let mut sleep = MIN_POLL_SLEEP;
+            loop {
+                if let Some((pid, status)) = self.poll_active() {
+                    self.finish_worker(pid, status);
+                    return;
                 }
-                return;
-            };
-            let Some((slot, job)) = self.active.remove(&pid) else {
-                return;
-            };
-            let slots = self.slots.as_ref().expect("worker mode has slots");
-            let events = slots.read_slot(slot);
-            // Novelty check doubles as merge into the sancov history.
-            let _ = crate::sancov::has_new_pool_coverage(slot);
-            self.free_slots.push(slot);
-
-            let exit = worker::classify_exit(status);
-            if exit == WorkerExit::Crashed {
-                eprintln!(
-                    "[explorer] worker crashed (recipe: {})",
-                    crate::replay::format_timeline(&job.recipe)
-                );
+                if self.active.is_empty() {
+                    return;
+                }
+                if polls < SPIN_POLLS {
+                    polls += 1;
+                    std::thread::yield_now();
+                } else {
+                    std::thread::sleep(sleep);
+                    sleep = (sleep * 2).min(MAX_POLL_SLEEP);
+                }
             }
-            let failed = exit != WorkerExit::Ok;
-            self.process_result(&job, &events, failed, true);
         }
+    }
+
+    /// One pass over the live workers: the first that exited, or that was
+    /// killed for outliving the ceiling, with its `waitpid` status (`None` for
+    /// a worker whose result is lost). `None` when every worker still runs.
+    #[cfg(unix)]
+    fn poll_active(&mut self) -> Option<(libc::pid_t, Option<libc::c_int>)> {
+        let now = Instant::now();
+        for (&pid, (_, job, started)) in &self.active {
+            match worker::poll_worker(pid) {
+                worker::WorkerState::Exited(status) => return Some((pid, Some(status))),
+                worker::WorkerState::Gone => return Some((pid, None)),
+                worker::WorkerState::Running
+                    if now.duration_since(*started) > self.worker_timeout =>
+                {
+                    eprintln!(
+                        "[explorer] worker {pid} exceeded the {:?} wall-clock ceiling; killed (recipe: {})",
+                        self.worker_timeout,
+                        crate::replay::format_timeline(&job.recipe)
+                    );
+                    return Some((pid, worker::kill_worker(pid)));
+                }
+                worker::WorkerState::Running => {}
+            }
+        }
+        None
+    }
+
+    /// Consume one finished worker's result slot. A missing status (the
+    /// worker was reaped elsewhere) counts as a crash with an empty journal.
+    #[cfg(unix)]
+    fn finish_worker(&mut self, pid: libc::pid_t, status: Option<libc::c_int>) {
+        let Some((slot, job, _)) = self.active.remove(&pid) else {
+            return;
+        };
+        let slots = self.slots.as_ref().expect("worker mode has slots");
+        let events = if status.is_some() {
+            slots.read_slot(slot)
+        } else {
+            Vec::new()
+        };
+        // Novelty check doubles as merge into the sancov history.
+        let _ = crate::sancov::has_new_pool_coverage(slot);
+        self.free_slots.push(slot);
+
+        let exit = status.map_or(WorkerExit::Crashed, worker::classify_exit);
+        if exit == WorkerExit::Crashed {
+            eprintln!(
+                "[explorer] worker crashed (recipe: {})",
+                crate::replay::format_timeline(&job.recipe)
+            );
+        }
+        let failed = exit != WorkerExit::Ok;
+        self.process_result(&job, &events, failed, true);
     }
 
     // -----------------------------------------------------------------
@@ -711,6 +810,77 @@ mod tests {
         config
             .validate()
             .expect("in-process minimum should be valid");
+    }
+
+    /// A one-worker controller with a single job queued, for the process
+    /// lifecycle tests below.
+    #[cfg(unix)]
+    fn one_worker_explorer() -> Explorer {
+        let mut explorer = Explorer::new(ExplorationConfig {
+            workers: 1,
+            max_runs_per_seed: 1,
+            ..ExplorationConfig::default()
+        })
+        .expect("explorer init");
+        explorer.begin_seed(1);
+        explorer
+            .frontier
+            .push_back(ExploreJob { recipe: Vec::new() });
+        explorer
+    }
+
+    /// Whether `pid` still names a process (a zombie included).
+    #[cfg(unix)]
+    fn process_exists(pid: libc::pid_t) -> bool {
+        // Safety: signal 0 only checks for existence and permission.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// A worker stuck outside the simulation is killed at the wall-clock
+    /// ceiling and recorded as a crashed run, instead of blocking the
+    /// controller forever (#262).
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_worker_is_killed_at_the_ceiling() {
+        let mut explorer = one_worker_explorer();
+        explorer.set_worker_timeout(Duration::from_millis(100));
+
+        let started = Instant::now();
+        explorer.explore(|_| {
+            loop {
+                std::thread::sleep(Duration::from_hours(1));
+            }
+        });
+
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "the ceiling must bound the wait, took {:?}",
+            started.elapsed()
+        );
+        assert!(explorer.active.is_empty(), "the hung worker was reaped");
+        assert_eq!(explorer.stats.total_timelines, 1);
+        assert_eq!(explorer.stats.bug_found, 1, "a killed worker is a crash");
+        drop(explorer);
+        crate::cleanup_assertions();
+    }
+
+    /// Dropping the controller kills and reaps every live worker rather than
+    /// orphaning it (#262).
+    #[cfg(unix)]
+    #[test]
+    fn dropping_the_explorer_kills_live_workers() {
+        let mut explorer = one_worker_explorer();
+        let job = explorer.frontier.pop_front().expect("queued job");
+        explorer.spawn_worker(job, &mut |_| loop {
+            std::thread::sleep(Duration::from_hours(1));
+        });
+        let pid = *explorer.active.keys().next().expect("a live worker");
+        assert!(process_exists(pid));
+
+        drop(explorer);
+
+        assert!(!process_exists(pid), "the worker was killed and reaped");
+        crate::cleanup_assertions();
     }
 
     #[test]

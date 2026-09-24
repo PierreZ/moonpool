@@ -14,8 +14,10 @@
 //!
 //! The `next_bucket` counter is incremented atomically (via `AtomicU32::fetch_add`)
 //! to allocate new buckets safely across process boundaries. An observation
-//! that finds the table full is counted in `dropped_allocations`, which
-//! moonpool-sim reports as an always-violation: overflow is never silent.
+//! that finds the table full, or a bucket whose initializer never published
+//! it, is counted in `dropped_allocations`, and one whose identity collides
+//! with a different key set flags the bucket `conflicted`; moonpool-sim
+//! reports both as always-violations, so neither loss is silent.
 
 use std::sync::atomic::Ordering;
 
@@ -66,6 +68,11 @@ pub struct EachBucket {
     pub key_values: [i64; MAX_EACH_KEYS],
     /// Assertion message string (null-terminated C-style).
     pub msg: [u8; EACH_MSG_LEN],
+    /// Set (to 1) when an observation reached this bucket with a different
+    /// message or different identity key values that hashed to the same
+    /// identity. Such an observation is not accounted here; the flag makes
+    /// the collision a reported violation instead of a silent merge.
+    pub conflicted: u8,
 }
 
 impl EachBucket {
@@ -102,18 +109,48 @@ impl Entry for EachBucket {
     }
 }
 
-/// Bucket identity: `site_hash` mixed with the identity key values via FNV-1a.
+/// Bucket identity: `site_hash` mixed with each identity key's name and value
+/// via FNV-1a. The name is followed by a `0xff` separator (never a UTF-8
+/// byte), so `("ab", v)` and `("a", ..), ("b", ..)` cannot run together.
 /// Quality values are NOT included — they're watermarks, not identity keys.
 fn bucket_hash(site_hash: u64, keys: &[(&str, i64)]) -> u64 {
-    keys.iter()
-        .fold(site_hash, |h, &(_, val)| fnv1a_64(h, val.to_le_bytes()))
+    keys.iter().fold(site_hash, |h, &(name, val)| {
+        let h = fnv1a_64(h, name.bytes().chain([0xff]));
+        fnv1a_64(h, val.to_le_bytes())
+    })
+}
+
+/// The identity key values as a bucket stores them.
+fn stored_key_values(keys: &[(&str, i64)]) -> [i64; MAX_EACH_KEYS] {
+    let mut key_values = [0i64; MAX_EACH_KEYS];
+    for (slot, &(_, v)) in key_values.iter_mut().zip(keys) {
+        *slot = v;
+    }
+    key_values
+}
+
+/// Whether a published bucket was allocated for exactly this observation's
+/// identity: the same (truncated) message and the same identity key values.
+///
+/// # Safety
+///
+/// `bucket` must point to a published bucket; its metadata is immutable once
+/// published.
+unsafe fn same_bucket(bucket: *const EachBucket, keys: &[(&str, i64)], msg: &str) -> bool {
+    unsafe {
+        usize::from((*bucket).num_keys) == keys.len().min(MAX_EACH_KEYS)
+            && (*bucket).key_values == stored_key_values(keys)
+            && (*bucket).msg == table::msg_buf::<EACH_MSG_LEN>(msg)
+    }
 }
 
 /// Find an existing bucket or allocate a new one by (`site_hash`, `bucket_hash`).
 ///
-/// Returns `None` if `EachBucket` memory is not initialized, the bucket is
-/// still being initialized by another claimant, or the table is full (counted
-/// as a dropped allocation).
+/// Returns `None` if `EachBucket` memory is not initialized, if the
+/// observation cannot be tracked (the table is full, or another claimant never
+/// finished initializing the bucket — both counted as dropped), or if the
+/// bucket belongs to a different identity that hashed alike (flagged as
+/// conflicted on the bucket).
 fn find_or_alloc_each_bucket(
     site_hash: u64,
     bucket_hash: u64,
@@ -126,11 +163,8 @@ fn find_or_alloc_each_bucket(
         return None;
     }
     let init = |bucket: *mut EachBucket| {
-        let mut key_values = [0i64; MAX_EACH_KEYS];
+        let key_values = stored_key_values(keys);
         let num_keys = keys.len().min(MAX_EACH_KEYS);
-        for (slot, &(_, v)) in key_values.iter_mut().zip(keys) {
-            *slot = v;
-        }
         // Safety: `claim` hands out an unpublished bucket this call owns.
         unsafe {
             (*bucket).discovered = 0;
@@ -141,13 +175,19 @@ fn find_or_alloc_each_bucket(
             (*bucket).best_score = 0;
             (*bucket).key_values = key_values;
             (*bucket).msg = table::msg_buf(msg);
+            (*bucket).conflicted = 0;
         }
     };
     // Safety: ptr was allocated with EACH_BUCKET_MEM_SIZE bytes.
     match unsafe { table::claim(ptr, (site_hash, bucket_hash), init) } {
-        Claim::Entry(bucket) => Some(bucket),
-        Claim::Busy => None,
-        Claim::Full => {
+        // Safety: `claim` returns published buckets only.
+        Claim::Entry(bucket) if unsafe { same_bucket(bucket, keys, msg) } => Some(bucket),
+        Claim::Entry(bucket) => {
+            // Safety: the bucket is published and the flag is only ever set.
+            unsafe { atomic(&raw const (*bucket).conflicted).store(1, Ordering::Relaxed) };
+            None
+        }
+        Claim::Busy | Claim::Full => {
             // Safety: the second header word is the dropped-allocation counter.
             let dropped = unsafe { table::header_word(ptr, DROPPED_ALLOCATIONS_WORD) };
             let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
@@ -235,8 +275,9 @@ pub fn assertion_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&st
     }
 }
 
-/// Read the number of `sometimes_each` observations that could not allocate a
-/// bucket because the table was full.
+/// Read the number of `sometimes_each` observations that could not be
+/// tracked: the table was full, or the bucket's initializer never published
+/// it.
 ///
 /// The counter lives in the bucket region header, so exploration timelines
 /// backed by `MAP_SHARED` memory contribute to one cumulative value. Returns
@@ -277,6 +318,7 @@ pub fn each_bucket_read_all() -> Vec<EachBucket> {
                 best_score: atomic(&raw const (*bucket).best_score).load(Ordering::Relaxed),
                 key_values: (*bucket).key_values,
                 msg: (*bucket).msg,
+                conflicted: atomic(&raw const (*bucket).conflicted).load(Ordering::Relaxed),
             })
             .collect()
     }
@@ -290,7 +332,7 @@ mod tests {
     fn bucket_hash_is_a_stable_wire_format() {
         assert_eq!(
             bucket_hash(msg_hash("site"), &[("a", 1), ("b", -2)]),
-            0x2a4a_985d_7d1d_1046
+            0xdc3e_fb78_d2b2_0639
         );
     }
 
@@ -314,8 +356,9 @@ mod tests {
     fn test_each_bucket_size_stable() {
         // EachBucket must have a stable size for shared memory layout.
         // site_hash(8) + bucket_hash(8) + 1+1+1+1 + pass_count(4) +
-        // best_score(8) + key_values(6*8) + msg(32) = 112 bytes
-        assert_eq!(std::mem::size_of::<EachBucket>(), 112);
+        // best_score(8) + key_values(6*8) + msg(32) + conflicted(1) + pad(7)
+        // = 120 bytes
+        assert_eq!(std::mem::size_of::<EachBucket>(), 120);
     }
 
     #[test]
@@ -435,6 +478,76 @@ mod tests {
         assert_eq!(buckets[0].pass_count, 600);
         assert_eq!(unpack_quality(buckets[0].best_score, 1), vec![0xfffe]);
 
+        crate::region::clear();
+    }
+
+    /// Key names are part of a bucket's identity: the same values under
+    /// different names are different buckets (#260).
+    #[test]
+    fn key_names_distinguish_buckets() {
+        crate::region::init();
+        crate::region::reset();
+
+        assertion_sometimes_each("named", &[("floor", 1)], &[]);
+        assertion_sometimes_each("named", &[("room", 1)], &[]);
+
+        let buckets = each_bucket_read_all();
+        assert_eq!(buckets.len(), 2);
+        assert!(buckets.iter().all(|bucket| bucket.conflicted == 0));
+        crate::region::clear();
+    }
+
+    /// An observation whose identity hashes onto a bucket holding different
+    /// key values is flagged, not merged into it (#260).
+    #[test]
+    fn a_bucket_collision_is_flagged_instead_of_merged() {
+        crate::region::init();
+        crate::region::reset();
+
+        assertion_sometimes_each("collide", &[("key", 1)], &[]);
+        // Forge a collision: rewrite the stored identity so that the
+        // observation of key = 2 hashes onto the bucket holding key = 1.
+        let ptr = crate::region::each_bucket_ptr();
+        let site = msg_hash("collide");
+        // Safety: `init` installed a correctly aligned bucket region, and the
+        // bucket at index zero is published.
+        unsafe {
+            let bucket = ptr.add(8).cast::<()>().cast::<EachBucket>();
+            <EachBucket as Entry>::store_id(bucket, (site, bucket_hash(site, &[("key", 2)])));
+        }
+        assertion_sometimes_each("collide", &[("key", 2)], &[]);
+
+        let buckets = each_bucket_read_all();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].key_values[0], 1);
+        assert_eq!(
+            buckets[0].pass_count, 1,
+            "the colliding observation is not merged"
+        );
+        assert_eq!(buckets[0].conflicted, 1);
+        crate::region::clear();
+    }
+
+    /// A bucket whose initializer died before publishing it costs later
+    /// observations a bounded wait and a dropped count, never a hang (#261).
+    #[test]
+    fn an_orphaned_initializing_bucket_counts_as_dropped() {
+        crate::region::init();
+        crate::region::reset();
+        let ptr = crate::region::each_bucket_ptr();
+        let site = msg_hash("orphan");
+
+        // Safety: `init` installed a correctly aligned bucket region.
+        unsafe {
+            let bucket = ptr.add(8).cast::<()>().cast::<EachBucket>();
+            table::header_word(ptr, 0).store(1, Ordering::Release);
+            <EachBucket as Entry>::store_id(bucket, (site, bucket_hash(site, &[("key", 1)])));
+            atomic(<EachBucket as Entry>::published(bucket)).store(1, Ordering::Release);
+        }
+
+        assertion_sometimes_each("orphan", &[("key", 1)], &[]);
+        assert_eq!(each_bucket_dropped_allocations(), 1);
+        assert!(each_bucket_read_all().is_empty());
         crate::region::clear();
     }
 

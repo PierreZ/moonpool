@@ -24,6 +24,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use moonpool_core::{Detach, TaskProvider, TimeProvider};
+use tracing::instrument;
 
 /// A [`hyper::rt::Executor`] backed by a moonpool [`TaskProvider`].
 ///
@@ -47,6 +48,7 @@ impl<T> Unpin for HyperExecutor<T> {}
 
 impl<T: TaskProvider> HyperExecutor<T> {
     /// Create an executor that spawns via the given task provider.
+    #[instrument(level = "debug", skip_all)]
     pub fn new(tasks: T) -> Self {
         Self { tasks }
     }
@@ -90,6 +92,7 @@ pub struct HyperTimer<T> {
 
 impl<T: TimeProvider> HyperTimer<T> {
     /// Create a timer that sleeps and reads the clock via the given provider.
+    #[instrument(level = "debug", skip_all)]
     pub fn new(time: T) -> Self {
         let epoch = time.now();
         Self {

@@ -134,8 +134,11 @@ pub struct AssertionSlot {
     pub frontier_target: u8,
     /// Publication state: zero = unused, one = initializing, two = ready.
     published: u8,
-    /// Padding for alignment.
-    pad: [u8; 1],
+    /// Set (to 1) when a call site reached this slot with a different kind,
+    /// `must_hit` or `maximize`, or with a different message that hashed to
+    /// the same identity. Such a call is not accounted here; the flag makes
+    /// the conflict a reported violation instead of a silent merge.
+    pub conflicted: u8,
     /// Assertion message string (null-terminated).
     pub msg: [u8; SLOT_MSG_LEN],
 }
@@ -212,11 +215,48 @@ fn update_watermark(watermark: &AtomicI64, value: i64, maximize: bool) -> bool {
     }
 }
 
+/// Whether a published slot was allocated by a call site with exactly this
+/// identity: the same (truncated) message, kind and flags.
+///
+/// # Safety
+///
+/// `slot` must point to a published slot; its metadata is immutable once
+/// published.
+unsafe fn same_site(
+    slot: *const AssertionSlot,
+    kind: AssertKind,
+    must_hit: bool,
+    maximize: bool,
+    msg: &str,
+) -> bool {
+    unsafe {
+        (*slot).kind == kind as u8
+            && (*slot).must_hit == u8::from(must_hit)
+            && (*slot).maximize == u8::from(maximize)
+            && (*slot).msg == table::msg_buf::<SLOT_MSG_LEN>(msg)
+    }
+}
+
+/// Count one assertion evaluation that could not be tracked.
+///
+/// # Safety
+///
+/// `table_ptr` must point to a live assertion table.
+unsafe fn count_dropped(table_ptr: *mut u8) {
+    // Safety: the second header word is the dropped-allocation counter.
+    let dropped = unsafe { table::header_word(table_ptr, DROPPED_ALLOCATIONS_WORD) };
+    let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_add(1))
+    });
+}
+
 /// Find an existing slot for `msg` or allocate a new one.
 ///
 /// Returns the slot and its message hash, or `None` when the assertion table
-/// is not initialized, the slot is still being initialized by another
-/// claimant, or the table is full (counted as a dropped allocation).
+/// is not initialized, when the evaluation cannot be tracked (the table is
+/// full, or another claimant never finished initializing the slot — both
+/// counted as dropped), or when the slot belongs to a different call site
+/// (flagged as conflicted on the slot).
 fn find_or_alloc_slot(
     kind: AssertKind,
     must_hit: bool,
@@ -243,20 +283,28 @@ fn find_or_alloc_slot(
             (*slot).combination_bits = 0;
             (*slot).frontier = 0;
             (*slot).frontier_target = 0;
-            (*slot).pad = [0; 1];
+            (*slot).conflicted = 0;
             (*slot).msg = table::msg_buf(msg);
         }
     };
     // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
     match unsafe { table::claim(table_ptr, hash, init) } {
-        Claim::Entry(slot) => Some((slot, hash)),
-        Claim::Busy => None,
-        Claim::Full => {
-            // Safety: the second header word is the dropped-allocation counter.
-            let dropped = unsafe { table::header_word(table_ptr, DROPPED_ALLOCATIONS_WORD) };
-            let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            });
+        // Safety: `claim` returns published slots only.
+        Claim::Entry(slot) if unsafe { same_site(slot, kind, must_hit, maximize, msg) } => {
+            Some((slot, hash))
+        }
+        Claim::Entry(slot) => {
+            // Another call site owns this identity: an `assert_always!` and an
+            // `assert_sometimes!` sharing a message, or two messages whose
+            // hashes collide. Accounting it here would evaluate one site
+            // under the other's contract, so flag the slot instead.
+            // Safety: the slot is published and the flag is only ever set.
+            unsafe { atomic(&raw const (*slot).conflicted).store(1, Ordering::Relaxed) };
+            None
+        }
+        Claim::Busy | Claim::Full => {
+            // Safety: table_ptr points to a live assertion table.
+            unsafe { count_dropped(table_ptr) };
             None
         }
     }
@@ -451,12 +499,14 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
                     .count_ones(),
                 frontier: atomic(&raw const (*slot).frontier).load(Ordering::Relaxed),
                 frontier_target: atomic(&raw const (*slot).frontier_target).load(Ordering::Relaxed),
+                conflicted: atomic(&raw const (*slot).conflicted).load(Ordering::Relaxed) != 0,
             })
             .collect()
     }
 }
 
-/// Read the number of assertion evaluations that could not allocate a slot.
+/// Read the number of assertion evaluations that could not be tracked: the
+/// table was full, or the slot's initializer never published it.
 ///
 /// The counter lives in the assertion table header, so exploration timelines
 /// backed by `MAP_SHARED` memory contribute to one cumulative value. Returns
@@ -494,6 +544,9 @@ pub struct AssertionSlotSnapshot {
     pub frontier: u8,
     /// Frontier target (the number of `BooleanSometimesAll` propositions).
     pub frontier_target: u8,
+    /// Whether another call site reached this slot with a different kind,
+    /// flags or message (see [`AssertionSlot::conflicted`]).
+    pub conflicted: bool,
 }
 
 #[cfg(test)]
@@ -553,7 +606,7 @@ mod tests {
         // msg_hash(8) + pass_count(8) + fail_count(8) + watermark(8) +
         // discovery_watermark(8) + combination_bits(8) + kind(1) + must_hit(1) +
         // maximize(1) + discovered(1) + frontier(1) + frontier_target(1) +
-        // published(1) + _pad(1) + msg(64) = 120
+        // published(1) + conflicted(1) + msg(64) = 120
         assert_eq!(std::mem::size_of::<AssertionSlot>(), 120);
     }
 
@@ -589,6 +642,105 @@ mod tests {
 
         assert_eq!(assertion_read_all().len(), 129);
         assert_eq!(assertion_dropped_allocations(), 0);
+        crate::region::clear();
+    }
+
+    /// An `assert_always!` and an `assert_sometimes!` sharing one message must
+    /// not share one slot silently: the always-failure would be evaluated
+    /// under the sometimes contract and reported as a pass (#260).
+    #[test]
+    fn a_kind_conflict_is_flagged_instead_of_merged() {
+        crate::region::init();
+        crate::region::reset();
+
+        assertion_bool(AssertKind::Sometimes, true, true, "quorum lost");
+        assertion_bool(AssertKind::Always, true, false, "quorum lost");
+
+        let slots = assertion_read_all();
+        assert_eq!(slots.len(), 1);
+        let slot = &slots[0];
+        assert_eq!(
+            slot.kind,
+            AssertKind::Sometimes as u8,
+            "first call site owns it"
+        );
+        assert_eq!(
+            (slot.pass_count, slot.fail_count),
+            (1, 0),
+            "no merged count"
+        );
+        assert!(slot.conflicted, "the second call site is reported");
+        crate::region::clear();
+    }
+
+    /// Two numeric sites that disagree on the watermark direction conflict too.
+    #[test]
+    fn a_direction_conflict_is_flagged() {
+        crate::region::init();
+        crate::region::reset();
+
+        assertion_numeric(
+            AssertKind::NumericSometimes,
+            AssertCmp::Gt,
+            true,
+            5,
+            0,
+            "depth",
+        );
+        assertion_numeric(
+            AssertKind::NumericSometimes,
+            AssertCmp::Lt,
+            false,
+            5,
+            9,
+            "depth",
+        );
+
+        let slots = assertion_read_all();
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0].conflicted);
+        assert_eq!(slots[0].pass_count, 1);
+        crate::region::clear();
+    }
+
+    /// Repeated evaluations of the same site are not conflicts.
+    #[test]
+    fn the_same_site_never_conflicts() {
+        crate::region::init();
+        crate::region::reset();
+
+        for condition in [true, false, true] {
+            assertion_bool(AssertKind::Always, true, condition, "steady site");
+        }
+
+        let slots = assertion_read_all();
+        assert_eq!(slots.len(), 1);
+        assert!(!slots[0].conflicted);
+        assert_eq!((slots[0].pass_count, slots[0].fail_count), (2, 1));
+        crate::region::clear();
+    }
+
+    /// A slot whose initializer died before publishing it cannot hang later
+    /// evaluations, nor lose them silently: after a bounded wait they are
+    /// counted as dropped (#261).
+    #[test]
+    fn an_orphaned_initializing_slot_counts_as_dropped() {
+        crate::region::init();
+        crate::region::reset();
+        let table = crate::region::assertion_table_ptr();
+
+        // A claimant reserved index zero for "orphan" and died mid-init.
+        // Safety: `init` installed a correctly aligned table region.
+        unsafe {
+            let slot = table.add(8).cast::<()>().cast::<AssertionSlot>();
+            crate::table::header_word(table, 0).store(1, Ordering::Release);
+            <AssertionSlot as Entry>::store_id(slot, msg_hash("orphan"));
+            atomic(<AssertionSlot as Entry>::published(slot)).store(1, Ordering::Release);
+        }
+
+        assertion_bool(AssertKind::Sometimes, true, true, "orphan");
+        assert_eq!(assertion_dropped_allocations(), 1);
+        assert!(assertion_read_all().is_empty());
         crate::region::clear();
     }
 
