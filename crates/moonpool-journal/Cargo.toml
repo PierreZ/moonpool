@@ -1,0 +1,28 @@
+[package]
+name = "moonpool-journal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A write-ahead journal over moonpool's BlockFile that tells crashes apart from corruption (CLSTORE layout)"
+documentation = "https://docs.rs/moonpool-journal"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+# Built only on the provider traits and `BlockFile`, so the same journal runs
+# over `TokioStorageProvider` in production and `SimStorageProvider` under
+# simulation. No production providers are pulled in here.
+[dependencies]
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+crc32c = "0.6"
+thiserror = "2.0"
+tracing = "0.1"
+
+[dev-dependencies]
+moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[lints]
+workspace = true

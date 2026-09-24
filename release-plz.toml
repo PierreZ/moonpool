@@ -37,6 +37,12 @@ name = "moonpool-hyper"
 changelog_path = "crates/moonpool-hyper/CHANGELOG.md"
 version_group = "moonpool"
 
+# CLSTORE-style write-ahead journal over BlockFile; depends only on moonpool-core.
+[[package]]
+name = "moonpool-journal"
+changelog_path = "crates/moonpool-journal/CHANGELOG.md"
+version_group = "moonpool"
+
 # The optional typed-interface attribute of moonpool-rpc; no moonpool
 # dependencies, so it publishes before moonpool-rpc.
 [[package]]

@@ -85,6 +85,7 @@ jobs:
       - name: Build for wasm32-unknown-unknown
         run: |
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-journal
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-wasm-demo
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-rpc
@@ -118,6 +119,7 @@ jobs:
             -p moonpool-core \
             -p moonpool-explorer \
             -p moonpool-hyper \
+            -p moonpool-journal \
             -p moonpool-prometheus \
             -p moonpool-rpc \
             -p moonpool-rpc-derive \
