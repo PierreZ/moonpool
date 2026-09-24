@@ -731,7 +731,10 @@ impl LinkLatencyConfig {
 pub struct NetworkConfiguration {
     /// Latency distribution for bind operations
     pub bind_latency: LatencyDistribution,
-    /// Latency distribution for accept operations
+    /// Latency distribution for accept operations.
+    ///
+    /// Drawn once per connection when it enters the listener's backlog, not
+    /// per `accept()` call: a dropped accept future never restarts it.
     pub accept_latency: LatencyDistribution,
     /// Latency distribution for connect operations
     pub connect_latency: LatencyDistribution,

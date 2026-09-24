@@ -592,15 +592,17 @@ impl Future for AcceptFuture {
                     Ok(None) => return Poll::Pending,
                     Err(error) => return Poll::Ready(Err(io::Error::other(error))),
                 };
-            let delay = sim.with_network_config(|config| {
-                crate::network::sample_latency(&config.accept_latency)
-            });
-            let operation = match sim.network_delay(delay) {
-                Ok(operation) => operation,
-                Err(error) => return Poll::Ready(Err(io::Error::other(error))),
-            };
+            // The latency was drawn when the connection entered the
+            // backlog; wait out only what is left of it, so an accept that a
+            // `select!` drops and re-creates never restarts the clock (#210).
+            let remaining = sim.accept_remaining(connection_id);
+            if !remaining.is_zero() {
+                match sim.network_delay(remaining) {
+                    Ok(operation) => self.delay = Some(operation),
+                    Err(error) => return Poll::Ready(Err(io::Error::other(error))),
+                }
+            }
             self.reserved = Some(connection_id);
-            self.delay = Some(operation);
         }
 
         if let Some(waiter_id) = self.waiter_id {
@@ -614,15 +616,14 @@ impl Future for AcceptFuture {
             )));
         }
 
-        let Some(delay) = self.delay.as_mut() else {
-            return Poll::Ready(Err(io::Error::other("accept delay state missing")));
-        };
-        match Pin::new(delay).poll(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(error)) => return Poll::Ready(Err(io::Error::other(error))),
-            Poll::Ready(Ok(())) => {}
+        if let Some(delay) = self.delay.as_mut() {
+            match Pin::new(delay).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(io::Error::other(error))),
+                Poll::Ready(Ok(())) => {}
+            }
+            self.delay.take();
         }
-        self.delay.take();
         let Some(connection_id) = self.reserved.take() else {
             return Poll::Ready(Err(io::Error::other("accept reservation missing")));
         };

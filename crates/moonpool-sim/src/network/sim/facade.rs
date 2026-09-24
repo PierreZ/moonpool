@@ -165,6 +165,12 @@ impl SimWorld {
         wakes.wake();
     }
 
+    /// The rest of `id`'s accept latency, measured from its backlog entry.
+    pub(crate) fn accept_remaining(&self, id: ConnectionId) -> Duration {
+        let inner = self.inner.read();
+        inner.network.accept_remaining(id, inner.now())
+    }
+
     pub(crate) fn refresh_accept_reservation_waker(&self, id: AcceptWaiterId, waker: Waker) {
         self.inner
             .write()
@@ -191,11 +197,13 @@ impl SimWorld {
         id: ConnectWaiterId,
         context_waker: Waker,
     ) -> PendingPublish {
-        let (status, wakes) =
-            self.inner
-                .write()
+        let (status, wakes) = {
+            let mut inner = self.inner.write();
+            let now = inner.now();
+            inner
                 .network
-                .poll_store_pending(addr, connection_id, id, context_waker);
+                .poll_store_pending(addr, connection_id, id, context_waker, now)
+        };
         wakes.wake();
         status
     }
@@ -209,7 +217,11 @@ impl SimWorld {
     /// `false`, publishing nothing, when nobody is listening there.
     #[cfg(test)]
     pub(crate) fn store_pending_connection(&self, addr: &str, id: ConnectionId) -> bool {
-        let wakes = self.inner.write().network.store_pending(addr, id);
+        let wakes = {
+            let mut inner = self.inner.write();
+            let now = inner.now();
+            inner.network.store_pending(addr, id, now)
+        };
         match wakes {
             Some(wakes) => {
                 wakes.wake();

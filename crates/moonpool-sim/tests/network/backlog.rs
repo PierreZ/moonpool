@@ -5,7 +5,7 @@ use crate::sync_drive::{drive, settle};
 use futures::task::noop_waker;
 use moonpool_sim::{
     LatencyDistribution, NetworkConfiguration, NetworkProvider, SimWorld, SimulationBuilder,
-    TcpListenerTrait, buggify_reset,
+    TcpListenerTrait, TimeProvider, buggify_reset,
 };
 use std::{
     future::Future,
@@ -121,6 +121,82 @@ fn reserved_accept_counts_until_its_delayed_future_returns() {
         panic!("second connect should resume after return");
     };
     drop((first, accepted, second));
+}
+
+fn world_with_accept_latency(latency: Duration) -> SimWorld {
+    let sim = world(8);
+    let mut config = sim.with_network_config(Clone::clone);
+    config.accept_latency = LatencyDistribution::Uniform {
+        start: latency,
+        end: latency,
+    };
+    let mut sim = sim;
+    sim.set_network_config(config);
+    sim
+}
+
+/// #210: the accept latency belongs to the connection, drawn when it enters
+/// the backlog. An accept dropped mid-delay and re-created returns the
+/// connection at the instant first scheduled, not a full latency later.
+#[test]
+fn a_dropped_accept_does_not_restart_the_connections_latency() {
+    let latency = Duration::from_millis(10);
+    let mut sim = world_with_accept_latency(latency);
+    let server = sim.network_provider(ip("10.0.1.2"));
+    let client = sim.network_provider(ip("10.0.1.1"));
+    let time = sim.time_provider();
+    let listener = drive(&mut sim, server.bind(SERVER)).expect("bind");
+    let client_stream = drive(&mut sim, client.connect(SERVER)).expect("connect");
+    let queued_at = sim.current_time();
+
+    {
+        let mut first = pin!(listener.accept());
+        assert!(poll_once(first.as_mut()).is_pending(), "accept reserves");
+        let mut nap = pin!(time.sleep(Duration::from_millis(4)));
+        assert!(settle(&mut sim, nap.as_mut()).is_ready());
+        assert_eq!(sim.current_time(), queued_at + Duration::from_millis(4));
+    }
+
+    let (accepted, _) = drive(&mut sim, listener.accept()).expect("second accept");
+    assert_eq!(
+        sim.current_time(),
+        queued_at + latency,
+        "the replacement accept waits out only the remainder"
+    );
+    drop((client_stream, accepted));
+}
+
+/// #210: the `select!` idiom that re-creates its accept arm on every pass
+/// must not starve while a sibling arm fires faster than the accept latency.
+#[test]
+fn an_accept_recreated_every_millisecond_still_completes_on_time() {
+    let latency = Duration::from_millis(8);
+    let mut sim = world_with_accept_latency(latency);
+    let server = sim.network_provider(ip("10.0.1.2"));
+    let client = sim.network_provider(ip("10.0.1.1"));
+    let time = sim.time_provider();
+    let listener = drive(&mut sim, server.bind(SERVER)).expect("bind");
+    let client_stream = drive(&mut sim, client.connect(SERVER)).expect("connect");
+    let queued_at = sim.current_time();
+
+    let mut accepted = None;
+    for _pass in 0..100 {
+        let mut accept = pin!(listener.accept());
+        if let Poll::Ready(result) = poll_once(accept.as_mut()) {
+            accepted = Some(result.expect("accept"));
+            break;
+        }
+        // The sibling arm wins the pass; `select!` drops the accept arm.
+        let mut tick = pin!(time.sleep(Duration::from_millis(1)));
+        assert!(settle(&mut sim, tick.as_mut()).is_ready());
+    }
+    let (accepted, _) = accepted.expect("accept starved behind a 1 ms sibling arm");
+    assert!(
+        sim.current_time() <= queued_at + latency + Duration::from_millis(1),
+        "accepted at {:?}, queued at {queued_at:?}",
+        sim.current_time()
+    );
+    drop((client_stream, accepted));
 }
 
 #[test]
