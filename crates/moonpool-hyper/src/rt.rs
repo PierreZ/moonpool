@@ -82,8 +82,8 @@ pub struct HyperTimer<T> {
     /// clock onto the `Instant` values hyper's `Timer` API requires. The
     /// anchor cancels out of every deadline computation hyper performs
     /// (deadlines come from `Timer::now() + interval` and return through
-    /// `sleep_until`), so despite being captured from the wall clock it
-    /// never influences behavior: provider time does.
+    /// `sleep_until`), so whatever value [`anchor`] mints it never
+    /// influences behavior: provider time does.
     anchor: Instant,
     /// Provider time at construction, subtracted so `now()` stays near the
     /// anchor instead of drifting `provider.now()` past it twice.
@@ -97,10 +97,39 @@ impl<T: TimeProvider> HyperTimer<T> {
         let epoch = time.now();
         Self {
             time,
-            anchor: Instant::now(),
+            anchor: anchor(),
             epoch,
         }
     }
+}
+
+/// Mint the arbitrary `Instant` a [`HyperTimer`] offsets provider time from.
+///
+/// Native targets read the wall clock once, as they always have; the value
+/// never reaches behavior.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+fn anchor() -> Instant {
+    Instant::now()
+}
+
+/// Mint the arbitrary `Instant` a [`HyperTimer`] offsets provider time from.
+///
+/// `wasm32-unknown-unknown` has no clock: std's `Instant::now` panics there
+/// ("time not implemented on this platform"), which killed every browser
+/// run that built an `H2Server` or a `ReconnectingChannel` (#189). The
+/// anchor's value is irrelevant, so build the zero `Instant` without reading
+/// any clock. On this target std's `Instant` is a newtype over `Duration`
+/// (`std::sys::time::unsupported`), and `Instant` arithmetic (`+ Duration`,
+/// `saturating_duration_since`) is pure `Duration` arithmetic that never
+/// touches the missing clock, so the timer keeps running on provider time
+/// exactly as on native targets.
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+fn anchor() -> Instant {
+    // SAFETY: on wasm32-unknown-unknown `std::time::Instant` is
+    // `struct Instant(Duration)`, so `Duration::ZERO`'s bit pattern is a valid
+    // `Instant`. `transmute` checks the sizes at compile time: a std layout
+    // change that altered the size fails this build rather than miscompiling.
+    unsafe { std::mem::transmute::<Duration, Instant>(Duration::ZERO) }
 }
 
 impl<T: TimeProvider> hyper::rt::Timer for HyperTimer<T> {

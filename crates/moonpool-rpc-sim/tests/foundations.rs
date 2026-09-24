@@ -21,6 +21,14 @@ fn seed_budget(count: usize) -> Vec<u64> {
 /// activation), about one seed in sixteen; eighty seeds leave margin.
 const BIT_FLIP_SEEDS: usize = 80;
 
+/// Seeds for the every-required-scenario campaign.
+///
+/// The rarest required scenario, a stale reference rejected after a restart,
+/// fires on about one seed in five (11 of seeds 1..=48). Twelve seeds left a
+/// single hit, so any change to the draw schedule could drop it; at 24 the
+/// chance of a miss is about 0.3%.
+const REQUIRED_SCENARIO_SEEDS: usize = 24;
+
 fn observations() -> Observations {
     Arc::new(Mutex::new(Vec::new()))
 }
@@ -60,8 +68,8 @@ fn bounded_campaign_hits_every_required_scenario() {
     let observations = observations();
     let report = campaign(WorkloadConfig::campaign(), &observations)
         .check_determinism()
-        .set_debug_seeds(seed_budget(12))
-        .set_iterations(12)
+        .set_debug_seeds(seed_budget(REQUIRED_SCENARIO_SEEDS))
+        .set_iterations(REQUIRED_SCENARIO_SEEDS)
         .run()
         .expect("simulation configuration is valid");
     report.eprint();

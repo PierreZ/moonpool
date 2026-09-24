@@ -53,7 +53,7 @@
 //! decided entirely by the seeded network jitter and task scheduling:
 //!
 //! ```text
-//! seed 4  →  after the trigger: busyness 1.00, retries 150/s, goodput 0/s
+//! seed 1  →  after the trigger: busyness 1.00, retries 150/s, goodput 0/s
 //! seed 0  →  after the trigger: busyness 0.38, retries   0/s, goodput 50/s
 //! ```
 //!
@@ -64,13 +64,13 @@
 //!
 //! ```text
 //! cargo run --release --example metastable_grpc_retry_storm \
-//!     --features hyper,prometheus -- --seed 4
+//!     --features hyper,prometheus -- --seed 1
 //!
 //! cargo run --release --example metastable_grpc_retry_storm \
 //!     --features hyper,prometheus -- --search 0..64
 //! ```
 //!
-//! `--seed` runs one seed and prints its graph (seed 4 storms, seed 0
+//! `--seed` runs one seed and prints its graph (seed 1 storms, seed 0
 //! recovers); `--search` runs a range and prints one summary line per seed, the
 //! three windows that matter, so you can pick one to look at.
 
@@ -1045,7 +1045,12 @@ fn graph(seed: u64) -> Result<String, String> {
 }
 
 /// The seed the demo prints by default: one that stays in the storm.
-const DEMO_SEED: u64 = 4;
+///
+/// A display seed, not a witness: any change to the simulator's draw schedule
+/// moves which seeds storm (about half of them do), and the test below then
+/// fails until this is re-picked with `--search`. Seed 4 stormed when the
+/// example landed, then quietly recovered while CI never ran the test (#264).
+const DEMO_SEED: u64 = 1;
 
 #[cfg(test)]
 mod tests {

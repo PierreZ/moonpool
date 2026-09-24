@@ -103,6 +103,13 @@ pub(crate) struct NetworkSimulation {
     failed_accepts: BTreeMap<AcceptWaiterId, SimulationError>,
     failed_connects: BTreeSet<ConnectWaiterId>,
     accept_reservations: BTreeMap<AcceptWaiterId, AcceptReservation>,
+    /// The instant each published connection becomes acceptable. The accept
+    /// latency is charged to the connection when it enters the backlog, as a
+    /// kernel completes the handshake whether or not an `accept()` is
+    /// pending: dropping an `AcceptFuture` returns the connection to the
+    /// queue with its clock intact, and a later accept waits out only the
+    /// remainder (#210).
+    accept_ready_at: BTreeMap<ConnectionId, Duration>,
     operation_waiters: WakerRegistry<NetworkOperationId>,
 }
 
@@ -125,6 +132,7 @@ impl NetworkSimulation {
             failed_accepts: BTreeMap::new(),
             failed_connects: BTreeSet::new(),
             accept_reservations: BTreeMap::new(),
+            accept_ready_at: BTreeMap::new(),
             operation_waiters: WakerRegistry::default(),
         }
     }
@@ -294,6 +302,7 @@ impl NetworkSimulation {
             }
         }
         for id in queued {
+            self.accept_ready_at.remove(&id);
             wakes.append(self.close_aborted(id));
         }
         wakes
@@ -499,6 +508,7 @@ impl NetworkSimulation {
             self.state.connections.remove(&current);
             self.state.connection_clogs.remove(&current);
             self.state.read_clogs.remove(&current);
+            self.accept_ready_at.remove(&current);
             wakes.push(self.waiters.reads.take(&current));
             Self::take_waiter(&mut self.waiters.write_clogs, current, &mut wakes);
             Self::take_waiter(&mut self.waiters.read_clogs, current, &mut wakes);
@@ -545,6 +555,7 @@ impl NetworkSimulation {
         connection_id: ConnectionId,
         id: ConnectWaiterId,
         context_waker: Waker,
+        now: Duration,
     ) -> (PendingPublish, WakeBatch) {
         let mut wakes = WakeBatch::default();
         if self.failed_connects.remove(&id) {
@@ -574,7 +585,7 @@ impl NetworkSimulation {
             .and_then(|waiters| waiters.keys().next().copied());
         if self.has_backlog_room(addr) && first.is_none_or(|first| first == id) {
             self.remove_connect_waiter(addr, id);
-            wakes.append(self.publish_pending(addr, listener_id, connection_id));
+            wakes.append(self.publish_pending(addr, listener_id, connection_id, now));
             self.wake_first_connect_if_room(addr, &mut wakes);
             return (PendingPublish::Published, wakes);
         }
@@ -667,9 +678,19 @@ impl NetworkSimulation {
     pub(crate) fn complete_accept(&mut self, id: AcceptWaiterId) -> WakeBatch {
         let mut wakes = WakeBatch::default();
         if let Some(reservation) = self.accept_reservations.remove(&id) {
+            self.accept_ready_at.remove(&reservation.connection_id);
             self.wake_first_connect_if_room(&reservation.addr, &mut wakes);
         }
         wakes
+    }
+
+    /// How long the connection still has to wait before an accept may
+    /// return it: its queue-time ready instant minus `now`, never a fresh
+    /// latency. Zero once the instant has passed.
+    pub(crate) fn accept_remaining(&self, id: ConnectionId, now: Duration) -> Duration {
+        self.accept_ready_at
+            .get(&id)
+            .map_or(Duration::ZERO, |ready_at| ready_at.saturating_sub(now))
     }
 
     pub(crate) fn refresh_accept_reservation_waker(&mut self, id: AcceptWaiterId, waker: Waker) {
@@ -699,6 +720,7 @@ impl NetworkSimulation {
                 return self
                     .return_pending_connection(&reservation.addr, reservation.connection_id);
             }
+            self.accept_ready_at.remove(&reservation.connection_id);
             let mut wakes = self.close_aborted(reservation.connection_id);
             self.wake_first_connect_if_room(&reservation.addr, &mut wakes);
             return wakes;
@@ -714,20 +736,29 @@ impl NetworkSimulation {
         &mut self,
         addr: &str,
         connection_id: ConnectionId,
+        now: Duration,
     ) -> Option<WakeBatch> {
         let listener_id = self.state.bound.get(addr)?.id;
         if !self.has_backlog_room(addr) || self.waiters.connects.contains_key(addr) {
             return None;
         }
-        Some(self.publish_pending(addr, listener_id, connection_id))
+        Some(self.publish_pending(addr, listener_id, connection_id, now))
     }
 
+    /// Enter `connection_id` into the listener's backlog, stamping the
+    /// instant it becomes acceptable. This is the one accept-latency draw a
+    /// connection ever gets, however many accept futures later reserve and
+    /// drop it.
     fn publish_pending(
         &mut self,
         addr: &str,
         listener_id: ListenerId,
         connection_id: ConnectionId,
+        now: Duration,
     ) -> WakeBatch {
+        let delay = crate::network::sample_latency(&self.state.config.accept_latency);
+        self.accept_ready_at
+            .insert(connection_id, now.saturating_add(delay));
         if let Some((waiter_id, waker)) = self.take_next_accept(addr) {
             self.accept_reservations.insert(
                 waiter_id,
@@ -1403,6 +1434,7 @@ impl NetworkSimulation {
             }
         }
         self.state.pending_connections.clear();
+        self.accept_ready_at.clear();
         // The world is over: every listener is dead, and a listener bound
         // after the shutdown must not collide with a leftover of it.
         self.state.bound.clear();

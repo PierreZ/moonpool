@@ -151,7 +151,12 @@ Top-level network simulation parameters.
 
 Bind, connect, and accept use their latency fields as genuinely delayed
 operations. Each call remains pending until its targeted scheduler completion
-fires. Established reads wait on buffered byte delivery or a network waker.
+fires. The accept latency is the exception to "per call": it belongs to the
+connection, drawn once when the connection enters the listener's backlog, as a
+kernel completes the handshake whether or not an `accept()` is pending.
+Dropping an accept future (a `select!` that re-creates its accept arm every
+pass) returns the connection with its clock intact, and a later accept waits
+only for what is left of it. Established reads wait on buffered byte delivery or a network waker.
 Write and link latency apply to ordered byte delivery after the stream accepts
 the bytes into its send window (see
 [Flow control](../part3-building/10-network-faults.md#flow-control)).
