@@ -284,7 +284,7 @@ temporary slowdown in the middle of the run.
 
 ```bash
 cargo run --release --example metastable_grpc_retry_storm \
-    --features hyper,prometheus -- --seed 4
+    --features hyper,prometheus -- --seed 1
 ```
 
 It reads back the series the run recorded, runs the query pipelines above over

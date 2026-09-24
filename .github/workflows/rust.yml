@@ -43,6 +43,11 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - name: Run cargo nextest
         run: nix develop --command cargo nextest run
+      # The workspace run uses the facade's default features (sim, tokio), so
+      # cargo skips this example and its regression test: it needs the hyper
+      # and prometheus facade features too.
+      - name: Run the metastable retry-storm example test
+        run: nix develop --command cargo nextest run -p moonpool --features sim,hyper,prometheus --example metastable_grpc_retry_storm
 
   # moonpool-rpc over real localhost TCP on both Tokio flavors: open-loop
   # unary load, reply streams, an overload burst and its recovery, every
