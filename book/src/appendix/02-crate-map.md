@@ -132,14 +132,14 @@ contains only the runtime adapters.
 ### moonpool-journal
 
 **Role**: A write-ahead journal over `BlockFile` that tells a crash apart from
-corruption (the CLSTORE layout from PAR/CTRL, FAST '18). See
+corruption (CLSTORE, the storage layer of PAR/CTRL, FAST '18). See
 [A Crash-Aware Journal](../part5-building-on-top/08-journal.md).
 
 **Key types**:
 
 - `Journal` appends, reads, and truncates a segmented log
 - `JournalConfig` and `Geometry` shape the segments
-- `Recovery` reports what opening found: corrupt entries, the ambiguous tail
+- `Recovery` reports what opening found: corrupt entries, the ambiguous last entry
 - `JournalError` separates operating errors from evidence of damage
 
 Depends only on `moonpool-core`'s provider traits, so the same journal runs on

@@ -1,27 +1,20 @@
-//! The recovery decision: given what the walk found at every index of a
-//! segment, what to keep, what to report, and what to cut.
+//! The recovery decision: given what the walk found at each index of a
+//! segment, what to keep, what to report, and where the log ends.
 //!
-//! | Entry | Slot      | Mid-log (a good entry follows)   | Tail (nothing good follows) |
-//! |-------|-----------|----------------------------------|-----------------------------|
-//! | good  | valid     | keep                             | —                           |
-//! | good  | empty/bad | keep, rewrite the slot           | —                           |
-//! | bad   | valid     | corrupt: report (index, epoch)   | torn, ambiguous: report     |
-//! | bad   | empty     | refuse: an entry went missing    | torn tail: truncate         |
-//! | bad   | bad       | refuse: double fault             | torn tail: truncate         |
+//! | Entry | Slot      | Action                                        |
+//! |-------|-----------|-----------------------------------------------|
+//! | good  | valid     | keep                                          |
+//! | good  | empty/bad | keep, rewrite the slot                        |
+//! | bad   | valid     | mark corrupt, report `(index, epoch)` upward  |
+//! | bad   | empty     | torn tail: the log ends here                  |
+//! | bad   | bad       | double fault: refuse to start                 |
 //!
-//! "Tail" means the **last batch**. Only one batch is ever unsynced, and a
-//! crash resolves each of its sectors independently — so inside it, entry
-//! *i* may be torn while entry *i + 1* survived, which is a crash, not
-//! corruption. The last good entry records its position in its batch, which
-//! gives the batch's first index; the tail starts at the first index from
-//! there on that is not good, and everything past the last good entry is tail
-//! too. Before the last batch, every index was synced, so a bad entry there
-//! is damage, never a crash. A single-node journal cannot tell
-//! whether an ambiguous tail entry (valid slot, bad entry) was acknowledged,
-//! so it truncates it like a torn write — but it still reports it, so a
-//! replicated caller can keep it if it was committed. A sealed segment has no
-//! tail at all: the next segment exists, so its every index was synced before
-//! the rollover and anything short of "good" or "corrupt" is refused.
+//! This is the CLSTORE rule for batched appends (Alagappan et al., FAST '18,
+//! §4): the first entry without an identifier ends the log, and every earlier
+//! faulty entry that has one is corrupted. The one exception — the *last*
+//! entry of the log, whose bad entry beside a valid slot a crash can produce
+//! just as well as corruption (the paper's Appendix A) — is applied by the
+//! journal, which alone knows which entry is last.
 //!
 //! Nothing here does I/O; [`Segment::recover`](crate::segment) walks the
 //! file and hands the result in.
@@ -49,60 +42,29 @@ pub(crate) struct Rec {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Decision {
     /// One record per kept index, starting at the segment's first index.
-    /// `None` only below the journal's live start, where nothing is checked.
-    pub recs: Vec<Option<Rec>>,
+    pub recs: Vec<Rec>,
     /// Kept indexes whose slot on disk must be rewritten from the entry.
     pub rewrite_slots: Vec<u64>,
-    /// Damaged entries mid-log, as `(index, epoch)`.
+    /// Damaged entries whose slot is intact, as `(index, epoch)`.
     pub corrupt: Vec<(u64, u64)>,
-    /// Torn tail entries whose slot was intact, as `(index, epoch)`.
-    pub ambiguous_tail: Vec<(u64, u64)>,
-    /// Whether anything past the kept range was found and must be wiped.
-    pub torn: bool,
+    /// The walk met an index with neither an intact entry nor an identifier:
+    /// the log ends there.
+    pub ended: bool,
 }
 
-/// Decide a segment whose indexes start at `first`.
-///
-/// `found` covers every index the walk reached. `sealed` is true when a later
-/// segment exists, in which case `found` must cover the segment's whole range.
-/// Indexes below `start` are compacted away: kept for addressing, never
-/// judged.
+/// Decide a segment whose indexes start at `first`, from what the walk
+/// found. The walk stops at the first index that ends the log, so that index,
+/// if any, is the last one in `found`.
 ///
 /// # Errors
 ///
-/// [`JournalError::MissingEntry`] or [`JournalError::DoubleFault`] for an
-/// unrecoverable index that is not part of a torn tail.
-pub(crate) fn decide(
-    first: u64,
-    start: u64,
-    found: &[Found],
-    sealed: bool,
-) -> Result<Decision, JournalError> {
-    let kept = if sealed {
-        found.len()
-    } else {
-        match found.iter().rposition(|f| f.entry.is_some()) {
-            None => 0,
-            Some(last) => {
-                let (_, header) = found[last].entry.expect("the last good entry");
-                let batch_start = last.saturating_sub(header.batch_pos as usize);
-                (batch_start..=last)
-                    .find(|rel| found[*rel].entry.is_none())
-                    .unwrap_or(last + 1)
-            }
-        }
-    };
+/// [`JournalError::DoubleFault`] where an entry and its slot are both
+/// damaged.
+pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalError> {
     let mut decision = Decision::default();
     for (rel, f) in found.iter().enumerate() {
         let index = first + rel as u64;
-        if rel >= kept {
-            decision.torn |= f.slot != SlotState::Empty;
-            if let SlotState::Valid(slot) = f.slot {
-                decision.ambiguous_tail.push((index, slot.epoch));
-            }
-            continue;
-        }
-        let rec = match (f.entry, f.slot) {
+        match (f.entry, f.slot) {
             (Some((offset, header)), slot) => {
                 let rebuilt = Slot {
                     index,
@@ -114,25 +76,24 @@ pub(crate) fn decide(
                 if slot != SlotState::Valid(rebuilt) {
                     decision.rewrite_slots.push(index);
                 }
-                Some(Rec {
+                decision.recs.push(Rec {
                     slot: rebuilt,
                     corrupt: false,
-                })
+                });
             }
             (None, SlotState::Valid(slot)) => {
-                if index >= start {
-                    decision.corrupt.push((index, slot.epoch));
-                }
-                Some(Rec {
+                decision.corrupt.push((index, slot.epoch));
+                decision.recs.push(Rec {
                     slot,
                     corrupt: true,
-                })
+                });
             }
-            (None, _) if index < start => None,
-            (None, SlotState::Empty) => return Err(JournalError::MissingEntry { index }),
+            (None, SlotState::Empty) => {
+                decision.ended = true;
+                break;
+            }
             (None, SlotState::Bad) => return Err(JournalError::DoubleFault { index }),
-        };
-        decision.recs.push(rec);
+        }
     }
     Ok(decision)
 }
@@ -162,7 +123,6 @@ mod tests {
                     index,
                     epoch: s.epoch,
                     crc: s.entry_crc,
-                    batch_pos: 0,
                 },
             )),
         }
@@ -182,83 +142,43 @@ mod tests {
             good(2, SlotState::Empty),
             good(3, SlotState::Bad),
         ];
-        let decision = decide(1, 1, &found, false).expect("recoverable");
+        let decision = decide(1, &found).expect("recoverable");
         assert_eq!(decision.recs.len(), 3);
         assert_eq!(decision.rewrite_slots, vec![2, 3]);
-        assert!(!decision.torn);
+        assert!(!decision.ended);
     }
 
     #[test]
-    fn a_bad_entry_with_a_valid_slot_mid_log_is_corrupt() {
+    fn a_bad_entry_with_a_valid_slot_is_corrupt() {
         let found = [
             good(1, SlotState::Valid(slot(1))),
             bad(SlotState::Valid(slot(2))),
             good(3, SlotState::Valid(slot(3))),
         ];
-        let decision = decide(1, 1, &found, false).expect("recoverable");
+        let decision = decide(1, &found).expect("recoverable");
         assert_eq!(decision.corrupt, vec![(2, 5)]);
-        assert!(decision.recs[1].expect("kept").corrupt);
+        assert!(decision.recs[1].corrupt);
     }
 
     #[test]
-    fn the_tail_is_truncated_and_its_intact_slots_reported() {
+    fn the_first_entry_without_an_identifier_ends_the_log() {
         let found = [
             good(1, SlotState::Valid(slot(1))),
             bad(SlotState::Valid(slot(2))),
             bad(SlotState::Empty),
-            bad(SlotState::Bad),
         ];
-        let decision = decide(1, 1, &found, false).expect("recoverable");
-        assert_eq!(decision.recs.len(), 1);
-        assert_eq!(decision.ambiguous_tail, vec![(2, 5)]);
-        assert!(decision.torn);
-    }
-
-    #[test]
-    fn a_hole_inside_the_last_batch_is_a_torn_write() {
-        // Indexes 2..=4 were one unsynced batch: 3 was torn, 4 survived.
-        let mut last = good(4, SlotState::Bad);
-        if let Some((_, header)) = &mut last.entry {
-            header.batch_pos = 2;
-        }
-        let found = [
-            good(1, SlotState::Valid(slot(1))),
-            good(2, SlotState::Bad),
-            bad(SlotState::Bad),
-            last,
-        ];
-        let decision = decide(1, 1, &found, false).expect("a crash, not corruption");
+        let decision = decide(1, &found).expect("recoverable");
         assert_eq!(decision.recs.len(), 2);
-        assert!(decision.torn);
+        assert_eq!(decision.corrupt, vec![(2, 5)]);
+        assert!(decision.ended);
     }
 
     #[test]
-    fn mid_log_loss_is_refused() {
-        let missing = [bad(SlotState::Empty), good(2, SlotState::Valid(slot(2)))];
-        assert!(matches!(
-            decide(1, 1, &missing, false),
-            Err(JournalError::MissingEntry { index: 1 })
-        ));
-        let double = [bad(SlotState::Bad), good(2, SlotState::Valid(slot(2)))];
-        assert!(matches!(
-            decide(1, 1, &double, false),
-            Err(JournalError::DoubleFault { index: 1 })
-        ));
-    }
-
-    #[test]
-    fn a_sealed_segment_has_no_tail() {
+    fn a_double_fault_is_refused() {
         let found = [good(1, SlotState::Valid(slot(1))), bad(SlotState::Bad)];
         assert!(matches!(
-            decide(1, 1, &found, true),
+            decide(1, &found),
             Err(JournalError::DoubleFault { index: 2 })
         ));
-    }
-
-    #[test]
-    fn indexes_below_the_start_are_not_judged() {
-        let found = [bad(SlotState::Bad), good(2, SlotState::Empty)];
-        let decision = decide(1, 2, &found, false).expect("compacted index ignored");
-        assert_eq!(decision.recs[0], None);
     }
 }

@@ -1,5 +1,5 @@
-//! The journal: an ordered list of segments, a manifest naming them, and the
-//! caller's metadata beside them.
+//! The journal: the ordered segments of a directory, and the caller's
+//! metadata beside them.
 
 use std::ops::Range;
 
@@ -8,27 +8,19 @@ use tracing::instrument;
 
 use crate::JournalError;
 use crate::dual::DualFile;
-use crate::layout::{BLOCK_U64, ENTRY_HEADER_SIZE, Geometry, entry_size};
-use crate::segment::{Bound, Entry, Placement, Segment, segment_path};
+use crate::layout::{ENTRY_HEADER_SIZE, Geometry, entry_size};
+use crate::segment::{Entry, Segment, is_segment_leftover, parse_segment_name, segment_path};
 
 /// How to lay out and drive a journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalConfig {
     /// The shape of every segment. Must match what an existing journal was
-    /// created with: a segment whose header disagrees is refused.
+    /// created with: a segment whose header or size disagrees is refused.
     pub geometry: Geometry,
-    /// The most bytes one `write → write → fdatasync` cycle carries. Larger
-    /// appends are split into several cycles.
-    ///
-    /// This also bounds how far past the last intact entry an unacknowledged
-    /// write can have reached when the process crashed, which is the range
-    /// recovery scrubs before the journal accepts new appends. One entry must
-    /// fit in it.
-    pub max_batch_bytes: u64,
     /// Direct-I/O policy for segment files.
     pub direct_io: DirectIo,
     /// The index of the first entry of a freshly created journal. Ignored
-    /// when the journal already exists.
+    /// when the directory already holds segments.
     pub first_index: u64,
 }
 
@@ -36,7 +28,6 @@ impl Default for JournalConfig {
     fn default() -> Self {
         Self {
             geometry: Geometry::default(),
-            max_batch_bytes: 4 << 20,
             direct_io: DirectIo::Optional,
             first_index: 1,
         }
@@ -55,20 +46,22 @@ pub struct Record<'a> {
 /// What opening the journal found and repaired.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Recovery {
-    /// The journal did not exist and was created.
+    /// The directory held no segment and the journal was created.
     pub created: bool,
-    /// Damaged entries mid-log, as `(index, epoch)`. They stay in the log;
-    /// reading one returns [`JournalError::Corrupt`]. A replicated caller
-    /// re-fetches them from a peer.
+    /// Damaged entries whose identifier is intact, as `(index, epoch)`. They
+    /// stay in the log; reading one returns [`JournalError::Corrupt`]. A
+    /// replicated caller fixes them from a peer.
     pub corrupt: Vec<(u64, u64)>,
-    /// Entries at the tail whose slot was intact but whose entry was not, as
-    /// `(index, epoch)`. A single node cannot tell whether they were
-    /// acknowledged, so they were truncated like a torn write; a replicated
-    /// caller keeps them if they were committed, and discards them if not.
-    pub ambiguous_tail: Vec<(u64, u64)>,
-    /// Slots of intact entries that were lost or damaged and rewritten.
+    /// The last entry of the log, when its identifier was intact but the
+    /// entry was not, as `(index, epoch)`. A crash between the slot write
+    /// and the sync produces exactly this, and so can corruption; no local
+    /// algorithm tells them apart. A single node cannot resolve it, so it is
+    /// truncated like a torn write — and reported, so a replicated caller
+    /// can keep it if it was committed.
+    pub ambiguous_tail: Option<(u64, u64)>,
+    /// Slots of intact entries that were missing or damaged and rewritten.
     pub slots_rewritten: usize,
-    /// A torn tail was found and wiped.
+    /// Something past the end of the log was discarded and zeroed.
     pub torn_tail: bool,
     /// Segment header copies that were damaged and rewritten from their twin.
     pub headers_repaired: usize,
@@ -81,11 +74,8 @@ pub struct Journal<P: StorageProvider> {
     provider: P,
     dir: String,
     config: JournalConfig,
-    manifest: DualFile,
     meta: DualFile,
     meta_value: Option<Vec<u8>>,
-    /// First live index; everything below was compacted away.
-    start: u64,
     /// Sorted by first index; never empty. The last one takes appends.
     segments: Vec<Segment<P::File>>,
     poisoned: bool,
@@ -95,58 +85,11 @@ impl<P: StorageProvider> std::fmt::Debug for Journal<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Journal")
             .field("dir", &self.dir)
-            .field("start", &self.start)
+            .field("start", &self.start_index())
             .field("next", &self.next_index())
             .field("segments", &self.segments.len())
             .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
-    }
-}
-
-/// The manifest: which segments exist, where the live log starts, and a
-/// suffix truncation in progress, if any.
-///
-/// ```text
-/// u64 start   u64 fence (u64::MAX: none)   u64 first index of each segment …
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Manifest {
-    start: u64,
-    fence: Option<u64>,
-    firsts: Vec<u64>,
-}
-
-impl Manifest {
-    const NO_FENCE: u64 = u64::MAX;
-
-    fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(16 + 8 * self.firsts.len());
-        bytes.extend_from_slice(&self.start.to_le_bytes());
-        bytes.extend_from_slice(&self.fence.unwrap_or(Self::NO_FENCE).to_le_bytes());
-        for first in &self.firsts {
-            bytes.extend_from_slice(&first.to_le_bytes());
-        }
-        bytes
-    }
-
-    fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 24 || !bytes.len().is_multiple_of(8) {
-            return None;
-        }
-        let mut words = bytes
-            .chunks_exact(8)
-            .map(|word| u64::from_le_bytes(word.try_into().expect("8 bytes")));
-        let start = words.next()?;
-        let fence = words.next().filter(|fence| *fence != Self::NO_FENCE);
-        let firsts: Vec<u64> = words.collect();
-        let sorted = firsts.windows(2).all(|pair| pair[0] < pair[1]);
-        let last = *firsts.last()?;
-        let fence_ok = fence.is_none_or(|fence| fence >= start.max(last));
-        (sorted && firsts[0] <= start && fence_ok).then_some(Self {
-            start,
-            fence,
-            firsts,
-        })
     }
 }
 
@@ -159,15 +102,18 @@ fn parent_of(dir: &str) -> &str {
 }
 
 impl<P: StorageProvider> Journal<P> {
-    /// Open the journal under `dir`, creating it if it does not exist, and
-    /// run the recovery scan.
+    /// Open the journal under `dir`, creating it if the directory holds no
+    /// segment, and run the recovery scan.
+    ///
+    /// Segments are found by listing the directory: each is named after its
+    /// first index, so the names alone give their order. A segment file left
+    /// half-created by a crash (`seg-….wal.tmp`) is removed.
     ///
     /// # Errors
     ///
     /// [`JournalError::InvalidConfig`] for an unusable configuration,
-    /// [`JournalError::DoubleFault`] / [`JournalError::MissingEntry`] when
-    /// damage cannot be told apart from lost acknowledged data, the
-    /// segment-level faults, and any I/O error.
+    /// [`JournalError::DoubleFault`] where an entry and its identifier are
+    /// both damaged, the segment metadata faults, and any I/O error.
     #[instrument(skip(provider, config))]
     pub async fn open(
         provider: P,
@@ -175,97 +121,89 @@ impl<P: StorageProvider> Journal<P> {
         config: JournalConfig,
     ) -> Result<(Self, Recovery), JournalError> {
         config.geometry.validate()?;
-        if config.max_batch_bytes < BLOCK_U64 {
-            return Err(JournalError::InvalidConfig(
-                "max_batch_bytes must hold at least one block".into(),
-            ));
-        }
         provider.create_dir_all(dir).await?;
         provider.sync_dir(parent_of(dir)).await?;
 
-        let (mut manifest, listed) = DualFile::load(&provider, dir, "manifest").await?;
         let (meta, meta_value) = DualFile::load(&provider, dir, "meta").await?;
-        let mut recovery = Recovery::default();
-        let (start, segments) = if let Some(bytes) = listed {
-            let Manifest {
-                start,
-                fence,
-                firsts,
-            } = Manifest::decode(&bytes)
-                .ok_or(JournalError::MetadataCorrupt { name: "manifest" })?;
-            let mut segments = Vec::with_capacity(firsts.len());
-            for (k, first) in firsts.iter().enumerate() {
-                let bound = match (firsts.get(k + 1), fence) {
-                    (Some(next), _) => Bound::Sealed(*next),
-                    (None, Some(fence)) => Bound::Fenced(fence),
-                    (None, None) => Bound::Tail,
-                };
-                let placement = Placement {
-                    dir,
-                    geometry: config.geometry,
-                    direct_io: config.direct_io,
-                    start,
-                    max_batch: config.max_batch_bytes,
-                };
-                let (segment, found) =
-                    Segment::recover(&provider, &placement, *first, bound).await?;
-                recovery.corrupt.extend(found.corrupt);
-                recovery.ambiguous_tail.extend(found.ambiguous_tail);
-                recovery.slots_rewritten += found.slots_rewritten;
-                recovery.torn_tail |= found.torn;
-                recovery.headers_repaired += usize::from(found.header_repaired);
-                segments.push(segment);
+        let mut firsts = Vec::new();
+        let mut leftovers = false;
+        for name in provider.list_dir(dir).await? {
+            if let Some(first) = parse_segment_name(&name) {
+                firsts.push(first);
+            } else if is_segment_leftover(&name) {
+                provider.delete(&format!("{dir}/{name}")).await?;
+                leftovers = true;
             }
-            if fence.is_some() {
-                // The interrupted truncation is finished now: clear it.
-                recovery.torn_tail = true;
-                let cleared = Manifest {
-                    start,
-                    fence: None,
-                    firsts,
-                };
-                manifest.store(&provider, &cleared.encode()).await?;
-            }
-            (start, segments)
-        } else {
-            // No manifest: the journal was never created, or its creation
-            // never reached the manifest. Either way nothing in it is live.
-            let first = config.first_index;
-            let segment =
-                Segment::create(&provider, dir, first, config.geometry, config.direct_io).await?;
-            let created = Manifest {
-                start: first,
-                fence: None,
-                firsts: vec![first],
-            };
-            manifest.store(&provider, &created.encode()).await?;
-            recovery.created = true;
-            (first, vec![segment])
-        };
+        }
+        if leftovers {
+            provider.sync_dir(dir).await?;
+        }
+        firsts.sort_unstable();
 
-        let next = segments.last().map_or(start, Segment::next_index);
-        if next < start {
-            return Err(JournalError::MissingEntry { index: next });
+        let mut recovery = Recovery::default();
+        let mut segments = Vec::with_capacity(firsts.len().max(1));
+        if firsts.is_empty() {
+            let first = config.first_index;
+            segments.push(
+                Segment::create(&provider, dir, first, config.geometry, config.direct_io).await?,
+            );
+            recovery.created = true;
+        }
+        for (k, first) in firsts.iter().enumerate() {
+            let next_first = firsts.get(k + 1).copied();
+            let (segment, found) = Segment::recover(
+                &provider,
+                dir,
+                *first,
+                config.geometry,
+                config.direct_io,
+                next_first,
+            )
+            .await?;
+            recovery.corrupt.extend(found.corrupt);
+            recovery.slots_rewritten += found.slots_rewritten;
+            recovery.torn_tail |= found.torn;
+            recovery.headers_repaired += usize::from(found.header_repaired);
+            segments.push(segment);
+            if found.ended && next_first.is_some() {
+                // The log ends inside a sealed segment: everything after it
+                // is discarded, newest first so the survivors stay a prefix.
+                for later in firsts[k + 1..].iter().rev() {
+                    provider.delete(&segment_path(dir, *later)).await?;
+                }
+                provider.sync_dir(dir).await?;
+                recovery.torn_tail = true;
+                break;
+            }
+        }
+
+        let mut journal = Self {
+            provider,
+            dir: dir.to_string(),
+            config,
+            meta,
+            meta_value,
+            segments,
+            poisoned: false,
+        };
+        // The last entry is the one a crash can leave with its identifier
+        // but without its bytes: ambiguous, so a single node truncates it.
+        if let Some((index, rec)) = journal.last_record()
+            && rec.corrupt
+        {
+            recovery.corrupt.retain(|(corrupt, _)| *corrupt != index);
+            recovery.ambiguous_tail = Some((index, rec.slot.epoch));
+            recovery.torn_tail = true;
+            journal.truncate_suffix(index).await?;
         }
         for (index, epoch) in &recovery.corrupt {
             tracing::warn!(index, epoch, "journal entry corrupt");
         }
-        let journal = Self {
-            provider,
-            dir: dir.to_string(),
-            config,
-            manifest,
-            meta,
-            meta_value,
-            start,
-            segments,
-            poisoned: false,
-        };
         Ok((journal, recovery))
     }
 
     /// The segment taking appends. The list is never empty: creation starts
-    /// it with one segment and truncation always keeps the last.
+    /// it with one segment and truncation always keeps the first.
     fn tail(&self) -> &Segment<P::File> {
         self.segments
             .last()
@@ -278,23 +216,19 @@ impl<P: StorageProvider> Journal<P> {
             .expect("the segment list is never empty")
     }
 
-    /// Durably record the segment list (the first `count` segments), the
-    /// live start, and a truncation fence.
-    async fn publish(&mut self, count: usize, fence: Option<u64>) -> Result<(), JournalError> {
-        let manifest = Manifest {
-            start: self.start,
-            fence,
-            firsts: self.segments[..count].iter().map(|s| s.first).collect(),
-        };
-        self.manifest
-            .store(&self.provider, &manifest.encode())
-            .await
+    /// The log's last entry and its record, wherever it lives (the tail
+    /// segment may be freshly rolled over and still empty).
+    fn last_record(&self) -> Option<(u64, crate::scan::Rec)> {
+        self.segments
+            .iter()
+            .rev()
+            .find_map(|segment| segment.last().map(|rec| (segment.next_index() - 1, rec)))
     }
 
-    /// First live index.
+    /// First live index: the first index of the oldest segment.
     #[must_use]
     pub fn start_index(&self) -> u64 {
-        self.start
+        self.segments.first().map_or(0, |segment| segment.first)
     }
 
     /// The index the next appended entry gets.
@@ -307,29 +241,23 @@ impl<P: StorageProvider> Journal<P> {
     #[must_use]
     pub fn last_index(&self) -> Option<u64> {
         let next = self.next_index();
-        (next > self.start).then(|| next - 1)
+        (next > self.start_index()).then(|| next - 1)
     }
 
-    /// The largest payload one entry may carry.
+    /// The largest payload one entry may carry: what one segment's data
+    /// region holds.
     #[must_use]
     pub fn max_payload(&self) -> u64 {
-        let per_entry = self
-            .config
-            .max_batch_bytes
-            .min(self.config.geometry.data_capacity());
         // Entries are padded to 8 bytes.
-        (per_entry & !7) - ENTRY_HEADER_SIZE as u64
+        (self.config.geometry.data_capacity() & !7) - ENTRY_HEADER_SIZE as u64
     }
 
     fn segment_of(&self, index: u64) -> Result<&Segment<P::File>, JournalError> {
-        let next = self.next_index();
-        if index < self.start || index >= next {
-            return Err(JournalError::OutOfRange {
-                index,
-                start: self.start,
-                next,
-            });
+        let (start, next) = (self.start_index(), self.next_index());
+        if index < start || index >= next {
+            return Err(JournalError::OutOfRange { index, start, next });
         }
+        // Binary search: the largest first index at or below `index`.
         let at = self
             .segments
             .partition_point(|segment| segment.first <= index)
@@ -350,7 +278,8 @@ impl<P: StorageProvider> Journal<P> {
     ///
     /// [`JournalError::OutOfRange`] outside `[start, next)`,
     /// [`JournalError::Corrupt`] if the entry fails any check (its CRC, its
-    /// index, or agreement with its slot), and any I/O error.
+    /// index, or agreement with its slot) or the medium cannot read it, and
+    /// any other I/O error.
     pub async fn read(&self, index: u64) -> Result<Entry, JournalError> {
         let entry = self.segment_of(index)?.read(index).await;
         if let Err(JournalError::Corrupt { index, epoch }) = &entry {
@@ -367,12 +296,13 @@ impl<P: StorageProvider> Journal<P> {
         }
     }
 
-    /// Append `records` at [`next_index`](Self::next_index) and return the
-    /// indexes they got. On `Ok` every record is durable.
+    /// Append `records` at [`next_index`](Self::next_index) as one batch and
+    /// return the indexes they got. On `Ok` every record is durable.
     ///
-    /// Records are written in batches: the entries in one write, their slots
-    /// in another, then one `fdatasync` per batch. A segment that runs out of
-    /// slots or data space rolls over to a new one.
+    /// The entries go in one write, their slots in another, then one
+    /// `fdatasync`. A batch that does not fit the current segment's slot
+    /// table or data region fills it, and the rest continues in a new
+    /// segment with its own sync.
     ///
     /// # Errors
     ///
@@ -397,19 +327,16 @@ impl<P: StorageProvider> Journal<P> {
         let first = self.next_index();
         let mut done = 0;
         while done < records.len() {
-            let fit = self
-                .tail()
-                .fitting(&sizes[done..], self.config.max_batch_bytes);
-            if fit == 0 {
-                self.guarded_rollover().await?;
-                continue;
-            }
-            let batch: Vec<(u64, &[u8])> = records[done..done + fit]
-                .iter()
-                .map(|record| (record.epoch, record.payload))
-                .collect();
-            let tail = self.tail_mut();
-            let outcome = tail.append(&batch).await;
+            let fit = self.tail().fitting(&sizes[done..]);
+            let outcome = if fit == 0 {
+                self.rollover().await
+            } else {
+                let batch: Vec<(u64, &[u8])> = records[done..done + fit]
+                    .iter()
+                    .map(|record| (record.epoch, record.payload))
+                    .collect();
+                self.tail_mut().append(&batch).await
+            };
             if outcome.is_err() {
                 self.poisoned = true;
             }
@@ -419,17 +346,8 @@ impl<P: StorageProvider> Journal<P> {
         Ok(first..self.next_index())
     }
 
-    async fn guarded_rollover(&mut self) -> Result<(), JournalError> {
-        let outcome = self.rollover().await;
-        if outcome.is_err() {
-            self.poisoned = true;
-        }
-        outcome
-    }
-
     /// Start a new segment at the next index. Every batch in the current one
-    /// is already synced, so the manifest may name the successor as soon as
-    /// the successor itself is durable.
+    /// is already synced.
     async fn rollover(&mut self) -> Result<(), JournalError> {
         let first = self.next_index();
         let segment = Segment::create(
@@ -441,26 +359,19 @@ impl<P: StorageProvider> Journal<P> {
         )
         .await?;
         self.segments.push(segment);
-        self.publish(self.segments.len(), None).await?;
         tracing::debug!(first, "journal segment rolled over");
         Ok(())
     }
 
     /// Discard every entry at `from` and after (Raft suffix truncation).
     ///
-    /// The cut is first recorded in the manifest as a *fence*; then the
-    /// discarded slots and entries are zeroed and synced; then the fence is
-    /// lifted. The appends that follow can therefore never be mistaken for,
-    /// or mixed up with, what was discarded — and a crash part-way, which may
-    /// leave any mix of zeroed and surviving sectors, recovers to exactly
-    /// `from` (fence recorded) or the old log (fence not yet durable).
-    ///
-    /// Cutting at the first index of a batch never rewrites a block that
-    /// holds kept entries, because every batch starts on a block boundary.
-    /// Cutting inside a batch zeroes the tail of the block where the cut
-    /// falls, rewriting the kept entries that share it; a crash during that
-    /// rewrite can tear them, and recovery then reports them in
-    /// [`Recovery::ambiguous_tail`].
+    /// Segments wholly past the cut are deleted, newest first. In the segment
+    /// the cut falls in, the discarded slots are zeroed and synced, then the
+    /// discarded entries are zeroed and synced — the clean-up that must
+    /// precede the next append, or a crash could leave an old slot beside a
+    /// new entry and make a harmless crash look like corruption. A crash
+    /// part-way leaves a log that ends somewhere between `from` and the old
+    /// end: never a gap, never a corrupt entry.
     ///
     /// # Errors
     ///
@@ -469,38 +380,33 @@ impl<P: StorageProvider> Journal<P> {
     #[instrument(skip(self), fields(dir = %self.dir))]
     pub async fn truncate_suffix(&mut self, from: u64) -> Result<(), JournalError> {
         self.check_writable()?;
-        let next = self.next_index();
-        if from < self.start || from > next {
+        let (start, next) = (self.start_index(), self.next_index());
+        if from < start || from > next {
             return Err(JournalError::OutOfRange {
                 index: from,
-                start: self.start,
+                start,
                 next,
             });
         }
         if from == next {
             return Ok(());
         }
+        // Keep the segments that start before the cut, and always the first.
         let keep = self
             .segments
-            .partition_point(|segment| segment.first <= from);
+            .partition_point(|segment| segment.first < from)
+            .max(1);
         let outcome = async {
-            // Zeroing is many writes, and a crash resolves each of them on
-            // its own: half-zeroed slots beside surviving entries would look
-            // like mid-log damage. So the cut is made durable first, as a
-            // fence recovery honours whatever state the zeroing reached.
-            self.publish(keep, Some(from)).await?;
             if keep < self.segments.len() {
-                for dropped in self.segments.drain(keep..) {
+                // Newest first, so the survivors always stay a prefix.
+                for dropped in self.segments.drain(keep..).rev() {
                     let path = segment_path(&self.dir, dropped.first);
                     drop(dropped);
                     self.provider.delete(&path).await?;
                 }
                 self.provider.sync_dir(&self.dir).await?;
             }
-            self.tail_mut().truncate_from(from).await?;
-            // The discarded range is zero and durable: lift the fence before
-            // anything is appended at `from` again.
-            self.publish(self.segments.len(), None).await
+            self.tail_mut().truncate_from(from).await
         }
         .await;
         if outcome.is_err() {
@@ -509,8 +415,10 @@ impl<P: StorageProvider> Journal<P> {
         outcome
     }
 
-    /// Forget every entry before `before` (compaction). Whole segments below
-    /// it are deleted; the live start is recorded durably either way.
+    /// Forget whole segments that lie entirely before `before` (compaction).
+    /// The segment holding `before` is kept, so the new
+    /// [`start_index`](Self::start_index) is its first index — at or below
+    /// `before`. Deleted oldest first, so the survivors stay a suffix.
     ///
     /// # Errors
     ///
@@ -519,42 +427,28 @@ impl<P: StorageProvider> Journal<P> {
     #[instrument(skip(self), fields(dir = %self.dir))]
     pub async fn truncate_prefix(&mut self, before: u64) -> Result<(), JournalError> {
         self.check_writable()?;
-        let next = self.next_index();
-        if before < self.start || before > next {
+        let (start, next) = (self.start_index(), self.next_index());
+        if before < start || before > next {
             return Err(JournalError::OutOfRange {
                 index: before,
-                start: self.start,
+                start,
                 next,
             });
-        }
-        if before == self.start {
-            return Ok(());
         }
         let drop_count = self
             .segments
             .partition_point(|segment| segment.first <= before)
-            - 1;
+            .saturating_sub(1);
+        if drop_count == 0 {
+            return Ok(());
+        }
         let outcome = async {
-            let manifest = Manifest {
-                start: before,
-                fence: None,
-                firsts: self.segments[drop_count..]
-                    .iter()
-                    .map(|s| s.first)
-                    .collect(),
-            };
-            self.manifest
-                .store(&self.provider, &manifest.encode())
-                .await?;
-            self.start = before;
             for dropped in self.segments.drain(..drop_count) {
                 let path = segment_path(&self.dir, dropped.first);
                 drop(dropped);
                 self.provider.delete(&path).await?;
             }
-            if drop_count > 0 {
-                self.provider.sync_dir(&self.dir).await?;
-            }
+            self.provider.sync_dir(&self.dir).await?;
             Ok(())
         }
         .await;
@@ -571,13 +465,13 @@ impl<P: StorageProvider> Journal<P> {
         self.meta_value.as_deref()
     }
 
-    /// Durably replace the caller's metadata. It lives in its own two-copy
-    /// file (`meta.0`, `meta.1`), each copy with a generation and a CRC,
-    /// updated through a temporary file, a sync, and a rename.
+    /// Durably replace the caller's metadata. It lives in its own file, in
+    /// two copies (`meta.0`, `meta.1`), each with a generation counter and a
+    /// CRC, each updated through a temporary file, a sync, and a rename.
     ///
     /// # Errors
     ///
-    /// Any I/O error; the previous value is still intact on disk.
+    /// Any I/O error; at least one copy is still intact on disk.
     #[instrument(skip_all, fields(dir = %self.dir, len = bytes.len()))]
     pub async fn save_meta(&mut self, bytes: &[u8]) -> Result<(), JournalError> {
         self.meta.store(&self.provider, bytes).await?;

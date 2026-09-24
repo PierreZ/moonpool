@@ -25,21 +25,12 @@ pub enum JournalError {
         epoch: u64,
     },
 
-    /// Both the entry at `index` and its slot are damaged, and a later entry
-    /// is intact — so this is not a torn tail, and nothing identifies what was
-    /// lost. The journal refuses to start.
-    #[error("double fault at index {index}: entry and slot are both damaged mid-log")]
+    /// Both the entry at `index` and its slot are damaged, so nothing
+    /// identifies what was there — CLSTORE crashes the node rather than
+    /// guess. The journal refuses to start.
+    #[error("double fault at index {index}: entry and slot are both damaged")]
     DoubleFault {
         /// The index whose entry and slot are both unusable.
-        index: u64,
-    },
-
-    /// The entry at `index` is damaged and its slot is empty, yet a later
-    /// entry is intact: an acknowledged entry went missing. The journal
-    /// refuses to start rather than truncate acknowledged data.
-    #[error("entry {index} is missing mid-log (damaged entry, empty slot)")]
-    MissingEntry {
-        /// The index that cannot be found.
         index: u64,
     },
 
@@ -63,15 +54,7 @@ pub enum JournalError {
         actual: u64,
     },
 
-    /// The manifest names a segment that does not exist.
-    #[error("segment starting at {first_index} is missing")]
-    SegmentMissing {
-        /// The missing segment's first index.
-        first_index: u64,
-    },
-
-    /// A two-copy metadata file (`name` is `manifest` or `meta`) exists but
-    /// neither copy is valid.
+    /// The two-copy metadata file exists but neither copy is valid.
     #[error("both copies of {name} are damaged")]
     MetadataCorrupt {
         /// Which file.
@@ -89,8 +72,7 @@ pub enum JournalError {
         next: u64,
     },
 
-    /// An entry is larger than one batch or one segment's data region can
-    /// hold.
+    /// An entry is larger than one segment's data region can hold.
     #[error("entry of {len} bytes exceeds the {max}-byte limit")]
     EntryTooLarge {
         /// The payload length.

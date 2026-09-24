@@ -3,9 +3,10 @@
 <!-- toc -->
 
 `moonpool-journal` is a write-ahead log built on nothing but the provider
-traits and [`BlockFile`](../part2-foundations/07-provider-traits.md). It is
-the kind of storage engine the simulator's disk model exists to break, and it
-doubles as a worked example of testing one against that model.
+traits and [`BlockFile`](../part2-foundations/07-provider-traits.md). It
+implements CLSTORE, the local storage layer of *Protocol-Aware Recovery for
+Consensus-Based Storage* (Alagappan et al., FAST '18), and doubles as a worked
+example of testing a storage engine against the simulator's disk.
 
 ## The Problem It Solves
 
@@ -15,79 +16,97 @@ was acknowledged and later rotted, it silently throws away committed data —
 and everything after it. The two look identical if all the log has is the
 entry.
 
-The journal follows CLSTORE, the local storage layer of *Protocol-Aware
-Recovery for Consensus-Based Storage* (FAST '18): each entry's identifier
-(index, epoch, offset, length, CRC) lives in a **slot**, in a table at the
-front of the segment, megabytes away from the entry. A failed entry with an
-intact slot was written and acknowledged; a failed entry without one was not.
+CLSTORE stores each entry's identifier (index, epoch, offset, length, CRC) in
+a **slot**, in a table at the front of the segment, megabytes away from the
+entry. A failed entry with an intact slot was written and acknowledged; a
+failed entry without one was not.
 
 ## Layout
 
 ```text
 Offset   Region        Contents
-0 KiB    Header A      magic, version, first_index, slot_count,
-4 KiB    Header B      data_start, segment_size, crc
+0 KiB    Header A      magic, version, first_index,
+4 KiB    Header B      slot_count, data_start, crc
 8 KiB    Slot table    65,536 slots × 32 B (2 MiB)
-~2 MiB   Guard gap     zeros
-4 MiB    Data region   append-only entries → end (64 MiB)
+~2 MiB   Guard gap     zeros (keeps IDs ≥2 MiB away)
+4 MiB    Data region   append-only entries → end
 ```
 
-Segments are preallocated with real zeros, so the file size never changes
-(`fdatasync` has no metadata to write, and a wrong size is itself a fault).
-Log indexes are dense and slots fixed-size, so slot *i* sits at a computed
-offset and the slot table is a plain array.
+Each segment is one preallocated, zero-filled file named after its first
+index; the journal finds them with `StorageProvider::list_dir`. Real zeros
+mean `fdatasync` never has metadata to write, "empty" reliably means all
+zeros, and a file of the wrong size is itself a detectable fault. Log indexes
+are dense and slots fixed-size, so slot *i* sits at a computed offset and the
+slot table is a plain array.
 
 ## Appending
 
-Per batch: one write for the entries, one for their slots, one `fdatasync`.
-Nothing orders the two writes; recovery does the disambiguation instead. Each
-batch starts on a block boundary, so an append never rewrites a block that
-holds acknowledged entries — `BlockFile` transfers whole blocks, and a shared
-block would otherwise put synced bytes back into the crash window.
+Per batch: write the entries contiguously into the data region, write their
+slots in one call, `fdatasync` once, acknowledge. Nothing orders the first
+write before the second — one sync per batch instead of two, with recovery
+doing the disambiguation.
 
 ## Recovering
 
-Opening walks every index. An entry is located through its slot, or — when
-the slot is unusable — from the end of the previous entry or the next block
-boundary. Then:
+Opening walks every index. Entry *i*'s offset comes from its slot, or — when
+the slot is unusable — from the end of entry *i − 1*. Then:
 
-| Entry | Slot      | Before the last batch             | In the last batch            |
-|-------|-----------|-----------------------------------|------------------------------|
-| good  | valid     | keep                              | keep                         |
-| good  | empty/bad | keep, rewrite the slot            | keep, rewrite the slot       |
-| bad   | valid     | corrupt: report `(index, epoch)`  | ambiguous: truncate, report  |
-| bad   | empty     | refuse: an entry went missing     | torn write: truncate         |
-| bad   | bad       | refuse: double fault              | torn write: truncate         |
+| Entry | Slot      | Action                                     |
+|-------|-----------|--------------------------------------------|
+| good  | valid     | keep                                       |
+| good  | empty/bad | keep, rewrite slot                         |
+| bad   | valid     | mark corrupt, report (index, epoch) upward |
+| bad   | empty     | torn tail: truncate here                   |
+| bad   | bad       | double fault: refuse to start              |
 
-The *last batch* matters because only one batch is ever unsynced, and the
-simulator's crash model resolves each of its sectors independently: entry *i*
-can be torn while entry *i + 1* survived. Treating that hole as mid-log damage
-would refuse to start after an ordinary crash. Each entry records its position
-in its batch, so recovery knows where the last batch began.
+The first entry without an identifier ends the log; every earlier faulty
+entry that has one is corruption. The one exception is the paper's theorem:
+the *last* entry, slot present and entry bad, is exactly what a crash between
+the slot write and the sync leaves, so nothing local can tell it from
+corruption. A replication layer keeps it if committed and discards it if not;
+the single-node journal truncates it and reports it as `ambiguous_tail`.
+
+An EIO is zero-filled into a checksum mismatch, as in the paper, so an
+unreadable entry is reported corrupt rather than stopping the journal. And
+recovery cleans up after itself like any truncation: the discarded slots and
+entry bytes are zeroed and synced before the first append.
 
 ## Truncating
 
-Suffix truncation zeroes the discarded slots and entries before returning, so
-new appends can never sit beside stale identifiers. But zeroing is many
-writes, and a crash in the middle leaves any mix of zeroed and surviving
-sectors — which reads exactly like mid-log damage. The cut is therefore made
-durable first, as a fence in the manifest; recovery discards everything past a
-fence whatever state it is in.
+Suffix truncation zeroes the discarded slots, syncs, zeroes the discarded
+entries, and syncs again before returning. Slots go first so that a crash
+part-way leaves only entries without identifiers past the cut — kept as a
+prefix of the old log, or read as its end — never an old identifier beside a
+zeroed entry, which would look like corruption.
+
+## Two Fault Models
+
+The paper assumes what most disks promise: a crash leaves each unsynced
+sector with its old contents or its new ones. Under that model, rewriting the
+acknowledged bytes that share the block a batch starts in is harmless.
+
+The simulator can be harsher. Following FoundationDB's `AsyncFileNonDurable`,
+it can lose, garble, or shear a sector that was being rewritten, destroying
+bytes a sync had already made durable. A byte-contiguous log rewrites exactly
+such sectors, so on that disk an acknowledged entry can come back damaged.
+The journal then does what the paper promises for any corruption: it reports
+the entry, or refuses to start, and never returns wrong data.
 
 ## How It Was Tested
 
-The integration tests drive the journal with the simulator's storage directly
-(no processes, no network): targeted bit flips for each row of the table, and
-a crash loop that runs a writer for a random number of simulation steps,
-crashes the process with `simulate_crash_for_process`, and reopens. Crash
-severity is drawn per seed — lost, shorn, latent-fault and correlated-rollback
-probabilities — because a brutal crash rarely leaves a later entry of the torn
-batch intact and a mild one rarely tears anything; the holes live in between.
-The invariant is two-sided: every acknowledged entry survives unchanged, and
-no crash is ever reported as corruption.
+The integration tests drive the journal against the simulator's storage
+directly. Targeted faults exercise each row of the table: a flipped payload
+bit, a flipped slot, a zeroed slot, both at once, a flipped last entry, a
+torn tail, an EIO block, and a damaged header. A crash loop runs a writer for
+a random number of simulation steps, crashes the process with
+`simulate_crash_for_process`, and reopens, playing the replication layer by
+cutting the log at the first unreadable entry. It runs under both fault
+models:
 
-Each rule above was confirmed load-bearing by removing it and watching the
-loop go red: the per-batch `fdatasync` (acknowledged entries lost), the
-last-batch tail rule (a crash reported as corruption), the truncation fence
-(a crash mid-truncation refused as a missing entry), and the post-recovery
-scrub (a stale entry resurrected under a new index).
+- **the paper's**: every acknowledged entry survives, and none is ever
+  reported corrupt;
+- **the simulator's full physics**: a read never returns anything but what
+  was acknowledged — damage is always reported.
+
+Removing the per-batch `fdatasync` turns the first loop red at its first
+seed; removing the post-recovery clean-up turns the torn-tail test red.

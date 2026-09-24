@@ -7,9 +7,9 @@ from corruption.
 
 A write-ahead log that finds a bad checksum usually has one move: truncate
 there. That is right for a torn write at the tail and silently wrong for an
-acknowledged entry that rotted in the middle of the log. The CLSTORE layout
-from *Protocol-Aware Recovery for Consensus-Based Storage* (Alagappan et al.,
-FAST '18) fixes this by storing every entry's identifier in a slot far from
+acknowledged entry that rotted in the middle of the log. CLSTORE, from
+*Protocol-Aware Recovery for Consensus-Based Storage* (Alagappan et al.,
+FAST '18), fixes this by storing every entry's identifier in a slot far from
 the entry: when the entry fails its checksum, its slot says whether it was
 ever completely written, and which entry (and epoch) it was.
 
@@ -18,22 +18,21 @@ ever completely written, and which entry (and epoch) it was.
 | Type | Role |
 |------|------|
 | `Journal<P>` | Append, read, and truncate a segmented log over any `StorageProvider` |
-| `JournalConfig` / `Geometry` | Segment shape, batch bound, direct-I/O policy |
-| `Recovery` | What opening found: corrupt entries, the ambiguous tail, repairs |
+| `JournalConfig` / `Geometry` | Segment shape and direct-I/O policy |
+| `Recovery` | What opening found: corrupt entries, the ambiguous last entry, repairs |
 | `JournalError` | Operating errors vs. evidence of damage (`Corrupt`, `DoubleFault`, …) |
 
-Each segment is one preallocated, zero-filled file (64 MiB by default) with
-two header copies, a slot table (65,536 × 32 B), a guard gap, and an
-append-only data region. A batch costs two writes and one `fdatasync`.
+Each segment is one preallocated, zero-filled file (64 MiB by default) named
+after its first index, found by listing the directory: two header copies, a
+slot table (65,536 × 32 B), a guard gap, and a data region of contiguous
+entries. A batch costs two writes and one `fdatasync`. Term/vote metadata
+lives in `meta.0` / `meta.1`.
 
 ## Testing
 
 The integration tests run the journal on the simulator's storage: targeted
-bit flips in entries, slots, headers and metadata, and a randomized crash loop
-that crashes a writer mid-append and mid-truncation under the full
-barrier-bounded crash model, checking that no acknowledged entry is ever lost
-and no crash is ever reported as corruption. `JOURNAL_CRASH_SEEDS` raises the
-seed count; `JOURNAL_CRASH_SEED` replays one.
-
-See the crate docs and the book chapter *A Crash-Aware Journal* for the layout
-and the recovery rules.
+faults for each row of the recovery table, and a crash loop under two fault
+models — the paper's (sector-atomic crashes: nothing acknowledged may be lost
+or reported corrupt) and moonpool's full physics (a read may never return
+wrong data). `JOURNAL_CRASH_SEEDS` raises the seed count;
+`JOURNAL_CRASH_SEED` replays one.

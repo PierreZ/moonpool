@@ -2,16 +2,12 @@
 //!
 //! ```text
 //! Offset      Region        Contents
-//! 0           Header A      magic, version, first_index, slot_count,
-//! BLOCK       Header B      data_start, segment_size, crc
+//! 0           Header A      magic, version, first_index,
+//! BLOCK       Header B      slot_count, data_start, crc
 //! 2 × BLOCK   Slot table    slot_count × 32 B
 //! …           Guard gap     zeros (keeps identifiers away from entries)
 //! data_start  Data region   append-only entries → end of file
 //! ```
-//!
-//! An entry's last header word — reserved in CLSTORE — holds its position
-//! within the batch that wrote it, so recovery can tell where the last batch
-//! began (see [`crate::scan`]).
 //!
 //! Every integer is little-endian. Nothing here does I/O: these are the
 //! encoders, the decoders, and the arithmetic the segment and the recovery
@@ -19,12 +15,9 @@
 
 use crate::JournalError;
 
-/// The journal's block: the unit every transfer is made of, and the boundary
-/// every batch starts on.
-///
-/// A batch never shares a block with an earlier batch, so appending never
-/// rewrites a block that holds acknowledged entries — a crash can only damage
-/// what was not yet acknowledged.
+/// The journal's block: the unit `BlockFile` transfers are made of. It is not
+/// a layout unit — entries are packed contiguously, 8-byte aligned — only the
+/// granularity of I/O.
 pub const BLOCK: usize = 4096;
 
 /// [`BLOCK`] as a file offset.
@@ -44,7 +37,7 @@ const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 const FORMAT_VERSION: u32 = 1;
 
 /// Bytes of the header block covered by its CRC.
-const HEADER_LEN: usize = 40;
+const HEADER_LEN: usize = 24;
 
 /// The shape of every segment in one journal.
 ///
@@ -56,12 +49,14 @@ const HEADER_LEN: usize = 40;
 pub struct Geometry {
     /// Slots per segment: the most entries one segment can hold.
     pub slot_count: u32,
-    /// Byte offset of the data region. Must be block-aligned and at or past
-    /// the end of the slot table.
+    /// Byte offset of the data region. Must be block-aligned, at or past the
+    /// end of the slot table, and below 4 GiB (the header stores it in 32
+    /// bits).
     pub data_start: u64,
     /// Size of every segment file, preallocated with zeros. Must be
     /// block-aligned, larger than `data_start`, and at most 4 GiB (slot
-    /// offsets are 32-bit).
+    /// offsets are 32-bit). Not recorded in the header: a file of any other
+    /// size is a metadata fault.
     pub segment_size: u64,
 }
 
@@ -97,6 +92,9 @@ impl Geometry {
         }
         if self.segment_size <= self.data_start {
             return invalid("segment_size must leave room for a data region");
+        }
+        if self.data_start > u64::from(u32::MAX) {
+            return invalid("data_start must fit 32 bits");
         }
         if self.segment_size > u64::from(u32::MAX) + 1 {
             return invalid("segment_size must fit 32-bit slot offsets");
@@ -147,11 +145,29 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 }
 
 /// A segment's header, written once when the segment is created, in two
-/// copies (blocks 0 and 1).
+/// copies (blocks 0 and 1): magic, version, first index, slot count, data
+/// start, and a CRC over them.
+///
+/// ```text
+/// 0  u32 magic   4  u32 version   8  u64 first_index
+/// 16 u32 slot_count   20 u32 data_start   24 u32 crc (0..24)
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Header {
     pub first_index: u64,
-    pub geometry: Geometry,
+    pub slot_count: u32,
+    pub data_start: u64,
+}
+
+impl Header {
+    /// The header a segment of `geometry` starting at `first_index` carries.
+    pub fn new(first_index: u64, geometry: Geometry) -> Self {
+        Self {
+            first_index,
+            slot_count: geometry.slot_count,
+            data_start: geometry.data_start,
+        }
+    }
 }
 
 impl Header {
@@ -160,10 +176,9 @@ impl Header {
         block[0..4].copy_from_slice(&HEADER_MAGIC.to_le_bytes());
         block[4..8].copy_from_slice(&FORMAT_VERSION.to_le_bytes());
         block[8..16].copy_from_slice(&self.first_index.to_le_bytes());
-        block[16..20].copy_from_slice(&self.geometry.slot_count.to_le_bytes());
-        block[20..24].fill(0);
-        block[24..32].copy_from_slice(&self.geometry.data_start.to_le_bytes());
-        block[32..40].copy_from_slice(&self.geometry.segment_size.to_le_bytes());
+        block[16..20].copy_from_slice(&self.slot_count.to_le_bytes());
+        let data_start = u32::try_from(self.data_start).expect("validated to fit 32 bits");
+        block[20..24].copy_from_slice(&data_start.to_le_bytes());
         let crc = crc32c::crc32c(&block[..HEADER_LEN]);
         block[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&crc.to_le_bytes());
     }
@@ -178,11 +193,8 @@ impl Header {
         }
         Some(Self {
             first_index: u64_at(block, 8),
-            geometry: Geometry {
-                slot_count: u32_at(block, 16),
-                data_start: u64_at(block, 24),
-                segment_size: u64_at(block, 32),
-            },
+            slot_count: u32_at(block, 16),
+            data_start: u64::from(u32_at(block, 20)),
         })
     }
 }
@@ -252,8 +264,6 @@ pub(crate) struct EntryHeader {
     pub index: u64,
     pub epoch: u64,
     pub crc: u32,
-    /// Position within its batch: `index − first index of the batch`.
-    pub batch_pos: u32,
 }
 
 impl EntryHeader {
@@ -267,13 +277,12 @@ impl EntryHeader {
             index: u64_at(bytes, 8),
             epoch: u64_at(bytes, 16),
             crc: u32_at(bytes, 24),
-            batch_pos: u32_at(bytes, 28),
         })
     }
 }
 
-/// The CRC an entry carries: over its header (minus the CRC field itself,
-/// but including the batch position) and its payload.
+/// The CRC an entry carries: over its header (minus the CRC field itself)
+/// and its payload.
 fn entry_crc(header: &[u8], payload: &[u8]) -> u32 {
     let crc = crc32c::crc32c(&header[..24]);
     let crc = crc32c::crc32c_append(crc, &header[28..32]);
@@ -281,20 +290,14 @@ fn entry_crc(header: &[u8], payload: &[u8]) -> u32 {
 }
 
 /// Encode an entry into `out` (exactly [`entry_size`] bytes); returns its CRC.
-pub(crate) fn encode_entry(
-    index: u64,
-    epoch: u64,
-    batch_pos: u32,
-    payload: &[u8],
-    out: &mut [u8],
-) -> u32 {
+pub(crate) fn encode_entry(index: u64, epoch: u64, payload: &[u8], out: &mut [u8]) -> u32 {
     let length = u32::try_from(payload.len()).expect("payload length checked by the caller");
     out[0..4].copy_from_slice(&ENTRY_MAGIC.to_le_bytes());
     out[4..8].copy_from_slice(&length.to_le_bytes());
     out[8..16].copy_from_slice(&index.to_le_bytes());
     out[16..24].copy_from_slice(&epoch.to_le_bytes());
-    out[24..28].fill(0);
-    out[28..32].copy_from_slice(&batch_pos.to_le_bytes());
+    // 24..28 is the CRC, filled in below; 28..32 is reserved.
+    out[24..32].fill(0);
     out[ENTRY_HEADER_SIZE..ENTRY_HEADER_SIZE + payload.len()].copy_from_slice(payload);
     out[ENTRY_HEADER_SIZE + payload.len()..].fill(0);
     let crc = entry_crc(&out[..ENTRY_HEADER_SIZE], payload);
@@ -344,12 +347,9 @@ mod tests {
     fn entries_round_trip_and_detect_a_flipped_payload_bit() {
         let payload = b"hello journal";
         let mut bytes = vec![0u8; usize::try_from(entry_size(13)).expect("small")];
-        encode_entry(9, 2, 4, payload, &mut bytes);
+        encode_entry(9, 2, payload, &mut bytes);
         let header = EntryHeader::parse(&bytes).expect("magic");
-        assert_eq!(
-            (header.index, header.epoch, header.length, header.batch_pos),
-            (9, 2, 13, 4)
-        );
+        assert_eq!((header.index, header.epoch, header.length), (9, 2, 13));
         assert!(entry_crc_ok(&header, &bytes));
         bytes[ENTRY_HEADER_SIZE + 1] ^= 0x40;
         assert!(!entry_crc_ok(&header, &bytes));
@@ -357,10 +357,7 @@ mod tests {
 
     #[test]
     fn headers_round_trip() {
-        let header = Header {
-            first_index: 1 << 20,
-            geometry: Geometry::default(),
-        };
+        let header = Header::new(1 << 20, Geometry::default());
         let mut block = vec![0u8; BLOCK];
         header.encode(&mut block);
         assert_eq!(Header::decode(&block), Some(header));

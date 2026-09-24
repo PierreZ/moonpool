@@ -1,7 +1,7 @@
 //! A write-ahead journal over moonpool's [`BlockFile`](moonpool_core::BlockFile)
 //! that tells a crash apart from corruption.
 //!
-//! The layout follows CLSTORE, the local storage layer of the PAR/CTRL paper
+//! The layout is CLSTORE, the local storage layer of the PAR/CTRL paper
 //! (Alagappan et al., *Protocol-Aware Recovery for Consensus-Based Storage*,
 //! FAST '18): every entry's identifier is stored in a slot **far from the
 //! entry itself**. When an entry's checksum fails, its slot says whether the
@@ -12,25 +12,29 @@
 //!
 //! Because it is written against the provider traits only, the same journal
 //! runs over `TokioStorageProvider` in production and over the simulator's
-//! storage — torn sectors, lost writes, misdirected I/O — in tests.
+//! storage in tests.
 //!
 //! # Segments
 //!
-//! The log is a sequence of segments. Each is one preallocated, zero-filled
-//! file named after its first index (`seg-00000000001048576.wal`):
+//! Each segment is one preallocated, zero-filled file named after its first
+//! index (`seg-00000000001048576.wal`, 64 MiB). The journal finds its
+//! segments by listing the directory
+//! ([`StorageProvider::list_dir`](moonpool_core::StorageProvider::list_dir)):
+//! the names alone give their order.
 //!
 //! ```text
 //! Offset   Region        Contents
-//! 0 KiB    Header A      magic, version, first_index, slot_count,
-//! 4 KiB    Header B      data_start, segment_size, crc
-//! 8 KiB    Slot table    slot_count slots × 32 B (65,536 → 2 MiB)
-//! ~2 MiB   Guard gap     zeros (keeps identifiers ≥ 2 MiB from entries)
-//! 4 MiB    Data region   append-only entries → end (64 MiB)
+//! 0 KiB    Header A      magic, version, first_index,
+//! 4 KiB    Header B      slot_count, data_start, crc
+//! 8 KiB    Slot table    65,536 slots × 32 B (2 MiB)
+//! ~2 MiB   Guard gap     zeros (keeps IDs ≥2 MiB away)
+//! 4 MiB    Data region   append-only entries → end
 //! ```
 //!
-//! The header is written once, when the segment is created, in two copies. A
-//! segment rolls over when its slot table or its data region fills. The
-//! [`Geometry`] is configurable; the defaults are the sizes above.
+//! The header is written once, when the segment is created, and kept in two
+//! copies. A segment rolls over when either its slot table or its data
+//! region fills. The [`Geometry`] is configurable; the defaults are the sizes
+//! above.
 //!
 //! Slot *i* lives at `8 KiB + 32 × (i − first_index)`:
 //!
@@ -40,112 +44,99 @@
 //!  8  u64 epoch                 4  u32 length
 //! 16  u32 offset               8  u64 index
 //! 20  u32 length              16  u64 epoch
-//! 24  u32 entry_crc           24  u32 crc  (header + payload)
-//! 28  u32 slot_crc (0–27)     28  u32 position in its batch
+//! 24  u32 entry_crc           24  u32 crc  (header+payload)
+//! 28  u32 slot_crc (0–27)     28  u32 reserved
 //!                             32  …   payload
 //! ```
 //!
-//! The entry repeats its index and epoch, so a stale record left behind by a
-//! lost or misdirected write — which may well still pass its own CRC — is
-//! caught by disagreeing with its slot.
+//! The entry repeats its index and epoch, so a stale record left by a lost
+//! or misdirected write, which may still pass its CRC, gets caught.
 //!
 //! # Appending
 //!
-//! Per batch: write the entries contiguously into the data region, write
-//! their slots in one call, `fdatasync` once, acknowledge. Nothing orders the
-//! first write before the second — that is the trade: one sync per batch
-//! instead of two, with recovery doing the disambiguation.
-//!
-//! Every batch starts on a [`BLOCK`] boundary. `BlockFile` transfers whole
-//! blocks, and a batch that shared a block with the previous one would
-//! rewrite already-acknowledged bytes without a sync covering them; a crash
-//! could then tear an acknowledged entry. Aligning batches costs at most one
-//! block of padding per batch and means an append never touches a block that
-//! holds acknowledged entries. (Slot-table blocks *are* shared across
-//! batches; a slot damaged that way is exactly the "good entry, bad slot"
-//! case recovery repairs.)
+//! Per batch: `pwrite` the entries contiguously into the data region,
+//! `pwrite` their slots in one call, `fdatasync` once, then acknowledge.
+//! Nothing orders the first write before the second: one sync per batch
+//! instead of two. `BlockFile` transfers whole blocks, so the block a batch
+//! starts in is rewritten with the bytes it already held, from an in-memory
+//! copy.
 //!
 //! # Recovery
 //!
-//! Opening a journal walks every index in order. Entry *i* is located through
-//! slot *i*, or — when that slot is unusable — from the end of entry *i − 1*
-//! (or the next block boundary, where a new batch would have started). A slot
-//! is *empty* when all its bytes are zero; an entry is *good* only when its
-//! CRC passes and its index matches (and, with a valid slot, its epoch,
-//! length and CRC agree with the slot).
+//! Opening walks the indexes in order. Entry *i*'s offset comes from slot
+//! *i*, or, if that slot is unusable, from the end of entry *i − 1*. A slot is
+//! *empty* if all its bytes are zero. An entry is *good* only if its CRC
+//! passes and its index matches (and, with a valid slot, its epoch, length
+//! and CRC agree with the slot).
 //!
-//! | Entry | Slot      | Before the last batch             | In the last batch            |
-//! |-------|-----------|-----------------------------------|------------------------------|
-//! | good  | valid     | keep                              | keep                         |
-//! | good  | empty/bad | keep, rewrite the slot            | keep, rewrite the slot       |
-//! | bad   | valid     | corrupt: report `(index, epoch)`  | ambiguous: truncate, report  |
-//! | bad   | empty     | refuse: an entry went missing     | torn write: truncate         |
-//! | bad   | bad       | refuse: double fault              | torn write: truncate         |
+//! | Entry | Slot      | Action                                     |
+//! |-------|-----------|--------------------------------------------|
+//! | good  | valid     | keep                                       |
+//! | good  | empty/bad | keep, rewrite slot                         |
+//! | bad   | valid     | mark corrupt, report (index, epoch) upward |
+//! | bad   | empty     | torn tail: truncate here                   |
+//! | bad   | bad       | double fault: refuse to start              |
 //!
-//! The *last batch* is the one holding the last good entry (each entry
-//! records its position in its batch), plus everything after it. Only one
-//! batch is ever unsynced, and a crash resolves its sectors independently, so
-//! a hole inside it is a crash; before it, every index was synced, so a hole
-//! is damage. Truncation cuts at the first index in the last batch that is
-//! not good. A single-node
-//! journal cannot resolve the ambiguous last entry (slot present, entry bad),
-//! so it treats it as torn and lists it in [`Recovery::ambiguous_tail`] for a
-//! replication layer that can: keep it if it was committed, discard it if
-//! not. Mid-log corruption fails loudly instead of being silently truncated.
+//! This is the paper's rule for batched appends: the first entry without an
+//! identifier ends the log, and every earlier faulty entry with one is
+//! corrupted. The *last* entry is the exception the paper proves unavoidable
+//! (its Appendix A): an identifier beside a bad entry at the very end is what
+//! a crash between the slot write and the sync leaves, just as corruption
+//! would. A replicated system hands it to the replication layer, which keeps
+//! it if committed and discards it if not; this single-node journal treats it
+//! as a torn write and reports it in [`Recovery::ambiguous_tail`]. Mid-log
+//! corruption fails loudly instead of being silently truncated.
 //!
-//! Before the journal accepts an append, recovery also zeroes whatever the
-//! crashed incarnation may have written past the last kept entry — up to
-//! [`JournalConfig::max_batch_bytes`], the most one unsynced batch can span —
-//! so a stale entry that still passes its CRC can never be picked up later.
+//! An EIO is treated as the paper does: the block is zero-filled, so its
+//! entries fail their checksums and are reported corrupt. An identifier the
+//! medium cannot read counts as damaged rather than absent — zeros there
+//! would otherwise pass for "no identifier".
 //!
-//! # Reading
+//! Recovery is a truncation, so it cleans up like one: past the end of the
+//! log, the discarded slots are zeroed and synced, then the discarded entry
+//! bytes, before any append — so "empty" keeps meaning all zeros.
 //!
-//! Log indexes are dense and slots are fixed-size, so the slot table is a
-//! plain array: a slot's position is computed, never searched for. The
-//! startup scan has already verified every slot, so reads use the in-memory
-//! copy, binary-search the segment list, read the entry, and check its CRC,
-//! its index, and its agreement with the slot. Any failure is
-//! [`JournalError::Corrupt`].
+//! # Reading one entry
+//!
+//! The slot table is the index. Log indexes are dense and slots are
+//! fixed-size, so a slot's position is computed, never searched for. A read
+//! binary-searches the sorted segments for the largest first index at or
+//! below *i*, then reads `32 + length` bytes at the slot's offset and checks
+//! the entry's CRC, that its index and epoch match the slot, and that its CRC
+//! equals `entry_crc`. The startup scan already read every slot, so the slot
+//! comes from memory. Any failed check is [`JournalError::Corrupt`].
 //!
 //! # Truncation and metadata
 //!
-//! [`Journal::truncate_suffix`] (Raft's conflicting-suffix truncation)
-//! zeroes the discarded slots and entries and syncs *before* returning, so a
-//! crash can never leave an old slot beside a new entry and make a harmless
-//! crash look like corruption. Zeroing is many writes, though, and a crash
-//! resolves each on its own — half-zeroed slots beside surviving entries look
-//! exactly like mid-log damage. So the cut is first made durable as a
-//! *fence* in the manifest, and recovery discards everything at or past a
-//! fence in whatever state it finds it, then scrubs the rest of that segment.
-//! [`Journal::truncate_prefix`] drops whole segments below the new start.
+//! [`Journal::truncate_suffix`] (Raft's conflicting-suffix truncation) cleans
+//! up before the next append: it zeroes the discarded slots, then the
+//! discarded entries, syncing after each, so a crash can never leave an old
+//! slot beside a new entry and make a harmless crash look like corruption.
+//! Zeroing the slots first means a crash part-way leaves only entries
+//! without identifiers past the cut: intact ones (kept, a prefix of the old
+//! log) or zeroed ones (the end). [`Journal::truncate_prefix`] deletes whole
+//! segments.
 //!
-//! The storage provider cannot list a directory, so the segment list lives in
-//! a manifest. It and the caller's own metadata ([`Journal::save_meta`], for
-//! a term and a vote) are each kept in two copies (`<name>.0`, `<name>.1`)
-//! with a generation counter and a CRC, each updated through a temporary
-//! file, a sync, and a rename; loading takes the valid copy with the highest
-//! generation. A segment is created — zero-filled, both headers written,
-//! synced, its name made durable — before the manifest names it, and the
-//! segment it follows is fully synced by then, so a sealed segment has no
-//! tail.
+//! The caller's term/vote metadata lives in its own file, in two copies
+//! (`meta.0`, `meta.1`), each with a generation counter and a CRC, each
+//! updated via a temporary file, an fsync, and a rename. Loading uses the
+//! valid copy with the highest generation.
 //!
-//! # Limits
+//! # The fault model
 //!
-//! - Physical separation of slots and entries is best-effort: the filesystem
-//!   decides block placement, though a contiguous preallocated file usually
-//!   keeps the guard gap real.
-//! - The last batch is inherently ambiguous: if it was synced and then an
-//!   entry in it rotted, a single node cannot tell that from the batch being
-//!   torn by a crash, and truncates it (reporting what it can in
-//!   [`Recovery::ambiguous_tail`]).
-//! - A suffix truncation that cuts inside a batch rewrites the block where the
-//!   cut falls; see [`Journal::truncate_suffix`].
-//! - When an entry and its slot are both damaged, recovery looks for a later
-//!   intact entry within one [`JournalConfig::max_batch_bytes`] (probing block
-//!   boundaries, where batches start) or through later valid slots. Finding
-//!   one proves the damage is mid-log and the journal refuses to start; a
-//!   double fault whose successors are all out of that reach, with their
-//!   slots damaged too, reads as a torn tail.
+//! The design assumes what the paper assumes of the disk: a crash leaves each
+//! unsynced sector with its old contents or its new ones. Rewriting the
+//! acknowledged bytes that share the block a batch starts in is then
+//! harmless. The simulator can also model harsher disks, where a crash
+//! destroys a sector that was being rewritten even though a sync had made
+//! its old contents durable (`FoundationDB`'s garbled in-flight pages). There,
+//! an acknowledged entry sharing that sector can come back damaged — and the
+//! journal detects it, reporting it corrupt or refusing to start, but cannot
+//! keep it. The crate's tests run both models.
+//!
+//! Physical separation of slots and entries is best-effort: the filesystem
+//! controls block placement, though contiguous preallocated extents usually
+//! keep the gap real.
 
 mod dual;
 mod error;

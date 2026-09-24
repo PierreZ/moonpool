@@ -1,9 +1,10 @@
 //! A small record kept in two copies, `<name>.0` and `<name>.1`.
 //!
-//! Each copy carries a generation counter and a CRC. An update writes the
-//! copy that does *not* hold the current generation — through a temporary
-//! file, a sync, a rename, and a directory sync — so one intact copy exists at
-//! every instant. Loading takes the valid copy with the highest generation.
+//! Each copy carries a generation counter and a CRC. An update rewrites each
+//! copy in turn — `.0`, then `.1` — through a temporary file, a sync, a
+//! rename, and a directory sync, so at every instant at least one copy holds
+//! either the old value or the new one intact. Loading takes the valid copy
+//! with the highest generation.
 //!
 //! ```text
 //! 0   u32 magic       8   u64 generation     20  u32 crc (0..20 + payload)
@@ -100,18 +101,34 @@ impl DualFile {
         }
     }
 
-    /// Durably replace the record with `payload`.
+    /// Durably replace the record with `payload`, in both copies.
     ///
     /// # Errors
     ///
-    /// Any I/O error; the previous copy is still intact when one is returned.
+    /// Any I/O error; at least one copy is still intact when one is returned.
     pub async fn store<P: StorageProvider>(
         &mut self,
         provider: &P,
         payload: &[u8],
     ) -> Result<(), JournalError> {
         let generation = self.generation + 1;
-        let target = self.path(generation % 2);
+        for copy in 0..2 {
+            self.store_copy(provider, copy, generation, payload).await?;
+        }
+        self.generation = generation;
+        Ok(())
+    }
+
+    /// Replace one copy through a temporary file, a sync, a rename, and a
+    /// directory sync.
+    async fn store_copy<P: StorageProvider>(
+        &self,
+        provider: &P,
+        copy: u64,
+        generation: u64,
+        payload: &[u8],
+    ) -> Result<(), JournalError> {
+        let target = self.path(copy);
         let temporary = format!("{target}.tmp");
         if provider.exists(&temporary).await? {
             provider.delete(&temporary).await?;
@@ -139,7 +156,6 @@ impl DualFile {
 
         provider.rename(&temporary, &target).await?;
         provider.sync_dir(&self.dir).await?;
-        self.generation = generation;
         Ok(())
     }
 }
