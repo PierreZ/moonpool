@@ -51,6 +51,11 @@ const SIM_BINARIES: &[SimBinary] = &[
     SimBinary::example("sim-metrics-service"),
     SimBinary::example("sim-topology"),
     SimBinary::example("sim-tonic-grpc"),
+    SimBinary::new(
+        "sim-journal",
+        SIM_EXAMPLES_PACKAGE,
+        "moonpool_sim_examples,moonpool_journal",
+    ),
     SimBinary::rpc("sim-rpc-foundations"),
     SimBinary::rpc("sim-rpc-delivery"),
     SimBinary::rpc("sim-rpc-interfaces"),

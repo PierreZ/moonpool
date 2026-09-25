@@ -36,3 +36,13 @@ models — the paper's (sector-atomic crashes: nothing acknowledged may be lost
 or reported corrupt) and moonpool's full physics (a read may never return
 wrong data). `JOURNAL_CRASH_SEEDS` raises the seed count;
 `JOURNAL_CRASH_SEED` replays one.
+
+## Example
+
+`crates/moonpool-sim-examples/src/journal.rs` runs the journal inside a full
+simulation — one node crashed over and over by attrition, checking on every
+boot that nothing it acknowledged was lost, changed, or reported corrupt:
+
+```sh
+cargo xtask sim run journal
+```

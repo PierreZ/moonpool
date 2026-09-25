@@ -92,6 +92,45 @@ such sectors, so on that disk an acknowledged entry can come back damaged.
 The journal then does what the paper promises for any corruption: it reports
 the entry, or refuses to start, and never returns wrong data.
 
+## The Example Simulation
+
+[`journal.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/journal.rs)
+in `moonpool-sim-examples` (`cargo xtask sim run journal`) is the journal
+inside a full simulation: one process owns it on its simulated disk, and
+`Chaos::Attrition` crashes that process over and over — never wiping it,
+since a wiped disk is data loss no local journal can recover from.
+
+```rust,ignore
+SimulationBuilder::new()
+    .processes(1, || Box::new(JournalNode))
+    .workload(JournalWorkload)
+    .enable_chaos([Chaos::Attrition { /* 80% crash, no wipe */ }])
+    .chaos_duration(Duration::from_secs(30))
+    .set_iterations(50)
+    .run()
+```
+
+The node's memory dies with it, so what it has acknowledged lives in a
+`Ledger` published in the iteration's `StateHandle`. Every boot opens the
+journal — running recovery — and checks it against that ledger before
+writing again:
+
+```rust,ignore
+let (mut journal, recovery) = Journal::open(ctx.storage().clone(), "wal", config()).await?;
+assert_always!(
+    recovery.corrupt.iter().all(|(index, _)| *index >= acked_end),
+    "only unacknowledged entries are reported corrupt"
+);
+assert_always!(journal.next_index() >= acked_end, "no acknowledged entry is lost");
+```
+
+Then it appends batches, truncates suffixes and prefixes, and saves
+metadata; a batch joins the ledger only once `append` returns. Moonpool's
+default disk is the paper's model, so the promises are the strong ones. The
+report shows what the crashes reached — torn tails, ambiguous last entries,
+corrupt unacknowledged entries, rebuilt slots, several segments — and
+removing the journal's per-batch `fdatasync` turns nearly every seed red.
+
 ## How It Was Tested
 
 The integration tests drive the journal against the simulator's storage

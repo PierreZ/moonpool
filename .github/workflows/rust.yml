@@ -224,6 +224,7 @@ jobs:
           - metrics-service
           - topology
           - tonic-grpc
+          - journal
           - rpc-foundations
           - rpc-delivery
           - rpc-interfaces
