@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-25
+
+### 🚀 Features
+
+- **moonpool-core**: StorageProvider::list_dir
+- **moonpool-sim**: SimulationBuilder::run returns Result
+- **moonpool-rpc**: Streams, balancing, security and qualification (P4–P7) ([#276](https://github.com/PierreZ/moonpool/pull/276))
+- **moonpool-rpc**: Typed dynamic-endpoint RPC, delivery contracts and interfaces across restarts (P1–P3) ([#275](https://github.com/PierreZ/moonpool/pull/275))
+- **storage**: Rebuild block I/O as a thin layer over the file provider ([#211](https://github.com/PierreZ/moonpool/pull/211))
+- **core**: Typed metric query and reporting layer ([#191](https://github.com/PierreZ/moonpool/pull/191))
+- **sim**: Report application metrics from a custom registry ([#190](https://github.com/PierreZ/moonpool/pull/190))
+- **storage**: BlockDevice — region-based block contract with a barrier-bounded crash model ([#185](https://github.com/PierreZ/moonpool/pull/185))
+
+### 🐛 Bug Fixes
+
+- Instrument the mutating and fault-injecting entry points
+- **moonpool-core**: Keep an append handle's positioned descriptor on the same file off Linux
+- Address post-release simulation audit findings ([#241](https://github.com/PierreZ/moonpool/pull/241))
+- **moonpool-sim**: Refuse the open flags std refuses instead of truncating ([#232](https://github.com/PierreZ/moonpool/pull/232))
+
+### 📚 Documentation
+
+- Rebuild the Claude Code skills and agents for moonpool development ([#207](https://github.com/PierreZ/moonpool/pull/207))
+
+### 🚜 Refactor
+
+- Simplify and factorize every crate ([#274](https://github.com/PierreZ/moonpool/pull/274))
+- Delete dead surface, stop the RNG rewind on restart, make numeric casts safe ([#200](https://github.com/PierreZ/moonpool/pull/200))
+- Simplify retained crate internals
+- Move rust crates under crates
+
+### 📦 Other
+
+- Close packaging metadata gaps across the publishable crates
+- One shared random stream, plus a madsim-style determinism canary ([#201](https://github.com/PierreZ/moonpool/pull/201))
+
+
 ## [0.8.0] - 2026-07-09
 
 ### 🚀 Features
