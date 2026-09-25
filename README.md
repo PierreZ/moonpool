@@ -16,6 +16,7 @@ moonpool                          Facade crate (features: sim / tokio / hyper)
 │   ├── moonpool-assertions       Assertion accounting (pure std, zero deps, wasm-able)
 │   └── moonpool-explorer         Frontier-based exploration controller (optional, libc)
 ├── moonpool-hyper                hyper 1.x: HTTP/gRPC over provider streams (opt-in)
+├── moonpool-journal              Write-ahead journal over BlockFile (crash vs. corruption)
 └── moonpool-core                 Provider traits and core types
 ```
 
@@ -30,6 +31,7 @@ with `--no-default-features`); the explorer runs on Linux and macOS.
 | Provider traits only | `moonpool-core` |
 | Deterministic simulation | `moonpool-sim` |
 | An HTTP/2 stack (tonic, axum, hyper) on the providers | `moonpool` with feature `hyper`, or `moonpool-hyper` |
+| A write-ahead log that tells crashes from corruption | `moonpool-journal` |
 | Assertion accounting only | `moonpool-assertions` |
 | Exploration controller internals | `moonpool-explorer` |
 

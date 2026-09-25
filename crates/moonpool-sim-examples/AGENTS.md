@@ -16,6 +16,7 @@ racing, the attrition preset, the binaries' report-and-exit) lives in
 | `metrics_service.rs` | application metrics through `.metrics_factory()` / `.metric()` |
 | `topology.rs` | failure domains with `.cluster(LocalityConfig, ..)` and machine-scoped attrition |
 | `tonic_grpc.rs` | a tonic service over hyper HTTP/2 under network chaos plus `Chaos::Attrition` |
+| `journal.rs` | a storage engine (`moonpool-journal`) on the simulated disk under crash attrition, with a ledger in the `StateHandle` that outlives reboots |
 
 ## Adding an example
 

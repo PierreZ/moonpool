@@ -687,6 +687,84 @@ fn simulated_paths_match_tokio_namespace_behavior() {
     });
 }
 
+/// What each listing answered: the names, or the kind of the refusal.
+type Listing = (&'static str, Result<Vec<String>, std::io::ErrorKind>);
+
+/// Listings of the same tree on both backends: sorted bare names, files and
+/// directories alike, refusals for a missing path and for a file, and the
+/// namespace changes a delete and a rename make.
+async fn listing_contract<P: StorageProvider>(
+    provider: P,
+    root: String,
+) -> std::io::Result<Vec<Listing>> {
+    let path = |name: &str| format!("{root}/{name}");
+    let listed = |result: std::io::Result<Vec<String>>| result.map_err(|error| error.kind());
+    for name in ["b", "a", "c"] {
+        drop(
+            provider
+                .open(&path(name), OpenOptions::create_new_write())
+                .await?,
+        );
+    }
+    provider.create_dir_all(&path("dir/nested")).await?;
+    drop(
+        provider
+            .open(&path("dir/x"), OpenOptions::create_new_write())
+            .await?,
+    );
+
+    let mut log = vec![
+        ("root", listed(provider.list_dir(&root).await)),
+        ("dir", listed(provider.list_dir(&path("dir")).await)),
+        ("dot dir", listed(provider.list_dir(&path("./dir/")).await)),
+        (
+            "empty dir",
+            listed(provider.list_dir(&path("dir/nested")).await),
+        ),
+        ("missing", listed(provider.list_dir(&path("missing")).await)),
+        ("file", listed(provider.list_dir(&path("a")).await)),
+    ];
+    provider.delete(&path("b")).await?;
+    provider.rename(&path("c"), &path("dir/y")).await?;
+    log.push((
+        "root after delete and rename",
+        listed(provider.list_dir(&root).await),
+    ));
+    log.push((
+        "dir after rename",
+        listed(provider.list_dir(&path("dir")).await),
+    ));
+    Ok(log)
+}
+
+#[test]
+fn simulated_listings_match_tokio() {
+    local_runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let root = format!("{}/tree", dir.path().to_str().expect("temp path is UTF-8"));
+        TokioStorageProvider::new()
+            .create_dir_all(&root)
+            .await
+            .expect("create root");
+        let production = listing_contract(TokioStorageProvider::new(), root)
+            .await
+            .expect("production listing scenario");
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let simulated = run_storage_test(sim, |provider| async move {
+            provider.create_dir_all("tree").await?;
+            listing_contract(provider, "tree".to_string()).await
+        })
+        .await
+        .expect("simulated listing scenario");
+        assert_eq!(production, simulated, "listings must match Tokio");
+        let names = |at: usize| production[at].1.clone().expect("listed");
+        assert_eq!(names(0), ["a", "b", "c", "dir"]);
+        assert_eq!(names(6), ["a", "dir"]);
+        assert_eq!(names(7), ["nested", "x", "y"]);
+    });
+}
+
 /// What one seek answered, and where the cursor stood afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SeekStep {

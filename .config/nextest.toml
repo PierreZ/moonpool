@@ -19,9 +19,20 @@ test-threads = "num-cpus"
 filter = 'binary(metastable_grpc_retry_storm)'
 slow-timeout = { period = "10s", terminate-after = 6 }
 
+# The journal's crash loops run 250 seeds each, every seed six crashed
+# incarnations of a writer on the simulated disk and a recovery scan per
+# crash: about 6s in the debug profile locally and just over 10s on a CI
+# runner. A wider budget for that binary rather than a smaller seed budget,
+# which would cut how many torn tails and ambiguous entries they reach. They
+# are CPU-bound campaigns like the RPC ones below, so they share their group.
+[[profile.default.overrides]]
+filter = 'package(moonpool-journal) and binary(journal)'
+slow-timeout = { period = "10s", terminate-after = 6 }
+test-group = 'campaigns'
+
 [[profile.default.overrides]]
 filter = 'package(moonpool-rpc-sim) and (test(bounded_campaign) | test(network_bit_flips) | test(same_seed_replays) | test(repeated_complete_runs) | test(reboot_storm) | test(host_speed))'
-test-group = 'rpc-campaigns'
+test-group = 'campaigns'
 
 # The qualification campaign's bounded test runs thirty seeds of every RPC
 # contract at once (three client lanes, five processes, twenty seconds of
@@ -50,10 +61,11 @@ path = "target/nextest/default/junit.xml"
 filter = 'package(moonpool-rpc-derive) and binary(compile_fail)'
 slow-timeout = { period = "60s", terminate-after = 10 }
 
-# The bounded RPC simulation campaigns each keep one core busy for tens of
-# seconds (qualification for about a minute and a half on CI). Run together
-# with everything else on a four-core runner they starve each other past their
+# The bounded simulation campaigns — the RPC ones and the journal's crash
+# loops — each keep one core busy for seconds to tens of seconds
+# (qualification for about a minute and a half on CI). Run together with
+# everything else on a four-core runner they starve each other past their
 # timeouts, so at most two of them run at once; the remaining cores keep
 # serving the fast tests.
 [test-groups]
-rpc-campaigns = { max-threads = 2 }
+campaigns = { max-threads = 2 }

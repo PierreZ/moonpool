@@ -165,6 +165,17 @@ impl SimWorld {
         })
     }
 
+    /// The visible names directly under `path`; see
+    /// [`StorageProvider::list_dir`](moonpool_core::StorageProvider::list_dir).
+    /// A namespace read: it schedules nothing and draws no randomness.
+    pub(crate) fn list_dir(
+        &self,
+        path: &str,
+        owner_ip: IpAddr,
+    ) -> Result<Vec<String>, StorageError> {
+        self.inner.read().storage.list_dir(path, owner_ip)
+    }
+
     pub(crate) fn sync_dir(&self, path: &str, owner_ip: IpAddr) -> Result<(), StorageError> {
         self.storage_transition(|inner| inner.storage.sync_dir(path, owner_ip))
     }

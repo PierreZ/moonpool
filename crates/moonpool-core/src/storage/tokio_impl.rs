@@ -61,6 +61,23 @@ impl StorageProvider for TokioStorageProvider {
     }
 
     #[instrument(skip(self))]
+    async fn list_dir(&self, path: &str) -> io::Result<Vec<String>> {
+        let mut entries = tokio::fs::read_dir(path).await?;
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let name = entry.file_name().into_string().map_err(|name| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("directory entry {} is not valid UTF-8", name.display()),
+                )
+            })?;
+            names.push(name);
+        }
+        names.sort_unstable();
+        Ok(names)
+    }
+
+    #[instrument(skip(self))]
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
         sync_dir_impl(path).await
     }

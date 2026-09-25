@@ -95,6 +95,7 @@
   - [Exemplars and Continuations](./part5-building-on-top/05-exemplars-continuations.md)
   - [Multi-Seed Exploration](./part5-building-on-top/06-multi-seed.md)
   - [Exploring a Consensus Protocol](./part5-building-on-top/07-exploring-consensus.md)
+- [A Crash-Aware Journal](./part5-building-on-top/08-journal.md)
 
 ---
 

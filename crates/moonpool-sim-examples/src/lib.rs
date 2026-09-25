@@ -11,6 +11,7 @@
 
 pub mod axum_web;
 pub mod dungeon;
+pub mod journal;
 pub mod maze;
 pub mod metrics_service;
 pub mod support;
