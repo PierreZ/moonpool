@@ -21,7 +21,7 @@
 //! | [`buggify!`] | Probabilistic fault injection at code locations |
 //! | [`assert_always!`] | Invariants that must never fail |
 //! | [`assert_sometimes!`] | Behaviors that should occur under chaos |
-//! | [`Invariant`] | Cross-workload properties validated after events |
+//! | [`Invariant`](crate::Invariant) | Cross-workload properties validated after events |
 //!
 //! # The Buggify System
 //!

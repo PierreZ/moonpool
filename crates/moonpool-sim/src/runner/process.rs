@@ -289,7 +289,7 @@ impl Attrition {
     /// the runner uses it to select a topology-backed scope whose groups can fit
     /// within `max_dead`.
     ///
-    /// When all three kind weights are masked off, [`choose_kind`](Self::choose_kind)
+    /// When all three kind weights are masked off, `choose_kind`
     /// falls back to [`RebootKind::Crash`] — the "always crash" single-mode regime.
     #[must_use]
     pub fn swarm_for_seed(&self) -> Attrition {

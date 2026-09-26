@@ -4,7 +4,7 @@
 //! Events are keyed by their name (the `tracing` message), mirroring how a
 //! production trace store is queried by event name. Typed values are
 //! extracted per field via the accessors on
-//! [`TraceEvent`](super::event::TraceEvent).
+//! [`TraceEvent`].
 
 use std::cell::Cell;
 

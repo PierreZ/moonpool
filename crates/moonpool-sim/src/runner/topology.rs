@@ -24,7 +24,7 @@ pub struct WorkloadTopology {
     pub peer_ips: Vec<String>,
     /// The names of all other peers in the simulation (parallel to `peer_ips`).
     pub peer_names: Vec<String>,
-    /// All server process IP addresses.
+    /// Server process IP addresses, excluding this process's own.
     pub process_ips: Vec<String>,
     /// Tags assigned to this workload/process (empty for workloads without tags).
     pub my_tags: ProcessTags,
@@ -87,7 +87,7 @@ impl WorkloadTopology {
             .map(|index| self.peer_ips[index].clone())
     }
 
-    /// Get all server process IPs in the simulation.
+    /// Get the server process IPs in the simulation, excluding the caller's own.
     #[must_use]
     pub fn all_process_ips(&self) -> &[String] {
         &self.process_ips

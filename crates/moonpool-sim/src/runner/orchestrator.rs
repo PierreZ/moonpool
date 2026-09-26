@@ -191,7 +191,7 @@ pub(crate) struct OrchestrateInputs<'a> {
     pub(crate) iteration_count: usize,
     /// Virtual-time budget for the run phase. If simulated time advances past
     /// this bound while workloads are still running, the run is declared a
-    /// deadlock. See [`DEFAULT_RUN_TIME_BUDGET`].
+    /// deadlock. See [`DEFAULT_RUN_TIME_BUDGET`](super::stall::DEFAULT_RUN_TIME_BUDGET).
     pub(crate) run_time_budget: Duration,
     /// Per-iteration accounting for detached task panics.
     pub(crate) task_panics: TaskPanicTracker,

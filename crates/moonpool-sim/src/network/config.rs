@@ -382,10 +382,10 @@ pub struct ChaosConfiguration {
     /// nothing closes, and only the caller's own deadline (an application
     /// timeout, an HTTP/2 keep-alive ping) can notice.
     ///
-    /// Rolled on the same I/O operations as [`random_close_probability`]
-    /// (`Self::random_close_probability`), with its own cooldown, and it picks
-    /// a direction the way random close does: this side's sends, the peer's
-    /// sends, or both. A black-holed connection never recovers; only a new
+    /// Rolled on the same I/O operations as
+    /// [`random_close_probability`](Self::random_close_probability), with its
+    /// own cooldown, and it picks a direction the way random close does: this
+    /// side's sends, the peer's sends, or both. A black-holed connection never recovers; only a new
     /// connection is clean. An abort (`RST`) still reaches the peer, as a
     /// kernel reset would once the host is back. Recovery mode stops new
     /// black holes but keeps the ones in force. Off by default.

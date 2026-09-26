@@ -115,7 +115,7 @@ pub mod providers;
 /// Network simulation and configuration.
 pub mod network;
 
-/// Production-friendly observability layer (replaces legacy Timeline + Invariant).
+/// Trace-based observability: `SimulationLayer` capture plus [`Invariant`]s.
 pub mod observability;
 
 /// Storage simulation and configuration.

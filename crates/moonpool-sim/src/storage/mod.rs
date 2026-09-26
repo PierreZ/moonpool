@@ -3,7 +3,7 @@
 //! This module provides simulated storage that integrates with the
 //! deterministic simulation engine for testing disk I/O patterns and faults.
 //!
-//! There is exactly one simulated file implementation ([`image::FileImage`])
+//! There is exactly one simulated file implementation ([`image::FileImage`](crate::storage::image::FileImage))
 //! and one engine driving it. Every API a caller can reach a file through —
 //! stream I/O, positioned I/O, sync, truncation — lands on those bytes, and
 //! every fault names a file and a flat sector offset inside it. Layers that

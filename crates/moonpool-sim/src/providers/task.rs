@@ -35,7 +35,7 @@ use tracing::Instrument as _;
 /// # Ownership
 ///
 /// A process's provider carries the **scope** of the boot it belongs to
-/// ([`SimProviders::with_task_scope`](crate::SimProviders::with_task_scope)):
+/// (`SimProviders::with_task_scope`):
 /// every task spawned through it, and every task those spawn in turn, is
 /// dropped when the process is killed. A crash therefore ends the whole
 /// process — a detached worker does not survive it to run beside the
