@@ -174,7 +174,8 @@ pub fn init_assertions() -> Result<(), std::io::Error> {
 
 /// Free the assertion table and each-bucket shared memory.
 ///
-/// Nulls the pointers after freeing. No-op if not initialized.
+/// Nulls the accounting pointers first, then unmaps the shared regions.
+/// No-op if not initialized.
 pub fn cleanup_assertions() {
     moonpool_assertions::clear();
     ASSERTION_REGIONS.with(|regions| regions.borrow_mut().take());
