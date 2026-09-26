@@ -21,6 +21,7 @@ use moonpool_rpc::security::CredentialError;
 use moonpool_sim::StateHandle;
 
 use super::trust::{Kind, Minted, Trust};
+use crate::lock;
 
 const LEDGER_KEY: &str = "rpc.security.ledger";
 /// The server's latest references, as [`ServerRefs`].
@@ -75,10 +76,6 @@ pub enum Class {
     Maybe,
     /// The handler ran but its outcome was unusable.
     Executed,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().expect("Mutex poisoned: prior task panicked")
 }
 
 /// Which endpoint a request is for.

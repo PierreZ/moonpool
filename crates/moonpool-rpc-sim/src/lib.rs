@@ -51,6 +51,11 @@ pub mod streams;
 
 use moonpool_sim::{NetworkFault, NetworkFaultMask};
 
+/// Lock a campaign's shared state. Poisoning means a prior task panicked.
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().expect("Mutex poisoned: prior task panicked")
+}
+
 /// Every network fault family except in-flight bit flips.
 ///
 /// Corruption is a separate, explicit network-model campaign (the

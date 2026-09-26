@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 
 use moonpool_sim::StateHandle;
 
+use crate::lock;
+
 const LEDGER_KEY: &str = "rpc.qual.ledger";
 /// Set once the fault script stopped (clock restored, processes back).
 pub const SCRIPT_DONE_KEY: &str = "rpc.qual.script.done";
@@ -55,10 +57,6 @@ pub struct LaneRecord {
     pub history: Vec<String>,
     /// Its runtimes returned to baseline once their drivers dropped.
     pub baseline: bool,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().expect("Mutex poisoned: prior task panicked")
 }
 
 /// Who published or ran something: application identity, not RPC identity.
