@@ -32,7 +32,6 @@ tracing = "0.1"
 # The real-TCP example runs the same RPC code on the production providers.
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
-tracing = "0.1"
 
 [[bin]]
 name = "sim-rpc-foundations"

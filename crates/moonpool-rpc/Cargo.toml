@@ -72,7 +72,6 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", 
 rcgen = "0.14"
 time = "0.3"
 # Captures traces in the redaction tests.
-tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [[example]]
