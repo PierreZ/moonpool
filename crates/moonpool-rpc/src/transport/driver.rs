@@ -398,7 +398,10 @@ where
     let deadline = handshake_deadline(shared, connection, shared.config.handshake_timeout);
     let liveness = monitor(shared, connection);
     futures::pin_mut!(read, write, deadline, liveness);
-    let io = futures::future::select(read, write);
+    // Poll the writer first: its first frame is this side's `Hello`, which
+    // must leave before the reader can judge the peer's and end the session
+    // (every side sends a `Hello`, so both sides see and count a refusal).
+    let io = futures::future::select(write, read);
     let guards = futures::future::select(deadline, liveness);
     match futures::future::select(io, guards).await {
         futures::future::Either::Left((
