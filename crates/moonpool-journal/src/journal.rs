@@ -296,6 +296,15 @@ impl<P: StorageProvider> Journal<P> {
         }
     }
 
+    /// Pass `outcome` through, poisoning the journal when it is an error: a
+    /// failed write leaves the on-disk state no longer known to match memory.
+    fn poison_on_err<T>(&mut self, outcome: Result<T, JournalError>) -> Result<T, JournalError> {
+        if outcome.is_err() {
+            self.poisoned = true;
+        }
+        outcome
+    }
+
     /// Append `records` at [`next_index`](Self::next_index) as one batch and
     /// return the indexes they got. On `Ok` every record is durable.
     ///
@@ -337,10 +346,7 @@ impl<P: StorageProvider> Journal<P> {
                     .collect();
                 self.tail_mut().append(&batch).await
             };
-            if outcome.is_err() {
-                self.poisoned = true;
-            }
-            outcome?;
+            self.poison_on_err(outcome)?;
             done += fit;
         }
         Ok(first..self.next_index())
@@ -409,10 +415,7 @@ impl<P: StorageProvider> Journal<P> {
             self.tail_mut().truncate_from(from).await
         }
         .await;
-        if outcome.is_err() {
-            self.poisoned = true;
-        }
-        outcome
+        self.poison_on_err(outcome)
     }
 
     /// Forget whole segments that lie entirely before `before` (compaction).
@@ -452,10 +455,7 @@ impl<P: StorageProvider> Journal<P> {
             Ok(())
         }
         .await;
-        if outcome.is_err() {
-            self.poisoned = true;
-        }
-        outcome
+        self.poison_on_err(outcome)
     }
 
     /// The caller's metadata (for example Raft's term and vote), as last
