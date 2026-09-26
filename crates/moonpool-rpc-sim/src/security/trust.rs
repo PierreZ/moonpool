@@ -305,12 +305,6 @@ impl Trust {
             .any(|(_, keys)| keys.contains(&index))
     }
 
-    /// Whether key `index` is published now.
-    #[must_use]
-    pub fn is_published(&self, index: u32) -> bool {
-        lock(&self.ring).published.contains(&index)
-    }
-
     /// Mint a credential of `kind` for `subject` at the script's UTC; `ttl`
     /// and `delay` (seconds) shape the time window where it applies.
     #[must_use]
