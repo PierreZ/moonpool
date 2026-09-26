@@ -18,8 +18,7 @@ tokio-providers = ["tokio-task", "tokio-time", "tokio-net", "tokio-fs", "tokio-r
 # Granular per-provider features. A consumer that only needs one provider (e.g.
 # moonpool-sim bundles the real TokioTaskProvider) enables just that one and stays
 # free of net/fs/time — keeping the crate wasm-clean where those aren't used.
-# tokio::task::Builder (named spawn) is behind cfg_trace! → needs tokio/tracing.
-tokio-task = ["dep:tokio", "tokio/rt", "tokio/tracing"]
+tokio-task = ["dep:tokio", "tokio/rt"]
 tokio-time = ["dep:tokio", "tokio/time"]
 tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
 # tokio/rt is needed for spawn_blocking (positioned file I/O runs on the
@@ -44,7 +43,6 @@ tokio-util = { version = "0.7", features = ["compat"], optional = true }
 tracing = "0.1"
 
 [dev-dependencies]
-futures = "0.3"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
