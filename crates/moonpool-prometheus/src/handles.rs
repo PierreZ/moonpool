@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use moonpool_core::TimeProvider;
+use moonpool_core::metrics::query::SeriesKey;
 use moonpool_core::metrics::{SeriesRecorder, u64_to_f64_exact};
 use prometheus::{Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec};
 
@@ -362,20 +363,16 @@ labelled_family!(
 
 /// Build the series identity for a labelled child: `name{key="value",...}`.
 ///
-/// Label pairs are sorted so the key matches the one a scraped
-/// `MetricSample` produces for the same series, letting the recorded series
-/// and the final scrape line up.
+/// Goes through [`SeriesKey`] so the key is the one a scraped `MetricSample`
+/// produces for the same series (pairs sorted by label name), letting the
+/// recorded series and the final scrape line up.
 fn series_key(name: &str, label_names: &[String], values: &[&str]) -> String {
-    let mut pairs: Vec<String> = label_names
+    let pairs = label_names
         .iter()
-        .zip(values.iter())
-        .map(|(k, v)| format!("{k}=\"{v}\""))
+        .zip(values)
+        .map(|(k, v)| (k.clone(), (*v).to_owned()))
         .collect();
-    if pairs.is_empty() {
-        return name.to_owned();
-    }
-    pairs.sort();
-    format!("{name}{{{}}}", pairs.join(","))
+    SeriesKey::new(name, pairs).to_string()
 }
 
 #[cfg(test)]
@@ -390,5 +387,16 @@ mod tests {
             r#"requests_total{code="200",method="GET"}"#
         );
         assert_eq!(series_key("uptime", &[], &[]), "uptime");
+    }
+
+    #[test]
+    fn series_key_sorts_by_label_name_not_by_rendered_pair() {
+        // Sorting rendered `k="v"` strings puts `code2=` before `code=`
+        // (`2` < `=`); the scrape sorts by label name.
+        let names = vec!["code2".to_owned(), "code".to_owned()];
+        assert_eq!(
+            series_key("requests_total", &names, &["b", "a"]),
+            r#"requests_total{code="a",code2="b"}"#
+        );
     }
 }
