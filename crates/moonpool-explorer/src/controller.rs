@@ -742,7 +742,7 @@ fn derive_seed(
 fn select_anchor(events: &[DiscoveryEvent]) -> Option<DiscoveryEvent> {
     events
         .iter()
-        .max_by_key(|event| (event.guidance_priority(), event.call_count))
+        .max_by_key(|event| event.retention_key())
         .copied()
 }
 
