@@ -183,13 +183,7 @@ impl TaskPanicReporter {
         payload: &(dyn Any + Send),
         observed: Arc<AtomicBool>,
     ) {
-        let message = if let Some(message) = payload.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else if let Some(message) = payload.downcast_ref::<String>() {
-            message.clone()
-        } else {
-            "non-string panic payload".to_string()
-        };
+        let message = panic_message(payload);
         self.tracker
             .panics
             .lock()
@@ -211,6 +205,17 @@ pub(crate) struct TaskPanic {
     pub(crate) actor: String,
     pub(crate) task: String,
     pub(crate) message: String,
+}
+
+/// The text of a panic payload, for the failure it becomes.
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
 }
 
 /// A task future bound to a process boot: completes, dropping the inner

@@ -13,5 +13,5 @@ pub use random::SimRandomProvider;
 pub use resolver::ScriptedResolver;
 pub use sim_providers::SimProviders;
 pub use task::SimTaskProvider;
-pub(crate) use task::{TaskPanicReporter, TaskPanicTracker};
+pub(crate) use task::{TaskPanicReporter, TaskPanicTracker, panic_message};
 pub use time::SimTimeProvider;
