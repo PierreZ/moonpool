@@ -56,6 +56,33 @@ pub(crate) unsafe fn header_word<'a>(region: *mut u8, index: usize) -> &'a Atomi
     unsafe { atomic(region.add(index * 4).cast::<()>().cast::<u32>()) }
 }
 
+/// Index of the dropped-allocation counter among a region's header words.
+const DROPPED_ALLOCATIONS_WORD: usize = 1;
+
+/// Count one allocation a full or contended region could not track.
+///
+/// # Safety
+///
+/// `region` must point to a live, eight-byte aligned table region.
+pub(crate) unsafe fn count_dropped(region: *mut u8) {
+    // Safety: the caller guarantees a live region; the second header word is
+    // the dropped-allocation counter.
+    let dropped = unsafe { header_word(region, DROPPED_ALLOCATIONS_WORD) };
+    let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_add(1))
+    });
+}
+
+/// Read a region's dropped-allocation counter.
+///
+/// # Safety
+///
+/// `region` must point to a live, eight-byte aligned table region.
+pub(crate) unsafe fn dropped_allocations(region: *mut u8) -> u32 {
+    // Safety: the caller guarantees a live region.
+    unsafe { header_word(region, DROPPED_ALLOCATIONS_WORD).load(Ordering::Relaxed) }
+}
+
 /// An entry type laid out in a region table.
 pub(crate) trait Entry: Sized {
     /// The identity the table deduplicates entries on.
