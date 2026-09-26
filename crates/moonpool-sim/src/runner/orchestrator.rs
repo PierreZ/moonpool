@@ -406,8 +406,7 @@ impl WorkloadOrchestrator {
             process_manager,
             env,
             &chaos_shutdown,
-        )
-        .map_err(|()| env.deadlock())?;
+        );
 
         let total_workloads = workloads.len();
         let (handles, workload_ips) =
@@ -697,10 +696,6 @@ impl WorkloadOrchestrator {
 
     /// Spawn the fault injectors for the chaos phase. When `chaos_duration`
     /// is `None`, the injectors are dropped unrun.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err(())` if the simulation has already been shut down.
     fn start_fault_injectors(
         fault_injectors: Vec<Box<dyn FaultInjector>>,
         chaos_duration: Option<Duration>,
@@ -708,13 +703,15 @@ impl WorkloadOrchestrator {
         process_manager: &ProcessManager<'_>,
         env: IterationEnv<'_>,
         chaos_shutdown: &CancellationToken,
-    ) -> Result<InjectorHandleSlots, ()> {
+    ) -> InjectorHandleSlots {
         let mut injector_handles: InjectorHandleSlots = Vec::new();
         if chaos_duration.is_none() {
-            return Ok(injector_handles);
+            return injector_handles;
         }
         for mut injector in fault_injectors {
-            let fault_sim = sim.downgrade().upgrade().map_err(|_| ())?;
+            let fault_sim = SimWorld {
+                inner: std::sync::Arc::clone(&sim.inner),
+            };
             let fault_ctx = FaultContext::new(
                 fault_sim,
                 process_manager.process_info(),
@@ -738,7 +735,7 @@ impl WorkloadOrchestrator {
             });
             injector_handles.push(Some(handle));
         }
-        Ok(injector_handles)
+        injector_handles
     }
 
     /// Boot the configured processes under a [`ProcessManager`] for lifecycle
