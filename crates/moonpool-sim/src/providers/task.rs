@@ -226,21 +226,21 @@ pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// finds the scope cancelled and drops the application future without
 /// giving it another poll, which is the "no application work after the
 /// kill" rule the process manager keeps for the root future by aborting it.
-struct Scoped<F> {
+struct Scoped {
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
-    inner: Pin<Box<F>>,
+    inner: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
-impl<F: Future<Output = ()>> Scoped<F> {
-    fn new(scope: CancellationToken, inner: F) -> Self {
+impl Scoped {
+    fn new(scope: CancellationToken, inner: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
         Self {
             cancelled: Box::pin(scope.cancelled_owned()),
-            inner: Box::pin(inner),
+            inner,
         }
     }
 }
 
-impl<F: Future<Output = ()>> Future for Scoped<F> {
+impl Future for Scoped {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
