@@ -244,10 +244,11 @@ pub(crate) unsafe fn published_entries<E: Entry>(region: *mut u8) -> impl Iterat
     }
 }
 
-/// Copy `msg` into a NUL-terminated buffer, truncating it to `N - 1` bytes.
+/// Copy `msg` into a NUL-terminated buffer, truncating it to at most `N - 1`
+/// bytes on a character boundary so the stored prefix stays valid UTF-8.
 pub(crate) fn msg_buf<const N: usize>(msg: &str) -> [u8; N] {
     let mut buf = [0u8; N];
-    let n = msg.len().min(N - 1);
+    let n = msg.floor_char_boundary(N - 1);
     buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
     buf
 }
@@ -256,4 +257,22 @@ pub(crate) fn msg_buf<const N: usize>(msg: &str) -> [u8; N] {
 pub(crate) fn msg_str(buf: &[u8]) -> &str {
     let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     std::str::from_utf8(&buf[..len]).unwrap_or("???")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{msg_buf, msg_str};
+
+    #[test]
+    fn msg_buf_truncates_on_a_char_boundary() {
+        // "é" occupies bytes 2..4: a cut at byte 3 would split it.
+        let buf = msg_buf::<4>("aaé");
+        assert_eq!(msg_str(&buf), "aa");
+    }
+
+    #[test]
+    fn msg_buf_keeps_short_messages_whole() {
+        let buf = msg_buf::<8>("abc");
+        assert_eq!(msg_str(&buf), "abc");
+    }
 }
