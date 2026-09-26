@@ -40,7 +40,7 @@ pub struct Entry {
 }
 
 /// The file name of the segment whose first index is `first`:
-/// `seg-00000000001048576.wal`.
+/// `seg-00000000000001048576.wal`.
 pub(crate) fn segment_name(first: u64) -> String {
     format!("{PREFIX}{first:020}{SUFFIX}")
 }
