@@ -114,7 +114,7 @@ pub trait Providers: Clone + Send + Sync + 'static {
     /// Time provider type for sleep, timeout, and time queries.
     type Time: TimeProvider;
 
-    /// Task provider type for spawning local tasks.
+    /// Task provider type for spawning `Send` tasks.
     type Task: TaskProvider;
 
     /// Random provider type for deterministic or real randomness.
