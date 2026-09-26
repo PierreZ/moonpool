@@ -56,9 +56,6 @@ type ChannelIo<P> = HyperIo<<<P as Providers>::Network as NetworkProvider>::TcpS
 /// then dies immediately therefore faces escalating backoff and can exhaust the
 /// failure cap, instead of spinning at zero backoff forever.
 ///
-/// Resetting only after a stable interval prevents a peer that accepts and
-/// immediately closes from keeping the channel at zero backoff.
-///
 /// # Where it may be polled
 ///
 /// `poll_ready` spawns the connection task through the task provider, so the
