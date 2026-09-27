@@ -84,8 +84,10 @@ filter = 'package(moonpool-rpc-sim)'
 slow-timeout = { period = "10s", terminate-after = 6 }
 
 [profile.default.junit]
-# Store test results
-path = "target/nextest/default/junit.xml"
+# Store test results, with every failing test's output, at
+# target/nextest/default/junit.xml (the path is relative to the profile's
+# directory). CI uploads it when a run fails.
+path = "junit.xml"
 
 # The compile-fail cases build moonpool-rpc and its dependencies in their
 # own trybuild workspace on the first run: give them minutes, not seconds.
