@@ -359,6 +359,18 @@ async fn a_restart_at_the_same_address_is_learned_only_through_republication_cur
     restart_scenario().await;
 }
 
+/// Poll on real time, for up to five seconds, until `rpc` holds no open
+/// connection.
+async fn sessions_closed(rpc: &RpcHandle<TokioProviders>) -> bool {
+    for _ in 0..500 {
+        if rpc.stats().expect("running").connections == 0 {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
 async fn restart_scenario() {
     struct Directory;
     impl RpcMethod for Directory {
@@ -423,6 +435,11 @@ async fn restart_scenario() {
         task.abort();
         let _ = task.await;
     }
+    // Let B see I1's session end before calling it again. Otherwise the
+    // reliable call's first attempt leaves on that dead session, and the
+    // refusal I2 gives its resent copy can only say `MaybeExecuted`: it
+    // proves nothing about an attempt that already left.
+    assert!(sessions_closed(&b).await, "B sees I1's session close");
     let Some((_a2, _second_boot)) = boot(&address.to_string(), "i2", second_calls.clone()).await
     else {
         eprintln!("could not rebind {address}; skipping");
