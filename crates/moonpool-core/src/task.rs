@@ -1,6 +1,6 @@
-//! Task spawning abstraction for single-threaded simulation environments.
+//! Task spawning abstraction.
 //!
-//! This module provides task provider abstractions for spawning local tasks
+//! This module provides task provider abstractions for spawning `Send` tasks
 //! that work with both simulation and real Tokio execution.
 
 use std::future::Future;

@@ -1,6 +1,5 @@
 //! Process lifecycle state for simulation runs.
 
-use std::any::Any;
 use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
@@ -10,7 +9,7 @@ use tracing::Instrument as _;
 
 use crate::chaos::state_handle::StateHandle;
 use crate::observability::SimulationLayerHandle;
-use crate::providers::TaskPanicTracker;
+use crate::providers::{TaskPanicTracker, panic_message};
 use crate::runner::app_metrics::MetricsHandle;
 use crate::runner::context::SimContext;
 use crate::runner::fault_injector::{DeadSet, ProcessInfo};
@@ -60,17 +59,6 @@ pub(crate) struct ProcessPanic {
 /// The panics recorded across every process task of one iteration, shared
 /// between the boot-time spawns and the restarts the manager performs.
 pub(crate) type ProcessPanics = Arc<Mutex<Vec<ProcessPanic>>>;
-
-/// The text of a panic payload, for the failure it becomes.
-fn panic_message(payload: &(dyn Any + Send)) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        (*message).to_string()
-    } else if let Some(message) = payload.downcast_ref::<String>() {
-        message.clone()
-    } else {
-        "non-string panic payload".to_string()
-    }
-}
 
 /// One boot of a process: its root task, and the scope every task it spawns
 /// through its provider is bound to.

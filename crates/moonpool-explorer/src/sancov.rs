@@ -222,13 +222,15 @@
 //! init_sancov_shared()          allocate transfer + history in MAP_SHARED
 //!   │
 //!   ├── per-child:
-//!   │     reset_bss_counters()        zero BSS array after fork
-//!   │     ... simulation runs ...     BSS counters increment
-//!   │     copy_counters_to_shared()   copy BSS → transfer/pool slot
-//!   │     exit_child()                _exit()
+//!   │     reset_bss_counters()                zero BSS array (via begin_run)
+//!   │     redirect_transfer_to_pool_slot(i)   point transfer at the worker's slot
+//!   │     ... simulation runs ...             BSS counters increment
+//!   │     copy_counters_to_shared()           copy BSS → transfer/pool slot
+//!   │     libc::_exit()
 //!   │
 //!   └── per-reap:
 //!         has_new_sancov_coverage()   bucket + compare against history
+//!         has_new_pool_coverage(i)    same, for a worker's pool slot
 //! ```
 
 use std::cell::{Cell, RefCell};
@@ -566,10 +568,11 @@ pub(crate) fn copy_counters_to_shared() {
     }
 }
 
-/// Zero BSS counters after fork.
+/// Zero BSS counters at the start of every timeline.
 ///
-/// Call in the child process immediately after `fork()` so the child's
-/// counters start from zero. No-op when sancov is unavailable.
+/// Called for the root run, for each in-process timeline and in each forked
+/// worker, so every timeline's counters start from zero. No-op when sancov
+/// is unavailable.
 pub(crate) fn reset_bss_counters() {
     let Some((ptr, len)) = counters() else {
         return;

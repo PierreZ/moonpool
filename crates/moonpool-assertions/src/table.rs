@@ -56,6 +56,33 @@ pub(crate) unsafe fn header_word<'a>(region: *mut u8, index: usize) -> &'a Atomi
     unsafe { atomic(region.add(index * 4).cast::<()>().cast::<u32>()) }
 }
 
+/// Index of the dropped-allocation counter among a region's header words.
+const DROPPED_ALLOCATIONS_WORD: usize = 1;
+
+/// Count one allocation a full or contended region could not track.
+///
+/// # Safety
+///
+/// `region` must point to a live, eight-byte aligned table region.
+pub(crate) unsafe fn count_dropped(region: *mut u8) {
+    // Safety: the caller guarantees a live region; the second header word is
+    // the dropped-allocation counter.
+    let dropped = unsafe { header_word(region, DROPPED_ALLOCATIONS_WORD) };
+    let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_add(1))
+    });
+}
+
+/// Read a region's dropped-allocation counter.
+///
+/// # Safety
+///
+/// `region` must point to a live, eight-byte aligned table region.
+pub(crate) unsafe fn dropped_allocations(region: *mut u8) -> u32 {
+    // Safety: the caller guarantees a live region.
+    unsafe { header_word(region, DROPPED_ALLOCATIONS_WORD).load(Ordering::Relaxed) }
+}
+
 /// An entry type laid out in a region table.
 pub(crate) trait Entry: Sized {
     /// The identity the table deduplicates entries on.
@@ -217,10 +244,11 @@ pub(crate) unsafe fn published_entries<E: Entry>(region: *mut u8) -> impl Iterat
     }
 }
 
-/// Copy `msg` into a NUL-terminated buffer, truncating it to `N - 1` bytes.
+/// Copy `msg` into a NUL-terminated buffer, truncating it to at most `N - 1`
+/// bytes on a character boundary so the stored prefix stays valid UTF-8.
 pub(crate) fn msg_buf<const N: usize>(msg: &str) -> [u8; N] {
     let mut buf = [0u8; N];
-    let n = msg.len().min(N - 1);
+    let n = msg.floor_char_boundary(N - 1);
     buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
     buf
 }
@@ -229,4 +257,22 @@ pub(crate) fn msg_buf<const N: usize>(msg: &str) -> [u8; N] {
 pub(crate) fn msg_str(buf: &[u8]) -> &str {
     let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     std::str::from_utf8(&buf[..len]).unwrap_or("???")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{msg_buf, msg_str};
+
+    #[test]
+    fn msg_buf_truncates_on_a_char_boundary() {
+        // "é" occupies bytes 2..4: a cut at byte 3 would split it.
+        let buf = msg_buf::<4>("aaé");
+        assert_eq!(msg_str(&buf), "aa");
+    }
+
+    #[test]
+    fn msg_buf_keeps_short_messages_whole() {
+        let buf = msg_buf::<8>("abc");
+        assert_eq!(msg_str(&buf), "abc");
+    }
 }

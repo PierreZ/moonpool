@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 
 use moonpool_sim::StateHandle;
 
+use crate::lock;
+
 const LEDGER_KEY: &str = "rpc.balance.ledger";
 /// Board label of the workload's runtime.
 pub const WORKLOAD_LABEL: &str = "balance-workload";
@@ -26,10 +28,6 @@ pub const WORKLOAD_LABEL: &str = "balance-workload";
 pub const WORKLOAD_IP_KEY: &str = "rpc.balance.workload.ip";
 /// Set once the fault script stopped injecting.
 pub const SCRIPT_DONE_KEY: &str = "rpc.balance.script.done";
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().expect("Mutex poisoned: prior task panicked")
-}
 
 /// One handler run.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -17,7 +17,7 @@
 //! # Segments
 //!
 //! Each segment is one preallocated, zero-filled file named after its first
-//! index (`seg-00000000001048576.wal`, 64 MiB). The journal finds its
+//! index (`seg-00000000000001048576.wal`, 64 MiB). The journal finds its
 //! segments by listing the directory
 //! ([`StorageProvider::list_dir`](moonpool_core::StorageProvider::list_dir)):
 //! the names alone give their order.

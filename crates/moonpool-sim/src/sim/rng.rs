@@ -4,7 +4,7 @@
 //! delay a message takes, the task the executor polls next, the branch a
 //! `select!` tries first, the per-seed swarm subset, a buggify activation, and
 //! every draw a process or workload makes through its `RandomProvider` — comes
-//! from the single thread-local [`SIM_RNG`] below. There is no private stream
+//! from the single thread-local `SIM_RNG` below. There is no private stream
 //! for the framework's own decisions: moonpool draws its randomness exactly the
 //! way the code it simulates does, so the same seed replays the same run, bit
 //! for bit, and adding or removing a draw anywhere shifts everything after it.

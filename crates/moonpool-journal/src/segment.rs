@@ -40,7 +40,7 @@ pub struct Entry {
 }
 
 /// The file name of the segment whose first index is `first`:
-/// `seg-00000000001048576.wal`.
+/// `seg-00000000000001048576.wal`.
 pub(crate) fn segment_name(first: u64) -> String {
     format!("{PREFIX}{first:020}{SUFFIX}")
 }
@@ -239,14 +239,19 @@ impl<F: StorageFile> Segment<F> {
         provider.rename(&temporary, &path).await?;
         provider.sync_dir(dir).await?;
         let file = Self::open_file(provider, &path, direct_io).await?;
-        Ok(Self {
+        Ok(Self::empty(first, file, geometry))
+    }
+
+    /// A segment handle over `file` with no records loaded yet.
+    fn empty(first: u64, file: BlockFile<F>, geometry: Geometry) -> Self {
+        Self {
             first,
             file,
             geometry,
             recs: Vec::new(),
             data_end: geometry.data_start,
             tail: Vec::new(),
-        })
+        }
     }
 
     async fn open_file<P: StorageProvider<File = F>>(
@@ -285,14 +290,7 @@ impl<F: StorageFile> Segment<F> {
                 actual,
             });
         }
-        let mut segment = Self {
-            first,
-            file,
-            geometry,
-            recs: Vec::new(),
-            data_end: geometry.data_start,
-            tail: Vec::new(),
-        };
+        let mut segment = Self::empty(first, file, geometry);
         let mut report = SegmentRecovery {
             header_repaired: segment.check_header().await?,
             ..SegmentRecovery::default()

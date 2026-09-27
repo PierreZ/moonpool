@@ -285,7 +285,7 @@ impl FaultContext {
     /// Reboot a process with custom delay ranges.
     ///
     /// Like [`reboot`](Self::reboot) but with configurable recovery delay and
-    /// grace period ranges (in milliseconds). Used by [`AttritionInjector`] to
+    /// grace period ranges (in milliseconds). Used by the built-in attrition injector to
     /// pass through [`Attrition`](super::process::Attrition) configuration.
     ///
     /// # Errors

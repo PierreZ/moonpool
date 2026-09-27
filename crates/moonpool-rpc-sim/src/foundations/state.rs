@@ -11,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use moonpool_rpc::{ResourceProbe, RpcStats};
 use moonpool_sim::StateHandle;
 
+use crate::lock;
+
 const LEDGER_KEY: &str = "rpc.ledger";
 const BOARD_KEY: &str = "rpc.board";
 /// Latest server references, as [`ServerRefs`].
@@ -23,10 +25,6 @@ pub const RELAY_REF_KEY: &str = "rpc.relay.ref";
 pub const CRASH_REQUESTS_KEY: &str = "rpc.crash.requests";
 /// How many times the server process has booted.
 pub const SERVER_BOOTS_KEY: &str = "rpc.server.boots";
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().expect("Mutex poisoned: prior task panicked")
-}
 
 /// Handler receipts per workload request id.
 #[derive(Clone, Default)]

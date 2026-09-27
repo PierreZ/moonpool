@@ -37,9 +37,6 @@ const EACH_MSG_LEN: usize = 32;
 /// Total memory size for the `EachBucket` region.
 pub const EACH_BUCKET_MEM_SIZE: usize = 8 + MAX_EACH_BUCKETS * std::mem::size_of::<EachBucket>();
 
-/// Index of the dropped-allocation counter among the region's header words.
-const DROPPED_ALLOCATIONS_WORD: usize = 1;
-
 /// One bucket's state for per-value bucketed assertions.
 ///
 /// Each unique combination of identity key values creates one bucket.
@@ -188,11 +185,8 @@ fn find_or_alloc_each_bucket(
             None
         }
         Claim::Busy | Claim::Full => {
-            // Safety: the second header word is the dropped-allocation counter.
-            let dropped = unsafe { table::header_word(ptr, DROPPED_ALLOCATIONS_WORD) };
-            let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            });
+            // Safety: ptr was allocated with EACH_BUCKET_MEM_SIZE bytes.
+            unsafe { table::count_dropped(ptr) };
             None
         }
     }
@@ -288,9 +282,8 @@ pub fn each_bucket_dropped_allocations() -> u32 {
     if ptr.is_null() {
         return 0;
     }
-    // Safety: ptr points to EACH_BUCKET_MEM_SIZE bytes, and the second u32 in
-    // the region header is the dropped-allocation counter.
-    unsafe { table::header_word(ptr, DROPPED_ALLOCATIONS_WORD).load(Ordering::Relaxed) }
+    // Safety: ptr points to EACH_BUCKET_MEM_SIZE bytes.
+    unsafe { table::dropped_allocations(ptr) }
 }
 
 /// Read all recorded `EachBucket` entries.

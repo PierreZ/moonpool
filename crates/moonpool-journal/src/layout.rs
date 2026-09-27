@@ -168,9 +168,7 @@ impl Header {
             data_start: geometry.data_start,
         }
     }
-}
 
-impl Header {
     /// Encode into the start of a header block; the rest stays zero.
     pub fn encode(&self, block: &mut [u8]) {
         block[0..4].copy_from_slice(&HEADER_MAGIC.to_le_bytes());

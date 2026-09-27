@@ -19,7 +19,7 @@
 //! simulation none of that exists; [`SimWorld`](crate::SimWorld)'s event
 //! queue *is* the reactor. Virtual time, network delivery, storage
 //! completion: every external event is a queue entry whose processing wakes
-//! the parked task through its ordinary [`Waker`]. The executor therefore
+//! the parked task through its ordinary [`Waker`](std::task::Waker). The executor therefore
 //! only needs to answer one question: "of the tasks that are runnable right
 //! now, which do I poll next?"
 //!
@@ -42,7 +42,7 @@
 //!
 //! # The driver contract: `block_on` + `until_stalled`
 //!
-//! [`Executor::block_on`] pins the main future (the simulation orchestrator)
+//! [`Executor::block_on`](crate::executor::Executor::block_on) pins the main future (the simulation orchestrator)
 //! on the stack. It is not in the ready queue and is never scheduled
 //! randomly; it is the *driver*, alternating with the task pool:
 //!
@@ -55,7 +55,7 @@
 //! }
 //! ```
 //!
-//! The orchestrator's step loops await [`until_stalled()`] between
+//! The orchestrator's step loops await [`until_stalled()`](crate::executor::until_stalled) between
 //! `sim.step()` calls. Because the driver is only re-polled after a full
 //! drain, resuming from `until_stalled().await` guarantees every task that
 //! was runnable has been polled to `Pending` or completion. This is strictly
@@ -63,7 +63,7 @@
 //! re-queuing the driver at the back of a FIFO), and it stays correct under
 //! randomized scheduling, where "back of the queue" does not exist.
 //!
-//! Inside a task, use [`yield_now()`]: it reschedules the task at a seeded
+//! Inside a task, use [`yield_now()`](crate::executor::yield_now): it reschedules the task at a seeded
 //! random position. `until_stalled()` is driver-only (debug-asserted): if a
 //! task awaited it, the drain-until-empty semantics would deadlock against
 //! itself.
@@ -72,11 +72,11 @@
 //!
 //! Spawning goes through [`async_task`]: each task splits into a `Runnable`
 //! (scheduled into the ready queue by its waker) and a
-//! [`JoinHandle`] wrapping the `FallibleTask` (awaitable output). Three
+//! [`JoinHandle`](crate::executor::JoinHandle) wrapping the `FallibleTask` (awaitable output). Three
 //! contracts mirror tokio because the orchestrator depends on them:
 //!
 //! - **Detach on drop**: dropping a `JoinHandle` lets the task keep running.
-//! - **Abort**: [`JoinHandle::abort`] cancels the task; awaiting the handle
+//! - **Abort**: [`JoinHandle::abort`](crate::executor::JoinHandle::abort) cancels the task; awaiting the handle
 //!   then yields `Err(JoinError::Cancelled)`.
 //! - **Panic isolation**: every spawned future is wrapped in
 //!   `catch_unwind`, so a panicking task never unwinds into the executor's

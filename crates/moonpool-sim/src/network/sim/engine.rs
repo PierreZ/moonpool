@@ -1997,9 +1997,7 @@ impl NetworkSimulation {
             return (None, NetworkActions::default(), WakeBatch::default());
         }
         self.state.last_random_close_time = now;
-        let a = sim_random_f64();
-        let close_recv = a < 0.66;
-        let close_send = a > 0.33;
+        let (close_send, close_recv) = draw_fault_direction();
         let wakes = self.close_asymmetric(id, close_send, close_recv);
         let explicit = sim_random_f64() < self.state.config.chaos.random_close_explicit_ratio;
         let mut actions = NetworkActions::default();
@@ -2029,9 +2027,7 @@ impl NetworkSimulation {
             return NetworkActions::default();
         }
         self.state.last_black_hole_time = now;
-        let a = sim_random_f64();
-        let hole_recv = a < 0.66;
-        let hole_send = a > 0.33;
+        let (hole_send, hole_recv) = draw_fault_direction();
         assert_reachable!("network: connection black-holed");
         self.black_hole(id, hole_send, hole_recv)
     }
@@ -2288,6 +2284,13 @@ impl NetworkSimulation {
             })
             .collect()
     }
+}
+
+/// Draw which directions a connection fault hits, as `(send, recv)`: this
+/// endpoint's sends, its peer's, or both, roughly a third each. One draw.
+fn draw_fault_direction() -> (bool, bool) {
+    let a = sim_random_f64();
+    (a > 0.33, a < 0.66)
 }
 
 #[cfg(test)]

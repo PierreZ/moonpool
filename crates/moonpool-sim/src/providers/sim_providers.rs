@@ -13,7 +13,7 @@ use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider, TaskPanicReport
 /// Simulation providers bundle for deterministic testing.
 ///
 /// This struct bundles all simulation-based providers into a single
-/// instance that implements [`Providers`]. Each bundle is scoped to a
+/// instance that implements [`Providers`](moonpool_core::Providers). Each bundle is scoped to a
 /// specific process IP for per-process storage fault injection.
 ///
 /// ## Usage

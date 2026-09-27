@@ -78,7 +78,6 @@ struct Method {
     request: Type,
     reply: Type,
     docs: Vec<Attribute>,
-    request_name: Ident,
 }
 
 fn camel(snake: &str) -> String {
@@ -202,7 +201,6 @@ fn parse_method(service: &Ident, item: TraitItemFn) -> syn::Result<Method> {
         stream: format_ident!("stream_{}", plain),
         id: args.required("id", span, "a service method")?,
         schema: args.required("schema", span, "a service method")?,
-        request_name: format_ident!("request"),
         ident: signature.ident.clone(),
         variant,
         request,
@@ -357,12 +355,11 @@ fn definitions(service: &Service, names: &Names, methods: &[Method]) -> TokenStr
             request,
             reply,
             docs,
-            request_name,
             ..
         } = method;
         quote! {
             #(#docs)*
-            fn #ident(&self, #request_name: #request)
+            fn #ident(&self, request: #request)
                 -> impl ::core::future::Future<Output = #reply> + ::core::marker::Send;
         }
     });

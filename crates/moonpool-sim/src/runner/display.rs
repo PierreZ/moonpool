@@ -441,7 +441,7 @@ fn write_assertions(w: &mut impl Write, details: &[AssertionDetail], color: bool
         let msg = &detail.msg;
         // Truncate very long messages
         let display_msg = if msg.len() > 40 {
-            format!("\"{}...\"", &msg[..37])
+            format!("\"{}...\"", &msg[..msg.floor_char_boundary(37)])
         } else {
             format!("\"{msg}\"")
         };
@@ -763,5 +763,31 @@ fn write_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
                 red = paint(ansi::BOLD_RED, color),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_non_ascii_assertion_message_is_truncated_on_a_char_boundary() {
+        // "é" occupies bytes 36..38: a cut at byte 37 would split it.
+        let msg = format!("{}é{}", "a".repeat(36), "b".repeat(10));
+        let detail = AssertionDetail {
+            msg,
+            kind: AssertKind::Always,
+            pass_count: 1,
+            fail_count: 0,
+            watermark: 0,
+            frontier: 0,
+            frontier_target: 0,
+            combinations_seen: 0,
+            status: AssertionStatus::Pass,
+        };
+        let mut out = Vec::new();
+        write_assertions(&mut out, &[detail], false);
+        let out = String::from_utf8(out).expect("report is UTF-8");
+        assert!(out.contains(&format!("\"{}...\"", "a".repeat(36))));
     }
 }

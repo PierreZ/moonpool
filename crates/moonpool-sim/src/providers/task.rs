@@ -35,7 +35,7 @@ use tracing::Instrument as _;
 /// # Ownership
 ///
 /// A process's provider carries the **scope** of the boot it belongs to
-/// ([`SimProviders::with_task_scope`](crate::SimProviders::with_task_scope)):
+/// (`SimProviders::with_task_scope`):
 /// every task spawned through it, and every task those spawn in turn, is
 /// dropped when the process is killed. A crash therefore ends the whole
 /// process — a detached worker does not survive it to run beside the
@@ -183,13 +183,7 @@ impl TaskPanicReporter {
         payload: &(dyn Any + Send),
         observed: Arc<AtomicBool>,
     ) {
-        let message = if let Some(message) = payload.downcast_ref::<&str>() {
-            (*message).to_string()
-        } else if let Some(message) = payload.downcast_ref::<String>() {
-            message.clone()
-        } else {
-            "non-string panic payload".to_string()
-        };
+        let message = panic_message(payload);
         self.tracker
             .panics
             .lock()
@@ -213,6 +207,17 @@ pub(crate) struct TaskPanic {
     pub(crate) message: String,
 }
 
+/// The text of a panic payload, for the failure it becomes.
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    }
+}
+
 /// A task future bound to a process boot: completes, dropping the inner
 /// future unpolled, as soon as the boot's scope is cancelled.
 ///
@@ -221,21 +226,21 @@ pub(crate) struct TaskPanic {
 /// finds the scope cancelled and drops the application future without
 /// giving it another poll, which is the "no application work after the
 /// kill" rule the process manager keeps for the root future by aborting it.
-struct Scoped<F> {
+struct Scoped {
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
-    inner: Pin<Box<F>>,
+    inner: Pin<Box<dyn Future<Output = ()> + Send>>,
 }
 
-impl<F: Future<Output = ()>> Scoped<F> {
-    fn new(scope: CancellationToken, inner: F) -> Self {
+impl Scoped {
+    fn new(scope: CancellationToken, inner: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
         Self {
             cancelled: Box::pin(scope.cancelled_owned()),
-            inner: Box::pin(inner),
+            inner,
         }
     }
 }
 
-impl<F: Future<Output = ()>> Future for Scoped<F> {
+impl Future for Scoped {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {

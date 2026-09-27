@@ -17,15 +17,13 @@ use std::sync::{Arc, Mutex};
 
 use moonpool_sim::StateHandle;
 
+use crate::lock;
+
 const LEDGER_KEY: &str = "rpc.interfaces.ledger";
 /// Board label of the workload's runtime.
 pub const WORKLOAD_LABEL: &str = "workload";
 /// Set once the fault script stopped rebooting participants.
 pub const SCRIPT_DONE_KEY: &str = "rpc.interfaces.script.done";
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().expect("Mutex poisoned: prior task panicked")
-}
 
 /// Who published or ran something: application identity, not RPC identity.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

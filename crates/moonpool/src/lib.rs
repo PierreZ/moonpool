@@ -82,8 +82,8 @@ pub use moonpool_sim::*;
 
 /// hyper 1.x integration, from [`moonpool_hyper`].
 ///
-/// A namespaced module rather than a fourth glob re-export at the root: the
-/// the core and simulation root exports already overlap in places. Hyper names
+/// A namespaced module rather than a third glob re-export at the root: the
+/// core and simulation root exports already overlap in places. Hyper names
 /// like `H2Channel` or `KeepAlive` read better qualified anyway.
 ///
 /// ```ignore

@@ -35,9 +35,6 @@ const SLOT_MSG_LEN: usize = 64;
 pub const ASSERTION_TABLE_MEM_SIZE: usize =
     8 + MAX_ASSERTION_SLOTS * std::mem::size_of::<AssertionSlot>();
 
-/// Index of the dropped-allocation counter among the table's header words.
-const DROPPED_ALLOCATIONS_WORD: usize = 1;
-
 /// The kind of assertion being tracked.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,19 +234,6 @@ unsafe fn same_site(
     }
 }
 
-/// Count one assertion evaluation that could not be tracked.
-///
-/// # Safety
-///
-/// `table_ptr` must point to a live assertion table.
-unsafe fn count_dropped(table_ptr: *mut u8) {
-    // Safety: the second header word is the dropped-allocation counter.
-    let dropped = unsafe { table::header_word(table_ptr, DROPPED_ALLOCATIONS_WORD) };
-    let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-        Some(count.saturating_add(1))
-    });
-}
-
 /// Find an existing slot for `msg` or allocate a new one.
 ///
 /// Returns the slot and its message hash, or `None` when the assertion table
@@ -304,7 +288,7 @@ fn find_or_alloc_slot(
         }
         Claim::Busy | Claim::Full => {
             // Safety: table_ptr points to a live assertion table.
-            unsafe { count_dropped(table_ptr) };
+            unsafe { table::count_dropped(table_ptr) };
             None
         }
     }
@@ -518,9 +502,8 @@ pub fn assertion_dropped_allocations() -> u32 {
         return 0;
     }
 
-    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes, and the
-    // second u32 in the table header is the dropped-allocation counter.
-    unsafe { table::header_word(table_ptr, DROPPED_ALLOCATIONS_WORD).load(Ordering::Relaxed) }
+    // Safety: table_ptr points to ASSERTION_TABLE_MEM_SIZE bytes.
+    unsafe { table::dropped_allocations(table_ptr) }
 }
 
 /// A snapshot of an assertion slot for reporting.

@@ -68,7 +68,10 @@ impl DiscoveryEvent {
         }
     }
 
-    fn retention_key(&self) -> (u8, u64) {
+    /// Rank used both to keep discoveries in the bounded journal and to pick
+    /// the anchor a timeline expands from: semantic priority first, then the
+    /// latest replay coordinate.
+    pub(crate) fn retention_key(&self) -> (u8, u64) {
         (self.guidance_priority(), self.call_count)
     }
 }

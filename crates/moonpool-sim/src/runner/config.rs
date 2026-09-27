@@ -51,13 +51,7 @@ impl ProcessCount {
         match self {
             Self::Fixed(count) => *count,
             Self::Range(range) => {
-                let start = *range.start();
-                let end = *range.end() + 1;
-                if start >= end {
-                    start
-                } else {
-                    crate::sim::sim_random_range(start..end)
-                }
+                crate::sim::sim_random_range_or_default(*range.start()..*range.end() + 1)
             }
         }
     }
