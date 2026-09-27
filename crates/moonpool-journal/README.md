@@ -44,7 +44,17 @@ or reported corrupt) and moonpool's full physics (a read may never return
 wrong data). `JOURNAL_CRASH_SEEDS` raises the seed count;
 `JOURNAL_CRASH_SEED` replays one.
 
-## Example
+## Examples
+
+`examples/accept_log.rs` runs the journal on the real filesystem through
+`TokioStorageProvider`: a Paxos acceptor journals its accepts tagged with
+their slot and ballot, restarts and replays them, then finds one entry
+rotted on disk — reported corrupt with its Paxos identity instead of
+truncated — and repairs it as if from a peer:
+
+```sh
+cargo run -p moonpool-journal --example accept_log
+```
 
 `crates/moonpool-sim-examples/src/journal.rs` runs the journal inside a full
 simulation — one node crashed over and over by attrition, checking on every

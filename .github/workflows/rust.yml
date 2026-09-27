@@ -128,6 +128,10 @@ jobs:
       # doctests (derive included) run here.
       - name: moonpool-rpc doctests
         run: nix develop --command cargo test -p moonpool-rpc --features derive --doc
+      # The journal on the real filesystem (TokioStorageProvider): write,
+      # restart, rot an entry on disk, repair. Self-checking.
+      - name: moonpool-journal real-filesystem example
+        run: nix develop --command cargo run -p moonpool-journal --example accept_log
       - name: Build without any rustflags (no tokio_unstable required)
         run: |
           # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml

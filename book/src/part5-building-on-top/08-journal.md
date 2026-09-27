@@ -200,6 +200,34 @@ report shows what the crashes reached — torn tails, ambiguous last batches
 segments — and
 removing the journal's per-batch `fdatasync` turns nearly every seed red.
 
+## On a Real Disk
+
+The journal is written against the provider traits only, so production
+hands it `TokioStorageProvider` instead of the simulator's storage.
+[`accept_log.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-journal/examples/accept_log.rs)
+(`cargo run -p moonpool-journal --example accept_log`) does exactly that, in
+a temporary directory: a Paxos acceptor appends its accepts, each tagged with
+the slot and ballot it is for, keeps its promise in the two-copy metadata,
+and replays everything with one `read_range` after a restart. Then it flips
+one byte of an acknowledged entry in the middle of the log, behind the
+journal's back:
+
+```rust,ignore
+let (journal, recovery) = Journal::open(TokioStorageProvider::new(), dir, config()).await?;
+for entry in journal.read_range(journal.start_index()..journal.next_index()).await? {
+    match entry {
+        Ok(entry) => replay(entry),
+        // Not truncated: the slot still names the Paxos slot and ballot.
+        Err(id) => fetch_from_peer(decode_tag(&id.tag)),
+    }
+}
+```
+
+The reopen keeps every later entry and reports the damaged one with the
+identity its slot recorded, so the acceptor cuts the log there with
+`truncate_suffix`, re-appends the peer's copy and the entries after it, and
+a final reopen comes back clean.
+
 ## How It Was Tested
 
 The integration tests drive the journal against the simulator's storage
