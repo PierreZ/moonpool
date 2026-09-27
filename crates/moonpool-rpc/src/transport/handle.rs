@@ -8,6 +8,7 @@ use moonpool_core::Providers;
 use super::Shared;
 use crate::call::client::ServiceClient;
 use crate::call::receiver::RequestStream;
+use crate::config::EndpointQueue;
 use crate::endpoint::{AccessClass, Incarnation, WellKnownId};
 use crate::error::{ErrorReason, RpcError};
 use crate::failure::FailureMonitor;
@@ -71,7 +72,21 @@ impl<P: Providers> RpcHandle<P> {
         &self,
         access: AccessClass,
     ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
-        self.running()?.register::<M>(access, None)
+        self.running()?.register::<M>(access, None, None)
+    }
+
+    /// [`register`](Self::register) with its own admission queue instead
+    /// of the runtime's [`RpcConfig::endpoint_queue`](crate::RpcConfig::endpoint_queue).
+    ///
+    /// # Errors
+    ///
+    /// As for [`register`](Self::register).
+    pub fn register_with<M: RpcMethod>(
+        &self,
+        access: AccessClass,
+        queue: EndpointQueue,
+    ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
+        self.running()?.register::<M>(access, None, Some(queue))
     }
 
     /// Register a dynamic endpoint group serving interface `I`.
@@ -112,7 +127,23 @@ impl<P: Providers> RpcHandle<P> {
         id: WellKnownId,
         access: AccessClass,
     ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
-        self.running()?.register::<M>(access, Some(id))
+        self.running()?.register::<M>(access, Some(id), None)
+    }
+
+    /// [`register_well_known`](Self::register_well_known) with its own
+    /// admission queue instead of the runtime's
+    /// [`RpcConfig::endpoint_queue`](crate::RpcConfig::endpoint_queue).
+    ///
+    /// # Errors
+    ///
+    /// As for [`register_well_known`](Self::register_well_known).
+    pub fn register_well_known_with<M: RpcMethod>(
+        &self,
+        id: WellKnownId,
+        access: AccessClass,
+        queue: EndpointQueue,
+    ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
+        self.running()?.register::<M>(access, Some(id), Some(queue))
     }
 
     /// Bind a reference to this runtime (same as [`ServiceRef::bind`]).

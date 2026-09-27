@@ -28,6 +28,7 @@ FoundationDB's `fdbrpc`; not wire-compatible with it.
 | `ReplyHandle<M>` | one-shot, session-bound responder; dropping it is a broken promise, `never_reply()` is not; `into_stream()` for a streaming method |
 | `ReplyStream<M>` / `StreamProducer<M>` / `SendError` | reply streams (`RpcMethod::STREAMING`, `ServiceClient::get_reply_stream`): ordered items paced by consumption credit, one terminal outcome |
 | `ResourceLimits` / `StreamPolicy` | admission and buffering budgets per endpoint, connection and runtime; stream windows and budgets (`RpcConfig::limits`, `RpcConfig::streams`) |
+| `EndpointQueue` | one endpoint's own admission queue (`register_with`, `register_well_known_with`, `ServiceGroup::serve_with`), instead of the runtime's `RpcConfig::endpoint_queue()` |
 | `RpcError` = `ErrorReason` + `Execution` | the failure reason, and what it proves (`NotAdmitted`, `MaybeExecuted`, `Executed`) |
 | `balance::{AlternativeSet, BalancedClient, BalancePolicy, QueueModel}` | load balancing over an explicit, versioned set of incarnation-specific references: locality, queue model, penalties, expiring exclusion, separate retry and duplicate (hedge) permissions, late losers, `Selector` and hooks |
 

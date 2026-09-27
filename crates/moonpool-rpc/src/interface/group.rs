@@ -5,6 +5,7 @@ use std::sync::Weak;
 
 use super::{InterfaceMethod, InterfaceRef, RpcInterface, ServiceRef};
 use crate::call::receiver::{EndpointOwner, RequestStream, endpoint_pair};
+use crate::config::EndpointQueue;
 use crate::endpoint::{AccessClass, Endpoint};
 use crate::error::{ErrorReason, RpcError};
 
@@ -64,11 +65,32 @@ impl<I: RpcInterface> ServiceGroup<I> {
     /// [`ErrorReason::AlreadyRegistered`] while another stream serves `M`
     /// in this group, [`ErrorReason::Shutdown`] once the runtime is gone.
     pub fn serve<M: InterfaceMethod<I>>(&self) -> Result<RequestStream<M>, RpcError> {
+        self.serve_queued::<M>(None)
+    }
+
+    /// [`serve`](Self::serve) with its own admission queue instead of the
+    /// runtime's [`RpcConfig::endpoint_queue`](crate::RpcConfig::endpoint_queue).
+    ///
+    /// # Errors
+    ///
+    /// As for [`serve`](Self::serve).
+    pub fn serve_with<M: InterfaceMethod<I>>(
+        &self,
+        queue: EndpointQueue,
+    ) -> Result<RequestStream<M>, RpcError> {
+        self.serve_queued::<M>(Some(queue))
+    }
+
+    fn serve_queued<M: InterfaceMethod<I>>(
+        &self,
+        queue: Option<EndpointQueue>,
+    ) -> Result<RequestStream<M>, RpcError> {
         let owner = self
             .owner
             .upgrade()
             .ok_or(RpcError::not_admitted(ErrorReason::Shutdown))?;
-        let (inbox, receiver) = endpoint_pair::<M>(owner.queue_capacity());
+        let capacity = queue.map_or_else(|| owner.queue_capacity(), EndpointQueue::budget);
+        let (inbox, receiver) = endpoint_pair::<M>(capacity);
         owner
             .attach(self.endpoint.token(), M::METHOD, inbox)
             .map_err(RpcError::not_admitted)?;
