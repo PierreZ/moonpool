@@ -4,7 +4,9 @@
 //! copy in turn — `.0`, then `.1` — through a temporary file, a sync, a
 //! rename, and a directory sync, so at every instant at least one copy holds
 //! either the old value or the new one intact. Loading takes the valid copy
-//! with the highest generation.
+//! with the highest generation, and rewrites the other copy from it when it
+//! is damaged, missing, or behind: two equal copies again, so one later fault
+//! can never roll the value back to an older generation.
 //!
 //! ```text
 //! 0   u32 magic       8   u64 generation     20  u32 crc (0..20 + payload)
@@ -53,52 +55,66 @@ impl DualFile {
         format!("{}/{}.{copy}", self.dir, self.name)
     }
 
-    /// Read both copies and keep the newest valid one.
+    /// Read both copies and keep the newest valid one, repairing the other
+    /// copy from it if it is damaged, missing, or older.
     ///
-    /// Returns `None` as the payload when neither copy exists.
+    /// Returns `None` as the payload when neither copy exists, and whether a
+    /// copy was repaired.
     ///
     /// # Errors
     ///
     /// [`JournalError::MetadataCorrupt`] when a copy exists but none is
-    /// valid; [`JournalError::Io`] if the namespace cannot be queried.
+    /// valid; [`JournalError::Io`] if the namespace cannot be queried or the
+    /// repair cannot be written.
     pub async fn load<P: StorageProvider>(
         provider: &P,
         dir: &str,
         name: &'static str,
-    ) -> Result<(Self, Option<Vec<u8>>), JournalError> {
+    ) -> Result<(Self, Option<Vec<u8>>, bool), JournalError> {
         let mut this = Self {
             dir: dir.to_string(),
             name,
             generation: 0,
         };
         let mut found_any = false;
-        let mut best: Option<(u64, Vec<u8>)> = None;
-        for copy in 0..2 {
-            let path = this.path(copy);
+        let mut copies: [Option<(u64, Vec<u8>)>; 2] = [None, None];
+        for (copy, slot) in copies.iter_mut().enumerate() {
+            let path = this.path(copy as u64);
             if !provider.exists(&path).await? {
                 continue;
             }
             found_any = true;
             // A copy that cannot be read is as good as a damaged one: the
             // other copy is what the two-copy scheme is for.
-            let Ok(Some(candidate)) = read_copy(provider, &path).await else {
-                continue;
+            if let Ok(Some(candidate)) = read_copy(provider, &path).await {
+                *slot = Some(candidate);
+            }
+        }
+        let best = copies
+            .iter()
+            .flatten()
+            .max_by_key(|(generation, _)| *generation)
+            .cloned();
+        let Some((generation, payload)) = best else {
+            return if found_any {
+                Err(JournalError::MetadataCorrupt { name })
+            } else {
+                Ok((this, None, false))
             };
-            if best
-                .as_ref()
-                .is_none_or(|(generation, _)| candidate.0 > *generation)
-            {
-                best = Some(candidate);
+        };
+        this.generation = generation;
+        let mut repaired = false;
+        for (copy, found) in copies.iter().enumerate() {
+            if found.as_ref().is_none_or(|(other, _)| *other != generation) {
+                this.store_copy(provider, copy as u64, generation, &payload)
+                    .await?;
+                repaired = true;
             }
         }
-        match best {
-            Some((generation, payload)) => {
-                this.generation = generation;
-                Ok((this, Some(payload)))
-            }
-            None if found_any => Err(JournalError::MetadataCorrupt { name }),
-            None => Ok((this, None)),
+        if repaired {
+            tracing::warn!(name, generation, "metadata copy repaired from its twin");
         }
+        Ok((this, Some(payload), repaired))
     }
 
     /// Durably replace the record with `payload`, in both copies.

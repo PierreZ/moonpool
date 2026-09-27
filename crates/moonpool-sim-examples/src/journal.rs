@@ -48,7 +48,7 @@ fn config() -> JournalConfig {
     JournalConfig {
         geometry: Geometry {
             slot_count: 256,
-            data_start: 16 * 1024,
+            data_start: 32 * 1024,
             segment_size: 256 * 1024,
         },
         ..JournalConfig::default()
@@ -183,7 +183,7 @@ async fn reconcile(
     let acked_end = acked.last().map_or(0, |(index, _, _)| index + 1);
 
     assert_always!(
-        recovery.corrupt.iter().all(|(index, _)| *index >= acked_end),
+        recovery.corrupt.iter().all(|id| id.index >= acked_end),
         "only unacknowledged entries are reported corrupt",
         { "corrupt" => format!("{:?}", recovery.corrupt), "acked_end" => acked_end }
     );
@@ -197,7 +197,7 @@ async fn reconcile(
     for index in journal.start_index()..journal.next_index() {
         match journal.read(index).await {
             Ok(entry) => kept.push(entry),
-            Err(JournalError::Corrupt { .. }) if index >= acked_end => {
+            Err(JournalError::Corrupt(_)) if index >= acked_end => {
                 journal.truncate_suffix(index).await?;
                 break;
             }
@@ -264,7 +264,7 @@ async fn step(
                 .collect();
             let records: Vec<Record<'_>> = payloads
                 .iter()
-                .map(|payload| Record { epoch, payload })
+                .map(|payload| Record::new(epoch, payload))
                 .collect();
             let indexes = journal.append(&records).await?;
             // Acknowledged: the batch is durable.

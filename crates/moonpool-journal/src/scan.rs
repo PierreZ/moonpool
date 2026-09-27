@@ -5,7 +5,7 @@
 //! |-------|-----------|-----------------------------------------------|
 //! | good  | valid     | keep                                          |
 //! | good  | empty/bad | keep, rewrite the slot                        |
-//! | bad   | valid     | mark corrupt, report `(index, epoch)` upward  |
+//! | bad   | valid     | mark corrupt, report its identity upward      |
 //! | bad   | empty     | torn tail: the log ends here                  |
 //! | bad   | bad       | double fault: refuse to start                 |
 //!
@@ -19,8 +19,8 @@
 //! Nothing here does I/O; [`Segment::recover`](crate::segment) walks the
 //! file and hands the result in.
 
-use crate::JournalError;
 use crate::layout::{EntryHeader, Slot, SlotState};
+use crate::{EntryId, JournalError};
 
 /// What the walk found at one index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +38,13 @@ pub(crate) struct Rec {
     pub corrupt: bool,
 }
 
+impl Rec {
+    /// First byte past the entry, padding included.
+    pub fn end(&self) -> u64 {
+        u64::from(self.slot.offset) + crate::layout::entry_size(self.slot.length)
+    }
+}
+
 /// The decision for one segment.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Decision {
@@ -45,8 +52,8 @@ pub(crate) struct Decision {
     pub recs: Vec<Rec>,
     /// Kept indexes whose slot on disk must be rewritten from the entry.
     pub rewrite_slots: Vec<u64>,
-    /// Damaged entries whose slot is intact, as `(index, epoch)`.
-    pub corrupt: Vec<(u64, u64)>,
+    /// Damaged entries whose slot is intact, with the identity it records.
+    pub corrupt: Vec<EntryId>,
     /// The walk met an index with neither an intact entry nor an identifier:
     /// the log ends there.
     pub ended: bool,
@@ -72,6 +79,7 @@ pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalErr
                     offset: u32::try_from(offset).expect("offsets fit a 32-bit segment"),
                     length: header.length,
                     entry_crc: header.crc,
+                    tag: header.tag,
                 };
                 if slot != SlotState::Valid(rebuilt) {
                     decision.rewrite_slots.push(index);
@@ -82,7 +90,7 @@ pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalErr
                 });
             }
             (None, SlotState::Valid(slot)) => {
-                decision.corrupt.push((index, slot.epoch));
+                decision.corrupt.push(slot.id());
                 decision.recs.push(Rec {
                     slot,
                     corrupt: true,
@@ -109,6 +117,7 @@ mod tests {
             offset: 4096 + 64 * u32::try_from(index).expect("small"),
             length: 8,
             entry_crc: 1,
+            tag: [3; crate::TAG_SIZE],
         }
     }
 
@@ -123,6 +132,7 @@ mod tests {
                     index,
                     epoch: s.epoch,
                     crc: s.entry_crc,
+                    tag: s.tag,
                 },
             )),
         }
@@ -156,7 +166,8 @@ mod tests {
             good(3, SlotState::Valid(slot(3))),
         ];
         let decision = decide(1, &found).expect("recoverable");
-        assert_eq!(decision.corrupt, vec![(2, 5)]);
+        assert_eq!(decision.corrupt, vec![slot(2).id()]);
+        assert_eq!(decision.corrupt[0].tag, [3; crate::TAG_SIZE]);
         assert!(decision.recs[1].corrupt);
     }
 
@@ -169,7 +180,7 @@ mod tests {
         ];
         let decision = decide(1, &found).expect("recoverable");
         assert_eq!(decision.recs.len(), 2);
-        assert_eq!(decision.corrupt, vec![(2, 5)]);
+        assert_eq!(decision.corrupt, vec![slot(2).id()]);
         assert!(decision.ended);
     }
 

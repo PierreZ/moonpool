@@ -4,7 +4,7 @@
 //! Offset      Region        Contents
 //! 0           Header A      magic, version, first_index,
 //! BLOCK       Header B      slot_count, data_start, crc
-//! 2 × BLOCK   Slot table    slot_count × 32 B
+//! 2 × BLOCK   Slot table    slot_count × 64 B
 //! …           Guard gap     zeros (keeps identifiers away from entries)
 //! data_start  Data region   append-only entries → end of file
 //! ```
@@ -26,24 +26,40 @@ pub(crate) const BLOCK_U64: u64 = BLOCK as u64;
 /// Byte offset of the slot table: after the two header copies.
 pub(crate) const SLOT_TABLE_OFFSET: u64 = 2 * BLOCK_U64;
 
-/// Size of one slot.
-pub const SLOT_SIZE: usize = 32;
+/// Size of one slot. A power of two, so a slot never straddles a sector.
+pub const SLOT_SIZE: usize = 64;
 
 /// Size of an entry's header; the payload follows it.
-pub const ENTRY_HEADER_SIZE: usize = 32;
+pub const ENTRY_HEADER_SIZE: usize = 64;
+
+/// Size of the caller's identity [`Tag`].
+pub const TAG_SIZE: usize = 24;
+
+/// Opaque caller identity stored with an entry, in its slot and in its header.
+///
+/// The slot's `index` and `epoch` are Raft's identity. A caller whose
+/// identity is wider — a Paxos acceptor journaling `(slot, ballot)` records
+/// under a write-ahead sequence number — puts the rest here: the slot keeps
+/// it far from the entry, so it survives when the entry's bytes do not, and
+/// recovery reports it with every corrupt entry.
+pub type Tag = [u8; TAG_SIZE];
+
+/// Where the tag sits in a slot and in an entry header.
+const TAG_AT: usize = 32;
 
 const HEADER_MAGIC: u32 = u32::from_le_bytes(*b"MPJH");
 const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 
 /// Bytes of the header block covered by its CRC.
 const HEADER_LEN: usize = 24;
 
 /// The shape of every segment in one journal.
 ///
-/// The defaults are the CLSTORE layout: 64 MiB segments, 65,536 slots (a
-/// 2 MiB slot table), and a data region starting at 4 MiB, which leaves a
-/// guard gap of about 2 MiB between the last identifier and the first entry.
+/// The defaults are the CLSTORE layout: 64 MiB segments, 32,768 slots (a
+/// 2 MiB slot table of 64-byte slots), and a data region starting at 4 MiB,
+/// which leaves a guard gap of about 2 MiB between the last identifier and
+/// the first entry.
 /// Shrink them in tests to make rollover cheap to reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
@@ -63,7 +79,7 @@ pub struct Geometry {
 impl Default for Geometry {
     fn default() -> Self {
         Self {
-            slot_count: 65_536,
+            slot_count: 32_768,
             data_start: 4 << 20,
             segment_size: 64 << 20,
         }
@@ -144,6 +160,12 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8-byte field"))
 }
 
+fn tag_at(bytes: &[u8]) -> Tag {
+    bytes[TAG_AT..TAG_AT + TAG_SIZE]
+        .try_into()
+        .expect("tag-sized field")
+}
+
 /// A segment's header, written once when the segment is created, in two
 /// copies (blocks 0 and 1): magic, version, first index, slot count, data
 /// start, and a CRC over them.
@@ -208,6 +230,19 @@ pub(crate) struct Slot {
     pub length: u32,
     /// The entry's own CRC, repeated.
     pub entry_crc: u32,
+    /// The caller's identity, repeated from the entry.
+    pub tag: Tag,
+}
+
+impl Slot {
+    /// The identity this slot records for its entry.
+    pub fn id(&self) -> crate::EntryId {
+        crate::EntryId {
+            index: self.index,
+            epoch: self.epoch,
+            tag: self.tag,
+        }
+    }
 }
 
 /// What a slot's 32 bytes turned out to hold.
@@ -221,15 +256,27 @@ pub(crate) enum SlotState {
     Bad,
 }
 
+/// Bytes of a slot covered by its CRC; the CRC follows.
+const SLOT_CRC_AT: usize = SLOT_SIZE - 4;
+
 impl Slot {
+    /// Encode into `out` (exactly [`SLOT_SIZE`] bytes):
+    ///
+    /// ```text
+    /// 0  u64 index       16 u32 offset      24 u32 entry_crc   32 tag (24 B)
+    /// 8  u64 epoch       20 u32 length      28 u32 reserved    56 u32 reserved
+    ///                                                          60 u32 crc (0..60)
+    /// ```
     pub fn encode(&self, out: &mut [u8]) {
+        out.fill(0);
         out[0..8].copy_from_slice(&self.index.to_le_bytes());
         out[8..16].copy_from_slice(&self.epoch.to_le_bytes());
         out[16..20].copy_from_slice(&self.offset.to_le_bytes());
         out[20..24].copy_from_slice(&self.length.to_le_bytes());
         out[24..28].copy_from_slice(&self.entry_crc.to_le_bytes());
-        let crc = crc32c::crc32c(&out[..28]);
-        out[28..32].copy_from_slice(&crc.to_le_bytes());
+        out[TAG_AT..TAG_AT + TAG_SIZE].copy_from_slice(&self.tag);
+        let crc = crc32c::crc32c(&out[..SLOT_CRC_AT]);
+        out[SLOT_CRC_AT..SLOT_SIZE].copy_from_slice(&crc.to_le_bytes());
     }
 
     /// Classify the slot stored for `index`.
@@ -237,7 +284,7 @@ impl Slot {
         if bytes.iter().all(|byte| *byte == 0) {
             return SlotState::Empty;
         }
-        if crc32c::crc32c(&bytes[..28]) != u32_at(bytes, 28) {
+        if crc32c::crc32c(&bytes[..SLOT_CRC_AT]) != u32_at(bytes, SLOT_CRC_AT) {
             return SlotState::Bad;
         }
         let slot = Self {
@@ -246,6 +293,7 @@ impl Slot {
             offset: u32_at(bytes, 16),
             length: u32_at(bytes, 20),
             entry_crc: u32_at(bytes, 24),
+            tag: tag_at(bytes),
         };
         if slot.index == index {
             SlotState::Valid(slot)
@@ -262,6 +310,7 @@ pub(crate) struct EntryHeader {
     pub index: u64,
     pub epoch: u64,
     pub crc: u32,
+    pub tag: Tag,
 }
 
 impl EntryHeader {
@@ -275,6 +324,7 @@ impl EntryHeader {
             index: u64_at(bytes, 8),
             epoch: u64_at(bytes, 16),
             crc: u32_at(bytes, 24),
+            tag: tag_at(bytes),
         })
     }
 }
@@ -283,19 +333,32 @@ impl EntryHeader {
 /// and its payload.
 fn entry_crc(header: &[u8], payload: &[u8]) -> u32 {
     let crc = crc32c::crc32c(&header[..24]);
-    let crc = crc32c::crc32c_append(crc, &header[28..32]);
+    let crc = crc32c::crc32c_append(crc, &header[28..ENTRY_HEADER_SIZE]);
     crc32c::crc32c_append(crc, payload)
 }
 
 /// Encode an entry into `out` (exactly [`entry_size`] bytes); returns its CRC.
-pub(crate) fn encode_entry(index: u64, epoch: u64, payload: &[u8], out: &mut [u8]) -> u32 {
+///
+/// ```text
+/// 0  u32 magic    8  u64 index    24 u32 crc        32 tag (24 B)
+/// 4  u32 length   16 u64 epoch    28 u32 reserved   56 u64 reserved
+///                                                   64 payload …
+/// ```
+pub(crate) fn encode_entry(
+    index: u64,
+    epoch: u64,
+    tag: &Tag,
+    payload: &[u8],
+    out: &mut [u8],
+) -> u32 {
     let length = u32::try_from(payload.len()).expect("payload length checked by the caller");
+    out[..ENTRY_HEADER_SIZE].fill(0);
     out[0..4].copy_from_slice(&ENTRY_MAGIC.to_le_bytes());
     out[4..8].copy_from_slice(&length.to_le_bytes());
     out[8..16].copy_from_slice(&index.to_le_bytes());
     out[16..24].copy_from_slice(&epoch.to_le_bytes());
-    // 24..28 is the CRC, filled in below; 28..32 is reserved.
-    out[24..32].fill(0);
+    // 24..28 is the CRC, filled in below; the rest past the tag is reserved.
+    out[TAG_AT..TAG_AT + TAG_SIZE].copy_from_slice(tag);
     out[ENTRY_HEADER_SIZE..ENTRY_HEADER_SIZE + payload.len()].copy_from_slice(payload);
     out[ENTRY_HEADER_SIZE + payload.len()..].fill(0);
     let crc = entry_crc(&out[..ENTRY_HEADER_SIZE], payload);
@@ -320,6 +383,10 @@ mod tests {
         let geometry = Geometry::default();
         geometry.validate().expect("default geometry is valid");
         assert_eq!(geometry.slot_table_end(), 8192 + 2 * 1024 * 1024);
+        assert!(
+            BLOCK.is_multiple_of(SLOT_SIZE),
+            "a slot never straddles a block"
+        );
         assert!(geometry.data_start - geometry.slot_table_end() >= 2 * 1024 * 1024 - 8192);
     }
 
@@ -331,6 +398,7 @@ mod tests {
             offset: 4096,
             length: 10,
             entry_crc: 0xDEAD_BEEF,
+            tag: [0xA5; TAG_SIZE],
         };
         let mut bytes = [0u8; SLOT_SIZE];
         slot.encode(&mut bytes);
@@ -339,16 +407,28 @@ mod tests {
         assert_eq!(Slot::decode(&[0; SLOT_SIZE], 7), SlotState::Empty);
         bytes[3] ^= 1;
         assert_eq!(Slot::decode(&bytes, 7), SlotState::Bad);
+        bytes[3] ^= 1;
+        bytes[TAG_AT + 5] ^= 1;
+        assert_eq!(
+            Slot::decode(&bytes, 7),
+            SlotState::Bad,
+            "the CRC covers the tag"
+        );
     }
 
     #[test]
     fn entries_round_trip_and_detect_a_flipped_payload_bit() {
         let payload = b"hello journal";
         let mut bytes = vec![0u8; usize::try_from(entry_size(13)).expect("small")];
-        encode_entry(9, 2, payload, &mut bytes);
+        let tag = [7; TAG_SIZE];
+        encode_entry(9, 2, &tag, payload, &mut bytes);
         let header = EntryHeader::parse(&bytes).expect("magic");
         assert_eq!((header.index, header.epoch, header.length), (9, 2, 13));
+        assert_eq!(header.tag, tag);
         assert!(entry_crc_ok(&header, &bytes));
+        bytes[TAG_AT] ^= 1;
+        assert!(!entry_crc_ok(&header, &bytes), "the CRC covers the tag");
+        bytes[TAG_AT] ^= 1;
         bytes[ENTRY_HEADER_SIZE + 1] ^= 0x40;
         assert!(!entry_crc_ok(&header, &bytes));
     }

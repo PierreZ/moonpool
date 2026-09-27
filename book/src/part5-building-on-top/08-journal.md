@@ -16,10 +16,33 @@ was acknowledged and later rotted, it silently throws away committed data —
 and everything after it. The two look identical if all the log has is the
 entry.
 
-CLSTORE stores each entry's identifier (index, epoch, offset, length, CRC) in
-a **slot**, in a table at the front of the segment, megabytes away from the
-entry. A failed entry with an intact slot was written and acknowledged; a
-failed entry without one was not.
+CLSTORE stores each entry's identifier (index, epoch, tag, offset, length,
+CRC) in a **slot**, in a table at the front of the segment, megabytes away
+from the entry. A failed entry with an intact slot was written and
+acknowledged; a failed entry without one was not.
+
+## Identity Wider Than a Term
+
+Raft names an entry by its index and term, and the slot records both. Not
+every consensus log fits that shape: a Paxos acceptor accepts slots out of
+order and re-accepts a slot at a higher ballot, so it journals its accepts as
+a write-ahead log of operations — appended under a sequence number, replayed
+latest-wins — and the identity a peer needs to repair a lost record is the
+Paxos slot and ballot, not the sequence number. Each `Record` therefore
+carries a 24-byte opaque `tag`, stored in the entry header *and* in the slot:
+
+```rust,ignore
+let tag = paxos_tag(slot, ballot); // the caller's encoding
+journal
+    .append(&[Record::new(ballot.round, &bytes).with_tag(tag)])
+    .await?;
+```
+
+When the entry's bytes are lost, `Recovery::corrupt` and
+`JournalError::Corrupt` carry an `EntryId { index, epoch, tag }` read from
+the slot, so the caller knows exactly which slot and ballot to fetch again.
+The tag is covered by both CRCs and repeated in both places, so an intact
+entry still rebuilds a lost slot whole.
 
 ## Layout
 
@@ -27,7 +50,7 @@ failed entry without one was not.
 Offset   Region        Contents
 0 KiB    Header A      magic, version, first_index,
 4 KiB    Header B      slot_count, data_start, crc
-8 KiB    Slot table    65,536 slots × 32 B (2 MiB)
+8 KiB    Slot table    32,768 slots × 64 B (2 MiB)
 ~2 MiB   Guard gap     zeros (keeps IDs ≥2 MiB away)
 4 MiB    Data region   append-only entries → end
 ```
@@ -55,7 +78,7 @@ the slot is unusable — from the end of entry *i − 1*. Then:
 |-------|-----------|--------------------------------------------|
 | good  | valid     | keep                                       |
 | good  | empty/bad | keep, rewrite slot                         |
-| bad   | valid     | mark corrupt, report (index, epoch) upward |
+| bad   | valid     | mark corrupt, report its identity upward   |
 | bad   | empty     | torn tail: truncate here                   |
 | bad   | bad       | double fault: refuse to start              |
 
@@ -63,13 +86,41 @@ The first entry without an identifier ends the log; every earlier faulty
 entry that has one is corruption. The one exception is the paper's theorem:
 the *last* entry, slot present and entry bad, is exactly what a crash between
 the slot write and the sync leaves, so nothing local can tell it from
-corruption. A replication layer keeps it if committed and discards it if not;
-the single-node journal truncates it and reports it as `ambiguous_tail`.
+corruption. It is always reported as `ambiguous_tail`; what happens next is
+the caller's choice, `JournalConfig::ambiguous_tail`:
+
+- `AmbiguousTail::Truncate` (the default) treats it as a torn write — the
+  only safe move for a single node, whose alternative is refusing to start.
+- `AmbiguousTail::Keep` leaves it in the log, marked corrupt, for a
+  replication layer to keep if committed and discard (with
+  `truncate_suffix`) if not. Truncating would erase the only local evidence
+  that the entry existed: one more crash before the caller acted on the
+  report, and a Paxos acceptor could answer "nothing accepted here" for a
+  vote it may have cast — the CTRL paper's Figure 2 bug.
 
 An EIO is zero-filled into a checksum mismatch, as in the paper, so an
 unreadable entry is reported corrupt rather than stopping the journal. And
 recovery cleans up after itself like any truncation: the discarded slots and
 entry bytes are zeroed and synced before the first append.
+
+## Replaying
+
+`Journal::read_range(start..next)` is the replay a caller runs after
+opening. Entries are packed back to back, so each segment's share of the
+range comes back in large sequential reads instead of one read per entry,
+with exactly `read`'s checks; a corrupt entry is returned in place as
+`Err(EntryId)` and the replay goes on.
+
+## Metadata
+
+Term/vote-style metadata (`save_meta`, `meta`) lives beside the segments in
+two copies, `meta.0` and `meta.1`, each with a generation and a CRC, each
+replaced through a temporary file, a sync, and a rename. Opening takes the
+newest valid copy and rewrites the other one when it is damaged, missing, or
+a generation behind — a crash between the two copy writes leaves exactly
+that. Without the repair, one later fault in the newer copy would roll the
+value back to one the caller may already have acted past: for an acceptor, a
+promise going backwards. `Recovery::meta_repaired` reports it.
 
 ## Truncating
 
@@ -118,7 +169,7 @@ writing again:
 ```rust,ignore
 let (mut journal, recovery) = Journal::open(ctx.storage().clone(), "wal", config()).await?;
 assert_always!(
-    recovery.corrupt.iter().all(|(index, _)| *index >= acked_end),
+    recovery.corrupt.iter().all(|id| id.index >= acked_end),
     "only unacknowledged entries are reported corrupt"
 );
 assert_always!(journal.next_index() >= acked_end, "no acknowledged entry is lost");
@@ -139,8 +190,12 @@ bit, a flipped slot, a zeroed slot, both at once, a flipped last entry, a
 torn tail, an EIO block, and a damaged header. A crash loop runs a writer for
 a random number of simulation steps, crashes the process with
 `simulate_crash_for_process`, and reopens, playing the replication layer by
-cutting the log at the first unreadable entry. It runs under both fault
-models:
+cutting the log at the first unreadable entry. Every recovery replays the
+log twice — one `read` per index and one `read_range` — and the two must
+agree; every corrupt entry must be reported with the tag it was written
+with; half the seeds keep the ambiguous last entry instead of truncating
+it; and the writer saves metadata, whose reopened value must be the last
+acknowledged one or the one in flight. It runs under both fault models:
 
 - **the paper's**: every acknowledged entry survives, and none is ever
   reported corrupt;
@@ -148,4 +203,5 @@ models:
   was acknowledged — damage is always reported.
 
 Removing the per-batch `fdatasync` turns the first loop red at its first
-seed; removing the post-recovery clean-up turns the torn-tail test red.
+seed; removing the post-recovery clean-up turns the torn-tail test red;
+removing the metadata repair turns both metadata tests red.
