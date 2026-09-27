@@ -61,6 +61,14 @@ slow-timeout = { period = "30s", terminate-after = 6 }
 filter = 'package(moonpool-rpc-sim) and binary(delivery)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# The zero-sleep stall test spins a workload until the runner's same-time
+# event threshold (100 000 events) declares the stall: a fixed amount of CPU
+# work, about two seconds in the debug profile locally, but past the 10s kill
+# on a CI runner whose cores the bounded campaigns are still holding.
+[[profile.default.overrides]]
+filter = 'package(moonpool-sim) and binary(zero_sleep_stall)'
+slow-timeout = { period = "10s", terminate-after = 3 }
+
 # The bounded RPC campaigns run tens of seeds of full client/server traffic
 # (the bit-flip scenario eighty, each thousands of frames) in the debug
 # profile.
