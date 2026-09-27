@@ -653,6 +653,9 @@ impl WorkloadOrchestrator {
                 // its processes are still alive.
                 chaos_shutdown.cancel();
                 sim.enter_recovery_mode();
+                // Disruptive buggify sites (`buggify_fault_with_prob!`) stop
+                // with the rest of the chaos; ordinary sites keep firing.
+                moonpool_buggify::buggify_enter_recovery();
                 chaos_ended = true;
                 assert_reachable!("phase: chaos ended");
             }

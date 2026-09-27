@@ -83,8 +83,9 @@ also usable without the simulation runner and compiles to wasm.
 
 ### moonpool-buggify
 
-**Role**: Standalone `buggify!` / `buggify_with_prob!` fault-injection macros and
-their per-run activation state, with no dependencies.
+**Role**: Standalone `buggify!` / `buggify_with_prob!` fault-injection macros,
+`buggify_fault_with_prob!` for disruptive points that fall silent in the
+recovery tail, and their per-run activation state, with no dependencies.
 
 Buggify is inert by default: outside a simulation every call site evaluates to
 `false`. moonpool-sim installs its seeded random source at the start of each

@@ -36,9 +36,12 @@ tls = ["dep:futures-rustls"]
 jwt = ["dep:jsonwebtoken", "dep:serde", "dep:serde_json"]
 
 [dependencies]
-# Only the provider traits. Never moonpool-sim or moonpool-explorer: the
+# Only the provider traits (plus the inert buggify macros). Never moonpool-sim or moonpool-explorer: the
 # simulation harness lives in the non-published moonpool-rpc-sim crate.
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+# BUGGIFY call sites (zero dependencies, wasm-safe): inert outside a
+# simulation, where every site evaluates to `false` with no side effect.
+moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
 
 futures = "0.3"
 # TLS 1.3 only (no `tls12`), ring provider, no logging feature. It re-exports

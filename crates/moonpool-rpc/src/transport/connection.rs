@@ -39,6 +39,10 @@ pub(crate) enum CloseReason {
     /// Closed from this side after carrying nothing for the idle timeout.
     /// Not a failure.
     Idle,
+    /// Cut from this side by a buggify fault site right after a request
+    /// frame left, as a network failure would: the request may have
+    /// executed and its reply is lost. Only ever in a simulation.
+    Injected,
     /// This side's selected connection to a peer, replaced by a session the
     /// peer dialed. Not a failure.
     Replaced,
@@ -91,6 +95,19 @@ pub(crate) struct Outgoing {
 pub(crate) enum QueueRefusal {
     Full,
     Closed,
+}
+
+/// Whether, and how, a request frame leaves (decided just before its first
+/// byte is written).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Transmit {
+    /// Refused; the frame is skipped and its call completed.
+    Skip,
+    /// Written.
+    Send,
+    /// Written and flushed, then the session is cut from this side
+    /// ([`CloseReason::Injected`]): the lost-response window.
+    SendThenCut,
 }
 
 /// A queued request frame and the call it belongs to (`None`: one-way).
@@ -855,13 +872,14 @@ async fn yield_now() {
 /// `admit_transmit` runs for a request frame before its first byte is
 /// written and decides whether it goes out (from then on the server may
 /// execute it); a refused frame is skipped and its call completed by the
-/// callback.
+/// callback. A frame sent with [`Transmit::SendThenCut`] is flushed, then
+/// the session ends from this side as [`CloseReason::Injected`].
 pub(crate) async fn write_loop<W, B>(
     connection: &Connection,
     mut writer: W,
     batch: usize,
-    admit_transmit: impl Fn(Option<u64>, &[u8]) -> bool,
-    close_bound: impl FnOnce() -> B,
+    admit_transmit: impl Fn(Option<u64>, &[u8]) -> Transmit,
+    close_bound: impl Fn() -> B,
 ) -> CloseReason
 where
     W: AsyncWrite + Unpin,
@@ -879,15 +897,28 @@ where
             let _ = futures::future::select(writer.close(), bound).await;
             return CloseReason::Local;
         };
-        let admitted = match outgoing.kind {
-            FrameKind::Control | FrameKind::Data => true,
+        let transmit = match outgoing.kind {
+            FrameKind::Control | FrameKind::Data => Transmit::Send,
             FrameKind::Request(call_id) => admit_transmit(call_id, &outgoing.bytes),
         };
-        if admitted && let Err(error) = writer.write_all(&outgoing.bytes).await {
+        if transmit != Transmit::Skip
+            && let Err(error) = writer.write_all(&outgoing.bytes).await
+        {
             return CloseReason::Io(error.to_string());
         }
         // The frame left the queue: release what its admission reserved.
         drop(outgoing.release);
+        if transmit == Transmit::SendThenCut {
+            // The request is on its way; end the session behind it, in
+            // order, so the peer can still read and execute it but can no
+            // longer answer on this session.
+            if writer.flush().await.is_ok() {
+                let bound = close_bound();
+                futures::pin_mut!(bound);
+                let _ = futures::future::select(writer.close(), bound).await;
+            }
+            return CloseReason::Injected;
+        }
         // Flush whenever nothing else is ready, including after a skipped
         // frame, so earlier writes never sit in a buffer.
         if connection.is_drained() {

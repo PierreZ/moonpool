@@ -659,6 +659,11 @@ Good Buggify candidates are:
 - choose a valid edge configuration, such as a batch size of one;
 - activate an alternate supported path that defaults rarely or never.
 
+Use `buggify_fault_with_prob!(p)` for a point that makes an operation fail
+rather than take a rare path: it fires like `buggify_with_prob!(p)` during the
+chaos window and never after the runner enters its recovery tail, so recovery
+checks are not failed by injection that should have stopped with the chaos.
+
 Use `buggify_with_prob!(p)` when a frequently evaluated point would otherwise
 dominate the run. Use `buggify_knob!(default, lo..hi)` for an application knob:
 

@@ -87,6 +87,7 @@ pub(crate) async fn report_stats(
 ) {
     loop {
         if let Some(stats) = rpc.stats() {
+            crate::observe_injections(&stats);
             board.report(label, stats);
         }
         if ctx.time().sleep(Duration::from_millis(100)).await.is_err() {

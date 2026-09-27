@@ -50,6 +50,8 @@ pub type RandomSource = fn() -> f64;
 #[derive(Default)]
 struct State {
     enabled: bool,
+    /// The run entered its recovery tail: fault sites stay silent.
+    recovering: bool,
     active_locations: BTreeMap<&'static str, bool>,
     activation_prob: f64,
     random_source: Option<RandomSource>,
@@ -83,6 +85,7 @@ pub fn clear_random_source() {
 pub fn buggify_init(activation_prob: f64) {
     with_state(|state| {
         state.enabled = true;
+        state.recovering = false;
         state.active_locations.clear();
         state.activation_prob = activation_prob;
     });
@@ -96,9 +99,39 @@ pub fn buggify_init(activation_prob: f64) {
 pub fn buggify_reset() {
     with_state(|state| {
         state.enabled = false;
+        state.recovering = false;
         state.active_locations.clear();
         state.activation_prob = 0.0;
     });
+}
+
+/// Enter the run's recovery tail: from now until the next
+/// [`buggify_init`], every [`buggify_fault_with_prob!`] site evaluates to
+/// `false` without drawing, while [`buggify!`] and [`buggify_with_prob!`]
+/// sites keep firing.
+///
+/// A simulation runtime calls this when its chaos window closes, so the
+/// system under test gets a quiet tail to recover in (`FoundationDB` gates
+/// its disruptive sites on `speedUpSimulation` for the same reason).
+pub fn buggify_enter_recovery() {
+    with_state(|state| state.recovering = true);
+}
+
+/// Whether [`buggify_enter_recovery`] ran since the last [`buggify_init`].
+#[must_use]
+pub fn buggify_is_recovering() -> bool {
+    with_state(|state| state.recovering)
+}
+
+/// Internal implementation backing [`buggify_fault_with_prob!`]: silent,
+/// with no draw, once the run is recovering; otherwise
+/// [`buggify_internal`].
+#[must_use]
+pub fn buggify_fault_internal(prob: f64, location: &'static str) -> bool {
+    if buggify_is_recovering() {
+        return false;
+    }
+    buggify_internal(prob, location)
 }
 
 /// Internal buggify implementation backing the [`buggify!`] and
@@ -143,6 +176,21 @@ macro_rules! buggify {
 macro_rules! buggify_with_prob {
     ($prob:expr) => {
         $crate::buggify_internal($prob as f64, concat!(file!(), ":", line!()))
+    };
+}
+
+/// Buggify a **disruptive** site with a custom probability: one that makes
+/// an operation fail (a cut session, a refused request) rather than merely
+/// take a rare path.
+///
+/// Same two-phase model as [`buggify_with_prob!`] during the chaos window;
+/// silent once the simulation entered its recovery tail
+/// ([`buggify_enter_recovery`]), so liveness checks made after the chaos
+/// window are not failed by injection that should have stopped with it.
+#[macro_export]
+macro_rules! buggify_fault_with_prob {
+    ($prob:expr) => {
+        $crate::buggify_fault_internal($prob as f64, concat!(file!(), ":", line!()))
     };
 }
 
@@ -238,6 +286,23 @@ mod tests {
             assert!(buggify_internal(1.0, "reset_case"));
             buggify_reset();
             assert!(!buggify_internal(1.0, "reset_case"));
+        });
+    }
+
+    #[test]
+    fn recovery_silences_fault_sites_only() {
+        with_test_source(1.0, || {
+            assert!(crate::buggify_fault_with_prob!(1.0));
+            buggify_enter_recovery();
+            assert!(buggify_is_recovering());
+            assert!(!crate::buggify_fault_with_prob!(1.0));
+            assert!(crate::buggify_with_prob!(1.0), "ordinary sites keep firing");
+            buggify_init(1.0);
+            assert!(
+                !buggify_is_recovering(),
+                "a new run starts outside recovery"
+            );
+            assert!(crate::buggify_fault_with_prob!(1.0));
         });
     }
 

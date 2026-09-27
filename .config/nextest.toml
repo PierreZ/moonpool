@@ -44,6 +44,48 @@ test-group = 'campaigns'
 filter = 'package(moonpool-rpc-sim) and binary(qualification)'
 slow-timeout = { period = "30s", terminate-after = 8 }
 
+# The security campaign's bounded test runs forty-eight seeds, each twice
+# under the RNG canary: its rarest required scenarios (a reliable call's
+# resent copy served, or refused, after a cut) fire on one to three seeds in
+# twenty-four, too close to zero for a smaller budget. About a minute in the
+# debug profile.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and binary(security)'
+slow-timeout = { period = "30s", terminate-after = 6 }
+
+# The delivery campaign's bounded test cuts sessions behind reliable requests
+# (the runtime's own buggify points), so its retained copies are resent over
+# fresh connections: about twenty seconds in the debug profile locally, and
+# past a minute on a loaded CI runner.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and binary(delivery)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# The streams campaign's bounded test was already about forty seconds in the
+# debug profile, and the runtime's deferred stream acknowledgements (a
+# buggify point) add about ten: past the 60s kill on a loaded CI runner.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and binary(streams)'
+slow-timeout = { period = "30s", terminate-after = 6 }
+
+# The explorer's frontier tests fork one worker process per timeline, up to
+# 2000 of them; single_worker_explores forks them one at a time. That is
+# under a second on Linux, but a darwin fork plus its reap takes a few
+# milliseconds: 7.6s on the macOS runner when it passes, and past the 10s kill
+# on a slower one (its stack, sampled at 8s, was busy forking and reaping,
+# not stuck).
+[[profile.default.overrides]]
+filter = 'package(moonpool-explorer) and binary(frontier)'
+slow-timeout = { period = "10s", terminate-after = 3 }
+
+# The zero-sleep stall test spins a workload until the runner's same-time
+# event threshold (100 000 events) declares the stall: a fixed amount of CPU
+# work, about two seconds in the debug profile locally, but past the 10s kill
+# on a CI runner whose cores the bounded campaigns are still holding.
+[[profile.default.overrides]]
+filter = 'package(moonpool-sim) and binary(zero_sleep_stall)'
+slow-timeout = { period = "10s", terminate-after = 3 }
+
 # The bounded RPC campaigns run tens of seeds of full client/server traffic
 # (the bit-flip scenario eighty, each thousands of frames) in the debug
 # profile.
@@ -52,8 +94,10 @@ filter = 'package(moonpool-rpc-sim)'
 slow-timeout = { period = "10s", terminate-after = 6 }
 
 [profile.default.junit]
-# Store test results
-path = "target/nextest/default/junit.xml"
+# Store test results, with every failing test's output, at
+# target/nextest/default/junit.xml (the path is relative to the profile's
+# directory). CI uploads it when a run fails.
+path = "junit.xml"
 
 # The compile-fail cases build moonpool-rpc and its dependencies in their
 # own trybuild workspace on the first run: give them minutes, not seconds.

@@ -50,6 +50,16 @@
 //! This ensures consistent behavior within a run while varying which
 //! locations are active across different seeds.
 //!
+//! ## Disruptive sites and the recovery tail
+//!
+//! A site that makes an operation *fail* (a cut session, a refused request)
+//! uses `buggify_fault_with_prob!` instead: the same two phases during the
+//! chaos window, and silent, drawing nothing, once the runner closes the
+//! window (`moonpool_buggify::buggify_enter_recovery`, called beside
+//! [`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)).
+//! Rare-but-harmless sites (`buggify!`, `buggify_with_prob!`) keep firing
+//! through the tail.
+//!
 //! | Parameter | Value | FDB Reference |
 //! |-----------|-------|---------------|
 //! | `activation_prob` | 50%, set by the runner's `buggify_init(0.5)` | `Buggify.h:79-88` |

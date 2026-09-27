@@ -327,6 +327,20 @@ The `sim-rpc-security` campaign puts all of the above under faults. A verifying 
 cargo xtask sim run rpc-security
 ```
 
+### Injection points inside the runtime
+
+The campaigns' faults all come from outside the runtime: the simulator's network chaos and scripted crashes. Those rarely land on the exact instant a contract is decided, so `moonpool-rpc` also carries its own BUGGIFY points (through the zero-dependency `moonpool-buggify`, inert outside a simulation). Each one forces an outcome the contract already allows, never one it rules out:
+
+| Point | What it forces | The contract it exercises |
+|---|---|---|
+| Cut behind an at-most-once request | The session is flushed and closed from the caller's side right after a two-way request's frame left: the server may run it but can no longer answer. | A single attempt fails `MaybeExecuted`, never `NotAdmitted`, and never runs twice. |
+| Cut behind a reliable request | The same, after a reliable request, at a higher rate (reliable calls are rarer). | The retained copy is sent again on the next session and may run more than once. |
+| Spurious overload at admission | A request is refused `Overloaded` after its security check, before any handler or queue sees it. | Declined without effect: `NotAdmitted`, and a balancer fails over. |
+| Deferred stream acknowledgement | While another item is already buffered, a taken item's acknowledgement waits for that item's cumulative one. | Credit is delayed, never lost; the producer lives nearer zero credit. |
+| Spurious failure-monitor wakeup | The monitor's change latch is bumped with nothing changed. | Every wait re-checks its condition; `on_change` may resolve with nothing new. |
+
+The first three are disruptive and use `buggify_fault_with_prob!`, so they stop when the chaos window closes and a campaign's recovery checks see a quiet runtime. Each one is counted in `RpcStats` (`injected_*`, always zero outside a simulation), and the campaigns turn every non-zero counter into a reachability marker, so a sweep shows that each point actually fired.
+
 Only the foundations campaign draws the simulator's in-flight bit flips (beside its own corrupting session upgrade): corruption is one explicit experiment, whose contract is that a checksum catches it and closes the session. Every other campaign masks that family (`NetworkFaultMask::all().without(NetworkFault::BitFlip)`) and runs on partitions, clogs, random closes, connect failures, black holes, latency and clock drift, so none of them mistakes corruption for message loss on healthy TCP.
 
 The `sim-rpc-qualification` campaign runs all of it at once: the interfaces campaign's same-address reboots and third-party interfaces, the delivery campaign's reliable ambiguity, the streams campaign's producers and consumers, the balance campaign's permissions, the security campaign's key rotations and UTC transitions, a version 1 peer, graceful shutdowns under held work and overload bursts, with three client lanes and five processes. Its oracles are the other campaigns' ledgers, unchanged, plus its own boot, publication and execution ledger; a handler asserts as it runs that the reference named its own boot and instance, so a stale I1 never reaches I2 whether it arrived as a direct call, a retained reliable call, a stream, a balanced set, a stored blob or a forwarded callback. After the faults, every service must come back within a declared bound; every stream of a current boot must end; and every runtime, of every boot and of the client lanes, must be back at its resource baseline (`ResourceProbe::is_at_baseline`: no task, connection, owed reply, queued byte, reserved window or buffered stream byte left). A seed must replay the same history, ledger and captured trace, in a fresh process or after other runs, and with every poll slowed on the host. [What moonpool-rpc Promises](./03-rpc-guarantees.md) states the resulting contract.

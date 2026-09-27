@@ -193,6 +193,10 @@ impl<P: Providers> FailureMonitor<P> {
 
     /// Resolves at the monitor's next published change after this call.
     ///
+    /// A change may carry nothing new for the address or endpoint the
+    /// caller cares about (every session end is published, and a simulation
+    /// also publishes spurious ones): re-read the state after it resolves.
+    ///
     /// # Errors
     ///
     /// [`ErrorReason::Shutdown`] once the runtime is gone.

@@ -106,6 +106,18 @@ if buggify_with_prob!(0.01) {
 }
 ```
 
+## Disruptive Points and the Recovery Tail
+
+A point that makes an operation *fail* (a cut session, a refused request, a crash) is different from one that only takes a rare path: if it keeps firing after the chaos window closes, the liveness checks the workload makes in its quiet tail fail on injection that should have stopped with everything else. Mark those points with `buggify_fault_with_prob!`:
+
+```rust
+if buggify_fault_with_prob!(0.02) {
+    return Err(Error::overloaded());
+}
+```
+
+During the chaos window it behaves exactly like `buggify_with_prob!`. When the runner closes the window (the moment it calls `SimWorld::enter_recovery_mode`), it also calls `moonpool_buggify::buggify_enter_recovery`, and from then until the next iteration every fault point evaluates to `false` without drawing. Ordinary `buggify!` and `buggify_with_prob!` points keep firing through the tail: a rare-but-harmless path is still worth taking while the system recovers. FoundationDB draws the same line by gating its disruptive points on `speedUpSimulation`.
+
 ## Spiking Config Knobs
 
 The patterns above scatter `buggify!()` through your own code. But the simulation has its own knobs: network latencies, disk IOPS, partition durations, fault probabilities. FoundationDB randomizes these the same way it randomizes everything else, with a one-liner at config construction:
@@ -167,13 +179,13 @@ This is the same guarantee FoundationDB provides: BUGGIFY is gated behind `g_net
 
 ## The Standalone `moonpool-buggify` Crate
 
-The `buggify!()` and `buggify_with_prob!()` macros live in the zero-dependency `moonpool-buggify` crate. Sans-I/O and production code that wants buggify points can depend on it directly, without pulling the simulation runtime into its dependency graph:
+The `buggify!()`, `buggify_with_prob!()` and `buggify_fault_with_prob!()` macros live in the zero-dependency `moonpool-buggify` crate. Sans-I/O and production code that wants buggify points can depend on it directly, without pulling the simulation runtime into its dependency graph:
 
 ```toml
 [dependencies]
 moonpool-buggify = "0.9"
 ```
 
-The crate owns only the disabled-by-default state and the macros. When a simulation run starts, `moonpool-sim` installs its deterministic seeded RNG into that shared state, so macros imported through either crate share activation decisions during simulation — and stay inert everywhere else. `moonpool-sim` re-exports both macros, so existing `moonpool_sim::buggify!` call sites are unchanged.
+The crate owns only the disabled-by-default state and the macros. When a simulation run starts, `moonpool-sim` installs its deterministic seeded RNG into that shared state, so macros imported through either crate share activation decisions during simulation — and stay inert everywhere else. `moonpool-sim` re-exports the macros, so existing `moonpool_sim::buggify!` call sites are unchanged.
 
 `buggify_knob!` remains in `moonpool-sim`: knob randomization is simulation-specific configuration spiking, not application-level fault injection.

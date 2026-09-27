@@ -253,11 +253,19 @@ impl ConsumerCore {
             let consumed = state.intake.consume(size);
             let route = state.route.clone();
             state.waiting = false;
+            // Acknowledgements are cumulative: while another item is
+            // already buffered, this one's may be deferred to that item's
+            // pop, which acknowledges both. The producer then waits nearer
+            // zero credit; credit is delayed, never lost (with nothing
+            // buffered behind it, an acknowledgement always goes out).
+            let deferred = !state.items.is_empty() && moonpool_buggify::buggify_with_prob!(0.5);
             drop(state);
             self.counters
                 .stream_buffered_bytes
                 .fetch_sub(size, Ordering::Relaxed);
-            if let Some(route) = route {
+            if deferred {
+                Counters::bump(&self.counters.injected_ack_deferrals);
+            } else if let Some(route) = route {
                 Counters::bump(if immediate {
                     &self.counters.stream_acks_immediate
                 } else {

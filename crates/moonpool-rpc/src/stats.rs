@@ -126,6 +126,20 @@ pub struct RpcStats {
     pub streams_disconnected: u64,
     /// Stream items or ends that arrived for a stream no longer consumed here.
     pub late_stream_frames: u64,
+    /// Sessions cut from this side by a buggify fault site right after an
+    /// at-most-once request left (the lost-response window). Always zero
+    /// outside a simulation.
+    pub injected_request_cuts: u64,
+    /// Sessions cut the same way right after a reliable request left, so its
+    /// retained copy is sent again and may execute twice.
+    pub injected_reliable_request_cuts: u64,
+    /// Requests refused `Overloaded` at admission by a buggify fault site.
+    pub injected_overloads: u64,
+    /// Stream acknowledgements a buggify site deferred to the next item's
+    /// cumulative acknowledgement.
+    pub injected_ack_deferrals: u64,
+    /// Failure-monitor wakeups a buggify site published with nothing changed.
+    pub injected_spurious_wakeups: u64,
     /// Reply streams this runtime consumes right now.
     pub streams_consuming: usize,
     /// Reply streams this runtime produces right now.
@@ -216,6 +230,11 @@ pub(crate) struct Counters {
     pub(crate) streams_abandoned: AtomicU64,
     pub(crate) streams_disconnected: AtomicU64,
     pub(crate) late_stream_frames: AtomicU64,
+    pub(crate) injected_request_cuts: AtomicU64,
+    pub(crate) injected_reliable_request_cuts: AtomicU64,
+    pub(crate) injected_overloads: AtomicU64,
+    pub(crate) injected_ack_deferrals: AtomicU64,
+    pub(crate) injected_spurious_wakeups: AtomicU64,
     pub(crate) live_server_streams: AtomicUsize,
     pub(crate) stream_buffered_bytes: AtomicU64,
     pub(crate) queued_bytes: AtomicU64,
@@ -328,6 +347,11 @@ impl Counters {
             streams_abandoned: load(&self.streams_abandoned),
             streams_disconnected: load(&self.streams_disconnected),
             late_stream_frames: load(&self.late_stream_frames),
+            injected_request_cuts: load(&self.injected_request_cuts),
+            injected_reliable_request_cuts: load(&self.injected_reliable_request_cuts),
+            injected_overloads: load(&self.injected_overloads),
+            injected_ack_deferrals: load(&self.injected_ack_deferrals),
+            injected_spurious_wakeups: load(&self.injected_spurious_wakeups),
             streams_consuming: 0,
             streams_producing: self.live_server_streams.load(Ordering::Relaxed),
             stream_buffered_bytes: self.stream_buffered_bytes.load(Ordering::Relaxed),
