@@ -53,6 +53,14 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 filter = 'package(moonpool-rpc-sim) and binary(security)'
 slow-timeout = { period = "30s", terminate-after = 6 }
 
+# The delivery campaign's bounded test cuts sessions behind reliable requests
+# (the runtime's own buggify points), so its retained copies are resent over
+# fresh connections: about twenty seconds in the debug profile locally, and
+# past a minute on a loaded CI runner.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and binary(delivery)'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 # The bounded RPC campaigns run tens of seeds of full client/server traffic
 # (the bit-flip scenario eighty, each thousands of frames) in the debug
 # profile.
