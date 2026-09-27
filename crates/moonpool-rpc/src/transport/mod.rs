@@ -573,6 +573,12 @@ impl<P: Providers> Shared<P> {
                         Denial::Unauthenticated(reason) => WireError::Unauthenticated { reason },
                         Denial::PermissionDenied => WireError::PermissionDenied,
                     }
+                } else if moonpool_buggify::buggify_fault_with_prob!(0.02) {
+                    // A spurious load refusal: declined before any handler
+                    // saw the request, exactly what the in-flight budget
+                    // below does, so callers must already handle it.
+                    Counters::bump(&self.counters.injected_overloads);
+                    WireError::Overloaded
                 } else if context
                     .outstanding
                     .as_ref()

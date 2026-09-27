@@ -465,6 +465,12 @@ async fn monitor<P: Providers>(
             // owed to it is released instead of waiting forever.
             continue;
         }
+        if moonpool_buggify::buggify_with_prob!(0.1) {
+            // A wakeup with nothing changed: every failure-monitor wait
+            // re-checks its condition, so none may resolve on it.
+            Counters::bump(&shared.counters.injected_spurious_wakeups);
+            shared.watch().notify();
+        }
         let before = connection.received();
         shared.ping(connection);
         let _ = shared.time().sleep(policy.ping_timeout).await;

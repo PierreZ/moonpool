@@ -146,7 +146,9 @@ jobs:
           for features in "--no-default-features" "" "--features tls,jwt"; do
             tree=$(nix develop --command cargo tree -p moonpool-rpc $features -e no-dev)
             echo "$tree"
-            if echo "$tree" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-assertions|moonpool-buggify|tokio v"; then
+            # moonpool-buggify is allowed: zero dependencies, inert outside a
+            # simulation, and the home of the runtime's own BUGGIFY points.
+            if echo "$tree" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-assertions|tokio v"; then
               echo "::error::moonpool-rpc ($features) pulled in a sim/explorer crate or a tokio runtime"
               exit 1
             fi

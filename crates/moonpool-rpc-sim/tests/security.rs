@@ -12,8 +12,11 @@ use moonpool_sim::SimulationReport;
 /// A fixed seed budget, so the bounded scenario is deterministic. These
 /// seeds are a budget, not witnesses: a change to the draw schedule may
 /// move which of them hits a scenario, and the budget is sized with margin
-/// for the rarest required scenario.
-const SEED_BUDGET: u64 = 24;
+/// for the rarest required scenario. Those are the two resent-copy
+/// scenarios (a reliable call's copy served with a fresh credential, or
+/// refused after an earlier copy left): one to three seeds in twenty-four,
+/// so twenty-four seeds missed one of them on some draw schedules.
+const SEED_BUDGET: u64 = 48;
 
 fn records() -> SecurityRecords {
     Arc::new(Mutex::new(Vec::new()))

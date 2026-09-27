@@ -44,6 +44,15 @@ test-group = 'campaigns'
 filter = 'package(moonpool-rpc-sim) and binary(qualification)'
 slow-timeout = { period = "30s", terminate-after = 8 }
 
+# The security campaign's bounded test runs forty-eight seeds, each twice
+# under the RNG canary: its rarest required scenarios (a reliable call's
+# resent copy served, or refused, after a cut) fire on one to three seeds in
+# twenty-four, too close to zero for a smaller budget. About a minute in the
+# debug profile.
+[[profile.default.overrides]]
+filter = 'package(moonpool-rpc-sim) and binary(security)'
+slow-timeout = { period = "30s", terminate-after = 6 }
+
 # The bounded RPC campaigns run tens of seeds of full client/server traffic
 # (the bit-flip scenario eighty, each thousands of frames) in the debug
 # profile.

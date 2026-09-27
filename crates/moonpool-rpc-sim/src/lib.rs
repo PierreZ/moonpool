@@ -51,6 +51,31 @@ pub mod streams;
 
 use moonpool_sim::{NetworkFault, NetworkFaultMask};
 
+/// Record which of `moonpool-rpc`'s own buggify sites fired in a runtime, one
+/// reachable per site, from the counters it exposes for them. A site is a
+/// cause, not an outcome, so it is a reachable and never a sometimes: whether
+/// a seed activates it is the draw's business. The outcomes it forces are the
+/// campaigns' own oracles and scenarios (an ambiguous at-most-once failure, a
+/// reliable call executed twice, an overload refusal, a producer waiting for
+/// credit, a failure-monitor wait that re-checks).
+fn observe_injections(stats: &moonpool_rpc::RpcStats) {
+    if stats.injected_request_cuts > 0 {
+        moonpool_sim::assert_reachable!("rpc buggify: session cut behind an at-most-once request");
+    }
+    if stats.injected_reliable_request_cuts > 0 {
+        moonpool_sim::assert_reachable!("rpc buggify: session cut behind a reliable request");
+    }
+    if stats.injected_overloads > 0 {
+        moonpool_sim::assert_reachable!("rpc buggify: request refused overloaded at admission");
+    }
+    if stats.injected_ack_deferrals > 0 {
+        moonpool_sim::assert_reachable!("rpc buggify: stream acknowledgement deferred");
+    }
+    if stats.injected_spurious_wakeups > 0 {
+        moonpool_sim::assert_reachable!("rpc buggify: failure-monitor wakeup with nothing changed");
+    }
+}
+
 /// Lock a campaign's shared state. Poisoning means a prior task panicked.
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("Mutex poisoned: prior task panicked")

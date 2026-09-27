@@ -168,7 +168,7 @@ pub use moonpool_core::metrics::query::{
 // Buggify macros live in the standalone zero-dependency moonpool-buggify
 // crate; re-exported here so existing `moonpool_sim::buggify!` call sites keep
 // working and share the same state as direct moonpool-buggify users.
-pub use moonpool_buggify::{buggify, buggify_with_prob};
+pub use moonpool_buggify::{buggify, buggify_fault_with_prob, buggify_with_prob};
 
 // Chaos module re-exports
 pub use chaos::{

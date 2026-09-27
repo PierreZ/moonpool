@@ -5,7 +5,7 @@ use std::sync::{Arc, Weak};
 use futures::channel::oneshot;
 use moonpool_core::Providers;
 
-use super::connection::{CloseReason, Connection, QueueRefusal};
+use super::connection::{CloseReason, Connection, QueueRefusal, Transmit};
 use super::{
     Admission, Completion, Delivery, Origin, PendingCall, ReplyBytes, Shared, State,
     permanent_failure, permanent_reason,
@@ -376,12 +376,21 @@ impl<P: Providers> Shared<P> {
     /// the peer's announced frame limit. A frame that does not is refused
     /// for its own call (never sent, so `NotAdmitted`) and the session
     /// stays up; a one-way frame that does not is dropped and counted.
+    ///
+    /// In a simulation, two buggify fault sites may cut the session right
+    /// behind a two-way request ([`Transmit::SendThenCut`]): the
+    /// lost-response window, where the server may execute the request but
+    /// can no longer answer. An at-most-once call then fails
+    /// `MaybeExecuted`; a reliable call is sent again on the next session
+    /// and may execute twice. Both are outcomes the delivery contract
+    /// already admits, forced at the one moment random network faults
+    /// rarely hit.
     pub(super) fn admit_transmit(
         &self,
         connection: &Connection,
         call_id: Option<u64>,
         frame: &[u8],
-    ) -> bool {
+    ) -> Transmit {
         let limit = connection
             .peer_hello()
             .map_or(self.config.max_frame_bytes, |hello| hello.max_frame_bytes);
@@ -417,15 +426,40 @@ impl<P: Providers> Shared<P> {
                 None if call_id.is_none() => Counters::bump(&self.counters.one_way_dropped),
                 None => {}
             }
-            return false;
+            return Transmit::Skip;
         }
         if crate::protocol::request_metadata_len(payload).is_some_and(|len| len > 0) {
             Counters::bump(&self.counters.credentials_attached);
         }
-        if let Some(call) = call_id.and_then(|call_id| state.pending.get_mut(&call_id)) {
-            call.transmitted = true;
+        let Some(call) = call_id.and_then(|call_id| state.pending.get_mut(&call_id)) else {
+            return Transmit::Send;
+        };
+        call.transmitted = true;
+        // Two independent locations, so a seed can force duplicate
+        // execution of reliable calls without cutting at-most-once ones.
+        // Reliable calls are rare next to at-most-once ones, hence the
+        // higher rate; a copy is cut with it again, so a call sent k times
+        // is cut every time with probability 0.1^k.
+        let cut = if call.retained.is_some() {
+            moonpool_buggify::buggify_fault_with_prob!(0.1)
+                .then_some(&self.counters.injected_reliable_request_cuts)
+        } else {
+            moonpool_buggify::buggify_fault_with_prob!(0.01)
+                .then_some(&self.counters.injected_request_cuts)
+        };
+        drop(state);
+        match cut {
+            Some(counter) => {
+                Counters::bump(counter);
+                tracing::debug!(
+                    ?call_id,
+                    peer = %connection.peer(),
+                    "rpc session cut behind a request (buggify)"
+                );
+                Transmit::SendThenCut
+            }
+            None => Transmit::Send,
         }
-        true
     }
 
     /// Complete a pending call from `origin`.
