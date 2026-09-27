@@ -21,14 +21,17 @@ ever completely written, and which entry it was — its index, its epoch, and a
 | `Journal<P>` | Append, read, and truncate a segmented log over any `StorageProvider` |
 | `JournalConfig` / `Geometry` | Segment shape and direct-I/O policy |
 | `Record` / `Entry` / `EntryId` | What is appended, read back, and reported: index, epoch, tag, payload |
-| `AmbiguousTail` | Truncate the ambiguous last entry (single node) or keep it for a replication layer |
-| `Recovery` | What opening found: corrupt entries, the ambiguous last entry, repairs |
+| `AmbiguousTail` | Truncate the damaged entries of the last batch (single node) or keep them for a replication layer |
+| `Recovery` | What opening found: corrupt entries, the ambiguous last batch, repairs |
 | `JournalError` | Operating errors vs. evidence of damage (`Corrupt`, `DoubleFault`, …) |
 
 Each segment is one preallocated, zero-filled file (64 MiB by default) named
 after its first index, found by listing the directory: two header copies, a
 slot table (32,768 × 64 B), a guard gap, and a data region of contiguous
-entries. A batch costs two writes and one `fdatasync`; `read_range` replays a
+entries. A batch costs two writes and one `fdatasync`, and its first entry
+carries a batch-start flag: a crash can tear any entry of the last batch, so
+recovery reports that batch's damage as ambiguous rather than as corruption.
+`read_range` replays a
 range in large sequential reads. Term/vote metadata lives in `meta.0` /
 `meta.1`, and opening repairs a damaged or stale copy from its twin.
 

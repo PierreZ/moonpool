@@ -22,7 +22,7 @@ pub struct JournalConfig {
     /// The index of the first entry of a freshly created journal. Ignored
     /// when the directory already holds segments.
     pub first_index: u64,
-    /// What opening does with the ambiguous last entry.
+    /// What opening does with the damaged entries of the last batch.
     pub ambiguous_tail: AmbiguousTail,
 }
 
@@ -37,30 +37,40 @@ impl Default for JournalConfig {
     }
 }
 
-/// What opening does with the log's last entry when its identifier is intact
-/// but the entry is not.
+/// What opening does with the damaged entries of the log's last append
+/// batch — entries whose identifier is intact but whose bytes are not.
 ///
-/// A crash between the slot write and the sync leaves exactly that, and so
-/// does corruption of an entry that was synced and acknowledged: no local
-/// algorithm tells them apart (the CLSTORE paper's Appendix A). Either way
-/// the entry is reported in [`Recovery::ambiguous_tail`]; this decides
-/// whether it is also removed.
+/// A batch's entries and slots are written by two unordered writes and made
+/// durable by one `fdatasync`. A crash before that sync returned can land
+/// any subset of their sectors, so any entry of the last batch can come back
+/// with its identifier and without its bytes — and so can corruption of a
+/// batch that was synced and acknowledged. No local algorithm tells the two
+/// apart (the CLSTORE paper's Appendix A, which the paper states for the
+/// last entry; with batched appends it holds for the whole last batch,
+/// since nothing durable after it proves its sync returned). Either way the
+/// entries are reported in [`Recovery::ambiguous_batch`], never in
+/// [`Recovery::corrupt`]; this decides whether they are also removed.
+///
+/// Batches are found through a batch-start flag every entry and slot carry,
+/// so a caller never has to encode batch numbers of its own. A batch that
+/// rolls over into a new segment is two batches, each with its own sync.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AmbiguousTail {
-    /// Treat it as a torn write and truncate it — right for a single node,
+    /// Treat them as a torn write: truncate from the first damaged entry of
+    /// the last batch, with everything after it — right for a single node,
     /// whose only other choice would be to refuse to start. A replicated
-    /// caller that instead needs to find out whether it was committed must
-    /// act on the report before the next crash: once truncated, the
-    /// identity is gone from disk.
+    /// caller that instead needs to find out whether they were committed
+    /// must act on the report before the next crash: once truncated, the
+    /// identities are gone from disk.
     #[default]
     Truncate,
-    /// Keep it in the log, marked corrupt like a damaged entry mid-log: a
-    /// read returns [`JournalError::Corrupt`], and its identity survives
+    /// Keep them in the log, marked corrupt like a damaged entry mid-log: a
+    /// read returns [`JournalError::Corrupt`], and their identities survive
     /// every later reopen. The caller decides — for example by asking its
-    /// peers whether the entry was committed — and discards it with
-    /// [`Journal::truncate_suffix`] if it was not. Appending after it
-    /// leaves it an ordinary corrupt entry, reported in
-    /// [`Recovery::corrupt`] from then on.
+    /// peers whether each was committed — and discards them with
+    /// [`Journal::truncate_suffix`] if they were not. Appending after them
+    /// starts a new batch and leaves them ordinary corrupt entries,
+    /// reported in [`Recovery::corrupt`] from then on.
     Keep,
 }
 
@@ -101,17 +111,19 @@ impl<'a> Record<'a> {
 pub struct Recovery {
     /// The directory held no segment and the journal was created.
     pub created: bool,
-    /// Damaged entries whose identifier is intact, with the identity it
-    /// records. They stay in the log; reading one returns
-    /// [`JournalError::Corrupt`]. A replicated caller fixes them from a peer.
+    /// Damaged entries whose identifier is intact, before the log's last
+    /// batch, with the identity their slot records: a later sync covers
+    /// them, so they were durable and damage explains them, never a crash.
+    /// They stay in the log; reading one returns [`JournalError::Corrupt`].
+    /// A replicated caller fixes them from a peer.
     pub corrupt: Vec<EntryId>,
-    /// The last entry of the log, when its identifier was intact but the
-    /// entry was not. A crash between the slot write and the sync produces
-    /// exactly this, and so can corruption; no local algorithm tells them
-    /// apart. [`JournalConfig::ambiguous_tail`] says whether it was
-    /// truncated like a torn write or kept, marked corrupt, for the caller
-    /// to resolve.
-    pub ambiguous_tail: Option<EntryId>,
+    /// Damaged entries of the log's last append batch whose identifier is
+    /// intact, in index order. A crash before the batch's sync returned
+    /// produces exactly this, and so can corruption; no local algorithm
+    /// tells them apart. [`JournalConfig::ambiguous_tail`] says whether
+    /// they were truncated like a torn write or kept, marked corrupt, for
+    /// the caller to resolve.
+    pub ambiguous_batch: Vec<EntryId>,
     /// Slots of intact entries that were missing or damaged and rewritten.
     pub slots_rewritten: usize,
     /// Something past the end of the log was discarded and zeroed.
@@ -246,20 +258,33 @@ impl<P: StorageProvider> Journal<P> {
             segments,
             poisoned: false,
         };
-        // The last entry is the one a crash can leave with its identifier
-        // but without its bytes: ambiguous. A single node truncates it; a
-        // replicated caller may keep it and resolve it with its peers.
-        if let Some(rec) = journal.last_record()
-            && rec.corrupt
-        {
-            let id = rec.slot.id();
-            recovery.corrupt.retain(|corrupt| corrupt.index != id.index);
-            recovery.ambiguous_tail = Some(id);
-            tracing::warn!(index = id.index, epoch = id.epoch, policy = ?journal.config.ambiguous_tail, "journal last entry ambiguous");
+        // The last batch is the one a crash can leave with identifiers but
+        // without bytes: its damaged entries are ambiguous. A single node
+        // truncates them; a replicated caller may keep them and resolve them
+        // with its peers.
+        let ambiguous: Vec<EntryId> = journal
+            .last_batch()
+            .iter()
+            .filter(|rec| rec.corrupt)
+            .map(|rec| rec.slot.id())
+            .collect();
+        if let Some(first) = ambiguous.first() {
+            recovery
+                .corrupt
+                .retain(|corrupt| corrupt.index < first.index);
+            for id in &ambiguous {
+                tracing::warn!(
+                    index = id.index,
+                    epoch = id.epoch,
+                    policy = ?journal.config.ambiguous_tail,
+                    "journal entry of the last batch ambiguous"
+                );
+            }
             if journal.config.ambiguous_tail == AmbiguousTail::Truncate {
                 recovery.torn_tail = true;
-                journal.truncate_suffix(id.index).await?;
+                journal.truncate_suffix(first.index).await?;
             }
+            recovery.ambiguous_batch = ambiguous;
         }
         for id in &recovery.corrupt {
             tracing::warn!(index = id.index, epoch = id.epoch, "journal entry corrupt");
@@ -281,10 +306,15 @@ impl<P: StorageProvider> Journal<P> {
             .expect("the segment list is never empty")
     }
 
-    /// The log's last record, wherever it lives (the tail segment may be
-    /// freshly rolled over and still empty).
-    fn last_record(&self) -> Option<crate::scan::Rec> {
-        self.segments.iter().rev().find_map(Segment::last)
+    /// The records of the log's last append batch, wherever it lives (the
+    /// tail segment may be freshly rolled over and still empty). Every
+    /// segment's first batch starts it, so the last batch never spans two.
+    fn last_batch(&self) -> &[crate::scan::Rec] {
+        self.segments
+            .iter()
+            .rev()
+            .find(|segment| segment.last().is_some())
+            .map_or(&[], |segment| segment.last_batch())
     }
 
     /// First live index: the first index of the oldest segment.

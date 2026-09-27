@@ -141,8 +141,8 @@ corruption (CLSTORE, the storage layer of PAR/CTRL, FAST '18). See
 - `Journal` appends, reads, and truncates a segmented log
 - `JournalConfig` and `Geometry` shape the segments
 - `Record`, `Entry`, and `EntryId` carry an entry's index, epoch, and 24-byte caller tag
-- `AmbiguousTail` truncates the ambiguous last entry or keeps it for a replication layer
-- `Recovery` reports what opening found: corrupt entries (by `EntryId`), the ambiguous last entry, repairs
+- `AmbiguousTail` truncates the damaged entries of the last batch or keeps them for a replication layer
+- `Recovery` reports what opening found: corrupt entries (by `EntryId`), the ambiguous last batch, repairs
 - `JournalError` separates operating errors from evidence of damage
 
 Depends only on `moonpool-core`'s provider traits, so the same journal runs on

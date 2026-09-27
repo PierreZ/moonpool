@@ -46,15 +46,16 @@
 //! 16  u32 offset               8  u64 index
 //! 20  u32 length              16  u64 epoch
 //! 24  u32 entry_crc           24  u32 crc  (header+payload)
-//! 28  u32 reserved            28  u32 reserved
+//! 28  u32 flags               28  u32 flags (batch start)
 //! 32  tag (24 B)              32  tag (24 B)
 //! 56  u32 reserved            56  u64 reserved
 //! 60  u32 slot_crc (0–59)     64  …   payload
 //! ```
 //!
-//! The entry repeats its index, epoch, and tag, so a stale record left by a
-//! lost or misdirected write, which may still pass its CRC, gets caught, and
-//! an intact entry can rebuild a lost slot whole.
+//! The entry repeats its index, epoch, tag, and flags, so a stale record
+//! left by a lost or misdirected write, which may still pass its CRC, gets
+//! caught, and an intact entry can rebuild a lost slot whole. The one flag
+//! marks the first entry of each append batch (see *Recovery*).
 //!
 //! # Identity: index, epoch, and tag
 //!
@@ -94,17 +95,22 @@
 //!
 //! This is the paper's rule for batched appends: the first entry without an
 //! identifier ends the log, and every earlier faulty entry with one is
-//! corrupted. The *last* entry is the exception the paper proves unavoidable
-//! (its Appendix A): an identifier beside a bad entry at the very end is what
-//! a crash between the slot write and the sync leaves, just as corruption
-//! would. It is reported in [`Recovery::ambiguous_tail`], and
-//! [`JournalConfig::ambiguous_tail`] decides the rest: a single node treats
-//! it as a torn write and truncates it ([`AmbiguousTail::Truncate`], the
-//! default); a replicated system keeps it, marked corrupt, for the
-//! replication layer to keep if committed and discard if not
-//! ([`AmbiguousTail::Keep`]) — kept, its identity survives every later
-//! crash, where a truncation would erase the only local evidence. Mid-log
-//! corruption fails loudly instead of being silently truncated.
+//! corrupted. The *last batch* is the exception the paper proves
+//! unavoidable (its Appendix A, stated there for the last entry): its
+//! entries and slots reach the disk through two unordered writes and one
+//! sync, so a crash before the sync returned can leave any of its entries
+//! with an identifier beside bad bytes, just as corruption would — and no
+//! later durable entry proves otherwise. Every entry and slot carries a
+//! batch-start flag, so opening finds the last batch itself. Its damaged
+//! entries are reported in [`Recovery::ambiguous_batch`], never in
+//! [`Recovery::corrupt`], and [`JournalConfig::ambiguous_tail`] decides the
+//! rest: a single node treats them as a torn write and truncates from the
+//! first of them ([`AmbiguousTail::Truncate`], the default); a replicated
+//! system keeps them, marked corrupt, for the replication layer to keep if
+//! committed and discard if not ([`AmbiguousTail::Keep`]) — kept, their
+//! identities survive every later crash, where a truncation would erase the
+//! only local evidence. Corruption before the last batch fails loudly
+//! instead of being silently truncated.
 //!
 //! An EIO is treated as the paper does: the block is zero-filled, so its
 //! entries fail their checksums and are reported corrupt. An identifier the

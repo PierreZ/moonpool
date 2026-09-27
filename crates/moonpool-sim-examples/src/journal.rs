@@ -13,7 +13,7 @@
 //!   corrupt — a checksum failure there would be a crash mistaken for
 //!   corruption;
 //! - only entries that were never acknowledged can be torn, and the journal
-//!   either truncates them (no identifier, or the ambiguous last entry) or
+//!   either truncates them (no identifier, or the ambiguous last batch) or
 //!   reports them corrupt, in which case the node plays the replication layer
 //!   and discards them, since nothing acknowledged them.
 //!
@@ -155,11 +155,11 @@ impl Process for JournalNode {
 /// Record what this recovery exercised.
 async fn note_recovery(ctx: &SimContext, recovery: &Recovery) {
     assert_sometimes!(recovery.torn_tail, "recovery discarded a torn tail");
-    if recovery.ambiguous_tail.is_some() {
-        assert_reachable!("recovery truncated an ambiguous last entry");
+    if !recovery.ambiguous_batch.is_empty() {
+        assert_reachable!("recovery truncated an ambiguous last batch");
     }
-    if !recovery.corrupt.is_empty() {
-        assert_reachable!("recovery reported an entry corrupt");
+    if recovery.ambiguous_batch.len() > 1 {
+        assert_reachable!("recovery found several damaged entries in the last batch");
     }
     if recovery.slots_rewritten > 0 {
         assert_reachable!("recovery rebuilt a lost slot");
@@ -186,6 +186,19 @@ async fn reconcile(
         recovery.corrupt.iter().all(|id| id.index >= acked_end),
         "only unacknowledged entries are reported corrupt",
         { "corrupt" => format!("{:?}", recovery.corrupt), "acked_end" => acked_end }
+    );
+    // Under the paper's model a crash damages only the batch whose sync
+    // never returned, and the journal reports that batch as ambiguous —
+    // never as corruption of data a later sync covered.
+    assert_always!(
+        recovery.corrupt.is_empty(),
+        "a crash is never reported as corruption",
+        { "corrupt" => format!("{:?}", recovery.corrupt) }
+    );
+    assert_always!(
+        recovery.ambiguous_batch.iter().all(|id| id.index >= acked_end),
+        "only unacknowledged entries are ambiguous",
+        { "ambiguous" => format!("{:?}", recovery.ambiguous_batch), "acked_end" => acked_end }
     );
     assert_always!(
         journal.next_index() >= acked_end,

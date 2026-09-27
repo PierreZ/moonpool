@@ -47,9 +47,19 @@ pub type Tag = [u8; TAG_SIZE];
 /// Where the tag sits in a slot and in an entry header.
 const TAG_AT: usize = 32;
 
+/// Where the flags word sits in a slot and in an entry header.
+const FLAGS_AT: usize = 28;
+
+/// Flag: this entry is the first of an append batch — of the entries one
+/// `fdatasync` made durable together.
+const FLAG_BATCH_START: u32 = 1;
+
 const HEADER_MAGIC: u32 = u32::from_le_bytes(*b"MPJH");
 const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
-const FORMAT_VERSION: u32 = 2;
+/// Version 3 adds the batch-start flag in the slot's and the entry's flags
+/// word (reserved, always zero, in version 2), so a version-2 segment would
+/// read as one never-ending batch and is refused instead.
+const FORMAT_VERSION: u32 = 3;
 
 /// Bytes of the header block covered by its CRC.
 const HEADER_LEN: usize = 24;
@@ -160,6 +170,10 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8-byte field"))
 }
 
+fn flags(batch_start: bool) -> u32 {
+    if batch_start { FLAG_BATCH_START } else { 0 }
+}
+
 fn tag_at(bytes: &[u8]) -> Tag {
     bytes[TAG_AT..TAG_AT + TAG_SIZE]
         .try_into()
@@ -232,6 +246,8 @@ pub(crate) struct Slot {
     pub entry_crc: u32,
     /// The caller's identity, repeated from the entry.
     pub tag: Tag,
+    /// The entry opened an append batch, repeated from the entry.
+    pub batch_start: bool,
 }
 
 impl Slot {
@@ -264,7 +280,7 @@ impl Slot {
     ///
     /// ```text
     /// 0  u64 index       16 u32 offset      24 u32 entry_crc   32 tag (24 B)
-    /// 8  u64 epoch       20 u32 length      28 u32 reserved    56 u32 reserved
+    /// 8  u64 epoch       20 u32 length      28 u32 flags       56 u32 reserved
     ///                                                          60 u32 crc (0..60)
     /// ```
     pub fn encode(&self, out: &mut [u8]) {
@@ -274,6 +290,7 @@ impl Slot {
         out[16..20].copy_from_slice(&self.offset.to_le_bytes());
         out[20..24].copy_from_slice(&self.length.to_le_bytes());
         out[24..28].copy_from_slice(&self.entry_crc.to_le_bytes());
+        out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&flags(self.batch_start).to_le_bytes());
         out[TAG_AT..TAG_AT + TAG_SIZE].copy_from_slice(&self.tag);
         let crc = crc32c::crc32c(&out[..SLOT_CRC_AT]);
         out[SLOT_CRC_AT..SLOT_SIZE].copy_from_slice(&crc.to_le_bytes());
@@ -294,6 +311,7 @@ impl Slot {
             length: u32_at(bytes, 20),
             entry_crc: u32_at(bytes, 24),
             tag: tag_at(bytes),
+            batch_start: u32_at(bytes, FLAGS_AT) & FLAG_BATCH_START != 0,
         };
         if slot.index == index {
             SlotState::Valid(slot)
@@ -311,6 +329,7 @@ pub(crate) struct EntryHeader {
     pub epoch: u64,
     pub crc: u32,
     pub tag: Tag,
+    pub batch_start: bool,
 }
 
 impl EntryHeader {
@@ -325,6 +344,7 @@ impl EntryHeader {
             epoch: u64_at(bytes, 16),
             crc: u32_at(bytes, 24),
             tag: tag_at(bytes),
+            batch_start: u32_at(bytes, FLAGS_AT) & FLAG_BATCH_START != 0,
         })
     }
 }
@@ -341,13 +361,14 @@ fn entry_crc(header: &[u8], payload: &[u8]) -> u32 {
 ///
 /// ```text
 /// 0  u32 magic    8  u64 index    24 u32 crc        32 tag (24 B)
-/// 4  u32 length   16 u64 epoch    28 u32 reserved   56 u64 reserved
+/// 4  u32 length   16 u64 epoch    28 u32 flags      56 u64 reserved
 ///                                                   64 payload …
 /// ```
 pub(crate) fn encode_entry(
     index: u64,
     epoch: u64,
     tag: &Tag,
+    batch_start: bool,
     payload: &[u8],
     out: &mut [u8],
 ) -> u32 {
@@ -358,6 +379,7 @@ pub(crate) fn encode_entry(
     out[8..16].copy_from_slice(&index.to_le_bytes());
     out[16..24].copy_from_slice(&epoch.to_le_bytes());
     // 24..28 is the CRC, filled in below; the rest past the tag is reserved.
+    out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&flags(batch_start).to_le_bytes());
     out[TAG_AT..TAG_AT + TAG_SIZE].copy_from_slice(tag);
     out[ENTRY_HEADER_SIZE..ENTRY_HEADER_SIZE + payload.len()].copy_from_slice(payload);
     out[ENTRY_HEADER_SIZE + payload.len()..].fill(0);
@@ -399,6 +421,7 @@ mod tests {
             length: 10,
             entry_crc: 0xDEAD_BEEF,
             tag: [0xA5; TAG_SIZE],
+            batch_start: true,
         };
         let mut bytes = [0u8; SLOT_SIZE];
         slot.encode(&mut bytes);
@@ -421,10 +444,14 @@ mod tests {
         let payload = b"hello journal";
         let mut bytes = vec![0u8; usize::try_from(entry_size(13)).expect("small")];
         let tag = [7; TAG_SIZE];
-        encode_entry(9, 2, &tag, payload, &mut bytes);
+        encode_entry(9, 2, &tag, true, payload, &mut bytes);
         let header = EntryHeader::parse(&bytes).expect("magic");
         assert_eq!((header.index, header.epoch, header.length), (9, 2, 13));
         assert_eq!(header.tag, tag);
+        assert!(header.batch_start);
+        bytes[FLAGS_AT] ^= 1;
+        assert!(!entry_crc_ok(&header, &bytes), "the CRC covers the flags");
+        bytes[FLAGS_AT] ^= 1;
         assert!(entry_crc_ok(&header, &bytes));
         bytes[TAG_AT] ^= 1;
         assert!(!entry_crc_ok(&header, &bytes), "the CRC covers the tag");

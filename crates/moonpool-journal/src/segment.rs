@@ -542,6 +542,20 @@ impl<F: StorageFile> Segment<F> {
         self.recs.last().copied()
     }
 
+    /// The records of this segment's last append batch: from the last
+    /// record flagged as a batch start to the end. Every segment's first
+    /// record starts a batch; should none be flagged, only the last record
+    /// is returned — calling acknowledged damage ambiguous could lose it to
+    /// a truncation, while the reverse only raises a false alarm.
+    pub fn last_batch(&self) -> &[Rec] {
+        let from = self
+            .recs
+            .iter()
+            .rposition(|rec| rec.slot.batch_start)
+            .unwrap_or_else(|| self.recs.len().saturating_sub(1));
+        &self.recs[from..]
+    }
+
     /// How many of `sizes` (on-disk entry sizes) still fit in this segment:
     /// it rolls over when its slot table or its data region fills.
     pub fn fitting(&self, sizes: &[u64]) -> usize {
@@ -578,7 +592,8 @@ impl<F: StorageFile> Segment<F> {
         data.as_mut_slice()[..lead].copy_from_slice(&self.tail);
         let first_rel = self.recs.len();
         let mut at = lead;
-        for record in batch {
+        for (at_batch, record) in batch.iter().enumerate() {
+            let batch_start = at_batch == 0;
             let length = u32::try_from(record.payload.len()).expect("checked");
             let size = usize_len(entry_size(length))?;
             let index = self.next_index();
@@ -587,6 +602,7 @@ impl<F: StorageFile> Segment<F> {
                 index,
                 record.epoch,
                 &record.tag,
+                batch_start,
                 record.payload,
                 &mut data.as_mut_slice()[at..at + size],
             );
@@ -598,6 +614,7 @@ impl<F: StorageFile> Segment<F> {
                     length,
                     entry_crc,
                     tag: record.tag,
+                    batch_start,
                 },
                 corrupt: false,
             });
@@ -726,6 +743,7 @@ fn verify(rec: &Rec, bytes: &[u8], damaged: bool) -> Result<Entry, EntryId> {
                 && header.length == slot.length
                 && header.crc == slot.entry_crc
                 && header.tag == slot.tag
+                && header.batch_start == slot.batch_start
                 && entry_crc_ok(&header, bytes)
         });
     if !intact {
@@ -767,7 +785,8 @@ async fn probe<F: StorageFile>(
         && (slot.epoch != header.epoch
             || slot.length != header.length
             || slot.entry_crc != header.crc
-            || slot.tag != header.tag)
+            || slot.tag != header.tag
+            || slot.batch_start != header.batch_start)
     {
         return Ok(None);
     }
