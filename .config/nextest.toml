@@ -68,6 +68,16 @@ slow-timeout = { period = "30s", terminate-after = 4 }
 filter = 'package(moonpool-rpc-sim) and binary(streams)'
 slow-timeout = { period = "30s", terminate-after = 6 }
 
+# The explorer's frontier tests fork one worker process per timeline, up to
+# 2000 of them; single_worker_explores forks them one at a time. That is
+# under a second on Linux, but a darwin fork plus its reap takes a few
+# milliseconds: 7.6s on the macOS runner when it passes, and past the 10s kill
+# on a slower one (its stack, sampled at 8s, was busy forking and reaping,
+# not stuck).
+[[profile.default.overrides]]
+filter = 'package(moonpool-explorer) and binary(frontier)'
+slow-timeout = { period = "10s", terminate-after = 3 }
+
 # The zero-sleep stall test spins a workload until the runner's same-time
 # event threshold (100 000 events) declares the stall: a fixed amount of CPU
 # work, about two seconds in the debug profile locally, but past the 10s kill
