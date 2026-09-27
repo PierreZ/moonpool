@@ -80,6 +80,7 @@ pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalErr
                     length: header.length,
                     entry_crc: header.crc,
                     tag: header.tag,
+                    batch_start: header.batch_start,
                 };
                 if slot != SlotState::Valid(rebuilt) {
                     decision.rewrite_slots.push(index);
@@ -118,6 +119,7 @@ mod tests {
             length: 8,
             entry_crc: 1,
             tag: [3; crate::TAG_SIZE],
+            batch_start: index == 1,
         }
     }
 
@@ -133,6 +135,7 @@ mod tests {
                     epoch: s.epoch,
                     crc: s.entry_crc,
                     tag: s.tag,
+                    batch_start: s.batch_start,
                 },
             )),
         }

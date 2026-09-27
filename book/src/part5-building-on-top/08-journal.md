@@ -83,20 +83,36 @@ the slot is unusable — from the end of entry *i − 1*. Then:
 | bad   | bad       | double fault: refuse to start              |
 
 The first entry without an identifier ends the log; every earlier faulty
-entry that has one is corruption. The one exception is the paper's theorem:
-the *last* entry, slot present and entry bad, is exactly what a crash between
-the slot write and the sync leaves, so nothing local can tell it from
-corruption. It is always reported as `ambiguous_tail`; what happens next is
-the caller's choice, `JournalConfig::ambiguous_tail`:
+entry that has one is corruption. The one exception is the paper's theorem,
+which it states for the *last entry* and which batching widens to the *last
+batch*. A batch's entries and slots go out in two unordered writes and one
+`fdatasync`. A crash before that sync returns can land any subset of their
+sectors: slot 7 on disk beside a torn entry 7, slot 9 beside an intact entry
+9. Every such entry of the last batch is exactly what a crash leaves, and
+nothing durable after it proves the sync returned, so nothing local can tell
+it from corruption. Damage *before* the last batch is different: a later
+sync covers it, so only corruption explains it.
 
-- `AmbiguousTail::Truncate` (the default) treats it as a torn write — the
-  only safe move for a single node, whose alternative is refusing to start.
-- `AmbiguousTail::Keep` leaves it in the log, marked corrupt, for a
+To find the last batch, every entry and slot carries a **batch-start flag**
+(format version 3), set on the first entry of each synced unit. A batch that
+rolls over into a new segment is two such units. The flag is in the entry as
+well as in the slot, so a rebuilt slot keeps it. The damaged entries of the
+last batch are reported as `ambiguous_batch`, never as `corrupt`, and what
+happens next is the caller's choice, `JournalConfig::ambiguous_tail`:
+
+- `AmbiguousTail::Truncate` (the default) treats them as a torn write and
+  truncates from the first of them, taking the batch's intact entries after
+  it along. That is the only safe move for a single node, whose alternative
+  is refusing to start.
+- `AmbiguousTail::Keep` leaves them in the log, marked corrupt, for a
   replication layer to keep if committed and discard (with
   `truncate_suffix`) if not. Truncating would erase the only local evidence
-  that the entry existed: one more crash before the caller acted on the
+  that the entries existed: one more crash before the caller acted on the
   report, and a Paxos acceptor could answer "nothing accepted here" for a
   vote it may have cast — the CTRL paper's Figure 2 bug.
+
+Because the journal tracks batches itself, a caller never has to encode batch
+numbers into its epochs to tell a torn batch from rot.
 
 An EIO is zero-filled into a checksum mismatch, as in the paper, so an
 unreadable entry is reported corrupt rather than stopping the journal. And
@@ -173,13 +189,15 @@ assert_always!(
     "only unacknowledged entries are reported corrupt"
 );
 assert_always!(journal.next_index() >= acked_end, "no acknowledged entry is lost");
+assert_always!(recovery.corrupt.is_empty(), "a crash is never reported as corruption");
 ```
 
 Then it appends batches, truncates suffixes and prefixes, and saves
 metadata; a batch joins the ledger only once `append` returns. Moonpool's
 default disk is the paper's model, so the promises are the strong ones. The
-report shows what the crashes reached — torn tails, ambiguous last entries,
-corrupt unacknowledged entries, rebuilt slots, several segments — and
+report shows what the crashes reached — torn tails, ambiguous last batches
+(several damaged entries in one of them, too), rebuilt slots, several
+segments — and
 removing the journal's per-batch `fdatasync` turns nearly every seed red.
 
 ## How It Was Tested
@@ -187,18 +205,22 @@ removing the journal's per-batch `fdatasync` turns nearly every seed red.
 The integration tests drive the journal against the simulator's storage
 directly. Targeted faults exercise each row of the table: a flipped payload
 bit, a flipped slot, a zeroed slot, both at once, a flipped last entry, a
-torn tail, an EIO block, and a damaged header. A crash loop runs a writer for
+torn tail, an EIO block, and a damaged header. The last-batch rule gets its
+own cases: several damaged entries of one batch, the same batch kept, damage
+before the last batch that stays corruption, and a lost batch-start slot
+that is rebuilt with its flag. A crash loop runs a writer for
 a random number of simulation steps, crashes the process with
 `simulate_crash_for_process`, and reopens, playing the replication layer by
 cutting the log at the first unreadable entry. Every recovery replays the
 log twice — one `read` per index and one `read_range` — and the two must
 agree; every corrupt entry must be reported with the tag it was written
-with; half the seeds keep the ambiguous last entry instead of truncating
+with; half the seeds keep the ambiguous last batch instead of truncating
 it; and the writer saves metadata, whose reopened value must be the last
 acknowledged one or the one in flight. It runs under both fault models:
 
 - **the paper's**: every acknowledged entry survives, and none is ever
-  reported corrupt;
+  reported corrupt or ambiguous. Nothing at all lands in `corrupt`: every
+  torn entry is in the ambiguous last batch;
 - **the simulator's full physics**: a read never returns anything but what
   was acknowledged — damage is always reported.
 

@@ -476,7 +476,7 @@ fn a_kept_ambiguous_last_entry_survives_reopen_until_resolved() {
             })
             .await
             .expect("reopen");
-            assert_eq!(recovery.ambiguous_tail, Some(ambiguous));
+            assert_eq!(recovery.ambiguous_batch, vec![ambiguous]);
             assert!(recovery.corrupt.is_empty());
             assert!(!recovery.torn_tail, "nothing was truncated");
             assert_eq!(journal.next_index(), 6, "the entry is kept");
@@ -501,8 +501,8 @@ fn a_kept_ambiguous_last_entry_survives_reopen_until_resolved() {
         })
         .await
         .expect("reopen");
-        assert_eq!(recovery.corrupt, vec![ambiguous]);
-        assert_eq!(recovery.ambiguous_tail, None);
+        assert_eq!(recovery.corrupt, vec![ambiguous], "a later batch covers it");
+        assert!(recovery.ambiguous_batch.is_empty());
 
         // The caller resolves it — here, as not committed — by truncating.
         run(&mut sim, |_| async move {
@@ -565,7 +565,7 @@ fn a_damaged_entry_mid_log_is_reported_not_truncated() {
             tag: tag(3, 7),
         };
         assert_eq!(recovery.corrupt, vec![damaged], "reported with its tag");
-        assert_eq!(recovery.ambiguous_tail, None);
+        assert!(recovery.ambiguous_batch.is_empty());
         assert_eq!(journal.next_index(), 6, "nothing after the damage is lost");
         assert_eq!(journal.entry_id(3), Some(damaged));
         run(&mut sim, |_| async move {
@@ -654,7 +654,7 @@ fn a_torn_tail_is_truncated_and_scrubbed() {
             "entry 4 and everything after it go"
         );
         assert!(recovery.torn_tail);
-        assert_eq!(recovery.ambiguous_tail, None);
+        assert!(recovery.ambiguous_batch.is_empty());
         drop(journal);
         // Entry 5 was intact but past the end: the scrub zeroed it, so it
         // can never come back through a lost slot.
@@ -678,15 +678,130 @@ fn the_ambiguous_last_entry_is_truncated_and_reported() {
         flip(&mut sim, segment_path(1), payload_byte(5)).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(
-            recovery.ambiguous_tail,
-            Some(EntryId {
+            recovery.ambiguous_batch,
+            vec![EntryId {
                 index: 5,
                 epoch: 7,
                 tag: tag(5, 7)
-            })
+            }]
         );
         assert!(recovery.corrupt.is_empty());
         assert_eq!(journal.next_index(), 5);
+    });
+}
+
+/// Entries 1 and 2 as single-entry batches, then 3..=5 as one batch of
+/// three: 64-byte payloads, so the offsets of `entry_offset` still hold.
+async fn two_batches_then_three(sim: &mut SimWorld) {
+    run(sim, |provider| async move {
+        let (mut journal, _) = open(provider, small()).await?;
+        append_each(&mut journal, 7, &[64; 2]).await?;
+        let bytes: Vec<Vec<u8>> = (3..=5).map(|index| payload(index, 64)).collect();
+        let records: Vec<Record<'_>> = bytes
+            .iter()
+            .zip(3..)
+            .map(|(payload, index)| Record::new(7, payload).with_tag(tag(index, 7)))
+            .collect();
+        journal.append(&records).await.map(|_| ())
+    })
+    .await
+    .expect("write");
+}
+
+fn id(index: u64) -> EntryId {
+    EntryId {
+        index,
+        epoch: 7,
+        tag: tag(index, 7),
+    }
+}
+
+/// A crash before a batch's sync can tear any of its entries, not only the
+/// last: every damaged entry of the last batch is ambiguous, none is
+/// reported as corruption of acknowledged data. `Truncate` cuts at the
+/// first of them, taking the batch's intact entries after it along.
+#[test]
+fn every_damaged_entry_of_the_last_batch_is_ambiguous() {
+    runtime().block_on(async {
+        let mut sim = sim(17);
+        two_batches_then_three(&mut sim).await;
+        flip(&mut sim, segment_path(1), payload_byte(3)).await;
+        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.ambiguous_batch, vec![id(3), id(4)]);
+        assert!(recovery.corrupt.is_empty(), "{recovery:?}");
+        assert!(recovery.torn_tail);
+        assert_eq!(
+            journal.next_index(),
+            3,
+            "the batch goes from its first damage"
+        );
+    });
+}
+
+/// The same damage under `Keep`: nothing is truncated, the intact entry
+/// after the damage is still readable, and the identities survive reopen.
+#[test]
+fn a_kept_ambiguous_batch_keeps_its_intact_entries() {
+    runtime().block_on(async {
+        let mut sim = sim(18);
+        two_batches_then_three(&mut sim).await;
+        flip(&mut sim, segment_path(1), payload_byte(3)).await;
+        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        for _ in 0..2 {
+            let (journal, recovery) = run(&mut sim, |provider| async move {
+                Journal::open(provider, DIR, keep()).await
+            })
+            .await
+            .expect("reopen");
+            assert_eq!(recovery.ambiguous_batch, vec![id(3), id(4)]);
+            assert!(recovery.corrupt.is_empty());
+            assert!(!recovery.torn_tail);
+            assert_eq!(journal.next_index(), 6);
+            run(&mut sim, |_| async move {
+                let read = journal.read_range(3..6).await.expect("read");
+                assert_eq!(read[0], Err(id(3)));
+                assert_eq!(read[1], Err(id(4)));
+                assert_eq!(
+                    read[2].as_ref().map(|e| e.payload.clone()),
+                    Ok(payload(5, 64))
+                );
+            })
+            .await;
+        }
+    });
+}
+
+/// Damage to an entry of an *earlier* batch is corruption — a later sync
+/// covers it — even when the last batch is damaged too.
+#[test]
+fn damage_before_the_last_batch_stays_corruption() {
+    runtime().block_on(async {
+        let mut sim = sim(19);
+        two_batches_then_three(&mut sim).await;
+        flip(&mut sim, segment_path(1), payload_byte(2)).await;
+        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.corrupt, vec![id(2)]);
+        assert_eq!(recovery.ambiguous_batch, vec![id(4)]);
+        assert_eq!(journal.next_index(), 4);
+    });
+}
+
+/// The batch-start flag lives in the entry too, so a lost slot of the
+/// batch's first entry is rebuilt with it and the batch is still found.
+#[test]
+fn a_rebuilt_slot_keeps_the_batch_boundary() {
+    runtime().block_on(async {
+        let mut sim = sim(20);
+        two_batches_then_three(&mut sim).await;
+        zero(&mut sim, segment_path(1), slot_offset(3), 64).await;
+        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.slots_rewritten, 1);
+        assert_eq!(recovery.ambiguous_batch, vec![id(4)]);
+        assert!(recovery.corrupt.is_empty());
+        assert_eq!(journal.next_index(), 4);
     });
 }
 
@@ -794,8 +909,15 @@ type MetaLedger = Arc<Mutex<MetaState>>;
 #[derive(Debug, Default)]
 struct Tally {
     torn: usize,
+    /// Recoveries whose last batch had damaged entries.
     ambiguous: usize,
+    /// Damaged entries of last batches, all recoveries together.
+    ambiguous_entries: usize,
+    /// Recoveries whose last batch had more than one damaged entry — the
+    /// case a last-entry-only rule would misreport as corruption.
+    ambiguous_multi: usize,
     ambiguous_kept: usize,
+    ambiguous_acked: usize,
     corrupt_unacked: usize,
     refused: usize,
     corrupt_acked: usize,
@@ -819,15 +941,19 @@ fn under_the_papers_fault_model_no_acknowledged_entry_is_lost_or_corrupt() {
     eprintln!("paper model: {tally:?}");
     assert!(tally.torn > 0, "no crash ever tore a tail");
     assert!(
-        tally.corrupt_unacked > 0,
-        "no crash ever tore inside a batch"
+        tally.ambiguous_multi > 0,
+        "no crash ever tore several entries of one batch"
     );
-    assert!(tally.ambiguous_kept > 0, "no ambiguous last entry was kept");
+    assert!(tally.ambiguous_kept > 0, "no ambiguous batch was kept");
     assert!(
         tally.meta_repaired > 0,
         "no crash ever split the metadata copies"
     );
-    assert_eq!(tally.refused + tally.corrupt_acked, 0);
+    assert_eq!(
+        tally.refused + tally.corrupt_acked + tally.corrupt_unacked + tally.ambiguous_acked,
+        0,
+        "under the paper's model, damage is only ever the unsynced last batch"
+    );
 }
 
 #[test]
@@ -841,7 +967,7 @@ fn under_moonpools_full_physics_a_read_never_returns_wrong_data() {
 }
 
 /// Crash a writer repeatedly, checking every recovery against the ledger.
-/// Odd seeds keep the ambiguous last entry instead of truncating it.
+/// Odd seeds keep the ambiguous last batch instead of truncating it.
 fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
     runtime().block_on(async {
         let mut sim = SimWorld::new_with_seed(seed);
@@ -953,29 +1079,7 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
             return false;
         }
     };
-    tally.torn += usize::from(recovery.torn_tail);
-    tally.ambiguous += usize::from(recovery.ambiguous_tail.is_some());
-    tally.meta_repaired += usize::from(recovery.meta_repaired);
-    if check.config.ambiguous_tail == AmbiguousTail::Keep {
-        tally.ambiguous_kept += usize::from(recovery.ambiguous_tail.is_some());
-    }
-    for id in recovery.corrupt.iter().chain(&recovery.ambiguous_tail) {
-        assert_eq!(
-            id.tag,
-            tag(id.index, id.epoch),
-            "{at}: a corrupt entry is reported with the tag it was written with"
-        );
-        if id.index >= acked_end {
-            tally.corrupt_unacked += 1;
-        } else {
-            assert!(
-                model == Model::Harsh,
-                "{at}: acknowledged entry {} reported corrupt: {recovery:?}",
-                id.index
-            );
-            tally.corrupt_acked += 1;
-        }
-    }
+    judge_reports(check, &recovery, acked_end, tally);
     // Whatever a read returned for an acknowledged index is exactly what was
     // acknowledged; under the paper's model, every acknowledged index is
     // still there.
@@ -1011,6 +1115,51 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
         pending: None,
     };
     true
+}
+
+/// Judge what the recovery reported against the ledger, and tally it.
+fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: &mut Tally) {
+    let (model, at) = (check.model, check.at);
+    tally.torn += usize::from(recovery.torn_tail);
+    let ambiguous = !recovery.ambiguous_batch.is_empty();
+    tally.ambiguous += usize::from(ambiguous);
+    tally.ambiguous_entries += recovery.ambiguous_batch.len();
+    tally.ambiguous_multi += usize::from(recovery.ambiguous_batch.len() > 1);
+    tally.meta_repaired += usize::from(recovery.meta_repaired);
+    if check.config.ambiguous_tail == AmbiguousTail::Keep {
+        tally.ambiguous_kept += usize::from(ambiguous);
+    }
+    for id in recovery.corrupt.iter().chain(&recovery.ambiguous_batch) {
+        assert_eq!(
+            id.tag,
+            tag(id.index, id.epoch),
+            "{at}: a corrupt entry is reported with the tag it was written with"
+        );
+    }
+    for id in &recovery.ambiguous_batch {
+        // Ambiguous is not a license to lose data: under the paper's model
+        // only a batch whose sync never returned can be damaged.
+        if id.index < acked_end {
+            assert!(
+                model == Model::Harsh,
+                "{at}: acknowledged entry {} reported ambiguous: {recovery:?}",
+                id.index
+            );
+            tally.ambiguous_acked += 1;
+        }
+    }
+    for id in &recovery.corrupt {
+        if id.index >= acked_end {
+            tally.corrupt_unacked += 1;
+        } else {
+            assert!(
+                model == Model::Harsh,
+                "{at}: acknowledged entry {} reported corrupt: {recovery:?}",
+                id.index
+            );
+            tally.corrupt_acked += 1;
+        }
+    }
 }
 
 /// The writer: `(kind, count, len)` steps of appends and, one time in ten
