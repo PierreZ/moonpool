@@ -6,10 +6,10 @@ use std::ops::Range;
 use moonpool_core::{DirectIo, StorageProvider};
 use tracing::instrument;
 
-use crate::JournalError;
 use crate::dual::DualFile;
-use crate::layout::{ENTRY_HEADER_SIZE, Geometry, entry_size};
+use crate::layout::{ENTRY_HEADER_SIZE, Geometry, TAG_SIZE, Tag, entry_size};
 use crate::segment::{Entry, Segment, is_segment_leftover, parse_segment_name, segment_path};
+use crate::{EntryId, JournalError};
 
 /// How to lay out and drive a journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +22,8 @@ pub struct JournalConfig {
     /// The index of the first entry of a freshly created journal. Ignored
     /// when the directory already holds segments.
     pub first_index: u64,
+    /// What opening does with the ambiguous last entry.
+    pub ambiguous_tail: AmbiguousTail,
 }
 
 impl Default for JournalConfig {
@@ -30,17 +32,68 @@ impl Default for JournalConfig {
             geometry: Geometry::default(),
             direct_io: DirectIo::Optional,
             first_index: 1,
+            ambiguous_tail: AmbiguousTail::Truncate,
         }
     }
 }
 
-/// An entry to append: the epoch (term) it belongs to and its bytes.
+/// What opening does with the log's last entry when its identifier is intact
+/// but the entry is not.
+///
+/// A crash between the slot write and the sync leaves exactly that, and so
+/// does corruption of an entry that was synced and acknowledged: no local
+/// algorithm tells them apart (the CLSTORE paper's Appendix A). Either way
+/// the entry is reported in [`Recovery::ambiguous_tail`]; this decides
+/// whether it is also removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AmbiguousTail {
+    /// Treat it as a torn write and truncate it — right for a single node,
+    /// whose only other choice would be to refuse to start. A replicated
+    /// caller that instead needs to find out whether it was committed must
+    /// act on the report before the next crash: once truncated, the
+    /// identity is gone from disk.
+    #[default]
+    Truncate,
+    /// Keep it in the log, marked corrupt like a damaged entry mid-log: a
+    /// read returns [`JournalError::Corrupt`], and its identity survives
+    /// every later reopen. The caller decides — for example by asking its
+    /// peers whether the entry was committed — and discards it with
+    /// [`Journal::truncate_suffix`] if it was not. Appending after it
+    /// leaves it an ordinary corrupt entry, reported in
+    /// [`Recovery::corrupt`] from then on.
+    Keep,
+}
+
+/// An entry to append: the epoch (term) it belongs to, the caller's
+/// identity tag, and its bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Record<'a> {
     /// The epoch this entry was written in.
     pub epoch: u64,
+    /// The caller's identity for this entry, kept in its slot far from the
+    /// entry and reported with it if the entry is ever found corrupt. All
+    /// zeros when the index and epoch identify the entry on their own.
+    pub tag: Tag,
     /// The caller's bytes.
     pub payload: &'a [u8],
+}
+
+impl<'a> Record<'a> {
+    /// A record with an all-zero tag.
+    #[must_use]
+    pub fn new(epoch: u64, payload: &'a [u8]) -> Self {
+        Self {
+            epoch,
+            tag: [0; TAG_SIZE],
+            payload,
+        }
+    }
+
+    /// The same record carrying `tag`.
+    #[must_use]
+    pub fn with_tag(self, tag: Tag) -> Self {
+        Self { tag, ..self }
+    }
 }
 
 /// What opening the journal found and repaired.
@@ -48,23 +101,27 @@ pub struct Record<'a> {
 pub struct Recovery {
     /// The directory held no segment and the journal was created.
     pub created: bool,
-    /// Damaged entries whose identifier is intact, as `(index, epoch)`. They
-    /// stay in the log; reading one returns [`JournalError::Corrupt`]. A
-    /// replicated caller fixes them from a peer.
-    pub corrupt: Vec<(u64, u64)>,
+    /// Damaged entries whose identifier is intact, with the identity it
+    /// records. They stay in the log; reading one returns
+    /// [`JournalError::Corrupt`]. A replicated caller fixes them from a peer.
+    pub corrupt: Vec<EntryId>,
     /// The last entry of the log, when its identifier was intact but the
-    /// entry was not, as `(index, epoch)`. A crash between the slot write
-    /// and the sync produces exactly this, and so can corruption; no local
-    /// algorithm tells them apart. A single node cannot resolve it, so it is
-    /// truncated like a torn write — and reported, so a replicated caller
-    /// can keep it if it was committed.
-    pub ambiguous_tail: Option<(u64, u64)>,
+    /// entry was not. A crash between the slot write and the sync produces
+    /// exactly this, and so can corruption; no local algorithm tells them
+    /// apart. [`JournalConfig::ambiguous_tail`] says whether it was
+    /// truncated like a torn write or kept, marked corrupt, for the caller
+    /// to resolve.
+    pub ambiguous_tail: Option<EntryId>,
     /// Slots of intact entries that were missing or damaged and rewritten.
     pub slots_rewritten: usize,
     /// Something past the end of the log was discarded and zeroed.
     pub torn_tail: bool,
     /// Segment header copies that were damaged and rewritten from their twin.
     pub headers_repaired: usize,
+    /// One copy of the caller's metadata was damaged, missing, or older than
+    /// the other, and was rewritten from the newest valid one — so a later
+    /// fault in either copy can never roll the metadata back.
+    pub meta_repaired: bool,
 }
 
 /// A write-ahead journal over moonpool's [`BlockFile`](moonpool_core::BlockFile).
@@ -124,7 +181,7 @@ impl<P: StorageProvider> Journal<P> {
         provider.create_dir_all(dir).await?;
         provider.sync_dir(parent_of(dir)).await?;
 
-        let (meta, meta_value) = DualFile::load(&provider, dir, "meta").await?;
+        let (meta, meta_value, meta_repaired) = DualFile::load(&provider, dir, "meta").await?;
         let mut firsts = Vec::new();
         let mut leftovers = false;
         for name in provider.list_dir(dir).await? {
@@ -140,7 +197,10 @@ impl<P: StorageProvider> Journal<P> {
         }
         firsts.sort_unstable();
 
-        let mut recovery = Recovery::default();
+        let mut recovery = Recovery {
+            meta_repaired,
+            ..Recovery::default()
+        };
         let mut segments = Vec::with_capacity(firsts.len().max(1));
         if firsts.is_empty() {
             let first = config.first_index;
@@ -187,17 +247,22 @@ impl<P: StorageProvider> Journal<P> {
             poisoned: false,
         };
         // The last entry is the one a crash can leave with its identifier
-        // but without its bytes: ambiguous, so a single node truncates it.
-        if let Some((index, rec)) = journal.last_record()
+        // but without its bytes: ambiguous. A single node truncates it; a
+        // replicated caller may keep it and resolve it with its peers.
+        if let Some(rec) = journal.last_record()
             && rec.corrupt
         {
-            recovery.corrupt.retain(|(corrupt, _)| *corrupt != index);
-            recovery.ambiguous_tail = Some((index, rec.slot.epoch));
-            recovery.torn_tail = true;
-            journal.truncate_suffix(index).await?;
+            let id = rec.slot.id();
+            recovery.corrupt.retain(|corrupt| corrupt.index != id.index);
+            recovery.ambiguous_tail = Some(id);
+            tracing::warn!(index = id.index, epoch = id.epoch, policy = ?journal.config.ambiguous_tail, "journal last entry ambiguous");
+            if journal.config.ambiguous_tail == AmbiguousTail::Truncate {
+                recovery.torn_tail = true;
+                journal.truncate_suffix(id.index).await?;
+            }
         }
-        for (index, epoch) in &recovery.corrupt {
-            tracing::warn!(index, epoch, "journal entry corrupt");
+        for id in &recovery.corrupt {
+            tracing::warn!(index = id.index, epoch = id.epoch, "journal entry corrupt");
         }
         Ok((journal, recovery))
     }
@@ -216,13 +281,10 @@ impl<P: StorageProvider> Journal<P> {
             .expect("the segment list is never empty")
     }
 
-    /// The log's last entry and its record, wherever it lives (the tail
-    /// segment may be freshly rolled over and still empty).
-    fn last_record(&self) -> Option<(u64, crate::scan::Rec)> {
-        self.segments
-            .iter()
-            .rev()
-            .find_map(|segment| segment.last().map(|rec| (segment.next_index() - 1, rec)))
+    /// The log's last record, wherever it lives (the tail segment may be
+    /// freshly rolled over and still empty).
+    fn last_record(&self) -> Option<crate::scan::Rec> {
+        self.segments.iter().rev().find_map(Segment::last)
     }
 
     /// First live index: the first index of the oldest segment.
@@ -269,7 +331,14 @@ impl<P: StorageProvider> Journal<P> {
     /// verified every slot.
     #[must_use]
     pub fn epoch(&self, index: u64) -> Option<u64> {
-        self.segment_of(index).ok()?.epoch(index)
+        self.entry_id(index).map(|id| id.epoch)
+    }
+
+    /// The identity — index, epoch, and tag — recorded for `index`, without
+    /// I/O, whether or not the entry itself is intact.
+    #[must_use]
+    pub fn entry_id(&self, index: u64) -> Option<EntryId> {
+        self.segment_of(index).ok()?.id(index)
     }
 
     /// Read and verify the entry at `index`.
@@ -282,10 +351,61 @@ impl<P: StorageProvider> Journal<P> {
     /// any other I/O error.
     pub async fn read(&self, index: u64) -> Result<Entry, JournalError> {
         let entry = self.segment_of(index)?.read(index).await;
-        if let Err(JournalError::Corrupt { index, epoch }) = &entry {
-            tracing::warn!(index, epoch, "journal entry corrupt on read");
+        if let Err(JournalError::Corrupt(id)) = &entry {
+            tracing::warn!(
+                index = id.index,
+                epoch = id.epoch,
+                "journal entry corrupt on read"
+            );
         }
         entry
+    }
+
+    /// Read and verify every entry in `range`, in order — the replay a
+    /// caller runs after [`open`](Self::open) to rebuild its state.
+    ///
+    /// Entries are packed back to back, so each segment's share of the
+    /// range is read in large sequential transfers rather than one read per
+    /// entry. Each entry comes back intact, with exactly the checks
+    /// [`read`](Self::read) applies, or as `Err` with the identity its slot
+    /// records: a corrupt entry does not stop the replay, it is reported in
+    /// place.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::OutOfRange`] unless `range` lies within
+    /// `[start, next]` and is not reversed, and any I/O error other than the
+    /// medium failing to read an entry (which reports that entry corrupt).
+    pub async fn read_range(
+        &self,
+        range: Range<u64>,
+    ) -> Result<Vec<Result<Entry, EntryId>>, JournalError> {
+        let (start, next) = (self.start_index(), self.next_index());
+        for bound in [range.start, range.end] {
+            if bound < start || bound > next || range.start > range.end {
+                return Err(JournalError::OutOfRange {
+                    index: bound,
+                    start,
+                    next,
+                });
+            }
+        }
+        let mut out = Vec::with_capacity(usize::try_from(range.end - range.start).unwrap_or(0));
+        let mut index = range.start;
+        while index < range.end {
+            let segment = self.segment_of(index)?;
+            let stop = range.end.min(segment.next_index());
+            segment.read_range(index..stop, &mut out).await?;
+            index = stop;
+        }
+        for id in out.iter().filter_map(|entry| entry.as_ref().err()) {
+            tracing::warn!(
+                index = id.index,
+                epoch = id.epoch,
+                "journal entry corrupt on read"
+            );
+        }
+        Ok(out)
     }
 
     fn check_writable(&self) -> Result<(), JournalError> {
@@ -340,11 +460,7 @@ impl<P: StorageProvider> Journal<P> {
             let outcome = if fit == 0 {
                 self.rollover().await
             } else {
-                let batch: Vec<(u64, &[u8])> = records[done..done + fit]
-                    .iter()
-                    .map(|record| (record.epoch, record.payload))
-                    .collect();
-                self.tail_mut().append(&batch).await
+                self.tail_mut().append(&records[done..done + fit]).await
             };
             self.poison_on_err(outcome)?;
             done += fit;

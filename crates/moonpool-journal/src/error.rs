@@ -2,6 +2,8 @@
 
 use std::io;
 
+use crate::EntryId;
+
 /// Errors from opening, reading, or writing a [`Journal`](crate::Journal).
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
@@ -14,16 +16,11 @@ pub enum JournalError {
     #[error("invalid journal configuration: {0}")]
     InvalidConfig(String),
 
-    /// The entry at `index` is damaged while its slot is intact: the log
-    /// knows exactly which entry is bad and which epoch it carried, and the
-    /// replication layer can re-fetch it.
-    #[error("entry {index} (epoch {epoch}) is corrupt")]
-    Corrupt {
-        /// The damaged entry's index.
-        index: u64,
-        /// The epoch its slot records.
-        epoch: u64,
-    },
+    /// An entry is damaged while its slot is intact: the log knows exactly
+    /// which entry is bad — its index, epoch, and tag, as the slot records
+    /// them — and the replication layer can re-fetch it.
+    #[error("entry {} (epoch {}) is corrupt", .0.index, .0.epoch)]
+    Corrupt(EntryId),
 
     /// Both the entry at `index` and its slot are damaged, so nothing
     /// identifies what was there — CLSTORE crashes the node rather than

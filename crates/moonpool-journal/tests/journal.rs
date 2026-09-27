@@ -1,13 +1,17 @@
 //! The journal over the simulator's storage: round trips, rollover,
-//! truncation, every row of the recovery table, and randomized crashes under
-//! two fault models.
+//! truncation, tags, batched reads, the ambiguous-tail policy, metadata
+//! repair, every row of the recovery table, and randomized crashes under two
+//! fault models.
 
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_journal::{Entry, Geometry, Journal, JournalConfig, JournalError, Record, Recovery};
+use moonpool_journal::{
+    AmbiguousTail, Entry, EntryId, Geometry, Journal, JournalConfig, JournalError, Record,
+    Recovery, TAG_SIZE, Tag,
+};
 use moonpool_sim::{EioTarget, SimStorageProvider, SimWorld, StorageConfiguration};
 
 const DIR: &str = "wal";
@@ -16,7 +20,7 @@ fn ip() -> IpAddr {
     "10.0.0.1".parse().expect("valid IP")
 }
 
-/// A small geometry: one-block slot table (128 slots), 16 KiB data start,
+/// A small geometry: a two-block slot table (128 slots), 16 KiB data start,
 /// 128 KiB segments — rollover is cheap to reach.
 fn small() -> JournalConfig {
     JournalConfig {
@@ -58,6 +62,16 @@ where
     handle.await.expect("task panicked")
 }
 
+/// The tag the tests write for `index` in `epoch`: every byte depends on
+/// both, so a tag read back for the wrong entry never matches.
+fn tag(index: u64, epoch: u64) -> Tag {
+    let mut tag = [0; TAG_SIZE];
+    tag[..8].copy_from_slice(&index.to_le_bytes());
+    tag[8..16].copy_from_slice(&epoch.to_le_bytes());
+    tag[16..].copy_from_slice(&(index ^ epoch.rotate_left(32)).to_le_bytes());
+    tag
+}
+
 fn payload(index: u64, len: usize) -> Vec<u8> {
     let seed = index.wrapping_mul(31).to_le_bytes()[0];
     (0..len).map(|at| seed ^ at.to_le_bytes()[0]).collect()
@@ -80,10 +94,7 @@ async fn append_each(
         let index = journal.next_index();
         let bytes = payload(index, *len);
         journal
-            .append(&[Record {
-                epoch,
-                payload: &bytes,
-            }])
+            .append(&[Record::new(epoch, &bytes).with_tag(tag(index, epoch))])
             .await?;
     }
     Ok(())
@@ -138,7 +149,7 @@ fn entries_round_trip_across_reopen() {
                 .collect();
             let records: Vec<Record<'_>> = bytes
                 .iter()
-                .map(|payload| Record { epoch: 3, payload })
+                .map(|payload| Record::new(3, payload))
                 .collect();
             assert_eq!(journal.append(&records).await?, 1..11);
             // A second batch lands right after the first, in the same block.
@@ -182,7 +193,7 @@ fn segments_are_found_by_listing_and_recovered_in_order() {
                     .collect();
                 let records: Vec<Record<'_>> = bytes
                     .iter()
-                    .map(|payload| Record { epoch: 2, payload })
+                    .map(|payload| Record::new(2, payload))
                     .collect();
                 journal.append(&records).await?;
             }
@@ -299,20 +310,33 @@ fn metadata_survives_damage_to_either_copy() {
     runtime().block_on(async {
         let mut sim = sim(5);
         run(&mut sim, |provider| async move {
-            let (mut journal, _) = open(provider, small()).await?;
+            let (mut journal, recovery) = open(provider, small()).await?;
             assert_eq!(journal.meta(), None);
+            assert!(!recovery.meta_repaired, "no metadata, nothing to repair");
             journal.save_meta(b"term=1 vote=a").await?;
             journal.save_meta(b"term=2 vote=b").await?;
             Ok::<_, JournalError>(())
         })
         .await
         .expect("write");
-        // Both copies were rewritten: either one alone carries the newest.
+        // Both copies were rewritten: either one alone carries the newest,
+        // and opening repairs the damaged one from its twin.
         flip(&mut sim, format!("{DIR}/meta.1"), 30).await;
-        let (journal, _) = reopen(&mut sim).await.expect("reopen");
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(journal.meta(), Some(b"term=2 vote=b".as_slice()));
+        assert!(recovery.meta_repaired);
         drop(journal);
+        // So the other copy can fail next, and the value still stands.
         flip(&mut sim, format!("{DIR}/meta.0"), 30).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(journal.meta(), Some(b"term=2 vote=b".as_slice()));
+        assert!(recovery.meta_repaired);
+        drop(journal);
+        let (_, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert!(!recovery.meta_repaired, "the repair is durable");
+        // Both copies at once is beyond what two copies can survive.
+        flip(&mut sim, format!("{DIR}/meta.0"), 30).await;
+        flip(&mut sim, format!("{DIR}/meta.1"), 30).await;
         let opened = reopen(&mut sim).await.map(|_| ());
         assert!(
             matches!(opened, Err(JournalError::MetadataCorrupt { .. })),
@@ -321,15 +345,194 @@ fn metadata_survives_damage_to_either_copy() {
     });
 }
 
-/// Five single-entry batches of 64-byte payloads: each entry is 96 bytes,
-/// packed contiguously from `data_start`.
+/// A crash between the two copy writes leaves one copy a generation behind.
+/// Opening brings it forward: otherwise a later fault in the newer copy
+/// would silently roll the metadata back — for a Paxos acceptor, a promise
+/// regressing below one it may have acted on.
+#[test]
+fn a_metadata_copy_left_behind_by_a_crash_is_brought_forward() {
+    runtime().block_on(async {
+        let mut sim = sim(14);
+        let stale = run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider.clone(), small()).await?;
+            journal.save_meta(b"promise=1").await?;
+            let file = provider
+                .open(&format!("{DIR}/meta.1"), OpenOptions::read_only())
+                .await?;
+            let mut stale = vec![0; usize::try_from(file.size().await?).expect("small")];
+            file.read_at(0, &mut stale).await?;
+            journal.save_meta(b"promise=2").await?;
+            Ok::<_, JournalError>(stale)
+        })
+        .await
+        .expect("write");
+        // As if the crash hit after `meta.0` took generation 2 and before
+        // `meta.1` did.
+        run(&mut sim, |provider| async move {
+            let file = provider
+                .open(&format!("{DIR}/meta.1"), OpenOptions::read_write())
+                .await?;
+            file.write_at(0, &stale).await?;
+            file.sync_all().await
+        })
+        .await
+        .expect("roll meta.1 back");
+
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(journal.meta(), Some(b"promise=2".as_slice()));
+        assert!(recovery.meta_repaired, "the stale copy is rewritten");
+        drop(journal);
+        flip(&mut sim, format!("{DIR}/meta.0"), 30).await;
+        let (journal, _) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(
+            journal.meta(),
+            Some(b"promise=2".as_slice()),
+            "losing the newer copy no longer rolls the value back"
+        );
+    });
+}
+
+/// `read_range` returns exactly what one `read` per index returns — across
+/// segment boundaries, with a corrupt entry reported in place by identity —
+/// and refuses a range outside the live log.
+#[test]
+fn a_batched_read_matches_one_read_per_entry() {
+    runtime().block_on(async {
+        let mut sim = sim(15);
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider, small()).await?;
+            let lens: Vec<usize> = (0..120).map(|i| 10 + (i * 53) % 3000).collect();
+            append_each(&mut journal, 4, &lens).await?;
+            Ok::<_, JournalError>(())
+        })
+        .await
+        .expect("write");
+        // Entry 1 (10 bytes) takes 80 bytes; entry 2's payload starts 64
+        // bytes into it.
+        flip(&mut sim, segment_path(1), 16 * 1024 + 80 + 70).await;
+
+        run(&mut sim, |provider| async move {
+            let (journal, recovery) = open(provider.clone(), small()).await?;
+            assert_eq!(recovery.corrupt.len(), 1);
+            let (start, next) = (journal.start_index(), journal.next_index());
+            let names = provider.list_dir(DIR).await?;
+            assert!(names.len() > 1, "the log spans several segments: {names:?}");
+
+            let batched = journal.read_range(start..next).await?;
+            assert_eq!(batched.len(), usize::try_from(next - start).expect("small"));
+            for (index, got) in (start..).zip(&batched) {
+                match (journal.read(index).await, got) {
+                    (Ok(one), Ok(many)) => {
+                        assert_eq!(&one, many);
+                        assert_eq!(many.tag, tag(index, 4));
+                    }
+                    (Err(JournalError::Corrupt(one)), Err(many)) => assert_eq!(one, *many),
+                    (one, many) => panic!("index {index}: {one:?} vs {many:?}"),
+                }
+            }
+            assert_eq!(batched[1].as_ref().err().map(|id| id.index), Some(2));
+
+            // Sub-ranges and the empty range agree too.
+            let middle = journal.read_range(start + 50..start + 70).await?;
+            assert_eq!(middle, batched[50..70]);
+            assert!(journal.read_range(next..next).await?.is_empty());
+            for bad in [start + 1..next + 1, start + 5..start + 4] {
+                assert!(matches!(
+                    journal.read_range(bad).await,
+                    Err(JournalError::OutOfRange { .. })
+                ));
+            }
+            Ok::<_, JournalError>(())
+        })
+        .await
+        .expect("read back");
+    });
+}
+
+fn keep() -> JournalConfig {
+    JournalConfig {
+        ambiguous_tail: AmbiguousTail::Keep,
+        ..small()
+    }
+}
+
+/// Under `AmbiguousTail::Keep` the ambiguous last entry stays in the log,
+/// marked corrupt, and is reported on every reopen until the caller
+/// resolves it — its identity is never lost to a local truncation.
+#[test]
+fn a_kept_ambiguous_last_entry_survives_reopen_until_resolved() {
+    runtime().block_on(async {
+        let mut sim = sim(16);
+        five_entries(&mut sim).await;
+        flip(&mut sim, segment_path(1), payload_byte(5)).await;
+        let ambiguous = EntryId {
+            index: 5,
+            epoch: 7,
+            tag: tag(5, 7),
+        };
+        for _ in 0..2 {
+            let (journal, recovery) = run(&mut sim, |provider| async move {
+                Journal::open(provider, DIR, keep()).await
+            })
+            .await
+            .expect("reopen");
+            assert_eq!(recovery.ambiguous_tail, Some(ambiguous));
+            assert!(recovery.corrupt.is_empty());
+            assert!(!recovery.torn_tail, "nothing was truncated");
+            assert_eq!(journal.next_index(), 6, "the entry is kept");
+            run(&mut sim, |_| async move {
+                assert!(matches!(
+                    journal.read(5).await,
+                    Err(JournalError::Corrupt(id)) if id == ambiguous
+                ));
+            })
+            .await;
+        }
+
+        // Writing past it makes it an ordinary corrupt entry.
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = Journal::open(provider, DIR, keep()).await?;
+            append_each(&mut journal, 8, &[64]).await
+        })
+        .await
+        .expect("append");
+        let (mut journal, recovery) = run(&mut sim, |provider| async move {
+            Journal::open(provider, DIR, keep()).await
+        })
+        .await
+        .expect("reopen");
+        assert_eq!(recovery.corrupt, vec![ambiguous]);
+        assert_eq!(recovery.ambiguous_tail, None);
+
+        // The caller resolves it — here, as not committed — by truncating.
+        run(&mut sim, |_| async move {
+            journal.truncate_suffix(5).await.expect("truncate");
+        })
+        .await;
+        let (journal, recovery) = run(&mut sim, |provider| async move {
+            Journal::open(provider, DIR, keep()).await
+        })
+        .await
+        .expect("reopen");
+        assert_eq!(recovery, Recovery::default());
+        assert_eq!(journal.next_index(), 5);
+    });
+}
+
+/// Five single-entry batches of 64-byte payloads: each entry is 128 bytes
+/// (a 64-byte header), packed contiguously from `data_start`.
 fn entry_offset(index: u64) -> u64 {
-    16 * 1024 + (index - 1) * 96
+    16 * 1024 + (index - 1) * 128
+}
+
+/// A byte inside entry `index`'s payload.
+fn payload_byte(index: u64) -> u64 {
+    entry_offset(index) + 80
 }
 
 /// Slot `i` of the first segment.
 fn slot_offset(index: u64) -> u64 {
-    8192 + (index - 1) * 32
+    8192 + (index - 1) * 64
 }
 
 async fn five_entries(sim: &mut SimWorld) {
@@ -354,15 +557,21 @@ fn a_damaged_entry_mid_log_is_reported_not_truncated() {
     runtime().block_on(async {
         let mut sim = sim(6);
         five_entries(&mut sim).await;
-        flip(&mut sim, segment_path(1), entry_offset(3) + 40).await;
+        flip(&mut sim, segment_path(1), payload_byte(3)).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
-        assert_eq!(recovery.corrupt, vec![(3, 7)]);
+        let damaged = EntryId {
+            index: 3,
+            epoch: 7,
+            tag: tag(3, 7),
+        };
+        assert_eq!(recovery.corrupt, vec![damaged], "reported with its tag");
         assert_eq!(recovery.ambiguous_tail, None);
         assert_eq!(journal.next_index(), 6, "nothing after the damage is lost");
+        assert_eq!(journal.entry_id(3), Some(damaged));
         run(&mut sim, |_| async move {
             assert!(matches!(
                 journal.read(3).await,
-                Err(JournalError::Corrupt { index: 3, epoch: 7 })
+                Err(JournalError::Corrupt(id)) if id == damaged
             ));
             let intact = journal.read(4).await.expect("intact");
             assert_eq!(intact.payload, payload(4, 64));
@@ -384,6 +593,11 @@ fn damaged_slots_are_rebuilt_from_intact_entries() {
         assert_eq!(recovery.slots_rewritten, 5);
         assert!(recovery.corrupt.is_empty());
         assert_eq!(journal.next_index(), 6);
+        assert_eq!(
+            journal.entry_id(4).map(|id| id.tag),
+            Some(tag(4, 7)),
+            "a rebuilt slot takes its tag from the entry"
+        );
         drop(journal);
         let (_, recovery) = reopen(&mut sim).await.expect("second reopen");
         assert_eq!(
@@ -401,7 +615,7 @@ fn a_lost_slot_write_is_rewritten() {
     runtime().block_on(async {
         let mut sim = sim(8);
         five_entries(&mut sim).await;
-        zero(&mut sim, segment_path(1), slot_offset(4), 64).await;
+        zero(&mut sim, segment_path(1), slot_offset(4), 128).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(recovery.slots_rewritten, 2);
         assert_eq!(journal.next_index(), 6);
@@ -415,7 +629,7 @@ fn a_double_fault_refuses_to_start() {
         let mut sim = sim(9);
         five_entries(&mut sim).await;
         flip(&mut sim, segment_path(1), slot_offset(3) + 9).await;
-        flip(&mut sim, segment_path(1), entry_offset(3) + 40).await;
+        flip(&mut sim, segment_path(1), payload_byte(3)).await;
         let opened = reopen(&mut sim).await.map(|_| ());
         assert!(
             matches!(opened, Err(JournalError::DoubleFault { index: 3 })),
@@ -431,8 +645,8 @@ fn a_torn_tail_is_truncated_and_scrubbed() {
     runtime().block_on(async {
         let mut sim = sim(10);
         five_entries(&mut sim).await;
-        zero(&mut sim, segment_path(1), slot_offset(4), 64).await;
-        flip(&mut sim, segment_path(1), entry_offset(4) + 40).await;
+        zero(&mut sim, segment_path(1), slot_offset(4), 128).await;
+        flip(&mut sim, segment_path(1), payload_byte(4)).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(
             journal.next_index(),
@@ -461,9 +675,16 @@ fn the_ambiguous_last_entry_is_truncated_and_reported() {
     runtime().block_on(async {
         let mut sim = sim(11);
         five_entries(&mut sim).await;
-        flip(&mut sim, segment_path(1), entry_offset(5) + 40).await;
+        flip(&mut sim, segment_path(1), payload_byte(5)).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
-        assert_eq!(recovery.ambiguous_tail, Some((5, 7)));
+        assert_eq!(
+            recovery.ambiguous_tail,
+            Some(EntryId {
+                index: 5,
+                epoch: 7,
+                tag: tag(5, 7)
+            })
+        );
         assert!(recovery.corrupt.is_empty());
         assert_eq!(journal.next_index(), 5);
     });
@@ -481,12 +702,13 @@ fn an_unreadable_entry_is_reported_corrupt() {
         })
         .await
         .expect("write");
-        // Entry i starts at 16384 + (i - 1) × 4032; block 6 (24576..28672)
+        // Entry i starts at 16384 + (i - 1) × 4064; block 6 (24576..28672)
         // holds the tail of entry 3 and the head of entry 4.
         sim.fail_file_with_eio(&segment_path(1), 50..51, EioTarget::Read)
             .expect("segment exists");
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
-        assert_eq!(recovery.corrupt, vec![(3, 7), (4, 7)]);
+        let indexes: Vec<u64> = recovery.corrupt.iter().map(|id| id.index).collect();
+        assert_eq!(indexes, vec![3, 4]);
         assert_eq!(journal.next_index(), 6);
     });
 }
@@ -557,14 +779,27 @@ fn storage(model: Model, rng: &mut Rng) -> StorageConfiguration {
 /// entry still in the log, in order.
 type Ledger = Arc<Mutex<Vec<(u64, u64, Vec<u8>)>>>;
 
+/// What the writer knows of its metadata: the last value `save_meta`
+/// acknowledged, and one it was saving when the crash hit (either may be
+/// what a reopen finds).
+#[derive(Debug, Default, Clone, Copy)]
+struct MetaState {
+    acked: Option<u64>,
+    pending: Option<u64>,
+}
+
+type MetaLedger = Arc<Mutex<MetaState>>;
+
 /// Tallies across seeds, to show the crashes landed where they matter.
 #[derive(Debug, Default)]
 struct Tally {
     torn: usize,
     ambiguous: usize,
+    ambiguous_kept: usize,
     corrupt_unacked: usize,
     refused: usize,
     corrupt_acked: usize,
+    meta_repaired: usize,
 }
 
 fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
@@ -587,6 +822,11 @@ fn under_the_papers_fault_model_no_acknowledged_entry_is_lost_or_corrupt() {
         tally.corrupt_unacked > 0,
         "no crash ever tore inside a batch"
     );
+    assert!(tally.ambiguous_kept > 0, "no ambiguous last entry was kept");
+    assert!(
+        tally.meta_repaired > 0,
+        "no crash ever split the metadata copies"
+    );
     assert_eq!(tally.refused + tally.corrupt_acked, 0);
 }
 
@@ -601,16 +841,26 @@ fn under_moonpools_full_physics_a_read_never_returns_wrong_data() {
 }
 
 /// Crash a writer repeatedly, checking every recovery against the ledger.
+/// Odd seeds keep the ambiguous last entry instead of truncating it.
 fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
     runtime().block_on(async {
         let mut sim = SimWorld::new_with_seed(seed);
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         sim.set_storage_config(storage(model, &mut rng));
+        let config = if seed % 2 == 1 { keep() } else { small() };
         let ledger: Ledger = Arc::new(Mutex::new(Vec::new()));
+        let meta: MetaLedger = Arc::new(Mutex::new(MetaState::default()));
 
         for round in 0..6 {
             let at = format!("{model:?} seed {seed} round {round}");
-            if !recover_and_check(&mut sim, &ledger, model, tally, &at).await {
+            let check = Check {
+                ledger: &ledger,
+                meta: &meta,
+                config: &config,
+                model,
+                at: &at,
+            };
+            if !recover_and_check(&mut sim, &check, tally).await {
                 return;
             }
             let ops = 1 + rng.below(12);
@@ -626,9 +876,11 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
                 .collect();
             let handle = tokio::spawn(write(
                 sim.storage_provider(ip()),
+                config.clone(),
                 round + 1,
                 plan,
                 Arc::clone(&ledger),
+                Arc::clone(&meta),
             ));
             for _ in 0..rng.below(400) {
                 if handle.is_finished() {
@@ -646,39 +898,51 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
     });
 }
 
+/// What one recovery is judged against.
+struct Check<'a> {
+    ledger: &'a Ledger,
+    meta: &'a MetaLedger,
+    config: &'a JournalConfig,
+    model: Model,
+    at: &'a str,
+}
+
 /// Reopen and judge the recovery against the ledger, then play the
 /// replication layer: an entry reported corrupt that was never acknowledged
 /// was never committed, so the log is cut before the first unreadable entry.
-/// Returns whether the seed can go on.
-async fn recover_and_check(
-    sim: &mut SimWorld,
-    ledger: &Ledger,
-    model: Model,
-    tally: &mut Tally,
-    at: &str,
-) -> bool {
-    let acked = ledger.lock().expect("ledger").clone();
+/// Every entry is read twice — one `read` per index and one `read_range` —
+/// and the two must agree. Returns whether the seed can go on.
+async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Tally) -> bool {
+    let (model, at) = (check.model, check.at);
+    let acked = check.ledger.lock().expect("ledger").clone();
     let acked_end = acked.last().map_or(1, |(index, _, _)| index + 1);
+    let config = check.config.clone();
     let outcome = run(sim, |provider| async move {
-        let (mut journal, recovery) = open(provider, small()).await?;
+        let (mut journal, recovery) = open(provider, config).await?;
+        let (start, next) = (journal.start_index(), journal.next_index());
+        let batched = journal.read_range(start..next).await?;
         let mut entries = Vec::new();
-        for index in journal.start_index()..journal.next_index() {
-            entries.push(journal.read(index).await);
+        for (index, many) in (start..next).zip(&batched) {
+            let one = journal.read(index).await;
+            match (&one, many) {
+                (Ok(one), Ok(many)) => assert_eq!(one, many, "read and read_range disagree"),
+                (Err(JournalError::Corrupt(one)), Err(many)) => assert_eq!(one, many),
+                (one, many) => panic!("index {index}: read {one:?}, read_range {many:?}"),
+            }
+            entries.push(one);
         }
         if let Some(bad) = entries.iter().position(Result::is_err) {
-            journal
-                .truncate_suffix(journal.start_index() + bad as u64)
-                .await?;
+            journal.truncate_suffix(start + bad as u64).await?;
             entries.truncate(bad);
         }
         let entries: Vec<Entry> = entries
             .into_iter()
             .map(|entry| entry.expect("kept"))
             .collect();
-        Ok::<_, JournalError>((recovery, entries))
+        Ok::<_, JournalError>((recovery, entries, journal.meta().map(<[u8]>::to_vec)))
     })
     .await;
-    let (recovery, entries) = match outcome {
+    let (recovery, entries, meta) = match outcome {
         Ok(found) => found,
         Err(error) => {
             assert!(
@@ -691,13 +955,23 @@ async fn recover_and_check(
     };
     tally.torn += usize::from(recovery.torn_tail);
     tally.ambiguous += usize::from(recovery.ambiguous_tail.is_some());
-    for (index, _) in &recovery.corrupt {
-        if *index >= acked_end {
+    tally.meta_repaired += usize::from(recovery.meta_repaired);
+    if check.config.ambiguous_tail == AmbiguousTail::Keep {
+        tally.ambiguous_kept += usize::from(recovery.ambiguous_tail.is_some());
+    }
+    for id in recovery.corrupt.iter().chain(&recovery.ambiguous_tail) {
+        assert_eq!(
+            id.tag,
+            tag(id.index, id.epoch),
+            "{at}: a corrupt entry is reported with the tag it was written with"
+        );
+        if id.index >= acked_end {
             tally.corrupt_unacked += 1;
         } else {
             assert!(
                 model == Model::Harsh,
-                "{at}: acknowledged entry {index} reported corrupt: {recovery:?}"
+                "{at}: acknowledged entry {} reported corrupt: {recovery:?}",
+                id.index
             );
             tally.corrupt_acked += 1;
         }
@@ -707,8 +981,8 @@ async fn recover_and_check(
     // still there.
     for (entry, (index, epoch, payload)) in entries.iter().zip(&acked) {
         assert_eq!(
-            (entry.index, entry.epoch, &entry.payload),
-            (*index, *epoch, payload),
+            (entry.index, entry.epoch, &entry.tag, &entry.payload),
+            (*index, *epoch, &tag(*index, *epoch), payload),
             "{at}: a read returned something other than what was acknowledged"
         );
     }
@@ -720,22 +994,36 @@ async fn recover_and_check(
             acked.len()
         );
     }
-    *ledger.lock().expect("ledger") = entries
+    *check.ledger.lock().expect("ledger") = entries
         .into_iter()
         .map(|entry| (entry.index, entry.epoch, entry.payload))
         .collect();
+
+    // The metadata is the last acknowledged value or the one being saved.
+    let mut state = check.meta.lock().expect("meta ledger");
+    let found = meta.map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8-byte meta")));
+    assert!(
+        found == state.acked || (found.is_some() && found == state.pending),
+        "{at}: metadata {found:?} is neither acknowledged nor in flight: {state:?}"
+    );
+    *state = MetaState {
+        acked: found,
+        pending: None,
+    };
     true
 }
 
-/// The writer: `(kind, count, len)` steps of appends and, one time in ten, a
-/// suffix truncation at an arbitrary index.
+/// The writer: `(kind, count, len)` steps of appends and, one time in ten
+/// each, a suffix truncation at an arbitrary index or a metadata save.
 async fn write(
     provider: SimStorageProvider,
+    config: JournalConfig,
     epoch: u64,
     plan: Vec<(u64, u64, u64)>,
     ledger: Ledger,
+    meta: MetaLedger,
 ) -> Result<(), JournalError> {
-    let (mut journal, _) = open(provider, small()).await?;
+    let (mut journal, _) = open(provider, config).await?;
     for (kind, count, len) in plan {
         let next = journal.next_index();
         let start = journal.start_index();
@@ -750,13 +1038,24 @@ async fn write(
             journal.truncate_suffix(from).await?;
             continue;
         }
+        if kind == 1 {
+            let value = epoch * 1000 + len;
+            meta.lock().expect("meta ledger").pending = Some(value);
+            journal.save_meta(&value.to_le_bytes()).await?;
+            *meta.lock().expect("meta ledger") = MetaState {
+                acked: Some(value),
+                pending: None,
+            };
+            continue;
+        }
         let len = usize::try_from(len).expect("small");
         let bytes: Vec<Vec<u8>> = (next..next + count)
             .map(|index| payload(index, len))
             .collect();
         let records: Vec<Record<'_>> = bytes
             .iter()
-            .map(|payload| Record { epoch, payload })
+            .zip(next..)
+            .map(|(payload, index)| Record::new(epoch, payload).with_tag(tag(index, epoch)))
             .collect();
         let range = journal.append(&records).await?;
         let mut ledger = ledger.lock().expect("ledger");

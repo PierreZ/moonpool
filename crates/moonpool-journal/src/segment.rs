@@ -8,16 +8,17 @@
 //! instead of reading them back.
 
 use std::io;
+use std::ops::Range;
 
 use moonpool_core::{BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
 
-use crate::JournalError;
 use crate::layout::{
     BLOCK, BLOCK_U64, ENTRY_HEADER_SIZE, EntryHeader, Geometry, Header, SLOT_SIZE,
-    SLOT_TABLE_OFFSET, Slot, SlotState, align_down, align_up, encode_entry, entry_crc_ok,
+    SLOT_TABLE_OFFSET, Slot, SlotState, Tag, align_down, align_up, encode_entry, entry_crc_ok,
     entry_size,
 };
 use crate::scan::{Decision, Found, Rec, decide};
+use crate::{JournalError, Record};
 
 /// Bytes read at a time while the recovery scan walks the data region.
 const SCAN_WINDOW: u64 = 1 << 20;
@@ -35,8 +36,35 @@ pub struct Entry {
     pub index: u64,
     /// The epoch (term) it was written with.
     pub epoch: u64,
+    /// The caller's identity it was written with.
+    pub tag: Tag,
     /// The caller's bytes.
     pub payload: Vec<u8>,
+}
+
+impl Entry {
+    /// The entry's identity: what its slot records.
+    #[must_use]
+    pub fn id(&self) -> EntryId {
+        EntryId {
+            index: self.index,
+            epoch: self.epoch,
+            tag: self.tag,
+        }
+    }
+}
+
+/// An entry's identity as its slot records it, far from the entry: known
+/// even when the entry's own bytes are lost, which is what lets a replicated
+/// caller re-fetch exactly that entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntryId {
+    /// Its log index.
+    pub index: u64,
+    /// The epoch (term) it was written with.
+    pub epoch: u64,
+    /// The caller's identity it was written with.
+    pub tag: Tag,
 }
 
 /// The file name of the segment whose first index is `first`:
@@ -68,7 +96,7 @@ pub(crate) fn segment_path(dir: &str, first: u64) -> String {
 /// What the recovery of one segment found.
 #[derive(Debug, Default)]
 pub(crate) struct SegmentRecovery {
-    pub corrupt: Vec<(u64, u64)>,
+    pub corrupt: Vec<EntryId>,
     pub slots_rewritten: usize,
     pub header_repaired: bool,
     /// The log ends in this segment (before its bound, for a sealed one).
@@ -535,12 +563,12 @@ impl<F: StorageFile> Segment<F> {
     /// entries contiguously into the data region, `pwrite` their slots in
     /// one call, `fdatasync` once. Nothing orders the two writes; recovery
     /// tells a torn batch from corruption instead.
-    pub async fn append(&mut self, batch: &[(u64, &[u8])]) -> Result<(), JournalError> {
+    pub async fn append(&mut self, batch: &[Record<'_>]) -> Result<(), JournalError> {
         let start = self.data_end;
         let base = align_down(start, BLOCK_U64);
         let total: u64 = batch
             .iter()
-            .map(|(_, payload)| entry_size(u32::try_from(payload.len()).expect("checked")))
+            .map(|record| entry_size(u32::try_from(record.payload.len()).expect("checked")))
             .sum();
         let blocks = usize_len((align_up(start + total, BLOCK_U64) - base) / BLOCK_U64)?;
         let mut data = self.file.buffer(blocks)?;
@@ -550,24 +578,26 @@ impl<F: StorageFile> Segment<F> {
         data.as_mut_slice()[..lead].copy_from_slice(&self.tail);
         let first_rel = self.recs.len();
         let mut at = lead;
-        for (epoch, payload) in batch {
-            let length = u32::try_from(payload.len()).expect("checked");
+        for record in batch {
+            let length = u32::try_from(record.payload.len()).expect("checked");
             let size = usize_len(entry_size(length))?;
             let index = self.next_index();
             let offset = base + u64_len(at);
             let entry_crc = encode_entry(
                 index,
-                *epoch,
-                payload,
+                record.epoch,
+                &record.tag,
+                record.payload,
                 &mut data.as_mut_slice()[at..at + size],
             );
             self.recs.push(Rec {
                 slot: Slot {
                     index,
-                    epoch: *epoch,
+                    epoch: record.epoch,
                     offset: u32::try_from(offset).expect("segment fits 32-bit offsets"),
                     length,
                     entry_crc,
+                    tag: record.tag,
                 },
                 corrupt: false,
             });
@@ -590,38 +620,71 @@ impl<F: StorageFile> Segment<F> {
     /// the slot's `entry_crc`. The slot comes from memory — the startup scan
     /// already verified it.
     pub async fn read(&self, index: u64) -> Result<Entry, JournalError> {
-        let rec = self.recs[usize_len(index - self.first)?];
-        let corrupt = JournalError::Corrupt {
-            index,
-            epoch: rec.slot.epoch,
-        };
+        let rec = self.rec(index);
         if rec.corrupt {
-            return Err(corrupt);
+            return Err(JournalError::Corrupt(rec.slot.id()));
         }
         let len = ENTRY_HEADER_SIZE + rec.slot.length as usize;
         let (bytes, failed) = read_bytes(&self.file, u64::from(rec.slot.offset), len).await?;
-        let intact = !failed
-            && EntryHeader::parse(&bytes).is_some_and(|header| {
-                header.index == index
-                    && header.epoch == rec.slot.epoch
-                    && header.length == rec.slot.length
-                    && header.crc == rec.slot.entry_crc
-                    && entry_crc_ok(&header, &bytes)
-            });
-        if !intact {
-            return Err(corrupt);
-        }
-        Ok(Entry {
-            index,
-            epoch: rec.slot.epoch,
-            payload: bytes[ENTRY_HEADER_SIZE..].to_vec(),
-        })
+        verify(&rec, &bytes, failed).map_err(JournalError::Corrupt)
     }
 
-    /// The epoch recorded for `index`, which this segment holds.
-    pub fn epoch(&self, index: u64) -> Option<u64> {
+    /// Read and verify every entry in `range` (all held by this segment),
+    /// through contiguous reads of up to [`SCAN_WINDOW`] bytes: entries are
+    /// packed back to back, so the span from the first to the last is one
+    /// sequential read instead of one per entry. Each entry comes back
+    /// intact or as the identity of a corrupt one.
+    pub async fn read_range(
+        &self,
+        range: Range<u64>,
+        out: &mut Vec<Result<Entry, EntryId>>,
+    ) -> Result<(), JournalError> {
+        let mut index = range.start;
+        while index < range.end {
+            // One window: entries from `index` while their span stays within
+            // SCAN_WINDOW (always at least one entry, however large).
+            let start = u64::from(self.rec(index).slot.offset);
+            let mut stop = index + 1;
+            let mut end = self.rec(index).end();
+            while stop < range.end {
+                let next = self.rec(stop);
+                if u64::from(next.slot.offset) < start || next.end() - start > SCAN_WINDOW {
+                    break;
+                }
+                end = end.max(next.end());
+                stop += 1;
+            }
+            let base = align_down(start, BLOCK_U64);
+            let limit = align_up(end, BLOCK_U64);
+            let mut buf = self.file.buffer(usize_len((limit - base) / BLOCK_U64)?)?;
+            let failed =
+                read_blocks_tolerant(&self.file, base / BLOCK_U64, buf.as_mut_slice()).await?;
+            let bytes = buf.as_slice();
+            for at in index..stop {
+                let rec = self.rec(at);
+                if rec.corrupt {
+                    out.push(Err(rec.slot.id()));
+                    continue;
+                }
+                let from = usize_len(u64::from(rec.slot.offset) - base)?;
+                let to = from + ENTRY_HEADER_SIZE + rec.slot.length as usize;
+                let damaged = failed[from / BLOCK..to.div_ceil(BLOCK)].contains(&true);
+                out.push(verify(&rec, &bytes[from..to], damaged));
+            }
+            index = stop;
+        }
+        Ok(())
+    }
+
+    /// The in-memory record of `index`, which this segment holds.
+    fn rec(&self, index: u64) -> Rec {
+        self.recs[usize::try_from(index - self.first).expect("index within the segment")]
+    }
+
+    /// The identity recorded for `index`, which this segment holds.
+    pub fn id(&self, index: u64) -> Option<EntryId> {
         let rel = usize::try_from(index.checked_sub(self.first)?).ok()?;
-        self.recs.get(rel).map(|rec| rec.slot.epoch)
+        self.recs.get(rel).map(|rec| rec.slot.id())
     }
 
     /// Discard `index` and everything after it in this segment, cleaning up
@@ -651,6 +714,31 @@ impl<F: StorageFile> Segment<F> {
     }
 }
 
+/// Check `bytes` — the entry `rec` locates, header and payload, `damaged`
+/// when the medium failed to read part of it — against its slot: its CRC,
+/// and that its index, epoch, length, CRC and tag agree with the slot.
+fn verify(rec: &Rec, bytes: &[u8], damaged: bool) -> Result<Entry, EntryId> {
+    let slot = rec.slot;
+    let intact = !damaged
+        && EntryHeader::parse(bytes).is_some_and(|header| {
+            header.index == slot.index
+                && header.epoch == slot.epoch
+                && header.length == slot.length
+                && header.crc == slot.entry_crc
+                && header.tag == slot.tag
+                && entry_crc_ok(&header, bytes)
+        });
+    if !intact {
+        return Err(slot.id());
+    }
+    Ok(Entry {
+        index: slot.index,
+        epoch: slot.epoch,
+        tag: slot.tag,
+        payload: bytes[ENTRY_HEADER_SIZE..ENTRY_HEADER_SIZE + slot.length as usize].to_vec(),
+    })
+}
+
 /// Whether an intact entry for `index` sits at `offset`: its magic, its CRC,
 /// and its index (the monotonic-index check that catches a misdirected write
 /// whose CRC still passes). When the slot is valid, the entry must also
@@ -678,7 +766,8 @@ async fn probe<F: StorageFile>(
     if let Some(slot) = expected
         && (slot.epoch != header.epoch
             || slot.length != header.length
-            || slot.entry_crc != header.crc)
+            || slot.entry_crc != header.crc
+            || slot.tag != header.tag)
     {
         return Ok(None);
     }
