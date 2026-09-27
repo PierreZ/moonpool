@@ -72,7 +72,7 @@ use self::upgrade::{Acceptor, Connector, PeerContext};
 use crate::call::receiver::{EndpointOwner, Inbox, RequestStream, endpoint_pair};
 use crate::call::reply::{Outstanding, ReplyContext, ReplyRoute};
 use crate::codec::CodecId;
-use crate::config::RpcConfig;
+use crate::config::{EndpointQueue, RpcConfig};
 use crate::endpoint::registry::{Registry, RegistryError};
 use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 use crate::error::{CallIdentity, ErrorReason, RpcError};
@@ -458,12 +458,14 @@ impl<P: Providers> Shared<P> {
         &self,
         access: AccessClass,
         well_known: Option<WellKnownId>,
+        queue: Option<EndpointQueue>,
     ) -> Result<(ServiceRef<M>, RequestStream<M>), RpcError> {
         self.refuse_if_closing()?;
         let address = self
             .address
             .ok_or(RpcError::not_admitted(ErrorReason::NotListening))?;
-        let (inbox, receiver) = endpoint_pair::<M>(self.queue_capacity());
+        let capacity = queue.map_or_else(|| self.queue_capacity(), EndpointQueue::budget);
+        let (inbox, receiver) = endpoint_pair::<M>(capacity);
         let token = self.insert(Registration::single(inbox, access), well_known)?;
         let endpoint = Endpoint::new(address, self.incarnation, token);
         let owner: Weak<dyn EndpointOwner> = self.this.clone();

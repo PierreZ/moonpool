@@ -12,9 +12,9 @@ use std::time::Duration;
 use moonpool_core::TokioProviders;
 use moonpool_rpc::security::SecurityConfig;
 use moonpool_rpc::{
-    Acceptor, AccessClass, CodecId, Connector, DecodeError, EncodeError, Endpoint, ErrorReason,
-    Execution, IncomingRequest, MethodId, PeerContext, RequestStream, RpcConfig, RpcDriver,
-    RpcError, RpcHandle, RpcMethod, SchemaVersion, ServiceRef, Wire,
+    Acceptor, AccessClass, CodecId, Connector, DecodeError, EncodeError, Endpoint, EndpointQueue,
+    ErrorReason, Execution, IncomingRequest, MethodId, PeerContext, RequestStream, RpcConfig,
+    RpcDriver, RpcError, RpcHandle, RpcMethod, SchemaVersion, ServiceRef, Wire,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -348,6 +348,88 @@ async fn local_and_remote_routes_share_every_admission_contract() {
         stats.requests_admitted, 4,
         "only the good calls reached a handler"
     );
+
+    server_driver.abort();
+    client_driver.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_registered_with_its_own_queue_admits_to_that_queue() {
+    // The runtime's queue holds one request; the two endpoints below carry
+    // their own, deeper ones.
+    let config = RpcConfig {
+        endpoint_queue_capacity: 1,
+        ..RpcConfig::default()
+    };
+    assert_eq!(
+        config
+            .endpoint_queue()
+            .map(|queue| (queue.requests().get(), queue.bytes().get())),
+        Some((1, 16 << 20)),
+        "the runtime-wide default queue"
+    );
+    let (server, server_driver) = listen(config).await;
+    let (client, client_driver) = client_only();
+    let queue = |requests: usize| {
+        EndpointQueue::new(
+            std::num::NonZeroUsize::new(requests).expect("non-zero"),
+            std::num::NonZeroU64::new(1 << 20).expect("non-zero"),
+        )
+    };
+    let (dynamic, mut dynamic_stream) = server
+        .register_with::<Held>(AccessClass::Public, queue(3))
+        .expect("register");
+    let (well_known, mut well_known_stream) = server
+        .register_well_known_with::<Held>(
+            moonpool_rpc::WellKnownId::new(7),
+            AccessClass::Public,
+            queue(2),
+        )
+        .expect("register");
+
+    // Fill each queue without taking anything, then overflow it.
+    let mut held = Vec::new();
+    for (target, depth) in [(&dynamic, 3_u64), (&well_known, 2)] {
+        let client = target.bind(&client);
+        let admitted_before = server.stats().expect("running").requests_admitted;
+        for id in 0..depth {
+            held.push(tokio::spawn({
+                let client = client.clone();
+                async move { client.try_get_reply(&ping(id)).await }
+            }));
+        }
+        assert!(
+            eventually(|| server
+                .stats()
+                .is_some_and(|s| s.requests_admitted == admitted_before + depth))
+            .await,
+            "every request up to the endpoint's own depth is admitted"
+        );
+        assert_eq!(
+            outcome(client.try_get_reply(&ping(depth)).await),
+            Err((ErrorReason::Overloaded, Execution::NotAdmitted)),
+            "the request past it is refused before admission"
+        );
+    }
+
+    // Everything admitted is still there to be taken.
+    for _ in 0..3 {
+        let incoming = dynamic_stream.recv().await.expect("queued");
+        incoming.reply.send(&Pong {
+            id: 0,
+            text: String::new(),
+        });
+    }
+    for _ in 0..2 {
+        let incoming = well_known_stream.recv().await.expect("queued");
+        incoming.reply.send(&Pong {
+            id: 0,
+            text: String::new(),
+        });
+    }
+    for call in held {
+        assert!(call.await.expect("join").is_ok());
+    }
 
     server_driver.abort();
     client_driver.abort();

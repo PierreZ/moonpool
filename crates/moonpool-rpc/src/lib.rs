@@ -194,8 +194,8 @@ pub use call::{
 };
 pub use codec::{CodecId, DecodeError, EncodeError, Wire};
 pub use config::{
-    InboundSharing, InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy, ResourceLimits,
-    RpcConfig, StreamPolicy,
+    EndpointQueue, InboundSharing, InvalidConfig, MAX_FRAME_BYTES, MIN_FRAME_BYTES, PeerPolicy,
+    ResourceLimits, RpcConfig, StreamPolicy,
 };
 pub use endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 pub use error::{ErrorReason, Execution, RpcError};

@@ -1,6 +1,7 @@
 //! Transport limits and settings.
 
 use std::net::SocketAddr;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::Duration;
 
 use crate::endpoint::Incarnation;
@@ -9,6 +10,55 @@ use crate::protocol::{
     REJECTION_ENVELOPE_LEN, STREAM_END_ENVELOPE_LEN, request_envelope_len, stream_item_frame_len,
     stream_request_envelope_len,
 };
+
+/// One endpoint's admission queue: the requests and encoded request bytes it
+/// may hold admitted but unread. Beyond either, new requests are refused
+/// [`ErrorReason::Overloaded`](crate::ErrorReason::Overloaded) with
+/// [`Execution::NotAdmitted`](crate::Execution::NotAdmitted).
+///
+/// Every endpoint takes the runtime's ([`RpcConfig::endpoint_queue`]) unless
+/// it was registered with its own
+/// ([`RpcHandle::register_with`](crate::RpcHandle::register_with),
+/// [`RpcHandle::register_well_known_with`](crate::RpcHandle::register_well_known_with),
+/// [`ServiceGroup::serve_with`](crate::ServiceGroup::serve_with)): one
+/// runtime can serve a latency-sensitive endpoint with a short queue beside
+/// a bulk one with a deep queue. Both bounds are non-zero by construction:
+/// an endpoint that can queue nothing could never admit a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointQueue {
+    requests: NonZeroUsize,
+    bytes: NonZeroU64,
+}
+
+impl EndpointQueue {
+    /// A queue of at most `requests` requests and `bytes` request bytes.
+    #[must_use]
+    pub const fn new(requests: NonZeroUsize, bytes: NonZeroU64) -> Self {
+        Self { requests, bytes }
+    }
+
+    /// The request bound.
+    #[must_use]
+    pub const fn requests(self) -> NonZeroUsize {
+        self.requests
+    }
+
+    /// The byte bound.
+    #[must_use]
+    pub const fn bytes(self) -> NonZeroU64 {
+        self.bytes
+    }
+
+    /// This queue with another request bound, the same byte bound.
+    #[must_use]
+    pub const fn with_requests(self, requests: NonZeroUsize) -> Self {
+        Self { requests, ..self }
+    }
+
+    pub(crate) fn budget(self) -> (usize, u64) {
+        (self.requests.get(), self.bytes.get())
+    }
+}
 
 /// The smallest accepted [`RpcConfig::max_frame_bytes`]: every fixed
 /// envelope (handshake, empty request, rejection) must fit a frame.
@@ -514,6 +564,19 @@ impl RpcConfig {
             ));
         }
         Ok(())
+    }
+
+    /// The queue an endpoint registered without its own takes:
+    /// [`endpoint_queue_capacity`](Self::endpoint_queue_capacity) requests
+    /// and [`ResourceLimits::endpoint_queue_bytes`] bytes, `None` when
+    /// either is zero (a configuration [`validate`](Self::validate)
+    /// refuses).
+    #[must_use]
+    pub fn endpoint_queue(&self) -> Option<EndpointQueue> {
+        Some(EndpointQueue::new(
+            NonZeroUsize::new(self.endpoint_queue_capacity)?,
+            NonZeroU64::new(self.limits.endpoint_queue_bytes)?,
+        ))
     }
 
     /// The version range this runtime announces in its handshake:
