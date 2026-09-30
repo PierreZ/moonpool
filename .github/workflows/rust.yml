@@ -59,7 +59,7 @@ jobs:
         run: scripts/ci/print-traces.sh
       - name: Upload failure traces
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: traces-test
           path: |
@@ -245,7 +245,7 @@ jobs:
         run: scripts/ci/print-traces.sh
       - name: Upload failure traces
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: traces-macos
           path: |
@@ -288,7 +288,7 @@ jobs:
       # in the log above; upload it on failure beside the rest.
       - name: Upload failure traces
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: traces-sim-${{ matrix.sim }}
           path: target/ci-traces/
