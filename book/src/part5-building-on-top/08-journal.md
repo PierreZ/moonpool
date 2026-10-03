@@ -191,6 +191,15 @@ repair durable. Uniform damage almost never hits a pair like an entry and
 its own slot. Aimed damage does: a few thousand seeds reach every verdict,
 double faults included.
 
+The atlas also aims the simulator's own random faults. After every write,
+the crash loop's `Aimed` model hands `Journal::atlas` to the disk as a
+`FaultFocus` (slots weighted 8, entries and twin copies 4, zeros 0.1), so
+the crash physics damage identifiers and live entries rather than the
+preallocated zeros. A crash can only damage the sectors dirty at that
+moment, so the gain is bounded, but it is real: on 250 seeds the damage
+reported against acknowledged data rose from 40 to 67, and refusals from 1
+to 4. The guarantee is unchanged: a read never returns wrong data.
+
 ## The Example Simulation
 
 [`journal.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/journal.rs)
