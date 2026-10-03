@@ -374,3 +374,22 @@ fn a_config_draws_only_its_pattern_kinds() {
     }
     assert_eq!(kinds.len(), 2, "both allowed kinds are drawn");
 }
+
+/// A process that declares damage its disk cannot show holds the turn
+/// until it declares itself recovered.
+#[test]
+fn a_declared_recovery_holds_the_turn() {
+    let mut sim = rolling_world(&[topology()]);
+    assert!(!write_and_crash(&mut sim, ip(3), Some(layout(2))).is_empty());
+    repair(&mut sim, ip(3));
+    sim.set_recovering(ip(3), true);
+    assert!(
+        write_and_crash(&mut sim, ip(4), Some(layout(3))).is_empty(),
+        "b's disk is clean but b still recovers: c waits"
+    );
+    sim.set_recovering(ip(3), false);
+    assert!(
+        !write_and_crash(&mut sim, ip(4), Some(layout(3))).is_empty(),
+        "b recovered, c takes the turn"
+    );
+}

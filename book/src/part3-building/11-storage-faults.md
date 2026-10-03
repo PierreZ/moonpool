@@ -568,6 +568,10 @@ the domains at the chosen level (machine, zone or datacenter):
   damage passes the turn on as soon as another domain's disk is up for a
   fault, so an idle domain never stalls the rotation; a domain that never
   repairs does, and a run stuck on one turn is the evidence.
+  Damage a disk cannot show counts too: a process that knows it lost a
+  record (and kept, say, only a "faulty" marker that a checkpoint rewrote
+  onto clean sectors) declares `ctx.storage().set_recovering(true)` until
+  its peers give the record back, and the turn waits on it.
 
 `ReplicatedFaults::patterns(&[..])` narrows the draw to the
 `FaultPatternKind`s a system's recovery can take: a striped pattern damages

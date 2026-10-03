@@ -513,6 +513,18 @@ impl StorageEngine {
         self.state.eligibility.set(mask);
     }
 
+    /// Record whether `ip` still holds damage its disk cannot show.
+    pub(crate) fn set_recovering(&mut self, ip: IpAddr, recovering: bool) {
+        let changed = if recovering {
+            self.state.recovering.insert(ip)
+        } else {
+            self.state.recovering.remove(&ip)
+        };
+        if changed {
+            self.state.note_damage_changed();
+        }
+    }
+
     /// Add one group's replicated fault pattern.
     pub(crate) fn add_replication_plan(
         &mut self,
@@ -1807,6 +1819,7 @@ impl StorageEngine {
         self.state.disk_episodes.remove(&ip);
         self.state.focus.remove(&ip);
         self.state.layouts.remove(&ip);
+        self.state.recovering.remove(&ip);
         let files = self
             .state
             .files

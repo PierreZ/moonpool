@@ -432,6 +432,17 @@ impl SimWorld {
         self.inner.write().storage.publish_layout(ip, regions);
     }
 
+    /// Declare whether `ip` still holds damage its disk cannot show (see
+    /// [`SimStorageProvider::set_recovering`](crate::SimStorageProvider::set_recovering)).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn set_recovering(&self, ip: IpAddr, recovering: bool) {
+        self.inner.write().storage.set_recovering(ip, recovering);
+    }
+
     /// Remove `ip`'s fault focus: every sector of its disk weighs 1 again.
     ///
     /// # Panics

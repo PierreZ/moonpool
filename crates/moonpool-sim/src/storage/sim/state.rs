@@ -146,6 +146,9 @@ pub(crate) struct StorageState {
     pub(crate) replication: Vec<ReplicationSlot>,
     /// Per-process published layouts, which the pattern reads.
     pub(crate) layouts: BTreeMap<IpAddr, Arc<LayoutIndex>>,
+    /// Processes that declared damage their disk cannot show (see
+    /// `SimStorageProvider::set_recovering`).
+    pub(crate) recovering: std::collections::BTreeSet<IpAddr>,
     /// Every fault the disk has injected, oldest first, drained by the caller.
     pub(crate) fault_records: Vec<StorageFaultRecord>,
     /// What each simulated crash did, per file, drained by the caller.
@@ -179,6 +182,7 @@ impl StorageState {
             focus: BTreeMap::new(),
             replication: Vec::new(),
             layouts: BTreeMap::new(),
+            recovering: std::collections::BTreeSet::new(),
             fault_records: Vec::new(),
             crash_reports: Vec::new(),
             barrier_violation_armed: false,
@@ -279,10 +283,17 @@ impl StorageState {
         }
     }
 
-    /// Whether any named file of a process in the window starting at
-    /// `turn` holds a damaged sector its process still publishes (or any
-    /// damaged sector, if it publishes nothing).
+    /// Whether a process in the window starting at `turn` declared itself
+    /// still recovering, or any of its named files holds a damaged sector
+    /// it still publishes (or any damaged sector, if it publishes nothing).
     fn window_damaged(&self, plan: &ReplicationPlan, turn: usize) -> bool {
+        let in_window = |ip: &IpAddr| {
+            plan.domain(*ip)
+                .is_some_and(|domain| plan.in_window(domain, turn))
+        };
+        if self.recovering.iter().any(in_window) {
+            return true;
+        }
         self.path_to_file.iter().any(|((owner, path), file_id)| {
             if !plan
                 .domain(*owner)

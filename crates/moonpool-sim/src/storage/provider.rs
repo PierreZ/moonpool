@@ -77,6 +77,21 @@ impl SimStorageProvider {
         Ok(())
     }
 
+    /// Declare whether this process still holds damage its disk cannot
+    /// show: a record it knows it lost (and kept only as a "faulty" marker,
+    /// say) that its peers have not yet given back. A rolling replicated
+    /// fault pattern counts the declaration as damage: the turn stays on
+    /// this process's domain until it declares `false` and its disk holds
+    /// no damage either. A wipe of this process's storage clears it.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn set_recovering(&self, recovering: bool) -> io::Result<()> {
+        self.sim()?.set_recovering(self.owner_ip, recovering);
+        Ok(())
+    }
+
     /// The replicated fault pattern this seed drew for this process's
     /// group, if the run covers it.
     ///
