@@ -26,7 +26,8 @@ use crate::{
     },
     storage::{
         EioTarget, FileCrashReport, FileImage, StorageConfiguration, StorageEligibilityMask,
-        StorageError, StorageFaultKind, StorageFaultRecord, StorageOperation, faults::sector_range,
+        StorageError, StorageFaultKind, StorageFaultRecord, StorageOperation,
+        faults::{FaultFocus, sector_range, weighted},
     },
 };
 
@@ -507,6 +508,18 @@ impl StorageEngine {
     /// a sector.
     pub(crate) fn set_eligibility_mask(&mut self, mask: Option<StorageEligibilityMask>) {
         self.state.eligibility.set(mask);
+    }
+
+    /// Install, replace, or (with `None`) remove `ip`'s fault focus.
+    pub(crate) fn set_fault_focus(&mut self, ip: IpAddr, focus: Option<FaultFocus>) {
+        match focus {
+            Some(focus) => {
+                self.state.focus.insert(ip, std::sync::Arc::new(focus));
+            }
+            None => {
+                self.state.focus.remove(&ip);
+            }
+        }
     }
 
     /// Drain the faults injected so far.
@@ -1194,9 +1207,13 @@ impl StorageEngine {
             .files
             .get(&pending.file_id)
             .is_some_and(|file| file.image.read_fails(sectors.clone()));
-        let random_hit =
-            config.read_eio_probability > 0.0 && eio_roll < config.read_eio_probability;
-        if targeted || (random_hit && self.state.eligible_range(&path, sectors.clone())) {
+        let random_hit = config.read_eio_probability > 0.0
+            && eio_roll
+                < weighted(
+                    config.read_eio_probability,
+                    self.state.weight_range(owner_ip, &path, sectors.clone()),
+                );
+        if targeted || random_hit {
             assert_reachable!("disk fault: read failed with EIO");
             self.record(&path, StorageFaultKind::EioRead, Some(sectors));
             actions.fault(SimFaultEvent::StorageReadFault {
@@ -1215,8 +1232,9 @@ impl StorageEngine {
         let mut read_faulted = false;
         if config.read_corruption_probability > 0.0 {
             for sector in sectors.clone() {
-                let hit = sim_random::<f64>() < config.read_corruption_probability;
-                if hit && self.state.eligible(&path, sector) {
+                let roll = sim_random::<f64>();
+                let weight = self.state.weight(owner_ip, &path, sector);
+                if roll < weighted(config.read_corruption_probability, weight) {
                     if let Some(file) = self.state.files.get_mut(&pending.file_id) {
                         file.image.corrupt(sector..sector + 1);
                     }
@@ -1392,14 +1410,25 @@ impl StorageEngine {
     ) -> WriteLanding {
         let sectors = sector_range(offset, len);
         let eio_roll = sim_random::<f64>();
-        let (targeted, path) = self.state.files.get(&file_id).map_or_else(
-            || (false, String::new()),
-            |file| (file.image.write_fails(sectors.clone()), file.path.clone()),
+        let (targeted, path, owner) = self.state.files.get(&file_id).map_or_else(
+            || (false, String::new(), None),
+            |file| {
+                (
+                    file.image.write_fails(sectors.clone()),
+                    file.path.clone(),
+                    Some(file.owner_ip),
+                )
+            },
         );
         let path = path.as_str();
-        let random_eio =
-            config.write_eio_probability > 0.0 && eio_roll < config.write_eio_probability;
-        if targeted || (random_eio && self.state.eligible_range(path, sectors.clone())) {
+        let weigh_range = |state: &StorageState, sectors: Range<u64>| match owner {
+            Some(owner) => state.weight_range(owner, path, sectors),
+            None => f64::from(u8::from(state.eligible_range(path, sectors))),
+        };
+        let range_weight = weigh_range(&self.state, sectors.clone());
+        let random_eio = config.write_eio_probability > 0.0
+            && eio_roll < weighted(config.write_eio_probability, range_weight);
+        if targeted || random_eio {
             assert_reachable!("disk fault: write failed with EIO");
             return WriteLanding::Eio;
         }
@@ -1407,8 +1436,7 @@ impl StorageEngine {
         let phantom_roll = sim_random::<f64>();
         let misdirect_roll = sim_random::<f64>();
         if config.phantom_write_probability > 0.0
-            && phantom_roll < config.phantom_write_probability
-            && self.state.eligible_range(path, sectors.clone())
+            && phantom_roll < weighted(config.phantom_write_probability, range_weight)
         {
             assert_reachable!("disk fault: phantom write dropped");
             return WriteLanding::Phantom;
@@ -1426,9 +1454,11 @@ impl StorageEngine {
                 0
             };
             let mistaken_sectors = sector_range(mistaken, len);
+            // A misdirection's draw is gated by the configured rate alone,
+            // so the focus only grants immunity here, never extra hits.
             if mistaken != offset
-                && self.state.eligible_range(path, sectors)
-                && self.state.eligible_range(path, mistaken_sectors)
+                && range_weight > 0.0
+                && weigh_range(&self.state, mistaken_sectors) > 0.0
             {
                 assert_reachable!("disk fault: misdirected write landed elsewhere");
                 return WriteLanding::At(mistaken);
@@ -1450,10 +1480,12 @@ impl StorageEngine {
         if config.write_corruption_probability <= 0.0 {
             return false;
         }
+        let owner = self.state.files.get(&file_id).map(|file| file.owner_ip);
         let mut corrupted = false;
         for sector in sector_range(offset, len) {
-            let hit = sim_random::<f64>() < config.write_corruption_probability;
-            if hit && self.state.eligible(path, sector) {
+            let roll = sim_random::<f64>();
+            let weight = owner.map_or(0.0, |owner| self.state.weight(owner, path, sector));
+            if roll < weighted(config.write_corruption_probability, weight) {
                 if let Some(file) = self.state.files.get_mut(&file_id) {
                     file.image.corrupt(sector..sector + 1);
                 }
@@ -1501,15 +1533,13 @@ impl StorageEngine {
         // A lying sync reports a sector durable while leaving it volatile;
         // the crash oracle later reports what that lie cost.
         self.state.barrier_violation_armed |= config.barrier_violation_probability > 0.0;
-        let eligibility = self.state.eligibility.mask();
-        let eligible =
-            move |sector: u64| eligibility.as_ref().is_none_or(|mask| mask(&path, sector));
+        let weigh = self.state.weigher(owner_ip, &path);
         let Some(file) = self.state.files.get_mut(&pending.file_id) else {
             return Err(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
             });
         };
-        file.image.sync(&config, &eligible);
+        file.image.sync(&config, &weigh);
         Ok(())
     }
 
@@ -1646,15 +1676,11 @@ impl StorageEngine {
             let Some(path) = self.state.files.get(file_id).map(|file| file.path.clone()) else {
                 continue;
             };
-            let eligibility = self.state.eligibility.mask();
-            let eligible = {
-                let path = path.clone();
-                move |sector: u64| eligibility.as_ref().is_none_or(|mask| mask(&path, sector))
-            };
+            let weigh = self.state.weigher(ip, &path);
             let Some(file) = self.state.files.get_mut(file_id) else {
                 continue;
             };
-            let report = file.image.crash(&path, &config, armed, &eligible);
+            let report = file.image.crash(&path, &config, armed, &weigh);
             for sector in &report.lost_synced {
                 self.state.record_fault(StorageFaultRecord {
                     path: path.clone(),
@@ -1697,6 +1723,7 @@ impl StorageEngine {
     pub(crate) fn wipe_process(&mut self, ip: IpAddr) -> StorageActions {
         self.state.failed_disks.remove(&ip);
         self.state.disk_episodes.remove(&ip);
+        self.state.focus.remove(&ip);
         let files = self
             .state
             .files

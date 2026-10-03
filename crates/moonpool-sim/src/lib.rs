@@ -192,7 +192,7 @@ pub use network::{
 
 // Storage exports
 pub use storage::{
-    CrashOutcome, EioTarget, FileCrashReport, FileImage, SECTOR_SIZE, SectorBitSet,
+    CrashOutcome, EioTarget, FaultFocus, FileCrashReport, FileImage, SECTOR_SIZE, SectorBitSet,
     SectorResolution, SimStorageProvider, StorageConfiguration, StorageEligibilityMask,
     StorageError, StorageFaultKind, StorageFaultRecord,
 };

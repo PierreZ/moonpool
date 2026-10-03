@@ -361,6 +361,29 @@ impl SimWorld {
         self.inner.write().storage.set_eligibility_mask(Some(mask));
     }
 
+    /// Weigh where random faults land on `ip`'s disk (see
+    /// [`FaultFocus`](crate::storage::FaultFocus)), replacing any focus it
+    /// had. A process sets its own through
+    /// [`SimStorageProvider::focus_faults`](crate::SimStorageProvider::focus_faults).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self, focus))]
+    pub fn set_fault_focus(&self, ip: IpAddr, focus: crate::storage::FaultFocus) {
+        self.inner.write().storage.set_fault_focus(ip, Some(focus));
+    }
+
+    /// Remove `ip`'s fault focus: every sector of its disk weighs 1 again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn clear_fault_focus(&self, ip: IpAddr) {
+        self.inner.write().storage.set_fault_focus(ip, None);
+    }
+
     /// Remove the eligibility mask: every sector becomes eligible again.
     ///
     /// # Panics

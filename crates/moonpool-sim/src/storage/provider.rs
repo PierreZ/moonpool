@@ -36,6 +36,31 @@ impl SimStorageProvider {
         Self { sim, owner_ip }
     }
 
+    /// Weigh where random faults land on this process's disk: the sectors a
+    /// [`FaultFocus`](super::FaultFocus) names get its weights, every other
+    /// one its background weight. Replaces any focus the disk had; a wipe of
+    /// this process's storage clears it. A harness that knows its on-disk
+    /// layout calls this to aim the configured fault families at the bytes
+    /// that matter.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn focus_faults(&self, focus: super::FaultFocus) -> io::Result<()> {
+        self.sim()?.set_fault_focus(self.owner_ip, focus);
+        Ok(())
+    }
+
+    /// Remove this process's fault focus.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn clear_fault_focus(&self) -> io::Result<()> {
+        self.sim()?.clear_fault_focus(self.owner_ip);
+        Ok(())
+    }
+
     /// Upgrade the weak simulation handle, mapping a dropped simulation to an
     /// I/O error so storage operations can propagate it with `?`.
     fn sim(&self) -> io::Result<crate::sim::SimWorld> {

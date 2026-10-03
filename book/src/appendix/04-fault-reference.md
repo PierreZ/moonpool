@@ -130,6 +130,7 @@ sampled one. Coordinates are a file path and a flat sector range.
 | `SimWorld::clear_file_eio(path, target)` | Clear the above |
 | `SimWorld::corrupt_durable_out_of_band(path, sector)` | Mutate a durable sector behind the crash model — a deliberate simulator bug, for testing the oracle |
 | `SimWorld::set_storage_eligibility_mask(mask)` | `(path, sector) -> bool`, consulted before any random fault damages a sector |
+| `SimStorageProvider::focus_faults(focus)` / `SimWorld::set_fault_focus(ip, focus)` | Weigh one process's random faults by byte range (`FaultFocus`): probabilities scale with the weight, 0 is immune |
 | `SimWorld::take_storage_fault_records()` | Drain the faults injected so far |
 | `SimWorld::take_storage_crash_reports()` | Drain what each crash did, per file and per sector |
 

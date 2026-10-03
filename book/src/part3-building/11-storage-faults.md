@@ -484,6 +484,34 @@ damage all copies of one record" without moonpool knowing what a replica is
 (TigerBeetle's `ClusterFaultAtlas` pattern). Rolls happen *before* the mask is
 consulted, so installing one never shifts the random stream.
 
+A mask only says *whether* a sector may be damaged. A **fault focus** says
+*how likely*: a harness that knows its on-disk layout weighs byte ranges of
+its own files, and every random family rolled per sector or per operation
+(read and write corruption, read and write EIO, phantom writes, sync lies,
+the damaging crash outcomes) has its probability multiplied by the weight of
+the sectors it would hit. Most of a preallocated file is zeros nobody reads,
+so a uniform fault mostly lands there. A focus moves the damage onto the
+bytes recovery has to judge:
+
+```rust
+// Inside a process: aim this disk's faults at a journal's identifiers.
+let focus = FaultFocus::new()
+    .background(0.1) // the zeros, barely
+    .spot("wal/seg-00000000000000000001.wal", 8192..8192 + 64 * 16, 8.0);
+ctx.storage().focus_faults(focus)?;
+```
+
+`SimStorageProvider::focus_faults` is reachable from process code, and it is
+scoped to that process's disk; `SimWorld::set_fault_focus(ip, focus)` does
+the same from a hand-driven test. A weight of 0 makes a sector immune, the
+mask still vetoes first, and a weight never revives a family the
+configuration leaves at zero. A misdirected write honours only the immunity:
+its offset draw depends on the configured rate alone. Rolls are drawn
+whatever the weights, so a focus changes which faults fire, never which
+draws decide them. A focus survives its process's crash and is cleared by a
+wipe of its storage. `moonpool-journal`'s `Atlas` is the map a journal
+harness feeds it (see [A Crash-Aware Journal](../part5-building-on-top/08-journal.md)).
+
 Directed tests reach for the targeted API on `SimWorld` instead:
 `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,
 `clear_file_eio`, and — to test the oracle itself —

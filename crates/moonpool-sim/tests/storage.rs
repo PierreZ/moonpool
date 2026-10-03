@@ -65,6 +65,8 @@ mod directory;
 mod disk_failure;
 #[path = "storage/faults.rs"]
 mod faults;
+#[path = "storage/focus.rs"]
+mod focus;
 #[path = "storage/latency.rs"]
 mod latency;
 #[path = "storage/namespaces.rs"]

@@ -39,7 +39,7 @@ use rand_chacha::ChaCha8Rng;
 
 use super::{
     StorageConfiguration,
-    faults::{CrashOutcome, EioTarget, FileCrashReport, SECTOR_SIZE, SectorResolution},
+    faults::{CrashOutcome, EioTarget, FileCrashReport, SECTOR_SIZE, SectorResolution, weighted},
 };
 use crate::assert_reachable;
 use crate::sim::rng::{sim_random, sim_random_range};
@@ -324,18 +324,14 @@ impl FileImage {
     /// Returns the sectors this sync *lied* about — reported durable while
     /// leaving them volatile (the opt-in barrier-violation family).
     #[instrument(level = "trace", skip_all)]
-    pub fn sync(
-        &mut self,
-        config: &StorageConfiguration,
-        eligible: &dyn Fn(u64) -> bool,
-    ) -> Vec<u64> {
+    pub fn sync(&mut self, config: &StorageConfiguration, weight: &dyn Fn(u64) -> f64) -> Vec<u64> {
         self.committed.resize(self.visible.len(), 0);
         let lie_probability = config.barrier_violation_probability;
         let mut lied = Vec::new();
         for sector in self.dirty_sectors() {
             let index = as_index(sector);
-            let lie =
-                lie_probability > 0.0 && sim_random::<f64>() < lie_probability && eligible(sector);
+            let lie = lie_probability > 0.0
+                && sim_random::<f64>() < weighted(lie_probability, weight(sector));
             let range = self.visible_bounds(sector);
             self.oracle.insert(
                 sector,
@@ -363,13 +359,13 @@ impl FileImage {
     /// Panics when a sector a sync reported durable changed across the crash
     /// while the barrier-violation family is not armed — that is a simulator
     /// bug, never legal disk behaviour.
-    #[instrument(level = "trace", skip(self, config, eligible))]
+    #[instrument(level = "trace", skip(self, config, weight))]
     pub fn crash(
         &mut self,
         path: &str,
         config: &StorageConfiguration,
         barrier_violation_armed: bool,
-        eligible: &dyn Fn(u64) -> bool,
+        weight: &dyn Fn(u64) -> f64,
     ) -> FileCrashReport {
         let mut report = FileCrashReport {
             path: path.to_string(),
@@ -423,7 +419,7 @@ impl FileImage {
                     self.lied.is_set(index),
                     in_window,
                     protected,
-                    eligible,
+                    weight,
                 );
                 let outcome = self.apply_outcome(sector, outcome);
                 note_outcome_reachable(outcome, self.fill.garbage);
@@ -749,8 +745,10 @@ fn clamp_sector(sector: u64, limit: usize) -> Range<usize> {
 
 /// Pick the resolution shape for one dirty sector.
 ///
-/// Damaging shapes are gated by the eligibility mask: an ineligible sector
-/// falls back to a plain rollback. Sectors a sync lied about always roll back
+/// Damaging shapes are weighted by the sector's fault weight (the
+/// eligibility mask and the owner's [`FaultFocus`](super::FaultFocus)):
+/// their bands scale with it, still within one roll, and a sector of weight
+/// zero falls back to a plain rollback. Sectors a sync lied about always roll back
 /// — the whole point of the lie is that the write was never durable. A
 /// `protected` sector is one carrying a durability stamp over a prefix of its
 /// bytes, which restricts the shapes it may take.
@@ -760,25 +758,27 @@ fn choose_outcome(
     lied: bool,
     in_window: bool,
     protected: bool,
-    eligible: &dyn Fn(u64) -> bool,
+    weight: &dyn Fn(u64) -> f64,
 ) -> CrashOutcome {
     if in_window || lied {
         return CrashOutcome::KeptOld;
     }
     let roll = sim_random::<f64>();
-    let allowed = eligible(sector);
-    let lost_at = config.crash_lost_probability;
-    let latent_at = lost_at + config.crash_latent_fault_probability;
-    let shorn_at = latent_at + config.shorn_write_probability;
-    let damaging = |outcome| {
-        if allowed {
-            outcome
-        } else {
-            CrashOutcome::KeptOld
-        }
+    let damaging_total = config.crash_lost_probability
+        + config.crash_latent_fault_probability
+        + config.shorn_write_probability;
+    // The damaging bands scale with the weight, capped so they never claim
+    // more than the whole roll.
+    let scale = if damaging_total > 0.0 {
+        weight(sector).min(1.0 / damaging_total)
+    } else {
+        0.0
     };
+    let lost_at = config.crash_lost_probability * scale;
+    let latent_at = lost_at + config.crash_latent_fault_probability * scale;
+    let shorn_at = latent_at + config.shorn_write_probability * scale;
     if roll < lost_at {
-        return damaging(CrashOutcome::Lost);
+        return CrashOutcome::Lost;
     }
     if roll < latent_at {
         // A latent fault damages the *whole* sector on every read (see
@@ -786,12 +786,12 @@ fn choose_outcome(
         // Losing the sector is the nearest shape a real disk offers: its fill
         // stops at the protected prefix.
         if protected {
-            return damaging(CrashOutcome::Lost);
+            return CrashOutcome::Lost;
         }
-        return damaging(CrashOutcome::LatentFault);
+        return CrashOutcome::LatentFault;
     }
     if roll < shorn_at {
-        return damaging(CrashOutcome::Shorn);
+        return CrashOutcome::Shorn;
     }
     let remaining = (1.0 - shorn_at).max(f64::EPSILON);
     if (roll - shorn_at) / remaining < 0.5 {
@@ -856,8 +856,8 @@ mod tests {
         FileImage::new(size, 0, false)
     }
 
-    fn always_eligible(_sector: u64) -> bool {
-        true
+    fn always_eligible(_sector: u64) -> f64 {
+        1.0
     }
 
     /// A shorn outcome on a sector with a single shared byte has nothing to
