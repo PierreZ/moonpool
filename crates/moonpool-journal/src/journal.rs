@@ -9,7 +9,7 @@ use tracing::instrument;
 use crate::dual::DualFile;
 use crate::layout::{ENTRY_HEADER_SIZE, Geometry, TAG_SIZE, Tag, entry_size};
 use crate::segment::{Entry, Segment, is_segment_leftover, parse_segment_name, segment_path};
-use crate::{Atlas, EntryId, JournalError};
+use crate::{EntryId, JournalAtlas, JournalError};
 
 /// How to lay out and drive a journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,10 +319,10 @@ impl<P: StorageProvider> Journal<P> {
 
     /// Where every region recovery reads lives right now: the metadata
     /// copies, each segment's headers, and each live entry and its slot.
-    /// See [`Atlas`].
+    /// See [`JournalAtlas`].
     #[must_use]
-    pub fn atlas(&self) -> Atlas {
-        let mut atlas = Atlas::default();
+    pub fn atlas(&self) -> JournalAtlas {
+        let mut atlas = JournalAtlas::default();
         if let Some(value) = &self.meta_value {
             for copy in 0..2u8 {
                 atlas.push_meta(

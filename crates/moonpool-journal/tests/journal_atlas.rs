@@ -1,4 +1,4 @@
-//! The atlas: where every region recovery reads lives, and faults aimed by
+//! The journal atlas: where every region recovery reads lives, and faults aimed by
 //! it. The scan of a closed journal agrees with the open journal's own chart,
 //! each entry's damage is reported at the index the atlas names, and a
 //! randomized loop aims damage where recovery has to decide — the last batch,
@@ -10,8 +10,8 @@ use std::net::IpAddr;
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
-    AmbiguousTail, Atlas, EntryId, Geometry, Journal, JournalConfig, JournalError, Record,
-    Recovery, Region, TAG_SIZE, Tag,
+    AmbiguousTail, EntryId, Geometry, Journal, JournalAtlas, JournalConfig, JournalError,
+    JournalRegion, Record, Recovery, TAG_SIZE, Tag,
 };
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 
@@ -104,7 +104,7 @@ impl Rng {
 
 /// Write a journal of `batches` batches of 1–4 entries each, with payloads
 /// of 0–600 bytes, and maybe metadata; return the open journal's atlas.
-async fn write_journal(provider: SimStorageProvider, seed: u64, batches: u64) -> Atlas {
+async fn write_journal(provider: SimStorageProvider, seed: u64, batches: u64) -> JournalAtlas {
     let mut rng = Rng::new(seed);
     let (mut journal, _) = Journal::open(provider, DIR, config()).await.expect("open");
     if rng.chance(70) {
@@ -132,8 +132,8 @@ async fn write_journal(provider: SimStorageProvider, seed: u64, batches: u64) ->
     journal.atlas()
 }
 
-async fn scan(provider: SimStorageProvider) -> Atlas {
-    Atlas::scan(&provider, DIR, config().geometry)
+async fn scan(provider: SimStorageProvider) -> JournalAtlas {
+    JournalAtlas::scan(&provider, DIR, config().geometry)
         .await
         .expect("scan")
 }
@@ -157,25 +157,26 @@ enum Damage {
 /// Damage `region` as `damage` says, at a byte the generator picks.
 async fn inflict(
     provider: SimStorageProvider,
-    atlas: Atlas,
-    hits: Vec<(Region, Damage, u64)>,
+    atlas: JournalAtlas,
+    hits: Vec<(JournalRegion, Damage, u64)>,
 ) -> std::io::Result<()> {
     for (region, damage, pick) in hits {
-        let extent = atlas.extent(region).expect("charted region").clone();
+        let layout = atlas.locate(region).expect("charted region").clone();
         let file = provider
-            .open(&extent.path, OpenOptions::read_write())
+            .open(&layout.path, OpenOptions::read_write())
             .await?;
         match damage {
             Damage::Flip => {
-                let at = extent.offset + pick % extent.len;
+                let at = layout.bytes.start + pick % (layout.bytes.end - layout.bytes.start);
                 let mut byte = [0u8; 1];
                 file.read_at(at, &mut byte).await?;
                 byte[0] ^= 0x04;
                 file.write_at(at, &byte).await?;
             }
             Damage::Zero => {
-                let zeros = vec![0u8; usize::try_from(extent.len).expect("small")];
-                file.write_at(extent.offset, &zeros).await?;
+                let len = layout.bytes.end - layout.bytes.start;
+                let zeros = vec![0u8; usize::try_from(len).expect("small")];
+                file.write_at(layout.bytes.start, &zeros).await?;
             }
         }
         file.sync_all().await?;
@@ -218,17 +219,17 @@ fn verdict_of(recovery: &Result<Recovery, JournalError>) -> Verdict {
 
 /// The recovery table applied to the damaged regions: metadata first, then
 /// segment by segment, its headers and then its indexes in order.
-fn predict(atlas: &Atlas, hits: &[(Region, Damage, u64)]) -> Verdict {
-    let damage = |region: Region| {
+fn predict(atlas: &JournalAtlas, hits: &[(JournalRegion, Damage, u64)]) -> Verdict {
+    let damage = |region: JournalRegion| {
         hits.iter()
             .find(|(hit, ..)| *hit == region)
             .map(|(_, damage, _)| *damage)
     };
-    let metas: Vec<Region> = atlas
+    let metas: Vec<JournalRegion> = atlas
         .regions()
         .iter()
         .map(|located| located.region)
-        .filter(|region| matches!(region, Region::Meta { .. }))
+        .filter(|region| matches!(region, JournalRegion::Meta { .. }))
         .collect();
     let bad_metas = metas.iter().filter(|r| damage(**r).is_some()).count();
     if !metas.is_empty() && bad_metas == metas.len() {
@@ -243,7 +244,7 @@ fn predict(atlas: &Atlas, hits: &[(Region, Damage, u64)]) -> Verdict {
         .regions()
         .iter()
         .filter_map(|located| match located.region {
-            Region::Header { segment, copy: 0 } => Some(segment),
+            JournalRegion::Header { segment, copy: 0 } => Some(segment),
             _ => None,
         })
         .collect();
@@ -251,7 +252,7 @@ fn predict(atlas: &Atlas, hits: &[(Region, Damage, u64)]) -> Verdict {
     'segments: for (k, first) in segments.iter().enumerate() {
         let bad_headers = (0..2u8)
             .filter(|copy| {
-                damage(Region::Header {
+                damage(JournalRegion::Header {
                     segment: *first,
                     copy: *copy,
                 })
@@ -267,11 +268,11 @@ fn predict(atlas: &Atlas, hits: &[(Region, Damage, u64)]) -> Verdict {
             let Some(entry) = atlas.entry(index) else {
                 continue;
             };
-            let Region::Entry(id) = entry.region else {
+            let JournalRegion::Entry(id) = entry.region else {
                 unreachable!("an entry region")
             };
-            let entry_bad = damage(Region::Entry(id)).is_some();
-            match (entry_bad, damage(Region::Slot(id))) {
+            let entry_bad = damage(JournalRegion::Entry(id)).is_some();
+            match (entry_bad, damage(JournalRegion::Slot(id))) {
                 (false, None) => survivors.push(id),
                 (false, Some(_)) => {
                     slots_rewritten += 1;
@@ -292,13 +293,13 @@ fn predict(atlas: &Atlas, hits: &[(Region, Damage, u64)]) -> Verdict {
                     let zeroed = |region| damage(region) == Some(Damage::Zero);
                     let later_bytes = (index + 1..live.end).any(|later| {
                         atlas.entry(later).is_some_and(|e| {
-                            let Region::Entry(id) = e.region else {
+                            let JournalRegion::Entry(id) = e.region else {
                                 unreachable!("an entry region")
                             };
-                            !(zeroed(Region::Entry(id)) && zeroed(Region::Slot(id)))
+                            !(zeroed(JournalRegion::Entry(id)) && zeroed(JournalRegion::Slot(id)))
                         })
                     });
-                    torn_tail = damage(Region::Entry(id)) == Some(Damage::Flip)
+                    torn_tail = damage(JournalRegion::Entry(id)) == Some(Damage::Flip)
                         || k + 1 < segments.len()
                         || later_bytes;
                     break 'segments;
@@ -359,7 +360,7 @@ fn each_charted_entry_is_reported_where_the_atlas_says() {
         assert!(atlas.live().end - atlas.live().start > 8, "spans segments");
         for index in atlas.live() {
             let entry = atlas.entry(index).expect("charted").region;
-            let Region::Entry(id) = entry else {
+            let JournalRegion::Entry(id) = entry else {
                 unreachable!("an entry region")
             };
             let mut sim = sim(seed);
@@ -382,7 +383,7 @@ fn each_charted_entry_is_reported_where_the_atlas_says() {
             run(&mut sim, move |p| write_journal(p, seed, 7)).await;
             let hits = vec![
                 (entry, Damage::Flip, index),
-                (Region::Slot(id), Damage::Flip, index),
+                (JournalRegion::Slot(id), Damage::Flip, index),
             ];
             let atlas2 = atlas.clone();
             run(&mut sim, move |p| inflict(p, atlas2, hits))
@@ -400,17 +401,17 @@ fn each_charted_entry_is_reported_where_the_atlas_says() {
 /// Choose this seed's injections from the atlas, biased toward where
 /// recovery decides: the last batch, an entry beside its own slot, both
 /// copies of a header or of the metadata, and a few independent picks.
-fn aim(atlas: &Atlas, rng: &mut Rng) -> Vec<(Region, Damage, u64)> {
-    let mut hits: Vec<(Region, Damage)> = Vec::new();
-    let regions: Vec<Region> = atlas.regions().iter().map(|l| l.region).collect();
-    let of = |want: fn(&Region) -> bool| -> Vec<Region> {
+fn aim(atlas: &JournalAtlas, rng: &mut Rng) -> Vec<(JournalRegion, Damage, u64)> {
+    let mut hits: Vec<(JournalRegion, Damage)> = Vec::new();
+    let regions: Vec<JournalRegion> = atlas.regions().iter().map(|l| l.region).collect();
+    let of = |want: fn(&JournalRegion) -> bool| -> Vec<JournalRegion> {
         regions.iter().copied().filter(want).collect()
     };
-    let entries = of(|r| matches!(r, Region::Entry(_)));
-    let last: Vec<Region> = entries
+    let entries = of(|r| matches!(r, JournalRegion::Entry(_)));
+    let last: Vec<JournalRegion> = entries
         .iter()
         .copied()
-        .filter(|r| matches!(r, Region::Entry(id) if atlas.last_batch().contains(&id.index)))
+        .filter(|r| matches!(r, JournalRegion::Entry(id) if atlas.last_batch().contains(&id.index)))
         .collect();
     let damage = |rng: &mut Rng| {
         if rng.chance(70) {
@@ -430,19 +431,25 @@ fn aim(atlas: &Atlas, rng: &mut Rng) -> Vec<(Region, Damage, u64)> {
         }
         1 => {
             // An entry and its own identifier.
-            if let Some(Region::Entry(id)) = rng.pick(&entries).copied() {
-                hits.push((Region::Entry(id), damage(rng)));
-                hits.push((Region::Slot(id), damage(rng)));
+            if let Some(JournalRegion::Entry(id)) = rng.pick(&entries).copied() {
+                hits.push((JournalRegion::Entry(id), damage(rng)));
+                hits.push((JournalRegion::Slot(id), damage(rng)));
             }
         }
         2 => {
             // Both copies of a twin: a header pair or the metadata pair.
-            let twins =
-                of(|r| matches!(r, Region::Header { copy: 0, .. } | Region::Meta { copy: 0 }));
+            let twins = of(|r| {
+                matches!(
+                    r,
+                    JournalRegion::Header { copy: 0, .. } | JournalRegion::Meta { copy: 0 }
+                )
+            });
             if let Some(region) = rng.pick(&twins).copied() {
                 let other = match region {
-                    Region::Header { segment, .. } => Region::Header { segment, copy: 1 },
-                    _ => Region::Meta { copy: 1 },
+                    JournalRegion::Header { segment, .. } => {
+                        JournalRegion::Header { segment, copy: 1 }
+                    }
+                    _ => JournalRegion::Meta { copy: 1 },
                 };
                 hits.push((region, damage(rng)));
                 if rng.chance(50) {
@@ -452,7 +459,7 @@ fn aim(atlas: &Atlas, rng: &mut Rng) -> Vec<(Region, Damage, u64)> {
         }
         3 => {
             // A run of slots, as one damaged sector of the table would.
-            if let Some(Region::Entry(id)) = rng.pick(&entries).copied() {
+            if let Some(JournalRegion::Entry(id)) = rng.pick(&entries).copied() {
                 for index in id.index..id.index + 1 + rng.below(8) {
                     if let Some(slot) = atlas.slot(index) {
                         hits.push((slot.region, damage(rng)));
@@ -469,7 +476,7 @@ fn aim(atlas: &Atlas, rng: &mut Rng) -> Vec<(Region, Damage, u64)> {
             }
         }
     }
-    let mut aimed: Vec<(Region, Damage, u64)> = Vec::new();
+    let mut aimed: Vec<(JournalRegion, Damage, u64)> = Vec::new();
     for (region, damage) in hits {
         if !aimed.iter().any(|(seen, ..)| *seen == region) {
             aimed.push((region, damage, rng.next()));

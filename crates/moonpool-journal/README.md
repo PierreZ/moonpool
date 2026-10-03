@@ -24,7 +24,7 @@ ever completely written, and which entry it was — its index, its epoch, and a
 | `AmbiguousTail` | Truncate the damaged entries of the last batch (single node) or keep them for a replication layer |
 | `Recovery` | What opening found: corrupt entries, the ambiguous last batch, repairs |
 | `JournalError` | Operating errors vs. evidence of damage (`Corrupt`, `DoubleFault`, …) |
-| `Atlas` / `Region` / `Extent` | Where every region recovery reads lives, from an open journal or a closed directory: aim faults by layout |
+| `JournalAtlas` / `JournalRegion` | Where every region recovery reads lives, from an open journal or a closed directory, as format-neutral `LayoutRegion`s: aim faults by layout |
 
 Each segment is one preallocated, zero-filled file (64 MiB by default) named
 after its first index, found by listing the directory: two header copies, a
@@ -43,8 +43,8 @@ faults for each row of the recovery table, and a crash loop under two fault
 models — the paper's (sector-atomic crashes: nothing acknowledged may be lost
 or reported corrupt) and moonpool's full physics (a read may never return
 wrong data). `JOURNAL_CRASH_SEEDS` raises the seed count;
-`JOURNAL_CRASH_SEED` replays one. `tests/atlas.rs` aims damage by the
-`Atlas` (the last batch, an entry beside its own slot, both copies of a
+`JOURNAL_CRASH_SEED` replays one. `tests/journal_atlas.rs` aims damage by the
+`JournalAtlas` (the last batch, an entry beside its own slot, both copies of a
 twin) and checks the verdict the damaged regions predict;
 `JOURNAL_ATLAS_SEEDS` raises its seed count.
 

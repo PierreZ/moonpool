@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
-    AmbiguousTail, Atlas, Entry, EntryId, Geometry, Journal, JournalConfig, JournalError, Record,
-    Recovery, Region, TAG_SIZE, Tag,
+    AmbiguousTail, Entry, EntryId, Geometry, Journal, JournalAtlas, JournalConfig, JournalError,
+    JournalRegion, Record, Recovery, TAG_SIZE, Tag,
 };
 use moonpool_sim::{EioTarget, FaultFocus, SimStorageProvider, SimWorld, StorageConfiguration};
 
@@ -873,7 +873,7 @@ enum Model {
     /// out — so the guarantee is detection: a read never returns wrong data.
     Harsh,
     /// The full physics again, aimed: after every write the writer hands
-    /// the journal's [`Atlas`] to the disk as a [`FaultFocus`], so the
+    /// the journal's [`JournalAtlas`] to the disk as a [`FaultFocus`], so the
     /// crash damages identifiers and live entries far more often than the
     /// zeros around them. Same guarantee as `Harsh`.
     Aimed,
@@ -888,16 +888,15 @@ impl Model {
 
 /// The disk weights an aimed writer installs: identifiers heaviest, then
 /// entries and the twin copies; the preallocated zeros barely at all.
-fn focus_of(atlas: &Atlas) -> FaultFocus {
-    atlas
-        .regions()
-        .iter()
-        .fold(FaultFocus::new().background(0.1), |focus, located| {
-            let weight = match located.region {
-                Region::Slot(_) => 8.0,
-                _ => 4.0,
-            };
-            focus.spot(&located.extent.path, located.extent.bytes(), weight)
+fn focus_of(atlas: &JournalAtlas) -> FaultFocus {
+    FaultFocus::new()
+        .background(0.1)
+        .layout(atlas.layout(), |region| {
+            if region.kind == JournalRegion::SLOT {
+                8.0
+            } else {
+                4.0
+            }
         })
 }
 

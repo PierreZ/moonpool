@@ -539,7 +539,7 @@ impl<F: StorageFile> Segment<F> {
 
     /// Add this segment's headers and live entries to `atlas`, its file
     /// being `path`.
-    pub fn chart(&self, path: &str, atlas: &mut crate::Atlas) {
+    pub fn chart(&self, path: &str, atlas: &mut crate::JournalAtlas) {
         atlas.push_headers(path, self.first);
         for (rel, rec) in (0u64..).zip(&self.recs) {
             atlas.push_entry(

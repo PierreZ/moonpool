@@ -6,14 +6,14 @@
 //! header or metadata copy — instead of spreading damage uniformly over a
 //! file that is mostly preallocated zeros. And because every region carries
 //! its meaning, the injector can tell what the damage it caused *should*
-//! make recovery do: [`Atlas::regions_in`] maps damaged bytes back to the
+//! make recovery do: [`JournalAtlas::regions_in`] maps damaged bytes back to the
 //! regions they touch.
 //!
 //! Two ways to get one:
 //!
 //! - [`Journal::atlas`] charts an open journal from what its recovery scan
 //!   verified — a snapshot; take a new one after the journal changes.
-//! - [`Atlas::scan`] charts a closed journal directory from its slot tables
+//! - [`JournalAtlas::scan`] charts a closed journal directory from its slot tables
 //!   alone, without opening it and so without repairing anything: what an
 //!   injector wants before a boot, to damage the bytes the next open will
 //!   read.
@@ -23,7 +23,7 @@
 use std::io;
 use std::ops::Range;
 
-use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{LayoutRegion, OpenOptions, StorageFile, StorageProvider};
 
 use crate::JournalError;
 use crate::layout::{
@@ -40,7 +40,7 @@ const META_HEADER: u64 = 24;
 
 /// What one region of the journal holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Region {
+pub enum JournalRegion {
     /// One of the two header copies of the segment whose first index is
     /// `segment`. Recovery repairs one copy from its twin and refuses to
     /// open the segment when both are damaged.
@@ -66,38 +66,36 @@ pub enum Region {
     },
 }
 
-/// A byte range of one file.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Extent {
-    /// The file's path, as the journal opens it.
-    pub path: String,
-    /// The range's first byte.
-    pub offset: u64,
-    /// The range's length in bytes.
-    pub len: u64,
-}
+impl JournalRegion {
+    /// The kind label of a header copy in a [`LayoutRegion`].
+    pub const HEADER: &'static str = "journal header";
+    /// The kind label of a slot (a far identifier).
+    pub const SLOT: &'static str = "journal slot";
+    /// The kind label of an entry's header and payload.
+    pub const ENTRY: &'static str = "journal entry";
+    /// The kind label of a metadata copy.
+    pub const META: &'static str = "journal meta";
 
-impl Extent {
-    /// The byte range within the file.
+    /// This region's kind, as its [`LayoutRegion`] labels it.
     #[must_use]
-    pub fn bytes(&self) -> Range<u64> {
-        self.offset..self.offset + self.len
-    }
-
-    /// Whether this extent shares a byte with `bytes` of the file at `path`.
-    #[must_use]
-    pub fn overlaps(&self, path: &str, bytes: &Range<u64>) -> bool {
-        self.path == path && self.offset < bytes.end && bytes.start < self.offset + self.len
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Header { .. } => Self::HEADER,
+            Self::Slot(_) => Self::SLOT,
+            Self::Entry(_) => Self::ENTRY,
+            Self::Meta { .. } => Self::META,
+        }
     }
 }
 
-/// A region and where it lives.
+/// A journal region and where it lives, in the format-neutral form a
+/// simulator aims faults with.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Located {
-    /// What the bytes hold.
-    pub region: Region,
-    /// Where they are.
-    pub extent: Extent,
+pub struct ChartedRegion {
+    /// What the bytes hold, in the journal's terms.
+    pub region: JournalRegion,
+    /// Where they are: file, byte range, and [`JournalRegion::kind`].
+    pub layout: LayoutRegion,
 }
 
 /// Every region recovery reads, as of one moment of a journal's life.
@@ -105,19 +103,26 @@ pub struct Located {
 /// Regions are listed metadata first, then segment by segment: the two
 /// header copies, then each live entry's slot and entry in index order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Atlas {
-    regions: Vec<Located>,
+pub struct JournalAtlas {
+    regions: Vec<ChartedRegion>,
     last_batch: Range<u64>,
     live: Range<u64>,
     /// Charted indexes whose entry opens an append batch, ascending.
     batch_starts: Vec<u64>,
 }
 
-impl Atlas {
-    /// Every region, in the order described on [`Atlas`].
+impl JournalAtlas {
+    /// Every region, in the order described on [`JournalAtlas`].
     #[must_use]
-    pub fn regions(&self) -> &[Located] {
+    pub fn regions(&self) -> &[ChartedRegion] {
         &self.regions
+    }
+
+    /// Every region in the format-neutral form: what a simulator's fault
+    /// focus takes (`FaultFocus::layout` in `moonpool-sim`), weighing each by
+    /// its [`kind`](JournalRegion::kind).
+    pub fn layout(&self) -> impl Iterator<Item = &LayoutRegion> {
+        self.regions.iter().map(|charted| &charted.layout)
     }
 
     /// The live indexes: from the journal's first index to its next one.
@@ -142,27 +147,27 @@ impl Atlas {
 
     /// Where `region` lives, if the journal holds it.
     #[must_use]
-    pub fn extent(&self, region: Region) -> Option<&Extent> {
+    pub fn locate(&self, region: JournalRegion) -> Option<&LayoutRegion> {
         self.regions
             .iter()
             .find(|located| located.region == region)
-            .map(|located| &located.extent)
+            .map(|located| &located.layout)
     }
 
     /// Where the entry at `index` lives, if it is live.
     #[must_use]
-    pub fn entry(&self, index: u64) -> Option<&Located> {
+    pub fn entry(&self, index: u64) -> Option<&ChartedRegion> {
         self.regions
             .iter()
-            .find(|located| matches!(located.region, Region::Entry(id) if id.index == index))
+            .find(|located| matches!(located.region, JournalRegion::Entry(id) if id.index == index))
     }
 
     /// Where the slot of the entry at `index` lives, if it is live.
     #[must_use]
-    pub fn slot(&self, index: u64) -> Option<&Located> {
+    pub fn slot(&self, index: u64) -> Option<&ChartedRegion> {
         self.regions
             .iter()
-            .find(|located| matches!(located.region, Region::Slot(id) if id.index == index))
+            .find(|located| matches!(located.region, JournalRegion::Slot(id) if id.index == index))
     }
 
     /// Every region sharing a byte with `bytes` of the file at `path`: what
@@ -170,10 +175,10 @@ impl Atlas {
     /// several slots, and a block several entries, so one damaged sector can
     /// reach more than one region.
     #[must_use]
-    pub fn regions_in(&self, path: &str, bytes: &Range<u64>) -> Vec<Region> {
+    pub fn regions_in(&self, path: &str, bytes: &Range<u64>) -> Vec<JournalRegion> {
         self.regions
             .iter()
-            .filter(|located| located.extent.overlaps(path, bytes))
+            .filter(|located| located.layout.overlaps(path, bytes))
             .map(|located| located.region)
             .collect()
     }
@@ -268,13 +273,13 @@ impl Atlas {
         Ok(atlas)
     }
 
-    pub(crate) fn push(&mut self, region: Region, path: &str, offset: u64, len: u64) {
-        self.regions.push(Located {
+    pub(crate) fn push(&mut self, region: JournalRegion, path: &str, offset: u64, len: u64) {
+        self.regions.push(ChartedRegion {
             region,
-            extent: Extent {
+            layout: LayoutRegion {
                 path: path.to_string(),
-                offset,
-                len,
+                bytes: offset..offset + len,
+                kind: region.kind(),
             },
         });
     }
@@ -286,14 +291,19 @@ impl Atlas {
 
     /// Add a metadata copy holding a `payload_len`-byte value.
     pub(crate) fn push_meta(&mut self, path: &str, copy: u8, payload_len: u64) {
-        self.push(Region::Meta { copy }, path, 0, META_HEADER + payload_len);
+        self.push(
+            JournalRegion::Meta { copy },
+            path,
+            0,
+            META_HEADER + payload_len,
+        );
     }
 
     /// Add a segment's two header copies.
     pub(crate) fn push_headers(&mut self, path: &str, segment: u64) {
         for copy in 0..2u8 {
             self.push(
-                Region::Header { segment, copy },
+                JournalRegion::Header { segment, copy },
                 path,
                 u64::from(copy) * BLOCK_U64,
                 HEADER_CHECKED,
@@ -316,13 +326,13 @@ impl Atlas {
         }
         let slot_size = SLOT_SIZE as u64;
         self.push(
-            Region::Slot(id),
+            JournalRegion::Slot(id),
             path,
             SLOT_TABLE_OFFSET + rel * slot_size,
             slot_size,
         );
         self.push(
-            Region::Entry(id),
+            JournalRegion::Entry(id),
             path,
             offset,
             ENTRY_HEADER_SIZE as u64 + u64::from(length),
