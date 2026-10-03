@@ -101,8 +101,8 @@ pub use random::TokioRandomProvider;
 pub use resolver::TokioResolver;
 pub use resolver::{Resolver, split_host_port};
 pub use storage::{
-    AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, OpenOptions, StorageFile,
-    StorageProvider, stream_io_unsupported,
+    AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, LayoutRegion, OpenOptions,
+    StorageFile, StorageProvider, stream_io_unsupported,
 };
 #[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};

@@ -509,8 +509,24 @@ configuration leaves at zero. A misdirected write honours only the immunity:
 its offset draw depends on the configured rate alone. Rolls are drawn
 whatever the weights, so a focus changes which faults fire, never which
 draws decide them. A focus survives its process's crash and is cleared by a
-wipe of its storage. `moonpool-journal`'s `Atlas` is the map a journal
-harness feeds it (see [A Crash-Aware Journal](../part5-building-on-top/08-journal.md)).
+wipe of its storage.
+
+The map comes from the format, not from moonpool. A format that knows its
+layout lists it as `LayoutRegion`s (`moonpool-core`: a path, a byte range,
+and the format's own kind label), and `FaultFocus::layout` weighs them by
+kind:
+
+```rust
+let focus = FaultFocus::new()
+    .background(0.1)
+    .layout(journal.atlas().layout(), |region| {
+        if region.kind == JournalRegion::SLOT { 8.0 } else { 4.0 }
+    });
+```
+
+`moonpool-journal`'s `JournalAtlas` is one such map (see
+[A Crash-Aware Journal](../part5-building-on-top/08-journal.md)); another
+format needs only to list its regions.
 
 Directed tests reach for the targeted API on `SimWorld` instead:
 `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,

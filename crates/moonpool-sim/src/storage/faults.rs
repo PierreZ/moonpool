@@ -191,6 +191,22 @@ impl FaultFocus {
         self
     }
 
+    /// Weigh every region of a storage format's layout by its kind:
+    /// `weight(region)` for each, as [`spot`](Self::spot) would. Any format
+    /// that lists its regions as [`LayoutRegion`](moonpool_core::LayoutRegion)s
+    /// — `moonpool-journal`'s `JournalAtlas` does — can be aimed this way
+    /// without the simulator knowing the format.
+    #[must_use]
+    pub fn layout<'a>(
+        self,
+        regions: impl IntoIterator<Item = &'a moonpool_core::LayoutRegion>,
+        weight: impl Fn(&moonpool_core::LayoutRegion) -> f64,
+    ) -> Self {
+        regions.into_iter().fold(self, |focus, region| {
+            focus.spot(&region.path, region.bytes.clone(), weight(region))
+        })
+    }
+
     /// The weight of `sector` of the file at `path`: the heaviest spot
     /// covering any of its bytes, or the background weight.
     #[must_use]

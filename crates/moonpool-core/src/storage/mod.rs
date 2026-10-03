@@ -37,6 +37,7 @@
 //! [`AsyncSeek`]: futures::io::AsyncSeek
 
 mod align;
+mod layout;
 mod options;
 #[cfg(feature = "tokio-fs")]
 mod tokio_impl;
@@ -45,6 +46,7 @@ use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use std::io;
 
 pub use align::{AlignedBuf, IoConstraints};
+pub use layout::LayoutRegion;
 pub use options::{DirectIo, InvalidOpenOptions, OpenOptions};
 
 /// The error a file with I/O constraints returns from the stream API.

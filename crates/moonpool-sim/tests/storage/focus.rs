@@ -205,3 +205,32 @@ fn a_neutral_focus_is_no_focus_and_a_wipe_clears_one() {
         .count();
     assert_eq!(lost, 1, "the wiped disk's focus no longer shields it");
 }
+
+/// Any format's layout, listed as `LayoutRegion`s, weighs its regions by
+/// kind — the simulator never learns the format.
+#[test]
+fn a_layout_is_weighed_by_its_kinds() {
+    let regions = [
+        moonpool_sim::LayoutRegion {
+            path: "db/pages".to_string(),
+            bytes: 0..512,
+            kind: "superblock",
+        },
+        moonpool_sim::LayoutRegion {
+            path: "db/pages".to_string(),
+            bytes: 4096..8192,
+            kind: "leaf",
+        },
+    ];
+    let focus = FaultFocus::new()
+        .background(0.0)
+        .layout(&regions, |region| match region.kind {
+            "superblock" => 10.0,
+            _ => 2.0,
+        });
+    assert_weight(focus.weight("db/pages", 0), 10.0, "the superblock");
+    assert_weight(focus.weight("db/pages", 9), 2.0, "a leaf page");
+    assert_weight(focus.weight("db/pages", 3), 0.0, "between them: background");
+    assert!(regions[1].overlaps("db/pages", &(8000..8001)));
+    assert!(!regions[1].overlaps("db/other", &(8000..8001)));
+}
