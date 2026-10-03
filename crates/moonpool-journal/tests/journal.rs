@@ -1276,3 +1276,32 @@ async fn write(
     }
     Ok(())
 }
+
+/// A journal opened under a fresh nested directory survives a crash that
+/// loses every unsynced directory entry: each directory `open` created is
+/// durable in its parent, not only the innermost.
+#[test]
+fn a_nested_directory_survives_a_crash_losing_unsynced_entries() {
+    runtime().block_on(async {
+        let mut sim = SimWorld::new_with_seed(11);
+        sim.set_storage_config(StorageConfiguration {
+            unsynced_dir_entry_loss_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        });
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = Journal::open(provider, "data/journals/1/2", small()).await?;
+            journal.save_meta(b"formatted").await?;
+            Ok::<_, JournalError>(())
+        })
+        .await
+        .expect("write");
+        sim.simulate_crash_for_process(ip(), true);
+        let meta = run(&mut sim, |provider| async move {
+            let (journal, _) = Journal::open(provider, "data/journals/1/2", small()).await?;
+            Ok::<_, JournalError>(journal.meta().map(<[u8]>::to_vec))
+        })
+        .await
+        .expect("reopen");
+        assert_eq!(meta.as_deref(), Some(b"formatted".as_slice()));
+    });
+}

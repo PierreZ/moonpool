@@ -170,6 +170,22 @@ fn parent_of(dir: &str) -> &str {
     }
 }
 
+/// Make `dir`'s whole path durable. `create_dir_all` may have created every
+/// directory on it, and each is only an entry in its parent until that
+/// parent is synced: syncing `dir`'s parent alone leaves the rest to a
+/// crash, which can take the whole tree — metadata, format marker and all.
+async fn sync_ancestors<P: StorageProvider>(provider: &P, dir: &str) -> std::io::Result<()> {
+    let mut at = dir.trim_end_matches('/');
+    loop {
+        let parent = parent_of(at);
+        provider.sync_dir(parent).await?;
+        if parent == "/" || parent == "." {
+            return Ok(());
+        }
+        at = parent;
+    }
+}
+
 impl<P: StorageProvider> Journal<P> {
     /// Open the journal under `dir`, creating it if the directory holds no
     /// segment, and run the recovery scan.
@@ -191,7 +207,7 @@ impl<P: StorageProvider> Journal<P> {
     ) -> Result<(Self, Recovery), JournalError> {
         config.geometry.validate()?;
         provider.create_dir_all(dir).await?;
-        provider.sync_dir(parent_of(dir)).await?;
+        sync_ancestors(&provider, dir).await?;
 
         let (meta, meta_value, meta_repaired) = DualFile::load(&provider, dir, "meta").await?;
         let mut firsts = Vec::new();
