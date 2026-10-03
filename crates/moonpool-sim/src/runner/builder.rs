@@ -286,7 +286,7 @@ pub struct SimulationBuilder {
     network_chaos: Option<ChaosMode>,
     storage_chaos: Option<ChaosMode>,
     /// Replicated storage fault patterns, drawn per seed over the topology.
-    replicated_faults: Option<crate::storage::ReplicatedFaults>,
+    replicated_faults: Vec<crate::storage::ReplicatedFaults>,
     /// Deterministic allow-mask applied after each per-seed network profile.
     network_fault_mask: crate::NetworkFaultMask,
     /// Distance-based link latency, applied to every iteration's network config.
@@ -349,7 +349,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
-            replicated_faults: None,
+            replicated_faults: Vec::new(),
             network_fault_mask: crate::NetworkFaultMask::all(),
             link_latency: None,
             tcp_send_window_bytes: None,
@@ -573,24 +573,32 @@ impl SimulationBuilder {
         self
     }
 
-    /// Spread random storage damage over the topology's failure domains so
-    /// no replicated record is ever damaged everywhere.
+    /// Spread random storage damage over a process group's failure domains
+    /// so no replicated record is ever damaged everywhere.
     ///
     /// Each seed draws a [`FaultPattern`](crate::FaultPattern) over the
     /// domains at `config`'s level of the [`.cluster()`](Self::cluster)
-    /// topology: a **minority** (only a few domains take damage) or a
-    /// **helix** (every domain does, each replicated record only in the
-    /// domains its key rotates to). Processes describe their disks with
+    /// topology, among the members of `config`'s
+    /// [group](crate::ReplicatedFaults::group) (every process without one):
+    /// a **minority** (only a few domains take damage), a **stripe
+    /// rotation** (every domain does, each replicated record only in the
+    /// domains its key rotates to), or a **rolling turn** (one domain at a
+    /// time takes damage anywhere, the turn moving on once its disks show
+    /// the damage repaired). Processes describe their disks with
     /// [`SimStorageProvider::publish_layout`](crate::SimStorageProvider::publish_layout):
     /// each region's `stripe` is the record's key, shared by every
-    /// replica's copy. A record loses copies in at most `tolerance`
-    /// domains, and so does node-local data, by construction.
+    /// replica's copy. A record holds damage in at most `tolerance` domains
+    /// at once, and so does node-local data, by construction.
+    ///
+    /// Call it once per replicated group: each call draws its own pattern
+    /// and runs its own turn. Processes outside every covered group keep
+    /// plain storage chaos.
     ///
     /// It shapes the families [`Chaos::Storage`] enables, the same ones a
     /// [`FaultFocus`](crate::FaultFocus) weighs; it is inert without storage
-    /// chaos and for processes outside the topology. Not covered: disk
-    /// failure, wipes, and namespace faults (a lost unsynced directory
-    /// entry), which take a whole disk or only unsynced state.
+    /// chaos. Not covered: disk failure, wipes, and namespace faults (a lost
+    /// unsynced directory entry), which take a whole disk or only unsynced
+    /// state.
     ///
     /// # Example
     ///
@@ -598,11 +606,11 @@ impl SimulationBuilder {
     /// SimulationBuilder::new()
     ///     .cluster(LocalityConfig::new(1, 3, 1..=2, 1), make_node)
     ///     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
-    ///     .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone))
+    ///     .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone).group("node"))
     /// ```
     #[must_use]
     pub fn replicated_storage_faults(mut self, config: crate::storage::ReplicatedFaults) -> Self {
-        self.replicated_faults = Some(config);
+        self.replicated_faults.push(config);
         self
     }
 
@@ -2034,20 +2042,31 @@ impl SimulationBuilder {
             .collect();
         // The replicated fault pattern draws last, after every draw a run
         // without it makes, so opting in shifts no other surface's sample.
-        if let (Some(config), Some(_)) = (self.replicated_faults, self.storage_chaos) {
-            let localities = process_config
-                .as_ref()
-                .map(|config| config.machine_registry.locality_map())
-                .unwrap_or_default();
-            match sim.draw_replicated_faults(config, &localities) {
-                crate::FaultPattern::Minority { .. } => {
-                    crate::assert_reachable!("storage: a seed draws minority corruption");
+        if self.storage_chaos.is_some() {
+            for config in &self.replicated_faults {
+                let mut localities = process_config
+                    .as_ref()
+                    .map(|config| config.machine_registry.locality_map())
+                    .unwrap_or_default();
+                if let (Some(group), Some(process_config)) =
+                    (config.group_name(), process_config.as_ref())
+                {
+                    let members = process_config.group_registry.ips_in_group(group);
+                    localities.retain(|ip, _| members.contains(ip));
                 }
-                crate::FaultPattern::Helical { .. } => {
-                    crate::assert_reachable!("storage: a seed draws helical corruption");
-                }
-                crate::FaultPattern::Spared => {
-                    crate::assert_reachable!("storage: too few domains, the disks are spared");
+                match sim.draw_replicated_faults(*config, &localities) {
+                    crate::FaultPattern::Minority { .. } => {
+                        crate::assert_reachable!("storage: a seed draws minority corruption");
+                    }
+                    crate::FaultPattern::Striped { .. } => {
+                        crate::assert_reachable!("storage: a seed draws striped corruption");
+                    }
+                    crate::FaultPattern::Rolling { .. } => {
+                        crate::assert_reachable!("storage: a seed draws rolling corruption");
+                    }
+                    crate::FaultPattern::Spared => {
+                        crate::assert_reachable!("storage: too few domains, the disks are spared");
+                    }
                 }
             }
         }

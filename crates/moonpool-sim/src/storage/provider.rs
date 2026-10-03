@@ -77,13 +77,14 @@ impl SimStorageProvider {
         Ok(())
     }
 
-    /// The replicated fault pattern this seed drew, if the run opted in.
+    /// The replicated fault pattern this seed drew for this process's
+    /// group, if the run covers it.
     ///
     /// # Errors
     ///
     /// An I/O error if the simulation has shut down.
     pub fn fault_pattern(&self) -> io::Result<Option<super::FaultPattern>> {
-        Ok(self.sim()?.fault_pattern())
+        Ok(self.sim()?.fault_pattern(self.owner_ip))
     }
 
     /// Upgrade the weak simulation handle, mapping a dropped simulation to an

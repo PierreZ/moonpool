@@ -7,19 +7,26 @@
 //! an unwinnable one. So the simulator, which knows the topology, decides
 //! *where* damage may land, from what each process publishes about its own
 //! layout ([`LayoutRegion`]s with a `stripe`, the record's key shared by
-//! every replica's copy):
+//! every replica's copy). One pattern covers one process group (or the
+//! whole topology), and each seed draws one of:
 //!
 //! - **minority**: only the processes of a few failure domains take damage,
 //!   anywhere on their disks — `TigerBeetle`'s minority corruption;
-//! - **helical**: every domain takes damage, but each stripe only in the
-//!   domains its key rotates to, so the damaged records "spin" around the
-//!   domains — `TigerBeetle`'s helical corruption, keyed by record instead
-//!   of by file offset, so it holds even where replicas lay their records
-//!   out differently. Bytes a node alone holds (stripe `None`, or bytes it
-//!   never published) are damaged only in the domains drawn for them.
+//! - **striped**: every domain takes damage, but each stripe only in the
+//!   domains its key rotates to — `TigerBeetle`'s helical corruption, keyed
+//!   by record instead of by file offset, so it holds even where replicas
+//!   lay their records out differently. Bytes a node alone holds (stripe
+//!   `None`, or bytes it never published) are damaged only in the domains
+//!   drawn for them;
+//! - **rolling**: one domain at a time takes damage, anywhere on its disks.
+//!   The turn stays on a domain while it holds damage, and moves to the
+//!   next domain in order once that damage is repaired, read off the disk:
+//!   every damaged sector rewritten, truncated or deleted, or outside every
+//!   region its process publishes. A domain holding no damage passes the
+//!   turn on as soon as another domain's disk is up for a fault.
 //!
-//! In both, a record's copies are damaged in at most `tolerance` domains,
-//! and so is node-local data: by construction, with no ledger.
+//! In each, a record's copies hold damage in at most `tolerance` domains at
+//! once, and so does node-local data: by construction, with no ledger.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -34,31 +41,44 @@ use crate::{DomainLevel, LocalityInfo};
 /// ([`SimulationBuilder::replicated_storage_faults`](crate::SimulationBuilder::replicated_storage_faults)).
 ///
 /// Each seed draws one [`FaultPattern`] over the failure domains at
-/// `level` of the run's topology. A record (a stripe) loses copies in at
-/// most `tolerance` domains, and so does node-local data.
+/// `level` of one process group (or, without [`group`](Self::group), the
+/// whole topology). A record (a stripe) holds damage in at most
+/// `tolerance` domains at once, and so does node-local data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplicatedFaults {
     level: DomainLevel,
     tolerance: usize,
+    group: Option<&'static str>,
 }
 
 impl ReplicatedFaults {
-    /// Spread damage over the domains at `level`, losing each record in at
-    /// most one of them.
+    /// Spread damage over the domains at `level`, a record holding damage
+    /// in at most one of them at once.
     #[must_use]
     pub fn new(level: DomainLevel) -> Self {
         Self {
             level,
             tolerance: 1,
+            group: None,
         }
     }
 
-    /// How many domains may lose their copy of one record (at least 1).
-    /// It is clamped below the number of domains a seed draws, so one
+    /// How many domains may hold damage to one record at once (at least
+    /// 1). It is clamped below the number of domains a seed draws, so one
     /// domain always keeps every record.
     #[must_use]
     pub fn tolerance(mut self, domains: usize) -> Self {
         self.tolerance = domains.max(1);
+        self
+    }
+
+    /// Cover only the process group `name` (its processes'
+    /// [`Process::name`](crate::Process::name)): its own replicated system,
+    /// with its own pattern, turn and records. Processes outside every
+    /// covered group keep plain storage chaos.
+    #[must_use]
+    pub fn group(mut self, name: &'static str) -> Self {
+        self.group = Some(name);
         self
     }
 
@@ -67,9 +87,15 @@ impl ReplicatedFaults {
     pub fn level(&self) -> DomainLevel {
         self.level
     }
+
+    /// The process group covered, or `None` for the whole topology.
+    #[must_use]
+    pub fn group_name(&self) -> Option<&'static str> {
+        self.group
+    }
 }
 
-/// The pattern one seed drew (see [`ReplicatedFaults`]).
+/// The pattern one seed drew for one group (see [`ReplicatedFaults`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaultPattern {
     /// Only these domains take damage.
@@ -79,39 +105,63 @@ pub enum FaultPattern {
     },
     /// Every domain takes damage on the stripes its key rotates to; these
     /// domains also take damage on node-local bytes.
-    Helical {
+    Striped {
         /// The domains, in rotation order: stripe `s` may be damaged in
         /// the `tolerance` domains starting at `s mod len`.
         domains: Vec<String>,
         /// The domains whose node-local bytes may be damaged.
         local: Vec<String>,
     },
-    /// The topology has fewer than two domains: no placement keeps a clean
-    /// copy elsewhere, so no process inside it takes damage.
+    /// One window of `tolerance` domains at a time takes damage; the
+    /// window moves on once its damage is repaired.
+    Rolling {
+        /// The domains, in turn order.
+        domains: Vec<String>,
+    },
+    /// The group has fewer than two domains: no placement keeps a clean
+    /// copy elsewhere, so no process in it takes damage.
     Spared,
 }
 
-/// One seed's plan: the pattern, and each process's domain index.
+/// Which pattern a draw makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PatternKind {
+    Minority,
+    Striped,
+    Rolling,
+}
+
+impl PatternKind {
+    /// The kind numbered `n` of three.
+    pub(crate) fn nth(n: usize) -> Self {
+        match n % 3 {
+            0 => Self::Minority,
+            1 => Self::Striped,
+            _ => Self::Rolling,
+        }
+    }
+}
+
+/// One seed's plan for one group: the pattern, and each member's domain.
 #[derive(Debug, Clone)]
 pub(crate) struct ReplicationPlan {
     pattern: FaultPattern,
     tolerance: usize,
-    /// Domain index (into the pattern's rotation) per process.
+    /// Domain index (into the pattern's rotation) per member.
     domain_of: BTreeMap<IpAddr, usize>,
-    /// For a minority: whether each domain index is damaged. For a helix:
-    /// whether each domain index may lose node-local bytes.
+    /// For a minority: whether each domain index is damaged. For a stripe
+    /// rotation: whether each domain index may lose node-local bytes.
     marked: Vec<bool>,
 }
 
 impl ReplicationPlan {
-    /// Draw a plan over `localities` with `pick(n)` returning a uniform
-    /// index below `n` (the simulation stream) and `helical` choosing the
-    /// pattern. With fewer than two domains the plan is
-    /// [`FaultPattern::Spared`].
+    /// Draw a plan over `localities` (the group's members) with `pick(n)`
+    /// returning a uniform index below `n` (the simulation stream). With
+    /// fewer than two domains the plan is [`FaultPattern::Spared`].
     pub(crate) fn draw(
         config: ReplicatedFaults,
         localities: &BTreeMap<IpAddr, LocalityInfo>,
-        helical: bool,
+        kind: PatternKind,
         mut pick: impl FnMut(usize) -> usize,
     ) -> Self {
         let mut domains: Vec<String> = localities
@@ -136,26 +186,30 @@ impl ReplicationPlan {
             };
         }
         let tolerance = config.tolerance.min(domains.len() - 1);
-        // `tolerance` distinct domains, drawn without replacement.
-        let mut pool: Vec<usize> = (0..domains.len()).collect();
         let mut marked = vec![false; domains.len()];
-        for _ in 0..tolerance {
-            let at = pick(pool.len());
-            marked[pool.swap_remove(at)] = true;
-        }
-        let chosen: Vec<String> = domains
-            .iter()
-            .zip(&marked)
-            .filter(|(_, marked)| **marked)
-            .map(|(id, _)| id.clone())
-            .collect();
-        let pattern = if helical {
-            FaultPattern::Helical {
-                domains,
-                local: chosen,
-            }
+        let pattern = if kind == PatternKind::Rolling {
+            FaultPattern::Rolling { domains }
         } else {
-            FaultPattern::Minority { domains: chosen }
+            // `tolerance` distinct domains, drawn without replacement.
+            let mut pool: Vec<usize> = (0..domains.len()).collect();
+            for _ in 0..tolerance {
+                let at = pick(pool.len());
+                marked[pool.swap_remove(at)] = true;
+            }
+            let chosen: Vec<String> = domains
+                .iter()
+                .zip(&marked)
+                .filter(|(_, marked)| **marked)
+                .map(|(id, _)| id.clone())
+                .collect();
+            if kind == PatternKind::Striped {
+                FaultPattern::Striped {
+                    domains,
+                    local: chosen,
+                }
+            } else {
+                FaultPattern::Minority { domains: chosen }
+            }
         };
         Self {
             pattern,
@@ -169,27 +223,54 @@ impl ReplicationPlan {
         &self.pattern
     }
 
-    fn domain_count(&self) -> usize {
+    pub(crate) fn is_rolling(&self) -> bool {
+        matches!(self.pattern, FaultPattern::Rolling { .. })
+    }
+
+    /// `ip`'s domain index, if it is a member.
+    pub(crate) fn domain(&self, ip: IpAddr) -> Option<usize> {
+        self.domain_of.get(&ip).copied()
+    }
+
+    pub(crate) fn domain_count(&self) -> usize {
         self.marked.len()
     }
 
-    /// Whether stripe `stripe` may be damaged in domain `domain`.
-    fn stripe_allowed(&self, stripe: u64, domain: usize) -> bool {
+    /// Whether `domain` is among the `tolerance` domains starting at
+    /// `first` in rotation order.
+    fn within(&self, domain: usize, first: u64) -> bool {
         let count = self.domain_count() as u64;
-        let first = stripe % count;
-        let offset = (domain as u64 + count - first) % count;
+        let offset = (domain as u64 + count - first % count) % count;
         offset < self.tolerance as u64
     }
 
+    /// Whether `domain` holds the rolling turn when it starts at `turn`.
+    pub(crate) fn in_window(&self, domain: usize, turn: usize) -> bool {
+        self.within(domain, turn as u64)
+    }
+
+    /// The ids of the domains holding the turn when it starts at `turn`.
+    pub(crate) fn window_ids(&self, turn: usize) -> Vec<String> {
+        let FaultPattern::Rolling { domains } = &self.pattern else {
+            return Vec::new();
+        };
+        (0..domains.len())
+            .filter(|domain| self.in_window(*domain, turn))
+            .map(|domain| domains[domain].clone())
+            .collect()
+    }
+
     /// Whether a random fault may damage `sector` of `owner`'s file at
-    /// `path`, given what `owner` published. A process outside the
-    /// topology is not constrained.
+    /// `path`, given what `owner` published and, for a rolling pattern,
+    /// where the turn starts. A process outside the group is not
+    /// constrained.
     pub(crate) fn allows(
         &self,
         owner: IpAddr,
         layout: Option<&LayoutIndex>,
         path: &str,
         sector: u64,
+        turn: usize,
     ) -> bool {
         let Some(&domain) = self.domain_of.get(&owner) else {
             return true;
@@ -197,7 +278,8 @@ impl ReplicationPlan {
         match &self.pattern {
             FaultPattern::Spared => false,
             FaultPattern::Minority { .. } => self.marked[domain],
-            FaultPattern::Helical { .. } => {
+            FaultPattern::Rolling { .. } => self.in_window(domain, turn),
+            FaultPattern::Striped { .. } => {
                 let mut stripes = layout
                     .map(|layout| layout.stripes(path, sector))
                     .unwrap_or_default();
@@ -209,7 +291,7 @@ impl ReplicationPlan {
                 stripes
                     .into_iter()
                     .flatten()
-                    .all(|stripe| self.stripe_allowed(stripe, domain))
+                    .all(|stripe| self.within(domain, stripe))
             }
         }
     }
@@ -245,6 +327,11 @@ impl LayoutIndex {
             ranges.sort_by_key(|(range, _)| range.start);
         }
         index
+    }
+
+    /// Whether any published region shares a byte with `sector`.
+    pub(crate) fn covers(&self, path: &str, sector: u64) -> bool {
+        !self.stripes(path, sector).is_empty()
     }
 
     /// The stripes of every region sharing a byte with `sector`, in range
@@ -296,12 +383,12 @@ mod tests {
     }
 
     #[test]
-    fn a_helix_damages_each_stripe_in_one_domain() {
+    fn stripes_rotate_one_domain_each() {
         let zones = localities(&["a", "b", "c"]);
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            true,
+            PatternKind::Striped,
             |_| 0,
         );
         // One stripe per sector.
@@ -311,7 +398,7 @@ mod tests {
         let layout = LayoutIndex::new(&regions);
         for stripe in 0..9 {
             let damaged: Vec<u8> = (1..=3)
-                .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", stripe))
+                .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", stripe, 0))
                 .collect();
             assert_eq!(damaged.len(), 1, "stripe {stripe}: {damaged:?}");
         }
@@ -323,12 +410,12 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            true,
+            PatternKind::Striped,
             |_| 0,
         );
         // Stripes 0 and 1 share sector 0: no domain may damage it.
         let layout = LayoutIndex::new(&[region(0..256, Some(0)), region(256..512, Some(1))]);
-        assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0)));
+        assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0, 0)));
     }
 
     #[test]
@@ -337,17 +424,17 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            true,
+            PatternKind::Striped,
             |_| 1,
         );
         let layout = LayoutIndex::new(&[region(0..512, None)]);
         let damaged: Vec<u8> = (1..=3)
-            .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", 0))
+            .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", 0, 0))
             .collect();
         assert_eq!(damaged, vec![2], "domain index 1 is zone b");
         // Bytes never published count as node-local too.
-        assert!(plan.allows(ip(2), None, "other", 7));
-        assert!(!plan.allows(ip(1), None, "other", 7));
+        assert!(plan.allows(ip(2), None, "other", 7, 0));
+        assert!(!plan.allows(ip(1), None, "other", 7, 0));
     }
 
     #[test]
@@ -356,7 +443,7 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone).tolerance(5),
             &zones,
-            false,
+            PatternKind::Minority,
             |_| 0,
         );
         let FaultPattern::Minority { domains } = plan.pattern() else {
@@ -368,7 +455,7 @@ mod tests {
             "tolerance is clamped below the domain count"
         );
         let spared = (1..=4)
-            .filter(|n| !plan.allows(ip(*n), None, "x", 0))
+            .filter(|n| !plan.allows(ip(*n), None, "x", 0, 0))
             .count();
         assert!(spared >= 1, "one domain keeps every record");
     }
@@ -379,11 +466,33 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            true,
+            PatternKind::Striped,
             |_| 0,
         );
         assert_eq!(plan.pattern(), &FaultPattern::Spared);
-        assert!(!plan.allows(ip(1), None, "x", 0));
-        assert!(plan.allows(ip(9), None, "x", 0), "outside the topology");
+        assert!(!plan.allows(ip(1), None, "x", 0, 0));
+        assert!(plan.allows(ip(9), None, "x", 0, 0), "outside the topology");
+    }
+
+    #[test]
+    fn a_rolling_turn_damages_one_domain_anywhere() {
+        let zones = localities(&["a", "b", "c"]);
+        let plan = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone),
+            &zones,
+            PatternKind::Rolling,
+            |_| 0,
+        );
+        let layout = LayoutIndex::new(&[region(0..512, Some(4)), region(512..1024, None)]);
+        for turn in 0..3 {
+            for sector in 0..2 {
+                let damaged: Vec<u8> = (1..=3)
+                    .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", sector, turn))
+                    .collect();
+                let expected = u8::try_from(turn + 1).expect("small");
+                assert_eq!(damaged, vec![expected], "turn {turn}, sector {sector}");
+            }
+        }
+        assert_eq!(plan.window_ids(4), vec!["b".to_string()], "the turn wraps");
     }
 }

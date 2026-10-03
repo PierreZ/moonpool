@@ -356,7 +356,8 @@ impl Process for ReplicaProcess {
         let ok = match (&pattern, self.expect_pattern) {
             (
                 Some(
-                    moonpool_sim::FaultPattern::Helical { domains, .. }
+                    moonpool_sim::FaultPattern::Striped { domains, .. }
+                    | moonpool_sim::FaultPattern::Rolling { domains }
                     | moonpool_sim::FaultPattern::Minority { domains },
                 ),
                 true,
@@ -374,14 +375,20 @@ impl Process for ReplicaProcess {
     }
 }
 
-fn replicated_run(storage_chaos: bool, seeds: Vec<u64>) -> moonpool_sim::SimulationReport {
-    let expect_pattern = storage_chaos;
+fn replicated_run(
+    storage_chaos: bool,
+    group: &'static str,
+    seeds: Vec<u64>,
+) -> moonpool_sim::SimulationReport {
+    let expect_pattern = storage_chaos && group == "replica";
     let mut builder = SimulationBuilder::new()
         .cluster(LocalityConfig::new(1, 3, 1, 1), move || {
             Box::new(ReplicaProcess { expect_pattern })
         })
         .workload(TimedWorkload(Duration::from_millis(50)))
-        .replicated_storage_faults(moonpool_sim::ReplicatedFaults::new(DomainLevel::Zone))
+        .replicated_storage_faults(
+            moonpool_sim::ReplicatedFaults::new(DomainLevel::Zone).group(group),
+        )
         .set_iterations(seeds.len())
         .set_debug_seeds(seeds);
     if storage_chaos {
@@ -392,13 +399,22 @@ fn replicated_run(storage_chaos: bool, seeds: Vec<u64>) -> moonpool_sim::Simulat
 
 #[test]
 fn replicated_storage_faults_draw_a_pattern_over_the_zones() {
-    let report = replicated_run(true, (1..=8).collect());
+    let report = replicated_run(true, "replica", (1..=8).collect());
     assert_eq!(report.failed_runs, 0, "every seed drew a pattern");
     assert_eq!(report.successful_runs, 8);
 }
 
 #[test]
 fn replicated_storage_faults_are_inert_without_storage_chaos() {
-    let report = replicated_run(false, vec![5]);
+    let report = replicated_run(false, "replica", vec![5]);
     assert_eq!(report.failed_runs, 0, "no storage chaos, no pattern");
+}
+
+#[test]
+fn replicated_storage_faults_cover_only_their_group() {
+    let report = replicated_run(true, "other", vec![5]);
+    assert_eq!(
+        report.failed_runs, 0,
+        "a replica outside the group has no pattern"
+    );
 }

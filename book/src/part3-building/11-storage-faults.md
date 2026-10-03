@@ -540,35 +540,54 @@ prevent it by construction, because it knows the topology:
 SimulationBuilder::new()
     .cluster(LocalityConfig::new(1, 3, 1..=2, 1), make_node)
     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
-    .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone))
+    .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone).group("node"))
 ```
 
 Each process publishes what its disk holds with
 `ctx.storage().publish_layout(regions)`: `LayoutRegion`s whose `stripe` is
 the replicated record's key, shared by every replica's copy (a Paxos slot, a
-page number), or `None` for bytes only that node has. Each seed then draws a
-`FaultPattern` over the domains at the chosen level:
+page number), or `None` for bytes only that node has. A `ReplicatedFaults`
+covers one process group (`.group(name)`, the processes' `Process::name`),
+or the whole topology without one; call `replicated_storage_faults` once per
+replicated group, so acceptors and matchmakers, say, each get their own
+pattern and their own records. Processes outside every covered group keep
+plain storage chaos. Each seed then draws, per group, a `FaultPattern` over
+the domains at the chosen level (machine, zone or datacenter):
 
 - **minority**: only the processes of a few domains take damage, anywhere on
   their disks;
-- **helical**: every domain takes damage, but stripe `s` only in the domain
+- **striped**: every domain takes damage, but stripe `s` only in the domain
   `s mod Z` rotates to, so the damaged records "spin" around the domains.
   Node-local bytes, and bytes never published, are damaged only in the
-  domains drawn for them.
+  domains drawn for them;
+- **rolling**: one domain at a time takes damage, anywhere on its disks. The
+  turn stays on a domain while it holds damage, and moves to the next domain
+  once that damage is repaired. Repair is read off the disk: every sector a
+  random fault damaged has been rewritten, truncated away or deleted, or is
+  no longer inside a region its process publishes. A domain holding no
+  damage passes the turn on as soon as another domain's disk is up for a
+  fault, so an idle domain never stalls the rotation; a domain that never
+  repairs does, and a run stuck on one turn is the evidence.
 
-Either way a record loses copies in at most `tolerance` domains (default 1,
-clamped so one domain always keeps every record), and so does node-local
-data. With fewer than two domains, nothing inside the topology is damaged.
-The helix is TigerBeetle's, keyed by **record** instead of file offset:
+In each, a record holds damage in at most `tolerance` domains at once
+(default 1, clamped so one domain always keeps every record), and so does
+node-local data; a rolling window spans `tolerance` consecutive domains.
+With fewer than two domains, no process in the group is damaged. The stripe
+rotation is TigerBeetle's helix, keyed by **record** instead of file offset:
 TigerBeetle's replicas are bit-for-bit identical, so an offset names the
 same record everywhere; a replicated log whose replicas write records at
-different offsets needs the key. The pattern shapes the same families a
-focus weighs (it is a weight of zero where damage may not land), composes
-with a focus and the mask, and is inert without storage chaos. Disk failure,
-wipes, and lost unsynced directory entries are outside it: they take a whole
-disk, or only unsynced state. `SimWorld::draw_replicated_faults` draws a
-pattern for a hand-driven test, and `SimStorageProvider::fault_pattern`
-tells a process which one its seed drew.
+different offsets needs the key. The rolling turn hits each domain harder,
+since its whole disk is open to damage, and tests recovery itself, since
+the next domain waits on it.
+
+The pattern shapes the same families a focus weighs (it is a weight of zero
+where damage may not land), composes with a focus and the mask, and is
+inert without storage chaos. Disk failure, wipes, and lost unsynced
+directory entries are outside it: they take a whole disk, or only unsynced
+state. `SimWorld::draw_replicated_faults` draws one group's pattern for a
+hand-driven test, `SimWorld::fault_turn(ip)` names the domains holding a
+rolling turn, and `SimStorageProvider::fault_pattern` tells a process which
+pattern its group drew.
 
 Directed tests reach for the targeted API on `SimWorld` instead:
 `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,

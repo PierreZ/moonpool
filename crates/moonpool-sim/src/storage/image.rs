@@ -165,6 +165,9 @@ pub struct FileImage {
     /// Targeted EIO injections.
     eio_read: SectorBitSet,
     eio_write: SectorBitSet,
+    /// Sectors a random fault left holding the wrong bytes, until rewritten
+    /// or truncated away: what a rolling replicated fault pattern waits on.
+    damaged: SectorBitSet,
     /// Per-sector `(CRC, byte length)` of the content the caller believes
     /// durable. A stamp exists only for sectors a sync claimed: a write to the
     /// sector drops it, a shrink into the sector narrows it to the surviving
@@ -197,6 +200,7 @@ impl FileImage {
             faults: SectorBitSet::new(0),
             eio_read: SectorBitSet::new(0),
             eio_write: SectorBitSet::new(0),
+            damaged: SectorBitSet::new(0),
             oracle: BTreeMap::new(),
             fill,
         };
@@ -283,22 +287,27 @@ impl FileImage {
     /// The bytes become visible immediately and durable only at the next
     /// successful [`sync`](Self::sync). The written sectors lose any latent
     /// fault, any lie, and any durability stamp: overwriting destroys the
-    /// guarantee the previous content carried.
+    /// guarantee the previous content carried. Returns whether it rewrote a
+    /// sector a random fault had damaged.
     #[instrument(level = "trace", skip(self, data), fields(len = data.len()))]
-    pub fn write(&mut self, offset: u64, data: &[u8]) {
+    pub fn write(&mut self, offset: u64, data: &[u8]) -> bool {
         let end = offset.saturating_add(data.len() as u64);
         if end > self.size() {
             self.resize_visible(end);
         }
         let start = as_index(offset);
         self.visible[start..start + data.len()].copy_from_slice(data);
+        let mut healed = false;
         for sector in super::faults::sector_range(offset, data.len()) {
             let index = as_index(sector);
+            healed |= self.damaged.is_set(index);
+            self.damaged.clear(index);
             self.dirty.set(index);
             self.faults.clear(index);
             self.lied.clear(index);
             self.oracle.remove(&sector);
         }
+        healed
     }
 
     /// Resize the visible image; the new length is durable only at the next
@@ -443,6 +452,9 @@ impl FileImage {
         self.lied.clear_all();
 
         report.lost_synced = self.oracle_sweep(path, &lied, barrier_violation_armed);
+        for sector in &report.lost_synced {
+            self.damaged.set(as_index(*sector));
+        }
         report
     }
 
@@ -453,6 +465,31 @@ impl FileImage {
         for sector in sectors {
             self.faults.set(as_index(sector));
         }
+    }
+
+    /// Mark `sectors` as damaged by a random fault (see
+    /// [`damaged_sectors`](Self::damaged_sectors)).
+    pub fn mark_damaged(&mut self, sectors: Range<u64>) {
+        for sector in sectors {
+            self.damaged.set(as_index(sector));
+        }
+    }
+
+    /// The sectors a random fault left holding the wrong bytes (a crash's
+    /// lost, torn or latent sectors, a phantom or misdirected write, planted
+    /// corruption), until they are rewritten or truncated away.
+    #[must_use]
+    pub fn damaged_sectors(&self) -> Vec<u64> {
+        (0..self.damaged.len())
+            .filter(|index| self.damaged.is_set(*index))
+            .map(|index| index as u64)
+            .collect()
+    }
+
+    /// Whether any sector is [damaged](Self::damaged_sectors).
+    #[must_use]
+    pub fn has_damage(&self) -> bool {
+        self.damaged.any_in(0..self.damaged.len() as u64)
     }
 
     /// Whether a sector currently carries a latent read fault.
@@ -584,6 +621,7 @@ impl FileImage {
         self.faults = self.faults.resized(len);
         self.eio_read = self.eio_read.resized(len);
         self.eio_write = self.eio_write.resized(len);
+        self.damaged = self.damaged.resized(len);
     }
 
     /// Commit one dirty sector honestly: the visible bytes become durable.
@@ -615,6 +653,7 @@ impl FileImage {
             CrashOutcome::LatentFault => {
                 self.commit_sector(sector);
                 self.faults.set(index);
+                self.damaged.set(index);
             }
             CrashOutcome::Lost => {
                 // Only the part of the sector past its protected prefix is
@@ -632,6 +671,7 @@ impl FileImage {
                 }
                 self.dirty.clear(index);
                 self.lied.clear(index);
+                self.damaged.set(index);
             }
             CrashOutcome::Shorn => {
                 let range = self.shared_bounds(sector);
@@ -650,6 +690,7 @@ impl FileImage {
                 self.committed[kept].copy_from_slice(&bytes);
                 self.dirty.clear(index);
                 self.lied.clear(index);
+                self.damaged.set(index);
             }
         }
         outcome
