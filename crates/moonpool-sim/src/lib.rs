@@ -73,9 +73,9 @@
 
 // Re-export core types for convenience
 pub use moonpool_core::{
-    Detach, NetworkProvider, OpenOptions, Providers, RandomProvider, Resolver, SimulationError,
-    SimulationResult, StorageFile, StorageProvider, TaskProvider, TcpListenerTrait, TimeError,
-    TimeProvider,
+    Detach, LayoutRegion, NetworkProvider, OpenOptions, Providers, RandomProvider, Resolver,
+    SimulationError, SimulationResult, StorageFile, StorageProvider, TaskProvider,
+    TcpListenerTrait, TimeError, TimeProvider,
 };
 // The deterministic select! (moonpool-sim always enables core's
 // deterministic-select, so this is tokio's expansion with a seeded start
@@ -192,9 +192,10 @@ pub use network::{
 
 // Storage exports
 pub use storage::{
-    CrashOutcome, EioTarget, FileCrashReport, FileImage, SECTOR_SIZE, SectorBitSet,
-    SectorResolution, SimStorageProvider, StorageConfiguration, StorageEligibilityMask,
-    StorageError, StorageFaultKind, StorageFaultRecord,
+    CrashOutcome, EioTarget, FaultFocus, FaultPattern, FileCrashReport, FileImage,
+    ReplicatedFaults, SECTOR_SIZE, SectorBitSet, SectorResolution, SimStorageProvider,
+    StorageConfiguration, StorageEligibilityMask, StorageError, StorageFaultKind,
+    StorageFaultRecord,
 };
 
 // Provider exports

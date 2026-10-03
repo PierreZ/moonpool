@@ -175,11 +175,13 @@
 mod dual;
 mod error;
 mod journal;
+mod journal_atlas;
 mod layout;
 mod scan;
 mod segment;
 
 pub use error::JournalError;
 pub use journal::{AmbiguousTail, Journal, JournalConfig, Record, Recovery};
+pub use journal_atlas::{ChartedRegion, JournalAtlas, JournalRegion};
 pub use layout::{BLOCK, ENTRY_HEADER_SIZE, Geometry, SLOT_SIZE, TAG_SIZE, Tag};
 pub use segment::{Entry, EntryId};

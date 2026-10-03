@@ -484,6 +484,111 @@ damage all copies of one record" without moonpool knowing what a replica is
 (TigerBeetle's `ClusterFaultAtlas` pattern). Rolls happen *before* the mask is
 consulted, so installing one never shifts the random stream.
 
+A mask only says *whether* a sector may be damaged. A **fault focus** says
+*how likely*: a harness that knows its on-disk layout weighs byte ranges of
+its own files, and every random family rolled per sector or per operation
+(read and write corruption, read and write EIO, phantom writes, sync lies,
+the damaging crash outcomes) has its probability multiplied by the weight of
+the sectors it would hit. Most of a preallocated file is zeros nobody reads,
+so a uniform fault mostly lands there. A focus moves the damage onto the
+bytes recovery has to judge:
+
+```rust
+// Inside a process: aim this disk's faults at a journal's identifiers.
+let focus = FaultFocus::new()
+    .background(0.1) // the zeros, barely
+    .spot("wal/seg-00000000000000000001.wal", 8192..8192 + 64 * 16, 8.0);
+ctx.storage().focus_faults(focus)?;
+```
+
+`SimStorageProvider::focus_faults` is reachable from process code, and it is
+scoped to that process's disk; `SimWorld::set_fault_focus(ip, focus)` does
+the same from a hand-driven test. A weight of 0 makes a sector immune, the
+mask still vetoes first, and a weight never revives a family the
+configuration leaves at zero. A misdirected write honours only the immunity:
+its offset draw depends on the configured rate alone. Rolls are drawn
+whatever the weights, so a focus changes which faults fire, never which
+draws decide them. A focus survives its process's crash and is cleared by a
+wipe of its storage.
+
+The map comes from the format, not from moonpool. A format that knows its
+layout lists it as `LayoutRegion`s (`moonpool-core`: a path, a byte range,
+and the format's own kind label), and `FaultFocus::layout` weighs them by
+kind:
+
+```rust
+let focus = FaultFocus::new()
+    .background(0.1)
+    .layout(journal.atlas().layout(), |region| {
+        if region.kind == JournalRegion::SLOT { 8.0 } else { 4.0 }
+    });
+```
+
+`moonpool-journal`'s `JournalAtlas` is one such map (see
+[A Crash-Aware Journal](../part5-building-on-top/08-journal.md)); another
+format needs only to list its regions.
+
+#### Replicated Fault Patterns
+
+A replicated system survives disk damage only while some replica keeps a
+clean copy of every record. Random faults drawn independently per disk
+eventually hit every copy of one record and turn a valid run into an
+unwinnable one. A harness can keep a ledger to prevent that; moonpool can
+prevent it by construction, because it knows the topology:
+
+```rust
+SimulationBuilder::new()
+    .cluster(LocalityConfig::new(1, 3, 1..=2, 1), make_node)
+    .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone).group("node"))
+```
+
+Each process publishes what its disk holds with
+`ctx.storage().publish_layout(regions)`: `LayoutRegion`s whose `stripe` is
+the replicated record's key, shared by every replica's copy (a Paxos slot, a
+page number), or `None` for bytes only that node has. A `ReplicatedFaults`
+covers one process group (`.group(name)`, the processes' `Process::name`),
+or the whole topology without one; call `replicated_storage_faults` once per
+replicated group, so acceptors and matchmakers, say, each get their own
+pattern and their own records. Processes outside every covered group keep
+plain storage chaos. Each seed then draws, per group, a `FaultPattern` over
+the domains at the chosen level (machine, zone or datacenter):
+
+- **minority**: only the processes of a few domains take damage, anywhere on
+  their disks;
+- **striped**: every domain takes damage, but stripe `s` only in the domain
+  `s mod Z` rotates to, so the damaged records "spin" around the domains.
+  Node-local bytes, and bytes never published, are damaged only in the
+  domains drawn for them;
+- **rolling**: one domain at a time takes damage, anywhere on its disks. The
+  turn stays on a domain while it holds damage, and moves to the next domain
+  once that damage is repaired. Repair is read off the disk: every sector a
+  random fault damaged has been rewritten, truncated away or deleted, or is
+  no longer inside a region its process publishes. A domain holding no
+  damage passes the turn on as soon as another domain's disk is up for a
+  fault, so an idle domain never stalls the rotation; a domain that never
+  repairs does, and a run stuck on one turn is the evidence.
+
+In each, a record holds damage in at most `tolerance` domains at once
+(default 1, clamped so one domain always keeps every record), and so does
+node-local data; a rolling window spans `tolerance` consecutive domains.
+With fewer than two domains, no process in the group is damaged. The stripe
+rotation is TigerBeetle's helix, keyed by **record** instead of file offset:
+TigerBeetle's replicas are bit-for-bit identical, so an offset names the
+same record everywhere; a replicated log whose replicas write records at
+different offsets needs the key. The rolling turn hits each domain harder,
+since its whole disk is open to damage, and tests recovery itself, since
+the next domain waits on it.
+
+The pattern shapes the same families a focus weighs (it is a weight of zero
+where damage may not land), composes with a focus and the mask, and is
+inert without storage chaos. Disk failure, wipes, and lost unsynced
+directory entries are outside it: they take a whole disk, or only unsynced
+state. `SimWorld::draw_replicated_faults` draws one group's pattern for a
+hand-driven test, `SimWorld::fault_turn(ip)` names the domains holding a
+rolling turn, and `SimStorageProvider::fault_pattern` tells a process which
+pattern its group drew.
+
 Directed tests reach for the targeted API on `SimWorld` instead:
 `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,
 `clear_file_eio`, and — to test the oracle itself —

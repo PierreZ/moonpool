@@ -159,6 +159,54 @@ such sectors, so on that disk an acknowledged entry can come back damaged.
 The journal then does what the paper promises for any corruption: it reports
 the entry, or refuses to start, and never returns wrong data.
 
+## Aiming Faults at the Layout
+
+The layout is known, so a fault injector does not have to damage a segment
+uniformly, where most sectors are preallocated zeros nobody reads. An
+`JournalAtlas` names every region recovery reads and where it lives, as a
+file and a byte range:
+
+| `JournalRegion` | What damage there makes recovery do |
+|----------|-------------------------------------|
+| `Header { segment, copy }` | repair it from its twin; both copies: `BadSegmentHeader` |
+| `Slot(id)` | rebuild it from an intact entry; beside a damaged entry: `DoubleFault` |
+| `Entry(id)` | report it corrupt, or ambiguous in the last batch |
+| `Meta { copy }` | repair it from the other copy; both: `MetadataCorrupt` |
+
+`Journal::atlas` charts an open journal from what its recovery scan
+verified. `JournalAtlas::scan` charts a closed directory from its slot tables
+alone, without opening it and so without repairing anything: an injector
+damages the bytes before the next boot reads them. `JournalAtlas::last_batch` and
+`JournalAtlas::starts_batch` give the batch boundaries, and `JournalAtlas::regions_in`
+maps damaged bytes back to the regions they reach: one sector of the slot
+table holds eight slots, one block several entries.
+
+Every charted region also comes as a `LayoutRegion` from `moonpool-core`
+(`JournalAtlas::layout`): a file, a byte range, and a kind label
+(`JournalRegion::SLOT`, `ENTRY`, `HEADER`, `META`). That form is
+format-neutral, so the simulator aims faults at it without knowing the
+journal, and any other storage format can describe its own layout the same
+way.
+
+Because each region carries its meaning, the injector also knows what the
+damage *should* do. The crate's `tests/journal_atlas.rs` aims damage the way a
+recovery decision needs it: part of the last batch, an entry beside its
+own slot, both copies of a twin, a run of slots. It predicts the verdict
+from the regions hit by applying the recovery table, then checks that
+reopening reports exactly that, and that a second reopen finds every
+repair durable. Uniform damage almost never hits a pair like an entry and
+its own slot. Aimed damage does: a few thousand seeds reach every verdict,
+double faults included.
+
+The atlas also aims the simulator's own random faults. After every write,
+the crash loop's `Aimed` model hands `Journal::atlas().layout()` to the disk as a
+`FaultFocus` (slots weighted 8, entries and twin copies 4, zeros 0.1), so
+the crash physics damage identifiers and live entries rather than the
+preallocated zeros. A crash can only damage the sectors dirty at that
+moment, so the gain is bounded, but it is real: on 250 seeds the damage
+reported against acknowledged data rose from 40 to 67, and refusals from 1
+to 4. The guarantee is unchanged: a read never returns wrong data.
+
 ## The Example Simulation
 
 [`journal.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/journal.rs)

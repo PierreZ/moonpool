@@ -361,6 +361,86 @@ impl SimWorld {
         self.inner.write().storage.set_eligibility_mask(Some(mask));
     }
 
+    /// Weigh where random faults land on `ip`'s disk (see
+    /// [`FaultFocus`](crate::storage::FaultFocus)), replacing any focus it
+    /// had. A process sets its own through
+    /// [`SimStorageProvider::focus_faults`](crate::SimStorageProvider::focus_faults).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self, focus))]
+    pub fn set_fault_focus(&self, ip: IpAddr, focus: crate::storage::FaultFocus) {
+        self.inner.write().storage.set_fault_focus(ip, Some(focus));
+    }
+
+    /// Draw and install a replicated fault pattern over `localities` (one
+    /// group's members), from the simulation stream: what the runner does
+    /// per seed and covered group, for a hand-driven test. Each call adds
+    /// one more group's pattern. Returns the pattern drawn.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use = "the pattern drawn says which disks may take damage"]
+    pub fn draw_replicated_faults(
+        &self,
+        config: crate::storage::ReplicatedFaults,
+        localities: &std::collections::BTreeMap<IpAddr, crate::LocalityInfo>,
+    ) -> crate::storage::FaultPattern {
+        use crate::storage::replication::{PatternKind, ReplicationPlan};
+        let kind = PatternKind::nth(crate::sim::rng::sim_random_range(0..3));
+        let plan = ReplicationPlan::draw(config, localities, kind, |n| {
+            crate::sim::rng::sim_random_range(0..n)
+        });
+        let pattern = plan.pattern().clone();
+        self.inner.write().storage.add_replication_plan(plan);
+        pattern
+    }
+
+    /// The replicated fault pattern covering `ip`, if one does.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn fault_pattern(&self, ip: IpAddr) -> Option<crate::storage::FaultPattern> {
+        self.inner.read().storage.fault_pattern(ip)
+    }
+
+    /// The domains holding the turn of the rolling pattern covering `ip`
+    /// (empty if no rolling pattern covers it).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn fault_turn(&self, ip: IpAddr) -> Vec<String> {
+        self.inner.read().storage.fault_turn(ip)
+    }
+
+    /// Replace what `ip` says about its own on-disk layout: the regions a
+    /// replicated fault pattern reads (see
+    /// [`SimStorageProvider::publish_layout`](crate::SimStorageProvider::publish_layout)).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self, regions))]
+    pub fn publish_layout(&self, ip: IpAddr, regions: &[moonpool_core::LayoutRegion]) {
+        self.inner.write().storage.publish_layout(ip, regions);
+    }
+
+    /// Remove `ip`'s fault focus: every sector of its disk weighs 1 again.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn clear_fault_focus(&self, ip: IpAddr) {
+        self.inner.write().storage.set_fault_focus(ip, None);
+    }
+
     /// Remove the eligibility mask: every sector becomes eligible again.
     ///
     /// # Panics

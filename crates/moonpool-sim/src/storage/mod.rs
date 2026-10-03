@@ -36,6 +36,9 @@ pub mod image;
 /// Storage provider implementation
 pub mod provider;
 
+// Replicated fault patterns: damage spread over failure domains
+pub mod replication;
+
 /// Deterministic storage engine and targeted event types.
 pub mod sim;
 
@@ -62,10 +65,12 @@ pub use file::SimStorageFile;
 
 // Re-export the file image and the fault vocabulary
 pub use faults::{
-    CrashOutcome, EioTarget, FileCrashReport, SECTOR_SIZE, SectorResolution,
+    CrashOutcome, EioTarget, FaultFocus, FileCrashReport, SECTOR_SIZE, SectorResolution,
     StorageEligibilityMask, StorageFaultKind, StorageFaultRecord,
 };
 pub use image::{FileImage, SectorBitSet};
+
+pub use replication::{FaultPattern, ReplicatedFaults};
 
 // Re-export provider
 pub use provider::SimStorageProvider;

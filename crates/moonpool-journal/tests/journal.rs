@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
-    AmbiguousTail, Entry, EntryId, Geometry, Journal, JournalConfig, JournalError, Record,
-    Recovery, TAG_SIZE, Tag,
+    AmbiguousTail, Entry, EntryId, Geometry, Journal, JournalAtlas, JournalConfig, JournalError,
+    JournalRegion, Record, Recovery, TAG_SIZE, Tag,
 };
-use moonpool_sim::{EioTarget, SimStorageProvider, SimWorld, StorageConfiguration};
+use moonpool_sim::{EioTarget, FaultFocus, SimStorageProvider, SimWorld, StorageConfiguration};
 
 const DIR: &str = "wal";
 
@@ -872,6 +872,32 @@ enum Model {
     /// durable when their sector is rewritten, which the paper's model rules
     /// out — so the guarantee is detection: a read never returns wrong data.
     Harsh,
+    /// The full physics again, aimed: after every write the writer hands
+    /// the journal's [`JournalAtlas`] to the disk as a [`FaultFocus`], so the
+    /// crash damages identifiers and live entries far more often than the
+    /// zeros around them. Same guarantee as `Harsh`.
+    Aimed,
+}
+
+impl Model {
+    /// Whether this model's disk can destroy bytes a sync made durable.
+    fn harsh(self) -> bool {
+        self != Model::Paper
+    }
+}
+
+/// The disk weights an aimed writer installs: identifiers heaviest, then
+/// entries and the twin copies; the preallocated zeros barely at all.
+fn focus_of(atlas: &JournalAtlas) -> FaultFocus {
+    FaultFocus::new()
+        .background(0.1)
+        .layout(atlas.layout(), |region| {
+            if region.kind == JournalRegion::SLOT {
+                8.0
+            } else {
+                4.0
+            }
+        })
 }
 
 fn storage(model: Model, rng: &mut Rng) -> StorageConfiguration {
@@ -882,7 +908,7 @@ fn storage(model: Model, rng: &mut Rng) -> StorageConfiguration {
     config.crash_lost_probability = 0.0;
     config.crash_latent_fault_probability = 0.0;
     config.shorn_write_probability = 0.0;
-    if model == Model::Harsh {
+    if model.harsh() {
         config.crash_lost_probability = rng.pick(&[0.02, 0.1, 0.3]);
         config.crash_latent_fault_probability = rng.pick(&[0.0, 0.02, 0.1]);
         config.shorn_write_probability = rng.pick(&[0.0, 0.05, 0.2]);
@@ -966,6 +992,29 @@ fn under_moonpools_full_physics_a_read_never_returns_wrong_data() {
     assert!(tally.torn > 0, "no crash ever tore a tail");
 }
 
+/// The same physics aimed by the atlas: the guarantee holds, and more of
+/// the damage lands on what was acknowledged. A crash can only damage the
+/// sectors dirty at that moment, so the focus re-weighs a small set. On 250
+/// seeds it raised the damage to acknowledged data from 40 to 67 reports
+/// (refusals 1 to 4, acknowledged ambiguous entries 15 to 36); the default
+/// 120 seeds, kept small because the test runs both models, give 15 to 26.
+#[test]
+fn aimed_by_the_atlas_the_physics_damage_acknowledged_entries_more_often() {
+    let (mut uniform, mut aimed) = (Tally::default(), Tally::default());
+    for seed in seeds(120) {
+        crash_loop(seed, Model::Harsh, &mut uniform);
+        crash_loop(seed, Model::Aimed, &mut aimed);
+    }
+    eprintln!("uniform: {uniform:?}\naimed: {aimed:?}");
+    let hurt = |t: &Tally| t.corrupt_acked + t.ambiguous_acked + t.refused;
+    assert!(
+        hurt(&aimed) > hurt(&uniform),
+        "aiming should raise the damage to acknowledged data: {} vs {}",
+        hurt(&aimed),
+        hurt(&uniform)
+    );
+}
+
 /// Crash a writer repeatedly, checking every recovery against the ledger.
 /// Odd seeds keep the ambiguous last batch instead of truncating it.
 fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
@@ -1002,6 +1051,7 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
                 .collect();
             let handle = tokio::spawn(write(
                 sim.storage_provider(ip()),
+                model,
                 config.clone(),
                 round + 1,
                 plan,
@@ -1072,7 +1122,7 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
         Ok(found) => found,
         Err(error) => {
             assert!(
-                model == Model::Harsh,
+                model.harsh(),
                 "{at}: the paper's model must always recover, got {error}"
             );
             tally.refused += 1;
@@ -1141,7 +1191,7 @@ fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: 
         // only a batch whose sync never returned can be damaged.
         if id.index < acked_end {
             assert!(
-                model == Model::Harsh,
+                model.harsh(),
                 "{at}: acknowledged entry {} reported ambiguous: {recovery:?}",
                 id.index
             );
@@ -1153,7 +1203,7 @@ fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: 
             tally.corrupt_unacked += 1;
         } else {
             assert!(
-                model == Model::Harsh,
+                model.harsh(),
                 "{at}: acknowledged entry {} reported corrupt: {recovery:?}",
                 id.index
             );
@@ -1166,13 +1216,22 @@ fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: 
 /// each, a suffix truncation at an arbitrary index or a metadata save.
 async fn write(
     provider: SimStorageProvider,
+    model: Model,
     config: JournalConfig,
     epoch: u64,
     plan: Vec<(u64, u64, u64)>,
     ledger: Ledger,
     meta: MetaLedger,
 ) -> Result<(), JournalError> {
+    let disk = provider.clone();
     let (mut journal, _) = open(provider, config).await?;
+    let aim = |journal: &Journal<SimStorageProvider>| {
+        if model == Model::Aimed {
+            disk.focus_faults(focus_of(&journal.atlas()))
+                .expect("simulation alive");
+        }
+    };
+    aim(&journal);
     for (kind, count, len) in plan {
         let next = journal.next_index();
         let start = journal.start_index();
@@ -1185,6 +1244,7 @@ async fn write(
                 .expect("ledger")
                 .retain(|(index, _, _)| *index < from);
             journal.truncate_suffix(from).await?;
+            aim(&journal);
             continue;
         }
         if kind == 1 {
@@ -1195,6 +1255,7 @@ async fn write(
                 acked: Some(value),
                 pending: None,
             };
+            aim(&journal);
             continue;
         }
         let len = usize::try_from(len).expect("small");
@@ -1207,6 +1268,7 @@ async fn write(
             .map(|(payload, index)| Record::new(epoch, payload).with_tag(tag(index, epoch)))
             .collect();
         let range = journal.append(&records).await?;
+        aim(&journal);
         let mut ledger = ledger.lock().expect("ledger");
         for (index, payload) in range.zip(bytes) {
             ledger.push((index, epoch, payload));

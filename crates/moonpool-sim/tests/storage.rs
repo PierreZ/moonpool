@@ -65,6 +65,8 @@ mod directory;
 mod disk_failure;
 #[path = "storage/faults.rs"]
 mod faults;
+#[path = "storage/focus.rs"]
+mod focus;
 #[path = "storage/latency.rs"]
 mod latency;
 #[path = "storage/namespaces.rs"]
@@ -75,6 +77,8 @@ mod performance;
 mod positioned;
 #[path = "storage/recovery.rs"]
 mod recovery;
+#[path = "storage/replicated.rs"]
+mod replicated;
 // Both exercise TokioStorageProvider — only available with the tokio-providers
 // feature.
 #[cfg(feature = "tokio-providers")]

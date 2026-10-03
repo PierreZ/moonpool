@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
+    sync::Arc,
     time::Duration,
 };
 
@@ -10,7 +11,9 @@ use moonpool_core::{IoConstraints, OpenOptions};
 
 use super::OperationId;
 use crate::storage::{
-    FileCrashReport, FileImage, StorageConfiguration, StorageFaultRecord, faults::EligibilitySlot,
+    FaultFocus, FileCrashReport, FileImage, StorageConfiguration, StorageFaultRecord,
+    faults::EligibilitySlot,
+    replication::{LayoutIndex, ReplicationPlan},
 };
 
 /// Unique identifier for persistent simulated file contents.
@@ -136,6 +139,13 @@ pub(crate) struct StorageState {
     /// Consulted before any random fault damages a sector (see
     /// [`StorageEligibilityMask`]).
     pub(crate) eligibility: EligibilitySlot,
+    /// Per-process fault weights (see [`FaultFocus`]); a process without one
+    /// weighs every sector 1.
+    pub(crate) focus: BTreeMap<IpAddr, Arc<FaultFocus>>,
+    /// The seed's replicated fault patterns, one per covered group.
+    pub(crate) replication: Vec<ReplicationSlot>,
+    /// Per-process published layouts, which the pattern reads.
+    pub(crate) layouts: BTreeMap<IpAddr, Arc<LayoutIndex>>,
     /// Every fault the disk has injected, oldest first, drained by the caller.
     pub(crate) fault_records: Vec<StorageFaultRecord>,
     /// What each simulated crash did, per file, drained by the caller.
@@ -166,6 +176,9 @@ impl StorageState {
             durable_directories: BTreeSet::new(),
             pending_ops: BTreeMap::new(),
             eligibility: EligibilitySlot::default(),
+            focus: BTreeMap::new(),
+            replication: Vec::new(),
+            layouts: BTreeMap::new(),
             fault_records: Vec::new(),
             crash_reports: Vec::new(),
             barrier_violation_armed: false,
@@ -191,5 +204,145 @@ impl StorageState {
         sectors
             .into_iter()
             .all(|sector| self.eligible(path, sector))
+    }
+
+    /// How much more likely than configured a random fault is to damage
+    /// `sector` of `owner`'s file at `path`: 0 where the eligibility mask
+    /// vetoes it or the seed's replicated fault pattern spares it, else the
+    /// owner's [`FaultFocus`] weight (1 without one).
+    pub(crate) fn weight(&self, owner: IpAddr, path: &str, sector: u64) -> f64 {
+        self.weigher(owner, path)(sector)
+    }
+
+    /// [`weight`](Self::weight) for one file, detached from the state so a
+    /// file image can consult it while the engine holds the image mutably.
+    pub(crate) fn weigher(&self, owner: IpAddr, path: &str) -> impl Fn(u64) -> f64 + use<> {
+        let mask = self.eligibility.mask();
+        let focus = self.focus.get(&owner).cloned();
+        let replication: Vec<(Arc<ReplicationPlan>, usize)> = self
+            .replication
+            .iter()
+            .map(|slot| (Arc::clone(&slot.plan), slot.turn))
+            .collect();
+        let layout = self.layouts.get(&owner).cloned();
+        let path = path.to_string();
+        move |sector| {
+            if !mask.as_ref().is_none_or(|mask| mask(&path, sector)) {
+                return 0.0;
+            }
+            if !replication
+                .iter()
+                .all(|(plan, turn)| plan.allows(owner, layout.as_deref(), &path, sector, *turn))
+            {
+                return 0.0;
+            }
+            focus
+                .as_ref()
+                .map_or(1.0, |focus| focus.weight(&path, sector))
+        }
+    }
+
+    /// A random fault damaged or a write repaired some sector, or what a
+    /// process publishes changed: each rolling turn re-reads its window's
+    /// disks before it next moves.
+    pub(crate) fn note_damage_changed(&mut self) {
+        for slot in &mut self.replication {
+            slot.recheck = true;
+        }
+    }
+
+    /// Before `owner`'s disk is up for a fault: every rolling turn that
+    /// covers `owner` from another domain, and whose window holds no
+    /// damage, moves one domain on.
+    pub(crate) fn settle_turns(&mut self, owner: IpAddr) {
+        for at in 0..self.replication.len() {
+            let plan = Arc::clone(&self.replication[at].plan);
+            if !plan.is_rolling() {
+                continue;
+            }
+            let Some(domain) = plan.domain(owner) else {
+                continue;
+            };
+            let turn = self.replication[at].turn;
+            if self.replication[at].recheck {
+                let damaged = self.window_damaged(&plan, turn);
+                let slot = &mut self.replication[at];
+                slot.damaged = damaged;
+                slot.recheck = false;
+            }
+            let slot = &mut self.replication[at];
+            if !slot.damaged && !plan.in_window(domain, turn) {
+                slot.turn = (turn + 1) % plan.domain_count();
+                slot.recheck = true;
+                crate::assert_reachable!("storage: a rolling turn moves on");
+            }
+        }
+    }
+
+    /// Whether any named file of a process in the window starting at
+    /// `turn` holds a damaged sector its process still publishes (or any
+    /// damaged sector, if it publishes nothing).
+    fn window_damaged(&self, plan: &ReplicationPlan, turn: usize) -> bool {
+        self.path_to_file.iter().any(|((owner, path), file_id)| {
+            if !plan
+                .domain(*owner)
+                .is_some_and(|domain| plan.in_window(domain, turn))
+            {
+                return false;
+            }
+            let Some(file) = self.files.get(file_id) else {
+                return false;
+            };
+            if !file.image.has_damage() {
+                return false;
+            }
+            let layout = self.layouts.get(owner);
+            file.image
+                .damaged_sectors()
+                .into_iter()
+                .any(|sector| layout.is_none_or(|layout| layout.covers(path, sector)))
+        })
+    }
+
+    /// The weight of a fault rolled once for a whole range: 0 if any sector
+    /// is vetoed or immune, else the heaviest sector's weight.
+    pub(crate) fn weight_range(
+        &self,
+        owner: IpAddr,
+        path: &str,
+        sectors: std::ops::Range<u64>,
+    ) -> f64 {
+        let mut heaviest = 0.0_f64;
+        for sector in sectors {
+            let weight = self.weight(owner, path, sector);
+            if weight <= 0.0 {
+                return 0.0;
+            }
+            heaviest = heaviest.max(weight);
+        }
+        heaviest
+    }
+}
+
+/// One group's replicated fault plan, and its rolling turn.
+#[derive(Debug)]
+pub(crate) struct ReplicationSlot {
+    pub(crate) plan: Arc<ReplicationPlan>,
+    /// Where the rolling window starts (unused by the other patterns).
+    pub(crate) turn: usize,
+    /// Whether the window held damage when last read.
+    pub(crate) damaged: bool,
+    /// Whether the window must be re-read before the turn next moves.
+    pub(crate) recheck: bool,
+}
+
+impl ReplicationSlot {
+    pub(crate) fn new(plan: ReplicationPlan) -> Self {
+        Self {
+            plan: Arc::new(plan),
+            turn: 0,
+            damaged: false,
+            recheck: false,
+        }
     }
 }

@@ -36,6 +36,57 @@ impl SimStorageProvider {
         Self { sim, owner_ip }
     }
 
+    /// Weigh where random faults land on this process's disk: the sectors a
+    /// [`FaultFocus`](super::FaultFocus) names get its weights, every other
+    /// one its background weight. Replaces any focus the disk had; a wipe of
+    /// this process's storage clears it. A harness that knows its on-disk
+    /// layout calls this to aim the configured fault families at the bytes
+    /// that matter.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn focus_faults(&self, focus: super::FaultFocus) -> io::Result<()> {
+        self.sim()?.set_fault_focus(self.owner_ip, focus);
+        Ok(())
+    }
+
+    /// Remove this process's fault focus.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn clear_fault_focus(&self) -> io::Result<()> {
+        self.sim()?.clear_fault_focus(self.owner_ip);
+        Ok(())
+    }
+
+    /// Tell the simulator what this process's disk holds: its storage
+    /// format's regions, each with the replicated record it holds (its
+    /// `stripe`). A run with
+    /// [`SimulationBuilder::replicated_storage_faults`](crate::SimulationBuilder::replicated_storage_faults)
+    /// reads it to damage every record on some replicas and never on all;
+    /// without it, publishing changes nothing. Replaces what was published
+    /// before; a wipe of this process's storage clears it.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn publish_layout(&self, regions: &[moonpool_core::LayoutRegion]) -> io::Result<()> {
+        self.sim()?.publish_layout(self.owner_ip, regions);
+        Ok(())
+    }
+
+    /// The replicated fault pattern this seed drew for this process's
+    /// group, if the run covers it.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn fault_pattern(&self) -> io::Result<Option<super::FaultPattern>> {
+        Ok(self.sim()?.fault_pattern(self.owner_ip))
+    }
+
     /// Upgrade the weak simulation handle, mapping a dropped simulation to an
     /// I/O error so storage operations can propagate it with `?`.
     fn sim(&self) -> io::Result<crate::sim::SimWorld> {

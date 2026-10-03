@@ -51,7 +51,7 @@ fn decode(bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
 }
 
 impl DualFile {
-    fn path(&self, copy: u64) -> String {
+    pub(crate) fn path(&self, copy: u64) -> String {
         format!("{}/{}.{copy}", self.dir, self.name)
     }
 

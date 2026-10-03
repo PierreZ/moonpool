@@ -537,6 +537,21 @@ impl<F: StorageFile> Segment<F> {
         self.first + u64_len(self.recs.len())
     }
 
+    /// Add this segment's headers and live entries to `atlas`, its file
+    /// being `path`.
+    pub fn chart(&self, path: &str, atlas: &mut crate::JournalAtlas) {
+        atlas.push_headers(path, self.first);
+        for (rel, rec) in (0u64..).zip(&self.recs) {
+            atlas.push_entry(
+                path,
+                rec.slot.id(),
+                rel,
+                (u64::from(rec.slot.offset), rec.slot.length),
+                rec.slot.batch_start,
+            );
+        }
+    }
+
     /// The last record this segment holds.
     pub fn last(&self) -> Option<Rec> {
         self.recs.last().copied()
