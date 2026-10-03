@@ -52,7 +52,7 @@ pub(crate) fn sim_shutdown_error() -> io::Error {
 pub use error::StorageError;
 
 // Re-export configuration
-pub use config::StorageConfiguration;
+pub use config::{StorageConfiguration, StorageFault, StorageFaultMask};
 
 // Re-export events
 pub use events::StorageOperation;

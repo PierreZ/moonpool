@@ -287,6 +287,8 @@ pub struct SimulationBuilder {
     storage_chaos: Option<ChaosMode>,
     /// Deterministic allow-mask applied after each per-seed network profile.
     network_fault_mask: crate::NetworkFaultMask,
+    /// Storage fault families retained after the storage profile is sampled.
+    storage_fault_mask: crate::StorageFaultMask,
     /// Distance-based link latency, applied to every iteration's network config.
     link_latency: Option<crate::network::LinkLatencyConfig>,
     /// End-to-end byte window per stream direction, applied to every
@@ -348,6 +350,7 @@ impl SimulationBuilder {
             network_chaos: None,
             storage_chaos: None,
             network_fault_mask: crate::NetworkFaultMask::all(),
+            storage_fault_mask: crate::StorageFaultMask::all(),
             link_latency: None,
             tcp_send_window_bytes: None,
             accept_backlog_capacity: None,
@@ -592,6 +595,29 @@ impl SimulationBuilder {
     #[must_use]
     pub fn network_fault_mask(mut self, mask: crate::NetworkFaultMask) -> Self {
         self.network_fault_mask = mask;
+        self
+    }
+
+    /// Restrict the storage fault families a sampled storage profile keeps,
+    /// the storage twin of [`network_fault_mask`](Self::network_fault_mask).
+    ///
+    /// Applied after profile sampling and buggify knob perturbation,
+    /// immediately before the [`SimWorld`](crate::SimWorld) is created; it
+    /// consumes no randomness, so draw order, exploration recipes and replay
+    /// are unchanged. The default mask retains every family.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    ///     .storage_fault_mask(
+    ///         StorageFaultMask::all().without(StorageFault::DiskFailure),
+    ///     )
+    /// ```
+    #[must_use]
+    pub fn storage_fault_mask(mut self, mask: crate::StorageFaultMask) -> Self {
+        self.storage_fault_mask = mask;
         self
     }
 
@@ -1194,8 +1220,9 @@ impl SimulationBuilder {
     /// The Swarm network subset (if any) draws from the simulation stream
     /// before the storage subset, keeping the per-seed draw order fixed and
     /// reproducible (see the draw-order contract on [`ChaosMode::resolve`]).
-    /// The caller's [`NetworkFaultMask`](crate::NetworkFaultMask) is applied
-    /// afterward and consumes no draws.
+    /// The caller's [`NetworkFaultMask`](crate::NetworkFaultMask) and
+    /// [`StorageFaultMask`](crate::StorageFaultMask) are applied
+    /// afterward and consume no draws.
     fn build_sim_for_iteration(&self, seed: u64) -> crate::sim::SimWorld {
         let network_chaos = self.network_chaos;
         let storage_chaos = self.storage_chaos;
@@ -1228,6 +1255,7 @@ impl SimulationBuilder {
         // A caller mask is the final fault-family decision. It consumes no RNG,
         // so adding or omitting it cannot shift config sampling or replay.
         self.network_fault_mask.apply_to(&mut network_config.chaos);
+        self.storage_fault_mask.apply_to(&mut storage_config);
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency.clone_from(&self.link_latency);
