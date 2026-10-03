@@ -327,3 +327,78 @@ fn range_topology_runs_clean_across_seeds() {
     );
     assert_eq!(report.successful_runs, 8);
 }
+
+// ============================================================================
+// Test: replicated storage faults draw a pattern over the topology.
+// ============================================================================
+
+/// Publishes a one-record layout and checks the seed drew the expected
+/// kind of pattern over its zones.
+struct ReplicaProcess {
+    expect_pattern: bool,
+}
+
+#[async_trait]
+impl Process for ReplicaProcess {
+    fn name(&self) -> &'static str {
+        "replica"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let storage = ctx.storage();
+        storage.publish_layout(&[moonpool_sim::LayoutRegion {
+            path: "data".to_string(),
+            bytes: 0..512,
+            kind: "record",
+            stripe: Some(7),
+        }])?;
+        let pattern = storage.fault_pattern()?;
+        let ok = match (&pattern, self.expect_pattern) {
+            (
+                Some(
+                    moonpool_sim::FaultPattern::Helical { domains, .. }
+                    | moonpool_sim::FaultPattern::Minority { domains },
+                ),
+                true,
+            ) => !domains.is_empty(),
+            (None, false) => true,
+            _ => false,
+        };
+        if !ok {
+            return Err(SimulationError::InvalidState(format!(
+                "unexpected fault pattern {pattern:?}"
+            )));
+        }
+        ctx.shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+fn replicated_run(storage_chaos: bool, seeds: Vec<u64>) -> moonpool_sim::SimulationReport {
+    let expect_pattern = storage_chaos;
+    let mut builder = SimulationBuilder::new()
+        .cluster(LocalityConfig::new(1, 3, 1, 1), move || {
+            Box::new(ReplicaProcess { expect_pattern })
+        })
+        .workload(TimedWorkload(Duration::from_millis(50)))
+        .replicated_storage_faults(moonpool_sim::ReplicatedFaults::new(DomainLevel::Zone))
+        .set_iterations(seeds.len())
+        .set_debug_seeds(seeds);
+    if storage_chaos {
+        builder = builder.enable_chaos([Chaos::Storage(ChaosMode::Random)]);
+    }
+    builder.run().expect("simulation configuration is valid")
+}
+
+#[test]
+fn replicated_storage_faults_draw_a_pattern_over_the_zones() {
+    let report = replicated_run(true, (1..=8).collect());
+    assert_eq!(report.failed_runs, 0, "every seed drew a pattern");
+    assert_eq!(report.successful_runs, 8);
+}
+
+#[test]
+fn replicated_storage_faults_are_inert_without_storage_chaos() {
+    let report = replicated_run(false, vec![5]);
+    assert_eq!(report.failed_runs, 0, "no storage chaos, no pattern");
+}

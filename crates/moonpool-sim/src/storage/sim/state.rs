@@ -13,6 +13,7 @@ use super::OperationId;
 use crate::storage::{
     FaultFocus, FileCrashReport, FileImage, StorageConfiguration, StorageFaultRecord,
     faults::EligibilitySlot,
+    replication::{LayoutIndex, ReplicationPlan},
 };
 
 /// Unique identifier for persistent simulated file contents.
@@ -141,6 +142,10 @@ pub(crate) struct StorageState {
     /// Per-process fault weights (see [`FaultFocus`]); a process without one
     /// weighs every sector 1.
     pub(crate) focus: BTreeMap<IpAddr, Arc<FaultFocus>>,
+    /// The seed's replicated fault pattern, if the run opted in.
+    pub(crate) replication: Option<Arc<ReplicationPlan>>,
+    /// Per-process published layouts, which the pattern reads.
+    pub(crate) layouts: BTreeMap<IpAddr, Arc<LayoutIndex>>,
     /// Every fault the disk has injected, oldest first, drained by the caller.
     pub(crate) fault_records: Vec<StorageFaultRecord>,
     /// What each simulated crash did, per file, drained by the caller.
@@ -172,6 +177,8 @@ impl StorageState {
             pending_ops: BTreeMap::new(),
             eligibility: EligibilitySlot::default(),
             focus: BTreeMap::new(),
+            replication: None,
+            layouts: BTreeMap::new(),
             fault_records: Vec::new(),
             crash_reports: Vec::new(),
             barrier_violation_armed: false,
@@ -201,14 +208,10 @@ impl StorageState {
 
     /// How much more likely than configured a random fault is to damage
     /// `sector` of `owner`'s file at `path`: 0 where the eligibility mask
-    /// vetoes it, else the owner's [`FaultFocus`] weight (1 without one).
+    /// vetoes it or the seed's replicated fault pattern spares it, else the
+    /// owner's [`FaultFocus`] weight (1 without one).
     pub(crate) fn weight(&self, owner: IpAddr, path: &str, sector: u64) -> f64 {
-        if !self.eligible(path, sector) {
-            return 0.0;
-        }
-        self.focus
-            .get(&owner)
-            .map_or(1.0, |focus| focus.weight(path, sector))
+        self.weigher(owner, path)(sector)
     }
 
     /// [`weight`](Self::weight) for one file, detached from the state so a
@@ -216,9 +219,16 @@ impl StorageState {
     pub(crate) fn weigher(&self, owner: IpAddr, path: &str) -> impl Fn(u64) -> f64 + use<> {
         let mask = self.eligibility.mask();
         let focus = self.focus.get(&owner).cloned();
+        let replication = self.replication.clone();
+        let layout = self.layouts.get(&owner).cloned();
         let path = path.to_string();
         move |sector| {
             if !mask.as_ref().is_none_or(|mask| mask(&path, sector)) {
+                return 0.0;
+            }
+            if let Some(plan) = &replication
+                && !plan.allows(owner, layout.as_deref(), &path, sector)
+            {
                 return 0.0;
             }
             focus

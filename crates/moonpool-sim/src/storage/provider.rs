@@ -61,6 +61,31 @@ impl SimStorageProvider {
         Ok(())
     }
 
+    /// Tell the simulator what this process's disk holds: its storage
+    /// format's regions, each with the replicated record it holds (its
+    /// `stripe`). A run with
+    /// [`SimulationBuilder::replicated_storage_faults`](crate::SimulationBuilder::replicated_storage_faults)
+    /// reads it to damage every record on some replicas and never on all;
+    /// without it, publishing changes nothing. Replaces what was published
+    /// before; a wipe of this process's storage clears it.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn publish_layout(&self, regions: &[moonpool_core::LayoutRegion]) -> io::Result<()> {
+        self.sim()?.publish_layout(self.owner_ip, regions);
+        Ok(())
+    }
+
+    /// The replicated fault pattern this seed drew, if the run opted in.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn fault_pattern(&self) -> io::Result<Option<super::FaultPattern>> {
+        Ok(self.sim()?.fault_pattern())
+    }
+
     /// Upgrade the weak simulation handle, mapping a dropped simulation to an
     /// I/O error so storage operations can propagate it with `?`.
     fn sim(&self) -> io::Result<crate::sim::SimWorld> {

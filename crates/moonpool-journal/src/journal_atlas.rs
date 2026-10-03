@@ -280,6 +280,9 @@ impl JournalAtlas {
                 path: path.to_string(),
                 bytes: offset..offset + len,
                 kind: region.kind(),
+                // The journal does not know what its caller replicates: the
+                // caller maps tags to stripes (`LayoutRegion::striped`).
+                stripe: None,
             },
         });
     }

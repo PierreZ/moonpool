@@ -285,6 +285,8 @@ pub struct SimulationBuilder {
     seeds: Vec<u64>,
     network_chaos: Option<ChaosMode>,
     storage_chaos: Option<ChaosMode>,
+    /// Replicated storage fault patterns, drawn per seed over the topology.
+    replicated_faults: Option<crate::storage::ReplicatedFaults>,
     /// Deterministic allow-mask applied after each per-seed network profile.
     network_fault_mask: crate::NetworkFaultMask,
     /// Distance-based link latency, applied to every iteration's network config.
@@ -347,6 +349,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
+            replicated_faults: None,
             network_fault_mask: crate::NetworkFaultMask::all(),
             link_latency: None,
             tcp_send_window_bytes: None,
@@ -567,6 +570,39 @@ impl SimulationBuilder {
     pub fn accept_backlog_capacity(mut self, capacity: usize) -> Self {
         assert!(capacity > 0, "accept backlog capacity must be positive");
         self.accept_backlog_capacity = Some(capacity);
+        self
+    }
+
+    /// Spread random storage damage over the topology's failure domains so
+    /// no replicated record is ever damaged everywhere.
+    ///
+    /// Each seed draws a [`FaultPattern`](crate::FaultPattern) over the
+    /// domains at `config`'s level of the [`.cluster()`](Self::cluster)
+    /// topology: a **minority** (only a few domains take damage) or a
+    /// **helix** (every domain does, each replicated record only in the
+    /// domains its key rotates to). Processes describe their disks with
+    /// [`SimStorageProvider::publish_layout`](crate::SimStorageProvider::publish_layout):
+    /// each region's `stripe` is the record's key, shared by every
+    /// replica's copy. A record loses copies in at most `tolerance`
+    /// domains, and so does node-local data, by construction.
+    ///
+    /// It shapes the families [`Chaos::Storage`] enables, the same ones a
+    /// [`FaultFocus`](crate::FaultFocus) weighs; it is inert without storage
+    /// chaos and for processes outside the topology. Not covered: disk
+    /// failure, wipes, and namespace faults (a lost unsynced directory
+    /// entry), which take a whole disk or only unsynced state.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .cluster(LocalityConfig::new(1, 3, 1..=2, 1), make_node)
+    ///     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    ///     .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone))
+    /// ```
+    #[must_use]
+    pub fn replicated_storage_faults(mut self, config: crate::storage::ReplicatedFaults) -> Self {
+        self.replicated_faults = Some(config);
         self
     }
 
@@ -1996,6 +2032,25 @@ impl SimulationBuilder {
                 )
             })
             .collect();
+        // The replicated fault pattern draws last, after every draw a run
+        // without it makes, so opting in shifts no other surface's sample.
+        if let (Some(config), Some(_)) = (self.replicated_faults, self.storage_chaos) {
+            let localities = process_config
+                .as_ref()
+                .map(|config| config.machine_registry.locality_map())
+                .unwrap_or_default();
+            match sim.draw_replicated_faults(config, &localities) {
+                crate::FaultPattern::Minority { .. } => {
+                    crate::assert_reachable!("storage: a seed draws minority corruption");
+                }
+                crate::FaultPattern::Helical { .. } => {
+                    crate::assert_reachable!("storage: a seed draws helical corruption");
+                }
+                crate::FaultPattern::Spared => {
+                    crate::assert_reachable!("storage: too few domains, the disks are spared");
+                }
+            }
+        }
         let fault_injectors = Self::collect_fault_injectors(&self.fault_factories, attritions);
         let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
             seed,

@@ -528,6 +528,48 @@ let focus = FaultFocus::new()
 [A Crash-Aware Journal](../part5-building-on-top/08-journal.md)); another
 format needs only to list its regions.
 
+#### Replicated Fault Patterns
+
+A replicated system survives disk damage only while some replica keeps a
+clean copy of every record. Random faults drawn independently per disk
+eventually hit every copy of one record and turn a valid run into an
+unwinnable one. A harness can keep a ledger to prevent that; moonpool can
+prevent it by construction, because it knows the topology:
+
+```rust
+SimulationBuilder::new()
+    .cluster(LocalityConfig::new(1, 3, 1..=2, 1), make_node)
+    .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone))
+```
+
+Each process publishes what its disk holds with
+`ctx.storage().publish_layout(regions)`: `LayoutRegion`s whose `stripe` is
+the replicated record's key, shared by every replica's copy (a Paxos slot, a
+page number), or `None` for bytes only that node has. Each seed then draws a
+`FaultPattern` over the domains at the chosen level:
+
+- **minority**: only the processes of a few domains take damage, anywhere on
+  their disks;
+- **helical**: every domain takes damage, but stripe `s` only in the domain
+  `s mod Z` rotates to, so the damaged records "spin" around the domains.
+  Node-local bytes, and bytes never published, are damaged only in the
+  domains drawn for them.
+
+Either way a record loses copies in at most `tolerance` domains (default 1,
+clamped so one domain always keeps every record), and so does node-local
+data. With fewer than two domains, nothing inside the topology is damaged.
+The helix is TigerBeetle's, keyed by **record** instead of file offset:
+TigerBeetle's replicas are bit-for-bit identical, so an offset names the
+same record everywhere; a replicated log whose replicas write records at
+different offsets needs the key. The pattern shapes the same families a
+focus weighs (it is a weight of zero where damage may not land), composes
+with a focus and the mask, and is inert without storage chaos. Disk failure,
+wipes, and lost unsynced directory entries are outside it: they take a whole
+disk, or only unsynced state. `SimWorld::draw_replicated_faults` draws a
+pattern for a hand-driven test, and `SimStorageProvider::fault_pattern`
+tells a process which one its seed drew.
+
 Directed tests reach for the targeted API on `SimWorld` instead:
 `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,
 `clear_file_eio`, and — to test the oracle itself —

@@ -374,6 +374,59 @@ impl SimWorld {
         self.inner.write().storage.set_fault_focus(ip, Some(focus));
     }
 
+    /// Install the seed's replicated fault pattern; `None` removes it.
+    pub(crate) fn set_replication_plan(
+        &self,
+        plan: Option<crate::storage::replication::ReplicationPlan>,
+    ) {
+        self.inner.write().storage.set_replication_plan(plan);
+    }
+
+    /// Draw and install a replicated fault pattern over `localities`, from
+    /// the simulation stream: what the runner does per seed, for a
+    /// hand-driven test. Returns the pattern drawn.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use = "the pattern drawn says which disks may take damage"]
+    pub fn draw_replicated_faults(
+        &self,
+        config: crate::storage::ReplicatedFaults,
+        localities: &std::collections::BTreeMap<IpAddr, crate::LocalityInfo>,
+    ) -> crate::storage::FaultPattern {
+        let helical = crate::sim::sim_random_bool(0.5);
+        let plan =
+            crate::storage::replication::ReplicationPlan::draw(config, localities, helical, |n| {
+                crate::sim::rng::sim_random_range(0..n)
+            });
+        let pattern = plan.pattern().clone();
+        self.set_replication_plan(Some(plan));
+        pattern
+    }
+
+    /// The seed's replicated fault pattern, if one is installed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn fault_pattern(&self) -> Option<crate::storage::FaultPattern> {
+        self.inner.read().storage.fault_pattern()
+    }
+
+    /// Replace what `ip` says about its own on-disk layout: the regions a
+    /// replicated fault pattern reads (see
+    /// [`SimStorageProvider::publish_layout`](crate::SimStorageProvider::publish_layout)).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self, regions))]
+    pub fn publish_layout(&self, ip: IpAddr, regions: &[moonpool_core::LayoutRegion]) {
+        self.inner.write().storage.publish_layout(ip, regions);
+    }
+
     /// Remove `ip`'s fault focus: every sector of its disk weighs 1 again.
     ///
     /// # Panics

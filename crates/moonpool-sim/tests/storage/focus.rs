@@ -215,11 +215,13 @@ fn a_layout_is_weighed_by_its_kinds() {
             path: "db/pages".to_string(),
             bytes: 0..512,
             kind: "superblock",
+            stripe: None,
         },
         moonpool_sim::LayoutRegion {
             path: "db/pages".to_string(),
             bytes: 4096..8192,
             kind: "leaf",
+            stripe: Some(1),
         },
     ];
     let focus = FaultFocus::new()

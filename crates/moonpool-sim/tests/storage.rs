@@ -77,6 +77,8 @@ mod performance;
 mod positioned;
 #[path = "storage/recovery.rs"]
 mod recovery;
+#[path = "storage/replicated.rs"]
+mod replicated;
 // Both exercise TokioStorageProvider — only available with the tokio-providers
 // feature.
 #[cfg(feature = "tokio-providers")]

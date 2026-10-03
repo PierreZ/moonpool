@@ -131,6 +131,8 @@ sampled one. Coordinates are a file path and a flat sector range.
 | `SimWorld::corrupt_durable_out_of_band(path, sector)` | Mutate a durable sector behind the crash model — a deliberate simulator bug, for testing the oracle |
 | `SimWorld::set_storage_eligibility_mask(mask)` | `(path, sector) -> bool`, consulted before any random fault damages a sector |
 | `SimStorageProvider::focus_faults(focus)` / `SimWorld::set_fault_focus(ip, focus)` | Weigh one process's random faults by byte range (`FaultFocus`): probabilities scale with the weight, 0 is immune |
+| `SimulationBuilder::replicated_storage_faults(config)` | Per seed, a minority or helical `FaultPattern` over the topology's domains: a replicated record (a published `stripe`) loses copies in at most `tolerance` domains |
+| `SimStorageProvider::publish_layout(regions)` / `SimWorld::publish_layout(ip, regions)` | Describe a disk's regions and the replicated record each holds, for the pattern |
 | `SimWorld::take_storage_fault_records()` | Drain the faults injected so far |
 | `SimWorld::take_storage_crash_reports()` | Drain what each crash did, per file and per sector |
 

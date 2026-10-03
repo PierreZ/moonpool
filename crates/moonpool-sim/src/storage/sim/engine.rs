@@ -510,6 +510,30 @@ impl StorageEngine {
         self.state.eligibility.set(mask);
     }
 
+    /// Install (or remove) the seed's replicated fault pattern.
+    pub(crate) fn set_replication_plan(
+        &mut self,
+        plan: Option<crate::storage::replication::ReplicationPlan>,
+    ) {
+        self.state.replication = plan.map(std::sync::Arc::new);
+    }
+
+    /// The seed's replicated fault pattern, if any.
+    pub(crate) fn fault_pattern(&self) -> Option<crate::storage::FaultPattern> {
+        self.state
+            .replication
+            .as_ref()
+            .map(|plan| plan.pattern().clone())
+    }
+
+    /// Replace `ip`'s published layout.
+    pub(crate) fn publish_layout(&mut self, ip: IpAddr, regions: &[moonpool_core::LayoutRegion]) {
+        self.state.layouts.insert(
+            ip,
+            std::sync::Arc::new(crate::storage::replication::LayoutIndex::new(regions)),
+        );
+    }
+
     /// Install, replace, or (with `None`) remove `ip`'s fault focus.
     pub(crate) fn set_fault_focus(&mut self, ip: IpAddr, focus: Option<FaultFocus>) {
         match focus {
@@ -1724,6 +1748,7 @@ impl StorageEngine {
         self.state.failed_disks.remove(&ip);
         self.state.disk_episodes.remove(&ip);
         self.state.focus.remove(&ip);
+        self.state.layouts.remove(&ip);
         let files = self
             .state
             .files

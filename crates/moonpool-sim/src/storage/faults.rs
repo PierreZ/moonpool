@@ -248,7 +248,7 @@ fn is_normal(path: &str) -> bool {
 }
 
 /// Lexical normalization: empty and `.` components dropped, `..` folded.
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split('/') {
         match part {
