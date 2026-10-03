@@ -371,6 +371,194 @@ pub struct StorageConfiguration {
     pub disk_failure_probability: f64,
 }
 
+/// One storage fault family, for a [`StorageFaultMask`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageFault {
+    /// A read plants latent corruption (`read_corruption_probability`).
+    ReadCorruption,
+    /// A write plants latent corruption (`write_corruption_probability`).
+    WriteCorruption,
+    /// A crash loses or corrupts unsynced sectors (`crash_lost_probability`,
+    /// `crash_latent_fault_probability`).
+    CrashDamage,
+    /// A crash tears a sector (`shorn_write_probability`).
+    ShornWrite,
+    /// A read is served from the wrong offset (`misdirect_read_probability`).
+    MisdirectedRead,
+    /// A write lands at the wrong offset (`misdirect_write_probability`).
+    MisdirectedWrite,
+    /// A write is acknowledged and never applied (`phantom_write_probability`).
+    PhantomWrite,
+    /// A sync reports a failure (`sync_failure_probability`).
+    SyncFailure,
+    /// A sync lies about durability (`barrier_violation_probability`).
+    BarrierViolation,
+    /// A read fails with EIO (`read_eio_probability`).
+    ReadEio,
+    /// A write fails with EIO (`write_eio_probability`).
+    WriteEio,
+    /// A transfer moves fewer bytes than asked (`short_transfer_probability`).
+    ShortTransfer,
+    /// A crash loses an unsynced directory entry
+    /// (`unsynced_dir_entry_loss_probability`).
+    DirEntryLoss,
+    /// A disk stalls for an episode (`disk_stall_probability`).
+    DiskStall,
+    /// A disk is throttled for an episode (`disk_throttle_probability`).
+    DiskThrottle,
+    /// A disk fails for good until its process reboots
+    /// (`disk_failure_probability`).
+    DiskFailure,
+}
+
+impl StorageFault {
+    const fn bit(self) -> u32 {
+        match self {
+            Self::ReadCorruption => 1 << 0,
+            Self::WriteCorruption => 1 << 1,
+            Self::CrashDamage => 1 << 2,
+            Self::ShornWrite => 1 << 3,
+            Self::MisdirectedRead => 1 << 4,
+            Self::MisdirectedWrite => 1 << 5,
+            Self::PhantomWrite => 1 << 6,
+            Self::SyncFailure => 1 << 7,
+            Self::BarrierViolation => 1 << 8,
+            Self::ReadEio => 1 << 9,
+            Self::WriteEio => 1 << 10,
+            Self::ShortTransfer => 1 << 11,
+            Self::DirEntryLoss => 1 << 12,
+            Self::DiskStall => 1 << 13,
+            Self::DiskThrottle => 1 << 14,
+            Self::DiskFailure => 1 << 15,
+        }
+    }
+}
+
+/// A deterministic allow-mask for per-seed storage fault profiles.
+///
+/// [`StorageFaultMask::all`] is the default. Removing a family makes it
+/// inert after the builder has sampled its Random or Swarm profile and
+/// perturbed its knobs, without consuming any randomness, so adding a mask
+/// never shifts a seed's schedule. Performance parameters (IOPS,
+/// bandwidth, latencies) are not fault families and stay as sampled.
+///
+/// # Example
+///
+/// ```
+/// use moonpool_sim::{StorageFault, StorageFaultMask};
+///
+/// let mask = StorageFaultMask::all().without(StorageFault::DiskFailure);
+/// assert!(!mask.contains(StorageFault::DiskFailure));
+/// assert!(mask.contains(StorageFault::ReadCorruption));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageFaultMask(u32);
+
+impl Default for StorageFaultMask {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl StorageFaultMask {
+    const ALL: u32 = (1 << 16) - 1;
+
+    /// Retain every storage fault family.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::ALL)
+    }
+
+    /// Suppress every storage fault family.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(0)
+    }
+
+    /// Return a mask that also retains `fault`.
+    #[must_use]
+    pub const fn with(self, fault: StorageFault) -> Self {
+        Self(self.0 | fault.bit())
+    }
+
+    /// Return a mask that suppresses `fault`.
+    #[must_use]
+    pub const fn without(self, fault: StorageFault) -> Self {
+        Self(self.0 & !fault.bit())
+    }
+
+    /// Return whether `fault` is retained by this mask.
+    #[must_use]
+    pub const fn contains(self, fault: StorageFault) -> bool {
+        self.0 & fault.bit() != 0
+    }
+
+    pub(crate) fn apply_to(self, config: &mut StorageConfiguration) {
+        let families: [(StorageFault, &mut f64); 15] = [
+            (
+                StorageFault::ReadCorruption,
+                &mut config.read_corruption_probability,
+            ),
+            (
+                StorageFault::WriteCorruption,
+                &mut config.write_corruption_probability,
+            ),
+            (
+                StorageFault::ShornWrite,
+                &mut config.shorn_write_probability,
+            ),
+            (
+                StorageFault::MisdirectedRead,
+                &mut config.misdirect_read_probability,
+            ),
+            (
+                StorageFault::MisdirectedWrite,
+                &mut config.misdirect_write_probability,
+            ),
+            (
+                StorageFault::PhantomWrite,
+                &mut config.phantom_write_probability,
+            ),
+            (
+                StorageFault::SyncFailure,
+                &mut config.sync_failure_probability,
+            ),
+            (
+                StorageFault::BarrierViolation,
+                &mut config.barrier_violation_probability,
+            ),
+            (StorageFault::ReadEio, &mut config.read_eio_probability),
+            (StorageFault::WriteEio, &mut config.write_eio_probability),
+            (
+                StorageFault::ShortTransfer,
+                &mut config.short_transfer_probability,
+            ),
+            (
+                StorageFault::DirEntryLoss,
+                &mut config.unsynced_dir_entry_loss_probability,
+            ),
+            (StorageFault::DiskStall, &mut config.disk_stall_probability),
+            (
+                StorageFault::DiskThrottle,
+                &mut config.disk_throttle_probability,
+            ),
+            (
+                StorageFault::DiskFailure,
+                &mut config.disk_failure_probability,
+            ),
+        ];
+        for (fault, probability) in families {
+            if !self.contains(fault) {
+                *probability = 0.0;
+            }
+        }
+        if !self.contains(StorageFault::CrashDamage) {
+            config.crash_lost_probability = 0.0;
+            config.crash_latent_fault_probability = 0.0;
+        }
+    }
+}
+
 impl Default for StorageConfiguration {
     fn default() -> Self {
         Self {

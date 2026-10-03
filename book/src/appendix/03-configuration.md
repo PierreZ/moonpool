@@ -17,6 +17,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
 | `tcp_send_window_bytes(bytes)` | `usize` | End-to-end byte window of every stream direction (default 64 KiB); a small window makes a slow reader back its writer up early |
 | `network_fault_mask(mask)` | `NetworkFaultMask` | Suppress selected families after each Random/Swarm network profile is sampled; deterministic and exploration-safe |
+| `storage_fault_mask(mask)` | `StorageFaultMask` | Suppress selected families after each Random/Swarm storage profile is sampled; deterministic and exploration-safe |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
@@ -179,6 +180,26 @@ the bytes into its send window (see
 | `NetworkConfiguration::random_for_seed()` | Randomized per seed for chaos testing |
 | `NetworkConfiguration::swarm_for_seed()` | Randomized per seed, then restricted to a per-seed subset of fault families |
 | `NetworkConfiguration::fast_local()` | Minimal latencies, all chaos disabled |
+
+### Storage fault mask
+
+`SimulationBuilder::storage_fault_mask()` is the storage twin of the network
+mask: applied after the per-seed storage profile and its buggify knobs,
+consuming no draws. A system leaves out the families its fault model does
+not cover, for instance a whole-disk failure that no replicated fault
+pattern bounds:
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    .storage_fault_mask(StorageFaultMask::all().without(StorageFault::DiskFailure))
+```
+
+The mask covers `ReadCorruption`, `WriteCorruption`, `CrashDamage`,
+`ShornWrite`, `MisdirectedRead`, `MisdirectedWrite`, `PhantomWrite`,
+`SyncFailure`, `BarrierViolation`, `ReadEio`, `WriteEio`, `ShortTransfer`,
+`DirEntryLoss`, `DiskStall`, `DiskThrottle`, and `DiskFailure`. IOPS,
+bandwidth and latencies are not families and stay as sampled.
 
 ### Network fault mask
 

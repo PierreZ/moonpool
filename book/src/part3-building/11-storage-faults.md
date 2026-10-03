@@ -569,6 +569,11 @@ the domains at the chosen level (machine, zone or datacenter):
   fault, so an idle domain never stalls the rotation; a domain that never
   repairs does, and a run stuck on one turn is the evidence.
 
+`ReplicatedFaults::patterns(&[..])` narrows the draw to the
+`FaultPatternKind`s a system's recovery can take: a striped pattern damages
+every domain, so a system that parks a node on a corruption verdict loses
+copies in two domains and should leave it out.
+
 In each, a record holds damage in at most `tolerance` domains at once
 (default 1, clamped so one domain always keeps every record), and so does
 node-local data; a rolling window spans `tolerance` consecutive domains.

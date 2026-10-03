@@ -7,8 +7,8 @@ use std::net::IpAddr;
 use crate::{local_runtime, run_as};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
-    CrashOutcome, DomainLevel, FaultPattern, LayoutRegion, LocalityInfo, ReplicatedFaults,
-    SECTOR_SIZE, SimWorld, StorageConfiguration,
+    CrashOutcome, DomainLevel, FaultPattern, FaultPatternKind, LayoutRegion, LocalityInfo,
+    ReplicatedFaults, SECTOR_SIZE, SimWorld, StorageConfiguration,
 };
 
 const SECTOR: u64 = SECTOR_SIZE as u64;
@@ -355,4 +355,22 @@ fn each_group_rolls_its_own_turn() {
         write_and_crash(&mut sim, ip(1), Some(layout(0))).is_empty(),
         "zone a waits in group one"
     );
+}
+
+/// A config that leaves a kind out never draws it.
+#[test]
+fn a_config_draws_only_its_pattern_kinds() {
+    let localities = topology();
+    let config = ReplicatedFaults::new(DomainLevel::Zone)
+        .patterns(&[FaultPatternKind::Minority, FaultPatternKind::Rolling]);
+    let mut kinds = BTreeSet::new();
+    for seed in 0..60_u64 {
+        let sim = SimWorld::new_with_seed(seed);
+        match sim.draw_replicated_faults(config, &localities) {
+            FaultPattern::Minority { .. } => kinds.insert("minority"),
+            FaultPattern::Rolling { .. } => kinds.insert("rolling"),
+            other => panic!("seed {seed}: drew {other:?}"),
+        };
+    }
+    assert_eq!(kinds.len(), 2, "both allowed kinds are drawn");
 }

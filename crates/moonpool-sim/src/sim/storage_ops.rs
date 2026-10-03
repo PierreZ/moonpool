@@ -388,8 +388,9 @@ impl SimWorld {
         config: crate::storage::ReplicatedFaults,
         localities: &std::collections::BTreeMap<IpAddr, crate::LocalityInfo>,
     ) -> crate::storage::FaultPattern {
-        use crate::storage::replication::{PatternKind, ReplicationPlan};
-        let kind = PatternKind::nth(crate::sim::rng::sim_random_range(0..3));
+        use crate::storage::replication::ReplicationPlan;
+        let kinds = config.allowed_kinds();
+        let kind = kinds[crate::sim::rng::sim_random_range(0..kinds.len())];
         let plan = ReplicationPlan::draw(config, localities, kind, |n| {
             crate::sim::rng::sim_random_range(0..n)
         });

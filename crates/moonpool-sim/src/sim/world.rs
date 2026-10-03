@@ -420,6 +420,12 @@ impl SimWorld {
         inner.storage.set_config(config);
     }
 
+    /// The storage configuration in force (tests of the builder's sampling).
+    #[cfg(test)]
+    pub(crate) fn storage_config(&self) -> crate::storage::StorageConfiguration {
+        self.inner.read().storage.config().clone()
+    }
+
     /// Returns an active disk episode for one IP.
     #[must_use]
     pub fn disk_episode_for(

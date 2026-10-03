@@ -289,6 +289,7 @@ pub struct SimulationBuilder {
     replicated_faults: Vec<crate::storage::ReplicatedFaults>,
     /// Deterministic allow-mask applied after each per-seed network profile.
     network_fault_mask: crate::NetworkFaultMask,
+    storage_fault_mask: crate::StorageFaultMask,
     /// Distance-based link latency, applied to every iteration's network config.
     link_latency: Option<crate::network::LinkLatencyConfig>,
     /// End-to-end byte window per stream direction, applied to every
@@ -351,6 +352,7 @@ impl SimulationBuilder {
             storage_chaos: None,
             replicated_faults: Vec::new(),
             network_fault_mask: crate::NetworkFaultMask::all(),
+            storage_fault_mask: crate::StorageFaultMask::all(),
             link_latency: None,
             tcp_send_window_bytes: None,
             accept_backlog_capacity: None,
@@ -636,6 +638,27 @@ impl SimulationBuilder {
     #[must_use]
     pub fn network_fault_mask(mut self, mask: crate::NetworkFaultMask) -> Self {
         self.network_fault_mask = mask;
+        self
+    }
+
+    /// Retain only the selected storage fault families in every per-seed
+    /// Random or Swarm profile.
+    ///
+    /// Like [`network_fault_mask`](Self::network_fault_mask): applied after
+    /// profile sampling and buggify knob perturbation, consuming no
+    /// randomness, so draw order, exploration recipes and replay are
+    /// unchanged. The default retains every family.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    ///     .storage_fault_mask(StorageFaultMask::all().without(StorageFault::DiskFailure))
+    /// ```
+    #[must_use]
+    pub fn storage_fault_mask(mut self, mask: crate::StorageFaultMask) -> Self {
+        self.storage_fault_mask = mask;
         self
     }
 
@@ -1272,6 +1295,7 @@ impl SimulationBuilder {
         // A caller mask is the final fault-family decision. It consumes no RNG,
         // so adding or omitting it cannot shift config sampling or replay.
         self.network_fault_mask.apply_to(&mut network_config.chaos);
+        self.storage_fault_mask.apply_to(&mut storage_config);
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency.clone_from(&self.link_latency);
@@ -2506,6 +2530,45 @@ mod tests {
         assert_eq!(masked, expected, "the mask changed another fault family");
         assert!(masked.chaos.partial_read_max_bytes > 0);
         assert!(masked.chaos.partial_write_max_bytes > 0);
+    }
+
+    fn sampled_storage_config(
+        mask: crate::StorageFaultMask,
+        seed: u64,
+    ) -> (crate::StorageConfiguration, u64) {
+        crate::sim::reset_sim_rng();
+        crate::sim::set_sim_seed(seed);
+        let sim = SimulationBuilder::new()
+            .enable_chaos([Chaos::Storage(ChaosMode::Random)])
+            .storage_fault_mask(mask)
+            .build_sim_for_iteration(seed);
+        let config = sim.storage_config();
+        (config, crate::sim::rng_call_count())
+    }
+
+    #[test]
+    fn storage_fault_mask_disables_only_its_family_and_draws_nothing() {
+        let (seed, baseline, baseline_draws) = (0..1000_u64)
+            .find_map(|seed| {
+                let (config, draws) = sampled_storage_config(crate::StorageFaultMask::all(), seed);
+                (config.disk_failure_probability > 0.0).then_some((seed, config, draws))
+            })
+            .expect("a seed draws a disk-failure rate within 1000 seeds");
+        let (masked, masked_draws) = sampled_storage_config(
+            crate::StorageFaultMask::all().without(crate::StorageFault::DiskFailure),
+            seed,
+        );
+        let mut expected = baseline.clone();
+        expected.disk_failure_probability = 0.0;
+        assert_eq!(
+            format!("{masked:?}"),
+            format!("{expected:?}"),
+            "the mask changed another family"
+        );
+        assert_eq!(masked_draws, baseline_draws, "the mask consumed a draw");
+        let (none, _) = sampled_storage_config(crate::StorageFaultMask::none(), seed);
+        assert!(none.read_corruption_probability == 0.0 && none.crash_lost_probability == 0.0);
+        assert_eq!(none.iops, baseline.iops, "performance stays as sampled");
     }
 
     #[test]

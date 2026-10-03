@@ -49,6 +49,8 @@ pub struct ReplicatedFaults {
     level: DomainLevel,
     tolerance: usize,
     group: Option<&'static str>,
+    /// The kinds a seed may draw, in [`FaultPatternKind::ALL`] order.
+    kinds: [bool; 3],
 }
 
 impl ReplicatedFaults {
@@ -60,7 +62,33 @@ impl ReplicatedFaults {
             level,
             tolerance: 1,
             group: None,
+            kinds: [true; 3],
         }
+    }
+
+    /// Draw only among `kinds` (every kind by default): a system whose
+    /// recovery assumptions one pattern breaks leaves it out.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `kinds` is empty.
+    #[must_use]
+    pub fn patterns(mut self, kinds: &[FaultPatternKind]) -> Self {
+        assert!(
+            !kinds.is_empty(),
+            "a replicated fault config needs a pattern kind"
+        );
+        self.kinds = FaultPatternKind::ALL.map(|kind| kinds.contains(&kind));
+        self
+    }
+
+    /// The kinds a seed may draw, in [`FaultPatternKind::ALL`] order.
+    pub(crate) fn allowed_kinds(&self) -> Vec<FaultPatternKind> {
+        FaultPatternKind::ALL
+            .into_iter()
+            .zip(self.kinds)
+            .filter_map(|(kind, allowed)| allowed.then_some(kind))
+            .collect()
     }
 
     /// How many domains may hold damage to one record at once (at least
@@ -123,23 +151,20 @@ pub enum FaultPattern {
     Spared,
 }
 
-/// Which pattern a draw makes.
+/// A kind of [`FaultPattern`], for [`ReplicatedFaults::patterns`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PatternKind {
+pub enum FaultPatternKind {
+    /// [`FaultPattern::Minority`].
     Minority,
+    /// [`FaultPattern::Striped`].
     Striped,
+    /// [`FaultPattern::Rolling`].
     Rolling,
 }
 
-impl PatternKind {
-    /// The kind numbered `n` of three.
-    pub(crate) fn nth(n: usize) -> Self {
-        match n % 3 {
-            0 => Self::Minority,
-            1 => Self::Striped,
-            _ => Self::Rolling,
-        }
-    }
+impl FaultPatternKind {
+    /// Every kind, in draw order.
+    pub const ALL: [Self; 3] = [Self::Minority, Self::Striped, Self::Rolling];
 }
 
 /// One seed's plan for one group: the pattern, and each member's domain.
@@ -161,7 +186,7 @@ impl ReplicationPlan {
     pub(crate) fn draw(
         config: ReplicatedFaults,
         localities: &BTreeMap<IpAddr, LocalityInfo>,
-        kind: PatternKind,
+        kind: FaultPatternKind,
         mut pick: impl FnMut(usize) -> usize,
     ) -> Self {
         let mut domains: Vec<String> = localities
@@ -187,7 +212,7 @@ impl ReplicationPlan {
         }
         let tolerance = config.tolerance.min(domains.len() - 1);
         let mut marked = vec![false; domains.len()];
-        let pattern = if kind == PatternKind::Rolling {
+        let pattern = if kind == FaultPatternKind::Rolling {
             FaultPattern::Rolling { domains }
         } else {
             // `tolerance` distinct domains, drawn without replacement.
@@ -202,7 +227,7 @@ impl ReplicationPlan {
                 .filter(|(_, marked)| **marked)
                 .map(|(id, _)| id.clone())
                 .collect();
-            if kind == PatternKind::Striped {
+            if kind == FaultPatternKind::Striped {
                 FaultPattern::Striped {
                     domains,
                     local: chosen,
@@ -388,7 +413,7 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            PatternKind::Striped,
+            FaultPatternKind::Striped,
             |_| 0,
         );
         // One stripe per sector.
@@ -410,7 +435,7 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            PatternKind::Striped,
+            FaultPatternKind::Striped,
             |_| 0,
         );
         // Stripes 0 and 1 share sector 0: no domain may damage it.
@@ -424,7 +449,7 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            PatternKind::Striped,
+            FaultPatternKind::Striped,
             |_| 1,
         );
         let layout = LayoutIndex::new(&[region(0..512, None)]);
@@ -443,7 +468,7 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone).tolerance(5),
             &zones,
-            PatternKind::Minority,
+            FaultPatternKind::Minority,
             |_| 0,
         );
         let FaultPattern::Minority { domains } = plan.pattern() else {
@@ -466,7 +491,7 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            PatternKind::Striped,
+            FaultPatternKind::Striped,
             |_| 0,
         );
         assert_eq!(plan.pattern(), &FaultPattern::Spared);
@@ -480,7 +505,7 @@ mod tests {
         let plan = ReplicationPlan::draw(
             ReplicatedFaults::new(DomainLevel::Zone),
             &zones,
-            PatternKind::Rolling,
+            FaultPatternKind::Rolling,
             |_| 0,
         );
         let layout = LayoutIndex::new(&[region(0..512, Some(4)), region(512..1024, None)]);
