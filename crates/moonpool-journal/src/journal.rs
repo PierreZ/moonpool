@@ -9,7 +9,7 @@ use tracing::instrument;
 use crate::dual::DualFile;
 use crate::layout::{ENTRY_HEADER_SIZE, Geometry, TAG_SIZE, Tag, entry_size};
 use crate::segment::{Entry, Segment, is_segment_leftover, parse_segment_name, segment_path};
-use crate::{EntryId, JournalError};
+use crate::{Atlas, EntryId, JournalError};
 
 /// How to lay out and drive a journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +315,32 @@ impl<P: StorageProvider> Journal<P> {
             .rev()
             .find(|segment| segment.last().is_some())
             .map_or(&[], |segment| segment.last_batch())
+    }
+
+    /// Where every region recovery reads lives right now: the metadata
+    /// copies, each segment's headers, and each live entry and its slot.
+    /// See [`Atlas`].
+    #[must_use]
+    pub fn atlas(&self) -> Atlas {
+        let mut atlas = Atlas::default();
+        if let Some(value) = &self.meta_value {
+            for copy in 0..2u8 {
+                atlas.push_meta(
+                    &self.meta.path(u64::from(copy)),
+                    copy,
+                    u64::try_from(value.len()).unwrap_or(u64::MAX),
+                );
+            }
+        }
+        for segment in &self.segments {
+            segment.chart(&segment_path(&self.dir, segment.first), &mut atlas);
+        }
+        let batch = self.last_batch();
+        let last_batch = batch.first().map_or(0..0, |rec| {
+            rec.slot.index..rec.slot.index + u64::try_from(batch.len()).unwrap_or(u64::MAX)
+        });
+        atlas.set_live(self.start_index()..self.next_index(), last_batch);
+        atlas
     }
 
     /// First live index: the first index of the oldest segment.

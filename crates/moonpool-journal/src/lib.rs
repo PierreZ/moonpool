@@ -172,6 +172,7 @@
 //! controls block placement, though contiguous preallocated extents usually
 //! keep the gap real.
 
+mod atlas;
 mod dual;
 mod error;
 mod journal;
@@ -179,6 +180,7 @@ mod layout;
 mod scan;
 mod segment;
 
+pub use atlas::{Atlas, Extent, Located, Region};
 pub use error::JournalError;
 pub use journal::{AmbiguousTail, Journal, JournalConfig, Record, Recovery};
 pub use layout::{BLOCK, ENTRY_HEADER_SIZE, Geometry, SLOT_SIZE, TAG_SIZE, Tag};

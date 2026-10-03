@@ -159,6 +159,38 @@ such sectors, so on that disk an acknowledged entry can come back damaged.
 The journal then does what the paper promises for any corruption: it reports
 the entry, or refuses to start, and never returns wrong data.
 
+## Aiming Faults at the Layout
+
+The layout is known, so a fault injector does not have to damage a segment
+uniformly, where most sectors are preallocated zeros nobody reads. An
+`Atlas` names every region recovery reads and where it lives, as a file and
+a byte range:
+
+| `Region` | What damage there makes recovery do |
+|----------|-------------------------------------|
+| `Header { segment, copy }` | repair it from its twin; both copies: `BadSegmentHeader` |
+| `Slot(id)` | rebuild it from an intact entry; beside a damaged entry: `DoubleFault` |
+| `Entry(id)` | report it corrupt, or ambiguous in the last batch |
+| `Meta { copy }` | repair it from the other copy; both: `MetadataCorrupt` |
+
+`Journal::atlas` charts an open journal from what its recovery scan
+verified. `Atlas::scan` charts a closed directory from its slot tables
+alone, without opening it and so without repairing anything: an injector
+damages the bytes before the next boot reads them. `Atlas::last_batch` and
+`Atlas::starts_batch` give the batch boundaries, and `Atlas::regions_in`
+maps damaged bytes back to the regions they reach: one sector of the slot
+table holds eight slots, one block several entries.
+
+Because each region carries its meaning, the injector also knows what the
+damage *should* do. The crate's `tests/atlas.rs` aims damage the way a
+recovery decision needs it: part of the last batch, an entry beside its
+own slot, both copies of a twin, a run of slots. It predicts the verdict
+from the regions hit by applying the recovery table, then checks that
+reopening reports exactly that, and that a second reopen finds every
+repair durable. Uniform damage almost never hits a pair like an entry and
+its own slot. Aimed damage does: a few thousand seeds reach every verdict,
+double faults included.
+
 ## The Example Simulation
 
 [`journal.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/journal.rs)
