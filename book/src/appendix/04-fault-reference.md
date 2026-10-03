@@ -95,6 +95,24 @@ never interpreted as success.
 | Short transfer | `short_transfer_probability` | 0% | `read`/`write` moving a prefix and returning the count |
 | Lost directory entry | `unsynced_dir_entry_loss_probability` | 0% | A create, delete, or rename that no `sync_dir` made durable |
 
+A builder campaign can keep families out of every seed with
+`SimulationBuilder::storage_fault_mask`, applied after the Random or Swarm
+profile and the buggify knobs are sampled, consuming no draw. Each
+`StorageFault` variant zeroes these fields:
+
+| `StorageFault` | Fields it zeroes |
+|----------------|------------------|
+| `Corruption` | `read_corruption_probability`, `write_corruption_probability` |
+| `Eio` | `read_eio_probability`, `write_eio_probability` |
+| `Misdirect` | `misdirect_read_probability`, `misdirect_write_probability` |
+| `PhantomWrite` | `phantom_write_probability` |
+| `SyncFailure` | `sync_failure_probability` |
+| `ShortTransfer` | `short_transfer_probability` |
+| `DirEntryLoss` | `unsynced_dir_entry_loss_probability` |
+| `CrashDamage` | `crash_lost_probability`, `crash_latent_fault_probability`, `shorn_write_probability` |
+| `Degradation` | `disk_stall_probability`, `disk_throttle_probability` |
+| `DiskFailure` | `disk_failure_probability` |
+
 ### The Crash Model
 
 What a crash *does* to writes a sync had not yet made durable. Not "should a

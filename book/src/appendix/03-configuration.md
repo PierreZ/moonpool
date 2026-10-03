@@ -17,6 +17,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
 | `tcp_send_window_bytes(bytes)` | `usize` | End-to-end byte window of every stream direction (default 64 KiB); a small window makes a slow reader back its writer up early |
 | `network_fault_mask(mask)` | `NetworkFaultMask` | Suppress selected families after each Random/Swarm network profile is sampled; deterministic and exploration-safe |
+| `storage_fault_mask(mask)` | `StorageFaultMask` | Suppress selected families after each Random/Swarm storage profile is sampled; deterministic and exploration-safe |
 | `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
 | `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
 | `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
@@ -204,6 +205,28 @@ The mask covers `Clog`, `Partition`, `BitFlip`, `RandomClose`,
 family can only suppress a fault; it cannot enable a family the sampled profile
 turned off. Partial reads and writes are TCP/buggify behavior rather than
 independently sampled fault families and remain active.
+
+### Storage fault mask
+
+`SimulationBuilder::storage_fault_mask()` is the storage twin: a typed
+allow-mask applied after the per-seed storage profile and buggify knob
+perturbations, consuming no randomness. A harness that cannot observe a
+family's effect removes it rather than judging runs it cannot explain — a
+disk that fails silently (every later operation pending forever) is the
+usual one:
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    .storage_fault_mask(
+        StorageFaultMask::all().without(StorageFault::DiskFailure),
+    )
+```
+
+The mask covers `Corruption`, `Eio`, `Misdirect`, `PhantomWrite`,
+`SyncFailure`, `ShortTransfer`, `DirEntryLoss`, `CrashDamage`, `Degradation`
+(stall and throttle episodes) and `DiskFailure`. Like the network mask it can
+only suppress a family the sampled profile kept.
 
 ### Latency distribution
 

@@ -289,6 +289,20 @@ let storage_config = StorageConfiguration::fast_local();
 
 The fault probabilities in `random_for_seed()` are intentionally low (0.001% to 0.1%). Storage faults at higher rates would prevent the system from making progress. The goal is a steady trickle of faults that occasionally exercises corruption detection and recovery, not a deluge that makes every I/O fail.
 
+Sometimes a system under test is honestly out of contract for a family. A replicated log keeps its votes on a local journal, and a **phantom write** that drops both writes of an acknowledged append makes that node forget a vote it cast. No local journal can survive that, and one forgotten vote breaks quorum intersection. A disk that fails for good needs a watchdog the system may not have yet. Rather than judge runs it cannot explain, the campaign keeps those families out with a storage fault mask, the twin of the network one:
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([Chaos::Storage(ChaosMode::Swarm), Chaos::BuggifyKnobs])
+    .storage_fault_mask(
+        StorageFaultMask::all()
+            .without(StorageFault::PhantomWrite)
+            .without(StorageFault::DiskFailure),
+    )
+```
+
+The mask is applied after the per-seed profile and the buggify knobs are sampled, right before the world is built, and it draws nothing: every seed samples exactly what it would unmasked, so recipes and replays stay valid, and the default mask (`StorageFaultMask::all()`) changes nothing. A mask only removes. It never revives a family the seed's swarm already switched off. The [fault reference](../appendix/04-fault-reference.md) lists which fields each `StorageFault` covers.
+
 ## Positioned I/O, Direct I/O, and Alignment
 
 A journal or a pager does not want a seek cursor. It wants to read page 7 and
