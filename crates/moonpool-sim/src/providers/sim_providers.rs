@@ -68,9 +68,9 @@ impl SimProviders {
         }
     }
 
-    /// The simulation these providers serve, while it is alive.
-    pub(crate) fn world(&self) -> crate::SimulationResult<crate::sim::SimWorld> {
-        self.sim.upgrade()
+    /// A weak handle on the simulation these providers serve.
+    pub(crate) fn weak_world(&self) -> WeakSimWorld {
+        self.sim.clone()
     }
 
     /// Bind every task spawned through this bundle's task provider to

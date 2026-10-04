@@ -40,7 +40,9 @@ impl Process for Writer {
             file.write_at(0, &[OLD; SECTOR * SECTORS]).await?;
             file.sync_all().await?;
             file.write_at(0, &[NEW; SECTOR * SECTORS]).await?;
-            ctx.crash_self(RebootKind::Crash, Some(Duration::from_millis(10)))?;
+            // Through the handle a driver's hooks would hold: no context.
+            let handle = ctx.self_crash()?;
+            handle.crash(RebootKind::Crash, Some(Duration::from_millis(10)))?;
             file.sync_all().await?;
             ctx.state().publish("ran past the crash", true);
         } else {
@@ -73,7 +75,7 @@ impl Workload for Judge {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         assert!(
-            ctx.crash_self(RebootKind::Crash, None).is_err(),
+            ctx.crash_self(RebootKind::Crash, None).is_err() && ctx.self_crash().is_err(),
             "a workload cannot crash itself"
         );
         loop {

@@ -185,6 +185,22 @@ impl FaultContext {
         Ok(())
     }
 
+    /// A storage provider scoped to `ip`'s disk, to read what a process
+    /// holds before aiming a targeted injection at it (scanning a format's
+    /// layout on a crashed node, say).
+    ///
+    /// Its operations are ordinary storage I/O on that disk: they take
+    /// simulated time and roll that disk's fault coins like the process's
+    /// own would. Write through it only to model what the process itself
+    /// could have written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn storage(&self, ip: &str) -> SimulationResult<crate::SimStorageProvider> {
+        Ok(self.sim.storage_provider(parse_ip(ip)?))
+    }
+
     /// Durably mutate exactly `bytes` of the file at `path` on `ip`'s disk,
     /// leaving every other process's file at that path alone (see
     /// [`SimWorld::corrupt_process_file_bytes`]). No randomness is drawn,

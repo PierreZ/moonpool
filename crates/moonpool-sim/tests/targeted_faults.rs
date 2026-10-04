@@ -78,6 +78,14 @@ impl FaultInjector for Corrupter {
                 .await
                 .map_err(|e| SimulationError::InvalidState(format!("sleep: {e}")))?;
         }
+        // Read the target's disk first, as an injector aiming by layout would.
+        let file = ctx
+            .storage(&ips[0])?
+            .open("data", OpenOptions::read_only())
+            .await?;
+        let mut bytes = vec![0; LEN];
+        file.read_at(0, &mut bytes).await?;
+        assert_eq!(bytes, pattern(), "the injector reads the target's bytes");
         ctx.corrupt_bytes(&ips[0], "data", DAMAGED)?;
         ctx.state().publish("corrupted", true);
         Ok(())
