@@ -145,6 +145,72 @@ impl SimContext {
         &self.topology.shutdown_signal
     }
 
+    /// Crash this process now, as a power loss would, from inside it.
+    ///
+    /// Schedules the same force kill a fault injector's
+    /// [`reboot`](crate::FaultContext::reboot) or
+    /// [`crash`](crate::FaultContext::crash) does, one scheduler tick from
+    /// now: the process's tasks are aborted, its connections reset, and its
+    /// storage goes through crash resolution, so every write not yet synced,
+    /// including one whose sync is in flight, resolves by crash physics
+    /// ([`RebootKind::CrashAndWipe`](crate::RebootKind::CrashAndWipe) also
+    /// wipes the disk). It is how a process reaches a crash at an exact
+    /// point of its own protocol (mid-append, between two syncs) without a
+    /// round trip through a fault injector.
+    ///
+    /// With `recovery_delay` the process restarts that long after the kill;
+    /// without it, it stays down until a fault injector
+    /// [restarts](crate::FaultContext::restart) it. No randomness is drawn.
+    /// The process counts as dead from the kill until it restarts.
+    ///
+    /// Call it, then keep awaiting the work it interrupts: the kill lands
+    /// before that work's next storage completion.
+    ///
+    /// # Errors
+    ///
+    /// [`SimulationError::InvalidState`](crate::SimulationError::InvalidState)
+    /// from a workload (only a process can crash itself) or for
+    /// [`RebootKind::Graceful`](crate::RebootKind::Graceful) (a process
+    /// shuts itself down gracefully by returning), and
+    /// [`SimulationError::SimulationShutdown`](crate::SimulationError::SimulationShutdown)
+    /// once the simulation is gone.
+    pub fn crash_self(
+        &self,
+        kind: crate::RebootKind,
+        recovery_delay: Option<std::time::Duration>,
+    ) -> crate::SimulationResult<()> {
+        let ip: std::net::IpAddr = self.my_ip().parse().map_err(|error| {
+            crate::SimulationError::InvalidState(format!("invalid IP '{}': {error}", self.my_ip()))
+        })?;
+        if self.topology.group_registry.group_for(ip).is_none() {
+            return Err(crate::SimulationError::InvalidState(
+                "crash_self: only a process can crash itself, not a workload".to_string(),
+            ));
+        }
+        let cause = match kind {
+            crate::RebootKind::Crash => crate::sim::ProcessKillKind::Crash,
+            crate::RebootKind::CrashAndWipe => crate::sim::ProcessKillKind::CrashAndWipe,
+            crate::RebootKind::Graceful => {
+                return Err(crate::SimulationError::InvalidState(
+                    "crash_self: a graceful shutdown is the process returning".to_string(),
+                ));
+            }
+        };
+        crate::assert_reachable!("crash: a process crashed itself");
+        let recovery_delay_ms =
+            recovery_delay.map(|delay| u64::try_from(delay.as_millis()).unwrap_or(u64::MAX));
+        self.providers.world()?.schedule_event(
+            crate::sim::Event::ProcessForceKill {
+                ip,
+                recovery_delay_ms,
+                cause,
+            },
+            std::time::Duration::from_nanos(1),
+        );
+        tracing::info!(%ip, ?kind, "process crashed itself");
+        Ok(())
+    }
+
     /// Get the workload topology (peer IPs, process IPs, tags, etc.).
     #[must_use]
     pub fn topology(&self) -> &WorkloadTopology {

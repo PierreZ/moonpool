@@ -256,6 +256,14 @@ async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
 
 Everything the script reads is per-iteration simulated state, so the crash target, milestone, and restart point replay exactly from the seed.
 
+A process can also crash **itself**, at an exact point of its own protocol, with no round trip through an injector: `ctx.crash_self(RebootKind::Crash, Some(delay))` (or `CrashAndWipe`) schedules the same force kill one scheduler tick later. Issued just before awaiting a sync, it lands while the sync is in flight, so the unsynced sectors resolve by crash physics — the way to keep an ambiguous last append reachable. With `Some(delay)` the process restarts that long after the kill; with `None` it stays down until an injector restarts it. It draws no randomness, counts the process as dead until it restarts, and fails from a workload or for `RebootKind::Graceful` (a process shuts down gracefully by returning).
+
+```rust
+file.write_at(offset, &batch).await?;
+ctx.crash_self(RebootKind::Crash, Some(Duration::from_millis(50)))?;
+file.sync_all().await?; // never completes: the kill lands first
+```
+
 ### Fault Factories and Exploration
 
 A custom injector is always registered through a **factory**, never as an instance: a mutated instance could not be rewound for every explored timeline, so the runner rebuilds the injector from the factory for every seed and every continuation.
