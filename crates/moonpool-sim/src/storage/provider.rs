@@ -87,6 +87,29 @@ impl SimStorageProvider {
         Ok(self.sim()?.fault_pattern(self.owner_ip))
     }
 
+    /// Set how many failure domains of this process's group may hold damage
+    /// to one record at once, for this seed: what a system whose tolerated
+    /// loss is drawn per seed (a majority, a flexible quorum, a grid) calls
+    /// at boot, once it knows it.
+    ///
+    /// The first call in the group wins and later ones change nothing, so
+    /// every member may call it with the same value. It replaces the
+    /// builder's [`ReplicatedFaults::tolerance`](super::ReplicatedFaults::tolerance)
+    /// default, is clamped below the group's domain count, and 0 spares
+    /// every member. No randomness is drawn: the domains a minority or a
+    /// stripe rotation marks are a prefix of an order drawn with the
+    /// pattern. Damage already done stays.
+    ///
+    /// Returns the tolerance in force, or `None` if no replicated pattern
+    /// covers this process.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn set_fault_tolerance(&self, domains: usize) -> io::Result<Option<usize>> {
+        Ok(self.sim()?.set_fault_tolerance(self.owner_ip, domains))
+    }
+
     /// This process's sectors that a random fault or a crash currently
     /// leaves damaged, as runs of one [`DamageKind`](super::DamageKind),
     /// sorted by path, then sector.

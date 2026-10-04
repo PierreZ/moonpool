@@ -69,6 +69,10 @@ impl ReplicatedFaults {
     /// How many domains may hold damage to one record at once (at least
     /// 1). It is clamped below the number of domains a seed draws, so one
     /// domain always keeps every record.
+    ///
+    /// This is the default for every seed. A system whose tolerated loss is
+    /// itself drawn per seed sets it from a process at boot instead, with
+    /// [`SimStorageProvider::set_fault_tolerance`](crate::SimStorageProvider::set_fault_tolerance).
     #[must_use]
     pub fn tolerance(mut self, domains: usize) -> Self {
         self.tolerance = domains.max(1);
@@ -156,8 +160,17 @@ impl PatternKind {
 /// One seed's plan for one group: the pattern, and each member's domain.
 #[derive(Debug, Clone)]
 pub(crate) struct ReplicationPlan {
+    kind: PatternKind,
+    /// The domain ids, sorted; a domain index points in here.
+    domains: Vec<String>,
+    /// A permutation of the domain indexes, drawn once (empty for a rolling
+    /// turn): the damaged or node-local domains are a prefix of it, so a
+    /// tolerance set later picks among them with no draw.
+    order: Vec<usize>,
     pattern: FaultPattern,
     tolerance: usize,
+    /// Whether a process has set the tolerance (the first one wins).
+    tolerance_set: bool,
     /// Domain index (into the pattern's rotation) per member.
     domain_of: BTreeMap<IpAddr, usize>,
     /// For a minority: whether each domain index is damaged. For a stripe
@@ -189,52 +202,94 @@ impl ReplicationPlan {
             })
             .collect();
         if domains.len() < 2 {
+            let count = domains.len();
             return Self {
+                kind,
+                domains,
+                order: Vec::new(),
                 pattern: FaultPattern::Spared,
                 tolerance: 0,
+                tolerance_set: false,
                 domain_of,
-                marked: vec![false; domains.len()],
+                marked: vec![false; count],
             };
         }
-        let tolerance = config.tolerance.min(domains.len() - 1);
-        let mut marked = vec![false; domains.len()];
-        let pattern = if kind == PatternKind::Rolling {
-            FaultPattern::Rolling { domains }
-        } else {
-            // Distinct domains, drawn without replacement: `tolerance` for a
-            // minority, one fewer for a stripe rotation, whose stripes each
-            // take the last domain of their tolerance.
-            let picks = if kind == PatternKind::Striped {
-                tolerance - 1
-            } else {
-                tolerance
-            };
+        // A minority or a stripe rotation marks a prefix of a random
+        // permutation, drawn whole (one pick per domain but the last) so
+        // any tolerance set later has its domains already drawn.
+        let mut order = Vec::new();
+        if kind != PatternKind::Rolling {
             let mut pool: Vec<usize> = (0..domains.len()).collect();
-            for _ in 0..picks {
+            while pool.len() > 1 {
                 let at = pick(pool.len());
-                marked[pool.swap_remove(at)] = true;
+                order.push(pool.swap_remove(at));
             }
-            let chosen: Vec<String> = domains
-                .iter()
-                .zip(&marked)
-                .filter(|(_, marked)| **marked)
-                .map(|(id, _)| id.clone())
-                .collect();
-            if kind == PatternKind::Striped {
-                FaultPattern::Striped {
-                    domains,
-                    local: chosen,
-                }
-            } else {
-                FaultPattern::Minority { domains: chosen }
-            }
-        };
-        Self {
-            pattern,
-            tolerance,
-            domain_of,
-            marked,
+            order.extend(pool);
         }
+        let count = domains.len();
+        let mut plan = Self {
+            kind,
+            domains,
+            order,
+            pattern: FaultPattern::Spared,
+            tolerance: config.tolerance.min(count - 1),
+            tolerance_set: false,
+            domain_of,
+            marked: vec![false; count],
+        };
+        plan.rebuild();
+        plan
+    }
+
+    /// Mark the prefix of the drawn order the tolerance gives and rebuild
+    /// the pattern from it: `tolerance` damaged domains for a minority, one
+    /// fewer node-local ones for a stripe rotation (each stripe takes the
+    /// last domain of its tolerance), none for a rolling turn.
+    fn rebuild(&mut self) {
+        let marks = match self.kind {
+            PatternKind::Minority => self.tolerance,
+            PatternKind::Striped => self.tolerance.saturating_sub(1),
+            PatternKind::Rolling => 0,
+        };
+        self.marked = vec![false; self.domains.len()];
+        for &domain in &self.order[..marks] {
+            self.marked[domain] = true;
+        }
+        let chosen: Vec<String> = self
+            .domains
+            .iter()
+            .zip(&self.marked)
+            .filter(|(_, marked)| **marked)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let domains = self.domains.clone();
+        self.pattern = match self.kind {
+            PatternKind::Minority => FaultPattern::Minority { domains: chosen },
+            PatternKind::Striped => FaultPattern::Striped {
+                domains,
+                local: chosen,
+            },
+            PatternKind::Rolling => FaultPattern::Rolling { domains },
+        };
+    }
+
+    /// Set how many domains may hold damage to one record at once, once:
+    /// the first call wins, later ones change nothing. It is clamped below
+    /// the domain count; 0 spares every member. No randomness is drawn.
+    /// Returns the tolerance in force.
+    pub(crate) fn set_tolerance(&mut self, domains: usize) -> usize {
+        if matches!(self.pattern, FaultPattern::Spared) || self.tolerance_set {
+            return self.tolerance;
+        }
+        self.tolerance = domains.min(self.domains.len() - 1);
+        self.tolerance_set = true;
+        self.rebuild();
+        self.tolerance
+    }
+
+    /// How many domains may hold damage to one record at once.
+    pub(crate) fn tolerance(&self) -> usize {
+        self.tolerance
     }
 
     pub(crate) fn pattern(&self) -> &FaultPattern {
@@ -269,7 +324,10 @@ impl ReplicationPlan {
             return false;
         }
         let rotation = self.marked.iter().filter(|marked| !**marked).count() as u64;
-        let rank = self.marked[..domain].iter().filter(|marked| !**marked).count() as u64;
+        let rank = self.marked[..domain]
+            .iter()
+            .filter(|marked| !**marked)
+            .count() as u64;
         stripe % rotation == rank
     }
 
@@ -304,6 +362,10 @@ impl ReplicationPlan {
         let Some(&domain) = self.domain_of.get(&owner) else {
             return true;
         };
+        if self.tolerance == 0 {
+            // No domain may lose a copy.
+            return false;
+        }
         match &self.pattern {
             FaultPattern::Spared => false,
             FaultPattern::Minority { .. } => self.marked[domain],
@@ -544,6 +606,64 @@ mod tests {
         assert_eq!(plan.pattern(), &FaultPattern::Spared);
         assert!(!plan.allows(ip(1), None, "x", 0, 0));
         assert!(plan.allows(ip(9), None, "x", 0, 0), "outside the topology");
+    }
+
+    #[test]
+    fn a_tolerance_set_later_takes_a_prefix_of_the_drawn_order() {
+        let zones = localities(&["a", "b", "c", "d", "e"]);
+        let mut draws = 0;
+        let mut plan = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone),
+            &zones,
+            PatternKind::Minority,
+            |n| {
+                draws += 1;
+                n - 1
+            },
+        );
+        assert_eq!(draws, 4, "the whole order is drawn up front");
+        let FaultPattern::Minority { domains } = plan.pattern() else {
+            panic!("a minority");
+        };
+        assert_eq!(domains, &["e".to_string()]);
+        assert_eq!(plan.set_tolerance(3), 3);
+        let FaultPattern::Minority { domains } = plan.pattern().clone() else {
+            panic!("a minority");
+        };
+        assert_eq!(
+            domains,
+            ["c", "d", "e"].map(String::from),
+            "the order's prefix"
+        );
+        assert_eq!(plan.set_tolerance(1), 3, "the first caller wins");
+        assert_eq!(plan.tolerance(), 3);
+    }
+
+    #[test]
+    fn a_tolerance_of_zero_spares_every_member() {
+        let zones = localities(&["a", "b", "c"]);
+        for kind in [
+            PatternKind::Minority,
+            PatternKind::Striped,
+            PatternKind::Rolling,
+        ] {
+            let mut plan = ReplicationPlan::draw(
+                ReplicatedFaults::new(DomainLevel::Zone),
+                &zones,
+                kind,
+                |_| 0,
+            );
+            assert_eq!(plan.set_tolerance(0), 0);
+            let layout = LayoutIndex::new(&[region(0..512, Some(0)), region(512..1024, None)]);
+            for n in 1..=3 {
+                for sector in 0..2 {
+                    assert!(
+                        !plan.allows(ip(n), Some(&layout), "wal/seg", sector, 0),
+                        "{kind:?}: zone {n} sector {sector}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

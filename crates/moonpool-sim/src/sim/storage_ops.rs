@@ -408,6 +408,18 @@ impl SimWorld {
         self.inner.read().storage.fault_pattern(ip)
     }
 
+    /// Set the tolerance of the replicated fault pattern covering `ip` (see
+    /// [`SimStorageProvider::set_fault_tolerance`](crate::SimStorageProvider::set_fault_tolerance)).
+    /// Returns the tolerance in force, or `None` if no pattern covers `ip`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn set_fault_tolerance(&self, ip: IpAddr, domains: usize) -> Option<usize> {
+        self.inner.write().storage.set_fault_tolerance(ip, domains)
+    }
+
     /// The domains holding the turn of the rolling pattern covering `ip`
     /// (empty if no rolling pattern covers it).
     ///

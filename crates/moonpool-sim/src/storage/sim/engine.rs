@@ -25,8 +25,9 @@ use crate::{
         wakers::{WakeBatch, WakerRegistry},
     },
     storage::{
-        DamageKind, DamagedRange, EioTarget, FileCrashReport, FileImage, StorageConfiguration, StorageEligibilityMask,
-        StorageError, StorageFaultKind, StorageFaultRecord, StorageOperation,
+        DamageKind, DamagedRange, EioTarget, FileCrashReport, FileImage, StorageConfiguration,
+        StorageEligibilityMask, StorageError, StorageFaultKind, StorageFaultRecord,
+        StorageOperation,
         faults::{FaultFocus, sector_range, weighted},
     },
 };
@@ -530,6 +531,22 @@ impl StorageEngine {
             .iter()
             .find(|slot| slot.plan.domain(ip).is_some())
             .map(|slot| slot.plan.pattern().clone())
+    }
+
+    /// Set the tolerance of the pattern covering `ip`, if one does and no
+    /// process set it first; returns the tolerance in force.
+    pub(crate) fn set_fault_tolerance(&mut self, ip: IpAddr, domains: usize) -> Option<usize> {
+        let slot = self
+            .state
+            .replication
+            .iter_mut()
+            .find(|slot| slot.plan.domain(ip).is_some())?;
+        let before = slot.plan.tolerance();
+        let tolerance = std::sync::Arc::make_mut(&mut slot.plan).set_tolerance(domains);
+        if tolerance != before {
+            slot.recheck = true;
+        }
+        Some(tolerance)
     }
 
     /// The domains holding the turn of the rolling pattern covering `ip`.

@@ -189,7 +189,78 @@ fn node_local_damage_counts_against_every_stripe() {
                 );
             }
         }
-        assert!(striped > 0, "tolerance {tolerance}: some seed draws stripes");
+        assert!(
+            striped > 0,
+            "tolerance {tolerance}: some seed draws stripes"
+        );
+    }
+}
+
+/// Five replicas, one per zone.
+fn five_zones() -> BTreeMap<IpAddr, LocalityInfo> {
+    (1..=5_u8)
+        .map(|n| {
+            (
+                IpAddr::from([10, 0, 1, n]),
+                LocalityInfo::new("dc", format!("z{n}"), format!("m{n}")),
+            )
+        })
+        .collect()
+}
+
+/// A tolerance a process sets at boot replaces the builder's default for
+/// the seed: the first caller wins, no stripe loses copies in more zones
+/// than it allows, and 0 spares every replica (moonpool#297).
+#[test]
+fn a_tolerance_set_at_boot_bounds_the_damage() {
+    let localities = five_zones();
+    for wanted in [0, 2, 3] {
+        let mut widest = 0;
+        for seed in 0..40_u64 {
+            let mut sim = SimWorld::new_with_seed(seed);
+            sim.set_storage_config(StorageConfiguration {
+                clean_crash_probability: 0.0,
+                correlated_rollback_probability: 0.0,
+                crash_lost_probability: 0.5,
+                crash_latent_fault_probability: 0.0,
+                shorn_write_probability: 0.0,
+                length_survives_crash_probability: 1.0,
+                ..StorageConfiguration::fast_local()
+            });
+            let _ =
+                sim.draw_replicated_faults(ReplicatedFaults::new(DomainLevel::Zone), &localities);
+            let mut damaged: BTreeMap<Option<u64>, BTreeSet<String>> = BTreeMap::new();
+            for (rank, (ip, locality)) in (0u64..).zip(&localities) {
+                let set = local_runtime().block_on(async {
+                    run_as(&mut sim, *ip, move |provider| async move {
+                        provider.set_fault_tolerance(wanted).expect("set")
+                    })
+                    .await
+                });
+                assert_eq!(set, Some(wanted), "every member sees the first value");
+                assert_eq!(
+                    sim.set_fault_tolerance(*ip, wanted + 1),
+                    Some(wanted),
+                    "the first caller wins"
+                );
+                for sector in write_and_crash(&mut sim, *ip, Some(layout(rank))) {
+                    damaged
+                        .entry(stripe_at(rank, sector))
+                        .or_default()
+                        .insert(locality.zone().to_string());
+                }
+            }
+            for (stripe, zones) in &damaged {
+                assert!(
+                    zones.len() <= wanted,
+                    "seed {seed}, tolerance {wanted}: {stripe:?} damaged in {zones:?}"
+                );
+                widest = widest.max(zones.len());
+            }
+        }
+        if wanted > 1 {
+            assert!(widest > 1, "tolerance {wanted}: some record uses it");
+        }
     }
 }
 

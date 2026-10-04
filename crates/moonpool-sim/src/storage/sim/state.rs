@@ -257,7 +257,8 @@ impl StorageState {
     pub(crate) fn settle_turns(&mut self, owner: IpAddr) {
         for at in 0..self.replication.len() {
             let plan = Arc::clone(&self.replication[at].plan);
-            if !plan.is_rolling() {
+            if !plan.is_rolling() || plan.tolerance() == 0 {
+                // A window of no domain never holds the turn.
                 continue;
             }
             let Some(domain) = plan.domain(owner) else {
