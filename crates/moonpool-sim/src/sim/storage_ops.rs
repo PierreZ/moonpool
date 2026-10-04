@@ -419,6 +419,18 @@ impl SimWorld {
         self.inner.read().storage.fault_turn(ip)
     }
 
+    /// The sectors of `ip`'s files that a random fault or a crash currently
+    /// leaves damaged, sorted by path, then sector (see
+    /// [`SimStorageProvider::damaged`](crate::SimStorageProvider::damaged)).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[must_use]
+    pub fn damaged(&self, ip: IpAddr) -> Vec<crate::storage::DamagedRange> {
+        self.inner.read().storage.damaged(ip)
+    }
+
     /// Replace what `ip` says about its own on-disk layout: the regions a
     /// replicated fault pattern reads (see
     /// [`SimStorageProvider::publish_layout`](crate::SimStorageProvider::publish_layout)).

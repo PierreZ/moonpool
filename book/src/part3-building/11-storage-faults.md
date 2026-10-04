@@ -601,6 +601,18 @@ Directed tests reach for the targeted API on `SimWorld` instead:
 `take_storage_crash_reports()`, and every fault injected from
 `take_storage_fault_records()`.
 
+Those two drain the whole world's log. A process, which sees only its own
+disk, asks `ctx.storage().damaged()` instead: the sectors of its own files
+that a random fault or a crash currently leaves damaged, as
+`DamagedRange { path, sectors, kind }` runs sorted by path and sector, with
+a `DamageKind` (`Corrupt`, `Lost`, `Shorn`, `Phantom`, `Misdirected`,
+`LostSyncedWrite`). A sector stays listed until it is rewritten, truncated
+away or its file deleted, and another process's damage to the same path
+never shows. The call reads, draws nothing and changes nothing, so a harness
+can judge what its recovery found at boot against what the disk did, with
+no trace to read. `SimWorld::damaged(ip)` asks the same of a hand-driven
+world.
+
 A failed `sync_dir` reports an I/O error to its caller and emits a
 `storage_sync_fault` event on the simulation fault timeline. An invalid or
 missing directory fails before the sync fault coin is considered.

@@ -25,7 +25,7 @@ use crate::{
         wakers::{WakeBatch, WakerRegistry},
     },
     storage::{
-        EioTarget, FileCrashReport, FileImage, StorageConfiguration, StorageEligibilityMask,
+        DamageKind, DamagedRange, EioTarget, FileCrashReport, FileImage, StorageConfiguration, StorageEligibilityMask,
         StorageError, StorageFaultKind, StorageFaultRecord, StorageOperation,
         faults::{FaultFocus, sector_range, weighted},
     },
@@ -1385,7 +1385,11 @@ impl StorageEngine {
                     StorageFaultKind::PhantomWrite,
                     Some(sector_range(offset, data.len())),
                 );
-                self.mark_damaged(pending.file_id, sector_range(offset, data.len()));
+                self.mark_damaged(
+                    pending.file_id,
+                    sector_range(offset, data.len()),
+                    DamageKind::Phantom,
+                );
                 fault_kind = Some("phantom");
             }
             WriteLanding::At(landed_at) => {
@@ -1615,8 +1619,9 @@ impl StorageEngine {
         }
         if landed_at != offset {
             // Both the bytes it clobbered and the ones it missed.
-            self.mark_damaged(file_id, sector_range(landed_at, data.len()));
-            self.mark_damaged(file_id, sector_range(offset, data.len()));
+            let kind = DamageKind::Misdirected;
+            self.mark_damaged(file_id, sector_range(landed_at, data.len()), kind);
+            self.mark_damaged(file_id, sector_range(offset, data.len()), kind);
         }
         Ok(())
     }
@@ -1626,15 +1631,41 @@ impl StorageEngine {
         if let Some(file) = self.state.files.get_mut(&file_id) {
             file.image.corrupt(sector..sector + 1);
         }
-        self.mark_damaged(file_id, sector..sector + 1);
+        self.mark_damaged(file_id, sector..sector + 1, DamageKind::Corrupt);
     }
 
     /// Mark sectors a random fault left holding the wrong bytes.
-    fn mark_damaged(&mut self, file_id: FileId, sectors: Range<u64>) {
+    fn mark_damaged(&mut self, file_id: FileId, sectors: Range<u64>, kind: DamageKind) {
         if let Some(file) = self.state.files.get_mut(&file_id) {
-            file.image.mark_damaged(sectors);
+            file.image.mark_damaged(sectors, kind);
         }
         self.state.note_damage_changed();
+    }
+
+    /// The sectors of `owner`'s named files a random fault or a crash
+    /// currently leaves damaged, sorted by path, then sector. Read-only and
+    /// draw-free.
+    pub(crate) fn damaged(&self, owner: IpAddr) -> Vec<DamagedRange> {
+        let mut report = Vec::new();
+        for ((ip, path), file_id) in &self.state.path_to_file {
+            if *ip != owner {
+                continue;
+            }
+            let Some(file) = self.state.files.get(file_id) else {
+                continue;
+            };
+            report.extend(
+                file.image
+                    .damage()
+                    .into_iter()
+                    .map(|(sectors, kind)| DamagedRange {
+                        path: path.clone(),
+                        sectors,
+                        kind,
+                    }),
+            );
+        }
+        report
     }
 
     /// Record one injected fault against a path.

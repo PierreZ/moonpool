@@ -57,6 +57,8 @@ mod config;
 mod crash_api;
 #[path = "storage/crash_model.rs"]
 mod crash_model;
+#[path = "storage/damage_report.rs"]
+mod damage_report;
 #[path = "storage/determinism.rs"]
 mod determinism;
 #[path = "storage/directory.rs"]

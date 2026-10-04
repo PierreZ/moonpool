@@ -65,8 +65,8 @@ pub use file::SimStorageFile;
 
 // Re-export the file image and the fault vocabulary
 pub use faults::{
-    CrashOutcome, EioTarget, FaultFocus, FileCrashReport, SECTOR_SIZE, SectorResolution,
-    StorageEligibilityMask, StorageFaultKind, StorageFaultRecord,
+    CrashOutcome, DamageKind, DamagedRange, EioTarget, FaultFocus, FileCrashReport, SECTOR_SIZE,
+    SectorResolution, StorageEligibilityMask, StorageFaultKind, StorageFaultRecord,
 };
 pub use image::{FileImage, SectorBitSet};
 

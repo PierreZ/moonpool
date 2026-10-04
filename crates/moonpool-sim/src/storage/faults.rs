@@ -64,6 +64,40 @@ pub struct StorageFaultRecord {
     pub sectors: Option<Range<u64>>,
 }
 
+/// How a random fault or a crash left a sector holding the wrong bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DamageKind {
+    /// A latent fault: reads return deterministically corrupted bytes (read
+    /// or write corruption, or a crash's [`CrashOutcome::LatentFault`]).
+    Corrupt,
+    /// A crash lost the unsynced write: the sector reads the fill pattern
+    /// ([`CrashOutcome::Lost`]).
+    Lost,
+    /// A crash tore the sector into old and new bytes
+    /// ([`CrashOutcome::Shorn`]).
+    Shorn,
+    /// A write was acknowledged but never applied: the old bytes remain.
+    Phantom,
+    /// A misdirected write: the bytes it clobbered where it landed, and the
+    /// ones it never wrote where it was aimed.
+    Misdirected,
+    /// A crash lost a write a sync had reported durable (barrier-violation
+    /// family).
+    LostSyncedWrite,
+}
+
+/// A run of sectors of one file currently damaged by one kind of fault
+/// ([`SimStorageProvider::damaged`](crate::SimStorageProvider::damaged)).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DamagedRange {
+    /// The file's path in its owner's namespace.
+    pub path: String,
+    /// The damaged sectors.
+    pub sectors: Range<u64>,
+    /// What damaged them.
+    pub kind: DamageKind,
+}
+
 /// Resolution shape of one dirty sector during a crash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashOutcome {

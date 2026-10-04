@@ -87,6 +87,29 @@ impl SimStorageProvider {
         Ok(self.sim()?.fault_pattern(self.owner_ip))
     }
 
+    /// This process's sectors that a random fault or a crash currently
+    /// leaves damaged, as runs of one [`DamageKind`](super::DamageKind),
+    /// sorted by path, then sector.
+    ///
+    /// A sector is listed from the fault that damaged it (a latent read or
+    /// write corruption, a phantom or misdirected write, a crash's lost,
+    /// torn or latent sector, a lost synced write) until it is rewritten or
+    /// truncated away, or its file is deleted. Targeted injections
+    /// (`SimWorld::corrupt_file`, `FaultContext::corrupt_bytes`) are not
+    /// listed: their caller knows what it aimed. Only this process's files
+    /// are, so another process's damage to the same path never shows here.
+    ///
+    /// It reads, draws no randomness and changes nothing: a harness may
+    /// call it at any point, a check at boot, say, to judge what its
+    /// recovery found against what the disk did.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn damaged(&self) -> io::Result<Vec<super::DamagedRange>> {
+        Ok(self.sim()?.damaged(self.owner_ip))
+    }
+
     /// Upgrade the weak simulation handle, mapping a dropped simulation to an
     /// I/O error so storage operations can propagate it with `?`.
     fn sim(&self) -> io::Result<crate::sim::SimWorld> {
