@@ -577,7 +577,16 @@ the domains at the chosen level (machine, zone or datacenter):
 In each, a record holds damage in at most `tolerance` domains at once
 (default 1, clamped so one domain always keeps every record), and so does
 node-local data; a rolling window spans `tolerance` consecutive domains.
-With fewer than two domains, no process in the group is damaged. The stripe
+The builder's `tolerance` is the default for every seed. A system whose
+tolerated loss is itself drawn per seed (a majority, a flexible quorum, a
+grid that tolerates none) sets it from a process at boot with
+`ctx.storage().set_fault_tolerance(k)`: the first caller in the group wins,
+later calls change nothing and return the value in force, and 0 spares the
+whole group. No randomness is drawn: the damaged or node-local domains are a
+prefix of an order drawn with the pattern. A group registered with
+`.processes()` has no locality, so each of its members counts as its own
+domain at every level, named after its IP; a `.cluster()` group uses its
+topology. With fewer than two domains, no process in the group is damaged. The stripe
 rotation is TigerBeetle's helix, keyed by **record** instead of file offset:
 TigerBeetle's replicas are bit-for-bit identical, so an offset names the
 same record everywhere; a replicated log whose replicas write records at

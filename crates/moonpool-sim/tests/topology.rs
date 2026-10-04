@@ -365,11 +365,9 @@ impl Process for ReplicaProcess {
             (None, false) => true,
             _ => false,
         };
-        if !ok {
-            return Err(SimulationError::InvalidState(format!(
-                "unexpected fault pattern {pattern:?}"
-            )));
-        }
+        // A panic, not an error: a process's error only ends the process,
+        // while a panic fails the run.
+        assert!(ok, "unexpected fault pattern {pattern:?}");
         ctx.shutdown().cancelled().await;
         Ok(())
     }
@@ -417,4 +415,29 @@ fn replicated_storage_faults_cover_only_their_group() {
         report.failed_runs, 0,
         "a replica outside the group has no pattern"
     );
+}
+
+/// A `.processes()` group has no locality, yet its members are distinct
+/// failure domains: each one is its own domain, so the group draws a real
+/// pattern rather than being spared (moonpool#297).
+#[test]
+fn a_processes_group_draws_a_pattern_over_its_members() {
+    let seeds: Vec<u64> = (1..=8).collect();
+    let report = SimulationBuilder::new()
+        .processes(3, || {
+            Box::new(ReplicaProcess {
+                expect_pattern: true,
+            })
+        })
+        .workload(TimedWorkload(Duration::from_millis(50)))
+        .replicated_storage_faults(
+            moonpool_sim::ReplicatedFaults::new(DomainLevel::Machine).group("replica"),
+        )
+        .enable_chaos([Chaos::Storage(ChaosMode::Random)])
+        .set_iterations(seeds.len())
+        .set_debug_seeds(seeds)
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "every seed drew a pattern");
+    assert_eq!(report.successful_runs, 8);
 }

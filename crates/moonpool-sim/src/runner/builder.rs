@@ -579,8 +579,8 @@ impl SimulationBuilder {
     /// Each seed draws a [`FaultPattern`](crate::FaultPattern) over the
     /// domains at `config`'s level of the [`.cluster()`](Self::cluster)
     /// topology, among the members of `config`'s
-    /// [group](crate::ReplicatedFaults::group) (every process without one):
-    /// a **minority** (only a few domains take damage), a **stripe
+    /// [group](crate::ReplicatedFaults::group) (every process with a
+    /// locality without one): a **minority** (only a few domains take damage), a **stripe
     /// rotation** (every domain does, each replicated record only in the
     /// domains its key rotates to), or a **rolling turn** (one domain at a
     /// time takes damage anywhere, the turn moving on once its disks show
@@ -589,6 +589,10 @@ impl SimulationBuilder {
     /// each region's `stripe` is the record's key, shared by every
     /// replica's copy. A record holds damage in at most `tolerance` domains
     /// at once, and so does node-local data, by construction.
+    ///
+    /// A group registered with [`.processes()`](Self::processes) has no
+    /// locality: each of its members is then its own domain, at every
+    /// level, named after its IP.
     ///
     /// Call it once per replicated group: each call draws its own pattern
     /// and runs its own turn. Processes outside every covered group keep
@@ -2053,6 +2057,15 @@ impl SimulationBuilder {
                 {
                     let members = process_config.group_registry.ips_in_group(group);
                     localities.retain(|ip, _| members.contains(ip));
+                    // A `.processes()` member has no locality: it shares no
+                    // fate with another, so it is its own domain at every
+                    // level, named after its IP.
+                    for ip in members {
+                        localities.entry(ip).or_insert_with(|| {
+                            let id = ip.to_string();
+                            crate::LocalityInfo::new(id.clone(), id.clone(), id)
+                        });
+                    }
                 }
                 match sim.draw_replicated_faults(*config, &localities) {
                     crate::FaultPattern::Minority { .. } => {
