@@ -13,11 +13,14 @@
 //! - **minority**: only the processes of a few failure domains take damage,
 //!   anywhere on their disks — `TigerBeetle`'s minority corruption;
 //! - **striped**: every domain takes damage, but each stripe only in the
-//!   domains its key rotates to — `TigerBeetle`'s helical corruption, keyed
+//!   domain its key rotates to — `TigerBeetle`'s helical corruption, keyed
 //!   by record instead of by file offset, so it holds even where replicas
 //!   lay their records out differently. Bytes a node alone holds (stripe
-//!   `None`, or bytes it never published) are damaged only in the domains
-//!   drawn for them;
+//!   `None`, or bytes it never published) are damaged only in the
+//!   `tolerance - 1` domains drawn for them, and those domains may damage
+//!   every stripe too: a format may answer node-local damage by giving up
+//!   the whole replica, so node-local damage counts against every stripe's
+//!   tolerance;
 //! - **rolling**: one domain at a time takes damage, anywhere on its disks.
 //!   The turn stays on a domain while it holds damage, and moves to the
 //!   next domain in order once that damage is repaired, read off the disk:
@@ -103,13 +106,21 @@ pub enum FaultPattern {
         /// The damaged domains' ids.
         domains: Vec<String>,
     },
-    /// Every domain takes damage on the stripes its key rotates to; these
-    /// domains also take damage on node-local bytes.
+    /// Every domain takes damage on the stripes its key rotates to; the
+    /// `local` domains take damage anywhere.
+    ///
+    /// Node-local damage may cost a node its whole replica (a format that
+    /// refuses to open on it), which damages every stripe it holds. So a
+    /// domain allowed node-local damage counts as damaged for every stripe,
+    /// and stripe `s` is damaged only in `local` plus the one domain it
+    /// rotates to: at most `tolerance` domains. At `tolerance = 1`, `local`
+    /// is empty and node-local bytes are never damaged under this pattern.
     Striped {
-        /// The domains, in rotation order: stripe `s` may be damaged in
-        /// the `tolerance` domains starting at `s mod len`.
+        /// The domains, in order. Stripe `s` may be damaged in the
+        /// `s mod n`-th domain outside `local`, with `n` their count.
         domains: Vec<String>,
-        /// The domains whose node-local bytes may be damaged.
+        /// The `tolerance - 1` domains whose bytes, node-local or striped,
+        /// may all be damaged.
         local: Vec<String>,
     },
     /// One window of `tolerance` domains at a time takes damage; the
@@ -150,7 +161,7 @@ pub(crate) struct ReplicationPlan {
     /// Domain index (into the pattern's rotation) per member.
     domain_of: BTreeMap<IpAddr, usize>,
     /// For a minority: whether each domain index is damaged. For a stripe
-    /// rotation: whether each domain index may lose node-local bytes.
+    /// rotation: whether each domain index may be damaged anywhere.
     marked: Vec<bool>,
 }
 
@@ -190,9 +201,16 @@ impl ReplicationPlan {
         let pattern = if kind == PatternKind::Rolling {
             FaultPattern::Rolling { domains }
         } else {
-            // `tolerance` distinct domains, drawn without replacement.
+            // Distinct domains, drawn without replacement: `tolerance` for a
+            // minority, one fewer for a stripe rotation, whose stripes each
+            // take the last domain of their tolerance.
+            let picks = if kind == PatternKind::Striped {
+                tolerance - 1
+            } else {
+                tolerance
+            };
             let mut pool: Vec<usize> = (0..domains.len()).collect();
-            for _ in 0..tolerance {
+            for _ in 0..picks {
                 let at = pick(pool.len());
                 marked[pool.swap_remove(at)] = true;
             }
@@ -244,6 +262,17 @@ impl ReplicationPlan {
         offset < self.tolerance as u64
     }
 
+    /// Whether `stripe` rotates to `domain`: the `stripe mod n`-th domain
+    /// outside the marked ones, with `n` their count.
+    fn rotates_to(&self, domain: usize, stripe: u64) -> bool {
+        if self.marked[domain] {
+            return false;
+        }
+        let rotation = self.marked.iter().filter(|marked| !**marked).count() as u64;
+        let rank = self.marked[..domain].iter().filter(|marked| !**marked).count() as u64;
+        stripe % rotation == rank
+    }
+
     /// Whether `domain` holds the rolling turn when it starts at `turn`.
     pub(crate) fn in_window(&self, domain: usize, turn: usize) -> bool {
         self.within(domain, turn as u64)
@@ -280,18 +309,22 @@ impl ReplicationPlan {
             FaultPattern::Minority { .. } => self.marked[domain],
             FaultPattern::Rolling { .. } => self.in_window(domain, turn),
             FaultPattern::Striped { .. } => {
+                if self.marked[domain] {
+                    // Counted as damaged for every stripe already.
+                    return true;
+                }
                 let mut stripes = layout
                     .map(|layout| layout.stripes(path, sector))
                     .unwrap_or_default();
                 if stripes.is_empty() || stripes.contains(&None) {
                     // Bytes this node alone holds, or never described.
-                    return self.marked[domain];
+                    return false;
                 }
                 stripes.dedup();
                 stripes
                     .into_iter()
                     .flatten()
-                    .all(|stripe| self.within(domain, stripe))
+                    .all(|stripe| self.rotates_to(domain, stripe))
             }
         }
     }
@@ -422,7 +455,7 @@ mod tests {
     fn node_local_bytes_are_damaged_only_in_the_drawn_domains() {
         let zones = localities(&["a", "b", "c"]);
         let plan = ReplicationPlan::draw(
-            ReplicatedFaults::new(DomainLevel::Zone),
+            ReplicatedFaults::new(DomainLevel::Zone).tolerance(2),
             &zones,
             PatternKind::Striped,
             |_| 1,
@@ -435,6 +468,45 @@ mod tests {
         // Bytes never published count as node-local too.
         assert!(plan.allows(ip(2), None, "other", 7, 0));
         assert!(!plan.allows(ip(1), None, "other", 7, 0));
+    }
+
+    #[test]
+    fn at_tolerance_one_no_domain_takes_node_local_damage() {
+        let zones = localities(&["a", "b", "c"]);
+        let plan = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone),
+            &zones,
+            PatternKind::Striped,
+            |_| 0,
+        );
+        let FaultPattern::Striped { local, .. } = plan.pattern() else {
+            panic!("a stripe rotation");
+        };
+        assert!(local.is_empty());
+        let layout = LayoutIndex::new(&[region(0..512, None)]);
+        assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0, 0)));
+    }
+
+    #[test]
+    fn a_node_local_domain_counts_against_every_stripe() {
+        let zones = localities(&["a", "b", "c", "d"]);
+        let plan = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone).tolerance(2),
+            &zones,
+            PatternKind::Striped,
+            |_| 0,
+        );
+        let regions: Vec<LayoutRegion> = (0..12)
+            .map(|s| region(s * 512..(s + 1) * 512, Some(s)))
+            .collect();
+        let layout = LayoutIndex::new(&regions);
+        for stripe in 0..12 {
+            let damaged: Vec<u8> = (1..=4)
+                .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", stripe, 0))
+                .collect();
+            assert_eq!(damaged.len(), 2, "stripe {stripe}: {damaged:?}");
+            assert!(damaged.contains(&1), "zone a is node-local: {damaged:?}");
+        }
     }
 
     #[test]

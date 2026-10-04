@@ -557,9 +557,14 @@ the domains at the chosen level (machine, zone or datacenter):
 - **minority**: only the processes of a few domains take damage, anywhere on
   their disks;
 - **striped**: every domain takes damage, but stripe `s` only in the domain
-  `s mod Z` rotates to, so the damaged records "spin" around the domains.
+  it rotates to, so the damaged records "spin" around the domains.
   Node-local bytes, and bytes never published, are damaged only in the
-  domains drawn for them;
+  `tolerance - 1` domains drawn for them. A format may answer node-local
+  damage by giving up the whole replica (a journal refusing to open on two
+  damaged header copies), so those domains count as damaged for every
+  stripe: they may damage anything, and the stripes rotate over the other
+  domains. At the default `tolerance` of 1 no node-local byte is damaged
+  under this pattern;
 - **rolling**: one domain at a time takes damage, anywhere on its disks. The
   turn stays on a domain while it holds damage, and moves to the next domain
   once that damage is repaired. Repair is read off the disk: every sector a
