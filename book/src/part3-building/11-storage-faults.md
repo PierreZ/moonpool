@@ -597,7 +597,16 @@ pattern its group drew.
 Directed tests reach for the targeted API on `SimWorld` instead:
 `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,
 `clear_file_eio`, and — to test the oracle itself —
-`corrupt_durable_out_of_band`. What each crash did is available from
+`corrupt_durable_out_of_band`. These are path-global: they reach every process's
+file at that path. To damage one copy of one record on one replica, aim at
+one owner and exact bytes: `SimWorld::corrupt_process_file_bytes(ip, path,
+bytes)` durably changes exactly those bytes of that process's file (each
+XORed with a nonzero mask of its offset, so no randomness is drawn) and
+re-stamps the durability oracle, so a later crash does not report the change
+as a lost synced write; `fail_process_file_with_eio(ip, path, sectors,
+target)` and `clear_process_file_eio` scope EIO the same way. A scripted
+fault injector holds the same three on `FaultContext`: `corrupt_bytes`,
+`fail_file_with_eio` and `clear_file_eio`, each taking the process's IP. What each crash did is available from
 `take_storage_crash_reports()`, and every fault injected from
 `take_storage_fault_records()`.
 
