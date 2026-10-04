@@ -537,6 +537,49 @@ impl FileImage {
         }
     }
 
+    /// Durably mutate exactly `bytes`, re-stamping the durability oracle so
+    /// the next crash does not take it for a lost synced write.
+    ///
+    /// Each byte is flipped by a nonzero XOR mask that depends on its offset
+    /// alone, so the damage is a pure function of the range and draws no
+    /// randomness. The durable image changes, and so does the visible one
+    /// wherever a sector holds no unsynced write (where it does, that write
+    /// still lands over the damage at the next sync). The range must lie
+    /// within the durable image; returns `false`, changing nothing, if not.
+    #[instrument(level = "trace", skip(self))]
+    pub fn corrupt_bytes(&mut self, bytes: Range<u64>) -> bool {
+        if bytes.end > self.committed.len() as u64 {
+            return false;
+        }
+        for offset in bytes.clone() {
+            let mask = offset.wrapping_mul(0x9E37_79B9_7F4A_7C15).to_le_bytes()[7] | 1;
+            let at = as_index(offset);
+            self.committed[at] ^= mask;
+            let sector = offset / SECTOR_SIZE as u64;
+            if at < self.visible.len() && !self.dirty.is_set(as_index(sector)) {
+                self.visible[at] ^= mask;
+            }
+        }
+        if bytes.is_empty() {
+            return true;
+        }
+        let sectors = bytes.start / SECTOR_SIZE as u64..(bytes.end - 1) / SECTOR_SIZE as u64 + 1;
+        for sector in sectors {
+            if self.dirty.is_set(as_index(sector)) {
+                // A pending write's stamp, if a lying sync left one, guards the
+                // visible bytes, which this left alone.
+                continue;
+            }
+            if let Some((_, stamped_len)) = self.oracle.get(&sector).copied() {
+                let range = self.committed_bounds(sector);
+                let stamped = range.start..(range.start + stamped_len).min(range.end);
+                let crc = crc32c::crc32c(&self.committed[stamped.clone()]);
+                self.oracle.insert(sector, (crc, stamped.len()));
+            }
+        }
+        true
+    }
+
     fn dirty_sectors(&self) -> Vec<u64> {
         (0..self.sectors())
             .filter(|s| self.dirty.is_set(as_index(*s)))

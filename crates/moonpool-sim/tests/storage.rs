@@ -71,6 +71,8 @@ mod focus;
 mod latency;
 #[path = "storage/namespaces.rs"]
 mod namespaces;
+#[path = "storage/owner_targeted.rs"]
+mod owner_targeted;
 #[path = "storage/performance.rs"]
 mod performance;
 #[path = "storage/positioned.rs"]

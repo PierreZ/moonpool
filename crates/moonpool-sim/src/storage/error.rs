@@ -140,6 +140,18 @@ pub enum StorageError {
         operation_id: OperationId,
     },
 
+    /// A targeted injection named bytes past the end of the file's durable
+    /// image.
+    #[error("bytes up to {end} of '{path}' are outside its {len} durable bytes")]
+    OutOfRange {
+        /// The file's path.
+        path: String,
+        /// The end of the requested byte range.
+        end: u64,
+        /// The file's durable length.
+        len: u64,
+    },
+
     /// Underlying I/O error from in-memory storage.
     #[error("I/O error on {file_id:?} ({kind:?}): {message}")]
     Io {
@@ -168,7 +180,8 @@ impl From<StorageError> for io::Error {
             StorageError::InvalidOperation { .. }
             | StorageError::InvalidOperationData { .. }
             | StorageError::InvalidOpenOptions { .. }
-            | StorageError::InvalidPath { .. } => io::ErrorKind::InvalidInput,
+            | StorageError::InvalidPath { .. }
+            | StorageError::OutOfRange { .. } => io::ErrorKind::InvalidInput,
             StorageError::DirectIoUnsupported | StorageError::DirectIoCreate { .. } => {
                 io::ErrorKind::Unsupported
             }

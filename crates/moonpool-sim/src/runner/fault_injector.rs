@@ -185,6 +185,82 @@ impl FaultContext {
         Ok(())
     }
 
+    /// A storage provider scoped to `ip`'s disk, to read what a process
+    /// holds before aiming a targeted injection at it (scanning a format's
+    /// layout on a crashed node, say).
+    ///
+    /// Its operations are ordinary storage I/O on that disk: they take
+    /// simulated time and roll that disk's fault coins like the process's
+    /// own would. Write through it only to model what the process itself
+    /// could have written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn storage(&self, ip: &str) -> SimulationResult<crate::SimStorageProvider> {
+        Ok(self.sim.storage_provider(parse_ip(ip)?))
+    }
+
+    /// Durably mutate exactly `bytes` of the file at `path` on `ip`'s disk,
+    /// leaving every other process's file at that path alone (see
+    /// [`SimWorld::corrupt_process_file_bytes`]). No randomness is drawn,
+    /// and a later crash does not take the change for a lost synced write.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails, `ip` has no file at `path`, or
+    /// `bytes` reach past its durable end.
+    pub fn corrupt_bytes(
+        &self,
+        ip: &str,
+        path: &str,
+        bytes: std::ops::Range<u64>,
+    ) -> SimulationResult<()> {
+        let ip = parse_ip(ip)?;
+        self.sim
+            .corrupt_process_file_bytes(ip, path, bytes)
+            .map_err(|error| std::io::Error::from(error).into())
+    }
+
+    /// Make reads and/or writes touching `sectors` of the file at `path` on
+    /// `ip`'s disk fail with an I/O error, until
+    /// [`clear_file_eio`](Self::clear_file_eio). Other processes' files at
+    /// that path are unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or `ip` has no file at `path`.
+    pub fn fail_file_with_eio(
+        &self,
+        ip: &str,
+        path: &str,
+        sectors: std::ops::Range<u64>,
+        target: crate::storage::EioTarget,
+    ) -> SimulationResult<()> {
+        let ip = parse_ip(ip)?;
+        self.sim
+            .fail_process_file_with_eio(ip, path, sectors, target)
+            .map_err(|error| std::io::Error::from(error).into())
+    }
+
+    /// Clear the targeted EIO injections on the file at `path` on `ip`'s
+    /// disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails or `ip` has no file at `path`.
+    pub fn clear_file_eio(
+        &self,
+        ip: &str,
+        path: &str,
+        target: crate::storage::EioTarget,
+    ) -> SimulationResult<()> {
+        let ip = parse_ip(ip)?;
+        self.sim
+            .clear_process_file_eio(ip, path, target)
+            .map_err(|error| std::io::Error::from(error).into())
+    }
+
     /// Remove a network partition between two IPs.
     ///
     /// # Errors
