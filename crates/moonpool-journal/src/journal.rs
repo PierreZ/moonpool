@@ -162,12 +162,35 @@ impl<P: StorageProvider> std::fmt::Debug for Journal<P> {
     }
 }
 
-fn parent_of(dir: &str) -> &str {
-    match dir.trim_end_matches('/').rfind('/') {
-        Some(0) => "/",
-        Some(at) => &dir[..at],
-        None => ".",
+/// Every directory whose entries name a component of `dir`, from the root
+/// down: `.`, `a`, `a/b` for `a/b/c`; `/`, `/a` for `/a/b`.
+///
+/// Syncing each of them makes the whole chain of names that reaches `dir`
+/// durable. A name created by `create_dir_all` is lost in a crash unless its
+/// parent is synced, and a synced child does not survive the loss of its
+/// parent's own name, so syncing only `dir`'s immediate parent is not enough
+/// for a nested `dir`.
+fn ancestors_of(dir: &str) -> Vec<String> {
+    let absolute = dir.starts_with('/');
+    let components: Vec<&str> = dir
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    let mut parents = Vec::with_capacity(components.len());
+    let mut current = if absolute {
+        "/".to_string()
+    } else {
+        ".".to_string()
+    };
+    for component in components {
+        parents.push(current.clone());
+        current = match current.as_str() {
+            "." => component.to_string(),
+            "/" => format!("/{component}"),
+            _ => format!("{current}/{component}"),
+        };
     }
+    parents
 }
 
 impl<P: StorageProvider> Journal<P> {
@@ -177,6 +200,10 @@ impl<P: StorageProvider> Journal<P> {
     /// Segments are found by listing the directory: each is named after its
     /// first index, so the names alone give their order. A segment file left
     /// half-created by a crash (`seg-….wal.tmp`) is removed.
+    ///
+    /// `dir` may be nested: every directory on the path to it is created and
+    /// its name made durable, so a crash right after the first open cannot
+    /// drop an ancestor and with it the whole journal.
     ///
     /// # Errors
     ///
@@ -191,7 +218,12 @@ impl<P: StorageProvider> Journal<P> {
     ) -> Result<(Self, Recovery), JournalError> {
         config.geometry.validate()?;
         provider.create_dir_all(dir).await?;
-        provider.sync_dir(parent_of(dir)).await?;
+        // Every ancestor, not only the ones this call created: an earlier open
+        // may have created them and failed before its syncs completed, leaving
+        // names that are visible but not durable.
+        for parent in ancestors_of(dir) {
+            provider.sync_dir(&parent).await?;
+        }
 
         let (meta, meta_value, meta_repaired) = DualFile::load(&provider, dir, "meta").await?;
         let mut firsts = Vec::new();

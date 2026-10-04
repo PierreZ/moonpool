@@ -175,6 +175,40 @@ fn entries_round_trip_across_reopen() {
     });
 }
 
+/// A nested journal directory survives a crash right after its first open:
+/// every directory `open` created has a durable name, so neither the journal
+/// nor its synced entries can vanish with an ancestor (moonpool#293).
+#[test]
+fn a_nested_journal_survives_a_crash_after_its_first_open() {
+    const NESTED: &str = "a/b/c/wal";
+    runtime().block_on(async {
+        let mut sim = sim(3);
+        sim.set_storage_config(StorageConfiguration {
+            unsynced_dir_entry_loss_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        });
+        let written = run(&mut sim, |provider| async move {
+            let (mut journal, recovery) = Journal::open(provider, NESTED, small()).await?;
+            assert!(recovery.created);
+            append_each(&mut journal, 1, &[100, 200, 300]).await?;
+            read_all(&journal).await
+        })
+        .await
+        .expect("write");
+
+        sim.simulate_crash_for_process(ip(), true);
+
+        let (read, recovery) = run(&mut sim, |provider| async move {
+            let (journal, recovery) = Journal::open(provider, NESTED, small()).await?;
+            Ok::<_, JournalError>((read_all(&journal).await?, recovery))
+        })
+        .await
+        .expect("reopen");
+        assert!(!recovery.created, "the journal survived the crash");
+        assert_eq!(read, written);
+    });
+}
+
 #[test]
 fn segments_are_found_by_listing_and_recovered_in_order() {
     runtime().block_on(async {
