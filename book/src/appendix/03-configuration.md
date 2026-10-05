@@ -225,8 +225,10 @@ SimulationBuilder::new()
 
 The mask covers `Corruption`, `Eio`, `Misdirect`, `PhantomWrite`,
 `SyncFailure`, `ShortTransfer`, `DirEntryLoss`, `CrashDamage`, `Degradation`
-(stall and throttle episodes) and `DiskFailure`. Like the network mask it can
-only suppress a family the sampled profile kept.
+(stall and throttle episodes), `DiskFailure`, `BarrierViolation` (sync lies)
+and `SlowDisk` (the buggify knobs' IOPS and bandwidth spikes: masked, the
+profile keeps the throughput it sampled). Like the network mask it can only
+suppress a family the sampled profile kept.
 
 ### Latency distribution
 

@@ -1288,6 +1288,7 @@ impl SimulationBuilder {
         // surface — only spike knobs where chaos is actually on, so it never
         // silently switches on a fault family that wasn't enabled. Draws from
         // `SIM_RNG` (buggify is live by now; see `reset_per_iteration_state`).
+        let sampled_storage = storage_config.clone();
         if self.buggify_knobs {
             if network_chaos.is_some() {
                 network_config.chaos.apply_buggify_knobs();
@@ -1299,7 +1300,8 @@ impl SimulationBuilder {
         // A caller mask is the final fault-family decision. It consumes no RNG,
         // so adding or omitting it cannot shift config sampling or replay.
         self.network_fault_mask.apply_to(&mut network_config.chaos);
-        self.storage_fault_mask.apply_to(&mut storage_config);
+        self.storage_fault_mask
+            .apply_after_knobs(&mut storage_config, &sampled_storage);
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency.clone_from(&self.link_latency);
@@ -2523,6 +2525,43 @@ mod tests {
             std::task::Poll::Pending => std::task::Poll::Pending,
         })
         .await
+    }
+
+    /// Masking the slow disk keeps the IOPS and bandwidth the profile
+    /// sampled, whatever the knobs spiked them to — and draws nothing.
+    #[test]
+    fn a_masked_slow_disk_keeps_the_sampled_throughput() {
+        use crate::{StorageFault, StorageFaultMask};
+
+        let sample = |mask: Option<StorageFaultMask>, knobs: bool, seed: u64| {
+            crate::sim::reset_sim_rng();
+            crate::sim::set_sim_seed(seed);
+            crate::chaos::buggify::buggify_init(1.0);
+            let mut chaos = vec![Chaos::Storage(ChaosMode::Random)];
+            if knobs {
+                chaos.push(Chaos::BuggifyKnobs);
+            }
+            let mut builder = SimulationBuilder::new().enable_chaos(chaos);
+            if let Some(mask) = mask {
+                builder = builder.storage_fault_mask(mask);
+            }
+            let sim = builder.build_sim_for_iteration(seed);
+            let draws = crate::sim::rng_call_count();
+            crate::chaos::buggify::buggify_reset();
+            let throughput = sim.with_storage_config(|config| (config.iops, config.bandwidth));
+            (throughput, draws)
+        };
+        let mask = StorageFaultMask::all().without(StorageFault::SlowDisk);
+        let mut spiked = 0;
+        for seed in 0..64 {
+            let (plain, _) = sample(None, false, seed);
+            let (knobbed, knobbed_draws) = sample(None, true, seed);
+            let (masked, masked_draws) = sample(Some(mask), true, seed);
+            assert_eq!(masked, plain, "seed {seed}: the knobs' slow disk leaked");
+            assert_eq!(masked_draws, knobbed_draws, "seed {seed}: the mask drew");
+            spiked += usize::from(knobbed != plain);
+        }
+        assert!(spiked > 0, "no seed spiked the disk to mask");
     }
 
     /// moonpool#292's acceptance: masking a storage family after Swarm and
