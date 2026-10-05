@@ -367,19 +367,39 @@ to 905, and the guarantee held throughout: nothing acknowledged was lost.
 
 [`journal.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/journal.rs)
 in `moonpool-sim-examples` (`cargo xtask sim run journal`) is the journal
-inside a full simulation: one process owns it on its simulated disk, and
-`Chaos::Attrition` crashes that process over and over — never wiping it,
-since a wiped disk is data loss no local journal can recover from.
+inside a full simulation: one process owns it on its simulated disk,
+`Chaos::Attrition` crashes that process over and over (never wiping it,
+since a wiped disk is data loss no local journal can recover from), and
+`Chaos::Storage(Random)` runs the disk's fault families underneath.
 
 ```rust,ignore
 SimulationBuilder::new()
     .processes(1, || Box::new(JournalNode))
     .workload(JournalWorkload)
-    .enable_chaos([Chaos::Attrition { /* 80% crash, no wipe */ }])
+    .enable_chaos([
+        Chaos::Attrition { /* 80% crash, 20% graceful, no wipe */ },
+        Chaos::Storage(ChaosMode::Random),
+    ])
+    // What a lone node has no second copy to repair from.
+    .storage_fault_mask(
+        StorageFaultMask::all()
+            .without(StorageFault::Corruption)
+            .without(StorageFault::Eio)
+            .without(StorageFault::Misdirect)
+            .without(StorageFault::PhantomWrite)
+            .without(StorageFault::DiskFailure),
+    )
     .chaos_duration(Duration::from_secs(30))
     .set_iterations(50)
     .run()
 ```
+
+What stays on is everything a lone journal must survive: the crash physics
+(lost, latent and shorn sectors, correlated rollbacks), lost directory
+entries, failed syncs, short transfers, slow-disk episodes. A failed sync
+poisons the journal, and the node reopens it, as any caller should. The
+journal runs with `AmbiguousTail::Keep`, the replicated caller's policy, and
+the node plays the replication layer by discarding what it kept.
 
 The node's memory dies with it, so what it has acknowledged lives in a
 `Ledger` published in the iteration's `StateHandle`. Every boot opens the
@@ -397,12 +417,16 @@ assert_always!(recovery.corrupt.is_empty(), "a crash is never reported as corrup
 ```
 
 Then it appends batches, truncates suffixes and prefixes, and saves
-metadata; a batch joins the ledger only once `append` returns. Moonpool's
-default disk is the paper's model, so the promises are the strong ones. The
-report shows what the crashes reached — torn tails, ambiguous last batches
+metadata; a batch joins the ledger only once `append` returns. The journal
+never rewrites a sector holding an acknowledged entry, so even on the
+harsher disk the promises are the paper's strong ones. The report shows what
+the crashes and the disk reached: torn tails, ambiguous last batches
 (several damaged entries in one of them, too), rebuilt slots, several
-segments — and
-removing the journal's per-batch `fdatasync` turns nearly every seed red.
+segments, failed syncs and the reopens they forced. Removing the journal's
+per-batch `fdatasync` turns nearly every seed red, and so did a missing
+sync on recovery, which this example found: a graceful reboot reopened
+over a batch that was never synced, the node adopted it, and the next power
+loss took it back.
 
 ## On a Real Disk
 
