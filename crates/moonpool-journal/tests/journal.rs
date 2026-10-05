@@ -1212,6 +1212,30 @@ async fn a_then_b(sim: &mut SimWorld, stop_after: Option<usize>) -> usize {
     steps
 }
 
+/// What opening reports is durable. A process that restarts without a power
+/// loss reopens over writes its predecessor never synced: they are visible,
+/// and recovery takes them into the log. Unless opening syncs them, the
+/// next power loss can take them back, after the caller acted on them.
+#[test]
+fn what_opening_reports_survives_the_next_power_loss() {
+    runtime().block_on(async {
+        let steps = a_then_b(&mut losing_disk(27), None).await;
+        let mut sim = losing_disk(27);
+        a_then_b(&mut sim, Some(steps - 1)).await;
+        // No crash: the process restarts, the disk keeps its page cache.
+        let (journal, _) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(journal.next_index(), 5, "B's unsynced writes are visible");
+        drop(journal);
+        sim.simulate_crash_for_process(ip(), true);
+        let (journal, _) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(
+            journal.next_index(),
+            5,
+            "what the last open reported is still there"
+        );
+    });
+}
+
 /// An append never rewrites a sector an earlier sync made durable. Batch B
 /// would fit in the block holding batch A's last entry; it starts on a
 /// fresh block instead, so a crash that loses every sector B was writing —
@@ -1758,6 +1782,8 @@ struct Tally {
     /// Recoveries whose log no longer starts at index 1: a prefix
     /// truncation dropped segments.
     compacted: usize,
+    /// Rounds that ended with the process restarting, not the power.
+    restarts: usize,
     /// Recoveries that found a checkpoint.
     checkpointed: usize,
     /// ... with the whole history still there to judge its replay against.
@@ -1925,7 +1951,13 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
             }
             handle.abort();
             let _ = handle.await;
-            sim.simulate_crash_for_process(ip(), true);
+            // One round in four the process alone dies: the disk keeps its
+            // page cache, and the next open reads unsynced writes back.
+            if rng.below(4) == 0 {
+                tally.restarts += 1;
+            } else {
+                sim.simulate_crash_for_process(ip(), true);
+            }
         }
     });
 }
@@ -1949,7 +1981,9 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
     let acked = check.ledger.lock().expect("ledger").clone();
     let acked_end = acked.last().map_or(1, |(index, _, _)| index + 1);
     let mut outcome = Err(JournalError::Poisoned);
-    for _ in 0..8 {
+    // An open issues a sync per segment and directory, and up to one in ten
+    // fails here: a caller retries until one goes through.
+    for _ in 0..256 {
         outcome = recover_once(sim, check.config.clone()).await;
         if !matches!(outcome, Err(JournalError::Io(_))) {
             break;

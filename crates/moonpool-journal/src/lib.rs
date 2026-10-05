@@ -139,7 +139,11 @@
 //!
 //! Recovery is a truncation, so it cleans up like one: past the end of the
 //! log, the discarded slots get their reserved records back and are synced,
-//! then the discarded entries' blocks are zeroed, before any append.
+//! then the discarded entries' blocks are zeroed, before any append. And it
+//! syncs what it keeps: a process that restarted without a power loss reads
+//! its predecessor's unsynced writes back from the page cache, and an entry
+//! opening reports must survive the next crash — `PostgreSQL` and `RocksDB`
+//! fsync their logs on recovery for the same reason.
 //!
 //! # Reading one entry
 //!

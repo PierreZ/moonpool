@@ -159,6 +159,16 @@ recovery cleans up after itself like any truncation: the discarded slots get
 their reserved records back and the discarded entries' blocks are zeroed,
 synced, before the first append.
 
+Recovery also **syncs what it keeps**. A process that restarts without a
+power loss (a graceful reboot, a crash of the process alone) finds its
+predecessor's unsynced writes still in the page cache, perfectly readable.
+Recovery takes them into the log, and the caller acts on them: a Paxos
+acceptor answers the next `Prepare` with the accept it finds there. If that
+accept was never synced, the next power loss takes it back, after a peer
+heard about it. PostgreSQL and RocksDB fsync their logs on recovery for the
+same reason. The example simulation found this one, a graceful reboot
+followed by a power loss.
+
 ## Replaying
 
 `Journal::read_range(start..next)` is the replay a caller runs after

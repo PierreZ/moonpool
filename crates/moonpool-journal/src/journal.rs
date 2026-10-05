@@ -271,7 +271,11 @@ impl<P: StorageProvider> Journal<P> {
     /// segment, and run the recovery scan.
     ///
     /// Segments are found by listing the directory: each is named after its
-    /// first index, so the names alone give their order. A segment file left
+    /// first index, so the names alone give their order. Everything the
+    /// recovered log holds is synced before this returns: a process that
+    /// restarted without a power loss reads its predecessor's unsynced
+    /// writes back, and an entry reported here must not vanish at the next
+    /// crash. A segment file left
     /// half-created by a crash (`seg-….wal.tmp`) is removed.
     ///
     /// `dir` may be nested: every directory on the path to it is created and

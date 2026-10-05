@@ -297,6 +297,7 @@ impl<F: StorageFile> Segment<F> {
     }
 
     /// Open an existing segment and run the recovery scan over it.
+    /// Everything it keeps is synced before it returns.
     ///
     /// `next_first` is the first index of the following segment, when one
     /// exists: the walk stops there, and must get there — a sealed segment
@@ -420,6 +421,12 @@ impl<F: StorageFile> Segment<F> {
                 segment.file.sync_data().await?;
             }
         }
+        // Whatever the walk kept is durable before the caller hears of it.
+        // A process that restarted without a power loss reads its
+        // predecessor's unsynced writes from the page cache; reported
+        // unsynced, the next power loss could take back an entry the caller
+        // has already acted on.
+        segment.file.sync_data().await?;
         Ok((segment, report))
     }
 
