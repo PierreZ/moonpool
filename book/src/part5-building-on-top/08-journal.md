@@ -216,6 +216,32 @@ marks the last kept slot **cut**, and the walk never takes anything after a
 cut entry for a continuation of its batch. Recovery does the same when it
 discards a torn tail.
 
+Prefix truncation (compaction) deletes whole segments, and here the danger is
+the directory, not the data. Unlinks are directory operations, and an unsynced
+one can be undone by a crash, each name on its own. Delete `seg-1` and `seg-2`,
+crash before the directory sync, and the disk may come back with `seg-1` and
+without `seg-2`. Before it recorded anything, the journal would then read
+`seg-1` as the start of the log. Its walk ran to the next segment's first
+index, past `seg-1`'s real end, met the first empty slot, and took it for the
+end of the log, deleting every later segment, acknowledged entries included.
+If `seg-1` had rolled over because its slot table filled, the walk indexed
+past the table instead and panicked.
+
+So `truncate_prefix` first makes the new start durable, in its own two-copy
+record (`start.0`, `start.1`, built exactly like the metadata), and only then
+unlinks, oldest first. Opening reads the recorded start and deletes again any
+segment wholly below it. A sealed segment must reach the next one's first
+index exactly: if it ends short, a segment is missing, and opening refuses
+with `SegmentGap` rather than discard what follows. Suffix truncation, which
+deletes from the other end, syncs the directory after each unlink, so a crash
+can undo at most the last one and the survivors are always a prefix.
+
+Opening also syncs the journal's directory before trusting anything in it.
+The crash loop found why. A segment renamed into place by a rollover whose
+directory sync failed is visible but not durable. The caller reopens, the new
+segment is there, appends are acknowledged into it, and the next crash takes
+its name, and with it the whole log.
+
 ## Two Fault Models
 
 The paper assumes what most disks promise: a crash leaves each unsynced

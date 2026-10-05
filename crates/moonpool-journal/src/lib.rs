@@ -168,7 +168,14 @@
 //! bytes in it stay, inert behind their reserved slots; the cut mark keeps
 //! them from passing for a continuation even if the reserved slot after the
 //! cut is damaged later. [`Journal::truncate_prefix`] deletes whole
-//! segments.
+//! segments. It first records the new start durably, in its own two-copy
+//! record (`start.0`, `start.1`), so a crash that undoes some of its unlinks
+//! (each name resolves on its own) cannot leave a gap that reads as the end
+//! of the log: opening deletes again any segment wholly below the recorded
+//! start, and a segment missing between the start and the tail is
+//! [`JournalError::SegmentGap`], never a truncation. A sealed segment must
+//! reach the next one's first index exactly, and the walk's bound comes
+//! from the slot table, with the next segment's name only a cross-check.
 //!
 //! The caller's term/vote metadata lives in its own file, in two copies
 //! (`meta.0`, `meta.1`), each with a generation counter and a CRC, each

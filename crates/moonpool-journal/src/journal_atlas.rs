@@ -26,6 +26,7 @@ use std::ops::Range;
 use moonpool_core::{LayoutRegion, OpenOptions, StorageFile, StorageProvider};
 
 use crate::JournalError;
+use crate::dual::DualFile;
 use crate::layout::{
     BLOCK_U64, ENTRY_HEADER_SIZE, Geometry, SLOT_SIZE, SLOT_TABLE_OFFSET, Slot, SlotState,
 };
@@ -65,6 +66,14 @@ pub enum JournalRegion {
         /// Which copy: 0 or 1.
         copy: u8,
     },
+    /// One copy of the log's start as the last prefix truncation recorded
+    /// it (`start.0` / `start.1`): opening deletes any segment wholly below
+    /// it. Repaired from the other copy like the metadata; both damaged is
+    /// [`JournalError::MetadataCorrupt`](crate::JournalError::MetadataCorrupt).
+    Start {
+        /// Which copy: 0 or 1.
+        copy: u8,
+    },
 }
 
 impl JournalRegion {
@@ -76,6 +85,8 @@ impl JournalRegion {
     pub const ENTRY: &'static str = "journal entry";
     /// The kind label of a metadata copy.
     pub const META: &'static str = "journal meta";
+    /// The kind label of a recorded-start copy.
+    pub const START: &'static str = "journal start";
 
     /// This region's kind, as its [`LayoutRegion`] labels it.
     #[must_use]
@@ -85,6 +96,7 @@ impl JournalRegion {
             Self::Slot(_) => Self::SLOT,
             Self::Entry(_) => Self::ENTRY,
             Self::Meta { .. } => Self::META,
+            Self::Start { .. } => Self::START,
         }
     }
 }
@@ -208,6 +220,9 @@ impl JournalAtlas {
         let mut names = provider.list_dir(dir).await?;
         names.sort_unstable();
         for copy in 0..2u8 {
+            if names.contains(&format!("start.{copy}")) {
+                atlas.push_start(&format!("{dir}/start.{copy}"), copy);
+            }
             let name = format!("meta.{copy}");
             if names.contains(&name) {
                 let path = format!("{dir}/{name}");
@@ -228,6 +243,17 @@ impl JournalAtlas {
         }
         let mut firsts: Vec<u64> = names.iter().filter_map(|n| parse_segment_name(n)).collect();
         firsts.sort_unstable();
+        // What the next open keeps: a segment wholly below the recorded
+        // start is one a crash brought back, and opening deletes it unread.
+        if let Ok(Some(bytes)) = DualFile::peek(provider, dir, "start").await
+            && let Ok(start) = <[u8; 8]>::try_from(bytes.as_slice()).map(u64::from_le_bytes)
+        {
+            let below = firsts
+                .windows(2)
+                .take_while(|pair| pair[1] <= start)
+                .count();
+            firsts.drain(..below);
+        }
         let mut live: Option<Range<u64>> = None;
         // Indexes and batch flags of the last segment holding entries.
         let mut tail: Vec<(u64, bool)> = Vec::new();
@@ -301,6 +327,11 @@ impl JournalAtlas {
             0,
             META_HEADER + payload_len,
         );
+    }
+
+    /// Add a copy of the recorded start.
+    pub(crate) fn push_start(&mut self, path: &str, copy: u8) {
+        self.push(JournalRegion::Start { copy }, path, 0, META_HEADER + 8);
     }
 
     /// Add a segment's two header copies.

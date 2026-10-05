@@ -342,6 +342,158 @@ fn prefix_truncation_drops_whole_segments() {
     });
 }
 
+/// The two ways a segment rolls over: its data region fills (one large
+/// entry per batch, each on its own blocks) or its slot table does (128
+/// small entries in one batch).
+#[derive(Debug, Clone, Copy)]
+enum Rollover {
+    DataFull,
+    TableFull,
+}
+
+/// Fill three segments the `shape` way, keep seg-1's bytes, and truncate
+/// the prefix past the second segment's start: seg-1 and seg-2 are deleted.
+/// Then put seg-1 back, byte for byte — what a crash leaves when the
+/// unsynced unlink of seg-1 is undone and seg-2's is not. Returns the
+/// segments' first indexes and the log's end.
+async fn resurrect_the_first_segment(sim: &mut SimWorld, shape: Rollover) -> ([u64; 3], u64) {
+    let (firsts, next, seg1) = run(sim, move |provider| async move {
+        let (mut journal, _) = open(provider.clone(), small()).await?;
+        let mut firsts = Vec::new();
+        while firsts.len() < 3 {
+            match shape {
+                Rollover::DataFull => append_each(&mut journal, 1, &[3000]).await?,
+                Rollover::TableFull => {
+                    let next = journal.next_index();
+                    let bytes: Vec<Vec<u8>> = (next..next + 128).map(|i| payload(i, 16)).collect();
+                    let records: Vec<Record<'_>> = bytes
+                        .iter()
+                        .zip(next..)
+                        .map(|(payload, index)| Record::new(1, payload).with_tag(tag(index, 1)))
+                        .collect();
+                    journal.append(&records).await?;
+                }
+            }
+            let names = provider.list_dir(DIR).await?;
+            firsts = names
+                .iter()
+                .filter_map(|name| {
+                    name.strip_prefix("seg-")?
+                        .strip_suffix(".wal")?
+                        .parse()
+                        .ok()
+                })
+                .collect();
+            firsts.sort_unstable();
+        }
+        let file = provider
+            .open(&segment_path(1), OpenOptions::read_only())
+            .await?;
+        let mut seg1 = vec![0; usize::try_from(file.size().await?).expect("small")];
+        file.read_at(0, &mut seg1).await?;
+        journal.truncate_prefix(firsts[2]).await?;
+        assert_eq!(journal.start_index(), firsts[2]);
+        Ok::<_, JournalError>((
+            [firsts[0], firsts[1], firsts[2]],
+            journal.next_index(),
+            seg1,
+        ))
+    })
+    .await
+    .expect("write");
+    run(sim, move |provider| async move {
+        let file = provider
+            .open(&segment_path(1), OpenOptions::create_write().read(true))
+            .await?;
+        file.write_at(0, &seg1).await?;
+        file.sync_all().await?;
+        provider.sync_dir(DIR).await
+    })
+    .await
+    .expect("resurrect seg-1");
+    (firsts, next)
+}
+
+/// A crash between `truncate_prefix`'s unlinks can bring the first dropped
+/// segment back while the second stays deleted: `[seg-1, seg-3]`, a gap.
+/// The new start is durable before any unlink, so opening knows seg-1 lies
+/// wholly below it and deletes it again: every live entry reads back. Read
+/// as a log, seg-1 would end past its real end and take the live log with
+/// it (data-full), or index past its slot table (table-full).
+#[test]
+fn a_segment_resurrected_below_the_start_is_deleted_not_walked() {
+    runtime().block_on(async {
+        for (seed, shape) in [(40, Rollover::DataFull), (41, Rollover::TableFull)] {
+            let mut sim = sim(seed);
+            let (firsts, next) = resurrect_the_first_segment(&mut sim, shape).await;
+            let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+            assert!(
+                !recovery.torn_tail,
+                "{shape:?}: nothing past the start is cut"
+            );
+            assert_eq!(
+                (journal.start_index(), journal.next_index()),
+                (firsts[2], next),
+                "{shape:?}"
+            );
+            let live = run(&mut sim, |provider| async move {
+                let entries = read_all(&journal).await?;
+                Ok::<_, JournalError>((entries.len(), provider.exists(&segment_path(1)).await?))
+            })
+            .await
+            .expect("read");
+            assert_eq!(
+                live,
+                (usize::try_from(next - firsts[2]).expect("small"), false),
+                "{shape:?}: every live entry reads, seg-1 is gone"
+            );
+        }
+    });
+}
+
+/// A segment missing between the start and the tail is damage, never the
+/// end of the log: opening refuses rather than delete what follows.
+#[test]
+fn a_missing_segment_is_refused_not_read_as_the_end() {
+    runtime().block_on(async {
+        let mut sim = sim(42);
+        let firsts = run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider.clone(), small()).await?;
+            append_each(&mut journal, 1, &[3000; 80]).await?;
+            let mut firsts: Vec<u64> = provider
+                .list_dir(DIR)
+                .await?
+                .iter()
+                .filter_map(|name| {
+                    name.strip_prefix("seg-")?
+                        .strip_suffix(".wal")?
+                        .parse()
+                        .ok()
+                })
+                .collect();
+            firsts.sort_unstable();
+            provider.delete(&segment_path(firsts[1])).await?;
+            provider.sync_dir(DIR).await?;
+            Ok::<_, JournalError>(firsts)
+        })
+        .await
+        .expect("write");
+        assert!(firsts.len() >= 3);
+        let opened = reopen(&mut sim).await.map(|_| ());
+        assert!(
+            matches!(opened, Err(JournalError::SegmentGap { end, next })
+                if end == firsts[1] && next == firsts[2]),
+            "{opened:?}"
+        );
+        let kept = run(&mut sim, move |provider| async move {
+            provider.exists(&segment_path(firsts[2])).await
+        })
+        .await
+        .expect("exists");
+        assert!(kept, "nothing after the gap was deleted");
+    });
+}
+
 #[test]
 fn metadata_survives_damage_to_either_copy() {
     runtime().block_on(async {
@@ -1353,6 +1505,9 @@ fn storage(model: Model, rng: &mut Rng) -> StorageConfiguration {
     // A failed sync is an operating error: the write it covered is not
     // acknowledged, and the writer retries a failed metadata save.
     config.sync_failure_probability = rng.pick(&[0.0, 0.02, 0.1]);
+    // Every unsynced name change may be undone at a crash, each on its own:
+    // a prefix truncation's unlinks among them.
+    config.unsynced_dir_entry_loss_probability = rng.pick(&[0.0, 0.5, 1.0]);
     if model.harsh() {
         config.crash_lost_probability = rng.pick(&[0.02, 0.1, 0.3]);
         config.crash_latent_fault_probability = rng.pick(&[0.0, 0.02, 0.1]);
@@ -1401,6 +1556,9 @@ struct Tally {
     /// Opens that failed on an I/O error (a failed sync) and were retried:
     /// an operating error, not a verdict on the data.
     open_retried: usize,
+    /// Recoveries whose log no longer starts at index 1: a prefix
+    /// truncation dropped segments.
+    compacted: usize,
 }
 
 fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
@@ -1431,6 +1589,10 @@ fn under_the_papers_fault_model_no_acknowledged_entry_is_lost_or_corrupt() {
     assert!(
         tally.meta_retried > 0,
         "no failed metadata save was ever retried"
+    );
+    assert!(
+        tally.compacted > 0,
+        "no prefix truncation ever dropped a segment"
     );
     assert_eq!(
         tally.corrupt_unacked, 0,
@@ -1479,6 +1641,16 @@ fn aimed_by_the_atlas_the_physics_cost_more_identifiers() {
     );
 }
 
+/// The crash loop's geometry: 48 KiB segments (eight 4 KiB batches of
+/// data), so rollover and prefix truncation — and the crashes between a
+/// truncation's unlinks — come every few rounds.
+fn looped() -> Geometry {
+    Geometry {
+        segment_size: 48 * 1024,
+        ..small().geometry
+    }
+}
+
 /// Crash a writer repeatedly, checking every recovery against the ledger.
 /// Odd seeds keep the ambiguous last batch instead of truncating it.
 fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
@@ -1486,7 +1658,10 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
         let mut sim = SimWorld::new_with_seed(seed);
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         sim.set_storage_config(storage(model, &mut rng));
-        let config = if seed % 2 == 1 { keep() } else { small() };
+        let config = JournalConfig {
+            geometry: looped(),
+            ..if seed % 2 == 1 { keep() } else { small() }
+        };
         let ledger: Ledger = Arc::new(Mutex::new(Vec::new()));
         let meta: MetaLedger = Arc::new(Mutex::new(MetaState::default()));
 
@@ -1563,7 +1738,7 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
         // and opening again is how a caller recovers from it.
         tally.open_retried += 1;
     }
-    let (recovery, entries, meta) = match outcome {
+    let (recovery, entries, meta, start) = match outcome {
         Ok(found) => found,
         // Nothing a crash does to the sectors being written may stop the
         // journal from opening, under any model: the damage is only ever
@@ -1571,23 +1746,26 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
         Err(error) => panic!("{at}: a crash must never stop the journal opening: {error}"),
     };
     judge_reports(check, &recovery, acked_end, tally);
-    // Whatever a read returned for an acknowledged index is exactly what was
-    // acknowledged, and every acknowledged index is still there — under the
-    // full physics too: no write rewrites a sector holding an acknowledged
-    // entry, so no crash can reach one.
-    for (entry, (index, epoch, payload)) in entries.iter().zip(&acked) {
+    tally.compacted += usize::from(start > 1);
+    // Every acknowledged index is still there and reads back exactly what
+    // was acknowledged — under the full physics too: no write rewrites a
+    // sector holding an acknowledged entry, so no crash can reach one. A
+    // prefix truncation drops its entries from the ledger before it starts,
+    // so the log may start earlier than the ledger, never later.
+    let first = entries.first().map_or(u64::MAX, |entry| entry.index);
+    for (index, epoch, payload) in &acked {
+        let found = index
+            .checked_sub(first)
+            .and_then(|at| entries.get(usize::try_from(at).ok()?));
+        let Some(entry) = found else {
+            panic!("{at}: acknowledged entry {index} lost (log holds {first}..)");
+        };
         assert_eq!(
             (entry.index, entry.epoch, &entry.tag, &entry.payload),
             (*index, *epoch, &tag(*index, *epoch), payload),
             "{at}: a read returned something other than what was acknowledged"
         );
     }
-    assert!(
-        entries.len() >= acked.len(),
-        "{at}: lost acknowledged entries ({} < {})",
-        entries.len(),
-        acked.len()
-    );
     *check.ledger.lock().expect("ledger") = entries
         .into_iter()
         .map(|entry| (entry.index, entry.epoch, entry.payload))
@@ -1611,7 +1789,7 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
 /// What one reopen found: the recovery report, the entries that read back
 /// (cut before the first unreadable one, as a replication layer would cut
 /// an uncommitted suffix), and the metadata.
-type Recovered = (Recovery, Vec<Entry>, Option<Vec<u8>>);
+type Recovered = (Recovery, Vec<Entry>, Option<Vec<u8>>, u64);
 
 /// Reopen once and read everything back. Every entry is read twice — one
 /// `read` per index and one `read_range` — and the two must agree.
@@ -1641,7 +1819,7 @@ async fn recover_once(
             .into_iter()
             .map(|entry| entry.expect("kept"))
             .collect();
-        Ok((recovery, entries, journal.meta().map(<[u8]>::to_vec)))
+        Ok((recovery, entries, journal.meta().map(<[u8]>::to_vec), start))
     })
     .await
 }
@@ -1686,7 +1864,8 @@ fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: 
 }
 
 /// The writer: `(kind, count, len)` steps of appends and, one time in ten
-/// each, a suffix truncation at an arbitrary index or a metadata save.
+/// each, a suffix truncation at an arbitrary index, a metadata save, or a
+/// prefix truncation.
 async fn write(
     provider: SimStorageProvider,
     model: Model,
@@ -1717,6 +1896,19 @@ async fn write(
                 .expect("ledger")
                 .retain(|(index, _, _)| *index < from);
             journal.truncate_suffix(from).await?;
+            aim(&journal);
+            continue;
+        }
+        if kind == 2 {
+            // Compaction. The dropped entries stop being guaranteed the
+            // moment it starts; the journal keeps the segment holding
+            // `before`, so what it keeps below `before` is not lost either.
+            let before = start + len % (next - start + 1);
+            ledger
+                .lock()
+                .expect("ledger")
+                .retain(|(index, _, _)| *index >= before);
+            journal.truncate_prefix(before).await?;
             aim(&journal);
             continue;
         }

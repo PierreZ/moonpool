@@ -39,6 +39,19 @@ pub enum JournalError {
         first_index: u64,
     },
 
+    /// The log ends at `end` inside a sealed segment, but the next segment
+    /// starts at `next`: a segment, or the end of one, is missing. Segments
+    /// are only ever removed whole, from either end, so a hole between the
+    /// start and the tail is damage — never the end of the log — and
+    /// opening refuses rather than discard what follows it.
+    #[error("the log ends at {end} but the next segment starts at {next}")]
+    SegmentGap {
+        /// The index the log reaches before the hole.
+        end: u64,
+        /// The first index of the segment after it.
+        next: u64,
+    },
+
     /// A segment file has the wrong size: segments are preallocated, so a
     /// size change is itself a fault.
     #[error("segment starting at {first_index} is {actual} bytes, expected {expected}")]

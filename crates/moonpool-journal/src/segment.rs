@@ -299,7 +299,8 @@ impl<F: StorageFile> Segment<F> {
     /// Open an existing segment and run the recovery scan over it.
     ///
     /// `next_first` is the first index of the following segment, when one
-    /// exists: the walk stops there. Wherever the log turns out to end — in
+    /// exists: the walk stops there, and must get there — a sealed segment
+    /// that ends short is [`JournalError::SegmentGap`]. Wherever the log turns out to end — in
     /// the last segment, or earlier in a sealed one — everything past the
     /// end is zeroed before the journal accepts an append, so "empty" keeps
     /// meaning all zeros.
@@ -335,6 +336,15 @@ impl<F: StorageFile> Segment<F> {
             ended,
             torn,
         } = decide(first, &found)?;
+        // A sealed segment holds every index up to the next one's first: a
+        // segment that ends short is a hole in the log, never its end, and
+        // nothing is written before saying so.
+        if let Some(next) = next_first {
+            let end = first + u64_len(recs.len());
+            if end != next {
+                return Err(JournalError::SegmentGap { end, next });
+            }
+        }
         segment.recs = recs;
         segment.data_end = segment.recs.last().map_or(geometry.data_start, |rec| {
             u64::from(rec.slot.offset) + entry_size(rec.slot.length)
@@ -456,7 +466,11 @@ impl<F: StorageFile> Segment<F> {
         .await?;
         let table_len = usize_len(u64::from(geometry.slot_count) * SLOT_SIZE as u64)?;
         let table = table.as_slice()[..table_len].to_vec();
-        let limit = next_first.map_or(u64::from(geometry.slot_count), |next| next - self.first);
+        // The slot table bounds the walk; the next segment's name only
+        // cross-checks it (a sealed segment must reach it exactly).
+        let limit = next_first.map_or(u64::from(geometry.slot_count), |next| {
+            (next - self.first).min(u64::from(geometry.slot_count))
+        });
 
         let decoded: Vec<SlotState> = (0..limit)
             .map(|rel| {

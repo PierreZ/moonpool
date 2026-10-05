@@ -88,6 +88,11 @@ fn decode(bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
 }
 
 impl DualFile {
+    /// Whether a value is stored: a copy loaded, or a store made.
+    pub(crate) fn is_stored(&self) -> bool {
+        self.generation > 0
+    }
+
     pub(crate) fn path(&self, copy: u64) -> String {
         format!("{}/{}.{copy}", self.dir, self.name)
     }
