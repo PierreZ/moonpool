@@ -14,6 +14,9 @@ use moonpool_journal::{
 };
 use moonpool_sim::{EioTarget, FaultFocus, SimStorageProvider, SimWorld, StorageConfiguration};
 
+mod support;
+use support::{Script, Scripted};
+
 const DIR: &str = "wal";
 
 fn ip() -> IpAddr {
@@ -422,6 +425,80 @@ fn a_metadata_copy_left_behind_by_a_crash_is_brought_forward() {
             journal.meta(),
             Some(b"promise=2".as_slice()),
             "losing the newer copy no longer rolls the value back"
+        );
+    });
+}
+
+/// A `save_meta` that fails part-way — both copies renamed into place, the
+/// directory sync after the second one failing — and a retry with a newer
+/// value that the process dies in, after its first copy: the retry's value
+/// is what reopening finds. Had the failed save not spent its generation,
+/// the retry would have written that same generation and loading would
+/// have had two valid copies of it to pick from, one holding the older
+/// value — a promise rolled back.
+#[test]
+fn a_retried_metadata_save_outranks_the_one_that_failed() {
+    runtime().block_on(async {
+        let mut sim = sim(30);
+        let script = Script::default();
+        let armed = script.clone();
+        run(&mut sim, |provider| async move {
+            let provider = Scripted::new(provider, armed.clone());
+            let (mut journal, _) = Journal::open(provider, DIR, small()).await?;
+            journal.save_meta(b"promise=1").await?;
+            armed.fail_sync_dir_after_rename_to("meta.1");
+            assert!(journal.save_meta(b"promise=2").await.is_err());
+            armed.refuse_rename_to("meta.1");
+            assert!(journal.save_meta(b"promise=3").await.is_err());
+            Ok::<_, JournalError>(())
+        })
+        .await
+        .expect("write");
+        drop(script);
+        sim.simulate_crash_for_process(ip(), true);
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(journal.meta(), Some(b"promise=3".as_slice()));
+        assert!(recovery.meta_repaired, "the copy left behind is rewritten");
+    });
+}
+
+/// Two valid copies at one generation with different payloads cannot come
+/// from a store, which spends its generation before writing either: opening
+/// refuses them rather than pick one.
+#[test]
+fn two_copies_of_one_generation_that_disagree_are_refused() {
+    runtime().block_on(async {
+        let mut sim = sim(31);
+        let other = run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider.clone(), small()).await?;
+            journal.save_meta(b"promise=2").await?;
+            let file = provider
+                .open(&format!("{DIR}/meta.1"), OpenOptions::read_only())
+                .await?;
+            let mut bytes = vec![0; usize::try_from(file.size().await?).expect("small")];
+            file.read_at(0, &mut bytes).await?;
+            Ok::<_, JournalError>(bytes)
+        })
+        .await
+        .expect("write");
+        // Generation 1 again, holding another value, CRC and all.
+        let mut forged = other;
+        forged[24..33].copy_from_slice(b"promise=9");
+        let crc = crc32c::crc32c_append(crc32c::crc32c(&forged[..20]), &forged[24..33]);
+        forged[20..24].copy_from_slice(&crc.to_le_bytes());
+        run(&mut sim, |provider| async move {
+            let file = provider
+                .open(&format!("{DIR}/meta.1"), OpenOptions::read_write())
+                .await?;
+            file.write_at(0, &forged).await?;
+            file.sync_all().await
+        })
+        .await
+        .expect("forge meta.1");
+        let opened = reopen(&mut sim).await.map(|_| ());
+        assert!(
+            matches!(opened, Err(JournalError::MetadataCorrupt { .. })),
+            "{opened:?}"
         );
     });
 }
@@ -942,6 +1019,9 @@ fn storage(model: Model, rng: &mut Rng) -> StorageConfiguration {
     config.crash_lost_probability = 0.0;
     config.crash_latent_fault_probability = 0.0;
     config.shorn_write_probability = 0.0;
+    // A failed sync is an operating error: the write it covered is not
+    // acknowledged, and the writer retries a failed metadata save.
+    config.sync_failure_probability = rng.pick(&[0.0, 0.02, 0.1]);
     if model.harsh() {
         config.crash_lost_probability = rng.pick(&[0.02, 0.1, 0.3]);
         config.crash_latent_fault_probability = rng.pick(&[0.0, 0.02, 0.1]);
@@ -955,12 +1035,15 @@ fn storage(model: Model, rng: &mut Rng) -> StorageConfiguration {
 type Ledger = Arc<Mutex<Vec<(u64, u64, Vec<u8>)>>>;
 
 /// What the writer knows of its metadata: the last value `save_meta`
-/// acknowledged, and one it was saving when the crash hit (either may be
-/// what a reopen finds).
-#[derive(Debug, Default, Clone, Copy)]
+/// acknowledged, and every value it tried to save since — failed saves it
+/// retried with a fresh value, and the one in flight when the crash hit.
+/// Any of them may be what a reopen finds.
+#[derive(Debug, Default, Clone)]
 struct MetaState {
     acked: Option<u64>,
-    pending: Option<u64>,
+    pending: Vec<u64>,
+    /// Saves that failed and were retried, since the last recovery.
+    retried: usize,
 }
 
 type MetaLedger = Arc<Mutex<MetaState>>;
@@ -982,6 +1065,11 @@ struct Tally {
     refused: usize,
     corrupt_acked: usize,
     meta_repaired: usize,
+    /// Metadata saves that failed and were retried with a newer value.
+    meta_retried: usize,
+    /// Opens that failed on an I/O error (a failed sync) and were retried:
+    /// an operating error, not a verdict on the data.
+    open_retried: usize,
 }
 
 fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
@@ -1008,6 +1096,10 @@ fn under_the_papers_fault_model_no_acknowledged_entry_is_lost_or_corrupt() {
     assert!(
         tally.meta_repaired > 0,
         "no crash ever split the metadata copies"
+    );
+    assert!(
+        tally.meta_retried > 0,
+        "no failed metadata save was ever retried"
     );
     assert_eq!(
         tally.refused + tally.corrupt_acked + tally.corrupt_unacked + tally.ambiguous_acked,
@@ -1120,38 +1212,21 @@ struct Check<'a> {
 /// Reopen and judge the recovery against the ledger, then play the
 /// replication layer: an entry reported corrupt that was never acknowledged
 /// was never committed, so the log is cut before the first unreadable entry.
-/// Every entry is read twice — one `read` per index and one `read_range` —
-/// and the two must agree. Returns whether the seed can go on.
+/// Returns whether the seed can go on.
 async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Tally) -> bool {
     let (model, at) = (check.model, check.at);
     let acked = check.ledger.lock().expect("ledger").clone();
     let acked_end = acked.last().map_or(1, |(index, _, _)| index + 1);
-    let config = check.config.clone();
-    let outcome = run(sim, |provider| async move {
-        let (mut journal, recovery) = open(provider, config).await?;
-        let (start, next) = (journal.start_index(), journal.next_index());
-        let batched = journal.read_range(start..next).await?;
-        let mut entries = Vec::new();
-        for (index, many) in (start..next).zip(&batched) {
-            let one = journal.read(index).await;
-            match (&one, many) {
-                (Ok(one), Ok(many)) => assert_eq!(one, many, "read and read_range disagree"),
-                (Err(JournalError::Corrupt(one)), Err(many)) => assert_eq!(one, many),
-                (one, many) => panic!("index {index}: read {one:?}, read_range {many:?}"),
-            }
-            entries.push(one);
+    let mut outcome = Err(JournalError::Poisoned);
+    for _ in 0..8 {
+        outcome = recover_once(sim, check.config.clone()).await;
+        if !matches!(outcome, Err(JournalError::Io(_))) {
+            break;
         }
-        if let Some(bad) = entries.iter().position(Result::is_err) {
-            journal.truncate_suffix(start + bad as u64).await?;
-            entries.truncate(bad);
-        }
-        let entries: Vec<Entry> = entries
-            .into_iter()
-            .map(|entry| entry.expect("kept"))
-            .collect();
-        Ok::<_, JournalError>((recovery, entries, journal.meta().map(<[u8]>::to_vec)))
-    })
-    .await;
+        // A sync failed under the recovery's repairs: an operating error,
+        // and opening again is how a caller recovers from it.
+        tally.open_retried += 1;
+    }
     let (recovery, entries, meta) = match outcome {
         Ok(found) => found,
         Err(error) => {
@@ -1191,14 +1266,53 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
     let mut state = check.meta.lock().expect("meta ledger");
     let found = meta.map(|bytes| u64::from_le_bytes(bytes.try_into().expect("8-byte meta")));
     assert!(
-        found == state.acked || (found.is_some() && found == state.pending),
+        found == state.acked || found.is_some_and(|value| state.pending.contains(&value)),
         "{at}: metadata {found:?} is neither acknowledged nor in flight: {state:?}"
     );
+    tally.meta_retried += state.retried;
     *state = MetaState {
         acked: found,
-        pending: None,
+        ..MetaState::default()
     };
     true
+}
+
+/// What one reopen found: the recovery report, the entries that read back
+/// (cut before the first unreadable one, as a replication layer would cut
+/// an uncommitted suffix), and the metadata.
+type Recovered = (Recovery, Vec<Entry>, Option<Vec<u8>>);
+
+/// Reopen once and read everything back. Every entry is read twice — one
+/// `read` per index and one `read_range` — and the two must agree.
+async fn recover_once(
+    sim: &mut SimWorld,
+    config: JournalConfig,
+) -> Result<Recovered, JournalError> {
+    run(sim, |provider| async move {
+        let (mut journal, recovery) = open(provider, config).await?;
+        let (start, next) = (journal.start_index(), journal.next_index());
+        let batched = journal.read_range(start..next).await?;
+        let mut entries = Vec::new();
+        for (index, many) in (start..next).zip(&batched) {
+            let one = journal.read(index).await;
+            match (&one, many) {
+                (Ok(one), Ok(many)) => assert_eq!(one, many, "read and read_range disagree"),
+                (Err(JournalError::Corrupt(one)), Err(many)) => assert_eq!(one, many),
+                (one, many) => panic!("index {index}: read {one:?}, read_range {many:?}"),
+            }
+            entries.push(one);
+        }
+        if let Some(bad) = entries.iter().position(Result::is_err) {
+            journal.truncate_suffix(start + bad as u64).await?;
+            entries.truncate(bad);
+        }
+        let entries: Vec<Entry> = entries
+            .into_iter()
+            .map(|entry| entry.expect("kept"))
+            .collect();
+        Ok((recovery, entries, journal.meta().map(<[u8]>::to_vec)))
+    })
+    .await
 }
 
 /// Judge what the recovery reported against the ledger, and tally it.
@@ -1282,13 +1396,26 @@ async fn write(
             continue;
         }
         if kind == 1 {
-            let value = epoch * 1000 + len;
-            meta.lock().expect("meta ledger").pending = Some(value);
-            journal.save_meta(&value.to_le_bytes()).await?;
-            *meta.lock().expect("meta ledger") = MetaState {
-                acked: Some(value),
-                pending: None,
+            // A failed save is retried with a newer value, as a caller whose
+            // promise moved on would: the retry must win over what the
+            // failure left behind.
+            let mut saved = None;
+            for attempt in 0..3 {
+                let value = epoch * 1000 + len * 4 + attempt;
+                meta.lock().expect("meta ledger").pending.push(value);
+                if journal.save_meta(&value.to_le_bytes()).await.is_ok() {
+                    saved = Some(value);
+                    break;
+                }
+                meta.lock().expect("meta ledger").retried += 1;
+            }
+            let Some(value) = saved else {
+                return Err(JournalError::Poisoned);
             };
+            let mut state = meta.lock().expect("meta ledger");
+            state.acked = Some(value);
+            state.pending.clear();
+            drop(state);
             aim(&journal);
             continue;
         }

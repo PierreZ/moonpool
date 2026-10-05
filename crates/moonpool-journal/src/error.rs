@@ -51,7 +51,8 @@ pub enum JournalError {
         actual: u64,
     },
 
-    /// The two-copy metadata file exists but neither copy is valid.
+    /// The two-copy metadata file exists but neither copy is valid, or
+    /// both are valid at one generation with different payloads.
     #[error("both copies of {name} are damaged")]
     MetadataCorrupt {
         /// Which file.

@@ -138,6 +138,17 @@ that. Without the repair, one later fault in the newer copy would roll the
 value back to one the caller may already have acted past: for an acceptor, a
 promise going backwards. `Recovery::meta_repaired` reports it.
 
+A save spends its generation *before* writing either copy, and keeps it
+spent when it fails. A save can fail after both copies landed (the directory
+sync after the second rename, say), and a caller whose promise moved on
+retries with a newer value. Had the failed save not consumed its generation,
+the retry would write the same one, and a crash after the retry's first copy
+would leave two valid copies of one generation, the older value among them:
+loading would pick one, and could pick the promise that went backwards. As it
+is, the retry always outranks what the failure left, and two valid copies of
+one generation that disagree can only be damage, so opening refuses them
+with `MetadataCorrupt`.
+
 ## Truncating
 
 Suffix truncation zeroes the discarded slots, syncs, zeroes the discarded

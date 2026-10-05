@@ -154,7 +154,11 @@
 //! it when that one is damaged, missing, or a generation behind (a crash
 //! between the two copy writes): left alone, a later fault in the newer copy
 //! would roll the metadata back to a value the caller may already have acted
-//! past ([`Recovery::meta_repaired`]).
+//! past ([`Recovery::meta_repaired`]). A save spends its generation before
+//! writing either copy, even if it then fails, so a retry always outranks
+//! what the failed save left behind; two valid copies of one generation
+//! that disagree are damage, and opening refuses them
+//! ([`JournalError::MetadataCorrupt`]).
 //!
 //! # The fault model
 //!
