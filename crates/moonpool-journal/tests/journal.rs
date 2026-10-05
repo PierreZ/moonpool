@@ -1389,6 +1389,205 @@ fn a_damaged_slot_past_a_cut_does_not_bring_the_cut_entry_back() {
     });
 }
 
+/// Append `count` image records as one checkpoint.
+async fn checkpoint_of(
+    journal: &mut Journal<SimStorageProvider>,
+    count: u64,
+) -> Result<std::ops::Range<u64>, JournalError> {
+    let next = journal.next_index();
+    let bytes: Vec<Vec<u8>> = (next..next + count)
+        .map(|index| payload(index, 48))
+        .collect();
+    let records: Vec<Record<'_>> = bytes
+        .iter()
+        .zip(next..)
+        .map(|(payload, index)| Record::new(7, payload).with_tag(tag(index, 7)))
+        .collect();
+    journal.append_checkpoint(&records).await
+}
+
+/// History, checkpoint C1 (entries 4–5), more history, checkpoint C2
+/// (entries 8–10), and one more entry so C2 is not the last batch.
+async fn two_checkpoints(sim: &mut SimWorld, config: JournalConfig) -> [std::ops::Range<u64>; 2] {
+    run(sim, |provider| async move {
+        let (mut journal, _) = Journal::open(provider, DIR, config).await?;
+        append_each(&mut journal, 7, &[64; 3]).await?;
+        let c1 = checkpoint_of(&mut journal, 2).await?;
+        append_each(&mut journal, 7, &[64; 2]).await?;
+        let c2 = checkpoint_of(&mut journal, 3).await?;
+        append_each(&mut journal, 7, &[64]).await?;
+        assert_eq!(journal.checkpoint(), Some(c2.clone()));
+        Ok::<_, JournalError>([c1, c2])
+    })
+    .await
+    .expect("write")
+}
+
+/// The newest intact checkpoint is where a replay starts. Damage one of
+/// its entries and it is passed over for the one before it — reported
+/// corrupt like any damaged batch — and with that one damaged too, there is
+/// none, the whole history still live.
+#[test]
+fn a_damaged_checkpoint_is_passed_over_for_the_one_before_it() {
+    runtime().block_on(async {
+        let mut sim = sim(50);
+        let [c1, c2] = two_checkpoints(&mut sim, small()).await;
+        assert_eq!((c1.clone(), c2.clone()), (4..6, 8..11));
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.checkpoint, Some(c2.clone()));
+        drop(journal);
+
+        let at = payload_byte(&mut sim, 9).await;
+        flip(&mut sim, segment_path(1), at).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.checkpoint, Some(c1.clone()));
+        assert_eq!(
+            recovery
+                .corrupt
+                .iter()
+                .map(|id| id.index)
+                .collect::<Vec<_>>(),
+            [9]
+        );
+        drop(journal);
+
+        let at = payload_byte(&mut sim, 4).await;
+        flip(&mut sim, segment_path(1), at).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.checkpoint, None);
+        assert_eq!(
+            (journal.start_index(), journal.next_index()),
+            (1, 12),
+            "all history live"
+        );
+    });
+}
+
+/// A crash before a checkpoint's sync leaves it the last batch, handled as
+/// any last batch is: here the disk loses every sector it was writing, so
+/// the log ends where the checkpoint began. The one before it is named,
+/// under either policy.
+#[test]
+fn a_crash_mid_checkpoint_leaves_the_one_before_it() {
+    runtime().block_on(async {
+        for config in [small(), keep()] {
+            let run_until = |stop_after: Option<usize>| {
+                let config = config.clone();
+                async move {
+                    let mut sim = losing_disk(51);
+                    let journal = run(&mut sim, |provider| async move {
+                        let (mut journal, _) = Journal::open(provider, DIR, config).await?;
+                        append_each(&mut journal, 7, &[64; 2]).await?;
+                        checkpoint_of(&mut journal, 2).await?;
+                        append_each(&mut journal, 7, &[64]).await?;
+                        Ok::<_, JournalError>(journal)
+                    })
+                    .await
+                    .expect("write");
+                    let handle = tokio::spawn(async move {
+                        let mut journal = journal;
+                        checkpoint_of(&mut journal, 4).await.map(|_| ())
+                    });
+                    let mut steps = 0;
+                    while !handle.is_finished() {
+                        if stop_after == Some(steps) {
+                            handle.abort();
+                            break;
+                        }
+                        if sim.pending_event_count() > 0 {
+                            sim.step();
+                            steps += 1;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    let _ = handle.await;
+                    (sim, steps)
+                }
+            };
+            let (_, steps) = run_until(None).await;
+            let (mut sim, _) = run_until(Some(steps - 1)).await;
+            sim.simulate_crash_for_process(ip(), true);
+            let config2 = config.clone();
+            let (journal, recovery) = run(&mut sim, |provider| async move {
+                Journal::open(provider, DIR, config2).await
+            })
+            .await
+            .expect("reopen");
+            assert_eq!(recovery.checkpoint, Some(3..5), "{config:?}");
+            assert_eq!(
+                journal.next_index(),
+                6,
+                "{config:?}: the cut checkpoint is gone"
+            );
+        }
+    });
+}
+
+/// A checkpoint's first entry records how many entries it has, so one cut
+/// short — here by a suffix truncation through it — is never named,
+/// though every entry left of it is intact.
+#[test]
+fn a_checkpoint_cut_short_is_never_named() {
+    runtime().block_on(async {
+        let mut sim = sim(52);
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider, small()).await?;
+            append_each(&mut journal, 7, &[64; 2]).await?;
+            let c1 = checkpoint_of(&mut journal, 2).await?;
+            let c2 = checkpoint_of(&mut journal, 5).await?;
+            journal.truncate_suffix(c2.start + 2).await?;
+            assert_eq!(journal.checkpoint(), Some(c1));
+            Ok::<_, JournalError>(())
+        })
+        .await
+        .expect("write");
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.checkpoint, Some(3..5));
+        assert_eq!(journal.next_index(), 7, "the fragment stays, unnamed");
+    });
+}
+
+/// A checkpoint is one batch and one sync: when the current segment cannot
+/// hold it, the journal rolls over first rather than split it; one that no
+/// segment could hold is refused before anything is written.
+#[test]
+fn a_checkpoint_is_never_split_across_segments() {
+    runtime().block_on(async {
+        let mut sim = sim(53);
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider.clone(), small()).await?;
+            // 120 of the 128 slots: a 20-entry checkpoint no longer fits.
+            let next = journal.next_index();
+            let bytes: Vec<Vec<u8>> = (next..next + 120).map(|index| payload(index, 16)).collect();
+            let records: Vec<Record<'_>> = bytes
+                .iter()
+                .zip(next..)
+                .map(|(payload, index)| Record::new(7, payload).with_tag(tag(index, 7)))
+                .collect();
+            journal.append(&records).await?;
+            let c = checkpoint_of(&mut journal, 20).await?;
+            assert_eq!(c, 121..141);
+            assert!(
+                provider.exists(&segment_path(121)).await?,
+                "rolled over first"
+            );
+            assert_eq!(journal.checkpoint(), Some(c));
+            let too_large = checkpoint_of(&mut journal, 129).await;
+            assert!(
+                matches!(
+                    too_large,
+                    Err(JournalError::CheckpointTooLarge { entries: 129, .. })
+                ),
+                "{too_large:?}"
+            );
+            assert_eq!(journal.next_index(), 141, "nothing written");
+            Ok::<_, JournalError>(())
+        })
+        .await
+        .expect("write");
+    });
+}
+
 /// EIO is zero-filled into a checksum mismatch, as CLSTORE does: the entries
 /// in the unreadable block are corrupt, not an error that stops the journal.
 #[test]
@@ -1559,6 +1758,10 @@ struct Tally {
     /// Recoveries whose log no longer starts at index 1: a prefix
     /// truncation dropped segments.
     compacted: usize,
+    /// Recoveries that found a checkpoint.
+    checkpointed: usize,
+    /// ... with the whole history still there to judge its replay against.
+    checkpoint_judged: usize,
 }
 
 fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
@@ -1593,6 +1796,10 @@ fn under_the_papers_fault_model_no_acknowledged_entry_is_lost_or_corrupt() {
     assert!(
         tally.compacted > 0,
         "no prefix truncation ever dropped a segment"
+    );
+    assert!(
+        tally.checkpoint_judged > 0,
+        "no replay from a checkpoint was judged against the history"
     );
     assert_eq!(
         tally.corrupt_unacked, 0,
@@ -1662,6 +1869,9 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
             geometry: looped(),
             ..if seed % 2 == 1 { keep() } else { small() }
         };
+        // A third of the seeds checkpoint, and judge every replay from the
+        // checkpoint against the history.
+        let checkpointing = seed.is_multiple_of(3);
         let ledger: Ledger = Arc::new(Mutex::new(Vec::new()));
         let meta: MetaLedger = Arc::new(Mutex::new(MetaState::default()));
 
@@ -1671,6 +1881,7 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
                 ledger: &ledger,
                 meta: &meta,
                 config: &config,
+                checkpointing,
                 at: &at,
             };
             if !recover_and_check(&mut sim, &check, tally).await {
@@ -1684,7 +1895,14 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
                     } else {
                         16 + rng.below(3000)
                     };
-                    (rng.below(10), 1 + rng.below(9), len)
+                    let kind = match rng.below(10) {
+                        // A checkpointing writer drops its prefix only
+                        // behind a checkpoint; any other appends there.
+                        2 if checkpointing => 4,
+                        3 if !checkpointing => 9,
+                        kind => kind,
+                    };
+                    (kind, 1 + rng.below(9), len)
                 })
                 .collect();
             let handle = tokio::spawn(write(
@@ -1717,6 +1935,8 @@ struct Check<'a> {
     ledger: &'a Ledger,
     meta: &'a MetaLedger,
     config: &'a JournalConfig,
+    /// The writer checkpoints: judge every replay from the checkpoint.
+    checkpointing: bool,
     at: &'a str,
 }
 
@@ -1747,6 +1967,9 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
     };
     judge_reports(check, &recovery, acked_end, tally);
     tally.compacted += usize::from(start > 1);
+    if check.checkpointing {
+        judge_checkpoint(check, &recovery, &entries, start, tally);
+    }
     // Every acknowledged index is still there and reads back exactly what
     // was acknowledged — under the full physics too: no write rewrites a
     // sector holding an acknowledged entry, so no crash can reach one. A
@@ -1824,6 +2047,50 @@ async fn recover_once(
     .await
 }
 
+/// A replay from the recovered checkpoint gives the state the whole history
+/// gives, whenever the history is still there; once the prefix is gone, a
+/// checkpoint stands in for it. Any image records after the checkpoint are
+/// a later one's remains, cut by a crash or by the replication layer, and a
+/// replay skips them.
+fn judge_checkpoint(
+    check: &Check<'_>,
+    recovery: &Recovery,
+    entries: &[Entry],
+    start: u64,
+    tally: &mut Tally,
+) {
+    let at = check.at;
+    let Some(c) = &recovery.checkpoint else {
+        assert_eq!(
+            start, 1,
+            "{at}: the prefix is gone and no checkpoint stands in for it"
+        );
+        return;
+    };
+    let from = usize::try_from(c.start - start).expect("small");
+    let len = usize::try_from(c.end - c.start).expect("small");
+    assert!(
+        from + len <= entries.len(),
+        "{at}: checkpoint {c:?} is not readable (log {start}..+{})",
+        entries.len()
+    );
+    assert!(
+        entries[from..from + len]
+            .iter()
+            .all(|entry| entry.epoch & IMAGE != 0),
+        "{at}: checkpoint {c:?} holds a record that is not an image"
+    );
+    tally.checkpointed += 1;
+    if start == 1 {
+        assert_eq!(
+            replay(&entries[from..], len),
+            history(entries),
+            "{at}: replaying from checkpoint {c:?} differs from replaying the history"
+        );
+        tally.checkpoint_judged += 1;
+    }
+}
+
 /// Judge what the recovery reported against the ledger, and tally it.
 fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: &mut Tally) {
     let at = check.at;
@@ -1863,9 +2130,106 @@ fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: 
     }
 }
 
+/// Save `value` as the metadata. A failed save is retried with a newer
+/// value, as a caller whose promise moved on would: the retry must win over
+/// what the failure left behind.
+async fn save_meta_retrying(
+    journal: &mut Journal<SimStorageProvider>,
+    meta: &MetaLedger,
+    value: u64,
+) -> Result<(), JournalError> {
+    for value in value..value + 3 {
+        meta.lock().expect("meta ledger").pending.push(value);
+        if journal.save_meta(&value.to_le_bytes()).await.is_ok() {
+            let mut state = meta.lock().expect("meta ledger");
+            state.acked = Some(value);
+            state.pending.clear();
+            return Ok(());
+        }
+        meta.lock().expect("meta ledger").retried += 1;
+    }
+    Err(JournalError::Poisoned)
+}
+
+/// The epoch bit of a checkpoint image record in the crash loop.
+const IMAGE: u64 = 1 << 62;
+
+/// State digests per image record: few, so a checkpoint spans several
+/// slot sectors and a crash can cut it short.
+const IMAGE_CHUNK: usize = 8;
+
+/// What the crash loop's writer folds its log into: the digest of every
+/// ordinary record, in order — here, from the records themselves.
+fn history<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Vec<u32> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.epoch & IMAGE == 0)
+        .map(|entry| crc32c::crc32c(&entry.payload))
+        .collect()
+}
+
+/// The same state replayed from a checkpoint, as a caller does: the image
+/// its first `len` entries hold, then every ordinary record after it.
+fn replay(entries: &[Entry], len: usize) -> Vec<u32> {
+    let (image, rest) = entries.split_at(len);
+    let mut state: Vec<u32> = image
+        .iter()
+        .flat_map(|entry| {
+            entry.payload[4..]
+                .chunks_exact(4)
+                .map(|digest| u32::from_le_bytes(digest.try_into().expect("4 bytes")))
+        })
+        .collect();
+    state.extend(history(rest));
+    state
+}
+
+/// The image of `state`: its digests, `IMAGE_CHUNK` per record, each record
+/// led by its position. An empty state is one empty record.
+fn image_of(state: &[u32]) -> Vec<Vec<u8>> {
+    if state.is_empty() {
+        return vec![0u32.to_le_bytes().to_vec()];
+    }
+    state
+        .chunks(IMAGE_CHUNK)
+        .enumerate()
+        .map(|(at, chunk)| {
+            let position = u32::try_from(at * IMAGE_CHUNK).expect("small");
+            let mut bytes = position.to_le_bytes().to_vec();
+            for digest in chunk {
+                bytes.extend(digest.to_le_bytes());
+            }
+            bytes
+        })
+        .collect()
+}
+
+/// The writer's state as its open finds it: replayed from the newest
+/// checkpoint, or the history from the start when there is none.
+async fn folded(journal: &Journal<SimStorageProvider>) -> Result<Vec<u32>, JournalError> {
+    let next = journal.next_index();
+    let checkpoint = journal.checkpoint();
+    let from = checkpoint
+        .as_ref()
+        .map_or(journal.start_index(), |c| c.start);
+    let entries = journal
+        .read_range(from..next)
+        .await?
+        .into_iter()
+        .map(|entry| entry.map_err(JournalError::Corrupt))
+        .collect::<Result<Vec<Entry>, _>>()?;
+    Ok(match checkpoint {
+        Some(c) => replay(&entries, usize::try_from(c.end - c.start).expect("small")),
+        None => history(&entries),
+    })
+}
+
 /// The writer: `(kind, count, len)` steps of appends and, one time in ten
 /// each, a suffix truncation at an arbitrary index, a metadata save, or a
-/// prefix truncation.
+/// prefix truncation. A checkpointing writer folds its records into a state
+/// and, one time in ten, checkpoints it (kind 3); its prefix truncations
+/// drop only what its newest checkpoint supersedes (kind 4), and its suffix
+/// truncations never cut into that checkpoint.
 async fn write(
     provider: SimStorageProvider,
     model: Model,
@@ -1884,11 +2248,16 @@ async fn write(
         }
     };
     aim(&journal);
+    let mut state = folded(&journal).await?;
     for (kind, count, len) in plan {
         let next = journal.next_index();
         let start = journal.start_index();
-        if kind == 0 && next > start + 1 {
-            let from = start + 1 + len % (next - start - 1);
+        // A checkpoint is never cut into: a fragment of one is no image.
+        let floor = journal
+            .checkpoint()
+            .map_or(start + 1, |c| c.end.max(start + 1));
+        if kind == 0 && next > floor {
+            let from = floor + len % (next - floor);
             // The dropped entries stop being guaranteed the moment the
             // truncation starts.
             ledger
@@ -1896,7 +2265,37 @@ async fn write(
                 .expect("ledger")
                 .retain(|(index, _, _)| *index < from);
             journal.truncate_suffix(from).await?;
+            state = folded(&journal).await?;
             aim(&journal);
+            continue;
+        }
+        if kind == 3 {
+            // A checkpoint: the state re-emitted as one batch.
+            let image = image_of(&state);
+            let epoch = epoch | IMAGE;
+            let records: Vec<Record<'_>> = image
+                .iter()
+                .zip(next..)
+                .map(|(payload, index)| Record::new(epoch, payload).with_tag(tag(index, epoch)))
+                .collect();
+            let range = journal.append_checkpoint(&records).await?;
+            aim(&journal);
+            let mut ledger = ledger.lock().expect("ledger");
+            for (index, payload) in range.zip(image) {
+                ledger.push((index, epoch, payload));
+            }
+            continue;
+        }
+        if kind == 4 {
+            // Drop what the newest checkpoint supersedes, and only that.
+            if let Some(c) = journal.checkpoint() {
+                ledger
+                    .lock()
+                    .expect("ledger")
+                    .retain(|(index, _, _)| *index >= c.start);
+                journal.truncate_prefix(c.start).await?;
+                aim(&journal);
+            }
             continue;
         }
         if kind == 2 {
@@ -1913,26 +2312,7 @@ async fn write(
             continue;
         }
         if kind == 1 {
-            // A failed save is retried with a newer value, as a caller whose
-            // promise moved on would: the retry must win over what the
-            // failure left behind.
-            let mut saved = None;
-            for attempt in 0..3 {
-                let value = epoch * 1000 + len * 4 + attempt;
-                meta.lock().expect("meta ledger").pending.push(value);
-                if journal.save_meta(&value.to_le_bytes()).await.is_ok() {
-                    saved = Some(value);
-                    break;
-                }
-                meta.lock().expect("meta ledger").retried += 1;
-            }
-            let Some(value) = saved else {
-                return Err(JournalError::Poisoned);
-            };
-            let mut state = meta.lock().expect("meta ledger");
-            state.acked = Some(value);
-            state.pending.clear();
-            drop(state);
+            save_meta_retrying(&mut journal, &meta, epoch * 1000 + len * 4).await?;
             aim(&journal);
             continue;
         }
@@ -1947,6 +2327,7 @@ async fn write(
             .collect();
         let range = journal.append(&records).await?;
         aim(&journal);
+        state.extend(bytes.iter().map(|payload| crc32c::crc32c(payload)));
         let mut ledger = ledger.lock().expect("ledger");
         for (index, payload) in range.zip(bytes) {
             ledger.push((index, epoch, payload));

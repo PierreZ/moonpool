@@ -96,6 +96,7 @@ pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalErr
                     // The cut mark lives in the slot alone: kept from a
                     // valid one, lost with a damaged one.
                     cut: matches!(slot, SlotState::Valid(slot) if slot.cut),
+                    checkpoint: header.checkpoint,
                 };
                 if slot != SlotState::Valid(rebuilt) {
                     decision.rewrite_slots.push(index);
@@ -141,6 +142,7 @@ mod tests {
             tag: [3; crate::TAG_SIZE],
             batch_start: index == 1,
             cut: false,
+            checkpoint: None,
         }
     }
 
@@ -158,6 +160,7 @@ mod tests {
                     crc: s.entry_crc,
                     tag: s.tag,
                     batch_start: s.batch_start,
+                    checkpoint: None,
                 },
             )),
         }

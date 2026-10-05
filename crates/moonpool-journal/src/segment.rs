@@ -648,6 +648,11 @@ impl<F: StorageFile> Segment<F> {
         }
     }
 
+    /// Every record this segment holds, from its first index.
+    pub fn records(&self) -> &[Rec] {
+        &self.recs
+    }
+
     /// The last record this segment holds.
     pub fn last(&self) -> Option<Rec> {
         self.recs.last().copied()
@@ -696,7 +701,15 @@ impl<F: StorageFile> Segment<F> {
     /// write does rewrite the acknowledged slots that share its blocks; a
     /// crash that loses one leaves its entry intact, and recovery rebuilds
     /// the slot from it.
-    pub async fn append(&mut self, batch: &[Record<'_>]) -> Result<(), JournalError> {
+    ///
+    /// A `checkpoint` batch marks its first entry, and that entry's slot, as
+    /// opening a checkpoint of `batch.len()` entries.
+    pub async fn append(
+        &mut self,
+        batch: &[Record<'_>],
+        checkpoint: bool,
+    ) -> Result<(), JournalError> {
+        let count = u32::try_from(batch.len()).expect("a batch fits one segment's slots");
         let base = self.next_batch_at();
         let total: u64 = batch
             .iter()
@@ -708,6 +721,7 @@ impl<F: StorageFile> Segment<F> {
         let mut at = 0;
         for (at_batch, record) in batch.iter().enumerate() {
             let batch_start = at_batch == 0;
+            let opens = (batch_start && checkpoint).then_some(count);
             let length = u32::try_from(record.payload.len()).expect("checked");
             let size = usize_len(entry_size(length))?;
             let index = self.next_index();
@@ -716,7 +730,7 @@ impl<F: StorageFile> Segment<F> {
                 index,
                 record.epoch,
                 &record.tag,
-                batch_start,
+                (batch_start, opens),
                 record.payload,
                 &mut data.as_mut_slice()[at..at + size],
             );
@@ -730,6 +744,7 @@ impl<F: StorageFile> Segment<F> {
                     tag: record.tag,
                     batch_start,
                     cut: false,
+                    checkpoint: opens,
                 },
                 corrupt: false,
             });
@@ -888,6 +903,7 @@ fn verify(rec: &Rec, bytes: &[u8], damaged: bool) -> Result<Entry, EntryId> {
                 && header.crc == slot.entry_crc
                 && header.tag == slot.tag
                 && header.batch_start == slot.batch_start
+                && header.checkpoint == slot.checkpoint
                 && entry_crc_ok(&header, bytes)
         });
     if !intact {
@@ -961,8 +977,10 @@ async fn probe<F: StorageFile>(
         return Ok(None);
     }
     // Every batch starts on a fresh block: a batch start anywhere else is a
-    // stale or misdirected record.
-    if header.batch_start && !offset.is_multiple_of(BLOCK_U64) {
+    // stale or misdirected record. Only a batch start opens a checkpoint.
+    if header.batch_start && !offset.is_multiple_of(BLOCK_U64)
+        || header.checkpoint.is_some() && !header.batch_start
+    {
         return Ok(None);
     }
     if let Some(slot) = expected
@@ -970,7 +988,8 @@ async fn probe<F: StorageFile>(
             || slot.length != header.length
             || slot.entry_crc != header.crc
             || slot.tag != header.tag
-            || slot.batch_start != header.batch_start)
+            || slot.batch_start != header.batch_start
+            || slot.checkpoint != header.checkpoint)
     {
         return Ok(None);
     }
