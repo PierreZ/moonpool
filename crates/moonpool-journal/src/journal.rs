@@ -662,6 +662,25 @@ impl<P: StorageProvider> Journal<P> {
         self.poison_on_err(outcome)
     }
 
+    /// The caller's metadata under `dir` as the newest valid copy holds it,
+    /// without opening the journal: no recovery scan, no repair of a damaged
+    /// or older copy, no truncation, nothing created. What
+    /// [`meta`](Self::meta) would return after [`open`](Self::open), for a
+    /// caller that only needs to know — say, whether a store was ever
+    /// formatted — and must not change what the next open finds.
+    ///
+    /// Returns `None` when neither copy exists, including when `dir` does
+    /// not.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::MetadataCorrupt`] when a copy exists but none is
+    /// valid (or both are valid at one generation and disagree), and
+    /// [`JournalError::Io`] if the namespace cannot be queried.
+    pub async fn peek_meta(provider: &P, dir: &str) -> Result<Option<Vec<u8>>, JournalError> {
+        DualFile::peek(provider, dir, "meta").await
+    }
+
     /// The caller's metadata (for example Raft's term and vote), as last
     /// saved.
     #[must_use]

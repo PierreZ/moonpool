@@ -149,6 +149,15 @@ is, the retry always outranks what the failure left, and two valid copies of
 one generation that disagree can only be damage, so opening refuses them
 with `MetadataCorrupt`.
 
+Sometimes a caller only needs to look. A Paxos node keeps its format marker
+in the metadata, and provisioning wants to know whether a store was ever
+formatted **before** booting it. Opening is the wrong tool: it repairs
+headers and slots, rewrites a stale copy, and may cut the last batch, so a
+probe meant to look could change what the real boot finds.
+`Journal::peek_meta(&provider, dir)` reads the newest valid copy and
+nothing else. It repairs nothing, creates nothing (an absent directory reads
+as `None`), and reports `MetadataCorrupt` when no copy is valid.
+
 ## Truncating
 
 Suffix truncation zeroes the discarded slots, syncs, zeroes the discarded

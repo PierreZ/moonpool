@@ -159,6 +159,8 @@
 //! what the failed save left behind; two valid copies of one generation
 //! that disagree are damage, and opening refuses them
 //! ([`JournalError::MetadataCorrupt`]).
+//! [`Journal::peek_meta`] reads the metadata of a closed journal without
+//! opening it: no recovery, no repair, nothing created.
 //!
 //! # The fault model
 //!

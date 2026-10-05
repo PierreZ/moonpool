@@ -134,6 +134,27 @@ impl DualFile {
         Ok((this, Some(payload), repaired))
     }
 
+    /// The payload [`load`](Self::load) would return, read without writing
+    /// anything: no repair of a damaged or older copy, and nothing created
+    /// when neither exists.
+    ///
+    /// # Errors
+    ///
+    /// As [`load`](Self::load), minus the repair.
+    pub async fn peek<P: StorageProvider>(
+        provider: &P,
+        dir: &str,
+        name: &'static str,
+    ) -> Result<Option<Vec<u8>>, JournalError> {
+        let this = Self {
+            dir: dir.to_string(),
+            name,
+            generation: 0,
+        };
+        let copies = this.read_copies(provider).await?;
+        Ok(newest(name, &copies)?.map(|(_, payload)| payload))
+    }
+
     /// What each copy holds on disk.
     async fn read_copies<P: StorageProvider>(
         &self,

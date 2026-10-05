@@ -503,6 +503,77 @@ fn two_copies_of_one_generation_that_disagree_are_refused() {
     });
 }
 
+async fn peek(sim: &mut SimWorld) -> Result<Option<Vec<u8>>, JournalError> {
+    run(sim, |provider| async move {
+        Journal::peek_meta(&provider, DIR).await
+    })
+    .await
+}
+
+async fn read_copy(sim: &mut SimWorld) -> std::io::Result<Vec<u8>> {
+    run(sim, |provider| async move {
+        let file = provider
+            .open(&format!("{DIR}/meta.0"), OpenOptions::read_only())
+            .await?;
+        let mut bytes = vec![0; usize::try_from(file.size().await?).expect("small")];
+        file.read_at(0, &mut bytes).await?;
+        Ok(bytes)
+    })
+    .await
+}
+
+/// `peek_meta` reads what `open` would load without repairing anything: one
+/// damaged copy is still damaged afterwards (the next open repairs it),
+/// both damaged is `MetadataCorrupt`, and an empty directory stays empty.
+#[test]
+fn peeking_at_the_metadata_changes_nothing() {
+    runtime().block_on(async {
+        let mut sim = sim(32);
+        let peeked = run(&mut sim, |provider| async move {
+            let before = Journal::peek_meta(&provider, DIR).await?;
+            let listed = provider.exists(DIR).await?;
+            Ok::<_, JournalError>((before, listed))
+        })
+        .await
+        .expect("peek an empty disk");
+        assert_eq!(peeked, (None, false), "nothing there, nothing created");
+
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider, small()).await?;
+            journal.save_meta(b"formatted").await
+        })
+        .await
+        .expect("write");
+        assert_eq!(
+            peek(&mut sim).await.expect("peek"),
+            Some(b"formatted".to_vec())
+        );
+
+        flip(&mut sim, format!("{DIR}/meta.0"), 30).await;
+        let damaged = read_copy(&mut sim).await.expect("read meta.0");
+        assert_eq!(
+            peek(&mut sim).await.expect("peek"),
+            Some(b"formatted".to_vec())
+        );
+        assert_eq!(
+            read_copy(&mut sim).await.expect("read meta.0"),
+            damaged,
+            "peeking repairs nothing"
+        );
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert!(recovery.meta_repaired, "the damage was left for the open");
+        drop(journal);
+
+        flip(&mut sim, format!("{DIR}/meta.0"), 30).await;
+        flip(&mut sim, format!("{DIR}/meta.1"), 30).await;
+        let both = peek(&mut sim).await;
+        assert!(
+            matches!(both, Err(JournalError::MetadataCorrupt { .. })),
+            "{both:?}"
+        );
+    });
+}
+
 /// `read_range` returns exactly what one `read` per index returns — across
 /// segment boundaries, with a corrupt entry reported in place by identity —
 /// and refuses a range outside the live log.
