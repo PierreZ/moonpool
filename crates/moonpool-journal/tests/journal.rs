@@ -589,9 +589,9 @@ fn a_batched_read_matches_one_read_per_entry() {
         })
         .await
         .expect("write");
-        // Entry 1 (10 bytes) takes 80 bytes; entry 2's payload starts 64
-        // bytes into it.
-        flip(&mut sim, segment_path(1), 16 * 1024 + 80 + 70).await;
+        // Entry 2's payload starts 64 bytes into it.
+        let at = entry_offset(&mut sim, 2).await + 70;
+        flip(&mut sim, segment_path(1), at).await;
 
         run(&mut sim, |provider| async move {
             let (journal, recovery) = open(provider.clone(), small()).await?;
@@ -646,7 +646,8 @@ fn a_kept_ambiguous_last_entry_survives_reopen_until_resolved() {
     runtime().block_on(async {
         let mut sim = sim(16);
         five_entries(&mut sim).await;
-        flip(&mut sim, segment_path(1), payload_byte(5)).await;
+        let at = payload_byte(&mut sim, 5).await;
+        flip(&mut sim, segment_path(1), at).await;
         let ambiguous = EntryId {
             index: 5,
             epoch: 7,
@@ -701,15 +702,25 @@ fn a_kept_ambiguous_last_entry_survives_reopen_until_resolved() {
     });
 }
 
-/// Five single-entry batches of 64-byte payloads: each entry is 128 bytes
-/// (a 64-byte header), packed contiguously from `data_start`.
-fn entry_offset(index: u64) -> u64 {
-    16 * 1024 + (index - 1) * 128
+/// Where entry `index` of the closed journal starts, as its slot records
+/// it: every batch starts on a fresh block, so the offsets depend on how the
+/// entries were batched, and the slot table is what knows.
+async fn entry_offset(sim: &mut SimWorld, index: u64) -> u64 {
+    run(sim, |provider| async move {
+        JournalAtlas::scan(&provider, DIR, small().geometry).await
+    })
+    .await
+    .expect("scan")
+    .entry(index)
+    .expect("a live entry")
+    .layout
+    .bytes
+    .start
 }
 
-/// A byte inside entry `index`'s payload.
-fn payload_byte(index: u64) -> u64 {
-    entry_offset(index) + 80
+/// A byte inside entry `index`'s payload (64-byte header first).
+async fn payload_byte(sim: &mut SimWorld, index: u64) -> u64 {
+    entry_offset(sim, index).await + 80
 }
 
 /// Slot `i` of the first segment.
@@ -739,7 +750,8 @@ fn a_damaged_entry_mid_log_is_reported_not_truncated() {
     runtime().block_on(async {
         let mut sim = sim(6);
         five_entries(&mut sim).await;
-        flip(&mut sim, segment_path(1), payload_byte(3)).await;
+        let at = payload_byte(&mut sim, 3).await;
+        flip(&mut sim, segment_path(1), at).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         let damaged = EntryId {
             index: 3,
@@ -810,8 +822,9 @@ fn a_double_fault_refuses_to_start() {
     runtime().block_on(async {
         let mut sim = sim(9);
         five_entries(&mut sim).await;
+        let at = payload_byte(&mut sim, 3).await;
         flip(&mut sim, segment_path(1), slot_offset(3) + 9).await;
-        flip(&mut sim, segment_path(1), payload_byte(3)).await;
+        flip(&mut sim, segment_path(1), at).await;
         let opened = reopen(&mut sim).await.map(|_| ());
         assert!(
             matches!(opened, Err(JournalError::DoubleFault { index: 3 })),
@@ -827,8 +840,9 @@ fn a_torn_tail_is_truncated_and_scrubbed() {
     runtime().block_on(async {
         let mut sim = sim(10);
         five_entries(&mut sim).await;
+        let at = payload_byte(&mut sim, 4).await;
         zero(&mut sim, segment_path(1), slot_offset(4), 128).await;
-        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        flip(&mut sim, segment_path(1), at).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(
             journal.next_index(),
@@ -857,7 +871,8 @@ fn the_ambiguous_last_entry_is_truncated_and_reported() {
     runtime().block_on(async {
         let mut sim = sim(11);
         five_entries(&mut sim).await;
-        flip(&mut sim, segment_path(1), payload_byte(5)).await;
+        let at = payload_byte(&mut sim, 5).await;
+        flip(&mut sim, segment_path(1), at).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(
             recovery.ambiguous_batch,
@@ -873,7 +888,7 @@ fn the_ambiguous_last_entry_is_truncated_and_reported() {
 }
 
 /// Entries 1 and 2 as single-entry batches, then 3..=5 as one batch of
-/// three: 64-byte payloads, so the offsets of `entry_offset` still hold.
+/// three, all with 64-byte payloads.
 async fn two_batches_then_three(sim: &mut SimWorld) {
     run(sim, |provider| async move {
         let (mut journal, _) = open(provider, small()).await?;
@@ -907,8 +922,10 @@ fn every_damaged_entry_of_the_last_batch_is_ambiguous() {
     runtime().block_on(async {
         let mut sim = sim(17);
         two_batches_then_three(&mut sim).await;
-        flip(&mut sim, segment_path(1), payload_byte(3)).await;
-        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        let at = payload_byte(&mut sim, 3).await;
+        flip(&mut sim, segment_path(1), at).await;
+        let at = payload_byte(&mut sim, 4).await;
+        flip(&mut sim, segment_path(1), at).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(recovery.ambiguous_batch, vec![id(3), id(4)]);
         assert!(recovery.corrupt.is_empty(), "{recovery:?}");
@@ -928,8 +945,10 @@ fn a_kept_ambiguous_batch_keeps_its_intact_entries() {
     runtime().block_on(async {
         let mut sim = sim(18);
         two_batches_then_three(&mut sim).await;
-        flip(&mut sim, segment_path(1), payload_byte(3)).await;
-        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        let at = payload_byte(&mut sim, 3).await;
+        flip(&mut sim, segment_path(1), at).await;
+        let at = payload_byte(&mut sim, 4).await;
+        flip(&mut sim, segment_path(1), at).await;
         for _ in 0..2 {
             let (journal, recovery) = run(&mut sim, |provider| async move {
                 Journal::open(provider, DIR, keep()).await
@@ -961,8 +980,10 @@ fn damage_before_the_last_batch_stays_corruption() {
     runtime().block_on(async {
         let mut sim = sim(19);
         two_batches_then_three(&mut sim).await;
-        flip(&mut sim, segment_path(1), payload_byte(2)).await;
-        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        let at = payload_byte(&mut sim, 2).await;
+        flip(&mut sim, segment_path(1), at).await;
+        let at = payload_byte(&mut sim, 4).await;
+        flip(&mut sim, segment_path(1), at).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(recovery.corrupt, vec![id(2)]);
         assert_eq!(recovery.ambiguous_batch, vec![id(4)]);
@@ -977,13 +998,102 @@ fn a_rebuilt_slot_keeps_the_batch_boundary() {
     runtime().block_on(async {
         let mut sim = sim(20);
         two_batches_then_three(&mut sim).await;
+        let at = payload_byte(&mut sim, 4).await;
         zero(&mut sim, segment_path(1), slot_offset(3), 64).await;
-        flip(&mut sim, segment_path(1), payload_byte(4)).await;
+        flip(&mut sim, segment_path(1), at).await;
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         assert_eq!(recovery.slots_rewritten, 1);
         assert_eq!(recovery.ambiguous_batch, vec![id(4)]);
         assert!(recovery.corrupt.is_empty());
         assert_eq!(journal.next_index(), 4);
+    });
+}
+
+/// A disk that loses every sector it was writing when the crash hits, and
+/// fills a lost sector with zeros.
+fn losing_disk(seed: u64) -> SimWorld {
+    let mut sim = SimWorld::new_with_seed(seed);
+    let mut config = StorageConfiguration::fast_local();
+    config.clean_crash_probability = 0.0;
+    config.correlated_rollback_probability = 0.0;
+    config.crash_lost_probability = 1.0;
+    config.garbage_fill_probability = 0.0;
+    sim.set_storage_config(config);
+    sim
+}
+
+/// Append batch A (three entries), then start batch B (one small entry) and
+/// stop the world `stop_after` steps into B's append — or let it finish when
+/// `None`. Returns how many steps B's append took, and the journal if it
+/// finished.
+async fn a_then_b(sim: &mut SimWorld, stop_after: Option<usize>) -> usize {
+    let journal = run(sim, |provider| async move {
+        let (mut journal, _) = open(provider, small()).await?;
+        let bytes: Vec<Vec<u8>> = (1..=3).map(|index| payload(index, 64)).collect();
+        let records: Vec<Record<'_>> = bytes
+            .iter()
+            .zip(1..)
+            .map(|(payload, index)| Record::new(7, payload).with_tag(tag(index, 7)))
+            .collect();
+        journal.append(&records).await?;
+        Ok::<_, JournalError>(journal)
+    })
+    .await
+    .expect("batch A");
+    let handle = tokio::spawn(async move {
+        let mut journal = journal;
+        append_each(&mut journal, 7, &[64]).await
+    });
+    let mut steps = 0;
+    while !handle.is_finished() {
+        if stop_after == Some(steps) {
+            handle.abort();
+            break;
+        }
+        if sim.pending_event_count() > 0 {
+            sim.step();
+            steps += 1;
+        }
+        tokio::task::yield_now().await;
+    }
+    let _ = handle.await;
+    steps
+}
+
+/// An append never rewrites a sector an earlier sync made durable. Batch B
+/// would fit in the block holding batch A's last entry; it starts on a
+/// fresh block instead, so a crash that loses every sector B was writing —
+/// its entry and its slot, which shares a slot-table block with A's — cannot
+/// reach A's entries: A's lost slots are rebuilt from them.
+#[test]
+fn a_crash_during_an_append_cannot_reach_the_batch_before_it() {
+    runtime().block_on(async {
+        // Count the steps of B's append on one world, then replay the same
+        // seed on another and crash one step short: B's writes have landed,
+        // its sync has not.
+        let steps = a_then_b(&mut losing_disk(21), None).await;
+        let mut sim = losing_disk(21);
+        a_then_b(&mut sim, Some(steps - 1)).await;
+        sim.simulate_crash_for_process(ip(), true);
+        let lost: usize = sim
+            .take_storage_crash_reports()
+            .iter()
+            .filter(|report| report.path.starts_with(&format!("{DIR}/seg-")))
+            .map(|report| report.resolutions.len())
+            .sum();
+        assert!(lost > 0, "the crash lost the sectors B was writing");
+
+        let (journal, recovery) = reopen(&mut sim).await.expect("A survives");
+        assert!(recovery.corrupt.is_empty(), "{recovery:?}");
+        assert!(recovery.ambiguous_batch.is_empty(), "{recovery:?}");
+        assert_eq!(journal.next_index(), 4, "B is gone, A is whole");
+        run(&mut sim, |_| async move {
+            for index in 1..=3 {
+                let entry = journal.read(index).await.expect("A's entry");
+                assert_eq!(entry.payload, payload(index, 64));
+            }
+        })
+        .await;
     });
 }
 
@@ -995,18 +1105,26 @@ fn an_unreadable_entry_is_reported_corrupt() {
         let mut sim = sim(12);
         run(&mut sim, |provider| async move {
             let (mut journal, _) = open(provider, small()).await?;
-            append_each(&mut journal, 7, &[4000; 5]).await
+            let bytes: Vec<Vec<u8>> = (1..=5).map(|index| payload(index, 4000)).collect();
+            let records: Vec<Record<'_>> = bytes
+                .iter()
+                .zip(1..)
+                .map(|(payload, index)| Record::new(7, payload).with_tag(tag(index, 7)))
+                .collect();
+            journal.append(&records).await?;
+            append_each(&mut journal, 7, &[64]).await
         })
         .await
         .expect("write");
-        // Entry i starts at 16384 + (i - 1) × 4064; block 6 (24576..28672)
-        // holds the tail of entry 3 and the head of entry 4.
+        // One batch of five, packed: entry i starts at 16384 + (i - 1) ×
+        // 4064, so block 6 (24576..28672) holds the tail of entry 3 and the
+        // head of entry 4. A later batch makes the damage corruption.
         sim.fail_file_with_eio(&segment_path(1), 50..51, EioTarget::Read)
             .expect("segment exists");
         let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
         let indexes: Vec<u64> = recovery.corrupt.iter().map(|id| id.index).collect();
         assert_eq!(indexes, vec![3, 4]);
-        assert_eq!(journal.next_index(), 6);
+        assert_eq!(journal.next_index(), 7);
     });
 }
 

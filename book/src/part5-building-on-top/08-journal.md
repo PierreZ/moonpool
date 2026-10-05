@@ -66,8 +66,26 @@ slot table is a plain array.
 
 Per batch: write the entries contiguously into the data region, write their
 slots in one call, `fdatasync` once, acknowledge. Nothing orders the first
-write before the second — one sync per batch instead of two, with recovery
-doing the disambiguation.
+write before the second, so it is one sync per batch instead of two, with
+recovery doing the disambiguation.
+
+Every batch starts on a **fresh block**. The entries of one batch are packed
+back to back, but the batch itself begins at the first 4 KiB boundary after
+the previous one and pads its last block with zeros. That costs space, up to
+a block per batch, and buys something a byte-contiguous log cannot have: the
+data write never touches a sector an earlier sync made durable. A disk is
+allowed to garble the sectors it was writing when the power went (more on
+that under *Two Fault Models*), and with fresh blocks those sectors only ever
+hold the batch nobody has acknowledged yet. TigerBeetle pads every prepare to
+its own sectors for the same reason, and FoundationDB's `DiskQueue` starts
+every commit on a fresh page.
+
+The slot table is the one place an append still rewrites acknowledged bytes:
+64 slots share a block, and writing a new slot rewrites its neighbours. That
+is fine, because a lost slot beside an intact entry is the recovery table's
+easiest row. Recovery finds the entry anyway (right after its predecessor
+when it continues a batch, on the next block when it starts one, as its
+batch-start flag says) and rebuilds the slot from it.
 
 ## Recovering
 
@@ -169,15 +187,19 @@ zeroed entry, which would look like corruption.
 ## Two Fault Models
 
 The paper assumes what most disks promise: a crash leaves each unsynced
-sector with its old contents or its new ones. Under that model, rewriting the
-acknowledged bytes that share the block a batch starts in is harmless.
+sector with its old contents or its new ones.
 
 The simulator can be harsher. Following FoundationDB's `AsyncFileNonDurable`,
 it can lose, garble, or shear a sector that was being rewritten, destroying
 bytes a sync had already made durable. A byte-contiguous log rewrites exactly
-such sectors, so on that disk an acknowledged entry can come back damaged.
-The journal then does what the paper promises for any corruption: it reports
-the entry, or refuses to start, and never returns wrong data.
+such sectors on every append. This journal's appends do not (every batch
+starts on a fresh block), so an appending crash on that disk still leaves
+every acknowledged entry intact. Before fresh blocks, a crash that lost the
+sectors of a one-entry batch sharing a block with the batch before it took
+that earlier batch along, slots and all, and recovery read the whole log as
+a torn tail. Where the journal does still rewrite a block holding
+acknowledged entries, it does what the paper promises for any corruption: it
+reports the entry, or refuses to start, and never returns wrong data.
 
 ## Aiming Faults at the Layout
 

@@ -3,9 +3,12 @@
 //!
 //! In memory a segment keeps one [`Rec`] per index it holds — the slot the
 //! startup scan verified or rebuilt — so a read computes where its entry is
-//! and never reads the slot table again. It also keeps the bytes of the
-//! partially filled last data block, so an append rewrites them unchanged
-//! instead of reading them back.
+//! and never reads the slot table again.
+//!
+//! Every append batch starts on a fresh [`BLOCK`]: the data write never
+//! touches a block an earlier sync made durable, so no crash during an
+//! append can damage an acknowledged entry, whatever the disk does to the
+//! sectors being written.
 
 use std::io;
 use std::ops::Range;
@@ -110,10 +113,9 @@ pub(crate) struct Segment<F> {
     file: BlockFile<F>,
     geometry: Geometry,
     recs: Vec<Rec>,
-    /// First byte past the last kept entry.
+    /// First byte past the last kept entry. The next batch starts at the
+    /// block boundary at or after it.
     data_end: u64,
-    /// The bytes of the block holding `data_end`, up to `data_end`.
-    tail: Vec<u8>,
 }
 
 fn u64_len(len: usize) -> u64 {
@@ -278,7 +280,6 @@ impl<F: StorageFile> Segment<F> {
             geometry,
             recs: Vec::new(),
             data_end: geometry.data_start,
-            tail: Vec::new(),
         }
     }
 
@@ -360,16 +361,19 @@ impl<F: StorageFile> Segment<F> {
             segment.write_slots(&dirty).await?;
             segment.file.sync_data().await?;
         }
-        segment.refresh_tail().await?;
         if report.ended {
             // The entry bytes past the end: if the walk stopped on anything
             // but zeros, whatever the crash left there is zeroed too, so a
             // stale entry that still passes its CRC can never be picked up
-            // through a lost slot later.
+            // through a lost slot later. The next batch would have started
+            // on the next block, so that is where a discarded one sits: the
+            // check covers the padding up to it and its first header.
+            let reach =
+                (segment.next_batch_at() + ENTRY_HEADER_SIZE as u64).min(geometry.segment_size);
             let (terminator, _) = read_bytes(
                 &segment.file,
                 segment.data_end,
-                ENTRY_HEADER_SIZE.min(usize_len(geometry.segment_size - segment.data_end)?),
+                usize_len(reach - segment.data_end)?,
             )
             .await?;
             if report.torn || terminator.iter().any(|b| *b != 0) {
@@ -412,7 +416,7 @@ impl<F: StorageFile> Segment<F> {
     }
 
     /// Walk the indexes in order. Entry *i* is located through slot *i*, or —
-    /// when that slot is unusable — at the end of entry *i − 1*. The walk
+    /// when that slot is unusable — after entry *i − 1* (see [`locate`]). The walk
     /// stops at `next_first`, at the first index with neither an intact
     /// entry nor an identifier (the end of the log), or at the first double
     /// fault. Returns what it found and the raw slot table.
@@ -443,13 +447,15 @@ impl<F: StorageFile> Segment<F> {
             } else {
                 Slot::decode(&table[at..at + SLOT_SIZE], index)
             };
-            let (offset, expected) = match slot {
-                SlotState::Valid(slot) => (u64::from(slot.offset), Some(slot)),
-                _ => (prev_end, None),
+            let entry = match slot {
+                SlotState::Valid(slot) => {
+                    let offset = u64::from(slot.offset);
+                    probe(&mut window, geometry, offset, index, Some(slot))
+                        .await?
+                        .map(|header| (offset, header))
+                }
+                _ => locate(&mut window, geometry, prev_end, index).await?,
             };
-            let entry = probe(&mut window, geometry, offset, index, expected)
-                .await?
-                .map(|header| (offset, header));
             prev_end = match (entry, slot) {
                 (Some((offset, header)), _) => offset + entry_size(header.length),
                 (None, SlotState::Valid(slot)) => u64::from(slot.offset) + entry_size(slot.length),
@@ -523,13 +529,10 @@ impl<F: StorageFile> Segment<F> {
         Ok(wrote)
     }
 
-    /// Reload the cached bytes of the block holding `data_end`.
-    async fn refresh_tail(&mut self) -> Result<(), JournalError> {
-        let start = align_down(self.data_end, BLOCK_U64);
-        self.tail = read_bytes(&self.file, start, usize_len(self.data_end - start)?)
-            .await?
-            .0;
-        Ok(())
+    /// Where the next append batch starts: the first block boundary at or
+    /// after the last kept entry.
+    fn next_batch_at(&self) -> u64 {
+        align_up(self.data_end, BLOCK_U64)
     }
 
     /// The next index this segment would hold.
@@ -575,7 +578,7 @@ impl<F: StorageFile> Segment<F> {
     /// it rolls over when its slot table or its data region fills.
     pub fn fitting(&self, sizes: &[u64]) -> usize {
         let free_slots = u64::from(self.geometry.slot_count) - u64_len(self.recs.len());
-        let room = self.geometry.segment_size - self.data_end;
+        let room = self.geometry.segment_size - self.next_batch_at();
         let mut used = 0;
         let mut count = 0;
         for size in sizes {
@@ -589,24 +592,27 @@ impl<F: StorageFile> Segment<F> {
     }
 
     /// Append one batch at [`next_index`](Self::next_index): `pwrite` the
-    /// entries contiguously into the data region, `pwrite` their slots in
-    /// one call, `fdatasync` once. Nothing orders the two writes; recovery
-    /// tells a torn batch from corruption instead.
+    /// entries contiguously into the data region from a fresh block,
+    /// `pwrite` their slots in one call, `fdatasync` once. Nothing orders the
+    /// two writes; recovery tells a torn batch from corruption instead.
+    ///
+    /// The data write starts on the block boundary after the last entry and
+    /// pads its last block with zeros, so it never rewrites a sector an
+    /// earlier sync made durable: up to one block of padding per batch, and
+    /// no crash during the append can reach an acknowledged entry. The slot
+    /// write does rewrite the acknowledged slots that share its blocks; a
+    /// crash that loses one leaves its entry intact, and recovery rebuilds
+    /// the slot from it.
     pub async fn append(&mut self, batch: &[Record<'_>]) -> Result<(), JournalError> {
-        let start = self.data_end;
-        let base = align_down(start, BLOCK_U64);
+        let base = self.next_batch_at();
         let total: u64 = batch
             .iter()
             .map(|record| entry_size(u32::try_from(record.payload.len()).expect("checked")))
             .sum();
-        let blocks = usize_len((align_up(start + total, BLOCK_U64) - base) / BLOCK_U64)?;
+        let blocks = usize_len(align_up(total, BLOCK_U64) / BLOCK_U64)?;
         let mut data = self.file.buffer(blocks)?;
-        // The block the batch starts in may already hold entries: they are
-        // rewritten byte for byte from the cached copy.
-        let lead = self.tail.len();
-        data.as_mut_slice()[..lead].copy_from_slice(&self.tail);
         let first_rel = self.recs.len();
-        let mut at = lead;
+        let mut at = 0;
         for (at_batch, record) in batch.iter().enumerate() {
             let batch_start = at_batch == 0;
             let length = u32::try_from(record.payload.len()).expect("checked");
@@ -641,9 +647,7 @@ impl<F: StorageFile> Segment<F> {
         let rels: Vec<u64> = (u64_len(first_rel)..u64_len(self.recs.len())).collect();
         self.write_slots(&rels).await?;
         self.file.sync_data().await?;
-        self.data_end = start + total;
-        let tail_start = usize_len(align_down(self.data_end, BLOCK_U64) - base)?;
-        self.tail = data.as_slice()[tail_start..at].to_vec();
+        self.data_end = base + total;
         Ok(())
     }
 
@@ -739,10 +743,10 @@ impl<F: StorageFile> Segment<F> {
         let rels: Vec<u64> = (u64_len(rel)..old_len).collect();
         self.write_slots(&rels).await?;
         self.file.sync_data().await?;
+        self.data_end = from;
         self.zero_data(from, old_end, false).await?;
         self.file.sync_data().await?;
-        self.data_end = from;
-        self.refresh_tail().await
+        Ok(())
     }
 }
 
@@ -772,6 +776,37 @@ fn verify(rec: &Rec, bytes: &[u8], damaged: bool) -> Result<Entry, EntryId> {
     })
 }
 
+/// Find entry `index` when its slot is unusable, from `prev_end`, the end of
+/// entry `index − 1` (or the data start, for a segment's first entry).
+///
+/// Within a batch, entries are packed back to back, so a continuation sits
+/// at `prev_end`; a new batch starts on the next block boundary. An entry
+/// is accepted only where its batch-start flag says it may be: at
+/// `prev_end` as a continuation, or at the boundary as a batch start — when
+/// `prev_end` is itself a boundary, either. The boundary is tried first: an
+/// entry there with this index can only have been written after any bytes
+/// at `prev_end` (which then belong to a discarded suffix).
+async fn locate<F: StorageFile>(
+    window: &mut Window<'_, F>,
+    geometry: Geometry,
+    prev_end: u64,
+    index: u64,
+) -> Result<Option<(u64, EntryHeader)>, JournalError> {
+    let boundary = align_up(prev_end, BLOCK_U64);
+    if let Some(header) = probe(window, geometry, boundary, index, None).await?
+        && (header.batch_start || boundary == prev_end)
+    {
+        return Ok(Some((boundary, header)));
+    }
+    if boundary == prev_end {
+        return Ok(None);
+    }
+    Ok(probe(window, geometry, prev_end, index, None)
+        .await?
+        .filter(|header| !header.batch_start)
+        .map(|header| (prev_end, header)))
+}
+
 /// Whether an intact entry for `index` sits at `offset`: its magic, its CRC,
 /// and its index (the monotonic-index check that catches a misdirected write
 /// whose CRC still passes). When the slot is valid, the entry must also
@@ -794,6 +829,11 @@ async fn probe<F: StorageFile>(
         return Ok(None);
     };
     if header.index != index || offset + entry_size(header.length) > geometry.segment_size {
+        return Ok(None);
+    }
+    // Every batch starts on a fresh block: a batch start anywhere else is a
+    // stale or misdirected record.
+    if header.batch_start && !offset.is_multiple_of(BLOCK_U64) {
         return Ok(None);
     }
     if let Some(slot) = expected

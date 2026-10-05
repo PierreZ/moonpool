@@ -73,14 +73,23 @@
 //! Per batch: `pwrite` the entries contiguously into the data region,
 //! `pwrite` their slots in one call, `fdatasync` once, then acknowledge.
 //! Nothing orders the first write before the second: one sync per batch
-//! instead of two. `BlockFile` transfers whole blocks, so the block a batch
-//! starts in is rewritten with the bytes it already held, from an in-memory
-//! copy.
+//! instead of two.
+//!
+//! Every batch starts on a fresh block (the [`BLOCK`] after the last entry,
+//! its last block padded with zeros), so the data write never rewrites a
+//! sector an earlier sync made durable: no crash during an append can damage
+//! an acknowledged entry, whatever the disk does to the sectors being
+//! written. The cost is space, up to one block of padding per batch, never a
+//! sync. The slot write does rewrite the acknowledged slots that share its
+//! blocks of the slot table; a crash that loses one leaves its entry intact,
+//! and recovery rebuilds the slot from it.
 //!
 //! # Recovery
 //!
 //! Opening walks the indexes in order. Entry *i*'s offset comes from slot
-//! *i*, or, if that slot is unusable, from the end of entry *i − 1*. A slot is
+//! *i*, or, if that slot is unusable, from the end of entry *i − 1*: right
+//! there for an entry that continues its batch, or on the next block for one
+//! that starts a batch — the batch-start flag in the entry says which. A slot is
 //! *empty* if all its bytes are zero. An entry is *good* only if its CRC
 //! passes and its index matches (and, with a valid slot, its epoch, length
 //! and CRC agree with the slot).
@@ -165,14 +174,17 @@
 //! # The fault model
 //!
 //! The design assumes what the paper assumes of the disk: a crash leaves each
-//! unsynced sector with its old contents or its new ones. Rewriting the
-//! acknowledged bytes that share the block a batch starts in is then
-//! harmless. The simulator can also model harsher disks, where a crash
-//! destroys a sector that was being rewritten even though a sync had made
-//! its old contents durable (`FoundationDB`'s garbled in-flight pages). There,
-//! an acknowledged entry sharing that sector can come back damaged — and the
-//! journal detects it, reporting it corrupt or refusing to start, but cannot
-//! keep it. The crate's tests run both models.
+//! unsynced sector with its old contents or its new ones. The simulator can
+//! also model harsher disks, where a crash destroys a sector that was being
+//! rewritten even though a sync had made its old contents durable
+//! (`FoundationDB`'s garbled in-flight pages). An append never rewrites an
+//! acknowledged entry's sectors, so on such a disk too an appending crash
+//! leaves every acknowledged entry intact; a lost slot is rebuilt from its
+//! entry. Suffix truncation and the clean-up after a torn tail still rewrite
+//! the block holding the cut, so there an acknowledged entry sharing that
+//! block can come back damaged — and the journal detects it, reporting it
+//! corrupt or refusing to start, but cannot keep it. The crate's tests run
+//! both models.
 //!
 //! Physical separation of slots and entries is best-effort: the filesystem
 //! controls block placement, though contiguous preallocated extents usually

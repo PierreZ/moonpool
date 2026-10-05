@@ -56,10 +56,14 @@ const FLAG_BATCH_START: u32 = 1;
 
 const HEADER_MAGIC: u32 = u32::from_le_bytes(*b"MPJH");
 const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
-/// Version 3 adds the batch-start flag in the slot's and the entry's flags
+/// Version 3 added the batch-start flag in the slot's and the entry's flags
 /// word (reserved, always zero, in version 2), so a version-2 segment would
 /// read as one never-ending batch and is refused instead.
-const FORMAT_VERSION: u32 = 3;
+///
+/// Version 4 starts every batch on a fresh block, and recovery rejects a
+/// batch start anywhere else: a version-3 segment, whose batches are packed
+/// back to back, is refused rather than misread.
+const FORMAT_VERSION: u32 = 4;
 
 /// Bytes of the header block covered by its CRC.
 const HEADER_LEN: usize = 24;
