@@ -52,7 +52,8 @@ pub enum JournalRegion {
     },
     /// The slot — the far identifier — of an entry. Damaged beside an intact
     /// entry, it is rebuilt; beside a damaged entry, recovery refuses to
-    /// start (a double fault).
+    /// start (a double fault), except in the last batch, where the log ends
+    /// there (a torn tail).
     Slot(EntryId),
     /// An entry's header and payload. Damaged beside an intact slot, it is
     /// reported corrupt (or ambiguous, in the last batch).
@@ -189,9 +190,9 @@ impl JournalAtlas {
     /// opened as a journal, so nothing is repaired.
     ///
     /// The slot table is the map, so the scan sees what the next open's
-    /// identifiers say: an entry whose slot is already damaged or empty is
-    /// not charted (recovery would locate it from its predecessor instead),
-    /// and each segment's walk stops at its first empty slot. The last batch
+    /// identifiers say: an entry whose slot is already damaged is not
+    /// charted (recovery would locate it from its predecessor instead), and
+    /// each segment's walk stops at its first reserved slot. The last batch
     /// is read from the slots' batch-start flags.
     ///
     /// # Errors
@@ -244,7 +245,7 @@ impl JournalAtlas {
             for (rel, bytes) in (0u64..).zip(table[..read].chunks_exact(SLOT_SIZE)) {
                 let index = first + rel;
                 match Slot::decode(bytes, index) {
-                    SlotState::Empty => break,
+                    SlotState::Reserved => break,
                     SlotState::Bad => {}
                     SlotState::Valid(slot) => {
                         atlas.push_entry(

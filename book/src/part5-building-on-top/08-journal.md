@@ -55,12 +55,22 @@ Offset   Region        Contents
 4 MiB    Data region   append-only entries → end
 ```
 
-Each segment is one preallocated, zero-filled file named after its first
-index; the journal finds them with `StorageProvider::list_dir`. Real zeros
-mean `fdatasync` never has metadata to write, "empty" reliably means all
-zeros, and a file of the wrong size is itself a detectable fault. Log indexes
-are dense and slots fixed-size, so slot *i* sits at a computed offset and the
-slot table is a plain array.
+Each segment is one preallocated file named after its first index; the
+journal finds them with `StorageProvider::list_dir`. Writing every byte up
+front means `fdatasync` never has metadata to write, and a file of the wrong
+size is itself a detectable fault. Log indexes are dense and slots
+fixed-size, so slot *i* sits at a computed offset and the slot table is a
+plain array.
+
+The slot table is not left as zeros. Every slot is formatted with a
+**reserved record**: its own index, a reserved flag, and a CRC over the lot,
+TigerBeetle's reserved headers. "No entry here" is then a positive,
+checksummed statement, and a slot that comes back as zeros (a lost sector, a
+zero-filled EIO, a misdirected page of zeros) is damage like any other. A
+reserved record naming another index is a misdirected write. The CTRL paper's
+Figure 2 bug lives exactly in that gap: if zeros mean "never written", a
+synced identifier that comes back zeroed beside a damaged entry reads as the
+end of the log, and every acknowledged entry after it is silently cut.
 
 ## Appending
 
@@ -89,16 +99,17 @@ batch-start flag says) and rebuilds the slot from it.
 
 ## Recovering
 
-Opening walks every index. Entry *i*'s offset comes from its slot, or — when
-the slot is unusable — from the end of entry *i − 1*. Then:
+Opening walks every index. Entry *i*'s offset comes from its slot, or, when
+the slot is damaged, from the end of entry *i − 1*. Then:
 
-| Entry | Slot      | Action                                     |
-|-------|-----------|--------------------------------------------|
-| good  | valid     | keep                                       |
-| good  | empty/bad | keep, rewrite slot                         |
-| bad   | valid     | mark corrupt, report its identity upward   |
-| bad   | empty     | torn tail: truncate here                   |
-| bad   | bad       | double fault: refuse to start              |
+| Entry | Slot     | Action                                          |
+|-------|----------|-------------------------------------------------|
+| any   | reserved | the log ends here                               |
+| good  | valid    | keep                                            |
+| good  | bad      | keep, rewrite slot                              |
+| bad   | valid    | mark corrupt, report its identity upward        |
+| bad   | bad      | in the last batch: torn tail, the log ends here |
+| bad   | bad      | before it: double fault, refuse to start        |
 
 The first entry without an identifier ends the log; every earlier faulty
 entry that has one is corruption. The one exception is the paper's theorem,
@@ -132,10 +143,21 @@ happens next is the caller's choice, `JournalConfig::ambiguous_tail`:
 Because the journal tracks batches itself, a caller never has to encode batch
 numbers into its epochs to tell a torn batch from rot.
 
+The same reasoning settles the last row. A crash before the last batch's sync
+can tear an entry **and** its slot, since nothing orders the two writes. That
+is a torn tail, not a double fault, so inside the last batch a damaged
+identifier beside a damaged entry ends the log. Refusing to start there would
+brick a node over a batch nobody acknowledged. Before the last batch the same
+pair is a double fault, as the paper says: a later sync covered both copies.
+An index is in the last batch when no identifier further on starts a batch
+(identifiers past a reserved one are leftovers of a cut a crash interrupted,
+and prove nothing).
+
 An EIO is zero-filled into a checksum mismatch, as in the paper, so an
 unreadable entry is reported corrupt rather than stopping the journal. And
-recovery cleans up after itself like any truncation: the discarded slots and
-entry bytes are zeroed and synced before the first append.
+recovery cleans up after itself like any truncation: the discarded slots get
+their reserved records back and the discarded entries' blocks are zeroed,
+synced, before the first append.
 
 ## Replaying
 
@@ -178,11 +200,21 @@ as `None`), and reports `MetadataCorrupt` when no copy is valid.
 
 ## Truncating
 
-Suffix truncation zeroes the discarded slots, syncs, zeroes the discarded
-entries, and syncs again before returning. Slots go first so that a crash
-part-way leaves only entries without identifiers past the cut — kept as a
-prefix of the old log, or read as its end — never an old identifier beside a
-zeroed entry, which would look like corruption.
+Suffix truncation resets the discarded slots to their reserved records,
+syncs, zeroes the discarded entries' blocks, and syncs again before
+returning. Slots go first so that a crash part-way leaves a reserved slot
+past the cut, the end of the log, never an old identifier beside a zeroed
+entry, which would look like corruption.
+
+What it does **not** touch is the block the cut falls in. That block also
+holds the entries being kept, and rewriting it would hand them to the next
+crash, so the cut entries' bytes stay there, inert behind their reserved
+slots. They do sit exactly where a continuation of the last kept entry would.
+If the reserved slot after the cut were later damaged, the walk would look
+there and find an intact entry with the right index. So the truncation also
+marks the last kept slot **cut**, and the walk never takes anything after a
+cut entry for a continuation of its batch. Recovery does the same when it
+discards a torn tail.
 
 ## Two Fault Models
 
@@ -192,14 +224,19 @@ sector with its old contents or its new ones.
 The simulator can be harsher. Following FoundationDB's `AsyncFileNonDurable`,
 it can lose, garble, or shear a sector that was being rewritten, destroying
 bytes a sync had already made durable. A byte-contiguous log rewrites exactly
-such sectors on every append. This journal's appends do not (every batch
-starts on a fresh block), so an appending crash on that disk still leaves
-every acknowledged entry intact. Before fresh blocks, a crash that lost the
-sectors of a one-entry batch sharing a block with the batch before it took
-that earlier batch along, slots and all, and recovery read the whole log as
-a torn tail. Where the journal does still rewrite a block holding
-acknowledged entries, it does what the paper promises for any corruption: it
-reports the entry, or refuses to start, and never returns wrong data.
+such sectors on every append. This journal never rewrites a sector holding an
+acknowledged entry: appends start on fresh blocks, and truncation and
+recovery leave the block holding the cut alone. So on that disk too every
+acknowledged entry survives a crash. Before fresh blocks, a crash that lost
+the sectors of a one-entry batch sharing a block with the batch before it
+took that earlier batch along, slots and all, and recovery read the whole log
+as a torn tail.
+
+The slot table is the exception, by design: writing a new slot rewrites its
+block, which holds acknowledged identifiers too. A crash can lose those, and
+it costs nothing, because each sits beside an intact entry that rebuilds it.
+The harsher disk therefore earns the same promise as the paper's, and the
+crash loop holds it to that promise.
 
 ## Aiming Faults at the Layout
 
@@ -211,7 +248,7 @@ file and a byte range:
 | `JournalRegion` | What damage there makes recovery do |
 |----------|-------------------------------------|
 | `Header { segment, copy }` | repair it from its twin; both copies: `BadSegmentHeader` |
-| `Slot(id)` | rebuild it from an intact entry; beside a damaged entry: `DoubleFault` |
+| `Slot(id)` | rebuild it from an intact entry; beside a damaged entry: `DoubleFault`, or a torn tail in the last batch |
 | `Entry(id)` | report it corrupt, or ambiguous in the last batch |
 | `Meta { copy }` | repair it from the other copy; both: `MetadataCorrupt` |
 
@@ -245,9 +282,10 @@ the crash loop's `Aimed` model hands `Journal::atlas().layout()` to the disk as 
 `FaultFocus` (slots weighted 8, entries and twin copies 4, zeros 0.1), so
 the crash physics damage identifiers and live entries rather than the
 preallocated zeros. A crash can only damage the sectors dirty at that
-moment, so the gain is bounded, but it is real: on 250 seeds the damage
-reported against acknowledged data rose from 40 to 67, and refusals from 1
-to 4. The guarantee is unchanged: a read never returns wrong data.
+moment: the batch being written, and the slot-table blocks its slots share
+with acknowledged ones. Aimed, it hits those identifiers far more often. On
+120 seeds the acknowledged identifiers recovery had to rebuild rose from 276
+to 905, and the guarantee held throughout: nothing acknowledged was lost.
 
 ## The Example Simulation
 
@@ -339,8 +377,10 @@ acknowledged one or the one in flight. It runs under both fault models:
 - **the paper's**: every acknowledged entry survives, and none is ever
   reported corrupt or ambiguous. Nothing at all lands in `corrupt`: every
   torn entry is in the ambiguous last batch;
-- **the simulator's full physics**: a read never returns anything but what
-  was acknowledged — damage is always reported.
+- **the simulator's full physics** (crash-lost sectors up to 0.3, latent
+  faults up to 0.1, shorn writes up to 0.2, garbage fills): exactly the same
+  promise, and every boot opens. Lost acknowledged identifiers are rebuilt
+  from their entries.
 
 Removing the per-batch `fdatasync` turns the first loop red at its first
 seed; removing the post-recovery clean-up turns the torn-tail test red;

@@ -54,6 +54,15 @@ const FLAGS_AT: usize = 28;
 /// `fdatasync` made durable together.
 const FLAG_BATCH_START: u32 = 1;
 
+/// Flag, on a slot only: a reserved record, the formatted content of a slot
+/// that holds no entry. Its index is the slot's own, every other field zero.
+const FLAG_RESERVED: u32 = 1 << 2;
+
+/// Flag, on a slot only: the entries after this one were cut (by a suffix
+/// truncation, or by recovery discarding a torn tail), so no entry continues
+/// this one's batch. Whatever bytes follow it in its block are discarded.
+const FLAG_CUT: u32 = 1 << 3;
+
 const HEADER_MAGIC: u32 = u32::from_le_bytes(*b"MPJH");
 const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 /// Version 3 added the batch-start flag in the slot's and the entry's flags
@@ -62,7 +71,9 @@ const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 ///
 /// Version 4 starts every batch on a fresh block, and recovery rejects a
 /// batch start anywhere else: a version-3 segment, whose batches are packed
-/// back to back, is refused rather than misread.
+/// back to back, is refused rather than misread. It also formats every slot
+/// with a reserved record, so all zeros in a slot is damage, never "empty",
+/// where version 3 read zeros as never written.
 const FORMAT_VERSION: u32 = 4;
 
 /// Bytes of the header block covered by its CRC.
@@ -252,6 +263,9 @@ pub(crate) struct Slot {
     pub tag: Tag,
     /// The entry opened an append batch, repeated from the entry.
     pub batch_start: bool,
+    /// The entries after this one were cut: none continues its batch. In
+    /// the slot alone — the entry was written before the cut.
+    pub cut: bool,
 }
 
 impl Slot {
@@ -265,14 +279,17 @@ impl Slot {
     }
 }
 
-/// What a slot's 32 bytes turned out to hold.
+/// What a slot's bytes turned out to hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SlotState {
-    /// All zero: never written, or wiped.
-    Empty,
+    /// A reserved record naming the index it sits at: formatted and never
+    /// written since, or reset by a truncation. A positive statement that
+    /// no entry is here.
+    Reserved,
     /// Its CRC passes and it names the index it sits at.
     Valid(Slot),
-    /// Anything else: torn, rotted, or stale.
+    /// Anything else — torn, rotted, zeroed, stale, or a reserved record
+    /// naming another index (misdirected).
     Bad,
 }
 
@@ -294,19 +311,41 @@ impl Slot {
         out[16..20].copy_from_slice(&self.offset.to_le_bytes());
         out[20..24].copy_from_slice(&self.length.to_le_bytes());
         out[24..28].copy_from_slice(&self.entry_crc.to_le_bytes());
-        out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&flags(self.batch_start).to_le_bytes());
+        let cut = if self.cut { FLAG_CUT } else { 0 };
+        out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&(flags(self.batch_start) | cut).to_le_bytes());
         out[TAG_AT..TAG_AT + TAG_SIZE].copy_from_slice(&self.tag);
         let crc = crc32c::crc32c(&out[..SLOT_CRC_AT]);
         out[SLOT_CRC_AT..SLOT_SIZE].copy_from_slice(&crc.to_le_bytes());
     }
 
-    /// Classify the slot stored for `index`.
+    /// Encode the reserved record of the slot for `index` into `out`
+    /// (exactly [`SLOT_SIZE`] bytes): the index, the reserved flag, zeros,
+    /// and the CRC — `TigerBeetle`'s reserved header, whose op is its slot.
+    pub fn encode_reserved(index: u64, out: &mut [u8]) {
+        out.fill(0);
+        out[0..8].copy_from_slice(&index.to_le_bytes());
+        out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&FLAG_RESERVED.to_le_bytes());
+        let crc = crc32c::crc32c(&out[..SLOT_CRC_AT]);
+        out[SLOT_CRC_AT..SLOT_SIZE].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    /// Classify the slot stored for `index`. All zeros fails the CRC like
+    /// any other damage.
     pub fn decode(bytes: &[u8], index: u64) -> SlotState {
         if bytes.iter().all(|byte| *byte == 0) {
-            return SlotState::Empty;
+            return SlotState::Bad;
         }
         if crc32c::crc32c(&bytes[..SLOT_CRC_AT]) != u32_at(bytes, SLOT_CRC_AT) {
             return SlotState::Bad;
+        }
+        if u32_at(bytes, FLAGS_AT) & FLAG_RESERVED != 0 {
+            let mut expected = [0u8; SLOT_SIZE];
+            Self::encode_reserved(index, &mut expected);
+            return if bytes == expected {
+                SlotState::Reserved
+            } else {
+                SlotState::Bad
+            };
         }
         let slot = Self {
             index: u64_at(bytes, 0),
@@ -316,6 +355,7 @@ impl Slot {
             entry_crc: u32_at(bytes, 24),
             tag: tag_at(bytes),
             batch_start: u32_at(bytes, FLAGS_AT) & FLAG_BATCH_START != 0,
+            cut: u32_at(bytes, FLAGS_AT) & FLAG_CUT != 0,
         };
         if slot.index == index {
             SlotState::Valid(slot)
@@ -426,12 +466,17 @@ mod tests {
             entry_crc: 0xDEAD_BEEF,
             tag: [0xA5; TAG_SIZE],
             batch_start: true,
+            cut: true,
         };
         let mut bytes = [0u8; SLOT_SIZE];
         slot.encode(&mut bytes);
         assert_eq!(Slot::decode(&bytes, 7), SlotState::Valid(slot));
         assert_eq!(Slot::decode(&bytes, 8), SlotState::Bad);
-        assert_eq!(Slot::decode(&[0; SLOT_SIZE], 7), SlotState::Empty);
+        assert_eq!(
+            Slot::decode(&[0; SLOT_SIZE], 7),
+            SlotState::Bad,
+            "zeros are damage"
+        );
         bytes[3] ^= 1;
         assert_eq!(Slot::decode(&bytes, 7), SlotState::Bad);
         bytes[3] ^= 1;
@@ -441,6 +486,20 @@ mod tests {
             SlotState::Bad,
             "the CRC covers the tag"
         );
+    }
+
+    #[test]
+    fn a_reserved_record_names_its_own_slot() {
+        let mut bytes = [0u8; SLOT_SIZE];
+        Slot::encode_reserved(7, &mut bytes);
+        assert_eq!(Slot::decode(&bytes, 7), SlotState::Reserved);
+        assert_eq!(
+            Slot::decode(&bytes, 8),
+            SlotState::Bad,
+            "a reserved record in another slot is misdirected"
+        );
+        bytes[1] ^= 1;
+        assert_eq!(Slot::decode(&bytes, 7), SlotState::Bad);
     }
 
     #[test]

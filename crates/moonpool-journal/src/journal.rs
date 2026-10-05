@@ -126,7 +126,9 @@ pub struct Recovery {
     pub ambiguous_batch: Vec<EntryId>,
     /// Slots of intact entries that were missing or damaged and rewritten.
     pub slots_rewritten: usize,
-    /// Something past the end of the log was discarded and zeroed.
+    /// Something past the end of the log was discarded: a torn identifier
+    /// in the last batch ended the log, or slots or entry blocks past the
+    /// end were reset.
     pub torn_tail: bool,
     /// Segment header copies that were damaged and rewritten from their twin.
     pub headers_repaired: usize,
@@ -576,12 +578,14 @@ impl<P: StorageProvider> Journal<P> {
     /// Discard every entry at `from` and after (Raft suffix truncation).
     ///
     /// Segments wholly past the cut are deleted, newest first. In the segment
-    /// the cut falls in, the discarded slots are zeroed and synced, then the
-    /// discarded entries are zeroed and synced — the clean-up that must
-    /// precede the next append, or a crash could leave an old slot beside a
-    /// new entry and make a harmless crash look like corruption. A crash
-    /// part-way leaves a log that ends somewhere between `from` and the old
-    /// end: never a gap, never a corrupt entry.
+    /// the cut falls in, the discarded slots are reset to their reserved
+    /// records and synced, then the discarded entries' blocks are zeroed and
+    /// synced — the clean-up that must precede the next append, or a crash
+    /// could leave an old slot beside a new entry and make a harmless crash
+    /// look like corruption. The block holding the cut keeps its kept
+    /// entries and is never rewritten. A crash part-way leaves a log that
+    /// ends somewhere between `from` and the old end: never a gap, never a
+    /// corrupt entry.
     ///
     /// # Errors
     ///

@@ -1097,6 +1097,146 @@ fn a_crash_during_an_append_cannot_reach_the_batch_before_it() {
     });
 }
 
+/// Where the slot of entry `index` of the closed journal lives.
+async fn slot_at(sim: &mut SimWorld, index: u64) -> u64 {
+    run(sim, |provider| async move {
+        JournalAtlas::scan(&provider, DIR, small().geometry).await
+    })
+    .await
+    .expect("scan")
+    .slot(index)
+    .expect("a live slot")
+    .layout
+    .bytes
+    .start
+}
+
+/// Every slot is formatted with a reserved record naming its own index, so
+/// a synced slot that comes back zeroed is damage, never "nothing here".
+/// Beside an intact entry it is rebuilt and nothing is cut; beside a damaged
+/// entry before the last batch it is a double fault — where reading zeros
+/// as "never written" would silently end the log there and drop every
+/// acknowledged entry after it.
+#[test]
+fn a_zeroed_slot_is_damage_never_the_end_of_the_log() {
+    runtime().block_on(async {
+        let mut sim = sim(22);
+        five_entries(&mut sim).await;
+        let at = slot_at(&mut sim, 2).await;
+        zero(&mut sim, segment_path(1), at, 64).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(recovery.slots_rewritten, 1);
+        assert!(!recovery.torn_tail);
+        assert_eq!(journal.next_index(), 6, "nothing is cut");
+        drop(journal);
+
+        let mut sim = self::sim(23);
+        five_entries(&mut sim).await;
+        let slot = slot_at(&mut sim, 2).await;
+        let entry = payload_byte(&mut sim, 2).await;
+        zero(&mut sim, segment_path(1), slot, 64).await;
+        flip(&mut sim, segment_path(1), entry).await;
+        let opened = reopen(&mut sim)
+            .await
+            .map(|(journal, _)| journal.next_index());
+        assert!(
+            matches!(opened, Err(JournalError::DoubleFault { index: 2 })),
+            "{opened:?}"
+        );
+    });
+}
+
+/// The last batch's entries and slots reach the disk through two unordered
+/// writes and one sync, so a crash before that sync can damage both copies
+/// of one identity. There that is a torn tail, not a double fault: the log
+/// ends at the damage, everything before it intact, and the node boots.
+#[test]
+fn a_torn_identifier_in_the_last_batch_ends_the_log() {
+    runtime().block_on(async {
+        let mut sim = sim(24);
+        two_batches_then_three(&mut sim).await;
+        let slot = slot_at(&mut sim, 3).await;
+        let entry = payload_byte(&mut sim, 3).await;
+        flip(&mut sim, segment_path(1), slot + 9).await;
+        flip(&mut sim, segment_path(1), entry).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("a torn last batch opens");
+        assert!(recovery.torn_tail);
+        assert!(recovery.corrupt.is_empty() && recovery.ambiguous_batch.is_empty());
+        assert_eq!(journal.next_index(), 3, "the last batch is gone");
+        run(&mut sim, |_| async move {
+            for index in 1..=2 {
+                let read = journal.read(index).await.expect("before it, intact");
+                assert_eq!(read.payload, payload(index, 64));
+            }
+        })
+        .await;
+    });
+}
+
+/// A suffix cut in the middle of a block leaves that block alone — it holds
+/// kept entries — and the discarded entries in it stay discarded: their
+/// slots hold reserved records, and the walk never looks behind one.
+#[test]
+fn a_suffix_cut_mid_block_never_brings_the_cut_entries_back() {
+    runtime().block_on(async {
+        let mut sim = sim(25);
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider, small()).await?;
+            let bytes: Vec<Vec<u8>> = (1..=5).map(|index| payload(index, 64)).collect();
+            let records: Vec<Record<'_>> = bytes
+                .iter()
+                .zip(1..)
+                .map(|(payload, index)| Record::new(7, payload).with_tag(tag(index, 7)))
+                .collect();
+            journal.append(&records).await?;
+            journal.truncate_suffix(3).await
+        })
+        .await
+        .expect("write and cut");
+        for _ in 0..2 {
+            let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+            assert_eq!(recovery, Recovery::default());
+            assert_eq!(journal.next_index(), 3);
+        }
+        let (mut journal, _) = reopen(&mut sim).await.expect("reopen");
+        run(&mut sim, |_| async move {
+            append_each(&mut journal, 8, &[64]).await.expect("append");
+        })
+        .await;
+        let (journal, _) = reopen(&mut sim).await.expect("reopen");
+        assert_eq!(journal.next_index(), 4);
+        assert_eq!(journal.epoch(3), Some(8), "the new entry, not the cut one");
+    });
+}
+
+/// The cut entries sit right where a continuation of the last kept entry
+/// would, so the walk must not take them for one even when the reserved
+/// slot after the cut is damaged: the last kept slot records the cut, and
+/// the damaged identifier then ends the log as a torn tail.
+#[test]
+fn a_damaged_slot_past_a_cut_does_not_bring_the_cut_entry_back() {
+    runtime().block_on(async {
+        let mut sim = sim(26);
+        run(&mut sim, |provider| async move {
+            let (mut journal, _) = open(provider, small()).await?;
+            let bytes: Vec<Vec<u8>> = (1..=5).map(|index| payload(index, 64)).collect();
+            let records: Vec<Record<'_>> = bytes
+                .iter()
+                .zip(1..)
+                .map(|(payload, index)| Record::new(7, payload).with_tag(tag(index, 7)))
+                .collect();
+            journal.append(&records).await?;
+            journal.truncate_suffix(3).await
+        })
+        .await
+        .expect("write and cut");
+        flip(&mut sim, segment_path(1), slot_offset(3) + 9).await;
+        let (journal, recovery) = reopen(&mut sim).await.expect("reopen");
+        assert!(recovery.torn_tail);
+        assert_eq!(journal.next_index(), 3, "entry 3 stays cut");
+    });
+}
+
 /// EIO is zero-filled into a checksum mismatch, as CLSTORE does: the entries
 /// in the unreadable block are corrupt, not an error that stops the journal.
 #[test]
@@ -1170,7 +1310,9 @@ enum Model {
     /// Moonpool's full physics on top: sectors lost to garbage, latent read
     /// faults, shorn sectors. These can destroy bytes a sync already made
     /// durable when their sector is rewritten, which the paper's model rules
-    /// out — so the guarantee is detection: a read never returns wrong data.
+    /// out. The journal never rewrites a sector holding an acknowledged
+    /// entry, so the guarantee is the paper's all the same; only
+    /// acknowledged identifiers can be lost, and they are rebuilt.
     Harsh,
     /// The full physics again, aimed: after every write the writer hands
     /// the journal's [`JournalAtlas`] to the disk as a [`FaultFocus`], so the
@@ -1249,10 +1391,10 @@ struct Tally {
     /// case a last-entry-only rule would misreport as corruption.
     ambiguous_multi: usize,
     ambiguous_kept: usize,
-    ambiguous_acked: usize,
     corrupt_unacked: usize,
-    refused: usize,
-    corrupt_acked: usize,
+    /// Identifiers rebuilt from their intact entries, all recoveries
+    /// together.
+    slots_rewritten: usize,
     meta_repaired: usize,
     /// Metadata saves that failed and were retried with a newer value.
     meta_retried: usize,
@@ -1291,42 +1433,49 @@ fn under_the_papers_fault_model_no_acknowledged_entry_is_lost_or_corrupt() {
         "no failed metadata save was ever retried"
     );
     assert_eq!(
-        tally.refused + tally.corrupt_acked + tally.corrupt_unacked + tally.ambiguous_acked,
-        0,
+        tally.corrupt_unacked, 0,
         "under the paper's model, damage is only ever the unsynced last batch"
     );
 }
 
+/// The full physics (crash-lost sectors up to 0.3, latent faults up to 0.1,
+/// shorn writes up to 0.2, garbage fills) and the paper's promise all the
+/// same: every acknowledged entry survives, none is reported corrupt or
+/// ambiguous, and every boot opens. A torn last batch, entries and
+/// identifiers alike, ends the log.
 #[test]
-fn under_moonpools_full_physics_a_read_never_returns_wrong_data() {
+fn under_moonpools_full_physics_no_acknowledged_entry_is_lost_or_corrupt() {
     let mut tally = Tally::default();
     for seed in seeds(250) {
         crash_loop(seed, Model::Harsh, &mut tally);
     }
     eprintln!("harsh model: {tally:?}");
     assert!(tally.torn > 0, "no crash ever tore a tail");
+    assert!(
+        tally.slots_rewritten > 0,
+        "no crash ever cost an acknowledged slot"
+    );
 }
 
 /// The same physics aimed by the atlas: the guarantee holds, and more of
-/// the damage lands on what was acknowledged. A crash can only damage the
-/// sectors dirty at that moment, so the focus re-weighs a small set. On 250
-/// seeds it raised the damage to acknowledged data from 40 to 67 reports
-/// (refusals 1 to 4, acknowledged ambiguous entries 15 to 36); the default
-/// 120 seeds, kept small because the test runs both models, give 15 to 26.
+/// the damage lands on identifiers. A crash can only damage the sectors
+/// dirty at that moment — the batch being written, and the slot-table
+/// blocks its slots share with acknowledged ones — so the focus re-weighs a
+/// small set, and the acknowledged identifiers it costs are rebuilt from
+/// their entries.
 #[test]
-fn aimed_by_the_atlas_the_physics_damage_acknowledged_entries_more_often() {
+fn aimed_by_the_atlas_the_physics_cost_more_identifiers() {
     let (mut uniform, mut aimed) = (Tally::default(), Tally::default());
     for seed in seeds(120) {
         crash_loop(seed, Model::Harsh, &mut uniform);
         crash_loop(seed, Model::Aimed, &mut aimed);
     }
     eprintln!("uniform: {uniform:?}\naimed: {aimed:?}");
-    let hurt = |t: &Tally| t.corrupt_acked + t.ambiguous_acked + t.refused;
     assert!(
-        hurt(&aimed) > hurt(&uniform),
-        "aiming should raise the damage to acknowledged data: {} vs {}",
-        hurt(&aimed),
-        hurt(&uniform)
+        aimed.slots_rewritten > uniform.slots_rewritten,
+        "aiming should raise the identifiers recovery rebuilds: {} vs {}",
+        aimed.slots_rewritten,
+        uniform.slots_rewritten
     );
 }
 
@@ -1347,7 +1496,6 @@ fn crash_loop(seed: u64, model: Model, tally: &mut Tally) {
                 ledger: &ledger,
                 meta: &meta,
                 config: &config,
-                model,
                 at: &at,
             };
             if !recover_and_check(&mut sim, &check, tally).await {
@@ -1394,7 +1542,6 @@ struct Check<'a> {
     ledger: &'a Ledger,
     meta: &'a MetaLedger,
     config: &'a JournalConfig,
-    model: Model,
     at: &'a str,
 }
 
@@ -1403,7 +1550,7 @@ struct Check<'a> {
 /// was never committed, so the log is cut before the first unreadable entry.
 /// Returns whether the seed can go on.
 async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Tally) -> bool {
-    let (model, at) = (check.model, check.at);
+    let at = check.at;
     let acked = check.ledger.lock().expect("ledger").clone();
     let acked_end = acked.last().map_or(1, |(index, _, _)| index + 1);
     let mut outcome = Err(JournalError::Poisoned);
@@ -1418,19 +1565,16 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
     }
     let (recovery, entries, meta) = match outcome {
         Ok(found) => found,
-        Err(error) => {
-            assert!(
-                model.harsh(),
-                "{at}: the paper's model must always recover, got {error}"
-            );
-            tally.refused += 1;
-            return false;
-        }
+        // Nothing a crash does to the sectors being written may stop the
+        // journal from opening, under any model: the damage is only ever
+        // the unsynced last batch, and that ends the log.
+        Err(error) => panic!("{at}: a crash must never stop the journal opening: {error}"),
     };
     judge_reports(check, &recovery, acked_end, tally);
     // Whatever a read returned for an acknowledged index is exactly what was
-    // acknowledged; under the paper's model, every acknowledged index is
-    // still there.
+    // acknowledged, and every acknowledged index is still there — under the
+    // full physics too: no write rewrites a sector holding an acknowledged
+    // entry, so no crash can reach one.
     for (entry, (index, epoch, payload)) in entries.iter().zip(&acked) {
         assert_eq!(
             (entry.index, entry.epoch, &entry.tag, &entry.payload),
@@ -1438,14 +1582,12 @@ async fn recover_and_check(sim: &mut SimWorld, check: &Check<'_>, tally: &mut Ta
             "{at}: a read returned something other than what was acknowledged"
         );
     }
-    if model == Model::Paper {
-        assert!(
-            entries.len() >= acked.len(),
-            "{at}: lost acknowledged entries ({} < {})",
-            entries.len(),
-            acked.len()
-        );
-    }
+    assert!(
+        entries.len() >= acked.len(),
+        "{at}: lost acknowledged entries ({} < {})",
+        entries.len(),
+        acked.len()
+    );
     *check.ledger.lock().expect("ledger") = entries
         .into_iter()
         .map(|entry| (entry.index, entry.epoch, entry.payload))
@@ -1506,13 +1648,14 @@ async fn recover_once(
 
 /// Judge what the recovery reported against the ledger, and tally it.
 fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: &mut Tally) {
-    let (model, at) = (check.model, check.at);
+    let at = check.at;
     tally.torn += usize::from(recovery.torn_tail);
     let ambiguous = !recovery.ambiguous_batch.is_empty();
     tally.ambiguous += usize::from(ambiguous);
     tally.ambiguous_entries += recovery.ambiguous_batch.len();
     tally.ambiguous_multi += usize::from(recovery.ambiguous_batch.len() > 1);
     tally.meta_repaired += usize::from(recovery.meta_repaired);
+    tally.slots_rewritten += recovery.slots_rewritten;
     if check.config.ambiguous_tail == AmbiguousTail::Keep {
         tally.ambiguous_kept += usize::from(ambiguous);
     }
@@ -1524,28 +1667,21 @@ fn judge_reports(check: &Check<'_>, recovery: &Recovery, acked_end: u64, tally: 
         );
     }
     for id in &recovery.ambiguous_batch {
-        // Ambiguous is not a license to lose data: under the paper's model
-        // only a batch whose sync never returned can be damaged.
-        if id.index < acked_end {
-            assert!(
-                model.harsh(),
-                "{at}: acknowledged entry {} reported ambiguous: {recovery:?}",
-                id.index
-            );
-            tally.ambiguous_acked += 1;
-        }
+        // Ambiguous is not a license to lose data: only a batch whose sync
+        // never returned can be damaged.
+        assert!(
+            id.index >= acked_end,
+            "{at}: acknowledged entry {} reported ambiguous: {recovery:?}",
+            id.index
+        );
     }
     for id in &recovery.corrupt {
-        if id.index >= acked_end {
-            tally.corrupt_unacked += 1;
-        } else {
-            assert!(
-                model.harsh(),
-                "{at}: acknowledged entry {} reported corrupt: {recovery:?}",
-                id.index
-            );
-            tally.corrupt_acked += 1;
-        }
+        assert!(
+            id.index >= acked_end,
+            "{at}: acknowledged entry {} reported corrupt: {recovery:?}",
+            id.index
+        );
+        tally.corrupt_unacked += 1;
     }
 }
 
