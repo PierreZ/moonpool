@@ -997,7 +997,7 @@ example:
   integration and recovery coverage.
 - `crates/moonpool-sim-examples/src/journal.rs`: a storage engine
   (`moonpool-journal`) crashed by attrition, with a ledger of acknowledged
-  entries kept in the `StateHandle` across reboots.
+  writes kept in the `StateHandle` across reboots.
 - `crates/moonpool-sim-examples/src/dungeon.rs`: fixed-draw operation swarming,
   compound guidance, and quality watermarks.
 - `crates/moonpool-sim/tests/chaos/swarm.rs`: layering

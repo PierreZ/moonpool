@@ -1,8 +1,8 @@
 //! Binary target for the crash-aware journal simulation.
 //!
-//! One node owns a `moonpool-journal` write-ahead log and is crashed over and
+//! One node owns a `moonpool-journal` CLSTORE journal and is crashed over and
 //! over by attrition, on a disk running `Chaos::Storage(Random)`; every boot
-//! recovers the journal and checks that no acknowledged entry was lost,
+//! recovers the journal and checks that no acknowledged write was lost,
 //! changed, or mistaken for corruption.
 
 use std::time::Duration;

@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "A write-ahead journal over moonpool's BlockFile that tells crashes apart from corruption (CLSTORE layout)"
+description = "A CLSTORE journal over moonpool's storage providers: positions in any order, crash vs. corruption, identified damage"
 documentation = "https://docs.rs/moonpool-journal"
 readme = "README.md"
 keywords.workspace = true
@@ -18,7 +18,6 @@ categories.workspace = true
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
 crc32c = "0.6"
 thiserror = "2.0"
-tracing = "0.1"
 
 [dev-dependencies]
 # The example runs the journal on the real filesystem.
