@@ -136,11 +136,6 @@ pub struct Recovery {
     /// the other, and was rewritten from the newest valid one — so a later
     /// fault in either copy can never roll the metadata back.
     pub meta_repaired: bool,
-    /// The newest intact checkpoint batch ([`Journal::append_checkpoint`]),
-    /// if any: where a replay starts. A caller replays
-    /// `checkpoint.start..next_index()` and prepends nothing. A checkpoint
-    /// with a damaged entry is passed over for the one before it.
-    pub checkpoint: Option<Range<u64>>,
 }
 
 /// A write-ahead journal over moonpool's [`BlockFile`](moonpool_core::BlockFile).
@@ -386,7 +381,6 @@ impl<P: StorageProvider> Journal<P> {
             }
             recovery.ambiguous_batch = ambiguous;
         }
-        recovery.checkpoint = journal.checkpoint();
         for id in &recovery.corrupt {
             tracing::warn!(index = id.index, epoch = id.epoch, "journal entry corrupt");
         }
@@ -611,9 +605,7 @@ impl<P: StorageProvider> Journal<P> {
             let outcome = if fit == 0 {
                 self.rollover().await
             } else {
-                self.tail_mut()
-                    .append(&records[done..done + fit], false)
-                    .await
+                self.tail_mut().append(&records[done..done + fit]).await
             };
             self.poison_on_err(outcome)?;
             done += fit;
@@ -641,93 +633,6 @@ impl<P: StorageProvider> Journal<P> {
                     })
             })
             .collect()
-    }
-
-    /// Append `records` as one batch flagged as a checkpoint: once durable it
-    /// supersedes every entry before it. Returns the indexes they got.
-    ///
-    /// A checkpoint is the caller's state re-emitted, so that a replay can
-    /// start from it: [`checkpoint`](Self::checkpoint) and
-    /// [`Recovery::checkpoint`] name the newest intact one, and the caller
-    /// replays `checkpoint.start..next_index()`. Dropping the history before
-    /// it stays the caller's [`truncate_prefix`](Self::truncate_prefix)
-    /// (`checkpoint.start`), so a crash between the two is harmless: the old
-    /// history is still there. When to checkpoint is the caller's call too.
-    ///
-    /// The batch is never split: if the current segment cannot hold all of
-    /// it, the journal rolls over first, so a checkpoint is always one batch
-    /// with one sync. Its first entry and slot record its entry count, so a
-    /// checkpoint cut short — by a crash before its sync, or by a suffix
-    /// truncation — is never taken for a complete one. A crash leaves it the
-    /// log's last batch, handled like any other (its damaged entries
-    /// truncated or kept per [`JournalConfig::ambiguous_tail`], a torn end
-    /// ending the log); whatever survives of it stays in the log, never
-    /// named, and a replay from the named checkpoint skips it as the caller
-    /// sees fit (the caller knows its image records).
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::CheckpointTooLarge`] when an empty segment could not
-    /// hold it, and with no records at all; [`JournalError::EntryTooLarge`]
-    /// (nothing is written in either case), [`JournalError::Poisoned`], and
-    /// any I/O error, which poisons.
-    #[instrument(skip_all, fields(dir = %self.dir, count = records.len()))]
-    pub async fn append_checkpoint(
-        &mut self,
-        records: &[Record<'_>],
-    ) -> Result<Range<u64>, JournalError> {
-        self.check_writable()?;
-        let sizes = self.sizes(records)?;
-        let bytes: u64 = sizes.iter().sum();
-        let geometry = self.config.geometry;
-        if records.is_empty()
-            || u64::try_from(records.len()).map_or(true, |n| n > u64::from(geometry.slot_count))
-            || bytes > geometry.data_capacity()
-        {
-            return Err(JournalError::CheckpointTooLarge {
-                entries: records.len(),
-                bytes,
-            });
-        }
-        if self.tail().fitting(&sizes) < records.len() {
-            let outcome = self.rollover().await;
-            self.poison_on_err(outcome)?;
-        }
-        let first = self.next_index();
-        let outcome = self.tail_mut().append(records, true).await;
-        self.poison_on_err(outcome)?;
-        Ok(first..self.next_index())
-    }
-
-    /// The newest intact checkpoint batch: every entry
-    /// [`append_checkpoint`](Self::append_checkpoint) wrote for it is in the
-    /// log and none is damaged. A damaged one, or one cut short, is passed
-    /// over for the one before it. `None` when there is none.
-    #[must_use]
-    pub fn checkpoint(&self) -> Option<Range<u64>> {
-        for segment in self.segments.iter().rev() {
-            let recs = segment.records();
-            for (at, rec) in recs.iter().enumerate().rev() {
-                let Some(count) = rec.slot.checkpoint else {
-                    continue;
-                };
-                let Some(batch) = usize::try_from(count)
-                    .ok()
-                    .and_then(|count| recs.get(at..at.checked_add(count)?))
-                else {
-                    continue;
-                };
-                let whole = batch
-                    .iter()
-                    .skip(1)
-                    .all(|rec| !rec.slot.batch_start && !rec.corrupt);
-                if !rec.corrupt && whole {
-                    let start = rec.slot.index;
-                    return Some(start..start + u64::from(count));
-                }
-            }
-        }
-        None
     }
 
     /// Start a new segment at the next index. Every batch in the current one

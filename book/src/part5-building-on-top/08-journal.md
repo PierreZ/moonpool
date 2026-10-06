@@ -177,46 +177,6 @@ range comes back in large sequential reads instead of one read per entry,
 with exactly `read`'s checks; a corrupt entry is returned in place as
 `Err(EntryId)` and the replay goes on.
 
-## Checkpoints
-
-A caller that journals operations and folds them at boot (a Paxos acceptor
-replaying its accepts, latest wins) has to compact: re-emit the folded state,
-then drop the history it supersedes. Done by hand, every rule of that dance is
-a rule about **batches**. Where does the image start and end? Is the last one
-whole, or did a crash cut it? Which intact image is newest? The journal
-already knows its batches, so it owns the dance.
-
-`Journal::append_checkpoint(&records)` appends the state as one batch flagged
-as a checkpoint. It is never split: if the current segment cannot hold it,
-the journal rolls over first, so a checkpoint is always one batch and one
-sync. Its first entry and slot also record **how many entries** it has, and
-that number is what keeps a cut checkpoint honest. A crash before the sync
-can land the first few entries and their slots and lose the rest to reserved
-slots, leaving a shorter run of entries that all verify. Without the count,
-that fragment would pass for a complete, smaller image.
-
-`Recovery::checkpoint` (and `Journal::checkpoint`, at any time) names the
-newest checkpoint whose every entry is in the log and intact. A damaged one is
-reported in `corrupt` like any damaged batch and passed over for the one
-before it, and a cut one is passed over too. A crash leaves a cut checkpoint
-as the log's last batch, handled like any other. The caller replays from the
-named one:
-
-```rust,ignore
-let (journal, recovery) = Journal::open(provider, "wal", config).await?;
-let from = recovery.checkpoint.map_or(journal.start_index(), |c| c.start);
-for entry in journal.read_range(from..journal.next_index()).await? {
-    fold(entry?);
-}
-```
-
-Dropping the history stays the caller's `truncate_prefix(checkpoint.start)`,
-so a crash between the checkpoint and the drop is harmless: the old history
-is still there, and a damaged newest checkpoint falls back to the one before
-it, or to the whole history. When to checkpoint (every so many entries, or
-when the history grows past some multiple of the image) is the caller's call
-too.
-
 ## Metadata
 
 Term/vote-style metadata (`save_meta`, `meta`) lives beside the segments in
@@ -472,13 +432,9 @@ log twice — one `read` per index and one `read_range` — and the two must
 agree; every corrupt entry must be reported with the tag it was written
 with; half the seeds keep the ambiguous last batch instead of truncating
 it; and the writer saves metadata, whose reopened value must be the last
-acknowledged one or the one in flight. A third of the seeds checkpoint: the
-writer folds its records into a state, re-emits it with `append_checkpoint`,
-and drops its prefix only behind the newest checkpoint, and every recovery
-checks that replaying from `Recovery::checkpoint` gives exactly the state the
-whole history gives, and that once the prefix is gone a checkpoint is always
-there. Accepting a checkpoint cut short, ignoring its count, turns that red.
-It runs under both fault models:
+acknowledged one or the one in flight. The writer also truncates its prefix,
+so a crash can land between a truncation's unlinks. It runs under both fault
+models:
 
 - **the paper's**: every acknowledged entry survives, and none is ever
   reported corrupt or ambiguous. Nothing at all lands in `corrupt`: every

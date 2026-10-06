@@ -46,9 +46,9 @@
 //! 16  u32 offset               8  u64 index
 //! 20  u32 length              16  u64 epoch
 //! 24  u32 entry_crc           24  u32 crc  (header+payload)
-//! 28  u32 flags               28  u32 flags (batch start, checkpoint)
+//! 28  u32 flags               28  u32 flags (batch start)
 //! 32  tag (24 B)              32  tag (24 B)
-//! 56  u32 checkpoint count    56  u32 checkpoint count, u32 reserved
+//! 56  u32 reserved            56  u64 reserved
 //! 60  u32 slot_crc (0–59)     64  …   payload
 //! ```
 //!
@@ -180,22 +180,6 @@
 //! [`JournalError::SegmentGap`], never a truncation. A sealed segment must
 //! reach the next one's first index exactly, and the walk's bound comes
 //! from the slot table, with the next segment's name only a cross-check.
-//!
-//! # Checkpoints
-//!
-//! A journal of operations folded at boot needs compaction: re-emit the
-//! folded state, then drop the history before it.
-//! [`Journal::append_checkpoint`] appends the state as one batch flagged as a
-//! checkpoint, in one segment and one sync (it rolls over first rather than
-//! split it), and its first entry and slot record its entry count.
-//! [`Journal::checkpoint`] and [`Recovery::checkpoint`] name the newest
-//! checkpoint whose every entry is in the log and intact: one with a damaged
-//! entry, or one cut short (by a crash before its sync, or by a suffix
-//! truncation), is passed over for the one before it, and a cut one is
-//! otherwise an ordinary last batch. A caller replays
-//! `checkpoint.start..next_index()`; dropping the history stays its
-//! [`Journal::truncate_prefix`], so a crash between the checkpoint and the
-//! drop costs nothing. When to checkpoint is the caller's call.
 //!
 //! The caller's term/vote metadata lives in its own file, in two copies
 //! (`meta.0`, `meta.1`), each with a generation counter and a CRC, each

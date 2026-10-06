@@ -54,16 +54,6 @@ const FLAGS_AT: usize = 28;
 /// `fdatasync` made durable together.
 const FLAG_BATCH_START: u32 = 1;
 
-/// Flag, beside the batch start: this batch is a checkpoint, which once
-/// durable supersedes every entry before it. The field at [`COUNT_AT`] then
-/// holds how many entries the batch has, so a checkpoint a crash cut short
-/// can never pass for a complete one.
-const FLAG_CHECKPOINT: u32 = 1 << 1;
-
-/// Where a checkpoint's entry count sits, in a slot and in an entry header
-/// (the first four bytes of their reserved field).
-const COUNT_AT: usize = 56;
-
 /// Flag, on a slot only: a reserved record, the formatted content of a slot
 /// that holds no entry. Its index is the slot's own, every other field zero.
 const FLAG_RESERVED: u32 = 1 << 2;
@@ -83,9 +73,15 @@ const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 /// batch start anywhere else: a version-3 segment, whose batches are packed
 /// back to back, is refused rather than misread. It also formats every slot
 /// with a reserved record, so all zeros in a slot is damage, never "empty",
-/// where version 3 read zeros as never written; and marks a checkpoint
-/// batch, with its entry count, in its first entry and slot.
-const FORMAT_VERSION: u32 = 4;
+/// where version 3 read zeros as never written.
+///
+/// Version 5 removes the checkpoint batch: version 4's checkpoint flag
+/// (bit 1 of the flags word) and its entry count (bytes 56..60 of a slot
+/// and of an entry header) are reserved again: written as zero and, like
+/// every other reserved bit, never interpreted (the CRC covers them). The
+/// version, not those bits, is what refuses a version-4 segment, rather
+/// than read it with its checkpoints silently dropped.
+const FORMAT_VERSION: u32 = 5;
 
 /// Bytes of the header block covered by its CRC.
 const HEADER_LEN: usize = 24;
@@ -196,16 +192,6 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8-byte field"))
 }
 
-fn flags(batch_start: bool, checkpoint: Option<u32>) -> u32 {
-    let start = if batch_start { FLAG_BATCH_START } else { 0 };
-    start | checkpoint.map_or(0, |_| FLAG_CHECKPOINT)
-}
-
-/// The checkpoint entry count the flags and count field record, if any.
-fn checkpoint_at(bytes: &[u8]) -> Option<u32> {
-    (u32_at(bytes, FLAGS_AT) & FLAG_CHECKPOINT != 0).then(|| u32_at(bytes, COUNT_AT))
-}
-
 fn tag_at(bytes: &[u8]) -> Tag {
     bytes[TAG_AT..TAG_AT + TAG_SIZE]
         .try_into()
@@ -283,9 +269,6 @@ pub(crate) struct Slot {
     /// The entries after this one were cut: none continues its batch. In
     /// the slot alone — the entry was written before the cut.
     pub cut: bool,
-    /// This entry opens a checkpoint batch of this many entries, repeated
-    /// from the entry.
-    pub checkpoint: Option<u32>,
 }
 
 impl Slot {
@@ -331,11 +314,15 @@ impl Slot {
         out[16..20].copy_from_slice(&self.offset.to_le_bytes());
         out[20..24].copy_from_slice(&self.length.to_le_bytes());
         out[24..28].copy_from_slice(&self.entry_crc.to_le_bytes());
+        let start = if self.batch_start {
+            FLAG_BATCH_START
+        } else {
+            0
+        };
         let cut = if self.cut { FLAG_CUT } else { 0 };
-        let flags = flags(self.batch_start, self.checkpoint) | cut;
+        let flags = start | cut;
         out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&flags.to_le_bytes());
         out[TAG_AT..TAG_AT + TAG_SIZE].copy_from_slice(&self.tag);
-        out[COUNT_AT..COUNT_AT + 4].copy_from_slice(&self.checkpoint.unwrap_or(0).to_le_bytes());
         let crc = crc32c::crc32c(&out[..SLOT_CRC_AT]);
         out[SLOT_CRC_AT..SLOT_SIZE].copy_from_slice(&crc.to_le_bytes());
     }
@@ -378,7 +365,6 @@ impl Slot {
             tag: tag_at(bytes),
             batch_start: u32_at(bytes, FLAGS_AT) & FLAG_BATCH_START != 0,
             cut: u32_at(bytes, FLAGS_AT) & FLAG_CUT != 0,
-            checkpoint: checkpoint_at(bytes),
         };
         if slot.index == index {
             SlotState::Valid(slot)
@@ -397,7 +383,6 @@ pub(crate) struct EntryHeader {
     pub crc: u32,
     pub tag: Tag,
     pub batch_start: bool,
-    pub checkpoint: Option<u32>,
 }
 
 impl EntryHeader {
@@ -413,7 +398,6 @@ impl EntryHeader {
             crc: u32_at(bytes, 24),
             tag: tag_at(bytes),
             batch_start: u32_at(bytes, FLAGS_AT) & FLAG_BATCH_START != 0,
-            checkpoint: checkpoint_at(bytes),
         })
     }
 }
@@ -437,7 +421,7 @@ pub(crate) fn encode_entry(
     index: u64,
     epoch: u64,
     tag: &Tag,
-    (batch_start, checkpoint): (bool, Option<u32>),
+    batch_start: bool,
     payload: &[u8],
     out: &mut [u8],
 ) -> u32 {
@@ -447,10 +431,9 @@ pub(crate) fn encode_entry(
     out[4..8].copy_from_slice(&length.to_le_bytes());
     out[8..16].copy_from_slice(&index.to_le_bytes());
     out[16..24].copy_from_slice(&epoch.to_le_bytes());
-    // 24..28 is the CRC, filled in below; past the tag, a checkpoint's
-    // entry count, then reserved.
-    out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&flags(batch_start, checkpoint).to_le_bytes());
-    out[COUNT_AT..COUNT_AT + 4].copy_from_slice(&checkpoint.unwrap_or(0).to_le_bytes());
+    // 24..28 is the CRC, filled in below; past the tag, reserved (zero).
+    let flags = if batch_start { FLAG_BATCH_START } else { 0 };
+    out[FLAGS_AT..FLAGS_AT + 4].copy_from_slice(&flags.to_le_bytes());
     out[TAG_AT..TAG_AT + TAG_SIZE].copy_from_slice(tag);
     out[ENTRY_HEADER_SIZE..ENTRY_HEADER_SIZE + payload.len()].copy_from_slice(payload);
     out[ENTRY_HEADER_SIZE + payload.len()..].fill(0);
@@ -494,7 +477,6 @@ mod tests {
             tag: [0xA5; TAG_SIZE],
             batch_start: true,
             cut: true,
-            checkpoint: Some(3),
         };
         let mut bytes = [0u8; SLOT_SIZE];
         slot.encode(&mut bytes);
@@ -535,12 +517,11 @@ mod tests {
         let payload = b"hello journal";
         let mut bytes = vec![0u8; usize::try_from(entry_size(13)).expect("small")];
         let tag = [7; TAG_SIZE];
-        encode_entry(9, 2, &tag, (true, Some(2)), payload, &mut bytes);
+        encode_entry(9, 2, &tag, true, payload, &mut bytes);
         let header = EntryHeader::parse(&bytes).expect("magic");
         assert_eq!((header.index, header.epoch, header.length), (9, 2, 13));
         assert_eq!(header.tag, tag);
         assert!(header.batch_start);
-        assert_eq!(header.checkpoint, Some(2));
         bytes[FLAGS_AT] ^= 1;
         assert!(!entry_crc_ok(&header, &bytes), "the CRC covers the flags");
         bytes[FLAGS_AT] ^= 1;
@@ -559,6 +540,16 @@ mod tests {
         header.encode(&mut block);
         assert_eq!(Header::decode(&block), Some(header));
         block[9] ^= 1;
+        assert_eq!(Header::decode(&block), None);
+    }
+
+    #[test]
+    fn an_older_version_is_refused_even_with_a_valid_crc() {
+        let mut block = vec![0u8; BLOCK];
+        Header::new(1, Geometry::default()).encode(&mut block);
+        block[4..8].copy_from_slice(&(FORMAT_VERSION - 1).to_le_bytes());
+        let crc = crc32c::crc32c(&block[..HEADER_LEN]);
+        block[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&crc.to_le_bytes());
         assert_eq!(Header::decode(&block), None);
     }
 }

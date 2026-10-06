@@ -92,16 +92,6 @@ pub enum JournalError {
         max: u64,
     },
 
-    /// A checkpoint is one batch with one sync, so it must fit an empty
-    /// segment's slot table and data region. Nothing was written.
-    #[error("a checkpoint of {entries} entries ({bytes} bytes) does not fit one segment")]
-    CheckpointTooLarge {
-        /// The entries asked for.
-        entries: usize,
-        /// Their size on disk, headers and padding included.
-        bytes: u64,
-    },
-
     /// An earlier write failed, so the on-disk state is no longer known to
     /// match memory. Reopen the journal.
     #[error("journal is poisoned by an earlier write failure; reopen it")]
