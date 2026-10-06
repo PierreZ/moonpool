@@ -112,8 +112,6 @@ profile and the buggify knobs are sampled, consuming no draw. Each
 | `CrashDamage` | `crash_lost_probability`, `crash_latent_fault_probability`, `shorn_write_probability` |
 | `Degradation` | `disk_stall_probability`, `disk_throttle_probability` |
 | `DiskFailure` | `disk_failure_probability` |
-| `BarrierViolation` | `barrier_violation_probability` |
-| `SlowDisk` | `iops` and `bandwidth` back to the sampled profile, undoing the buggify knobs' spikes |
 
 ### The Crash Model
 

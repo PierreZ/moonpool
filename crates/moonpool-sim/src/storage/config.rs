@@ -110,17 +110,6 @@ pub enum StorageFault {
     /// A disk that fails for good: every later operation stays pending
     /// forever.
     DiskFailure,
-    /// Syncs that lie: report a write durable and leave it volatile
-    /// (`barrier_violation_probability`). No Random or Swarm profile draws
-    /// it, so masking it only matters for a hand-made one.
-    BarrierViolation,
-    /// The seed-wide slow disk the buggify knobs spike to: IOPS down to
-    /// 100–5,000 and bandwidth to 1–20 MB/s
-    /// ([`StorageConfiguration::apply_buggify_knobs`]). Masked, the profile
-    /// keeps the IOPS and bandwidth it sampled; the knobs still draw, so
-    /// nothing else shifts. Stall and throttle episodes are
-    /// [`Degradation`](Self::Degradation).
-    SlowDisk,
 }
 
 impl StorageFault {
@@ -136,8 +125,6 @@ impl StorageFault {
             Self::CrashDamage => 1 << 7,
             Self::Degradation => 1 << 8,
             Self::DiskFailure => 1 << 9,
-            Self::BarrierViolation => 1 << 10,
-            Self::SlowDisk => 1 << 11,
         }
     }
 }
@@ -171,7 +158,7 @@ impl Default for StorageFaultMask {
 }
 
 impl StorageFaultMask {
-    const ALL: u16 = (1 << 12) - 1;
+    const ALL: u16 = (1 << 10) - 1;
 
     /// Retain every selected storage fault family.
     #[must_use]
@@ -240,24 +227,6 @@ impl StorageFaultMask {
         }
         if !self.contains(StorageFault::DiskFailure) {
             config.disk_failure_probability = 0.0;
-        }
-        if !self.contains(StorageFault::BarrierViolation) {
-            config.barrier_violation_probability = 0.0;
-        }
-    }
-
-    /// [`apply_to`](Self::apply_to) a profile the buggify knobs perturbed,
-    /// `sampled` being the profile before them: a masked
-    /// [`StorageFault::SlowDisk`] restores the IOPS and bandwidth it had.
-    pub(crate) fn apply_after_knobs(
-        self,
-        config: &mut StorageConfiguration,
-        sampled: &StorageConfiguration,
-    ) {
-        self.apply_to(config);
-        if !self.contains(StorageFault::SlowDisk) {
-            config.iops = sampled.iops;
-            config.bandwidth = sampled.bandwidth;
         }
     }
 }
@@ -1006,11 +975,6 @@ mod swarm_tests {
             config.sync_failure_probability.to_bits(),
             0.25_f64.to_bits()
         );
-        config.barrier_violation_probability = 0.5;
-        StorageFaultMask::all()
-            .without(StorageFault::BarrierViolation)
-            .apply_to(&mut config);
-        assert_zero(config.barrier_violation_probability);
         StorageFaultMask::none().apply_to(&mut config);
         assert_zero(config.write_corruption_probability);
         assert_zero(config.sync_failure_probability);
