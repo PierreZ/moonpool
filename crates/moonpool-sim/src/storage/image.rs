@@ -223,6 +223,13 @@ impl FileImage {
         self.committed.len() as u64
     }
 
+    /// The durable image: the bytes as of the last successful sync, with no
+    /// latent fault applied.
+    #[must_use]
+    pub fn durable_bytes(&self) -> &[u8] {
+        &self.committed
+    }
+
     /// Number of sectors the visible image spans.
     #[must_use]
     pub fn sectors(&self) -> u64 {

@@ -627,9 +627,10 @@ as a lost synced write; `fail_process_file_with_eio(ip, path, sectors,
 target)` and `clear_process_file_eio` scope EIO the same way. A scripted
 fault injector holds the same three on `FaultContext`: `corrupt_bytes`,
 `fail_file_with_eio` and `clear_file_eio`, each taking the process's IP.
-`FaultContext::storage(ip)` gives it a provider on that process's disk, so
-it can find the bytes to aim at first (`JournalAtlas::scan` on a crashed
-node, say). What each crash did is available from
+`FaultContext::durable_bytes(ip, path)` (`SimWorld::process_file_durable_bytes`)
+returns that file's durable image, so it can find the bytes to aim at first;
+the read takes no simulated time, rolls no fault coin and draws no
+randomness, so aiming never perturbs the run. What each crash did is available from
 `take_storage_crash_reports()`, and every fault injected from
 `take_storage_fault_records()`.
 

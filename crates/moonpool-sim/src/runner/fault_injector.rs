@@ -185,20 +185,19 @@ impl FaultContext {
         Ok(())
     }
 
-    /// A storage provider scoped to `ip`'s disk, to read what a process
-    /// holds before aiming a targeted injection at it (scanning a format's
-    /// layout on a crashed node, say).
-    ///
-    /// Its operations are ordinary storage I/O on that disk: they take
-    /// simulated time and roll that disk's fault coins like the process's
-    /// own would. Write through it only to model what the process itself
-    /// could have written.
+    /// The durable bytes of the file at `path` on `ip`'s disk, to read a
+    /// format's layout before aiming a targeted injection at it (see
+    /// [`SimWorld::process_file_durable_bytes`]). Takes no simulated time and
+    /// draws no randomness.
     ///
     /// # Errors
     ///
-    /// Returns an error if IP parsing fails.
-    pub fn storage(&self, ip: &str) -> SimulationResult<crate::SimStorageProvider> {
-        Ok(self.sim.storage_provider(parse_ip(ip)?))
+    /// Returns an error if IP parsing fails or `ip` has no file at `path`.
+    pub fn durable_bytes(&self, ip: &str, path: &str) -> SimulationResult<Vec<u8>> {
+        let ip = parse_ip(ip)?;
+        self.sim
+            .process_file_durable_bytes(ip, path)
+            .map_err(|error| std::io::Error::from(error).into())
     }
 
     /// Durably mutate exactly `bytes` of the file at `path` on `ip`'s disk,

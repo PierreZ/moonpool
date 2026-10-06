@@ -665,18 +665,38 @@ impl StorageEngine {
     ///
     /// [`StorageError::NotFound`] when `owner` has no file at `path`.
     fn file_of(&mut self, owner: IpAddr, path: &str) -> Result<&mut FileState, StorageError> {
-        let not_found = || StorageError::NotFound {
-            path: path.to_string(),
-        };
+        let file_id = self.file_id_of(owner, path)?;
+        self.state
+            .files
+            .get_mut(&file_id)
+            .ok_or_else(|| not_found(path))
+    }
+
+    /// The id of the file `owner` names `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::NotFound`] when `owner` has no file at `path`.
+    fn file_id_of(&self, owner: IpAddr, path: &str) -> Result<FileId, StorageError> {
         let (resolved, _) = self
             .resolve_path(owner, path, false)
-            .map_err(|_| not_found())?;
-        let file_id = *self
-            .state
+            .map_err(|_| not_found(path))?;
+        self.state
             .path_to_file
             .get(&(owner, resolved))
-            .ok_or_else(not_found)?;
-        self.state.files.get_mut(&file_id).ok_or_else(not_found)
+            .copied()
+            .ok_or_else(|| not_found(path))
+    }
+
+    /// A copy of the durable image of `owner`'s file at `path`. Reads no
+    /// handle, schedules nothing and draws no randomness.
+    pub(crate) fn durable_bytes(&self, owner: IpAddr, path: &str) -> Result<Vec<u8>, StorageError> {
+        let file_id = self.file_id_of(owner, path)?;
+        self.state
+            .files
+            .get(&file_id)
+            .map(|file| file.image.durable_bytes().to_vec())
+            .ok_or_else(|| not_found(path))
     }
 
     /// Apply `inject` to every file currently named `path`, on whichever
@@ -2176,5 +2196,12 @@ fn saturating_duration_from_secs(seconds: f64) -> Duration {
 impl Default for StorageEngine {
     fn default() -> Self {
         Self::new(StorageConfiguration::default())
+    }
+}
+
+/// The error for a path no file answers to.
+fn not_found(path: &str) -> StorageError {
+    StorageError::NotFound {
+        path: path.to_string(),
     }
 }

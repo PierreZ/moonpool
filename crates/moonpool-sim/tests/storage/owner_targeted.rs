@@ -123,3 +123,39 @@ fn an_owner_scoped_eio_fails_only_that_owner() {
         .expect("clear");
     assert!(read(&mut sim, node_a()).is_ok(), "cleared");
 }
+
+#[test]
+fn durable_bytes_reads_the_synced_image_without_drawing() {
+    let mut sim = world();
+    // An unsynced overwrite on A is visible to A but not durable.
+    local_runtime().block_on(async {
+        run_as(&mut sim, node_a(), |provider| async move {
+            let file = provider.open("data", OpenOptions::read_write()).await?;
+            file.write_at(0, &[0xFF; 16]).await
+        })
+        .await
+        .expect("unsynced write");
+    });
+    sim.corrupt_process_file_bytes(node_b(), "data", 100..101)
+        .expect("corrupt");
+    let draws = moonpool_sim::rng_call_count();
+    assert_eq!(
+        sim.process_file_durable_bytes(node_a(), "data")
+            .expect("read a"),
+        pattern(),
+        "only what was synced"
+    );
+    assert_eq!(
+        differing(
+            &sim.process_file_durable_bytes(node_b(), "data")
+                .expect("read b")
+        ),
+        vec![100],
+        "B's own image, damage included"
+    );
+    assert!(matches!(
+        sim.process_file_durable_bytes(node_a(), "missing"),
+        Err(StorageError::NotFound { .. })
+    ));
+    assert_eq!(moonpool_sim::rng_call_count(), draws, "the reads drew");
+}
