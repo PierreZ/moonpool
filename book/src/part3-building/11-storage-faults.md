@@ -577,7 +577,13 @@ the domains at the chosen level (machine, zone or datacenter):
 In each, a record holds damage in at most `tolerance` domains at once
 (default 1, clamped so one domain always keeps every record), and so does
 node-local data; a rolling window spans `tolerance` consecutive domains.
-With fewer than two domains, no process in the group is damaged. The stripe
+With fewer than two domains, no process in the group is damaged. Failure
+domains come from the [`.cluster()`](09-attrition.md) topology, so a
+group registered with `.processes()` has none and is always spared. A
+second role that needs its own domains (a few matchmakers beside the
+replicas, say) is a second `.cluster()` group with its own
+`replicated_storage_faults` call. Attrition and the fault plan then agree on
+which processes share fate. The stripe
 rotation is TigerBeetle's helix, keyed by **record** instead of file offset:
 TigerBeetle's replicas are bit-for-bit identical, so an offset names the
 same record everywhere; a replicated log whose replicas write records at
