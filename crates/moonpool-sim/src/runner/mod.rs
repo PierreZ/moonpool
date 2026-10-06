@@ -35,7 +35,7 @@ pub mod workload;
 pub use app_metrics::{INSTANCE_LABEL, MetricsHandle};
 pub use builder::{Chaos, ChaosMode, WorkloadCount};
 pub use builder::{IterationControl, SimulationBuilder};
-pub use context::SimContext;
+pub use context::{SelfCrash, SimContext};
 pub use fault_injector::{FaultContext, FaultInjector};
 pub use groups::GroupRegistry;
 pub use locality::{LocalityConfig, MachineRegistry};

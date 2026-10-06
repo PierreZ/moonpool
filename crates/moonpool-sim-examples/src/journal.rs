@@ -4,18 +4,25 @@
 //! On every boot it opens the journal — running the CLSTORE recovery scan —
 //! checks what survived against the ledger of acknowledged entries, and then
 //! appends batches, truncates suffixes and prefixes, and saves metadata until
-//! attrition crashes it again. The crash resolves every unsynced sector the
-//! way moonpool's default disk does: old or new, reordered, sometimes rolled
-//! back in correlated runs. That is the fault model the CLSTORE paper
-//! assumes, so the node holds the journal to the paper's promise:
+//! attrition crashes it again. The disk runs `Chaos::Storage(Random)` with
+//! the families a lone node cannot repair masked: a crash resolves every
+//! unsynced sector old or new, lost, latent or shorn, unsynced directory
+//! entries may vanish, syncs fail, transfers come up short. The journal
+//! never rewrites a sector holding an acknowledged entry, so the node holds
+//! it to the CLSTORE paper's promise all the same:
 //!
 //! - an acknowledged entry is never lost, never changed, and never reported
 //!   corrupt — a checksum failure there would be a crash mistaken for
 //!   corruption;
 //! - only entries that were never acknowledged can be torn, and the journal
 //!   either truncates them (no identifier, or the ambiguous last batch) or
-//!   reports them corrupt, in which case the node plays the replication layer
+//!   keeps them marked corrupt (`AmbiguousTail::Keep`, a replicated
+//!   caller's policy), in which case the node plays the replication layer
 //!   and discards them, since nothing acknowledged them.
+//!
+//! A failed sync is an operating error, not a verdict: the write it covered
+//! was never acknowledged, and the node reopens the journal, as a caller of
+//! a poisoned journal does.
 //!
 //! The ledger lives in the iteration's [`StateHandle`](moonpool_sim::StateHandle),
 //! so it survives the reboots that the node's memory does not.
@@ -24,7 +31,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_journal::{Entry, Geometry, Journal, JournalConfig, JournalError, Record, Recovery};
+use moonpool_journal::{
+    AmbiguousTail, Entry, Geometry, Journal, JournalConfig, JournalError, Record, Recovery,
+};
 use moonpool_sim::{
     Process, RandomProvider, SimContext, SimStorageProvider, SimulationResult, StorageProvider,
     TimeProvider, Workload, assert_always, assert_reachable, assert_sometimes,
@@ -51,6 +60,7 @@ fn config() -> JournalConfig {
             data_start: 32 * 1024,
             segment_size: 256 * 1024,
         },
+        ambiguous_tail: AmbiguousTail::Keep,
         ..JournalConfig::default()
     }
 }
@@ -64,7 +74,7 @@ struct LedgerState {
     /// `(index, epoch, payload)` of every acknowledged entry still in the
     /// log, in order.
     acked: Vec<(u64, u64, Vec<u8>)>,
-    /// Boots so far: each one writes in a fresh epoch.
+    /// Openings so far: each one writes in a fresh epoch.
     boots: u64,
 }
 
@@ -104,51 +114,60 @@ impl Process for JournalNode {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let ledger = Ledger::shared(ctx);
-        let epoch = ledger.with(|state| {
-            state.boots += 1;
-            state.boots
-        });
-
-        let open = Journal::open(ctx.storage().clone(), DIR, config());
-        let Some(opened) = unless_shutdown(ctx, open).await else {
-            return Ok(());
-        };
-        let (mut journal, recovery) = match opened {
-            Ok(opened) => opened,
-            Err(error) => {
-                assert_always!(false, "the journal recovers from every crash", {
-                    "error" => error
-                });
-                return Err(invalid_state(format!("journal refused to open: {error}")));
-            }
-        };
-        note_recovery(ctx, &recovery).await;
-
-        let Some(checked) = unless_shutdown(ctx, reconcile(&mut journal, &ledger, &recovery)).await
-        else {
-            return Ok(());
-        };
-        checked.map_err(|error| invalid_state(format!("reconciling the journal: {error}")))?;
-
         loop {
-            let Some(step) = unless_shutdown(ctx, step(ctx, &mut journal, &ledger, epoch)).await
-            else {
+            // Each opening writes in a fresh epoch: a boot, or a reopen
+            // after an I/O error.
+            let epoch = ledger.with(|state| {
+                state.boots += 1;
+                state.boots
+            });
+            let Some(life) = unless_shutdown(ctx, live(ctx, &ledger, epoch)).await else {
                 return Ok(());
             };
-            if let Err(error) = step {
+            match life {
+                // A failed sync (or another I/O error) poisons the journal:
+                // reopen it, as its caller should.
+                Err(JournalError::Io(_)) => {
+                    assert_reachable!("an I/O error made the node reopen its journal");
+                }
+                Err(error) => return Err(invalid_state(format!("journal failed: {error}"))),
+                Ok(()) => return Ok(()),
+            }
+        }
+    }
+}
+
+/// One opening of the journal: recover and check it, then write until an
+/// error. Returns the error that ended it; I/O errors are the caller's to
+/// recover from by reopening.
+async fn live(ctx: &SimContext, ledger: &Ledger, epoch: u64) -> Result<(), JournalError> {
+    let (mut journal, recovery) = match Journal::open(ctx.storage().clone(), DIR, config()).await {
+        Ok(opened) => opened,
+        Err(error @ JournalError::Io(_)) => return Err(error),
+        Err(error) => {
+            assert_always!(false, "the journal recovers from every crash", {
+                "error" => error
+            });
+            return Err(error);
+        }
+    };
+    note_recovery(ctx, &recovery).await;
+    reconcile(&mut journal, ledger, &recovery).await?;
+
+    loop {
+        match step(ctx, &mut journal, ledger, epoch).await {
+            Ok(()) => {}
+            Err(error @ JournalError::Io(_)) => return Err(error),
+            Err(error) => {
                 assert_always!(false, "journal writes succeed on a healthy disk", {
                     "error" => error
                 });
-                return Err(invalid_state(format!("journal write failed: {error}")));
-            }
-            let pause = Duration::from_millis(ctx.random().random_range(1..20));
-            if unless_shutdown(ctx, ctx.time().sleep(pause))
-                .await
-                .is_none()
-            {
-                return Ok(());
+                return Err(error);
             }
         }
+        let pause = Duration::from_millis(ctx.random().random_range(1..20));
+        // A sleep only fails at shutdown, which the caller watches for.
+        let _ = ctx.time().sleep(pause).await;
     }
 }
 
@@ -253,11 +272,12 @@ async fn step(
             assert_reachable!("the node truncated a suffix");
         }
         1 if next > start => {
-            // Compaction: whole segments before a point go.
+            // Compaction: whole segments before a point go. The entries
+            // before it stop being guaranteed the moment it starts; what
+            // the journal keeps of them is adopted again at the next boot.
             let before = random.random_range(start..next);
+            ledger.with(|state| state.acked.retain(|(index, _, _)| *index >= before));
             journal.truncate_prefix(before).await?;
-            let start = journal.start_index();
-            ledger.with(|state| state.acked.retain(|(index, _, _)| *index >= start));
         }
         2 => {
             let meta = format!("term={epoch} vote=node");

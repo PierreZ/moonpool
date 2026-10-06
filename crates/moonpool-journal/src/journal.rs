@@ -126,7 +126,9 @@ pub struct Recovery {
     pub ambiguous_batch: Vec<EntryId>,
     /// Slots of intact entries that were missing or damaged and rewritten.
     pub slots_rewritten: usize,
-    /// Something past the end of the log was discarded and zeroed.
+    /// Something past the end of the log was discarded: a torn identifier
+    /// in the last batch ended the log, or slots or entry blocks past the
+    /// end were reset.
     pub torn_tail: bool,
     /// Segment header copies that were damaged and rewritten from their twin.
     pub headers_repaired: usize,
@@ -134,6 +136,11 @@ pub struct Recovery {
     /// the other, and was rewritten from the newest valid one — so a later
     /// fault in either copy can never roll the metadata back.
     pub meta_repaired: bool,
+    /// The newest intact checkpoint batch ([`Journal::append_checkpoint`]),
+    /// if any: where a replay starts. A caller replays
+    /// `checkpoint.start..next_index()` and prepends nothing. A checkpoint
+    /// with a damaged entry is passed over for the one before it.
+    pub checkpoint: Option<Range<u64>>,
 }
 
 /// A write-ahead journal over moonpool's [`BlockFile`](moonpool_core::BlockFile).
@@ -145,6 +152,9 @@ pub struct Journal<P: StorageProvider> {
     config: JournalConfig,
     meta: DualFile,
     meta_value: Option<Vec<u8>>,
+    /// The log's start, made durable by every prefix truncation before it
+    /// deletes anything (`start.0`, `start.1`).
+    start: DualFile,
     /// Sorted by first index; never empty. The last one takes appends.
     segments: Vec<Segment<P::File>>,
     poisoned: bool,
@@ -162,12 +172,98 @@ impl<P: StorageProvider> std::fmt::Debug for Journal<P> {
     }
 }
 
-fn parent_of(dir: &str) -> &str {
-    match dir.trim_end_matches('/').rfind('/') {
-        Some(0) => "/",
-        Some(at) => &dir[..at],
-        None => ".",
+/// Every directory whose entries name a component of `dir`, from the root
+/// down: `.`, `a`, `a/b` for `a/b/c`; `/`, `/a` for `/a/b`.
+///
+/// Syncing each of them makes the whole chain of names that reaches `dir`
+/// durable. A name created by `create_dir_all` is lost in a crash unless its
+/// parent is synced, and a synced child does not survive the loss of its
+/// parent's own name, so syncing only `dir`'s immediate parent is not enough
+/// for a nested `dir`.
+fn ancestors_of(dir: &str) -> Vec<String> {
+    let absolute = dir.starts_with('/');
+    let components: Vec<&str> = dir
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    let mut parents = Vec::with_capacity(components.len());
+    let mut current = if absolute {
+        "/".to_string()
+    } else {
+        ".".to_string()
+    };
+    for component in components {
+        parents.push(current.clone());
+        current = match current.as_str() {
+            "." => component.to_string(),
+            "/" => format!("/{component}"),
+            _ => format!("{current}/{component}"),
+        };
     }
+    parents
+}
+
+/// The first indexes of the segments under `dir`, in order, after removing
+/// what a crash left behind: half-created segment files, and segments wholly
+/// below the `recorded_start` (unlinks a crash undid).
+///
+/// # Errors
+///
+/// [`JournalError::SegmentGap`] when the segment holding the recorded start
+/// is missing, and any I/O error.
+async fn segment_firsts<P: StorageProvider>(
+    provider: &P,
+    dir: &str,
+    recorded_start: Option<u64>,
+) -> Result<Vec<u64>, JournalError> {
+    let mut firsts = Vec::new();
+    let mut leftovers = false;
+    for name in provider.list_dir(dir).await? {
+        if let Some(first) = parse_segment_name(&name) {
+            firsts.push(first);
+        } else if is_segment_leftover(&name) {
+            provider.delete(&format!("{dir}/{name}")).await?;
+            leftovers = true;
+        }
+    }
+    if leftovers {
+        provider.sync_dir(dir).await?;
+    }
+    firsts.sort_unstable();
+    if let Some(start) = recorded_start {
+        // A prefix truncation records the new start before its unlinks,
+        // which a crash may undo one by one: a segment wholly below the
+        // start is one of those, back from the dead, and goes again.
+        let below = firsts
+            .windows(2)
+            .take_while(|pair| pair[1] <= start)
+            .count();
+        for first in firsts.drain(..below) {
+            tracing::warn!(first, start, "journal segment below the start removed");
+            provider.delete(&segment_path(dir, first)).await?;
+        }
+        if below > 0 {
+            provider.sync_dir(dir).await?;
+        }
+        if let Some(first) = firsts.first().copied()
+            && first != start
+        {
+            return Err(JournalError::SegmentGap {
+                end: start,
+                next: first,
+            });
+        }
+    }
+
+    Ok(firsts)
+}
+
+/// The start a prefix truncation recorded: eight little-endian bytes.
+fn decode_start(bytes: &[u8]) -> Result<u64, JournalError> {
+    bytes
+        .try_into()
+        .map(u64::from_le_bytes)
+        .map_err(|_| JournalError::MetadataCorrupt { name: "start" })
 }
 
 impl<P: StorageProvider> Journal<P> {
@@ -175,14 +271,26 @@ impl<P: StorageProvider> Journal<P> {
     /// segment, and run the recovery scan.
     ///
     /// Segments are found by listing the directory: each is named after its
-    /// first index, so the names alone give their order. A segment file left
+    /// first index, so the names alone give their order. Everything the
+    /// recovered log holds is synced before this returns: a process that
+    /// restarted without a power loss reads its predecessor's unsynced
+    /// writes back, and an entry reported here must not vanish at the next
+    /// crash. A segment file left
     /// half-created by a crash (`seg-….wal.tmp`) is removed.
+    ///
+    /// `dir` may be nested: every directory on the path to it is created and
+    /// its name made durable, so a crash right after the first open cannot
+    /// drop an ancestor and with it the whole journal. `dir` itself is synced
+    /// too, before anything in it is trusted: a name an earlier, failed
+    /// attempt left visible but not durable is made durable first.
     ///
     /// # Errors
     ///
     /// [`JournalError::InvalidConfig`] for an unusable configuration,
     /// [`JournalError::DoubleFault`] where an entry and its identifier are
-    /// both damaged, the segment metadata faults, and any I/O error.
+    /// both damaged before the last batch, [`JournalError::SegmentGap`]
+    /// where a segment is missing between the start and the tail, the
+    /// segment metadata faults, and any I/O error.
     #[instrument(skip(provider, config))]
     pub async fn open(
         provider: P,
@@ -191,23 +299,24 @@ impl<P: StorageProvider> Journal<P> {
     ) -> Result<(Self, Recovery), JournalError> {
         config.geometry.validate()?;
         provider.create_dir_all(dir).await?;
-        provider.sync_dir(parent_of(dir)).await?;
+        // Every ancestor, not only the ones this call created: an earlier open
+        // may have created them and failed before its syncs completed, leaving
+        // names that are visible but not durable.
+        for parent in ancestors_of(dir) {
+            provider.sync_dir(&parent).await?;
+        }
+        // And the directory itself: a segment or metadata copy renamed into
+        // place by an earlier attempt whose directory sync failed is visible
+        // but not durable. Recovering it without this sync would acknowledge
+        // appends into a file whose name the next crash can undo.
+        provider.sync_dir(dir).await?;
 
         let (meta, meta_value, meta_repaired) = DualFile::load(&provider, dir, "meta").await?;
-        let mut firsts = Vec::new();
-        let mut leftovers = false;
-        for name in provider.list_dir(dir).await? {
-            if let Some(first) = parse_segment_name(&name) {
-                firsts.push(first);
-            } else if is_segment_leftover(&name) {
-                provider.delete(&format!("{dir}/{name}")).await?;
-                leftovers = true;
-            }
-        }
-        if leftovers {
-            provider.sync_dir(dir).await?;
-        }
-        firsts.sort_unstable();
+        let (start, recorded_start, _) = DualFile::load(&provider, dir, "start").await?;
+        let recorded_start = recorded_start
+            .map(|bytes| decode_start(&bytes))
+            .transpose()?;
+        let firsts = segment_firsts(&provider, dir, recorded_start).await?;
 
         let mut recovery = Recovery {
             meta_repaired,
@@ -215,7 +324,7 @@ impl<P: StorageProvider> Journal<P> {
         };
         let mut segments = Vec::with_capacity(firsts.len().max(1));
         if firsts.is_empty() {
-            let first = config.first_index;
+            let first = recorded_start.unwrap_or(config.first_index);
             segments.push(
                 Segment::create(&provider, dir, first, config.geometry, config.direct_io).await?,
             );
@@ -237,16 +346,6 @@ impl<P: StorageProvider> Journal<P> {
             recovery.torn_tail |= found.torn;
             recovery.headers_repaired += usize::from(found.header_repaired);
             segments.push(segment);
-            if found.ended && next_first.is_some() {
-                // The log ends inside a sealed segment: everything after it
-                // is discarded, newest first so the survivors stay a prefix.
-                for later in firsts[k + 1..].iter().rev() {
-                    provider.delete(&segment_path(dir, *later)).await?;
-                }
-                provider.sync_dir(dir).await?;
-                recovery.torn_tail = true;
-                break;
-            }
         }
 
         let mut journal = Self {
@@ -255,6 +354,7 @@ impl<P: StorageProvider> Journal<P> {
             config,
             meta,
             meta_value,
+            start,
             segments,
             poisoned: false,
         };
@@ -286,6 +386,7 @@ impl<P: StorageProvider> Journal<P> {
             }
             recovery.ambiguous_batch = ambiguous;
         }
+        recovery.checkpoint = journal.checkpoint();
         for id in &recovery.corrupt {
             tracing::warn!(index = id.index, epoch = id.epoch, "journal entry corrupt");
         }
@@ -330,6 +431,11 @@ impl<P: StorageProvider> Journal<P> {
                     copy,
                     u64::try_from(value.len()).unwrap_or(u64::MAX),
                 );
+            }
+        }
+        if self.start.is_stored() {
+            for copy in 0..2u8 {
+                atlas.push_start(&self.start.path(u64::from(copy)), copy);
             }
         }
         for segment in &self.segments {
@@ -497,18 +603,7 @@ impl<P: StorageProvider> Journal<P> {
     #[instrument(skip_all, fields(dir = %self.dir, count = records.len()))]
     pub async fn append(&mut self, records: &[Record<'_>]) -> Result<Range<u64>, JournalError> {
         self.check_writable()?;
-        let max = self.max_payload();
-        let mut sizes = Vec::with_capacity(records.len());
-        for record in records {
-            let len = u32::try_from(record.payload.len())
-                .ok()
-                .filter(|len| u64::from(*len) <= max)
-                .ok_or(JournalError::EntryTooLarge {
-                    len: record.payload.len(),
-                    max,
-                })?;
-            sizes.push(entry_size(len));
-        }
+        let sizes = self.sizes(records)?;
         let first = self.next_index();
         let mut done = 0;
         while done < records.len() {
@@ -516,12 +611,123 @@ impl<P: StorageProvider> Journal<P> {
             let outcome = if fit == 0 {
                 self.rollover().await
             } else {
-                self.tail_mut().append(&records[done..done + fit]).await
+                self.tail_mut()
+                    .append(&records[done..done + fit], false)
+                    .await
             };
             self.poison_on_err(outcome)?;
             done += fit;
         }
         Ok(first..self.next_index())
+    }
+
+    /// The on-disk size of each record.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::EntryTooLarge`] for a payload one segment cannot hold.
+    fn sizes(&self, records: &[Record<'_>]) -> Result<Vec<u64>, JournalError> {
+        let max = self.max_payload();
+        records
+            .iter()
+            .map(|record| {
+                u32::try_from(record.payload.len())
+                    .ok()
+                    .filter(|len| u64::from(*len) <= max)
+                    .map(entry_size)
+                    .ok_or(JournalError::EntryTooLarge {
+                        len: record.payload.len(),
+                        max,
+                    })
+            })
+            .collect()
+    }
+
+    /// Append `records` as one batch flagged as a checkpoint: once durable it
+    /// supersedes every entry before it. Returns the indexes they got.
+    ///
+    /// A checkpoint is the caller's state re-emitted, so that a replay can
+    /// start from it: [`checkpoint`](Self::checkpoint) and
+    /// [`Recovery::checkpoint`] name the newest intact one, and the caller
+    /// replays `checkpoint.start..next_index()`. Dropping the history before
+    /// it stays the caller's [`truncate_prefix`](Self::truncate_prefix)
+    /// (`checkpoint.start`), so a crash between the two is harmless: the old
+    /// history is still there. When to checkpoint is the caller's call too.
+    ///
+    /// The batch is never split: if the current segment cannot hold all of
+    /// it, the journal rolls over first, so a checkpoint is always one batch
+    /// with one sync. Its first entry and slot record its entry count, so a
+    /// checkpoint cut short — by a crash before its sync, or by a suffix
+    /// truncation — is never taken for a complete one. A crash leaves it the
+    /// log's last batch, handled like any other (its damaged entries
+    /// truncated or kept per [`JournalConfig::ambiguous_tail`], a torn end
+    /// ending the log); whatever survives of it stays in the log, never
+    /// named, and a replay from the named checkpoint skips it as the caller
+    /// sees fit (the caller knows its image records).
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::CheckpointTooLarge`] when an empty segment could not
+    /// hold it, and with no records at all; [`JournalError::EntryTooLarge`]
+    /// (nothing is written in either case), [`JournalError::Poisoned`], and
+    /// any I/O error, which poisons.
+    #[instrument(skip_all, fields(dir = %self.dir, count = records.len()))]
+    pub async fn append_checkpoint(
+        &mut self,
+        records: &[Record<'_>],
+    ) -> Result<Range<u64>, JournalError> {
+        self.check_writable()?;
+        let sizes = self.sizes(records)?;
+        let bytes: u64 = sizes.iter().sum();
+        let geometry = self.config.geometry;
+        if records.is_empty()
+            || u64::try_from(records.len()).map_or(true, |n| n > u64::from(geometry.slot_count))
+            || bytes > geometry.data_capacity()
+        {
+            return Err(JournalError::CheckpointTooLarge {
+                entries: records.len(),
+                bytes,
+            });
+        }
+        if self.tail().fitting(&sizes) < records.len() {
+            let outcome = self.rollover().await;
+            self.poison_on_err(outcome)?;
+        }
+        let first = self.next_index();
+        let outcome = self.tail_mut().append(records, true).await;
+        self.poison_on_err(outcome)?;
+        Ok(first..self.next_index())
+    }
+
+    /// The newest intact checkpoint batch: every entry
+    /// [`append_checkpoint`](Self::append_checkpoint) wrote for it is in the
+    /// log and none is damaged. A damaged one, or one cut short, is passed
+    /// over for the one before it. `None` when there is none.
+    #[must_use]
+    pub fn checkpoint(&self) -> Option<Range<u64>> {
+        for segment in self.segments.iter().rev() {
+            let recs = segment.records();
+            for (at, rec) in recs.iter().enumerate().rev() {
+                let Some(count) = rec.slot.checkpoint else {
+                    continue;
+                };
+                let Some(batch) = usize::try_from(count)
+                    .ok()
+                    .and_then(|count| recs.get(at..at.checked_add(count)?))
+                else {
+                    continue;
+                };
+                let whole = batch
+                    .iter()
+                    .skip(1)
+                    .all(|rec| !rec.slot.batch_start && !rec.corrupt);
+                if !rec.corrupt && whole {
+                    let start = rec.slot.index;
+                    return Some(start..start + u64::from(count));
+                }
+            }
+        }
+        None
     }
 
     /// Start a new segment at the next index. Every batch in the current one
@@ -544,12 +750,14 @@ impl<P: StorageProvider> Journal<P> {
     /// Discard every entry at `from` and after (Raft suffix truncation).
     ///
     /// Segments wholly past the cut are deleted, newest first. In the segment
-    /// the cut falls in, the discarded slots are zeroed and synced, then the
-    /// discarded entries are zeroed and synced — the clean-up that must
-    /// precede the next append, or a crash could leave an old slot beside a
-    /// new entry and make a harmless crash look like corruption. A crash
-    /// part-way leaves a log that ends somewhere between `from` and the old
-    /// end: never a gap, never a corrupt entry.
+    /// the cut falls in, the discarded slots are reset to their reserved
+    /// records and synced, then the discarded entries' blocks are zeroed and
+    /// synced — the clean-up that must precede the next append, or a crash
+    /// could leave an old slot beside a new entry and make a harmless crash
+    /// look like corruption. The block holding the cut keeps its kept
+    /// entries and is never rewritten. A crash part-way leaves a log that
+    /// ends somewhere between `from` and the old end: never a gap, never a
+    /// corrupt entry.
     ///
     /// # Errors
     ///
@@ -576,13 +784,15 @@ impl<P: StorageProvider> Journal<P> {
             .max(1);
         let outcome = async {
             if keep < self.segments.len() {
-                // Newest first, so the survivors always stay a prefix.
+                // Newest first, each unlink durable before the next, so a
+                // crash can undo at most the last one: the survivors always
+                // stay a prefix, never one with a hole.
                 for dropped in self.segments.drain(keep..).rev() {
                     let path = segment_path(&self.dir, dropped.first);
                     drop(dropped);
                     self.provider.delete(&path).await?;
+                    self.provider.sync_dir(&self.dir).await?;
                 }
-                self.provider.sync_dir(&self.dir).await?;
             }
             self.tail_mut().truncate_from(from).await
         }
@@ -593,7 +803,14 @@ impl<P: StorageProvider> Journal<P> {
     /// Forget whole segments that lie entirely before `before` (compaction).
     /// The segment holding `before` is kept, so the new
     /// [`start_index`](Self::start_index) is its first index — at or below
-    /// `before`. Deleted oldest first, so the survivors stay a suffix.
+    /// `before`.
+    ///
+    /// The new start is made durable first, in its own two-copy record
+    /// (`start.0`, `start.1`), and only then are the segments deleted, oldest
+    /// first. A crash can undo any of those unlinks, each on its own; the
+    /// next open finds the durable start and deletes again whatever lies
+    /// wholly below it, so a resurrected segment is never read as part of
+    /// the log.
     ///
     /// # Errors
     ///
@@ -617,7 +834,11 @@ impl<P: StorageProvider> Journal<P> {
         if drop_count == 0 {
             return Ok(());
         }
+        let new_start = self.segments[drop_count].first;
         let outcome = async {
+            self.start
+                .store(&self.provider, &new_start.to_le_bytes())
+                .await?;
             for dropped in self.segments.drain(..drop_count) {
                 let path = segment_path(&self.dir, dropped.first);
                 drop(dropped);
@@ -628,6 +849,25 @@ impl<P: StorageProvider> Journal<P> {
         }
         .await;
         self.poison_on_err(outcome)
+    }
+
+    /// The caller's metadata under `dir` as the newest valid copy holds it,
+    /// without opening the journal: no recovery scan, no repair of a damaged
+    /// or older copy, no truncation, nothing created. What
+    /// [`meta`](Self::meta) would return after [`open`](Self::open), for a
+    /// caller that only needs to know — say, whether a store was ever
+    /// formatted — and must not change what the next open finds.
+    ///
+    /// Returns `None` when neither copy exists, including when `dir` does
+    /// not.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::MetadataCorrupt`] when a copy exists but none is
+    /// valid (or both are valid at one generation and disagree), and
+    /// [`JournalError::Io`] if the namespace cannot be queried.
+    pub async fn peek_meta(provider: &P, dir: &str) -> Result<Option<Vec<u8>>, JournalError> {
+        DualFile::peek(provider, dir, "meta").await
     }
 
     /// The caller's metadata (for example Raft's term and vote), as last

@@ -26,6 +26,7 @@ use std::ops::Range;
 use moonpool_core::{LayoutRegion, OpenOptions, StorageFile, StorageProvider};
 
 use crate::JournalError;
+use crate::dual::DualFile;
 use crate::layout::{
     BLOCK_U64, ENTRY_HEADER_SIZE, Geometry, SLOT_SIZE, SLOT_TABLE_OFFSET, Slot, SlotState,
 };
@@ -52,7 +53,8 @@ pub enum JournalRegion {
     },
     /// The slot — the far identifier — of an entry. Damaged beside an intact
     /// entry, it is rebuilt; beside a damaged entry, recovery refuses to
-    /// start (a double fault).
+    /// start (a double fault), except in the last batch, where the log ends
+    /// there (a torn tail).
     Slot(EntryId),
     /// An entry's header and payload. Damaged beside an intact slot, it is
     /// reported corrupt (or ambiguous, in the last batch).
@@ -61,6 +63,14 @@ pub enum JournalRegion {
     /// copy is repaired from the other; both damaged is
     /// [`JournalError::MetadataCorrupt`](crate::JournalError::MetadataCorrupt).
     Meta {
+        /// Which copy: 0 or 1.
+        copy: u8,
+    },
+    /// One copy of the log's start as the last prefix truncation recorded
+    /// it (`start.0` / `start.1`): opening deletes any segment wholly below
+    /// it. Repaired from the other copy like the metadata; both damaged is
+    /// [`JournalError::MetadataCorrupt`](crate::JournalError::MetadataCorrupt).
+    Start {
         /// Which copy: 0 or 1.
         copy: u8,
     },
@@ -75,6 +85,8 @@ impl JournalRegion {
     pub const ENTRY: &'static str = "journal entry";
     /// The kind label of a metadata copy.
     pub const META: &'static str = "journal meta";
+    /// The kind label of a recorded-start copy.
+    pub const START: &'static str = "journal start";
 
     /// This region's kind, as its [`LayoutRegion`] labels it.
     #[must_use]
@@ -84,6 +96,7 @@ impl JournalRegion {
             Self::Slot(_) => Self::SLOT,
             Self::Entry(_) => Self::ENTRY,
             Self::Meta { .. } => Self::META,
+            Self::Start { .. } => Self::START,
         }
     }
 }
@@ -189,9 +202,9 @@ impl JournalAtlas {
     /// opened as a journal, so nothing is repaired.
     ///
     /// The slot table is the map, so the scan sees what the next open's
-    /// identifiers say: an entry whose slot is already damaged or empty is
-    /// not charted (recovery would locate it from its predecessor instead),
-    /// and each segment's walk stops at its first empty slot. The last batch
+    /// identifiers say: an entry whose slot is already damaged is not
+    /// charted (recovery would locate it from its predecessor instead), and
+    /// each segment's walk stops at its first reserved slot. The last batch
     /// is read from the slots' batch-start flags.
     ///
     /// # Errors
@@ -207,6 +220,9 @@ impl JournalAtlas {
         let mut names = provider.list_dir(dir).await?;
         names.sort_unstable();
         for copy in 0..2u8 {
+            if names.contains(&format!("start.{copy}")) {
+                atlas.push_start(&format!("{dir}/start.{copy}"), copy);
+            }
             let name = format!("meta.{copy}");
             if names.contains(&name) {
                 let path = format!("{dir}/{name}");
@@ -227,6 +243,17 @@ impl JournalAtlas {
         }
         let mut firsts: Vec<u64> = names.iter().filter_map(|n| parse_segment_name(n)).collect();
         firsts.sort_unstable();
+        // What the next open keeps: a segment wholly below the recorded
+        // start is one a crash brought back, and opening deletes it unread.
+        if let Ok(Some(bytes)) = DualFile::peek(provider, dir, "start").await
+            && let Ok(start) = <[u8; 8]>::try_from(bytes.as_slice()).map(u64::from_le_bytes)
+        {
+            let below = firsts
+                .windows(2)
+                .take_while(|pair| pair[1] <= start)
+                .count();
+            firsts.drain(..below);
+        }
         let mut live: Option<Range<u64>> = None;
         // Indexes and batch flags of the last segment holding entries.
         let mut tail: Vec<(u64, bool)> = Vec::new();
@@ -244,7 +271,7 @@ impl JournalAtlas {
             for (rel, bytes) in (0u64..).zip(table[..read].chunks_exact(SLOT_SIZE)) {
                 let index = first + rel;
                 match Slot::decode(bytes, index) {
-                    SlotState::Empty => break,
+                    SlotState::Reserved => break,
                     SlotState::Bad => {}
                     SlotState::Valid(slot) => {
                         atlas.push_entry(
@@ -300,6 +327,11 @@ impl JournalAtlas {
             0,
             META_HEADER + payload_len,
         );
+    }
+
+    /// Add a copy of the recorded start.
+    pub(crate) fn push_start(&mut self, path: &str, copy: u8) {
+        self.push(JournalRegion::Start { copy }, path, 0, META_HEADER + 8);
     }
 
     /// Add a segment's two header copies.

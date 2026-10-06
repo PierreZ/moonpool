@@ -476,6 +476,10 @@ impl SimWorld {
     /// deterministically corrupted bytes, identically on every retry, until
     /// the sectors are rewritten.
     ///
+    /// Path-global: it reaches every process's file at `path`. To damage one
+    /// replica, use
+    /// [`corrupt_process_file_bytes`](Self::corrupt_process_file_bytes).
+    ///
     /// # Errors
     ///
     /// Returns [`StorageError::NotFound`] if no file exists at `path`.
@@ -514,6 +518,107 @@ impl SimWorld {
             .write()
             .storage
             .fail_file_with_eio(path, sectors, target)
+    }
+
+    /// Durably mutate exactly `bytes` of `ip`'s file at `path`, and nothing
+    /// of another process's file at the same path.
+    ///
+    /// The bytes change in the durable image (and in the visible one where
+    /// no unsynced write covers them), each flipped by a nonzero XOR mask that
+    /// depends on its offset alone: no randomness is drawn. The durability
+    /// stamp is updated, so a later crash does not report the change as a
+    /// lost synced write. This is the byte-granular way to damage one copy
+    /// of one record on one replica, for a scenario whose outcome is known
+    /// in advance.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::NotFound`] if `ip` has no file at `path`, and
+    /// [`StorageError::OutOfRange`] if `bytes` reach past its durable end.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn corrupt_process_file_bytes(
+        &self,
+        ip: IpAddr,
+        path: &str,
+        bytes: std::ops::Range<u64>,
+    ) -> Result<(), StorageError> {
+        self.inner.write().storage.corrupt_bytes(ip, path, bytes)
+    }
+
+    /// A copy of the durable image of `ip`'s file at `path`: the bytes as of
+    /// its last successful sync, which a crash keeps and
+    /// [`corrupt_process_file_bytes`](Self::corrupt_process_file_bytes)
+    /// addresses.
+    ///
+    /// Not a storage operation: it takes no simulated time, rolls no fault
+    /// coin and draws no randomness, so a fault injector can read a
+    /// format's layout before aiming without perturbing the run. Unsynced
+    /// writes and latent read faults are not in it.
+    ///
+    /// # Errors
+    ///
+    /// [`StorageError::NotFound`] if `ip` has no file at `path`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    pub fn process_file_durable_bytes(
+        &self,
+        ip: IpAddr,
+        path: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        self.inner.read().storage.durable_bytes(ip, path)
+    }
+
+    /// [`fail_file_with_eio`](Self::fail_file_with_eio) on `ip`'s file at
+    /// `path` alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if `ip` has no file at `path`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn fail_process_file_with_eio(
+        &self,
+        ip: IpAddr,
+        path: &str,
+        sectors: std::ops::Range<u64>,
+        target: crate::storage::EioTarget,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .write()
+            .storage
+            .fail_owner_file_with_eio(ip, path, sectors, target)
+    }
+
+    /// [`clear_file_eio`](Self::clear_file_eio) on `ip`'s file at `path`
+    /// alone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::NotFound`] if `ip` has no file at `path`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn clear_process_file_eio(
+        &self,
+        ip: IpAddr,
+        path: &str,
+        target: crate::storage::EioTarget,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .write()
+            .storage
+            .clear_owner_file_eio(ip, path, target)
     }
 
     /// Clear targeted EIO injections on `path`.

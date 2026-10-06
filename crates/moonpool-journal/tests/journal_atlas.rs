@@ -282,26 +282,25 @@ fn predict(atlas: &JournalAtlas, hits: &[(JournalRegion, Damage, u64)]) -> Verdi
                     corrupt.push(id);
                     survivors.push(id);
                 }
-                (true, Some(Damage::Flip)) => {
-                    return Verdict::Refused(format!("double {index}"));
-                }
-                (true, Some(Damage::Zero)) => {
-                    // No identifier and no entry: the log ends here. A torn
-                    // tail is reported when something nonzero lies past
-                    // the end — the damaged entry itself, a later entry or
-                    // slot, or a later segment, which is deleted.
-                    let zeroed = |region| damage(region) == Some(Damage::Zero);
-                    let later_bytes = (index + 1..live.end).any(|later| {
-                        atlas.entry(later).is_some_and(|e| {
-                            let JournalRegion::Entry(id) = e.region else {
-                                unreachable!("an entry region")
-                            };
-                            !(zeroed(JournalRegion::Entry(id)) && zeroed(JournalRegion::Slot(id)))
-                        })
+                (true, Some(_)) => {
+                    // No entry and no identifier — zeros are damage like any
+                    // other. In the last batch (the tail segment, no later
+                    // batch start among the intact identifiers) a crash can
+                    // tear both, and the log ends here; anywhere before, it
+                    // is a double fault.
+                    let later_start = (index + 1..end).any(|later| {
+                        atlas.starts_batch(later)
+                            && atlas.entry(later).is_some_and(|e| {
+                                let JournalRegion::Entry(id) = e.region else {
+                                    unreachable!("an entry region")
+                                };
+                                damage(JournalRegion::Slot(id)).is_none()
+                            })
                     });
-                    torn_tail = damage(JournalRegion::Entry(id)) == Some(Damage::Flip)
-                        || k + 1 < segments.len()
-                        || later_bytes;
+                    if k + 1 < segments.len() || later_start {
+                        return Verdict::Refused(format!("double {index}"));
+                    }
+                    torn_tail = true;
                     break 'segments;
                 }
             }
@@ -350,7 +349,8 @@ fn a_scan_of_the_closed_journal_matches_the_open_journals_atlas() {
 
 /// moonpool#289's acceptance: damaging each charted entry gets it reported
 /// at its index — corrupt, or ambiguous in the last batch — and damaging it
-/// with its slot gets a double fault there.
+/// with its slot gets a double fault there, or, in the last batch, a torn
+/// tail that ends the log there.
 #[test]
 fn each_charted_entry_is_reported_where_the_atlas_says() {
     runtime().block_on(async {
@@ -390,10 +390,17 @@ fn each_charted_entry_is_reported_where_the_atlas_says() {
                 .await
                 .expect("inflict");
             let opened = run(&mut sim, reopen).await;
-            assert!(
-                matches!(opened, Err(JournalError::DoubleFault { index: at }) if at == index),
-                "index {index}: {opened:?}"
-            );
+            if atlas.last_batch().contains(&index) {
+                // A crash can tear both copies of an identity in the last
+                // batch: the log ends there.
+                let recovery = opened.expect("a torn last batch opens");
+                assert!(recovery.torn_tail, "index {index}: {recovery:?}");
+            } else {
+                assert!(
+                    matches!(opened, Err(JournalError::DoubleFault { index: at }) if at == index),
+                    "index {index}: {opened:?}"
+                );
+            }
         }
     });
 }

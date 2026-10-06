@@ -1,20 +1,26 @@
 //! The recovery decision: given what the walk found at each index of a
 //! segment, what to keep, what to report, and where the log ends.
 //!
-//! | Entry | Slot      | Action                                        |
-//! |-------|-----------|-----------------------------------------------|
-//! | good  | valid     | keep                                          |
-//! | good  | empty/bad | keep, rewrite the slot                        |
-//! | bad   | valid     | mark corrupt, report its identity upward      |
-//! | bad   | empty     | torn tail: the log ends here                  |
-//! | bad   | bad       | double fault: refuse to start                 |
+//! | Entry | Slot     | Action                                         |
+//! |-------|----------|------------------------------------------------|
+//! | any   | reserved | the log ends here                              |
+//! | good  | valid    | keep                                           |
+//! | good  | bad      | keep, rewrite the slot                         |
+//! | bad   | valid    | mark corrupt, report its identity upward       |
+//! | bad   | bad      | in the last batch: torn, the log ends here     |
+//! | bad   | bad      | before it: double fault, refuse to start       |
 //!
 //! This is the CLSTORE rule for batched appends (Alagappan et al., FAST '18,
 //! §4): the first entry without an identifier ends the log, and every earlier
-//! faulty entry that has one is corrupted. The one exception — the *last*
-//! entry of the log, whose bad entry beside a valid slot a crash can produce
-//! just as well as corruption (the paper's Appendix A) — is applied by the
-//! journal, which alone knows which entry is last.
+//! faulty entry that has one is corrupted. "Without an identifier" is a
+//! reserved record — formatted, checksummed, naming its own slot — never
+//! zeros: a slot that comes back zeroed is damage. The last batch's slots
+//! and entries reach the disk through two unordered writes and one sync, so
+//! a crash before that sync can tear both of an entry's copies; there a
+//! damaged identifier ends the log too, where anywhere earlier it is a
+//! double fault. The last batch's bad entries beside valid slots (the
+//! paper's Appendix A, widened to the batch) are the journal's to judge,
+//! which alone knows where the last batch is across segments.
 //!
 //! Nothing here does I/O; [`Segment::recover`](crate::segment) walks the
 //! file and hands the result in.
@@ -28,6 +34,9 @@ pub(crate) struct Found {
     pub slot: SlotState,
     /// The entry, where one checked out: its offset and header.
     pub entry: Option<(u64, EntryHeader)>,
+    /// The index is in the log's last batch: no later batch start follows
+    /// it, in this segment or after.
+    pub in_last_batch: bool,
 }
 
 /// One kept index, as the segment tracks it in memory.
@@ -54,9 +63,12 @@ pub(crate) struct Decision {
     pub rewrite_slots: Vec<u64>,
     /// Damaged entries whose slot is intact, with the identity it records.
     pub corrupt: Vec<EntryId>,
-    /// The walk met an index with neither an intact entry nor an identifier:
-    /// the log ends there.
+    /// The walk met an index with no entry to keep and no identifier — a
+    /// reserved slot, or a damaged one in the last batch: the log ends
+    /// there.
     pub ended: bool,
+    /// The log ended on a damaged identifier rather than a reserved one.
+    pub torn: bool,
 }
 
 /// Decide a segment whose indexes start at `first`, from what the walk
@@ -66,7 +78,7 @@ pub(crate) struct Decision {
 /// # Errors
 ///
 /// [`JournalError::DoubleFault`] where an entry and its slot are both
-/// damaged.
+/// damaged before the last batch.
 pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalError> {
     let mut decision = Decision::default();
     for (rel, f) in found.iter().enumerate() {
@@ -81,6 +93,10 @@ pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalErr
                     entry_crc: header.crc,
                     tag: header.tag,
                     batch_start: header.batch_start,
+                    // The cut mark lives in the slot alone: kept from a
+                    // valid one, lost with a damaged one.
+                    cut: matches!(slot, SlotState::Valid(slot) if slot.cut),
+                    checkpoint: header.checkpoint,
                 };
                 if slot != SlotState::Valid(rebuilt) {
                     decision.rewrite_slots.push(index);
@@ -97,8 +113,13 @@ pub(crate) fn decide(first: u64, found: &[Found]) -> Result<Decision, JournalErr
                     corrupt: true,
                 });
             }
-            (None, SlotState::Empty) => {
+            (_, SlotState::Reserved) => {
                 decision.ended = true;
+                break;
+            }
+            (None, SlotState::Bad) if f.in_last_batch => {
+                decision.ended = true;
+                decision.torn = true;
                 break;
             }
             (None, SlotState::Bad) => return Err(JournalError::DoubleFault { index }),
@@ -120,12 +141,15 @@ mod tests {
             entry_crc: 1,
             tag: [3; crate::TAG_SIZE],
             batch_start: index == 1,
+            cut: false,
+            checkpoint: None,
         }
     }
 
     fn good(index: u64, slot_state: SlotState) -> Found {
         let s = slot(index);
         Found {
+            in_last_batch: false,
             slot: slot_state,
             entry: Some((
                 u64::from(s.offset),
@@ -136,6 +160,7 @@ mod tests {
                     crc: s.entry_crc,
                     tag: s.tag,
                     batch_start: s.batch_start,
+                    checkpoint: None,
                 },
             )),
         }
@@ -145,6 +170,7 @@ mod tests {
         Found {
             slot: slot_state,
             entry: None,
+            in_last_batch: false,
         }
     }
 
@@ -152,7 +178,7 @@ mod tests {
     fn good_entries_are_kept_and_lost_slots_rewritten() {
         let found = [
             good(1, SlotState::Valid(slot(1))),
-            good(2, SlotState::Empty),
+            good(2, SlotState::Bad),
             good(3, SlotState::Bad),
         ];
         let decision = decide(1, &found).expect("recoverable");
@@ -179,7 +205,7 @@ mod tests {
         let found = [
             good(1, SlotState::Valid(slot(1))),
             bad(SlotState::Valid(slot(2))),
-            bad(SlotState::Empty),
+            bad(SlotState::Reserved),
         ];
         let decision = decide(1, &found).expect("recoverable");
         assert_eq!(decision.recs.len(), 2);
@@ -194,5 +220,19 @@ mod tests {
             decide(1, &found),
             Err(JournalError::DoubleFault { index: 2 })
         ));
+    }
+
+    #[test]
+    fn a_torn_identifier_in_the_last_batch_ends_the_log() {
+        let found = [
+            good(1, SlotState::Valid(slot(1))),
+            Found {
+                in_last_batch: true,
+                ..bad(SlotState::Bad)
+            },
+        ];
+        let decision = decide(1, &found).expect("recoverable");
+        assert_eq!(decision.recs.len(), 1);
+        assert!(decision.ended && decision.torn);
     }
 }

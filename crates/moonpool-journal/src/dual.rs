@@ -1,12 +1,16 @@
 //! A small record kept in two copies, `<name>.0` and `<name>.1`.
 //!
-//! Each copy carries a generation counter and a CRC. An update rewrites each
-//! copy in turn — `.0`, then `.1` — through a temporary file, a sync, a
-//! rename, and a directory sync, so at every instant at least one copy holds
-//! either the old value or the new one intact. Loading takes the valid copy
-//! with the highest generation, and rewrites the other copy from it when it
-//! is damaged, missing, or behind: two equal copies again, so one later fault
-//! can never roll the value back to an older generation.
+//! Each copy carries a generation counter and a CRC. An update spends a new
+//! generation, then rewrites each copy in turn — `.0`, then `.1` — through a
+//! temporary file, a sync, a rename, and a directory sync, so at every
+//! instant at least one copy holds either the old value or the new one
+//! intact. Loading takes the valid copy with the highest generation, and
+//! rewrites the other copy from it when it is damaged, missing, or behind:
+//! two equal copies again, so one later fault can never roll the value back
+//! to an older generation. The generation is spent even when the update
+//! fails, so a retry never writes a second payload under a generation a
+//! copy may already carry; two valid copies of one generation with
+//! different payloads are therefore damage, and loading refuses them.
 //!
 //! ```text
 //! 0   u32 magic       8   u64 generation     20  u32 crc (0..20 + payload)
@@ -21,6 +25,39 @@ use crate::layout::{BLOCK, BLOCK_U64};
 const MAGIC: u32 = u32::from_le_bytes(*b"MPJM");
 const VERSION: u32 = 1;
 const HEADER: usize = 24;
+
+/// What one copy holds on disk.
+#[derive(Debug)]
+enum Copy {
+    Missing,
+    Damaged,
+    Valid(u64, Vec<u8>),
+}
+
+/// The newest valid copy's `(generation, payload)`, `None` when neither copy
+/// exists.
+///
+/// # Errors
+///
+/// [`JournalError::MetadataCorrupt`] when a copy exists but none is valid,
+/// or when both are valid at one generation with different payloads: a
+/// store spends its generation before writing either copy, so only damage
+/// produces that pair, and picking one could roll the value back.
+fn newest(name: &'static str, copies: &[Copy; 2]) -> Result<Option<(u64, Vec<u8>)>, JournalError> {
+    match copies {
+        [Copy::Missing, Copy::Missing] => Ok(None),
+        [Copy::Valid(g0, p0), Copy::Valid(g1, p1)] if g0 == g1 && p0 != p1 => {
+            Err(JournalError::MetadataCorrupt { name })
+        }
+        [Copy::Valid(g0, p0), Copy::Valid(g1, p1)] => Ok(Some(if g1 > g0 {
+            (*g1, p1.clone())
+        } else {
+            (*g0, p0.clone())
+        })),
+        [Copy::Valid(g, p), _] | [_, Copy::Valid(g, p)] => Ok(Some((*g, p.clone()))),
+        _ => Err(JournalError::MetadataCorrupt { name }),
+    }
+}
 
 /// One two-copy record under a directory.
 #[derive(Debug)]
@@ -51,6 +88,11 @@ fn decode(bytes: &[u8]) -> Option<(u64, Vec<u8>)> {
 }
 
 impl DualFile {
+    /// Whether a value is stored: a copy loaded, or a store made.
+    pub(crate) fn is_stored(&self) -> bool {
+        self.generation > 0
+    }
+
     pub(crate) fn path(&self, copy: u64) -> String {
         format!("{}/{}.{copy}", self.dir, self.name)
     }
@@ -64,8 +106,9 @@ impl DualFile {
     /// # Errors
     ///
     /// [`JournalError::MetadataCorrupt`] when a copy exists but none is
-    /// valid; [`JournalError::Io`] if the namespace cannot be queried or the
-    /// repair cannot be written.
+    /// valid, or when both are valid at one generation with different
+    /// payloads; [`JournalError::Io`] if the namespace cannot be queried or
+    /// the repair cannot be written.
     pub async fn load<P: StorageProvider>(
         provider: &P,
         dir: &str,
@@ -76,36 +119,15 @@ impl DualFile {
             name,
             generation: 0,
         };
-        let mut found_any = false;
-        let mut copies: [Option<(u64, Vec<u8>)>; 2] = [None, None];
-        for (copy, slot) in copies.iter_mut().enumerate() {
-            let path = this.path(copy as u64);
-            if !provider.exists(&path).await? {
-                continue;
-            }
-            found_any = true;
-            // A copy that cannot be read is as good as a damaged one: the
-            // other copy is what the two-copy scheme is for.
-            if let Ok(Some(candidate)) = read_copy(provider, &path).await {
-                *slot = Some(candidate);
-            }
-        }
-        let best = copies
-            .iter()
-            .flatten()
-            .max_by_key(|(generation, _)| *generation)
-            .cloned();
-        let Some((generation, payload)) = best else {
-            return if found_any {
-                Err(JournalError::MetadataCorrupt { name })
-            } else {
-                Ok((this, None, false))
-            };
+        let copies = this.read_copies(provider).await?;
+        let Some((generation, payload)) = newest(name, &copies)? else {
+            return Ok((this, None, false));
         };
         this.generation = generation;
         let mut repaired = false;
         for (copy, found) in copies.iter().enumerate() {
-            if found.as_ref().is_none_or(|(other, _)| *other != generation) {
+            let current = matches!(found, Copy::Valid(other, _) if *other == generation);
+            if !current {
                 this.store_copy(provider, copy as u64, generation, &payload)
                     .await?;
                 repaired = true;
@@ -115,6 +137,48 @@ impl DualFile {
             tracing::warn!(name, generation, "metadata copy repaired from its twin");
         }
         Ok((this, Some(payload), repaired))
+    }
+
+    /// The payload [`load`](Self::load) would return, read without writing
+    /// anything: no repair of a damaged or older copy, and nothing created
+    /// when neither exists.
+    ///
+    /// # Errors
+    ///
+    /// As [`load`](Self::load), minus the repair.
+    pub async fn peek<P: StorageProvider>(
+        provider: &P,
+        dir: &str,
+        name: &'static str,
+    ) -> Result<Option<Vec<u8>>, JournalError> {
+        let this = Self {
+            dir: dir.to_string(),
+            name,
+            generation: 0,
+        };
+        let copies = this.read_copies(provider).await?;
+        Ok(newest(name, &copies)?.map(|(_, payload)| payload))
+    }
+
+    /// What each copy holds on disk.
+    async fn read_copies<P: StorageProvider>(
+        &self,
+        provider: &P,
+    ) -> Result<[Copy; 2], JournalError> {
+        let mut copies = [Copy::Missing, Copy::Missing];
+        for (copy, slot) in copies.iter_mut().enumerate() {
+            let path = self.path(copy as u64);
+            if !provider.exists(&path).await? {
+                continue;
+            }
+            // A copy that cannot be read is as good as a damaged one: the
+            // other copy is what the two-copy scheme is for.
+            *slot = match read_copy(provider, &path).await {
+                Ok(Some((generation, payload))) => Copy::Valid(generation, payload),
+                Ok(None) | Err(_) => Copy::Damaged,
+            };
+        }
+        Ok(copies)
     }
 
     /// Durably replace the record with `payload`, in both copies.
@@ -127,11 +191,15 @@ impl DualFile {
         provider: &P,
         payload: &[u8],
     ) -> Result<(), JournalError> {
-        let generation = self.generation + 1;
+        // The generation is spent before the first copy is written, so a
+        // retry after a failure part-way never reuses it: two valid copies
+        // of one generation always hold one payload, and a copy left by a
+        // failed store can never outrank the retry.
+        self.generation += 1;
+        let generation = self.generation;
         for copy in 0..2 {
             self.store_copy(provider, copy, generation, payload).await?;
         }
-        self.generation = generation;
         Ok(())
     }
 

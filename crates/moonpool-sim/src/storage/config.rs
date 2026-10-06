@@ -80,6 +80,157 @@ use crate::network::config::{LatencyDistribution, random_latency_for_seed};
 use crate::sim::rng::{sim_random_bool, sim_random_range};
 use std::time::Duration;
 
+/// A storage fault family that can be retained or suppressed by a
+/// [`StorageFaultMask`].
+///
+/// The mask only suppresses faults a storage chaos profile selected; it never
+/// enables a family whose sampled probability is already zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageFault {
+    /// Read and write corruption (`read_corruption_probability`,
+    /// `write_corruption_probability`).
+    Corruption,
+    /// Read and write `EIO` (`read_eio_probability`, `write_eio_probability`).
+    Eio,
+    /// Misdirected reads and writes.
+    Misdirect,
+    /// Writes that report success and never persist.
+    PhantomWrite,
+    /// Failed `sync_all` / `sync_data`.
+    SyncFailure,
+    /// Short reads and writes.
+    ShortTransfer,
+    /// Unsynced directory-entry loss at a crash.
+    DirEntryLoss,
+    /// Crash damage to unsynced sectors (`crash_lost_probability`,
+    /// `crash_latent_fault_probability`, `shorn_write_probability`).
+    CrashDamage,
+    /// Disk stall and throttle episodes.
+    Degradation,
+    /// A disk that fails for good: every later operation stays pending
+    /// forever.
+    DiskFailure,
+}
+
+impl StorageFault {
+    const fn bit(self) -> u16 {
+        match self {
+            Self::Corruption => 1 << 0,
+            Self::Eio => 1 << 1,
+            Self::Misdirect => 1 << 2,
+            Self::PhantomWrite => 1 << 3,
+            Self::SyncFailure => 1 << 4,
+            Self::ShortTransfer => 1 << 5,
+            Self::DirEntryLoss => 1 << 6,
+            Self::CrashDamage => 1 << 7,
+            Self::Degradation => 1 << 8,
+            Self::DiskFailure => 1 << 9,
+        }
+    }
+}
+
+/// A deterministic allow-mask for per-seed storage fault profiles, the
+/// storage twin of [`NetworkFaultMask`](crate::NetworkFaultMask).
+///
+/// [`StorageFaultMask::all`] is the default. Removing a family makes it inert
+/// after the builder has sampled its Random or Swarm profile, without
+/// consuming any randomness, so exploration recipes and replay are
+/// unchanged. A harness that cannot observe a family's effect — a disk that
+/// fails silently, say — removes it here rather than judging a run it cannot
+/// explain.
+///
+/// # Example
+///
+/// ```
+/// use moonpool_sim::{StorageFault, StorageFaultMask};
+///
+/// let mask = StorageFaultMask::all().without(StorageFault::DiskFailure);
+/// assert!(!mask.contains(StorageFault::DiskFailure));
+/// assert!(mask.contains(StorageFault::Corruption));
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageFaultMask(u16);
+
+impl Default for StorageFaultMask {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+impl StorageFaultMask {
+    const ALL: u16 = (1 << 10) - 1;
+
+    /// Retain every selected storage fault family.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::ALL)
+    }
+
+    /// Suppress every storage fault family.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(0)
+    }
+
+    /// Return a mask that also retains `fault`.
+    #[must_use]
+    pub const fn with(self, fault: StorageFault) -> Self {
+        Self(self.0 | fault.bit())
+    }
+
+    /// Return a mask that suppresses `fault`.
+    #[must_use]
+    pub const fn without(self, fault: StorageFault) -> Self {
+        Self(self.0 & !fault.bit())
+    }
+
+    /// Return whether `fault` is retained by this mask.
+    #[must_use]
+    pub const fn contains(self, fault: StorageFault) -> bool {
+        self.0 & fault.bit() != 0
+    }
+
+    /// Zero every suppressed family's probabilities in `config`.
+    pub(crate) fn apply_to(self, config: &mut StorageConfiguration) {
+        if !self.contains(StorageFault::Corruption) {
+            config.read_corruption_probability = 0.0;
+            config.write_corruption_probability = 0.0;
+        }
+        if !self.contains(StorageFault::Eio) {
+            config.read_eio_probability = 0.0;
+            config.write_eio_probability = 0.0;
+        }
+        if !self.contains(StorageFault::Misdirect) {
+            config.misdirect_read_probability = 0.0;
+            config.misdirect_write_probability = 0.0;
+        }
+        if !self.contains(StorageFault::PhantomWrite) {
+            config.phantom_write_probability = 0.0;
+        }
+        if !self.contains(StorageFault::SyncFailure) {
+            config.sync_failure_probability = 0.0;
+        }
+        if !self.contains(StorageFault::ShortTransfer) {
+            config.short_transfer_probability = 0.0;
+        }
+        if !self.contains(StorageFault::DirEntryLoss) {
+            config.unsynced_dir_entry_loss_probability = 0.0;
+        }
+        if !self.contains(StorageFault::CrashDamage) {
+            config.crash_lost_probability = 0.0;
+            config.crash_latent_fault_probability = 0.0;
+            config.shorn_write_probability = 0.0;
+        }
+        if !self.contains(StorageFault::Degradation) {
+            config.disk_stall_probability = 0.0;
+            config.disk_throttle_probability = 0.0;
+        }
+        if !self.contains(StorageFault::DiskFailure) {
+            config.disk_failure_probability = 0.0;
+        }
+    }
+}
+
 /// Configuration for storage simulation parameters.
 ///
 /// This struct contains all settings related to storage simulation including
@@ -697,7 +848,7 @@ impl StorageConfiguration {
 
 #[cfg(test)]
 mod swarm_tests {
-    use super::StorageConfiguration;
+    use super::{StorageConfiguration, StorageFault, StorageFaultMask};
     use crate::sim::rng::{reset_sim_rng, set_sim_seed};
 
     /// The on/off state of each swarmed fault family, in mask order.
@@ -802,6 +953,36 @@ mod swarm_tests {
         assert_zero(config.unsynced_dir_entry_loss_probability);
         assert_zero(config.read_eio_probability);
         assert_zero(config.write_eio_probability);
+    }
+
+    #[test]
+    fn a_storage_fault_mask_zeroes_only_the_families_it_removes() {
+        let mut config = StorageConfiguration {
+            disk_failure_probability: 1.0,
+            write_corruption_probability: 0.5,
+            sync_failure_probability: 0.25,
+            ..StorageConfiguration::fast_local()
+        };
+        StorageFaultMask::all()
+            .without(StorageFault::DiskFailure)
+            .apply_to(&mut config);
+        assert_zero(config.disk_failure_probability);
+        assert_eq!(
+            config.write_corruption_probability.to_bits(),
+            0.5_f64.to_bits()
+        );
+        assert_eq!(
+            config.sync_failure_probability.to_bits(),
+            0.25_f64.to_bits()
+        );
+        StorageFaultMask::none().apply_to(&mut config);
+        assert_zero(config.write_corruption_probability);
+        assert_zero(config.sync_failure_probability);
+        assert!(
+            StorageFaultMask::none()
+                .with(StorageFault::Eio)
+                .contains(StorageFault::Eio)
+        );
     }
 
     #[test]

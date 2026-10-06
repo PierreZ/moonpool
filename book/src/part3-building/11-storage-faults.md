@@ -289,6 +289,20 @@ let storage_config = StorageConfiguration::fast_local();
 
 The fault probabilities in `random_for_seed()` are intentionally low (0.001% to 0.1%). Storage faults at higher rates would prevent the system from making progress. The goal is a steady trickle of faults that occasionally exercises corruption detection and recovery, not a deluge that makes every I/O fail.
 
+Sometimes a system under test is honestly out of contract for a family. A replicated log keeps its votes on a local journal, and a **phantom write** that drops both writes of an acknowledged append makes that node forget a vote it cast. No local journal can survive that, and one forgotten vote breaks quorum intersection. A disk that fails for good needs a watchdog the system may not have yet. Rather than judge runs it cannot explain, the campaign keeps those families out with a storage fault mask, the twin of the network one:
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([Chaos::Storage(ChaosMode::Swarm), Chaos::BuggifyKnobs])
+    .storage_fault_mask(
+        StorageFaultMask::all()
+            .without(StorageFault::PhantomWrite)
+            .without(StorageFault::DiskFailure),
+    )
+```
+
+The mask is applied after the per-seed profile and the buggify knobs are sampled, right before the world is built, and it draws nothing: every seed samples exactly what it would unmasked, so recipes and replays stay valid, and the default mask (`StorageFaultMask::all()`) changes nothing. A mask only removes. It never revives a family the seed's swarm already switched off. The [fault reference](../appendix/04-fault-reference.md) lists which fields each `StorageFault` covers.
+
 ## Positioned I/O, Direct I/O, and Alignment
 
 A journal or a pager does not want a seek cursor. It wants to read page 7 and
@@ -557,9 +571,14 @@ the domains at the chosen level (machine, zone or datacenter):
 - **minority**: only the processes of a few domains take damage, anywhere on
   their disks;
 - **striped**: every domain takes damage, but stripe `s` only in the domain
-  `s mod Z` rotates to, so the damaged records "spin" around the domains.
+  it rotates to, so the damaged records "spin" around the domains.
   Node-local bytes, and bytes never published, are damaged only in the
-  domains drawn for them;
+  `tolerance - 1` domains drawn for them. A format may answer node-local
+  damage by giving up the whole replica (a journal refusing to open on two
+  damaged header copies), so those domains count as damaged for every
+  stripe: they may damage anything, and the stripes rotate over the other
+  domains. At the default `tolerance` of 1 no node-local byte is damaged
+  under this pattern;
 - **rolling**: one domain at a time takes damage, anywhere on its disks. The
   turn stays on a domain while it holds damage, and moves to the next domain
   once that damage is repaired. Repair is read off the disk: every sector a
@@ -572,7 +591,13 @@ the domains at the chosen level (machine, zone or datacenter):
 In each, a record holds damage in at most `tolerance` domains at once
 (default 1, clamped so one domain always keeps every record), and so does
 node-local data; a rolling window spans `tolerance` consecutive domains.
-With fewer than two domains, no process in the group is damaged. The stripe
+With fewer than two domains, no process in the group is damaged. Failure
+domains come from the [`.cluster()`](09-attrition.md) topology, so a
+group registered with `.processes()` has none and is always spared. A
+second role that needs its own domains (a few matchmakers beside the
+replicas, say) is a second `.cluster()` group with its own
+`replicated_storage_faults` call. Attrition and the fault plan then agree on
+which processes share fate. The stripe
 rotation is TigerBeetle's helix, keyed by **record** instead of file offset:
 TigerBeetle's replicas are bit-for-bit identical, so an offset names the
 same record everywhere; a replicated log whose replicas write records at
@@ -592,7 +617,20 @@ pattern its group drew.
 Directed tests reach for the targeted API on `SimWorld` instead:
 `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, target)`,
 `clear_file_eio`, and — to test the oracle itself —
-`corrupt_durable_out_of_band`. What each crash did is available from
+`corrupt_durable_out_of_band`. These are path-global: they reach every process's
+file at that path. To damage one copy of one record on one replica, aim at
+one owner and exact bytes: `SimWorld::corrupt_process_file_bytes(ip, path,
+bytes)` durably changes exactly those bytes of that process's file (each
+XORed with a nonzero mask of its offset, so no randomness is drawn) and
+re-stamps the durability oracle, so a later crash does not report the change
+as a lost synced write; `fail_process_file_with_eio(ip, path, sectors,
+target)` and `clear_process_file_eio` scope EIO the same way. A scripted
+fault injector holds the same three on `FaultContext`: `corrupt_bytes`,
+`fail_file_with_eio` and `clear_file_eio`, each taking the process's IP.
+`FaultContext::durable_bytes(ip, path)` (`SimWorld::process_file_durable_bytes`)
+returns that file's durable image, so it can find the bytes to aim at first;
+the read takes no simulated time, rolls no fault coin and draws no
+randomness, so aiming never perturbs the run. What each crash did is available from
 `take_storage_crash_reports()`, and every fault injected from
 `take_storage_fault_records()`.
 

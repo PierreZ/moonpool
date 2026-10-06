@@ -333,15 +333,16 @@ fn range_topology_runs_clean_across_seeds() {
 // ============================================================================
 
 /// Publishes a one-record layout and checks the seed drew the expected
-/// kind of pattern over its zones.
+/// kind of pattern over its domains.
 struct ReplicaProcess {
+    name: &'static str,
     expect_pattern: bool,
 }
 
 #[async_trait]
 impl Process for ReplicaProcess {
     fn name(&self) -> &'static str {
-        "replica"
+        self.name
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
@@ -365,11 +366,9 @@ impl Process for ReplicaProcess {
             (None, false) => true,
             _ => false,
         };
-        if !ok {
-            return Err(SimulationError::InvalidState(format!(
-                "unexpected fault pattern {pattern:?}"
-            )));
-        }
+        // A process error only ends the process, never the run: panic, so a
+        // wrong pattern fails the seed.
+        assert!(ok, "{}: unexpected fault pattern {pattern:?}", self.name);
         ctx.shutdown().cancelled().await;
         Ok(())
     }
@@ -383,7 +382,10 @@ fn replicated_run(
     let expect_pattern = storage_chaos && group == "replica";
     let mut builder = SimulationBuilder::new()
         .cluster(LocalityConfig::new(1, 3, 1, 1), move || {
-            Box::new(ReplicaProcess { expect_pattern })
+            Box::new(ReplicaProcess {
+                name: "replica",
+                expect_pattern,
+            })
         })
         .workload(TimedWorkload(Duration::from_millis(50)))
         .replicated_storage_faults(
@@ -417,4 +419,39 @@ fn replicated_storage_faults_cover_only_their_group() {
         report.failed_runs, 0,
         "a replica outside the group has no pattern"
     );
+}
+
+/// A second role that needs failure domains of its own (a set of
+/// matchmakers beside the replicas, say) is a second `.cluster()` group: each
+/// gets its own pattern over its own domains, and attrition and the fault
+/// plan agree on what those domains are.
+#[test]
+fn a_second_cluster_group_draws_its_own_pattern() {
+    let report = SimulationBuilder::new()
+        .cluster(LocalityConfig::new(1, 3, 1, 1), || {
+            Box::new(ReplicaProcess {
+                name: "replica",
+                expect_pattern: true,
+            })
+        })
+        .cluster(LocalityConfig::new(1, 1, 3, 1), || {
+            Box::new(ReplicaProcess {
+                name: "matchmaker",
+                expect_pattern: true,
+            })
+        })
+        .workload(TimedWorkload(Duration::from_millis(50)))
+        .replicated_storage_faults(
+            moonpool_sim::ReplicatedFaults::new(DomainLevel::Zone).group("replica"),
+        )
+        .replicated_storage_faults(
+            moonpool_sim::ReplicatedFaults::new(DomainLevel::Machine).group("matchmaker"),
+        )
+        .enable_chaos([Chaos::Storage(ChaosMode::Random)])
+        .set_iterations(8)
+        .set_debug_seeds((1..=8).collect())
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "both groups drew a pattern");
+    assert_eq!(report.successful_runs, 8);
 }

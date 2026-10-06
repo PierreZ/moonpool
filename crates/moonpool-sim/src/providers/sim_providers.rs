@@ -46,6 +46,7 @@ pub struct SimProviders {
     task: SimTaskProvider,
     random: SimRandomProvider,
     storage: SimStorageProvider,
+    sim: WeakSimWorld,
 }
 
 impl SimProviders {
@@ -62,8 +63,14 @@ impl SimProviders {
             time: SimTimeProvider::new(sim.clone()),
             task: SimTaskProvider::default(),
             random: SimRandomProvider::new(),
-            storage: SimStorageProvider::new(sim, ip),
+            storage: SimStorageProvider::new(sim.clone(), ip),
+            sim,
         }
+    }
+
+    /// A weak handle on the simulation these providers serve.
+    pub(crate) fn weak_world(&self) -> WeakSimWorld {
+        self.sim.clone()
     }
 
     /// Bind every task spawned through this bundle's task provider to

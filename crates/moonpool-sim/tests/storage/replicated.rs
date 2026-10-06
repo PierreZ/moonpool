@@ -68,6 +68,13 @@ fn stripe_at(rank: u64, sector: u64) -> Option<u64> {
 /// returns the pattern and the zones each stripe (or node-local data) lost
 /// a copy in.
 fn one_seed(seed: u64) -> (FaultPattern, BTreeMap<Option<u64>, BTreeSet<String>>) {
+    one_seed_at(seed, ReplicatedFaults::new(DomainLevel::Zone))
+}
+
+fn one_seed_at(
+    seed: u64,
+    config: ReplicatedFaults,
+) -> (FaultPattern, BTreeMap<Option<u64>, BTreeSet<String>>) {
     let mut sim = SimWorld::new_with_seed(seed);
     sim.set_storage_config(StorageConfiguration {
         clean_crash_probability: 0.0,
@@ -79,7 +86,7 @@ fn one_seed(seed: u64) -> (FaultPattern, BTreeMap<Option<u64>, BTreeSet<String>>
         ..StorageConfiguration::fast_local()
     });
     let localities = topology();
-    let pattern = sim.draw_replicated_faults(ReplicatedFaults::new(DomainLevel::Zone), &localities);
+    let pattern = sim.draw_replicated_faults(config, &localities);
     let mut damaged: BTreeMap<Option<u64>, BTreeSet<String>> = BTreeMap::new();
     for (rank, (ip, locality)) in (0u64..).zip(&localities) {
         local_runtime().block_on(async {
@@ -153,6 +160,40 @@ fn no_record_is_damaged_in_two_zones() {
     );
     assert!(striped_everywhere, "some seed's stripes reach every zone");
     assert!(rolled, "some seed's turn damages a zone");
+}
+
+/// A format that gives up the whole replica on any node-local damage (a
+/// journal refusing to open on two damaged header copies, say) loses every
+/// stripe in that zone. Under a stripe rotation no stripe may then lose
+/// copies, damaged or with the replica, in more than `tolerance` zones
+/// (moonpool#294).
+#[test]
+fn node_local_damage_counts_against_every_stripe() {
+    for tolerance in [1, 2] {
+        let mut striped = 0;
+        for seed in 0..40_u64 {
+            let config = ReplicatedFaults::new(DomainLevel::Zone).tolerance(tolerance);
+            let (pattern, damaged) = one_seed_at(seed, config);
+            if !matches!(pattern, FaultPattern::Striped { .. }) {
+                continue;
+            }
+            striped += 1;
+            let lost_replica = damaged.get(&None).cloned().unwrap_or_default();
+            for stripe in 0..STRIPES {
+                let mut zones = damaged.get(&Some(stripe)).cloned().unwrap_or_default();
+                zones.extend(lost_replica.iter().cloned());
+                assert!(
+                    zones.len() <= tolerance,
+                    "seed {seed}, tolerance {tolerance}: stripe {stripe} lost in {zones:?} \
+                     under {pattern:?}"
+                );
+            }
+        }
+        assert!(
+            striped > 0,
+            "tolerance {tolerance}: some seed draws stripes"
+        );
+    }
 }
 
 /// Write every sector of `ip`'s replica and crash it; return the sectors

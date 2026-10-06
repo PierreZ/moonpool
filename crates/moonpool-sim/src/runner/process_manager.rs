@@ -275,6 +275,13 @@ impl<'a> ProcessManager<'a> {
             tracing::info!(%ip, index, "force-killed process");
         }
         self.process_tokens[index] = None;
+        // Dead until restarted, whoever decided the kill: a fault injector
+        // marks it at the decision already, a process crashing itself
+        // (`SimContext::crash_self`) does not.
+        self.dead
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .insert(ip);
     }
 
     pub(crate) fn restart(&mut self, ip: std::net::IpAddr, env: &ProcessEnv<'_>) {

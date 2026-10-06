@@ -143,7 +143,7 @@ pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 pub use runner::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, FaultContext, FaultInjector,
     GroupRegistry, INSTANCE_LABEL, IterationControl, LocalityConfig, MachineRegistry,
-    MetricsHandle, Process, ProcessTags, RebootKind, SimContext, SimulationBuilder,
+    MetricsHandle, Process, ProcessTags, RebootKind, SelfCrash, SimContext, SimulationBuilder,
     SimulationMetrics, SimulationReport, TagRegistry, Workload, WorkloadCount, WorkloadTopology,
 };
 
@@ -194,8 +194,8 @@ pub use network::{
 pub use storage::{
     CrashOutcome, EioTarget, FaultFocus, FaultPattern, FileCrashReport, FileImage,
     ReplicatedFaults, SECTOR_SIZE, SectorBitSet, SectorResolution, SimStorageProvider,
-    StorageConfiguration, StorageEligibilityMask, StorageError, StorageFaultKind,
-    StorageFaultRecord,
+    StorageConfiguration, StorageEligibilityMask, StorageError, StorageFault, StorageFaultKind,
+    StorageFaultMask, StorageFaultRecord,
 };
 
 // Provider exports

@@ -289,6 +289,8 @@ pub struct SimulationBuilder {
     replicated_faults: Vec<crate::storage::ReplicatedFaults>,
     /// Deterministic allow-mask applied after each per-seed network profile.
     network_fault_mask: crate::NetworkFaultMask,
+    /// Storage fault families retained after the storage profile is sampled.
+    storage_fault_mask: crate::StorageFaultMask,
     /// Distance-based link latency, applied to every iteration's network config.
     link_latency: Option<crate::network::LinkLatencyConfig>,
     /// End-to-end byte window per stream direction, applied to every
@@ -351,6 +353,7 @@ impl SimulationBuilder {
             storage_chaos: None,
             replicated_faults: Vec::new(),
             network_fault_mask: crate::NetworkFaultMask::all(),
+            storage_fault_mask: crate::StorageFaultMask::all(),
             link_latency: None,
             tcp_send_window_bytes: None,
             accept_backlog_capacity: None,
@@ -636,6 +639,29 @@ impl SimulationBuilder {
     #[must_use]
     pub fn network_fault_mask(mut self, mask: crate::NetworkFaultMask) -> Self {
         self.network_fault_mask = mask;
+        self
+    }
+
+    /// Restrict the storage fault families a sampled storage profile keeps,
+    /// the storage twin of [`network_fault_mask`](Self::network_fault_mask).
+    ///
+    /// Applied after profile sampling and buggify knob perturbation,
+    /// immediately before the [`SimWorld`](crate::SimWorld) is created; it
+    /// consumes no randomness, so draw order, exploration recipes and replay
+    /// are unchanged. The default mask retains every family.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// SimulationBuilder::new()
+    ///     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
+    ///     .storage_fault_mask(
+    ///         StorageFaultMask::all().without(StorageFault::DiskFailure),
+    ///     )
+    /// ```
+    #[must_use]
+    pub fn storage_fault_mask(mut self, mask: crate::StorageFaultMask) -> Self {
+        self.storage_fault_mask = mask;
         self
     }
 
@@ -1238,8 +1264,9 @@ impl SimulationBuilder {
     /// The Swarm network subset (if any) draws from the simulation stream
     /// before the storage subset, keeping the per-seed draw order fixed and
     /// reproducible (see the draw-order contract on [`ChaosMode::resolve`]).
-    /// The caller's [`NetworkFaultMask`](crate::NetworkFaultMask) is applied
-    /// afterward and consumes no draws.
+    /// The caller's [`NetworkFaultMask`](crate::NetworkFaultMask) and
+    /// [`StorageFaultMask`](crate::StorageFaultMask) are applied
+    /// afterward and consume no draws.
     fn build_sim_for_iteration(&self, seed: u64) -> crate::sim::SimWorld {
         let network_chaos = self.network_chaos;
         let storage_chaos = self.storage_chaos;
@@ -1272,6 +1299,7 @@ impl SimulationBuilder {
         // A caller mask is the final fault-family decision. It consumes no RNG,
         // so adding or omitting it cannot shift config sampling or replay.
         self.network_fault_mask.apply_to(&mut network_config.chaos);
+        self.storage_fault_mask.apply_to(&mut storage_config);
         // Distance latency is deployment shape, not a per-seed fault: it is
         // applied verbatim, whatever the chaos mode.
         network_config.link_latency.clone_from(&self.link_latency);
@@ -2460,6 +2488,108 @@ mod tests {
         assert_eq!(report.failed_runs, 0);
         assert!((report.success_rate() - 100.0).abs() < f64::EPSILON);
         assert_eq!(report.seeds_used, vec![1, 2, 3]);
+    }
+
+    /// The world a Swarm + `BuggifyKnobs` storage campaign builds for
+    /// `seed`, under `mask`, and the draws building it consumed.
+    fn sampled_storage_world(
+        mask: Option<crate::StorageFaultMask>,
+        seed: u64,
+    ) -> (crate::sim::SimWorld, u64) {
+        crate::sim::reset_sim_rng();
+        crate::sim::set_sim_seed(seed);
+        let mut builder = SimulationBuilder::new()
+            .enable_chaos([Chaos::Storage(ChaosMode::Swarm), Chaos::BuggifyKnobs]);
+        if let Some(mask) = mask {
+            builder = builder.storage_fault_mask(mask);
+        }
+        let sim = builder.build_sim_for_iteration(seed);
+        (sim, crate::sim::rng_call_count())
+    }
+
+    /// Drive `future` and the world together until it finishes.
+    async fn drive_storage<F: std::future::Future>(
+        sim: &mut crate::sim::SimWorld,
+        future: F,
+    ) -> F::Output {
+        futures::pin_mut!(future);
+        std::future::poll_fn(|context| match future.as_mut().poll(context) {
+            std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
+            std::task::Poll::Pending if sim.has_pending_events() => {
+                sim.step();
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        })
+        .await
+    }
+
+    /// moonpool#292's acceptance: masking a storage family after Swarm and
+    /// `BuggifyKnobs` sampling keeps it out of every seed — its
+    /// probabilities are zero in the world, and a write load records none
+    /// of it — and consumes no draw, so each seed samples exactly what it
+    /// samples unmasked. (The load also masks the disk-failure family: a
+    /// failed disk leaves every later operation pending.)
+    #[test]
+    fn a_storage_fault_mask_keeps_its_family_out_and_draws_nothing() {
+        use crate::{StorageFault, StorageFaultKind, StorageFaultMask};
+        use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
+
+        let mask = StorageFaultMask::all()
+            .without(StorageFault::PhantomWrite)
+            .without(StorageFault::DiskFailure);
+        let mut phantoms_drawn = 0;
+        let mut writes = 0;
+        for seed in 0..24 {
+            let (mut masked, masked_draws) = sampled_storage_world(Some(mask), seed);
+            let (full, full_draws) = sampled_storage_world(None, seed);
+            assert_eq!(masked_draws, full_draws, "seed {seed}: the mask drew");
+            let (phantom, failure) = masked.with_storage_config(|config| {
+                (
+                    config.phantom_write_probability,
+                    config.disk_failure_probability,
+                )
+            });
+            assert_eq!(
+                (phantom.to_bits(), failure.to_bits()),
+                (0, 0),
+                "seed {seed}"
+            );
+            phantoms_drawn += usize::from(
+                full.with_storage_config(|config| config.phantom_write_probability > 0.0),
+            );
+
+            let provider = masked.storage_provider(std::net::IpAddr::from([10, 0, 1, 1]));
+            let block = vec![0xA5u8; 4096];
+            let written = crate::executor::Executor::new(seed).block_on(async {
+                drive_storage(&mut masked, async move {
+                    let file = provider
+                        .open("mask.dat", OpenOptions::create_write().read(true))
+                        .await?;
+                    let mut written = 0;
+                    for at in 0..400u64 {
+                        // A fault is an outcome here, not a failure.
+                        written += usize::from(file.write_at(at * 4096, &block).await.is_ok());
+                        if at % 8 == 7 {
+                            let _ = file.sync_data().await;
+                        }
+                    }
+                    Ok::<_, std::io::Error>(written)
+                })
+                .await
+            });
+            writes += written.expect("open the file");
+            let records = masked.take_storage_fault_records();
+            assert!(
+                records
+                    .iter()
+                    .all(|record| record.kind != StorageFaultKind::PhantomWrite),
+                "seed {seed}: a masked family fired: {records:?}"
+            );
+        }
+        assert!(phantoms_drawn > 0, "no seed drew phantom writes to mask");
+        assert!(writes > 0);
     }
 
     fn sampled_network_config(
