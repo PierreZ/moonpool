@@ -424,6 +424,23 @@ impl<P: StorageProvider> Journal<P> {
         Ok(Some((journal, recovery)))
     }
 
+    /// The caller's metainfo of the journal in `dir`, read without opening
+    /// it: no recovery, no repair, no sync, nothing created, so a probe never
+    /// changes what the next open finds. `Ok(None)` where there is no journal.
+    ///
+    /// # Errors
+    /// [`OpenError::MetaLost`] when no copy is valid,
+    /// [`OpenError::WrongJournal`], or the provider's error.
+    pub async fn peek_meta(
+        provider: &P,
+        dir: &str,
+        id: JournalId,
+    ) -> Result<Option<Vec<u8>>, OpenError> {
+        Ok(MetaFile::<P::File>::peek(provider, dir, id)
+            .await?
+            .map(|meta| meta.bytes))
+    }
+
     // ---- what the journal knows, from memory ----
 
     /// The journal's identity.

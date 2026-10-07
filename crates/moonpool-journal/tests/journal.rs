@@ -562,6 +562,36 @@ fn metainfo_survives_either_copy_and_refuses_losing_both() {
 }
 
 #[test]
+fn peeking_reads_the_metainfo_and_changes_nothing() {
+    runtime().block_on(async {
+        let mut sim = sim(16);
+        let none = run(&mut sim, |provider| async move {
+            Journal::peek_meta(&provider, DIR, JOURNAL).await
+        })
+        .await
+        .expect("peek");
+        assert_eq!(none, None, "no journal yet");
+        let journal = create(&mut sim, Durability::Ordered).await;
+        let mut batch = Batch::new();
+        batch.set_meta("formatted");
+        drop(commit(&mut sim, journal, batch).await.expect("meta"));
+        // Damage copy A: a peek still reads B, and repairs nothing.
+        flip(&mut sim, format!("{DIR}/meta"), 30).await;
+        let peeked = run(&mut sim, |provider| async move {
+            Journal::peek_meta(&provider, DIR, JOURNAL).await
+        })
+        .await
+        .expect("peek");
+        assert_eq!(peeked.as_deref(), Some(&b"formatted"[..]));
+        let (_, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        assert!(
+            recovery.meta_repaired,
+            "the peek left the repair to the open"
+        );
+    });
+}
+
+#[test]
 fn segments_without_metainfo_are_a_lost_journal_not_an_empty_one() {
     runtime().block_on(async {
         let mut sim = sim(14);

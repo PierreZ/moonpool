@@ -97,8 +97,20 @@ impl<F: StorageFile> MetaFile<F> {
         // before the other copy is touched: two copies in flight at once can
         // both be torn by one crash.
         meta_file.sync().await?;
-        let a = meta_file.read(Copy::A).await?;
-        let b = meta_file.read(Copy::B).await?;
+        let (meta, stale) = meta_file.choose(journal).await?;
+        if let Some(copy) = stale {
+            meta_file.write(copy, &meta).await?;
+            meta_file.sync().await?;
+        }
+        Ok(Some((meta_file, meta, stale.is_some())))
+    }
+
+    /// The current value and the copy that is stale, if one is: the valid
+    /// copy with the higher sequence number. Two damaged copies, or two valid
+    /// copies of one sequence that disagree, are [`OpenError::MetaLost`].
+    async fn choose(&self, journal: JournalId) -> Result<(Meta, Option<Copy>), OpenError> {
+        let a = self.read(Copy::A).await?;
+        let b = self.read(Copy::B).await?;
         let (meta, stale) = match (a, b) {
             (Some(a), Some(b)) if a == b => (a, None),
             (Some(a), Some(b)) if a.seq == b.seq => return Err(OpenError::MetaLost),
@@ -112,11 +124,27 @@ impl<F: StorageFile> MetaFile<F> {
                 found: meta.journal.0,
             });
         }
-        if let Some(copy) = stale {
-            meta_file.write(copy, &meta).await?;
-            meta_file.sync().await?;
+        Ok((meta, stale))
+    }
+
+    /// The metainfo of a closed journal, read only: no sync, no repair,
+    /// nothing created. `Ok(None)` where there is no meta file.
+    pub async fn peek<P: StorageProvider<File = F>>(
+        provider: &P,
+        dir: &str,
+        journal: JournalId,
+    ) -> Result<Option<Meta>, OpenError> {
+        let path = format!("{dir}/{META_NAME}");
+        if !provider.exists(&path).await? {
+            return Ok(None);
         }
-        Ok(Some((meta_file, meta, stale.is_some())))
+        let file = provider.open(&path, OpenOptions::read_only()).await?;
+        let file = BlockFile::new(file, BLOCK)?;
+        if file.size_in_blocks().await? != META_FILE_BLOCKS {
+            return Err(OpenError::MetaLost);
+        }
+        let (meta, _) = Self { file }.choose(journal).await?;
+        Ok(Some(meta))
     }
 
     async fn read(&self, copy: Copy) -> std::io::Result<Option<Meta>> {
