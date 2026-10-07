@@ -54,9 +54,9 @@ any order, the floor and tombstones, one test per row of the recovery table
 aimed with `Journal::layout`, the metainfo copies, lost batches and segments,
 and crash loops under two fault models (the paper's sector-atomic one, and
 moonpool's full physics: lost, latent and shorn sectors) for each durability
-mode and for a mode drawn afresh every round, with crashes inside recovery
-too. `JOURNAL_CRASH_SEEDS` raises the seed count, `JOURNAL_CRASH_SEED`
-replays one, `JOURNAL_CRASH_MODE=ordered|batched|mixed` keeps one mode.
+mode and for a mode drawn afresh every round (one test each), with crashes
+inside recovery too. `JOURNAL_CRASH_SEEDS` raises the seed count,
+`JOURNAL_CRASH_SEED` replays one.
 
 ## Examples
 

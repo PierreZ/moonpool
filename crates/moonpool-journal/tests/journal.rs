@@ -606,21 +606,6 @@ fn segments_without_metainfo_are_a_lost_journal_not_an_empty_one() {
     });
 }
 
-/// Each fixed mode, then the mode drawn afresh every round;
-/// `JOURNAL_CRASH_MODE=ordered|batched|mixed` keeps one.
-fn modes() -> Vec<Option<Durability>> {
-    let all = [
-        ("ordered", Some(Durability::Ordered)),
-        ("batched", Some(Durability::Batched)),
-        ("mixed", None),
-    ];
-    let only = std::env::var("JOURNAL_CRASH_MODE").ok();
-    all.into_iter()
-        .filter(|(name, _)| only.as_deref().is_none_or(|o| o == *name))
-        .map(|(_, mode)| mode)
-        .collect()
-}
-
 fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
     let env = |name: &str| std::env::var(name).ok().and_then(|s| s.parse().ok());
     if let Some(seed) = env("JOURNAL_CRASH_SEED") {
@@ -629,33 +614,62 @@ fn seeds(default: u64) -> std::ops::RangeInclusive<u64> {
     1..=env("JOURNAL_CRASH_SEEDS").unwrap_or(default)
 }
 
-#[test]
-fn under_the_papers_fault_model_nothing_acknowledged_is_lost_or_damaged() {
-    for durability in modes() {
-        let mut tally = support::Tally::default();
-        for seed in seeds(120) {
-            crash_loop(seed, CrashModel::Paper, durability, &mut tally);
-        }
-        eprintln!("paper {durability:?}: {tally:?}");
-        assert!(tally.recoveries > 0 && tally.commits > 0);
-        assert!(
-            tally.torn + tally.rebuilt > 0,
-            "no crash ever landed mid-batch"
-        );
+/// The crash loop under the paper's fault model, for one durability setting
+/// (`None` draws it afresh every round). One test per setting, so each stays
+/// within its time budget and they run in parallel.
+fn paper(durability: Option<Durability>) {
+    let mut tally = support::Tally::default();
+    for seed in seeds(120) {
+        crash_loop(seed, CrashModel::Paper, durability, &mut tally);
     }
+    eprintln!("paper {durability:?}: {tally:?}");
+    assert!(tally.recoveries > 0 && tally.commits > 0);
+    assert!(
+        tally.torn + tally.rebuilt > 0,
+        "no crash ever landed mid-batch"
+    );
+}
+
+/// The crash loop under moonpool's full crash physics, for one durability
+/// setting (`None` draws it afresh every round).
+fn harsh(durability: Option<Durability>) {
+    let mut tally = support::Tally::default();
+    for seed in seeds(120) {
+        crash_loop(seed, CrashModel::Harsh, durability, &mut tally);
+    }
+    eprintln!("harsh {durability:?}: {tally:?}");
+    assert!(tally.torn > 0, "no crash ever tore a record");
+    assert!(tally.prefix_dropped > 0, "no segment was ever freed");
 }
 
 #[test]
-fn under_moonpools_full_physics_nothing_acknowledged_is_lost_or_damaged() {
-    for durability in modes() {
-        let mut tally = support::Tally::default();
-        for seed in seeds(120) {
-            crash_loop(seed, CrashModel::Harsh, durability, &mut tally);
-        }
-        eprintln!("harsh {durability:?}: {tally:?}");
-        assert!(tally.torn > 0, "no crash ever tore a record");
-        assert!(tally.prefix_dropped > 0, "no segment was ever freed");
-    }
+fn ordered_under_the_papers_fault_model_nothing_acknowledged_is_lost_or_damaged() {
+    paper(Some(Durability::Ordered));
+}
+
+#[test]
+fn batched_under_the_papers_fault_model_nothing_acknowledged_is_lost_or_damaged() {
+    paper(Some(Durability::Batched));
+}
+
+#[test]
+fn mixed_under_the_papers_fault_model_nothing_acknowledged_is_lost_or_damaged() {
+    paper(None);
+}
+
+#[test]
+fn ordered_under_moonpools_full_physics_nothing_acknowledged_is_lost_or_damaged() {
+    harsh(Some(Durability::Ordered));
+}
+
+#[test]
+fn batched_under_moonpools_full_physics_nothing_acknowledged_is_lost_or_damaged() {
+    harsh(Some(Durability::Batched));
+}
+
+#[test]
+fn mixed_under_moonpools_full_physics_nothing_acknowledged_is_lost_or_damaged() {
+    harsh(None);
 }
 
 #[test]
