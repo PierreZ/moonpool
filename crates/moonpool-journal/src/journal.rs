@@ -7,9 +7,9 @@ use moonpool_core::{DirectIo, LayoutRegion, StorageProvider};
 
 use crate::batch::{Batch, Write};
 use crate::format::{
-    BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, MAX_BATCH_RECORDS,
-    META_COPY_B_AT, META_MAX, Meta, RECORD_SIZE, Record, align_up, clear_id, entry_crc,
-    first_batch_of, generation_of, journal_tag, u64_of, usize_of,
+    BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, META_COPY_B_AT, META_MAX,
+    Meta, RECORD_SIZE, Record, align_up, clear_id, entry_crc, first_batch_of, generation_of,
+    journal_tag, u64_of, usize_of,
 };
 use crate::meta::{Copy, META_NAME, MetaFile, remove_leftover};
 use crate::recover::{Located, Op, Stale, entry_matches, scan};
@@ -660,7 +660,7 @@ impl<P: StorageProvider> Journal<P> {
         {
             return Err(CommitError::MetaTooLarge { len: meta.len() });
         }
-        if batch.writes.len() > MAX_BATCH_RECORDS {
+        if !batch.fits(self.config.geometry) {
             return Err(CommitError::BatchTooLarge);
         }
         let meta_changes = batch.meta.is_some() || floor != self.meta.floor;
@@ -803,11 +803,15 @@ impl<P: StorageProvider> Journal<P> {
         entries.resize(usize_of(align_up(u64_of(entries.len()), BLOCK_U64)), 0);
         let records = vec![0u8; usize_of(Record::blocks_for(decoded.len()) * BLOCK_U64)];
         let geometry = self.config.geometry;
-        let fits_empty = Record::blocks_for(decoded.len()) <= u64::from(geometry.persist_blocks)
-            && u64_of(entries.len()) <= u64::from(geometry.entry_blocks) * BLOCK_U64;
-        if !fits_empty {
-            return Err(CommitError::BatchTooLarge);
-        }
+        // Pair with `Batch::fits`, checked before anything was laid out.
+        assert!(
+            Record::blocks_for(decoded.len()) <= u64::from(geometry.persist_blocks),
+            "a batch that fits holds its records in one persist log"
+        );
+        assert!(
+            u64_of(entries.len()) <= u64::from(geometry.entry_blocks) * BLOCK_U64,
+            "a batch that fits holds its entries in one entry log"
+        );
         Ok(Prepared {
             seq,
             entries,

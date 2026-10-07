@@ -1,6 +1,6 @@
 //! A batch: what one commit makes durable together.
 
-use crate::format::Id;
+use crate::format::{BLOCK_U64, EntryHeader, Geometry, Id, MAX_BATCH_RECORDS, Record, align_up};
 
 /// One write a batch carries, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +73,50 @@ impl Batch {
     pub fn set_meta(&mut self, meta: impl Into<Vec<u8>>) -> &mut Self {
         self.meta = Some(meta.into());
         self
+    }
+
+    /// Whether the batch fits one empty segment of `geometry`, the bound
+    /// [`commit`](crate::Journal::commit) refuses with
+    /// [`CommitError::BatchTooLarge`](crate::CommitError::BatchTooLarge): at
+    /// most [`MAX_BATCH_RECORDS`] writes, their records within the persist
+    /// log and their entries (header and payload, each padded to 8 bytes,
+    /// the batch to a block) within the entry log. A caller with more to
+    /// make durable than one segment holds splits it across commits.
+    #[must_use]
+    pub fn fits(&self, geometry: Geometry) -> bool {
+        self.fits_with(geometry, None)
+    }
+
+    /// Whether the batch still [`fits`](Self::fits) `geometry` with one more
+    /// [`put`](Self::put) of a `payload_len`-byte payload: how a caller packs
+    /// its writes into commits that each fit.
+    #[must_use]
+    pub fn fits_another(&self, geometry: Geometry, payload_len: usize) -> bool {
+        self.fits_with(geometry, Some(payload_len))
+    }
+
+    fn fits_with(&self, geometry: Geometry, another: Option<usize>) -> bool {
+        let count = self.writes.len() + usize::from(another.is_some());
+        if count > MAX_BATCH_RECORDS {
+            return false;
+        }
+        let lens = self
+            .writes
+            .iter()
+            .map(|write| match write {
+                Write::Put { payload, .. } => payload.len(),
+                Write::Clear { .. } => 0,
+            })
+            .chain(another);
+        let mut entry_bytes = 0_u64;
+        for len in lens {
+            let Ok(len) = u32::try_from(len) else {
+                return false;
+            };
+            entry_bytes += EntryHeader::footprint(len);
+        }
+        Record::blocks_for(count) <= u64::from(geometry.persist_blocks)
+            && align_up(entry_bytes, BLOCK_U64) <= u64::from(geometry.entry_blocks) * BLOCK_U64
     }
 
     /// Whether the batch would write nothing.

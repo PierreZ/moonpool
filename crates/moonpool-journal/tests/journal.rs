@@ -306,6 +306,52 @@ fn a_put_below_the_floor_is_refused_before_anything_is_written() {
     });
 }
 
+#[test]
+fn a_batch_past_one_segment_is_refused_and_fits_on_split() {
+    runtime().block_on(async {
+        let mut sim = sim(16);
+        let geometry = Geometry::small();
+        // 100 entries of 1 KiB: more than the small shape's 64 KiB entry log.
+        let puts: Vec<(u64, Vec<u8>)> = (0..100)
+            .map(|p| (p, vec![u8::try_from(p).unwrap_or(0); 1024]))
+            .collect();
+        let mut whole = Batch::new();
+        for (position, payload) in &puts {
+            whole.put(*position, id(*position, 1), payload.clone());
+        }
+        assert!(!whole.fits(geometry), "the whole batch overflows a segment");
+        let journal = create(&mut sim, Durability::Ordered).await;
+        let refused = commit(&mut sim, journal, whole).await;
+        assert!(
+            matches!(refused, Err(CommitError::BatchTooLarge)),
+            "{refused:?}"
+        );
+        // Refused before anything was written: the journal reopens empty,
+        // and the same writes split by `fits` all commit.
+        let (mut journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        assert_eq!(journal.positions().count(), 0, "nothing was written");
+        let mut chunks = 0;
+        let mut chunk = Batch::new();
+        for (position, payload) in &puts {
+            if !chunk.fits_another(geometry, payload.len()) {
+                assert!(chunk.fits(geometry));
+                journal = commit(&mut sim, journal, std::mem::take(&mut chunk))
+                    .await
+                    .expect("a chunk that fits commits");
+                chunks += 1;
+            }
+            chunk.put(*position, id(*position, 1), payload.clone());
+        }
+        journal = commit(&mut sim, journal, chunk)
+            .await
+            .expect("the last chunk commits");
+        assert!(chunks >= 1, "the writes needed more than one commit");
+        drop(journal);
+        let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        assert_eq!(journal.positions().count(), puts.len());
+    });
+}
+
 async fn journal_regions(sim: &mut SimWorld) -> Vec<moonpool_core::LayoutRegion> {
     let (journal, _) = reopen(sim, Durability::Ordered).await.expect("reopen");
     journal.regions()

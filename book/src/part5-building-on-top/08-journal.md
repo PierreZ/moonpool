@@ -51,6 +51,12 @@ and `set_meta` replaces up to 4 KiB of metainfo kept in two copies. There
 are no snapshots and no compaction: space comes back through the floor and
 tombstones.
 
+A batch lands in one segment, so it must fit an empty one; a bigger one is
+refused with `BatchTooLarge` before anything is written. A caller with more
+to write than that (a replica catching up a long log at once) packs its
+writes with `Batch::fits_another(geometry, payload_len)` and commits each
+batch in turn, metainfo and floor in the last.
+
 ## Layout
 
 ```text
