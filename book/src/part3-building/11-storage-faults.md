@@ -533,12 +533,12 @@ kind:
 ```rust
 let focus = FaultFocus::new()
     .background(0.1)
-    .layout(journal.atlas().layout(), |region| {
-        if region.kind == JournalRegion::SLOT { 8.0 } else { 4.0 }
+    .layout(&journal.regions(), |region| {
+        if region.kind == Layout::RECORD { 8.0 } else { 4.0 }
     });
 ```
 
-`moonpool-journal`'s `JournalAtlas` is one such map (see
+`moonpool-journal`'s `Journal::regions` is one such map (see
 [A Crash-Aware Journal](../part5-building-on-top/08-journal.md)); another
 format needs only to list its regions.
 

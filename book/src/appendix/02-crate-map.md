@@ -132,21 +132,19 @@ contains only the runtime adapters.
 
 ### moonpool-journal
 
-**Role**: A write-ahead journal over `BlockFile` that tells a crash apart from
-corruption (CLSTORE, the storage layer of PAR/CTRL, FAST '18). See
+**Role**: A CLSTORE journal (the storage layer of PAR/CTRL, FAST '18) over the
+provider traits: entries at `u64` positions written in any order, crash told
+apart from corruption, damaged entries identified. See
 [A Crash-Aware Journal](../part5-building-on-top/08-journal.md).
 
 **Key types**:
 
-- `Journal` appends, reads, and truncates a segmented log
-- `JournalConfig` and `Geometry` shape the segments
-- `Record`, `Entry`, and `EntryId` carry an entry's index, epoch, and 24-byte caller tag
-- `AmbiguousTail` truncates the damaged entries of the last batch or keeps them for a replication layer
-- `Recovery` reports what opening found: corrupt entries (by `EntryId`), the ambiguous last batch, repairs
-- `JournalError` separates operating errors from evidence of damage
-
-Depends only on `moonpool-core`'s provider traits, so the same journal runs on
-`TokioStorageProvider` and on the simulator's storage.
+- `Journal` creates, opens (recovers), commits, reads and replays
+- `Batch` stages `put`, `clear`, `truncate_prefix` and `set_meta` for one commit
+- `JournalConfig`, `Durability` (one sync or two per commit) and `Geometry`
+- `Id` (the caller's 24-byte identity) and `JournalId`
+- `State` (`Live`, `Corrupt`, `Ambiguous`) and `Recovery` report what is known
+- `Layout` and `Journal::regions` list the on-disk regions for aiming faults
 
 ### moonpool-rpc
 

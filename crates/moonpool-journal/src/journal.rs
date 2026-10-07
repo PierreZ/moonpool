@@ -1,162 +1,155 @@
-//! The journal: the ordered segments of a directory, and the caller's
-//! metadata beside them.
+//! [`Journal`]: create, open, commit, read.
 
-use std::ops::Range;
+use std::collections::BTreeMap;
+use std::ops::RangeBounds;
 
-use moonpool_core::{DirectIo, StorageProvider};
-use tracing::instrument;
+use moonpool_core::{DirectIo, LayoutRegion, StorageProvider};
 
-use crate::dual::DualFile;
-use crate::layout::{ENTRY_HEADER_SIZE, Geometry, TAG_SIZE, Tag, entry_size};
-use crate::segment::{Entry, Segment, is_segment_leftover, parse_segment_name, segment_path};
-use crate::{EntryId, JournalAtlas, JournalError};
+use crate::batch::{Batch, Write};
+use crate::format::{
+    BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, META_COPY_B_AT, META_MAX,
+    Meta, RECORD_SIZE, Record, align_up, clear_id, entry_crc, first_batch_of, generation_of,
+    journal_tag, u64_of, usize_of,
+};
+use crate::meta::{Copy, META_NAME, MetaFile, remove_leftover};
+use crate::recover::{Located, Op, Stale, entry_matches, scan};
+use crate::segment::{Segment, is_segment_leftover, parse_segment_name};
+use crate::{CommitError, Durable, OpenError, ReadError};
 
-/// How to lay out and drive a journal.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct JournalConfig {
-    /// The shape of every segment. Must match what an existing journal was
-    /// created with: a segment whose header or size disagrees is refused.
-    pub geometry: Geometry,
-    /// Direct-I/O policy for segment files.
-    pub direct_io: DirectIo,
-    /// The index of the first entry of a freshly created journal. Ignored
-    /// when the directory already holds segments.
-    pub first_index: u64,
-    /// What opening does with the damaged entries of the last batch.
-    pub ambiguous_tail: AmbiguousTail,
-}
+/// A journal's identity, stamped in its meta file, its segment headers and
+/// (as a 32-bit tag) every entry, so files of another journal are refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JournalId(pub u128);
 
-impl Default for JournalConfig {
-    fn default() -> Self {
-        Self {
-            geometry: Geometry::default(),
-            direct_io: DirectIo::Optional,
-            first_index: 1,
-            ambiguous_tail: AmbiguousTail::Truncate,
-        }
-    }
-}
-
-/// What opening does with the damaged entries of the log's last append
-/// batch — entries whose identifier is intact but whose bytes are not.
-///
-/// A batch's entries and slots are written by two unordered writes and made
-/// durable by one `fdatasync`. A crash before that sync returned can land
-/// any subset of their sectors, so any entry of the last batch can come back
-/// with its identifier and without its bytes — and so can corruption of a
-/// batch that was synced and acknowledged. No local algorithm tells the two
-/// apart (the CLSTORE paper's Appendix A, which the paper states for the
-/// last entry; with batched appends it holds for the whole last batch,
-/// since nothing durable after it proves its sync returned). Either way the
-/// entries are reported in [`Recovery::ambiguous_batch`], never in
-/// [`Recovery::corrupt`]; this decides whether they are also removed.
-///
-/// Batches are found through a batch-start flag every entry and slot carry,
-/// so a caller never has to encode batch numbers of its own. A batch that
-/// rolls over into a new segment is two batches, each with its own sync.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum AmbiguousTail {
-    /// Treat them as a torn write: truncate from the first damaged entry of
-    /// the last batch, with everything after it — right for a single node,
-    /// whose only other choice would be to refuse to start. A replicated
-    /// caller that instead needs to find out whether they were committed
-    /// must act on the report before the next crash: once truncated, the
-    /// identities are gone from disk.
+/// How many syncs a commit spends, and what that buys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Durability {
+    /// CLSTORE's protocol: `write(entries); write(persist records); fsync`.
+    /// One sync per batch. A crash can leave an intact persist record beside
+    /// a damaged entry, exactly as corruption would, and the paper proves
+    /// the two cannot be told apart for the last batch: its damaged entries
+    /// are reported [`State::Ambiguous`].
+    Batched,
+    /// `write(entries); fsync; write(persist records); fsync`. Two syncs
+    /// per batch; a persist record proves its entry was synced, so damage is
+    /// always told apart.
     #[default]
-    Truncate,
-    /// Keep them in the log, marked corrupt like a damaged entry mid-log: a
-    /// read returns [`JournalError::Corrupt`], and their identities survive
-    /// every later reopen. The caller decides — for example by asking its
-    /// peers whether each was committed — and discards them with
-    /// [`Journal::truncate_suffix`] if they were not. Appending after them
-    /// starts a new batch and leaves them ordinary corrupt entries,
-    /// reported in [`Recovery::corrupt`] from then on.
-    Keep,
+    Ordered,
 }
 
-/// An entry to append: the epoch (term) it belongs to, the caller's
-/// identity tag, and its bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Record<'a> {
-    /// The epoch this entry was written in.
-    pub epoch: u64,
-    /// The caller's identity for this entry, kept in its slot far from the
-    /// entry and reported with it if the entry is ever found corrupt. All
-    /// zeros when the index and epoch identify the entry on their own.
-    pub tag: Tag,
+/// How a journal lays out and writes its files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JournalConfig {
+    /// The protocol of each commit. Recorded per batch, so it may change
+    /// between opens.
+    pub durability: Durability,
+    /// The segment shape: fixed at creation, checked at every open.
+    pub geometry: Geometry,
+    /// Direct-I/O policy for the segment files.
+    pub direct_io: DirectIo,
+}
+
+/// What a position holds, as far as the journal knows without reading it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    /// Nothing: never written, cleared, or below the floor.
+    Empty,
+    /// An entry, believed intact (read it to check).
+    Live {
+        /// Its identity.
+        id: Id,
+        /// Its payload length.
+        len: u32,
+    },
+    /// The entry's bytes are damaged and its persist record proves it was
+    /// written: corruption. Fetch it again from a peer.
+    Corrupt {
+        /// Its identity, from the persist record.
+        id: Id,
+    },
+    /// The last batch of a [`Durability::Batched`] journal: a damaged entry
+    /// beside an intact persist record is a crash or corruption, and nothing
+    /// local tells which. Leave it (it becomes [`State::Corrupt`] once
+    /// another batch commits) or clear it.
+    Ambiguous {
+        /// Its identity, from the persist record.
+        id: Id,
+    },
+}
+
+/// An entry read back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    /// Its position.
+    pub position: u64,
+    /// Its identity.
+    pub id: Id,
     /// The caller's bytes.
-    pub payload: &'a [u8],
+    pub payload: Vec<u8>,
 }
 
-impl<'a> Record<'a> {
-    /// A record with an all-zero tag.
-    #[must_use]
-    pub fn new(epoch: u64, payload: &'a [u8]) -> Self {
-        Self {
-            epoch,
-            tag: [0; TAG_SIZE],
-            payload,
-        }
-    }
-
-    /// The same record carrying `tag`.
-    #[must_use]
-    pub fn with_tag(self, tag: Tag) -> Self {
-        Self { tag, ..self }
-    }
-}
-
-/// What opening the journal found and repaired.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// What opening found and did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Recovery {
-    /// The directory held no segment and the journal was created.
-    pub created: bool,
-    /// Damaged entries whose identifier is intact, before the log's last
-    /// batch, with the identity their slot records: a later sync covers
-    /// them, so they were durable and damage explains them, never a crash.
-    /// They stay in the log; reading one returns [`JournalError::Corrupt`].
-    /// A replicated caller fixes them from a peer.
-    pub corrupt: Vec<EntryId>,
-    /// Damaged entries of the log's last append batch whose identifier is
-    /// intact, in index order. A crash before the batch's sync returned
-    /// produces exactly this, and so can corruption; no local algorithm
-    /// tells them apart. [`JournalConfig::ambiguous_tail`] says whether
-    /// they were truncated like a torn write or kept, marked corrupt, for
-    /// the caller to resolve.
-    pub ambiguous_batch: Vec<EntryId>,
-    /// Slots of intact entries that were missing or damaged and rewritten.
-    pub slots_rewritten: usize,
-    /// Something past the end of the log was discarded: a torn identifier
-    /// in the last batch ended the log, or slots or entry blocks past the
-    /// end were reset.
-    pub torn_tail: bool,
-    /// Segment header copies that were damaged and rewritten from their twin.
-    pub headers_repaired: usize,
-    /// One copy of the caller's metadata was damaged, missing, or older than
-    /// the other, and was rewritten from the newest valid one — so a later
-    /// fault in either copy can never roll the metadata back.
+    /// Entries of the last batch whose bytes are damaged although their
+    /// persist record proves them written (the rest of the log is checked
+    /// when read).
+    pub corrupt: Vec<(u64, Id)>,
+    /// The last batch's damaged entries of a [`Durability::Batched`] commit.
+    pub ambiguous: Vec<(u64, Id)>,
+    /// Records of the last batch torn by a crash and discarded: both the
+    /// record and its entry damaged.
+    pub torn: u32,
+    /// Persist records rebuilt from their intact entries.
+    pub rebuilt: u32,
+    /// A metainfo copy was rewritten from its twin.
     pub meta_repaired: bool,
-    /// The newest intact checkpoint batch ([`Journal::append_checkpoint`]),
-    /// if any: where a replay starts. A caller replays
-    /// `checkpoint.start..next_index()` and prepends nothing. A checkpoint
-    /// with a damaged entry is passed over for the one before it.
-    pub checkpoint: Option<Range<u64>>,
+    /// Segment header copies rewritten from their twin.
+    pub headers_repaired: u32,
+    /// Segments deleted because they hold nothing live.
+    pub segments_removed: u32,
 }
 
-/// A write-ahead journal over moonpool's [`BlockFile`](moonpool_core::BlockFile).
-///
-/// See the [crate docs](crate) for the layout and the recovery rules.
+/// Where a position's persist record and entry live, for aiming faults:
+/// both regions carry the position as their stripe, the key every replica's
+/// copy of that position shares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Layout {
+    /// The persist record ([`Layout::RECORD`]).
+    pub record: LayoutRegion,
+    /// The entry, header and payload ([`Layout::ENTRY`]).
+    pub entry: LayoutRegion,
+}
+
+impl Layout {
+    /// The kind of a persist record's region.
+    pub const RECORD: &'static str = "persist record";
+    /// The kind of an entry's region.
+    pub const ENTRY: &'static str = "entry";
+    /// The kind of a metainfo copy's region (node-unique: no stripe).
+    pub const META: &'static str = "metainfo";
+    /// The kind of a segment header copy's region (no stripe).
+    pub const HEADER: &'static str = "segment header";
+}
+
+/// A CLSTORE journal over any [`StorageProvider`]: see the crate docs.
 pub struct Journal<P: StorageProvider> {
     provider: P,
     dir: String,
+    id: JournalId,
+    tag: u32,
     config: JournalConfig,
-    meta: DualFile,
-    meta_value: Option<Vec<u8>>,
-    /// The log's start, made durable by every prefix truncation before it
-    /// deletes anything (`start.0`, `start.1`).
-    start: DualFile,
-    /// Sorted by first index; never empty. The last one takes appends.
+    meta_file: MetaFile<P::File>,
+    meta: Meta,
     segments: Vec<Segment<P::File>>,
+    index: BTreeMap<u64, Located>,
+    /// The last batch in the log (0: none).
+    last_batch: u64,
+    /// The batch whose damaged entries are still ambiguous: the last one at
+    /// open, until the next batch commits.
+    ambiguous_batch: Option<u64>,
+    /// This open's generation: the high bits of every batch it writes.
+    generation: u32,
     poisoned: bool,
 }
 
@@ -164,35 +157,34 @@ impl<P: StorageProvider> std::fmt::Debug for Journal<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Journal")
             .field("dir", &self.dir)
-            .field("start", &self.start_index())
-            .field("next", &self.next_index())
+            .field("id", &self.id)
+            .field("floor", &self.meta.floor)
+            .field("last_batch", &self.last_batch)
+            .field("live", &self.index.len())
             .field("segments", &self.segments.len())
             .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
 }
 
-/// Every directory whose entries name a component of `dir`, from the root
-/// down: `.`, `a`, `a/b` for `a/b/c`; `/`, `/a` for `/a/b`.
-///
-/// Syncing each of them makes the whole chain of names that reaches `dir`
-/// durable. A name created by `create_dir_all` is lost in a crash unless its
-/// parent is synced, and a synced child does not survive the loss of its
-/// parent's own name, so syncing only `dir`'s immediate parent is not enough
-/// for a nested `dir`.
-fn ancestors_of(dir: &str) -> Vec<String> {
-    let absolute = dir.starts_with('/');
-    let components: Vec<&str> = dir
-        .split('/')
-        .filter(|part| !part.is_empty() && *part != ".")
-        .collect();
-    let mut parents = Vec::with_capacity(components.len());
-    let mut current = if absolute {
-        "/".to_string()
+fn check_config(config: &JournalConfig) -> Result<(), OpenError> {
+    if config.geometry.is_valid() {
+        Ok(())
     } else {
-        ".".to_string()
-    };
-    for component in components {
+        Err(OpenError::InvalidConfig(
+            "the geometry describes no usable segment",
+        ))
+    }
+}
+
+/// Every directory whose entries name a component of `dir`, from the root
+/// down: `.`, `a`, `a/b` for `a/b/c`; `/`, `/a` for `/a/b`. A name created
+/// by `create_dir_all` is lost in a crash unless its parent is synced, and a
+/// synced child does not survive the loss of its parent's own name.
+fn ancestors_of(dir: &str) -> Vec<String> {
+    let mut current = if dir.starts_with('/') { "/" } else { "." }.to_string();
+    let mut parents = Vec::new();
+    for component in dir.split('/').filter(|c| !c.is_empty() && *c != ".") {
         parents.push(current.clone());
         current = match current.as_str() {
             "." => component.to_string(),
@@ -203,691 +195,870 @@ fn ancestors_of(dir: &str) -> Vec<String> {
     parents
 }
 
-/// The first indexes of the segments under `dir`, in order, after removing
-/// what a crash left behind: half-created segment files, and segments wholly
-/// below the `recorded_start` (unlinks a crash undid).
-///
-/// # Errors
-///
-/// [`JournalError::SegmentGap`] when the segment holding the recorded start
-/// is missing, and any I/O error.
-async fn segment_firsts<P: StorageProvider>(
-    provider: &P,
-    dir: &str,
-    recorded_start: Option<u64>,
-) -> Result<Vec<u64>, JournalError> {
-    let mut firsts = Vec::new();
-    let mut leftovers = false;
-    for name in provider.list_dir(dir).await? {
-        if let Some(first) = parse_segment_name(&name) {
-            firsts.push(first);
-        } else if is_segment_leftover(&name) {
-            provider.delete(&format!("{dir}/{name}")).await?;
-            leftovers = true;
-        }
+/// Make every name on the way to `dir`, and the names inside it, durable.
+/// Opening runs it too: an earlier attempt may have created a name, or
+/// renamed a file into place, and failed before its directory sync.
+async fn sync_names<P: StorageProvider>(provider: &P, dir: &str) -> std::io::Result<()> {
+    for parent in ancestors_of(dir) {
+        provider.sync_dir(&parent).await?;
     }
-    if leftovers {
-        provider.sync_dir(dir).await?;
-    }
-    firsts.sort_unstable();
-    if let Some(start) = recorded_start {
-        // A prefix truncation records the new start before its unlinks,
-        // which a crash may undo one by one: a segment wholly below the
-        // start is one of those, back from the dead, and goes again.
-        let below = firsts
-            .windows(2)
-            .take_while(|pair| pair[1] <= start)
-            .count();
-        for first in firsts.drain(..below) {
-            tracing::warn!(first, start, "journal segment below the start removed");
-            provider.delete(&segment_path(dir, first)).await?;
-        }
-        if below > 0 {
-            provider.sync_dir(dir).await?;
-        }
-        if let Some(first) = firsts.first().copied()
-            && first != start
-        {
-            return Err(JournalError::SegmentGap {
-                end: start,
-                next: first,
-            });
-        }
-    }
-
-    Ok(firsts)
+    provider.sync_dir(dir).await
 }
 
-/// The start a prefix truncation recorded: eight little-endian bytes.
-fn decode_start(bytes: &[u8]) -> Result<u64, JournalError> {
-    bytes
-        .try_into()
-        .map(u64::from_le_bytes)
-        .map_err(|_| JournalError::MetadataCorrupt { name: "start" })
+/// The segments in `dir`, sorted by first batch, after removing what a
+/// crashed creation left; `None` when `dir` does not exist.
+async fn list_segments<P: StorageProvider>(
+    provider: &P,
+    dir: &str,
+) -> Result<Option<Vec<(u64, String)>>, OpenError> {
+    let names = match provider.list_dir(dir).await {
+        Ok(names) => names,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    sync_names(provider, dir).await?;
+    remove_leftover(provider, dir).await?;
+    let mut firsts: Vec<(u64, String)> = Vec::new();
+    for name in names {
+        if is_segment_leftover(&name) {
+            provider.delete(&format!("{dir}/{name}")).await?;
+        } else if let Some(first) = parse_segment_name(&name) {
+            firsts.push((first, name));
+        }
+    }
+    firsts.sort();
+    Ok(Some(firsts))
+}
+
+/// Make what this open found the log from now on: a new generation, durable
+/// in both metainfo copies before any write, so whatever lies beyond the end
+/// and was invisible here can never come back as evidence.
+async fn begin_generation<F: moonpool_core::StorageFile>(
+    meta_file: &MetaFile<F>,
+    meta: Meta,
+    last_batch: u64,
+) -> Result<Meta, OpenError> {
+    let generation = meta
+        .open_generation
+        .checked_add(1)
+        .ok_or(OpenError::InvalidConfig("open generations exhausted"))?;
+    let meta = Meta {
+        seq: meta.seq + 1,
+        last_batch,
+        open_generation: generation,
+        open_last: last_batch,
+        ..meta
+    };
+    meta_file.write(Copy::A, &meta).await?;
+    meta_file.sync().await?;
+    meta_file.write(Copy::B, &meta).await?;
+    meta_file.sync().await?;
+    Ok(meta)
 }
 
 impl<P: StorageProvider> Journal<P> {
-    /// Open the journal under `dir`, creating it if the directory holds no
-    /// segment, and run the recovery scan.
-    ///
-    /// Segments are found by listing the directory: each is named after its
-    /// first index, so the names alone give their order. Everything the
-    /// recovered log holds is synced before this returns: a process that
-    /// restarted without a power loss reads its predecessor's unsynced
-    /// writes back, and an entry reported here must not vanish at the next
-    /// crash. A segment file left
-    /// half-created by a crash (`seg-….wal.tmp`) is removed.
-    ///
-    /// `dir` may be nested: every directory on the path to it is created and
-    /// its name made durable, so a crash right after the first open cannot
-    /// drop an ancestor and with it the whole journal. `dir` itself is synced
-    /// too, before anything in it is trusted: a name an earlier, failed
-    /// attempt left visible but not durable is made durable first.
+    /// Create a journal in `dir` with the caller's first metainfo.
     ///
     /// # Errors
+    /// [`OpenError::AlreadyExists`] if `dir` holds a journal; any I/O error.
+    pub async fn create(
+        provider: P,
+        dir: &str,
+        id: JournalId,
+        config: JournalConfig,
+        meta: &[u8],
+    ) -> Result<Self, OpenError> {
+        check_config(&config)?;
+        if meta.len() > META_MAX {
+            return Err(OpenError::InvalidConfig(
+                "the first metainfo exceeds META_MAX",
+            ));
+        }
+        provider.create_dir_all(dir).await?;
+        sync_names(&provider, dir).await?;
+        if provider.exists(&format!("{dir}/{META_NAME}")).await? {
+            return Err(OpenError::AlreadyExists);
+        }
+        let first = Meta {
+            seq: 1,
+            journal: id,
+            floor: 0,
+            last_batch: 0,
+            open_generation: 1,
+            open_last: 0,
+            geometry: config.geometry,
+            bytes: meta.to_vec(),
+        };
+        let meta_file = MetaFile::create(&provider, dir, &first).await?;
+        Ok(Self {
+            tag: journal_tag(id),
+            provider,
+            dir: dir.to_string(),
+            id,
+            config,
+            meta_file,
+            meta: first,
+            segments: Vec::new(),
+            index: BTreeMap::new(),
+            last_batch: 0,
+            ambiguous_batch: None,
+            generation: 1,
+            poisoned: false,
+        })
+    }
+
+    /// Open the journal in `dir` and recover it. `Ok(None)`: there is no
+    /// journal here (no meta file, no segments); whether that is a fresh
+    /// node or a lost disk is the caller's to judge.
     ///
-    /// [`JournalError::InvalidConfig`] for an unusable configuration,
-    /// [`JournalError::DoubleFault`] where an entry and its identifier are
-    /// both damaged before the last batch, [`JournalError::SegmentGap`]
-    /// where a segment is missing between the start and the tail, the
-    /// segment metadata faults, and any I/O error.
-    #[instrument(skip(provider, config))]
+    /// Everything opening reports is durable before it returns: a process
+    /// that restarted without a power loss reads its predecessor's unsynced
+    /// writes back from the page cache, so opening syncs what it keeps.
+    ///
+    /// # Errors
+    /// The evidence variants of [`OpenError`] when the journal cannot be
+    /// trusted; [`OpenError::Io`] when the provider fails (open again).
     pub async fn open(
         provider: P,
         dir: &str,
+        id: JournalId,
         config: JournalConfig,
-    ) -> Result<(Self, Recovery), JournalError> {
-        config.geometry.validate()?;
-        provider.create_dir_all(dir).await?;
-        // Every ancestor, not only the ones this call created: an earlier open
-        // may have created them and failed before its syncs completed, leaving
-        // names that are visible but not durable.
-        for parent in ancestors_of(dir) {
-            provider.sync_dir(&parent).await?;
+    ) -> Result<Option<(Self, Recovery)>, OpenError> {
+        check_config(&config)?;
+        let Some(firsts) = list_segments(&provider, dir).await? else {
+            return Ok(None);
+        };
+        let Some((meta_file, meta, meta_repaired)) = MetaFile::open(&provider, dir, id).await?
+        else {
+            // Segments without metainfo: the node-unique state is gone.
+            return if firsts.is_empty() {
+                Ok(None)
+            } else {
+                Err(OpenError::MetaLost)
+            };
+        };
+        if meta.geometry != config.geometry {
+            return Err(OpenError::InvalidConfig(
+                "the geometry differs from the one the journal was created with",
+            ));
         }
-        // And the directory itself: a segment or metadata copy renamed into
-        // place by an earlier attempt whose directory sync failed is visible
-        // but not durable. Recovering it without this sync would acknowledge
-        // appends into a file whose name the next crash can undo.
-        provider.sync_dir(dir).await?;
-
-        let (meta, meta_value, meta_repaired) = DualFile::load(&provider, dir, "meta").await?;
-        let (start, recorded_start, _) = DualFile::load(&provider, dir, "start").await?;
-        let recorded_start = recorded_start
-            .map(|bytes| decode_start(&bytes))
-            .transpose()?;
-        let firsts = segment_firsts(&provider, dir, recorded_start).await?;
-
         let mut recovery = Recovery {
             meta_repaired,
             ..Recovery::default()
         };
-        let mut segments = Vec::with_capacity(firsts.len().max(1));
-        if firsts.is_empty() {
-            let first = recorded_start.unwrap_or(config.first_index);
-            segments.push(
-                Segment::create(&provider, dir, first, config.geometry, config.direct_io).await?,
-            );
-            recovery.created = true;
-        }
-        for (k, first) in firsts.iter().enumerate() {
-            let next_first = firsts.get(k + 1).copied();
-            let (segment, found) = Segment::recover(
+        let mut segments = Vec::with_capacity(firsts.len());
+        for (first, name) in &firsts {
+            let (segment, repaired) = Segment::open(
                 &provider,
                 dir,
+                name,
                 *first,
+                id,
                 config.geometry,
                 config.direct_io,
-                next_first,
             )
             .await?;
-            recovery.corrupt.extend(found.corrupt);
-            recovery.slots_rewritten += found.slots_rewritten;
-            recovery.torn_tail |= found.torn;
-            recovery.headers_repaired += usize::from(found.header_repaired);
+            recovery.headers_repaired += u32::from(repaired);
             segments.push(segment);
         }
 
+        let tag = journal_tag(id);
+        let stale = Stale {
+            generation: meta.open_generation,
+            last: meta.open_last,
+        };
+        let scanned = scan(&segments, tag, stale).await?;
+        if scanned.last_batch < meta.last_batch {
+            return Err(OpenError::LostBatch {
+                batch: meta.last_batch,
+            });
+        }
+        for (segment, (persist_next, entry_next)) in segments.iter_mut().zip(&scanned.cursors) {
+            segment.persist_next = *persist_next;
+            segment.entry_next = *entry_next;
+        }
+        if let Some((at, offset, bytes)) = &scanned.rewrite {
+            // A rebuilt record says its entry was persisted, and the entry it
+            // was rebuilt from may be a predecessor's unsynced write still in
+            // the page cache: the entry reaches the disk first, as in a
+            // commit. (A crash between a rewrite and the entries' sync left
+            // records naming entries that never landed: corruption from a
+            // crash alone.)
+            segments[*at].sync().await?;
+            segments[*at].write(*offset, bytes).await?;
+        }
+        // Whatever opening keeps must survive the next power loss.
+        for segment in &segments {
+            segment.sync().await?;
+        }
+        meta_file.sync().await?;
+        let meta = begin_generation(&meta_file, meta, scanned.last_batch).await?;
+        let generation = meta.open_generation;
+
+        recovery.corrupt = scanned.corrupt;
+        recovery.ambiguous = scanned.ambiguous;
+        recovery.torn = scanned.voided;
+        recovery.rebuilt = scanned.rebuilt;
+        let ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(scanned.last_batch);
         let mut journal = Self {
+            tag,
             provider,
             dir: dir.to_string(),
+            id,
             config,
+            meta_file,
             meta,
-            meta_value,
-            start,
             segments,
+            index: BTreeMap::new(),
+            last_batch: scanned.last_batch,
+            ambiguous_batch,
+            generation,
             poisoned: false,
         };
-        // The last batch is the one a crash can leave with identifiers but
-        // without bytes: its damaged entries are ambiguous. A single node
-        // truncates them; a replicated caller may keep them and resolve them
-        // with its peers.
-        let ambiguous: Vec<EntryId> = journal
-            .last_batch()
-            .iter()
-            .filter(|rec| rec.corrupt)
-            .map(|rec| rec.slot.id())
-            .collect();
-        if let Some(first) = ambiguous.first() {
-            recovery
-                .corrupt
-                .retain(|corrupt| corrupt.index < first.index);
-            for id in &ambiguous {
-                tracing::warn!(
-                    index = id.index,
-                    epoch = id.epoch,
-                    policy = ?journal.config.ambiguous_tail,
-                    "journal entry of the last batch ambiguous"
-                );
-            }
-            if journal.config.ambiguous_tail == AmbiguousTail::Truncate {
-                recovery.torn_tail = true;
-                journal.truncate_suffix(first.index).await?;
-            }
-            recovery.ambiguous_batch = ambiguous;
+        for op in scanned.ops {
+            journal.apply(&op);
         }
-        recovery.checkpoint = journal.checkpoint();
-        for id in &recovery.corrupt {
-            tracing::warn!(index = id.index, epoch = id.epoch, "journal entry corrupt");
-        }
-        Ok((journal, recovery))
+        journal.drop_below_floor();
+        recovery.segments_removed = journal.remove_dead_segments().await?;
+        journal.assert_invariants();
+        Ok(Some((journal, recovery)))
     }
 
-    /// The segment taking appends. The list is never empty: creation starts
-    /// it with one segment and truncation always keeps the first.
-    fn tail(&self) -> &Segment<P::File> {
-        self.segments
-            .last()
-            .expect("the segment list is never empty")
+    /// The caller's metainfo of the journal in `dir`, read without opening
+    /// it: no recovery, no repair, no sync, nothing created, so a probe never
+    /// changes what the next open finds. `Ok(None)` where there is no journal.
+    ///
+    /// # Errors
+    /// [`OpenError::MetaLost`] when no copy is valid,
+    /// [`OpenError::WrongJournal`], or the provider's error.
+    pub async fn peek_meta(
+        provider: &P,
+        dir: &str,
+        id: JournalId,
+    ) -> Result<Option<Vec<u8>>, OpenError> {
+        Ok(MetaFile::<P::File>::peek(provider, dir, id)
+            .await?
+            .map(|meta| meta.bytes))
     }
 
-    fn tail_mut(&mut self) -> &mut Segment<P::File> {
-        self.segments
-            .last_mut()
-            .expect("the segment list is never empty")
-    }
+    // ---- what the journal knows, from memory ----
 
-    /// The records of the log's last append batch, wherever it lives (the
-    /// tail segment may be freshly rolled over and still empty). Every
-    /// segment's first batch starts it, so the last batch never spans two.
-    fn last_batch(&self) -> &[crate::scan::Rec] {
-        self.segments
-            .iter()
-            .rev()
-            .find(|segment| segment.last().is_some())
-            .map_or(&[], |segment| segment.last_batch())
-    }
-
-    /// Where every region recovery reads lives right now: the metadata
-    /// copies, each segment's headers, and each live entry and its slot.
-    /// See [`JournalAtlas`].
+    /// The journal's identity.
     #[must_use]
-    pub fn atlas(&self) -> JournalAtlas {
-        let mut atlas = JournalAtlas::default();
-        if let Some(value) = &self.meta_value {
-            for copy in 0..2u8 {
-                atlas.push_meta(
-                    &self.meta.path(u64::from(copy)),
-                    copy,
-                    u64::try_from(value.len()).unwrap_or(u64::MAX),
-                );
+    pub fn id(&self) -> JournalId {
+        self.id
+    }
+
+    /// The caller's metainfo.
+    #[must_use]
+    pub fn meta(&self) -> &[u8] {
+        &self.meta.bytes
+    }
+
+    /// Positions below this are gone.
+    #[must_use]
+    pub fn floor(&self) -> u64 {
+        self.meta.floor
+    }
+
+    /// The number of the last batch in the log (0 before the first).
+    #[must_use]
+    pub fn last_batch(&self) -> u64 {
+        self.last_batch
+    }
+
+    /// What `position` holds, without reading it.
+    #[must_use]
+    pub fn state(&self, position: u64) -> State {
+        self.index
+            .get(&position)
+            .map_or(State::Empty, |at| self.state_of(at))
+    }
+
+    fn state_of(&self, at: &Located) -> State {
+        if !at.damaged {
+            State::Live {
+                id: at.id,
+                len: at.len,
             }
+        } else if self.ambiguous_batch == Some(at.batch) && at.flags & FLAG_ORDERED == 0 {
+            State::Ambiguous { id: at.id }
+        } else {
+            State::Corrupt { id: at.id }
         }
-        if self.start.is_stored() {
-            for copy in 0..2u8 {
-                atlas.push_start(&self.start.path(u64::from(copy)), copy);
-            }
-        }
+    }
+
+    /// Every non-empty position in order, with its state.
+    pub fn positions(&self) -> impl Iterator<Item = (u64, State)> + '_ {
+        self.index
+            .iter()
+            .map(|(&position, at)| (position, self.state_of(at)))
+    }
+
+    /// The highest non-empty position.
+    #[must_use]
+    pub fn last_position(&self) -> Option<u64> {
+        self.index.keys().next_back().copied()
+    }
+
+    /// Where `position`'s persist record and entry live.
+    #[must_use]
+    pub fn layout(&self, position: u64) -> Option<Layout> {
+        let at = self.index.get(&position)?;
+        let segment = &self.segments[self.segment_index(at.segment)];
+        let path = format!("{}/{}", self.dir, segment.name);
+        let offset = u64::from(at.offset);
+        let region = |bytes, kind| LayoutRegion {
+            path: path.clone(),
+            bytes,
+            kind,
+            stripe: Some(position),
+        };
+        Some(Layout {
+            record: region(
+                at.record_at..at.record_at + u64_of(RECORD_SIZE),
+                Layout::RECORD,
+            ),
+            entry: region(
+                offset..offset + u64_of(RECORD_SIZE) + u64::from(at.len),
+                Layout::ENTRY,
+            ),
+        })
+    }
+
+    /// Every region of the journal a fault could hit: each live position's
+    /// record and entry (striped by position), the two metainfo copies and
+    /// every segment's two header copies (node-unique: no stripe).
+    #[must_use]
+    pub fn regions(&self) -> Vec<LayoutRegion> {
+        let meta = format!("{}/{}", self.dir, META_NAME);
+        let mut regions = vec![
+            LayoutRegion {
+                path: meta.clone(),
+                bytes: 0..BLOCK_U64,
+                kind: Layout::META,
+                stripe: None,
+            },
+            LayoutRegion {
+                path: meta,
+                bytes: META_COPY_B_AT..META_COPY_B_AT + BLOCK_U64,
+                kind: Layout::META,
+                stripe: None,
+            },
+        ];
         for segment in &self.segments {
-            segment.chart(&segment_path(&self.dir, segment.first), &mut atlas);
-        }
-        let batch = self.last_batch();
-        let last_batch = batch.first().map_or(0..0, |rec| {
-            rec.slot.index..rec.slot.index + u64::try_from(batch.len()).unwrap_or(u64::MAX)
-        });
-        atlas.set_live(self.start_index()..self.next_index(), last_batch);
-        atlas
-    }
-
-    /// First live index: the first index of the oldest segment.
-    #[must_use]
-    pub fn start_index(&self) -> u64 {
-        self.segments.first().map_or(0, |segment| segment.first)
-    }
-
-    /// The index the next appended entry gets.
-    #[must_use]
-    pub fn next_index(&self) -> u64 {
-        self.tail().next_index()
-    }
-
-    /// The last index in the log, if the log is not empty.
-    #[must_use]
-    pub fn last_index(&self) -> Option<u64> {
-        let next = self.next_index();
-        (next > self.start_index()).then(|| next - 1)
-    }
-
-    /// The largest payload one entry may carry: what one segment's data
-    /// region holds.
-    #[must_use]
-    pub fn max_payload(&self) -> u64 {
-        // Entries are padded to 8 bytes.
-        (self.config.geometry.data_capacity() & !7) - ENTRY_HEADER_SIZE as u64
-    }
-
-    fn segment_of(&self, index: u64) -> Result<&Segment<P::File>, JournalError> {
-        let (start, next) = (self.start_index(), self.next_index());
-        if index < start || index >= next {
-            return Err(JournalError::OutOfRange { index, start, next });
-        }
-        // Binary search: the largest first index at or below `index`.
-        let at = self
-            .segments
-            .partition_point(|segment| segment.first <= index)
-            - 1;
-        Ok(&self.segments[at])
-    }
-
-    /// The epoch recorded for `index`, without I/O: the startup scan already
-    /// verified every slot.
-    #[must_use]
-    pub fn epoch(&self, index: u64) -> Option<u64> {
-        self.entry_id(index).map(|id| id.epoch)
-    }
-
-    /// The identity — index, epoch, and tag — recorded for `index`, without
-    /// I/O, whether or not the entry itself is intact.
-    #[must_use]
-    pub fn entry_id(&self, index: u64) -> Option<EntryId> {
-        self.segment_of(index).ok()?.id(index)
-    }
-
-    /// Read and verify the entry at `index`.
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::OutOfRange`] outside `[start, next)`,
-    /// [`JournalError::Corrupt`] if the entry fails any check (its CRC, its
-    /// index, or agreement with its slot) or the medium cannot read it, and
-    /// any other I/O error.
-    pub async fn read(&self, index: u64) -> Result<Entry, JournalError> {
-        let entry = self.segment_of(index)?.read(index).await;
-        if let Err(JournalError::Corrupt(id)) = &entry {
-            tracing::warn!(
-                index = id.index,
-                epoch = id.epoch,
-                "journal entry corrupt on read"
-            );
-        }
-        entry
-    }
-
-    /// Read and verify every entry in `range`, in order — the replay a
-    /// caller runs after [`open`](Self::open) to rebuild its state.
-    ///
-    /// Entries are packed back to back, so each segment's share of the
-    /// range is read in large sequential transfers rather than one read per
-    /// entry. Each entry comes back intact, with exactly the checks
-    /// [`read`](Self::read) applies, or as `Err` with the identity its slot
-    /// records: a corrupt entry does not stop the replay, it is reported in
-    /// place.
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::OutOfRange`] unless `range` lies within
-    /// `[start, next]` and is not reversed, and any I/O error other than the
-    /// medium failing to read an entry (which reports that entry corrupt).
-    pub async fn read_range(
-        &self,
-        range: Range<u64>,
-    ) -> Result<Vec<Result<Entry, EntryId>>, JournalError> {
-        let (start, next) = (self.start_index(), self.next_index());
-        for bound in [range.start, range.end] {
-            if bound < start || bound > next || range.start > range.end {
-                return Err(JournalError::OutOfRange {
-                    index: bound,
-                    start,
-                    next,
+            let path = format!("{}/{}", self.dir, segment.name);
+            for copy in 0..2 {
+                regions.push(LayoutRegion {
+                    path: path.clone(),
+                    bytes: copy * BLOCK_U64..(copy + 1) * BLOCK_U64,
+                    kind: Layout::HEADER,
+                    stripe: None,
                 });
             }
         }
-        let mut out = Vec::with_capacity(usize::try_from(range.end - range.start).unwrap_or(0));
-        let mut index = range.start;
-        while index < range.end {
-            let segment = self.segment_of(index)?;
-            let stop = range.end.min(segment.next_index());
-            segment.read_range(index..stop, &mut out).await?;
-            index = stop;
+        for layout in self.index.keys().filter_map(|&p| self.layout(p)) {
+            regions.push(layout.record);
+            regions.push(layout.entry);
         }
-        for id in out.iter().filter_map(|entry| entry.as_ref().err()) {
-            tracing::warn!(
-                index = id.index,
-                epoch = id.epoch,
-                "journal entry corrupt on read"
-            );
+        regions
+    }
+
+    // ---- reads ----
+
+    /// Read the entry at `position`, checked against its persist record:
+    /// its CRC, and that it is exactly the entry the record names.
+    ///
+    /// # Errors
+    /// [`ReadError::Damaged`] with the record's identity when the bytes are
+    /// damaged (a medium error reads as damage); [`ReadError::Empty`].
+    pub async fn read(&self, position: u64) -> Result<Entry, ReadError> {
+        let at = self
+            .index
+            .get(&position)
+            .ok_or(ReadError::Empty { position })?;
+        let damaged = ReadError::Damaged {
+            position,
+            id: at.id,
+        };
+        if at.damaged {
+            return Err(damaged);
+        }
+        let segment = &self.segments[self.segment_index(at.segment)];
+        let bytes = segment
+            .read_at(
+                u64::from(at.offset),
+                RECORD_SIZE + usize_of(u64::from(at.len)),
+            )
+            .await?;
+        let record = record_of(position, at);
+        let intact = EntryHeader::parse(&bytes).is_some_and(|(header, stored)| {
+            header.tag == self.tag
+                && entry_matches(&record, &header, stored)
+                && entry_crc(&bytes[..RECORD_SIZE], &bytes[RECORD_SIZE..]) == stored
+        });
+        if !intact {
+            return Err(damaged);
+        }
+        Ok(Entry {
+            position,
+            id: at.id,
+            payload: bytes[RECORD_SIZE..].to_vec(),
+        })
+    }
+
+    /// Read every non-empty position in `range`, in order: a damaged entry
+    /// is reported in place and the replay goes on.
+    ///
+    /// # Errors
+    /// Only a provider failure that is not the medium's.
+    pub async fn replay(
+        &self,
+        range: impl RangeBounds<u64>,
+    ) -> Result<Vec<(u64, Result<Entry, ReadError>)>, std::io::Error> {
+        let positions: Vec<u64> = self.index.range(range).map(|(&p, _)| p).collect();
+        let mut out = Vec::with_capacity(positions.len());
+        for position in positions {
+            match self.read(position).await {
+                Err(ReadError::Io(error)) => return Err(error),
+                read => out.push((position, read)),
+            }
         }
         Ok(out)
     }
 
-    fn check_writable(&self) -> Result<(), JournalError> {
+    // ---- writes ----
+
+    /// Make `batch` durable, then return. See [`Durability`] for the
+    /// protocol. Metainfo, when the batch changes it, is written copy A in
+    /// the first window and copy B in the second.
+    ///
+    /// # Errors
+    /// [`CommitError::BelowFloor`], [`CommitError::MetaTooLarge`] and
+    /// [`CommitError::BatchTooLarge`] before anything is written; an I/O
+    /// failure poisons the journal ([`CommitError::Io`] says whether the
+    /// batch may be durable anyway).
+    pub async fn commit(&mut self, batch: Batch) -> Result<(), CommitError> {
         if self.poisoned {
-            Err(JournalError::Poisoned)
-        } else {
-            Ok(())
+            return Err(CommitError::Poisoned);
         }
-    }
-
-    /// Pass `outcome` through, poisoning the journal when it is an error: a
-    /// failed write leaves the on-disk state no longer known to match memory.
-    fn poison_on_err<T>(&mut self, outcome: Result<T, JournalError>) -> Result<T, JournalError> {
-        if outcome.is_err() {
-            self.poisoned = true;
+        let floor = batch
+            .floor
+            .map_or(self.meta.floor, |f| f.max(self.meta.floor));
+        for write in &batch.writes {
+            if let Write::Put { position, .. } = write
+                && *position < floor
+            {
+                return Err(CommitError::BelowFloor {
+                    position: *position,
+                    floor,
+                });
+            }
         }
-        outcome
-    }
-
-    /// Append `records` at [`next_index`](Self::next_index) as one batch and
-    /// return the indexes they got. On `Ok` every record is durable.
-    ///
-    /// The entries go in one write, their slots in another, then one
-    /// `fdatasync`. A batch that does not fit the current segment's slot
-    /// table or data region fills it, and the rest continues in a new
-    /// segment with its own sync.
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::EntryTooLarge`] (nothing is written),
-    /// [`JournalError::Poisoned`] after an earlier failure, and any I/O error
-    /// — which poisons the journal, since part of the append may be on disk.
-    #[instrument(skip_all, fields(dir = %self.dir, count = records.len()))]
-    pub async fn append(&mut self, records: &[Record<'_>]) -> Result<Range<u64>, JournalError> {
-        self.check_writable()?;
-        let sizes = self.sizes(records)?;
-        let first = self.next_index();
-        let mut done = 0;
-        while done < records.len() {
-            let fit = self.tail().fitting(&sizes[done..]);
-            let outcome = if fit == 0 {
-                self.rollover().await
-            } else {
-                self.tail_mut()
-                    .append(&records[done..done + fit], false)
-                    .await
-            };
-            self.poison_on_err(outcome)?;
-            done += fit;
-        }
-        Ok(first..self.next_index())
-    }
-
-    /// The on-disk size of each record.
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::EntryTooLarge`] for a payload one segment cannot hold.
-    fn sizes(&self, records: &[Record<'_>]) -> Result<Vec<u64>, JournalError> {
-        let max = self.max_payload();
-        records
-            .iter()
-            .map(|record| {
-                u32::try_from(record.payload.len())
-                    .ok()
-                    .filter(|len| u64::from(*len) <= max)
-                    .map(entry_size)
-                    .ok_or(JournalError::EntryTooLarge {
-                        len: record.payload.len(),
-                        max,
-                    })
-            })
-            .collect()
-    }
-
-    /// Append `records` as one batch flagged as a checkpoint: once durable it
-    /// supersedes every entry before it. Returns the indexes they got.
-    ///
-    /// A checkpoint is the caller's state re-emitted, so that a replay can
-    /// start from it: [`checkpoint`](Self::checkpoint) and
-    /// [`Recovery::checkpoint`] name the newest intact one, and the caller
-    /// replays `checkpoint.start..next_index()`. Dropping the history before
-    /// it stays the caller's [`truncate_prefix`](Self::truncate_prefix)
-    /// (`checkpoint.start`), so a crash between the two is harmless: the old
-    /// history is still there. When to checkpoint is the caller's call too.
-    ///
-    /// The batch is never split: if the current segment cannot hold all of
-    /// it, the journal rolls over first, so a checkpoint is always one batch
-    /// with one sync. Its first entry and slot record its entry count, so a
-    /// checkpoint cut short — by a crash before its sync, or by a suffix
-    /// truncation — is never taken for a complete one. A crash leaves it the
-    /// log's last batch, handled like any other (its damaged entries
-    /// truncated or kept per [`JournalConfig::ambiguous_tail`], a torn end
-    /// ending the log); whatever survives of it stays in the log, never
-    /// named, and a replay from the named checkpoint skips it as the caller
-    /// sees fit (the caller knows its image records).
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::CheckpointTooLarge`] when an empty segment could not
-    /// hold it, and with no records at all; [`JournalError::EntryTooLarge`]
-    /// (nothing is written in either case), [`JournalError::Poisoned`], and
-    /// any I/O error, which poisons.
-    #[instrument(skip_all, fields(dir = %self.dir, count = records.len()))]
-    pub async fn append_checkpoint(
-        &mut self,
-        records: &[Record<'_>],
-    ) -> Result<Range<u64>, JournalError> {
-        self.check_writable()?;
-        let sizes = self.sizes(records)?;
-        let bytes: u64 = sizes.iter().sum();
-        let geometry = self.config.geometry;
-        if records.is_empty()
-            || u64::try_from(records.len()).map_or(true, |n| n > u64::from(geometry.slot_count))
-            || bytes > geometry.data_capacity()
+        if let Some(meta) = &batch.meta
+            && meta.len() > META_MAX
         {
-            return Err(JournalError::CheckpointTooLarge {
-                entries: records.len(),
-                bytes,
+            return Err(CommitError::MetaTooLarge { len: meta.len() });
+        }
+        if !batch.fits(self.config.geometry) {
+            return Err(CommitError::BatchTooLarge);
+        }
+        let meta_changes = batch.meta.is_some() || floor != self.meta.floor;
+        let next_meta = Meta {
+            seq: self.meta.seq + 1,
+            floor,
+            last_batch: self.last_batch,
+            bytes: batch
+                .meta
+                .clone()
+                .unwrap_or_else(|| self.meta.bytes.clone()),
+            ..self.meta.clone()
+        };
+        if batch.writes.is_empty() {
+            if meta_changes {
+                self.write_meta_only(&next_meta).await?;
+                self.meta = next_meta;
+                self.after_commit().await?;
+            }
+            return Ok(());
+        }
+        let mut prepared = self.prepare(&batch)?;
+        let at = self.segment_for(&prepared).await?;
+        let segment = &self.segments[at];
+        prepared.place(segment.persist_next, segment.entry_next);
+        let ordered = self.config.durability == Durability::Ordered;
+        let meta = meta_changes.then_some(&next_meta);
+        if let Err((error, durable)) =
+            write_protocol(segment, &self.meta_file, &prepared, meta, ordered).await
+        {
+            self.poisoned = true;
+            return Err(CommitError::Io { error, durable });
+        }
+
+        // Durable: now memory follows.
+        let segment = &mut self.segments[at];
+        segment.persist_next = prepared.persist_at + u64_of(prepared.records.len());
+        segment.entry_next = prepared.entry_at + u64_of(prepared.entries.len());
+        let first_batch = segment.first_batch;
+        for (index, (record, write)) in (0u16..).zip(prepared.decoded.iter().zip(&batch.writes)) {
+            let op = match write {
+                Write::Put { position, .. } => Op::Put {
+                    position: *position,
+                    at: Located {
+                        segment: first_batch,
+                        record_at: prepared.persist_at + Record::slot_offset(index),
+                        offset: record.offset,
+                        len: record.len,
+                        entry_crc: record.entry_crc,
+                        id: record.id,
+                        batch: record.batch,
+                        index,
+                        count: record.count,
+                        flags: record.flags,
+                        damaged: false,
+                    },
+                },
+                Write::Clear { start, end } => Op::Clear {
+                    start: *start,
+                    end: *end,
+                },
+            };
+            self.apply(&op);
+        }
+        self.last_batch = prepared.seq;
+        self.ambiguous_batch = None;
+        if meta_changes {
+            self.meta = next_meta;
+        }
+        self.after_commit().await
+    }
+
+    /// The floor took effect and segments emptied: drop what is dead.
+    async fn after_commit(&mut self) -> Result<(), CommitError> {
+        self.drop_below_floor();
+        if let Err(error) = self.remove_dead_segments().await {
+            self.poisoned = true;
+            return Err(CommitError::Io {
+                error,
+                durable: Durable::Unknown,
             });
         }
-        if self.tail().fitting(&sizes) < records.len() {
-            let outcome = self.rollover().await;
-            self.poison_on_err(outcome)?;
-        }
-        let first = self.next_index();
-        let outcome = self.tail_mut().append(records, true).await;
-        self.poison_on_err(outcome)?;
-        Ok(first..self.next_index())
-    }
-
-    /// The newest intact checkpoint batch: every entry
-    /// [`append_checkpoint`](Self::append_checkpoint) wrote for it is in the
-    /// log and none is damaged. A damaged one, or one cut short, is passed
-    /// over for the one before it. `None` when there is none.
-    #[must_use]
-    pub fn checkpoint(&self) -> Option<Range<u64>> {
-        for segment in self.segments.iter().rev() {
-            let recs = segment.records();
-            for (at, rec) in recs.iter().enumerate().rev() {
-                let Some(count) = rec.slot.checkpoint else {
-                    continue;
-                };
-                let Some(batch) = usize::try_from(count)
-                    .ok()
-                    .and_then(|count| recs.get(at..at.checked_add(count)?))
-                else {
-                    continue;
-                };
-                let whole = batch
-                    .iter()
-                    .skip(1)
-                    .all(|rec| !rec.slot.batch_start && !rec.corrupt);
-                if !rec.corrupt && whole {
-                    let start = rec.slot.index;
-                    return Some(start..start + u64::from(count));
-                }
-            }
-        }
-        None
-    }
-
-    /// Start a new segment at the next index. Every batch in the current one
-    /// is already synced.
-    async fn rollover(&mut self) -> Result<(), JournalError> {
-        let first = self.next_index();
-        let segment = Segment::create(
-            &self.provider,
-            &self.dir,
-            first,
-            self.config.geometry,
-            self.config.direct_io,
-        )
-        .await?;
-        self.segments.push(segment);
-        tracing::debug!(first, "journal segment rolled over");
+        self.assert_invariants();
         Ok(())
     }
 
-    /// Discard every entry at `from` and after (Raft suffix truncation).
-    ///
-    /// Segments wholly past the cut are deleted, newest first. In the segment
-    /// the cut falls in, the discarded slots are reset to their reserved
-    /// records and synced, then the discarded entries' blocks are zeroed and
-    /// synced — the clean-up that must precede the next append, or a crash
-    /// could leave an old slot beside a new entry and make a harmless crash
-    /// look like corruption. The block holding the cut keeps its kept
-    /// entries and is never rewritten. A crash part-way leaves a log that
-    /// ends somewhere between `from` and the old end: never a gap, never a
-    /// corrupt entry.
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::OutOfRange`] unless `start <= from <= next`,
-    /// [`JournalError::Poisoned`], and any I/O error (which poisons).
-    #[instrument(skip(self), fields(dir = %self.dir))]
-    pub async fn truncate_suffix(&mut self, from: u64) -> Result<(), JournalError> {
-        self.check_writable()?;
-        let (start, next) = (self.start_index(), self.next_index());
-        if from < start || from > next {
-            return Err(JournalError::OutOfRange {
-                index: from,
-                start,
-                next,
+    fn prepare(&self, batch: &Batch) -> Result<Prepared, CommitError> {
+        let seq = if generation_of(self.last_batch) == u64::from(self.generation) {
+            self.last_batch + 1
+        } else {
+            first_batch_of(u64::from(self.generation))
+        };
+        assert!(seq > self.last_batch, "batch numbers only grow");
+        let count = u16::try_from(batch.writes.len()).map_err(|_| CommitError::BatchTooLarge)?;
+        let flags = match self.config.durability {
+            Durability::Ordered => FLAG_ORDERED,
+            Durability::Batched => 0,
+        };
+        // Entries are laid out relative to the batch's first entry; the
+        // offsets are fixed once a segment is chosen.
+        let mut entries = Vec::new();
+        let mut decoded = Vec::with_capacity(batch.writes.len());
+        for (index, write) in (0u16..).zip(&batch.writes) {
+            let (kind, position, id, payload): (Kind, u64, Id, &[u8]) = match write {
+                Write::Put {
+                    position,
+                    id,
+                    payload,
+                } => (Kind::Put, *position, *id, payload),
+                Write::Clear { start, end } => (Kind::Clear, *start, clear_id(*end), &[]),
+            };
+            let len = u32::try_from(payload.len()).map_err(|_| CommitError::BatchTooLarge)?;
+            let header = EntryHeader {
+                kind,
+                flags,
+                index,
+                count,
+                batch: seq,
+                position,
+                id,
+                len,
+                tag: self.tag,
+            };
+            let start = entries.len();
+            entries.resize(start + usize_of(EntryHeader::footprint(len)), 0);
+            let entry_crc = header.encode(payload, &mut entries[start..]);
+            decoded.push(Record {
+                kind,
+                flags,
+                index,
+                count,
+                batch: seq,
+                position,
+                id,
+                offset: u32::try_from(start).map_err(|_| CommitError::BatchTooLarge)?,
+                len,
+                entry_crc,
             });
         }
-        if from == next {
-            return Ok(());
-        }
-        // Keep the segments that start before the cut, and always the first.
-        let keep = self
-            .segments
-            .partition_point(|segment| segment.first < from)
-            .max(1);
-        let outcome = async {
-            if keep < self.segments.len() {
-                // Newest first, each unlink durable before the next, so a
-                // crash can undo at most the last one: the survivors always
-                // stay a prefix, never one with a hole.
-                for dropped in self.segments.drain(keep..).rev() {
-                    let path = segment_path(&self.dir, dropped.first);
-                    drop(dropped);
-                    self.provider.delete(&path).await?;
-                    self.provider.sync_dir(&self.dir).await?;
-                }
-            }
-            self.tail_mut().truncate_from(from).await
-        }
-        .await;
-        self.poison_on_err(outcome)
+        entries.resize(usize_of(align_up(u64_of(entries.len()), BLOCK_U64)), 0);
+        let records = vec![0u8; usize_of(Record::blocks_for(decoded.len()) * BLOCK_U64)];
+        let geometry = self.config.geometry;
+        // Pair with `Batch::fits`, checked before anything was laid out.
+        assert!(
+            Record::blocks_for(decoded.len()) <= u64::from(geometry.persist_blocks),
+            "a batch that fits holds its records in one persist log"
+        );
+        assert!(
+            u64_of(entries.len()) <= u64::from(geometry.entry_blocks) * BLOCK_U64,
+            "a batch that fits holds its entries in one entry log"
+        );
+        Ok(Prepared {
+            seq,
+            entries,
+            records,
+            decoded,
+            persist_at: 0,
+            entry_at: 0,
+        })
     }
 
-    /// Forget whole segments that lie entirely before `before` (compaction).
-    /// The segment holding `before` is kept, so the new
-    /// [`start_index`](Self::start_index) is its first index — at or below
-    /// `before`.
-    ///
-    /// The new start is made durable first, in its own two-copy record
-    /// (`start.0`, `start.1`), and only then are the segments deleted, oldest
-    /// first. A crash can undo any of those unlinks, each on its own; the
-    /// next open finds the durable start and deletes again whatever lies
-    /// wholly below it, so a resurrected segment is never read as part of
-    /// the log.
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::OutOfRange`] unless `start <= before <= next`,
-    /// [`JournalError::Poisoned`], and any I/O error (which poisons).
-    #[instrument(skip(self), fields(dir = %self.dir))]
-    pub async fn truncate_prefix(&mut self, before: u64) -> Result<(), JournalError> {
-        self.check_writable()?;
-        let (start, next) = (self.start_index(), self.next_index());
-        if before < start || before > next {
-            return Err(JournalError::OutOfRange {
-                index: before,
-                start,
-                next,
-            });
-        }
-        let drop_count = self
+    /// The segment this batch goes to, rolling over when the active one is
+    /// full; fixes the batch's offsets.
+    async fn segment_for(&mut self, prepared: &Prepared) -> Result<usize, CommitError> {
+        let persist_blocks = u64_of(prepared.records.len()) / BLOCK_U64;
+        let entry_bytes = u64_of(prepared.entries.len());
+        let fits = self
             .segments
-            .partition_point(|segment| segment.first <= before)
-            .saturating_sub(1);
-        if drop_count == 0 {
-            return Ok(());
-        }
-        let new_start = self.segments[drop_count].first;
-        let outcome = async {
-            self.start
-                .store(&self.provider, &new_start.to_le_bytes())
-                .await?;
-            for dropped in self.segments.drain(..drop_count) {
-                let path = segment_path(&self.dir, dropped.first);
-                drop(dropped);
-                self.provider.delete(&path).await?;
+            .last()
+            .is_some_and(|s| s.fits(persist_blocks, entry_bytes));
+        if !fits {
+            let created = Segment::create(
+                &self.provider,
+                &self.dir,
+                self.id,
+                prepared.seq,
+                self.last_batch,
+                self.config.geometry,
+                self.config.direct_io,
+            )
+            .await;
+            match created {
+                Ok(segment) => self.segments.push(segment),
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(CommitError::Io {
+                        error: std::io::Error::other(error.to_string()),
+                        durable: Durable::No,
+                    });
+                }
             }
+        }
+        Ok(self.segments.len() - 1)
+    }
+
+    async fn write_meta_only(&mut self, meta: &Meta) -> Result<(), CommitError> {
+        let outcome: std::io::Result<()> = async {
+            self.meta_file.write(Copy::A, meta).await?;
+            self.meta_file.sync().await?;
+            self.meta_file.write(Copy::B, meta).await?;
+            self.meta_file.sync().await
+        }
+        .await;
+        outcome.map_err(|error| {
+            self.poisoned = true;
+            CommitError::Io {
+                error,
+                durable: Durable::Unknown,
+            }
+        })
+    }
+
+    // ---- the index ----
+
+    fn segment_index(&self, first_batch: u64) -> usize {
+        self.segments
+            .binary_search_by_key(&first_batch, |s| s.first_batch)
+            .expect("a located entry's segment is open")
+    }
+
+    fn apply(&mut self, op: &Op) {
+        match op {
+            Op::Put { position, at } => {
+                let new = self.segment_index(at.segment);
+                self.segments[new].live += 1;
+                if let Some(old) = self.index.insert(*position, *at) {
+                    self.release(&old);
+                }
+            }
+            Op::Clear { start, end } => {
+                let gone: Vec<u64> = self.index.range(*start..*end).map(|(&p, _)| p).collect();
+                for position in gone {
+                    let old = self.index.remove(&position).expect("listed");
+                    self.release(&old);
+                }
+            }
+        }
+    }
+
+    fn release(&mut self, old: &Located) {
+        let at = self.segment_index(old.segment);
+        assert!(
+            self.segments[at].live > 0,
+            "a segment's live count covers its entries"
+        );
+        self.segments[at].live -= 1;
+    }
+
+    fn drop_below_floor(&mut self) {
+        let floor = self.meta.floor;
+        let gone: Vec<u64> = self.index.range(..floor).map(|(&p, _)| p).collect();
+        for position in gone {
+            let old = self.index.remove(&position).expect("listed");
+            self.release(&old);
+        }
+    }
+
+    /// Delete the leading segments that hold nothing live, never the active
+    /// one, and only from the front: a later segment may hold the write or
+    /// the tombstone that makes an earlier one dead, so it must outlive it.
+    /// Each unlink is made durable before the next, so a crash can only
+    /// bring back the front one, never leave a hole in the chain.
+    async fn remove_dead_segments(&mut self) -> std::io::Result<u32> {
+        let mut removed = 0;
+        while self.segments.len() > 1 && self.segments[0].live == 0 {
+            let path = format!("{}/{}", self.dir, self.segments[0].name);
+            self.provider.delete(&path).await?;
             self.provider.sync_dir(&self.dir).await?;
-            Ok(())
+            drop(self.segments.remove(0));
+            removed += 1;
         }
-        .await;
-        self.poison_on_err(outcome)
+        Ok(removed)
     }
 
-    /// The caller's metadata under `dir` as the newest valid copy holds it,
-    /// without opening the journal: no recovery scan, no repair of a damaged
-    /// or older copy, no truncation, nothing created. What
-    /// [`meta`](Self::meta) would return after [`open`](Self::open), for a
-    /// caller that only needs to know — say, whether a store was ever
-    /// formatted — and must not change what the next open finds.
-    ///
-    /// Returns `None` when neither copy exists, including when `dir` does
-    /// not.
-    ///
-    /// # Errors
-    ///
-    /// [`JournalError::MetadataCorrupt`] when a copy exists but none is
-    /// valid (or both are valid at one generation and disagree), and
-    /// [`JournalError::Io`] if the namespace cannot be queried.
-    pub async fn peek_meta(provider: &P, dir: &str) -> Result<Option<Vec<u8>>, JournalError> {
-        DualFile::peek(provider, dir, "meta").await
+    fn assert_invariants(&self) {
+        let live: u64 = self.segments.iter().map(|s| s.live).sum();
+        assert_eq!(
+            live,
+            u64_of(self.index.len()),
+            "live counts cover the index"
+        );
+        assert!(
+            self.index
+                .keys()
+                .next()
+                .is_none_or(|&p| p >= self.meta.floor),
+            "nothing live below the floor"
+        );
+        assert!(
+            self.segments
+                .windows(2)
+                .all(|w| w[0].first_batch < w[1].first_batch),
+            "segments are ordered by their first batch"
+        );
+        assert!(
+            self.meta.bytes.len() <= META_MAX && BLOCK == 4096,
+            "metainfo fits its block"
+        );
     }
+}
 
-    /// The caller's metadata (for example Raft's term and vote), as last
-    /// saved.
-    #[must_use]
-    pub fn meta(&self) -> Option<&[u8]> {
-        self.meta_value.as_deref()
+/// The persist record a located entry was written under.
+fn record_of(position: u64, at: &Located) -> Record {
+    Record {
+        kind: Kind::Put,
+        flags: at.flags,
+        index: at.index,
+        count: at.count,
+        batch: at.batch,
+        position,
+        id: at.id,
+        offset: at.offset,
+        len: at.len,
+        entry_crc: at.entry_crc,
     }
+}
 
-    /// Durably replace the caller's metadata. It lives in its own file, in
-    /// two copies (`meta.0`, `meta.1`), each with a generation counter and a
-    /// CRC, each updated through a temporary file, a sync, and a rename.
-    ///
-    /// # Errors
-    ///
-    /// Any I/O error; at least one copy is still intact on disk.
-    #[instrument(skip_all, fields(dir = %self.dir, len = bytes.len()))]
-    pub async fn save_meta(&mut self, bytes: &[u8]) -> Result<(), JournalError> {
-        self.meta.store(&self.provider, bytes).await?;
-        self.meta_value = Some(bytes.to_vec());
-        Ok(())
+/// A batch encoded: its entries (offsets relative to the batch's first
+/// entry until [`Prepared::place`]) and its persist records.
+struct Prepared {
+    seq: u64,
+    entries: Vec<u8>,
+    records: Vec<u8>,
+    decoded: Vec<Record>,
+    persist_at: u64,
+    entry_at: u64,
+}
+
+impl Prepared {
+    /// Fix the batch at its place in a segment and encode its records.
+    fn place(&mut self, persist_at: u64, entry_at: u64) {
+        assert!(
+            persist_at.is_multiple_of(BLOCK_U64) && entry_at.is_multiple_of(BLOCK_U64),
+            "a batch starts on a fresh block in both logs"
+        );
+        self.persist_at = persist_at;
+        self.entry_at = entry_at;
+        for (slot, record) in self.decoded.iter_mut().enumerate() {
+            record.offset = u32::try_from(entry_at + u64::from(record.offset))
+                .expect("geometry bounds offsets to u32");
+            record.encode(&mut self.records[slot * RECORD_SIZE..]);
+        }
+    }
+}
+
+/// The commit protocol (see [`Durability`]), with metainfo copy A in the
+/// first window and copy B in the second.
+async fn write_protocol<F: moonpool_core::StorageFile>(
+    segment: &Segment<F>,
+    meta_file: &MetaFile<F>,
+    batch: &Prepared,
+    meta: Option<&Meta>,
+    ordered: bool,
+) -> Result<(), (std::io::Error, Durable)> {
+    segment
+        .write(batch.entry_at, &batch.entries)
+        .await
+        .map_err(|error| (error, Durable::No))?;
+    let unknown = |error| (error, Durable::Unknown);
+    if !ordered {
+        segment
+            .write(batch.persist_at, &batch.records)
+            .await
+            .map_err(unknown)?;
+    }
+    if let Some(meta) = meta {
+        meta_file.write(Copy::A, meta).await.map_err(unknown)?;
+    }
+    segment.sync().await.map_err(unknown)?;
+    if meta.is_some() {
+        meta_file.sync().await.map_err(unknown)?;
+    }
+    if ordered {
+        segment
+            .write(batch.persist_at, &batch.records)
+            .await
+            .map_err(unknown)?;
+    }
+    if let Some(meta) = meta {
+        meta_file.write(Copy::B, meta).await.map_err(unknown)?;
+    }
+    if ordered {
+        segment.sync().await.map_err(unknown)?;
+    }
+    if meta.is_some() {
+        meta_file.sync().await.map_err(unknown)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ancestors_of;
+
+    #[test]
+    fn every_ancestor_from_the_root_down() {
+        assert_eq!(ancestors_of("wal"), vec!["."]);
+        assert_eq!(ancestors_of("a/b/c"), vec![".", "a", "a/b"]);
+        assert_eq!(ancestors_of("/a/b"), vec!["/", "/a"]);
     }
 }

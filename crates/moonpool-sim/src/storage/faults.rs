@@ -194,7 +194,7 @@ impl FaultFocus {
     /// Weigh every region of a storage format's layout by its kind:
     /// `weight(region)` for each, as [`spot`](Self::spot) would. Any format
     /// that lists its regions as [`LayoutRegion`](moonpool_core::LayoutRegion)s
-    /// — `moonpool-journal`'s `JournalAtlas` does — can be aimed this way
+    /// — `moonpool-journal`'s `Journal::regions` does — can be aimed this way
     /// without the simulator knowing the format.
     #[must_use]
     pub fn layout<'a>(
