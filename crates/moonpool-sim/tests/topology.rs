@@ -455,3 +455,113 @@ fn a_second_cluster_group_draws_its_own_pattern() {
     assert_eq!(report.failed_runs, 0, "both groups drew a pattern");
     assert_eq!(report.successful_runs, 8);
 }
+
+// ============================================================================
+// Test: a `.cluster()` group may draw zero processes.
+// ============================================================================
+
+/// The matchmaker count every seed drew.
+type Counts = std::sync::Arc<std::sync::Mutex<Vec<usize>>>;
+
+/// A matchmaker: checks the seed drew a real pattern exactly when its group
+/// spans two datacenters.
+struct Matchmaker;
+
+#[async_trait]
+impl Process for Matchmaker {
+    fn name(&self) -> &'static str {
+        "matchmaker"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let members = ctx.topology().ips_in_group("matchmaker").len();
+        let pattern = ctx.storage().fault_pattern()?;
+        let spared = matches!(pattern, None | Some(moonpool_sim::FaultPattern::Spared));
+        assert!(
+            spared == (members < 2),
+            "{members} matchmakers drew {pattern:?}"
+        );
+        ctx.shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+/// Records the matchmaker count and checks every group kept its range.
+struct OptionalGroupWorkload(Counts);
+
+#[async_trait]
+impl Workload for OptionalGroupWorkload {
+    fn name(&self) -> &'static str {
+        "optional_group"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let topo = ctx.topology();
+        let matchmakers = topo.ips_in_group("matchmaker");
+        let ok = topo.ips_in_group("replica") == ["10.0.1.1", "10.0.1.2", "10.0.1.3"]
+            && matchmakers.len() <= 2
+            && matchmakers
+                .iter()
+                .enumerate()
+                .all(|(i, ip)| *ip == format!("10.0.2.{}", i + 1))
+            && topo.ips_in_group("witness") == ["10.0.3.1"]
+            && topo.groups() == ["replica", "matchmaker", "witness"];
+        if !ok {
+            return Err(SimulationError::InvalidState(format!(
+                "bad layout: {:?}",
+                topo.all_process_ips()
+            )));
+        }
+        self.0
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .push(matchmakers.len());
+        ctx.time()
+            .sleep(Duration::from_millis(50))
+            .await
+            .map_err(|e| SimulationError::InvalidState(format!("sleep failed: {e}")))
+    }
+}
+
+#[test]
+fn a_cluster_group_may_draw_zero_processes() {
+    let counts: Counts = std::sync::Arc::default();
+    let report = SimulationBuilder::new()
+        .cluster(LocalityConfig::new(1, 3, 1, 1), || {
+            Box::new(ReplicaProcess {
+                name: "replica",
+                expect_pattern: true,
+            })
+        })
+        .cluster(LocalityConfig::new(0..=2, 1, 1, 1), || Box::new(Matchmaker))
+        .cluster(LocalityConfig::new(1, 1, 1, 1), || {
+            Box::new(ReplicaProcess {
+                name: "witness",
+                expect_pattern: false,
+            })
+        })
+        .workload(OptionalGroupWorkload(counts.clone()))
+        .replicated_storage_faults(
+            moonpool_sim::ReplicatedFaults::new(DomainLevel::Zone).group("replica"),
+        )
+        .replicated_storage_faults(
+            moonpool_sim::ReplicatedFaults::new(DomainLevel::Datacenter).group("matchmaker"),
+        )
+        .enable_chaos([Chaos::Storage(ChaosMode::Random)])
+        .set_iterations(16)
+        .set_debug_seeds((1..=16).collect())
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "{report}");
+    assert_eq!(report.successful_runs, 16);
+    let counts = counts.lock().expect("Mutex poisoned: prior task panicked");
+    assert_eq!(counts.len(), 16);
+    assert!(
+        counts.contains(&0),
+        "no seed drew an empty group: {counts:?}"
+    );
+    assert!(
+        counts.iter().any(|&n| n > 0),
+        "every seed drew an empty group: {counts:?}"
+    );
+}

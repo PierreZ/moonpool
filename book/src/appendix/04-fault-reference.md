@@ -205,6 +205,7 @@ custom [`FaultInjector`](../part3-building/07-chaos.md) implementations.
 | Crash + wipe | `RebootKind::CrashAndWipe` | Crash behavior + immediate wipe of all persistent storage owned by the process (scoped by IP) |
 | Continuous attrition | `Attrition` config | Random reboots during chaos phase with weighted `prob_graceful`/`prob_crash`/`prob_wipe` and `max_dead` limit |
 | Correlated reboot | `AttritionScope::PerMachine` / `PerZone` / `PerDatacenter` | Reboot every process of one failure domain together; only fires when the whole group fits in `max_dead` |
+| Correlated outage | `Chaos::Outage` / `Outage` config | At most once per run, crash every live process of the named groups in one tick; each restarts after its own `down` draw, one optional straggler last; restarts land even after the chaos window; publishes `OutageLanded` under `OUTAGE_STATE_KEY` |
 
 ## Configuration Presets
 

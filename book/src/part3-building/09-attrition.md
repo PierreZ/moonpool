@@ -170,7 +170,7 @@ SimulationBuilder::new()
     .workload(MyWorkload::new());
 ```
 
-The topology, not a flat count, decides how many processes exist. Each one is assigned a globally unique datacenter, zone, and machine id (`dc1`, `dc1-z1`, `dc1-z1-m1`), and processes read their own placement plus query the cluster through their topology:
+The topology, not a flat count, decides how many processes exist, and a dimension may draw **zero**. `LocalityConfig::new(0..=2, 1, 1, 1)` is an optional role: some seeds run the deployment without it, its group simply empty (no IPs, no attrition victims, no replicated fault pattern), while every later group keeps its own `10.0.{g+1}.x` range. Each one is assigned a globally unique datacenter, zone, and machine id (`dc1`, `dc1-z1`, `dc1-z1-m1`), and processes read their own placement plus query the cluster through their topology:
 
 ```rust
 let me = ctx.topology().my_locality().expect("clustered process");
@@ -201,6 +201,31 @@ Now `scope` earns its keep. With `AttritionScope::PerMachine`, attrition picks a
 The same topology also shapes the network, not just the reboots. `PartitionStrategy::IsolateZone` and `IsolateDatacenter` cut a whole domain off the rest of the cluster, and `LinkLatencyConfig` gives cross-datacenter links their real cost. Both are covered in [Network Faults](10-network-faults.md).
 
 For targeted correlated faults, `FaultContext` exposes the group reboots directly. `ctx.reboot_machine("dc1-z1-m1", RebootKind::Crash)` kills a named machine and returns the IPs it took down, and `ctx.reboot_domain(DomainLevel::Datacenter, "dc1", kind)` blacks out a whole datacenter. Combined with `ctx.ips_in_domain(...)`, the same domain ids drive network partitions across a zone or datacenter boundary, so you can model a region cut as cleanly as a host reboot.
+
+## Correlated Outages: The Whole Rack Goes Dark
+
+Attrition never takes more than `max_dead` processes at once, and that is the point: it models the steady drizzle of failures a healthy cluster rides through. A rack-wide power loss is a different fault. Every process of a group loses power **at the same instant**, every memory is gone, and what survives is exactly what the disks hold. No peer can repair a copy from memory, because there is no peer left awake. Then the machines come back one by one, each on its own schedule, and one straggler may take much longer than the rest. FoundationDB's simulator models this as `killDataCenter`, and a quorum protocol that never faces it has never had its recovery path tested from cold disks alone.
+
+`Chaos::Outage` is that fault:
+
+```rust
+.enable_chaos([Chaos::Outage {
+    config: Outage {
+        start: Duration::from_secs(10)..Duration::from_secs(25),
+        down: Duration::from_secs(1)..Duration::from_secs(5),
+        straggler: Some(Duration::from_secs(20)..Duration::from_secs(40)),
+        ..Outage::groups(["acceptor"])
+    },
+    mode: ChaosMode::Swarm,
+}])
+.chaos_duration(Duration::from_secs(30))
+```
+
+At most once per run, with `probability` (1.0 by default), at a time drawn from `start` after the chaos window opens, every live process of the named groups crashes in the same tick. Each restarts after its own draw from `down`, and with a `straggler` range one victim, picked at random, is held down for a draw from that range instead. The straggler range must start where `down` ends, so the straggler is always the last one back. `Swarm` drops the outage on half the seeds and the straggler on half the rest.
+
+Two properties make the fault trustworthy. Every draw comes from the simulation stream, in ascending IP order at the outage instant, so a seed or an exploration recipe replays **the same kill and restart schedule**. And each restart is a scheduled `ProcessRestart` event, not a step of the injector, so restarts land even after the chaos window closes: a victim is never stranded down into the recovery tail. Victims count toward `dead_count`, so attrition holds off while they are down. Give the workload enough time after the window for the last straggler to come back.
+
+The injector also tells you when it has landed. Once every victim's kill has run, it publishes an `OutageLanded` (the instant, the victims in IP order, each one's time down, the straggler) under `OUTAGE_STATE_KEY` in the `StateHandle`. A custom fault injector that waits for that key can plan latent disk damage at the one moment no copy lives in memory anywhere.
 
 ## Custom Fault Injection
 

@@ -755,6 +755,13 @@ on the role under test rather than on spares; `max_dead` then counts dead
 processes in that pool only, and one `Chaos::Attrition` entry per group gives
 each role its own regime and budget.
 
+`Chaos::Outage { config: Outage::groups(["acceptor"]), mode }` is the
+correlated counterpart: at most once per run, every live process of the named
+groups crashes in one tick and each restarts after its own `down` draw (one
+optional `straggler` last). Restarts are scheduled events, so they land even
+after the chaos window closes. Once every victim is down, an `OutageLanded`
+is published in the `StateHandle` under `OUTAGE_STATE_KEY`.
+
 `.chaos_duration(...)` bounds the window in which Moonpool may inject **new**
 faults of any kind. At the cutoff the runner stops attrition and custom fault
 injectors *and* calls `SimWorld::enter_recovery_mode()`, which switches off every

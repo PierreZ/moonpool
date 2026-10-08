@@ -25,7 +25,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `chaos_duration(dur)` | `Duration` | Bound the window in which new faults may be injected (see [Chaos duration and recovery mode](#chaos-duration-and-recovery-mode)) |
 | `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
 | `set_debug_seeds(seeds)` | `Vec<u64>` | Use specific seeds for deterministic debugging |
-| `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
+| `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition/outage chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
 | `swarm_operations()` | -- | Enable per-seed swarm of each workload's operation alphabet |
 | `check_determinism()` | -- | Run every seed twice and fail it if the replay's draw fingerprints differ (see [The Determinism Canary](../part2-foundations/03-seeds.md#the-determinism-canary)) |
 | `enable_exploration(config)` | `ExplorationConfig` | Enable fork-based multiverse exploration |
@@ -145,6 +145,20 @@ The type of reboot chosen based on attrition probabilities:
 | `Graceful` | Signal shutdown token, wait grace period, drain send buffers, then restart |
 | `Crash` | Immediate task cancel, all connections abort, no buffer drain |
 | `CrashAndWipe` | Same as Crash plus immediate storage wipe for the process (scoped by IP) |
+
+## Outage
+
+A correlated group outage (`Chaos::Outage { config, mode }`), built from `Outage::groups([...])`. Requires `.chaos_duration()`. See [Correlated Outages](../part3-building/09-attrition.md#correlated-outages-the-whole-rack-goes-dark).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `groups` | `Vec<String>` | -- | Process groups that lose power together; each must be registered |
+| `probability` | `f64` | `1.0` | Chance a seed has an outage at all |
+| `start` | `Range<Duration>` | `0s..10s` | When it strikes, from the chaos window's opening; a draw past the window means no outage |
+| `down` | `Range<Duration>` | `1s..10s` | Each victim's time down |
+| `straggler` | `Option<Range<Duration>>` | `None` | One victim's time down instead; must start at or after `down`'s end |
+
+In `ChaosMode::Swarm`, each seed keeps the outage with probability 0.5 and its straggler with probability 0.5 (two build-time draws).
 
 ## NetworkConfiguration
 
