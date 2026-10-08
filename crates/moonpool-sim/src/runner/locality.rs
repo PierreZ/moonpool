@@ -32,6 +32,14 @@ use super::builder::ProcessCount;
 /// so every seed exercises a different cluster shape — mirroring `FoundationDB`'s
 /// per-seed topology generation. The total process count is the product of the
 /// four sampled dimensions.
+///
+/// A dimension may draw **zero** (`LocalityConfig::new(0..=2, 1, 1, 1)`): the
+/// group is then empty for that seed, an optional role a deployment may run
+/// without. It gets no IPs, `topology().ips_in_group(name)` returns nothing
+/// for it, attrition finds no victim in it, and a
+/// [`ReplicatedFaults`](crate::ReplicatedFaults) scoped to it draws
+/// [`FaultPattern::Spared`](crate::FaultPattern::Spared). Later groups keep
+/// their address ranges.
 #[derive(Debug, Clone)]
 pub struct LocalityConfig {
     datacenters: ProcessCount,
@@ -62,13 +70,15 @@ impl LocalityConfig {
     /// per process index via contiguous hierarchical slicing.
     ///
     /// Consecutive process indices share a machine, so collocation is contiguous
-    /// — the property that makes machine-scoped reboots meaningful. Each
-    /// dimension is clamped to at least 1.
+    /// — the property that makes machine-scoped reboots meaningful. Every
+    /// dimension is drawn, in order, even when an earlier one drew zero, so
+    /// the draw schedule never depends on the shape. A zero in any dimension
+    /// leaves the group empty for that seed.
     pub(crate) fn resolve_topology(&self) -> Vec<LocalityInfo> {
-        let datacenters = self.datacenters.resolve().max(1);
-        let zones = self.zones_per_datacenter.resolve().max(1);
-        let machines = self.machines_per_zone.resolve().max(1);
-        let processes = self.processes_per_machine.resolve().max(1);
+        let datacenters = self.datacenters.resolve();
+        let zones = self.zones_per_datacenter.resolve();
+        let machines = self.machines_per_zone.resolve();
+        let processes = self.processes_per_machine.resolve();
 
         let mut out = Vec::with_capacity(datacenters * zones * machines * processes);
         for d in 0..datacenters {
@@ -212,6 +222,25 @@ mod tests {
         // Datacenter boundary after zones * machines * processes = 8.
         assert_eq!(locs[7].datacenter(), "dc1");
         assert_eq!(locs[8].datacenter(), "dc2");
+    }
+
+    #[test]
+    fn a_zero_dimension_empties_the_group() {
+        assert!(
+            LocalityConfig::new(0, 2, 2, 2)
+                .resolve_topology()
+                .is_empty()
+        );
+        assert!(
+            LocalityConfig::new(2, 2, 0, 2)
+                .resolve_topology()
+                .is_empty()
+        );
+        assert!(
+            LocalityConfig::new(2, 2, 2, 0)
+                .resolve_topology()
+                .is_empty()
+        );
     }
 
     #[test]

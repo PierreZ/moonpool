@@ -170,7 +170,7 @@ SimulationBuilder::new()
     .workload(MyWorkload::new());
 ```
 
-The topology, not a flat count, decides how many processes exist. Each one is assigned a globally unique datacenter, zone, and machine id (`dc1`, `dc1-z1`, `dc1-z1-m1`), and processes read their own placement plus query the cluster through their topology:
+The topology, not a flat count, decides how many processes exist, and a dimension may draw **zero**. `LocalityConfig::new(0..=2, 1, 1, 1)` is an optional role: some seeds run the deployment without it, its group simply empty (no IPs, no attrition victims, no replicated fault pattern), while every later group keeps its own `10.0.{g+1}.x` range. Each one is assigned a globally unique datacenter, zone, and machine id (`dc1`, `dc1-z1`, `dc1-z1-m1`), and processes read their own placement plus query the cluster through their topology:
 
 ```rust
 let me = ctx.topology().my_locality().expect("clustered process");
