@@ -104,7 +104,8 @@ impl ChaosMode {
     /// 2. then the operation-alphabet swarm mask and `set_rng_breakpoints`;
     /// 3. then attrition, in registration order, in
     ///    `run_orchestrator_for_iteration` — **after** the reset and the
-    ///    breakpoints, so its draws are counted and replayed.
+    ///    breakpoints, so its draws are counted and replayed;
+    /// 4. then outages, in registration order, the same way.
     ///
     /// Moving a call across the reset, or reordering two calls, shifts every
     /// seed and invalidates recorded recipes.
@@ -134,6 +135,18 @@ pub enum Chaos {
         /// Base reboot regime.
         config: Attrition,
         /// Per-seed sampling strategy.
+        mode: ChaosMode,
+    },
+    /// A correlated outage: every process of the named groups loses power
+    /// at one instant, each back after its own delay (see
+    /// [`Outage`](crate::Outage)). At most one per run, inside the chaos
+    /// window; its restarts run even once the window has closed.
+    Outage {
+        /// The outage regime.
+        config: crate::Outage,
+        /// Per-seed sampling strategy: `Random` keeps the outage on every
+        /// seed (it still strikes with its `probability`); `Swarm` drops it
+        /// on half the seeds, and its straggler on half the rest.
         mode: ChaosMode,
     },
     /// Occasionally perturb enabled network and storage knobs to extremes.

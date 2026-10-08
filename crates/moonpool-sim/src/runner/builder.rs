@@ -282,6 +282,9 @@ pub struct SimulationBuilder {
     /// sampling mode. Several entries let each process group (or tag) carry
     /// its own reboot regime and `max_dead` budget.
     attritions: Vec<(Attrition, ChaosMode)>,
+    /// Correlated group outages, one injector each, with their per-seed
+    /// sampling mode.
+    outages: Vec<(crate::runner::outage::Outage, ChaosMode)>,
     seeds: Vec<u64>,
     network_chaos: Option<ChaosMode>,
     storage_chaos: Option<ChaosMode>,
@@ -348,6 +351,7 @@ impl SimulationBuilder {
             entries: Vec::new(),
             process_entries: Vec::new(),
             attritions: Vec::new(),
+            outages: Vec::new(),
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
@@ -997,9 +1001,10 @@ impl SimulationBuilder {
     /// surface, except attrition: every [`Chaos::Attrition`] entry adds one
     /// independent injector, so a campaign with several process groups can
     /// give each its own reboot regime, victim filter, and `max_dead` budget
-    /// (a filtered injector spends its budget on its own pool only).
-    /// Attrition, like every fault injector, runs only inside the chaos window
-    /// and therefore requires [`Self::chaos_duration`].
+    /// (a filtered injector spends its budget on its own pool only). Every
+    /// [`Chaos::Outage`] entry likewise adds one correlated-outage injector.
+    /// Attrition and outages, like every fault injector, run only inside the
+    /// chaos window and therefore require [`Self::chaos_duration`].
     ///
     /// `Swarm` mode defeats passive suppression: when every fault is always
     /// slightly on (`Random`) families crowd each other out and the extreme
@@ -1047,6 +1052,7 @@ impl SimulationBuilder {
                 Chaos::Network(mode) => self.network_chaos = Some(mode),
                 Chaos::Storage(mode) => self.storage_chaos = Some(mode),
                 Chaos::Attrition { config, mode } => self.attritions.push((config, mode)),
+                Chaos::Outage { config, mode } => self.outages.push((config, mode)),
                 Chaos::BuggifyKnobs => self.buggify_knobs = true,
             }
         }
@@ -1325,6 +1331,7 @@ impl SimulationBuilder {
     fn collect_fault_injectors(
         fault_factories: &[Box<dyn Fn() -> Box<dyn FaultInjector> + 'static>],
         attritions: Vec<Attrition>,
+        outages: Vec<crate::runner::outage::Outage>,
     ) -> Vec<Box<dyn FaultInjector>> {
         let mut fault_injectors: Vec<Box<dyn FaultInjector>> =
             fault_factories.iter().map(|factory| factory()).collect();
@@ -1333,14 +1340,30 @@ impl SimulationBuilder {
                 crate::runner::fault_injector::AttritionInjector::new(attrition),
             ));
         }
+        for outage in outages {
+            fault_injectors.push(Box::new(crate::runner::outage::OutageInjector::new(outage)));
+        }
         fault_injectors
     }
 
     /// Refuse fault injectors that could never run: injectors (custom
-    /// factories and attrition regimes) only run inside the chaos window, so
-    /// without [`Self::chaos_duration`] they would be dropped unrun while the
-    /// campaign reports success.
+    /// factories, attrition regimes and outages) only run inside the chaos
+    /// window, so without [`Self::chaos_duration`] they would be dropped
+    /// unrun while the campaign reports success. Also refuse an outage that
+    /// names no registered group or carries a malformed range.
     fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
+        let registered: Vec<&str> = self
+            .process_entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        if let Some(reason) = self
+            .outages
+            .iter()
+            .find_map(|(outage, _)| outage.invalid(&registered))
+        {
+            return Err(SimulationError::InvalidConfiguration(reason));
+        }
         if self.chaos_duration.is_some() {
             return Ok(());
         }
@@ -1356,6 +1379,9 @@ impl SimulationBuilder {
                 "{} Chaos::Attrition regime(s)",
                 self.attritions.len()
             ));
+        }
+        if !self.outages.is_empty() {
+            unrun.push(format!("{} Chaos::Outage regime(s)", self.outages.len()));
         }
         if unrun.is_empty() {
             return Ok(());
@@ -2068,6 +2094,20 @@ impl SimulationBuilder {
                 )
             })
             .collect();
+        // Then the outages, in registration order: `Swarm` keeps or drops each
+        // one (and its straggler) with two draws; `Random` keeps it as written.
+        let outages: Vec<crate::runner::outage::Outage> = self
+            .outages
+            .iter()
+            .filter_map(|(base, mode)| {
+                ChaosMode::resolve(
+                    Some(*mode),
+                    || Some(base.clone()),
+                    || Some(base.clone()),
+                    || base.swarm_for_seed(),
+                )
+            })
+            .collect();
         // The replicated fault pattern draws last, after every draw a run
         // without it makes, so opting in shifts no other surface's sample.
         if self.storage_chaos.is_some() {
@@ -2098,7 +2138,8 @@ impl SimulationBuilder {
                 }
             }
         }
-        let fault_injectors = Self::collect_fault_injectors(&self.fault_factories, attritions);
+        let fault_injectors =
+            Self::collect_fault_injectors(&self.fault_factories, attritions, outages);
         let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
             seed,
             metrics_factory: self.metrics_factory.as_ref(),

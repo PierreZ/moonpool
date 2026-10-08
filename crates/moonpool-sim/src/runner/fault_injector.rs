@@ -464,6 +464,33 @@ impl FaultContext {
         Ok(())
     }
 
+    /// Crash a process now and restart it after exactly `down`: no draw is
+    /// made, and the restart is a scheduled event, so it runs even once the
+    /// chaos window has closed and this injector is gone. A process already
+    /// dead is left alone (see [`reboot`](Self::reboot)).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn crash_for(&self, ip: &str, down: Duration) -> SimulationResult<()> {
+        let ip_addr = parse_ip(ip)?;
+        if self.is_dead(ip) {
+            assert_reachable!("crash_for: target already dead, skipped");
+            return Ok(());
+        }
+        self.mark_dead(ip_addr);
+        self.sim.schedule_event(
+            crate::sim::Event::ProcessForceKill {
+                ip: ip_addr,
+                recovery_delay_ms: Some(u64::try_from(down.as_millis()).unwrap_or(u64::MAX)),
+                cause: ProcessKillKind::Crash,
+            },
+            Duration::from_nanos(1),
+        );
+        tracing::info!("Crashed process at IP {} (restart in {:?})", ip, down);
+        Ok(())
+    }
+
     /// Explicitly restart a process, typically one held down by
     /// [`crash`](Self::crash).
     ///
