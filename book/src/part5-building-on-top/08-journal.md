@@ -101,8 +101,15 @@ carries: with one sync, a crash can leave an intact record beside a damaged
 entry exactly as corruption would, so the last batch's damaged entries are
 reported `Ambiguous` and the replication layer decides. `Ordered` writes the
 records only once the entries are durable, so a record always proves its
-entry was synced, at the price of a second sync. When a batch changes the
-metainfo, copy A goes in the first window and copy B in the second.
+entry was synced, at the price of a second sync.
+
+When a batch changes the metainfo (or the floor, which lives there), the two
+copies are written only **after** the batch's last sync: copy A, sync, copy
+B, sync. That ordering is a promise to the caller. A crash can leave the
+batch durable without its metainfo, but never the metainfo without its
+batch, so anything that is true only once a batch is on disk (a Paxos chosen
+index, a watermark whose clears ride along) can share that batch's commit
+instead of paying for one of its own.
 
 ## Recovering
 
@@ -202,7 +209,9 @@ assert_always!(present, "no acknowledged write is lost");
 ```
 
 Then it commits batches at random positions, with tombstones, floor raises
-and metainfo. A batch joins the ledger only once `commit` returns.
+and metainfo. A batch joins the ledger only once `commit` returns. When the
+batch in flight at the crash comes back with its metainfo or floor, every
+one of its writes must have come back too.
 
 ## On a Real Disk
 

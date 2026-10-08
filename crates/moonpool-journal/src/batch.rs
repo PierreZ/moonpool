@@ -70,6 +70,11 @@ impl Batch {
 
     /// Replace the caller's metainfo (at most [`META_MAX`](crate::META_MAX)
     /// bytes): what no peer can restore, kept in two local copies.
+    ///
+    /// The metainfo becomes durable only after the rest of this batch: a
+    /// crash may leave the batch without it, never it without the batch. A
+    /// value that depends on this batch's writes (a chosen index, a
+    /// watermark whose clears ride along) can share its commit.
     pub fn set_meta(&mut self, meta: impl Into<Vec<u8>>) -> &mut Self {
         self.meta = Some(meta.into());
         self

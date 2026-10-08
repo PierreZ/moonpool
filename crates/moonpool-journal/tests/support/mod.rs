@@ -335,6 +335,29 @@ async fn recover(
     panic!("{at}: the journal never opened");
 }
 
+/// The metainfo becomes durable only after its batch: if the in-flight
+/// batch's metainfo (or floor) landed, every one of its writes did too, and
+/// this is what the disk must then hold.
+fn landed_with_meta(
+    snapshot: &Ledger,
+    pending: &Pending,
+    meta: &[u8],
+    floor: u64,
+) -> Option<BTreeMap<u64, Value>> {
+    let meta_landed = pending
+        .meta
+        .as_deref()
+        .is_some_and(|new| new != snapshot.meta.as_slice() && meta == new)
+        || pending
+            .floor
+            .is_some_and(|f| f > snapshot.floor && floor != snapshot.floor);
+    meta_landed.then(|| {
+        let mut after = snapshot.clone();
+        after.ack(pending.clone());
+        after.acked
+    })
+}
+
 /// Check every position, then make the ledger what the disk holds. `None`
 /// when the discard of damaged entries failed (reopen and judge again).
 async fn judge(sim: &mut SimWorld, journal: J, ledger: &Shared, at: &str) -> Option<J> {
@@ -369,6 +392,7 @@ async fn judge(sim: &mut SimWorld, journal: J, ledger: &Shared, at: &str) -> Opt
         String::from_utf8_lossy(journal.meta())
     );
 
+    let landed = landed_with_meta(&snapshot, &pending, journal.meta(), journal.floor());
     let mut positions: Vec<u64> = snapshot.acked.keys().copied().collect();
     positions.extend(found.keys().copied());
     positions.extend(pending.puts.iter().map(|(p, _)| *p));
@@ -380,6 +404,12 @@ async fn judge(sim: &mut SimWorld, journal: J, ledger: &Shared, at: &str) -> Opt
             || pending.clears.iter().any(|r| r.contains(&position))
             || pending.floor.is_some_and(|f| position < f);
         let acked = snapshot.acked.get(&position);
+        if let Some(landed) = &landed {
+            assert!(
+                found.get(&position).and_then(|read| read.as_ref().ok()) == landed.get(&position),
+                "{at}: the in-flight metainfo landed without its batch at position {position}"
+            );
+        }
         match found.get(&position) {
             None => assert!(
                 acked.is_none() || touched || position < journal.floor(),

@@ -52,8 +52,12 @@
 //! | [`Batched`](Durability::Batched) (the paper's) | `write(entries); write(records); fsync` | 1 |
 //! | [`Ordered`](Durability::Ordered) | `write(entries); fsync; write(records); fsync` | 2 |
 //!
-//! Metainfo, when a batch changes it, is written copy A in the first window
-//! and copy B in the second, so at most one copy is ever in flight.
+//! Metainfo, when a batch changes it (with [`Batch::set_meta`] or a floor
+//! raise), is written only **after** the batch's last sync: copy A, sync,
+//! copy B, sync, so at most one copy is ever in flight. A crash can
+//! therefore leave a batch durable without its metainfo, but never the
+//! metainfo without its batch: a caller may put in the metainfo anything
+//! that is true only once the batch's entries and tombstones are on disk.
 //!
 //! # Recovery
 //!

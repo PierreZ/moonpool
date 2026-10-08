@@ -1,8 +1,8 @@
 //! The meta file: CLSTORE's metainfo, in two checksummed copies far apart
 //! in one file.
 //!
-//! The copies are written **one after the other**, each followed by a sync:
-//! copy A in a commit's first write window, copy B in its second. At most
+//! The copies are written **one after the other**, each followed by a sync,
+//! and only once the commit's batch is durable. At most
 //! one copy is ever in flight, so a crash tears at most the one being
 //! written, and after a complete write both hold the same value, so a single
 //! rotted copy never rolls the metainfo back (`LogCabin` and canonical/raft
@@ -158,6 +158,15 @@ impl<F: StorageFile> MetaFile<F> {
         let mut block = vec![0u8; BLOCK];
         meta.encode(copy as u8, &mut block);
         write_blocks(&self.file, copy.block(), &block).await
+    }
+
+    /// Replace the value: copy A, synced, then copy B, synced, so at most
+    /// one copy is ever in flight.
+    pub async fn update(&self, meta: &Meta) -> std::io::Result<()> {
+        self.write(Copy::A, meta).await?;
+        self.sync().await?;
+        self.write(Copy::B, meta).await?;
+        self.sync().await
     }
 
     pub async fn sync(&self) -> std::io::Result<()> {

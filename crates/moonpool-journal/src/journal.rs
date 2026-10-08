@@ -11,7 +11,7 @@ use crate::format::{
     Meta, RECORD_SIZE, Record, align_up, clear_id, entry_crc, first_batch_of, generation_of,
     journal_tag, u64_of, usize_of,
 };
-use crate::meta::{Copy, META_NAME, MetaFile, remove_leftover};
+use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{Located, Op, Stale, entry_matches, scan};
 use crate::segment::{Segment, is_segment_leftover, parse_segment_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
@@ -249,10 +249,7 @@ async fn begin_generation<F: moonpool_core::StorageFile>(
         open_last: last_batch,
         ..meta
     };
-    meta_file.write(Copy::A, &meta).await?;
-    meta_file.sync().await?;
-    meta_file.write(Copy::B, &meta).await?;
-    meta_file.sync().await?;
+    meta_file.update(&meta).await?;
     Ok(meta)
 }
 
@@ -857,14 +854,7 @@ impl<P: StorageProvider> Journal<P> {
     }
 
     async fn write_meta_only(&mut self, meta: &Meta) -> Result<(), CommitError> {
-        let outcome: std::io::Result<()> = async {
-            self.meta_file.write(Copy::A, meta).await?;
-            self.meta_file.sync().await?;
-            self.meta_file.write(Copy::B, meta).await?;
-            self.meta_file.sync().await
-        }
-        .await;
-        outcome.map_err(|error| {
+        self.meta_file.update(meta).await.map_err(|error| {
             self.poisoned = true;
             CommitError::Io {
                 error,
@@ -1006,8 +996,10 @@ impl Prepared {
     }
 }
 
-/// The commit protocol (see [`Durability`]), with metainfo copy A in the
-/// first window and copy B in the second.
+/// The commit protocol (see [`Durability`]), then the metainfo: copy A only
+/// once the batch is synced, copy B once copy A is. A durable metainfo
+/// therefore always vouches for a durable batch; the reverse (the batch
+/// durable, its metainfo not) is what a crash between the two leaves.
 async fn write_protocol<F: moonpool_core::StorageFile>(
     segment: &Segment<F>,
     meta_file: &MetaFile<F>,
@@ -1020,33 +1012,16 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
         .await
         .map_err(|error| (error, Durable::No))?;
     let unknown = |error| (error, Durable::Unknown);
-    if !ordered {
-        segment
-            .write(batch.persist_at, &batch.records)
-            .await
-            .map_err(unknown)?;
-    }
-    if let Some(meta) = meta {
-        meta_file.write(Copy::A, meta).await.map_err(unknown)?;
-    }
-    segment.sync().await.map_err(unknown)?;
-    if meta.is_some() {
-        meta_file.sync().await.map_err(unknown)?;
-    }
-    if ordered {
-        segment
-            .write(batch.persist_at, &batch.records)
-            .await
-            .map_err(unknown)?;
-    }
-    if let Some(meta) = meta {
-        meta_file.write(Copy::B, meta).await.map_err(unknown)?;
-    }
     if ordered {
         segment.sync().await.map_err(unknown)?;
     }
-    if meta.is_some() {
-        meta_file.sync().await.map_err(unknown)?;
+    segment
+        .write(batch.persist_at, &batch.records)
+        .await
+        .map_err(unknown)?;
+    segment.sync().await.map_err(unknown)?;
+    if let Some(meta) = meta {
+        meta_file.update(meta).await.map_err(unknown)?;
     }
     Ok(())
 }
