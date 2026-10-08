@@ -19,6 +19,14 @@ test-threads = "num-cpus"
 filter = 'binary(metastable_grpc_retry_storm)'
 slow-timeout = { period = "10s", terminate-after = 6 }
 
+# The storage fault-mask test writes 400 blocks on a simulated disk for each
+# of 24 seeds: about 2.6s in the debug profile locally, and past the 10s kill
+# on a loaded CI runner (its stack, sampled at 8s, was still landing writes,
+# not stuck).
+[[profile.default.overrides]]
+filter = 'package(moonpool-sim) and test(=runner::builder::tests::a_storage_fault_mask_keeps_its_family_out_and_draws_nothing)'
+slow-timeout = { period = "10s", terminate-after = 4 }
+
 # The journal's crash loops run 120 seeds, one test per fault model and
 # durability setting, every seed eight crashed incarnations of a writer on
 # the simulated disk and a recovery per crash: about 6s each in the debug
