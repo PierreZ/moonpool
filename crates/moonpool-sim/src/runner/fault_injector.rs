@@ -730,14 +730,24 @@ impl AttritionInjector {
     /// regime: within the `max_dead` budget of the eligible pool, with a
     /// kind and delays drawn as for a timed reboot. Returns whether the
     /// reboot was scheduled. The hinting process alone is rebooted, whatever
-    /// the regime's failure scope.
-    pub(crate) fn reboot_on_hint(&self, ctx: &FaultContext, ip: &str) -> SimulationResult<bool> {
+    /// the regime's failure scope. `permit` is asked last, once the reboot
+    /// fits the budget, and draws nothing: a refusal leaves the process
+    /// alive.
+    pub(crate) fn reboot_on_hint(
+        &self,
+        ctx: &FaultContext,
+        ip: &str,
+        permit: impl FnOnce() -> bool,
+    ) -> SimulationResult<bool> {
         if ctx.is_dead(ip) {
             return Ok(false);
         }
         let eligible = self.eligible(ctx, ctx.process_ips());
         if Self::dead_among(ctx, &eligible) >= self.config.max_dead {
             assert_reachable!("attrition: max_dead limit refuses a reboot hint");
+            return Ok(false);
+        }
+        if !permit() {
             return Ok(false);
         }
         let kind = self.choose_kind();
