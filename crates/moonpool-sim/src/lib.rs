@@ -170,7 +170,8 @@ pub use moonpool_core::metrics::query::{
 // crate; re-exported here so existing `moonpool_sim::buggify!` call sites keep
 // working and share the same state as direct moonpool-buggify users.
 pub use moonpool_buggify::{
-    buggify, buggify_fault_with_prob, buggify_pick, buggify_range, buggify_with_prob, hint,
+    buggify, buggify_fault_with_prob, buggify_named, buggify_pick, buggify_range,
+    buggify_with_prob, hint, set_activation,
 };
 
 // Chaos module re-exports
