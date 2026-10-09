@@ -80,6 +80,8 @@ crates/
 ├── moonpool-buggify/      - Standalone buggify!/buggify_with_prob! macros + state (pure std, ZERO
 │                            deps, wasm-able). Inert by default; moonpool-sim installs its seeded
 │                            RNG per run and re-exports the macros. buggify_knob! stays in sim.
+│                            hint!("moment"): the code names a moment, the sim's HintSink decides
+│                            (reboot under the seed's attrition regime, process = task owner).
 ├── moonpool-sim/          - Simulation runtime, chaos testing, buggify, assertions wiring.
 │                            feature `exploration` (default ON) gates moonpool-explorer; without it
 │                            the sim compiles to wasm32-unknown-unknown.

@@ -169,7 +169,9 @@ pub use moonpool_core::metrics::query::{
 // Buggify macros live in the standalone zero-dependency moonpool-buggify
 // crate; re-exported here so existing `moonpool_sim::buggify!` call sites keep
 // working and share the same state as direct moonpool-buggify users.
-pub use moonpool_buggify::{buggify, buggify_fault_with_prob, buggify_with_prob};
+pub use moonpool_buggify::{
+    buggify, buggify_fault_with_prob, buggify_pick, buggify_range, buggify_with_prob, hint,
+};
 
 // Chaos module re-exports
 pub use chaos::{
@@ -205,7 +207,7 @@ pub use providers::{
 };
 
 // Assertion vocabulary — always available (dependency-free accounting layer).
-pub use moonpool_assertions::{AssertCmp, AssertKind};
+pub use moonpool_assertions::{AssertCmp, AssertKind, reachable, sometimes};
 // Exploration-only re-exports (fork-based multiverse engine).
 #[cfg(feature = "exploration")]
 pub use moonpool_explorer::{ExplorationConfig, Recipe, format_timeline, parse_timeline};

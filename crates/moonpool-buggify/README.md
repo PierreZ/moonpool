@@ -37,6 +37,15 @@ fn flush(buffer: &mut Vec<u8>) {
 }
 ```
 
+## Hints
+
+`hint!("batch durable, not sent").await` names a moment where a crash would
+be interesting. In a simulation, `moonpool-sim` may reboot the calling
+process there, under the seed's attrition regime; then the future never
+resolves. Outside a simulation it resolves at once. `is_simulated()` says
+whether a simulation runs; `buggify_pick!` and `buggify_range!` draw a
+choice or a value at an active point.
+
 `buggify_knob!`, which picks an extreme value for a tunable, needs the
 simulation's random helpers and is provided by `moonpool-sim`.
 

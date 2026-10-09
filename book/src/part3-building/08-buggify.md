@@ -95,16 +95,42 @@ if should_compact {
 }
 ```
 
-### 5. Process Restarts
+### 5. Process Restarts: Hints
 
-Trigger restarts at specific points to test crash recovery:
+A crash is not something the code decides: it is the environment's. So
+the code does not crash itself. It names the **moment** where a crash
+would be interesting, and the simulator decides:
 
 ```rust
-if buggify_with_prob!(0.01) {
-    // Simulate a crash right after writing but before syncing
-    return Err(Error::crash("buggified crash after write"));
-}
+use moonpool_buggify::hint;
+
+storage.sync().await?;
+hint!("batch durable, not sent").await;
+send(messages).await;
 ```
+
+The batch is durable, and its messages are not sent yet. A reboot right
+here leaves the peers not knowing what this process holds. Three vetoes
+stand between a hint and a reboot, and none of them commands:
+
+1. The point is a disruptive buggify location of its own. It is activated
+   once per run, fires at a low rate per call (`hint::POINT_PROB`, 5%, or
+   `hint!("label", 0.2)`), and falls silent in the recovery tail.
+2. The seed's chaos. The first `Chaos::Attrition` regime whose victim
+   filter admits the process decides. A seed whose swarm drew the
+   never-reboot regime never reboots on a hint either.
+3. The regime's `max_dead` budget, reboot-kind weights and recovery
+   delays, exactly as for its own timed reboots.
+
+When the simulator reboots, the future never resolves: the kill lands
+within one scheduler tick, and every write not yet synced resolves by the
+disk's crash physics. Otherwise, and always in production, the future
+resolves at once. The simulator finds the process through the task being
+polled: each task carries the process that spawned it. A hint from a
+workload is ignored.
+
+This is `FoundationDB`'s `if (buggify()) throw please_reboot()`, which its
+simulated worker turns into a reboot.
 
 ## Disruptive Points and the Recovery Tail
 
@@ -187,5 +213,7 @@ moonpool-buggify = "0.9"
 ```
 
 The crate owns only the disabled-by-default state and the macros. When a simulation run starts, `moonpool-sim` installs its deterministic seeded RNG into that shared state, so macros imported through either crate share activation decisions during simulation — and stay inert everywhere else. `moonpool-sim` re-exports the macros, so existing `moonpool_sim::buggify!` call sites are unchanged.
+
+The crate also holds `hint!` (above), `is_simulated()`, and `buggify_pick!` / `buggify_range!`, which draw a choice or a value at an active point without a `rand` dependency. Their production probe companions, `reachable!` and `sometimes!`, live in the zero-dependency `moonpool-assertions`: a probe and a simulation's `assert_reachable!` with the same message share one slot.
 
 `buggify_knob!` remains in `moonpool-sim`: knob randomization is simulation-specific configuration spiking, not application-level fault injection.

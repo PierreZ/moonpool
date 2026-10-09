@@ -34,6 +34,8 @@
 
 #![deny(missing_docs)]
 
+pub mod hint;
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -59,6 +61,16 @@ struct State {
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     STATE.with(|state| f(&mut state.borrow_mut()))
+}
+
+/// Whether this thread runs a simulation: buggify is enabled and has a
+/// random source (`FoundationDB`'s `g_network->isSimulated()`).
+///
+/// Code under test may use it to tilt rates, cadences and extra checks in
+/// simulation. It should never change an outcome a caller can observe.
+#[must_use]
+pub fn is_simulated() -> bool {
+    with_state(|state| state.enabled && state.random_source.is_some())
 }
 
 /// Install the deterministic random source used for activation and firing draws.
@@ -194,6 +206,89 @@ macro_rules! buggify_fault_with_prob {
     };
 }
 
+/// Report an interesting moment; see [`hint::at`]. Await the result.
+///
+/// `hint!("label")` fires at [`hint::POINT_PROB`] while active;
+/// `hint!("label", 0.2)` at a site rate.
+#[macro_export]
+macro_rules! hint {
+    ($label:literal) => {
+        $crate::hint::at(
+            $label,
+            $crate::hint::POINT_PROB,
+            concat!(file!(), ":", line!()),
+        )
+    };
+    ($label:literal, $prob:expr) => {
+        $crate::hint::at($label, $prob as f64, concat!(file!(), ":", line!()))
+    };
+}
+
+/// `Some(i)` with `i` drawn in `0..n` when this site is active and fires,
+/// `None` otherwise (and always outside a simulation). For a site that
+/// overrides a choice: a column, a row, a target.
+#[macro_export]
+macro_rules! buggify_pick {
+    ($prob:expr, $n:expr) => {
+        $crate::buggify_pick_internal($prob as f64, $n, concat!(file!(), ":", line!()))
+    };
+}
+
+/// `Some(v)` with `v` drawn in `range` (a `Range<u64>`) when this site is
+/// active and fires, `None` otherwise (and always outside a simulation).
+/// For a site that stretches a value: a delay, a count.
+#[macro_export]
+macro_rules! buggify_range {
+    ($prob:expr, $range:expr) => {
+        $crate::buggify_range_internal($prob as f64, $range, concat!(file!(), ":", line!()))
+    };
+}
+
+/// Internal implementation backing [`buggify_pick!`]: one draw more than
+/// [`buggify_internal`] when it fires, none for `n == 0`. `n` is capped at
+/// `u32::MAX`.
+#[must_use]
+pub fn buggify_pick_internal(prob: f64, n: usize, location: &'static str) -> Option<usize> {
+    let n = u32::try_from(n).unwrap_or(u32::MAX);
+    if n == 0 || !buggify_internal(prob, location) {
+        return None;
+    }
+    let draw = with_state(|state| state.random_source.map_or(0.0, |random| random()));
+    usize::try_from(scale(draw, n)).ok()
+}
+
+/// The index `i` in `0..n` whose share `[i/n, (i+1)/n)` holds `draw`, a
+/// value in `[0, 1)`: a binary search, so no float-to-integer cast.
+fn scale(draw: f64, n: u32) -> u32 {
+    let (mut low, mut high) = (0, n - 1);
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if draw < f64::from(mid + 1) / f64::from(n) {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    low
+}
+
+/// Internal implementation backing [`buggify_range!`]: one draw more than
+/// [`buggify_internal`] when it fires, none for an empty range.
+#[must_use]
+pub fn buggify_range_internal(
+    prob: f64,
+    range: std::ops::Range<u64>,
+    location: &'static str,
+) -> Option<u64> {
+    if range.is_empty() {
+        return None;
+    }
+    let span = usize::try_from(range.end - range.start).unwrap_or(usize::MAX);
+    buggify_pick_internal(prob, span, location)
+        .and_then(|offset| u64::try_from(offset).ok())
+        .map(|offset| range.start + offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +323,42 @@ mod tests {
         buggify_reset();
         clear_random_source();
         out
+    }
+
+    #[test]
+    fn simulated_only_while_enabled_with_a_source() {
+        buggify_reset();
+        clear_random_source();
+        assert!(!is_simulated());
+        with_test_source(0.5, || assert!(is_simulated()));
+        assert!(!is_simulated());
+    }
+
+    #[test]
+    fn a_pick_stays_in_range_and_is_inert_outside_a_simulation() {
+        buggify_reset();
+        assert_eq!(crate::buggify_pick!(1.0, 4), None);
+        assert_eq!(crate::buggify_range!(1.0, 10..20), None);
+        with_test_source(1.0, || {
+            for _ in 0..200 {
+                if let Some(i) = crate::buggify_pick!(1.0, 4) {
+                    assert!(i < 4);
+                }
+                if let Some(v) = crate::buggify_range!(1.0, 10..20) {
+                    assert!((10..20).contains(&v));
+                }
+            }
+            assert_eq!(crate::buggify_pick!(1.0, 0), None);
+            assert_eq!(crate::buggify_range!(1.0, 5..5), None);
+        });
+    }
+
+    #[test]
+    fn scale_covers_every_index() {
+        assert_eq!(scale(0.0, 1), 0);
+        assert_eq!(scale(0.0, 4), 0);
+        assert_eq!(scale(0.25, 4), 1);
+        assert_eq!(scale(0.999, 4), 3);
     }
 
     #[test]

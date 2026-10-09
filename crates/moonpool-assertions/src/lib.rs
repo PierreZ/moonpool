@@ -39,3 +39,24 @@ pub use slots::{
     MAX_ASSERTION_SLOTS, assertion_bool, assertion_dropped_allocations, assertion_numeric,
     assertion_read_all, assertion_sometimes_all, msg_hash,
 };
+
+/// A probe: production code marks a path it walked (`FoundationDB`'s
+/// `CODE_PROBE`). Inert outside a simulation (no table installed: one
+/// pointer read). The slot is the hash of the message, so a probe and a
+/// simulation's `assert_reachable!` with the same text share one slot.
+/// Never reword a probe's message.
+#[macro_export]
+macro_rules! reachable {
+    ($message:expr) => {
+        $crate::assertion_bool($crate::AssertKind::Reachable, true, true, $message)
+    };
+}
+
+/// An outcome production code expects some run to reach: the same
+/// accounting as a simulation's `assert_sometimes!`, inert outside one.
+#[macro_export]
+macro_rules! sometimes {
+    ($condition:expr, $message:expr) => {
+        $crate::assertion_bool($crate::AssertKind::Sometimes, true, $condition, $message)
+    };
+}

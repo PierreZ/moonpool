@@ -656,6 +656,7 @@ impl WorkloadOrchestrator {
                 // Disruptive buggify sites (`buggify_fault_with_prob!`) stop
                 // with the rest of the chaos; ordinary sites keep firing.
                 moonpool_buggify::buggify_enter_recovery();
+                moonpool_buggify::hint::clear_sink();
                 chaos_ended = true;
                 assert_reachable!("phase: chaos ended");
             }
@@ -711,18 +712,31 @@ impl WorkloadOrchestrator {
         if chaos_duration.is_none() {
             return injector_handles;
         }
-        for mut injector in fault_injectors {
-            let fault_sim = SimWorld {
-                inner: std::sync::Arc::clone(&sim.inner),
-            };
-            let fault_ctx = FaultContext::new(
-                fault_sim,
+        let new_fault_ctx = || {
+            FaultContext::new(
+                SimWorld {
+                    inner: std::sync::Arc::clone(&sim.inner),
+                },
                 process_manager.process_info(),
                 crate::SimRandomProvider::new(),
                 sim.time_provider(),
                 env.state.clone(),
                 chaos_shutdown.clone(),
-            );
+            )
+        };
+        // Reboot hints from code under test are decided by the same attrition
+        // regimes, for the chaos window only (cleared when it ends).
+        let regimes: Vec<_> = fault_injectors
+            .iter()
+            .filter_map(|injector| injector.hint_regime())
+            .map(crate::runner::fault_injector::AttritionInjector::new)
+            .collect();
+        moonpool_buggify::hint::set_sink(Box::new(crate::runner::hint::HintSink::new(
+            new_fault_ctx(),
+            regimes,
+        )));
+        for mut injector in fault_injectors {
+            let fault_ctx = new_fault_ctx();
             let reporter = env.task_panics.reporter("fault-injector");
             let handle = crate::executor::spawn("fault-injector", async move {
                 match AssertUnwindSafe(injector.inject(&fault_ctx))

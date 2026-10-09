@@ -101,8 +101,12 @@ pub(crate) fn spawn_process(
     let ip = ip.to_string();
     let span_ip = ip.clone();
     let panics = Arc::clone(panics);
-    let handle = crate::executor::spawn(
+    let owner: std::net::IpAddr = ip
+        .parse()
+        .expect("a process IP is a valid address: the manager assigned it");
+    let handle = crate::executor::spawn_owned(
         &format!("process@{span_ip}"),
+        owner,
         async move {
             let outcome = AssertUnwindSafe(process.run(&ctx)).catch_unwind().await;
             match outcome {

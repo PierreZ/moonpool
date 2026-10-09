@@ -25,6 +25,7 @@ pub use moonpool_buggify::buggify_internal;
 /// [`buggify!`](crate::buggify), the per-site argument for
 /// [`buggify_with_prob!`](crate::buggify_with_prob)).
 pub fn buggify_init(activation_prob: f64) {
+    moonpool_buggify::hint::clear_sink();
     moonpool_buggify::set_random_source(sim_random_f64);
     moonpool_buggify::buggify_init(activation_prob);
 }
@@ -34,6 +35,7 @@ pub fn buggify_init(activation_prob: f64) {
 /// Buggify is inert again after this call, as it is outside an active
 /// simulation.
 pub fn buggify_reset() {
+    moonpool_buggify::hint::clear_sink();
     moonpool_buggify::buggify_reset();
     moonpool_buggify::clear_random_source();
 }
