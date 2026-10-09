@@ -406,7 +406,7 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
 /// that assertions never crash the program.
 #[macro_export]
 macro_rules! assert_always {
-    ($condition:expr, $message:expr) => {
+    ($condition:expr, $message:expr) => {{
         let __msg = $message;
         let cond = $condition;
         $crate::chaos::assertions::on_assertion_bool(
@@ -418,8 +418,8 @@ macro_rules! assert_always {
         if !cond {
             $crate::chaos::assertions::record_always_violation();
         }
-    };
-    ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {
+    }};
+    ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {{
         let __msg = $message;
         let cond = $condition;
         $crate::chaos::assertions::on_assertion_bool(
@@ -439,7 +439,7 @@ macro_rules! assert_always {
                 )
             );
         }
-    };
+    }};
 }
 
 /// Assert that a condition is always true when reached, but the code path
@@ -448,7 +448,7 @@ macro_rules! assert_always {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_or_unreachable {
-    ($condition:expr, $message:expr) => {
+    ($condition:expr, $message:expr) => {{
         let __msg = $message;
         let cond = $condition;
         $crate::chaos::assertions::on_assertion_bool(
@@ -460,8 +460,8 @@ macro_rules! assert_always_or_unreachable {
         if !cond {
             $crate::chaos::assertions::record_always_violation();
         }
-    };
-    ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {
+    }};
+    ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {{
         let __msg = $message;
         let cond = $condition;
         $crate::chaos::assertions::on_assertion_bool(
@@ -481,7 +481,7 @@ macro_rules! assert_always_or_unreachable {
                 )
             );
         }
-    };
+    }};
 }
 
 /// Assert a condition that should sometimes be true, tracking stats and triggering exploration.
@@ -489,14 +489,14 @@ macro_rules! assert_always_or_unreachable {
 /// Does not panic. Its first success creates a replay anchor for exploration.
 #[macro_export]
 macro_rules! assert_sometimes {
-    ($condition:expr, $message:expr) => {
+    ($condition:expr, $message:expr) => {{
         $crate::chaos::assertions::on_assertion_bool(
             &$message,
             $condition,
             $crate::chaos::assertions::_re_export::AssertKind::Sometimes,
             true,
         );
-    };
+    }};
 }
 
 /// Assert that a code path is reachable (should be reached at least once).
@@ -504,14 +504,14 @@ macro_rules! assert_sometimes {
 /// Does not panic. Its first reach creates a replay anchor for exploration.
 #[macro_export]
 macro_rules! assert_reachable {
-    ($message:expr) => {
+    ($message:expr) => {{
         $crate::chaos::assertions::on_assertion_bool(
             &$message,
             true,
             $crate::chaos::assertions::_re_export::AssertKind::Reachable,
             true,
         );
-    };
+    }};
 }
 
 /// Assert that a code path should never be reached.
@@ -520,7 +520,7 @@ macro_rules! assert_reachable {
 /// Tracks in shared memory for reporting.
 #[macro_export]
 macro_rules! assert_unreachable {
-    ($message:expr) => {
+    ($message:expr) => {{
         let __msg = $message;
         $crate::chaos::assertions::on_assertion_bool(
             &__msg,
@@ -529,8 +529,8 @@ macro_rules! assert_unreachable {
             false,
         );
         $crate::chaos::assertions::record_always_violation();
-    };
-    ($message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {
+    }};
+    ($message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {{
         let __msg = $message;
         $crate::chaos::assertions::on_assertion_bool(
             &__msg,
@@ -546,7 +546,7 @@ macro_rules! assert_unreachable {
                 &[ $(($key, &$val as &dyn std::fmt::Display)),+ ]
             )
         );
-    };
+    }};
 }
 
 /// Shared expansion of the four `assert_always_*` numeric comparisons:
@@ -555,7 +555,7 @@ macro_rules! assert_unreachable {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __assert_always_numeric {
-    ($cmp:ident, $op:tt, $maximize:expr, $val:expr, $thresh:expr, $message:expr) => {
+    ($cmp:ident, $op:tt, $maximize:expr, $val:expr, $thresh:expr, $message:expr) => {{
         let __msg = $message;
         let __v = $crate::chaos::assertions::to_i64_saturating($val);
         let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
@@ -570,8 +570,8 @@ macro_rules! __assert_always_numeric {
         if !(__v $op __t) {
             $crate::chaos::assertions::record_always_violation();
         }
-    };
-    ($cmp:ident, $op:tt, $maximize:expr, $val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {
+    }};
+    ($cmp:ident, $op:tt, $maximize:expr, $val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {{
         let __msg = $message;
         let __v = $crate::chaos::assertions::to_i64_saturating($val);
         let __t = $crate::chaos::assertions::to_i64_saturating($thresh);
@@ -594,14 +594,14 @@ macro_rules! __assert_always_numeric {
                 )
             );
         }
-    };
+    }};
 }
 
 /// Shared expansion of the four `assert_sometimes_*` numeric comparisons.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __assert_sometimes_numeric {
-    ($cmp:ident, $maximize:expr, $val:expr, $thresh:expr, $message:expr) => {
+    ($cmp:ident, $maximize:expr, $val:expr, $thresh:expr, $message:expr) => {{
         $crate::chaos::assertions::on_assertion_numeric(
             &$message,
             $crate::chaos::assertions::to_i64_saturating($val),
@@ -610,7 +610,7 @@ macro_rules! __assert_sometimes_numeric {
             $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
             $maximize,
         );
-    };
+    }};
 }
 
 /// Assert that `val > threshold` always holds.
@@ -618,11 +618,11 @@ macro_rules! __assert_sometimes_numeric {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_greater_than {
-    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Gt, >, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
-    };
+    }};
 }
 
 /// Assert that `val >= threshold` always holds.
@@ -630,11 +630,11 @@ macro_rules! assert_always_greater_than {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_greater_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Ge, >=, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
-    };
+    }};
 }
 
 /// Assert that `val < threshold` always holds.
@@ -642,11 +642,11 @@ macro_rules! assert_always_greater_than_or_equal_to {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than {
-    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Lt, <, true, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
-    };
+    }};
 }
 
 /// Assert that `val <= threshold` always holds.
@@ -654,43 +654,43 @@ macro_rules! assert_always_less_than {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {
+    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Le, <=, true, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
-    };
+    }};
 }
 
 /// Assert that `val > threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_greater_than {
-    ($val:expr, $thresh:expr, $message:expr) => {
+    ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Gt, true, $val, $thresh, $message);
-    };
+    }};
 }
 
 /// Assert that `val >= threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_greater_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:expr) => {
+    ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Ge, true, $val, $thresh, $message);
-    };
+    }};
 }
 
 /// Assert that `val < threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_less_than {
-    ($val:expr, $thresh:expr, $message:expr) => {
+    ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Lt, false, $val, $thresh, $message);
-    };
+    }};
 }
 
 /// Assert that `val <= threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_less_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:expr) => {
+    ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Le, false, $val, $thresh, $message);
-    };
+    }};
 }
 
 /// Compound boolean assertion: all named bools should sometimes be true simultaneously.
@@ -709,9 +709,9 @@ macro_rules! assert_sometimes_less_than_or_equal_to {
 /// ```
 #[macro_export]
 macro_rules! assert_sometimes_all {
-    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ]) => {
+    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ]) => {{
         $crate::chaos::assertions::on_assertion_sometimes_all($msg, &[ $(($name, $val)),+ ])
-    };
+    }};
 }
 
 /// Per-value bucketed sometimes assertion with optional quality watermarks.
@@ -731,20 +731,20 @@ macro_rules! assert_sometimes_all {
 /// ```
 #[macro_export]
 macro_rules! assert_sometimes_each {
-    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ]) => {
+    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ]) => {{
         $crate::chaos::assertions::on_sometimes_each(
             $msg,
             &[ $(($name, $crate::chaos::assertions::to_i64_saturating($val))),+ ],
             &[],
         )
-    };
-    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ], [ $(($qname:expr, $qval:expr)),+ $(,)? ]) => {
+    }};
+    ($msg:expr, [ $(($name:expr, $val:expr)),+ $(,)? ], [ $(($qname:expr, $qval:expr)),+ $(,)? ]) => {{
         $crate::chaos::assertions::on_sometimes_each(
             $msg,
             &[ $(($name, $crate::chaos::assertions::to_i64_saturating($val))),+ ],
             &[ $(($qname, $crate::chaos::assertions::to_i64_saturating($qval))),+ ],
         )
-    };
+    }};
 }
 
 /// Re-exports for macro hygiene (`$crate::chaos::assertions::_re_export::*`).

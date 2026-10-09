@@ -29,7 +29,7 @@ pub(crate) async fn read_blocks<F: StorageFile>(
         Err(error) if !is_media_error(&error) => return Err(error),
         Err(_) => {}
     }
-    for (at, chunk) in buf.chunks_exact_mut(BLOCK).enumerate() {
+    for (at, chunk) in buf.as_chunks_mut::<BLOCK>().0.iter_mut().enumerate() {
         match file.read_blocks(first_block + u64_of(at), chunk).await {
             Ok(()) => {}
             Err(error) if is_media_error(&error) => chunk.fill(0),

@@ -56,11 +56,11 @@
             # mdbook
             mdbook
             mdbook-toc
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # C toolchain for linking. Linux-only: darwin's stdenv already
             # provides clang, and GNU gcc is a heavy, fragile build there.
             gcc
-          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             # Crate build scripts link against iconv on darwin.
             libiconv
           ];

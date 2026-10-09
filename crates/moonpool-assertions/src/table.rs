@@ -68,7 +68,7 @@ pub(crate) unsafe fn count_dropped(region: *mut u8) {
     // Safety: the caller guarantees a live region; the second header word is
     // the dropped-allocation counter.
     let dropped = unsafe { header_word(region, DROPPED_ALLOCATIONS_WORD) };
-    let _ = dropped.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+    let _ = dropped.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
         Some(count.saturating_add(1))
     });
 }
