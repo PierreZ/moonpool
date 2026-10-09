@@ -16,7 +16,7 @@ rust Wasm file schema version: 0.2.X
 ```
 
 The two versions come from two different places:
-- **crate**: pinned in `Cargo.toml` → `wasm-bindgen = "=0.2.121"` (wasm32 target only)
+- **crate**: pinned in `Cargo.toml` → `wasm-bindgen = "=0.2.129"` (wasm32 target only)
 - **CLI**: provided by the flake from nixpkgs (`flake.nix` → `wasm-bindgen-cli`)
 
 To stop them drifting:
@@ -35,7 +35,7 @@ then match the crate to it:
 nix flake update nixpkgs
 
 # 2. Read the CLI version nixpkgs now provides
-nix develop --command wasm-bindgen --version    # e.g. "wasm-bindgen 0.2.121"
+nix develop --command wasm-bindgen --version    # e.g. "wasm-bindgen 0.2.129"
 
 # 3. Pin the crate to that exact version in Cargo.toml
 #    [target.'cfg(target_arch = "wasm32")'.dependencies]

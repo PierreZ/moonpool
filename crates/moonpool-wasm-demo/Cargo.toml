@@ -24,13 +24,13 @@ serde_json = "1"
 tracing = "0.1"
 
 # wasm-only glue. The crate version MUST exactly match the flake's
-# wasm-bindgen-cli (0.2.121) — a mismatch is the #1 wasm-bindgen footgun and
+# wasm-bindgen-cli (0.2.129) — a mismatch is the #1 wasm-bindgen footgun and
 # produces an opaque "schema version" error at bindgen time. dependabot is told
 # to ignore `wasm-bindgen*` (see .github/dependabot.yml) so it can't bump this
 # out of sync with the CLI; bump both together when `nix flake update` moves the
 # CLI (run `nix develop --command wasm-bindgen --version` and match it here).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "=0.2.121"
+wasm-bindgen = "=0.2.129"
 console_error_panic_hook = "0.1"
 
 [lints]

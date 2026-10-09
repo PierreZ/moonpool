@@ -38,3 +38,10 @@ async_fn_in_trait = "allow"
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 disallowed_types = "deny"
+# Rust 1.99 pedantic lint: wants `fn ... -> impl Future` + `std::future::ready`
+# for async trait impls that never await. The `async fn` form mirrors the
+# trait and reads better, so keep it.
+unused_async_trait_impl = "allow"
+# Rust 1.99 pedantic lint: its `assert_eq!(x, [] as [T; 0])` rewrite of
+# `assert!(x.is_empty())` is noisier than the message it buys.
+assert_is_empty = "allow"

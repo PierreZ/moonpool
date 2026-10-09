@@ -53,11 +53,11 @@ fn test_buggify_integration() {
     buggify_reset();
     println!("\nAfter reset, buggify should never fire:");
     for i in 0..5 {
-        if moonpool_sim::buggify!() {
-            panic!("❌ ERROR: buggify!() fired after reset at iteration {i}!");
-        } else {
-            println!("✅ buggify!() correctly disabled after reset (iteration {i})");
-        }
+        assert!(
+            !moonpool_sim::buggify!(),
+            "❌ ERROR: buggify!() fired after reset at iteration {i}!"
+        );
+        println!("✅ buggify!() correctly disabled after reset (iteration {i})");
     }
 
     println!("✅ All buggify integration tests passed!");

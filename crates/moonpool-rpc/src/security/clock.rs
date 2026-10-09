@@ -91,7 +91,7 @@ impl FixedUtc {
     pub fn advance(&self, seconds: u64) {
         let _ = self
             .seconds
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |now| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |now| {
                 (now != u64::MAX).then(|| now.saturating_add(seconds).min(u64::MAX - 1))
             });
     }
