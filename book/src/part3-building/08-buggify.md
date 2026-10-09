@@ -165,6 +165,23 @@ if buggify_fault_with_prob!(0.02) {
 
 During the chaos window it behaves exactly like `buggify_with_prob!`. When the runner closes the window (the moment it calls `SimWorld::enter_recovery_mode`), it also calls `moonpool_buggify::buggify_enter_recovery`, and from then until the next iteration every fault point evaluates to `false` without drawing. Ordinary `buggify!` and `buggify_with_prob!` points keep firing through the tail: a rare-but-harmless path is still worth taking while the system recovers. FoundationDB draws the same line by gating its disruptive points on `speedUpSimulation`.
 
+## Named Points a Harness Can Force
+
+Some decisions are made once per seed: hold one journal for the whole chaos window, withhold a whole class of requests. The plain macros key a location by its `file:line`, and its activation is an independent coin. A harness that builds a scenario out of several such ingredients then waits for the product of their coins. `buggify_named!` keys the location by a stable label instead, so the harness can decide it together with the other ingredients:
+
+```rust
+// Shipped code: with probability 1.0 the location's activation is the
+// per-seed decision. Disruptive, so silent in the recovery tail.
+if buggify_named!("withhold gc requests", 1.0) {
+    return;
+}
+
+// Harness, once it drew the scenario for this seed:
+moonpool_sim::set_activation("withhold gc requests", scenario);
+```
+
+A point the harness never sets keeps its own activation coin. Otherwise it behaves like `buggify_fault_with_prob!`. Every label must be unique: two points with one label share one activation.
+
 ## Spiking Config Knobs
 
 The patterns above scatter `buggify!()` through your own code. But the simulation has its own knobs: network latencies, disk IOPS, partition durations, fault probabilities. FoundationDB randomizes these the same way it randomizes everything else, with a one-liner at config construction:

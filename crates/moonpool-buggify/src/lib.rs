@@ -146,6 +146,28 @@ pub fn buggify_fault_internal(prob: f64, location: &'static str) -> bool {
     buggify_internal(prob, location)
 }
 
+/// Decide the named location `label` ([`buggify_named!`]) for the current
+/// run: `active` replaces its own activation draw.
+///
+/// A harness calls it when a per-seed scenario needs that location on (or
+/// off) together with its other ingredients, so the scenario does not hang
+/// on the product of independent activation coins. Call it before the
+/// location's first encounter, or at any time to override the decision; it
+/// draws nothing. [`buggify_init`] clears it with every other decision.
+pub fn set_activation(label: &'static str, active: bool) {
+    with_state(|state| {
+        state.active_locations.insert(label, active);
+    });
+}
+
+/// Internal implementation backing [`buggify_named!`]: a disruptive site
+/// ([`buggify_fault_internal`]) whose location is its `label`, so a harness
+/// can name it in [`set_activation`].
+#[must_use]
+pub fn buggify_named_internal(prob: f64, label: &'static str) -> bool {
+    buggify_fault_internal(prob, label)
+}
+
 /// Internal buggify implementation backing the [`buggify!`] and
 /// [`buggify_with_prob!`] macros.
 ///
@@ -203,6 +225,23 @@ macro_rules! buggify_with_prob {
 macro_rules! buggify_fault_with_prob {
     ($prob:expr) => {
         $crate::buggify_fault_internal($prob as f64, concat!(file!(), ":", line!()))
+    };
+}
+
+/// A **disruptive** site keyed by a stable `label` (a `&'static str`)
+/// instead of its `file:line`, so a harness can decide its activation per
+/// seed with [`set_activation`]. Otherwise it is [`buggify_fault_with_prob!`]:
+/// activated once per run on first encounter, fired at `prob` per call
+/// while active, silent in the recovery tail.
+///
+/// Use it for a per-seed decision a scenario couples with others: with
+/// `prob` 1.0 the location's activation is the per-seed draw. Every label
+/// must be unique in the program: two sites with one label share one
+/// activation.
+#[macro_export]
+macro_rules! buggify_named {
+    ($label:expr, $prob:expr) => {
+        $crate::buggify_named_internal($prob as f64, $label)
     };
 }
 
@@ -409,6 +448,47 @@ mod tests {
     fn always_active_always_fires() {
         let fired = with_test_source(1.0, || (0..20).any(|_| buggify_internal(1.0, "always")));
         assert!(fired, "activation 1.0 + prob 1.0 must fire");
+    }
+
+    #[test]
+    fn a_named_location_follows_its_set_activation_whatever_its_draw() {
+        with_test_source(0.0, || {
+            // Activation 0.0: no location activates on its own.
+            assert!(!crate::buggify_named!("unforced", 1.0));
+            set_activation("forced", true);
+            for _ in 0..20 {
+                assert!(crate::buggify_named!("forced", 1.0));
+            }
+            // A new run clears the decision.
+            buggify_init(0.0);
+            assert!(!crate::buggify_named!("forced", 1.0));
+        });
+        with_test_source(1.0, || {
+            // Activation 1.0: every location activates on its own, unless
+            // the harness turned it off.
+            set_activation("suppressed", false);
+            for _ in 0..20 {
+                assert!(!crate::buggify_named!("suppressed", 1.0));
+            }
+        });
+    }
+
+    #[test]
+    fn a_named_location_is_silent_in_the_recovery_tail() {
+        with_test_source(1.0, || {
+            set_activation("tail", true);
+            assert!(crate::buggify_named!("tail", 1.0));
+            buggify_enter_recovery();
+            assert!(!crate::buggify_named!("tail", 1.0));
+        });
+    }
+
+    #[test]
+    fn inert_outside_a_simulation() {
+        buggify_reset();
+        set_activation("outside", true);
+        assert!(!crate::buggify_named!("outside", 1.0));
+        buggify_reset();
     }
 
     #[test]

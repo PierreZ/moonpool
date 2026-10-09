@@ -664,6 +664,11 @@ rather than take a rare path: it fires like `buggify_with_prob!(p)` during the
 chaos window and never after the runner enters its recovery tail, so recovery
 checks are not failed by injection that should have stopped with the chaos.
 
+Use `buggify_named!("label", p)` for a disruptive per-seed decision a harness
+must be able to switch on or off with other ingredients of a scenario: it is keyed by
+its label, and `set_activation("label", on)` decides it for the run. Labels
+must be unique.
+
 Use `buggify_with_prob!(p)` when a frequently evaluated point would otherwise
 dominate the run. Use `buggify_knob!(default, lo..hi)` for an application knob:
 
