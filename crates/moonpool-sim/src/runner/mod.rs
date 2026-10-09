@@ -18,6 +18,7 @@ pub mod context;
 pub mod display;
 pub mod fault_injector;
 pub mod groups;
+pub(crate) mod hint;
 pub(crate) mod iteration;
 pub mod locality;
 pub(crate) mod metrics;

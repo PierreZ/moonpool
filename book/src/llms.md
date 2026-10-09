@@ -674,6 +674,26 @@ let batch_size = moonpool_sim::buggify_knob!(128_usize, 1_usize..16_usize);
 Always supply a valid, non-empty half-open range. A fired invalid range falls
 back to `range.start`, not to the default value.
 
+Use `hint!("label")` in production code to name a moment where a crash would
+be interesting (writes durable but unannounced, staged but unsynced). Await
+it. It never crashes on its own: a fired point asks the simulator, which
+reboots the calling process only under the first `Chaos::Attrition` regime
+whose victim filter admits it, within that regime's `max_dead` budget, kind
+weights and recovery delays. A killed caller's future never resolves; every
+other caller, and every caller outside a simulation, resolves at once. Use
+`hint!("label", p)` for a site rate (default 5%). Never write a sim wrapper
+that races a timer against your code to crash it: hint the moment instead.
+
+```rust,ignore
+storage.sync().await?;
+moonpool_buggify::hint!("batch durable, not sent").await;
+send(messages).await;
+```
+
+For probes in production code, use `moonpool_assertions::reachable!(msg)` and
+`sometimes!(cond, msg)`: inert outside a simulation, and one slot with the
+simulation's `assert_reachable!` of the same message.
+
 `Chaos::BuggifyKnobs` is different. It asks the builder to spike selected
 built-in network/storage configuration values, and it only modifies a surface
 that is also explicitly enabled:

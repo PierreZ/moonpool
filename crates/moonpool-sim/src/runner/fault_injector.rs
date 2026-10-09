@@ -638,6 +638,15 @@ pub trait FaultInjector: Send + Sync + 'static {
     ///
     /// Should respect `ctx.chaos_shutdown()` to allow graceful termination.
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()>;
+
+    /// The attrition regime this injector runs, if it is the built-in
+    /// attrition injector: the regime that decides a process's
+    /// [reboot hints](moonpool_buggify::hint) too. Custom injectors keep
+    /// the default `None`.
+    #[doc(hidden)]
+    fn hint_regime(&self) -> Option<super::process::Attrition> {
+        None
+    }
 }
 
 /// Built-in fault injector that randomly reboots server processes.
@@ -691,7 +700,7 @@ impl AttritionInjector {
 
     /// Whether the victim filter admits `ip`; an unparsable IP is never
     /// eligible.
-    fn admits(&self, ctx: &FaultContext, ip: &str) -> bool {
+    pub(crate) fn admits(&self, ctx: &FaultContext, ip: &str) -> bool {
         ip.parse::<std::net::IpAddr>()
             .is_ok_and(|ip| self.config.victims.admits(ip, &ctx.process_info))
     }
@@ -715,6 +724,27 @@ impl AttritionInjector {
         if self.config.victims != AttritionVictims::Any {
             assert_reachable!("attrition: victim filter narrowed the pool");
         }
+    }
+
+    /// Reboot `ip` at its own [hint](moonpool_buggify::hint), under this
+    /// regime: within the `max_dead` budget of the eligible pool, with a
+    /// kind and delays drawn as for a timed reboot. Returns whether the
+    /// reboot was scheduled. The hinting process alone is rebooted, whatever
+    /// the regime's failure scope.
+    pub(crate) fn reboot_on_hint(&self, ctx: &FaultContext, ip: &str) -> SimulationResult<bool> {
+        if ctx.is_dead(ip) {
+            return Ok(false);
+        }
+        let eligible = self.eligible(ctx, ctx.process_ips());
+        if Self::dead_among(ctx, &eligible) >= self.config.max_dead {
+            assert_reachable!("attrition: max_dead limit refuses a reboot hint");
+            return Ok(false);
+        }
+        let kind = self.choose_kind();
+        let (recovery_range, grace_range) = self.delay_ranges();
+        self.check_victim(ctx, ip);
+        ctx.reboot_with_delays(ip, kind, &recovery_range, &grace_range)?;
+        Ok(true)
     }
 
     /// Reboot a single random live eligible process, respecting the
@@ -803,6 +833,10 @@ impl AttritionInjector {
 impl FaultInjector for AttritionInjector {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn hint_regime(&self) -> Option<super::process::Attrition> {
+        Some(self.config.clone())
     }
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {

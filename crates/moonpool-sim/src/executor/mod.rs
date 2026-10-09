@@ -142,6 +142,10 @@ pub(crate) struct TaskMeta {
     pub(crate) id: u64,
     /// Human-readable task name (from `spawn`'s `name` argument).
     pub(crate) name: Arc<str>,
+    /// The simulated process this task belongs to: set on a process's root
+    /// task, inherited by every task spawned while one of its tasks polls.
+    /// `None` for the driver's, the workloads' and the injectors' tasks.
+    pub(crate) owner: Option<std::net::IpAddr>,
 }
 
 /// A schedulable task holding our metadata.
@@ -154,6 +158,18 @@ thread_local! {
     /// True while a task is being polled by `run_until_stalled` (as opposed
     /// to the driver). Guards the driver-only `until_stalled()` primitive.
     static IN_TASK: Cell<bool> = const { Cell::new(false) };
+
+    /// The owner of the task being polled, if any (see [`TaskMeta::owner`]).
+    static CURRENT_OWNER: Cell<Option<std::net::IpAddr>> = const { Cell::new(None) };
+}
+
+/// The simulated process whose task is being polled right now, if any.
+///
+/// It is how a hint from code under test
+/// ([`moonpool_buggify::hint_reboot!`]) finds the process to reboot without
+/// being handed one.
+pub(crate) fn current_owner() -> Option<std::net::IpAddr> {
+    CURRENT_OWNER.with(Cell::get)
 }
 
 /// Report whether the current code is running inside a task poll (true) or
@@ -213,7 +229,7 @@ struct Handle {
 }
 
 impl Handle {
-    fn spawn<T, F>(&self, name: &str, future: F) -> JoinHandle<T>
+    fn spawn<T, F>(&self, name: &str, owner: Option<std::net::IpAddr>, future: F) -> JoinHandle<T>
     where
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -222,6 +238,7 @@ impl Handle {
         let meta = TaskMeta {
             id,
             name: Arc::from(name),
+            owner,
         };
 
         // catch_unwind: a panicking task must resolve its JoinHandle with
@@ -303,7 +320,27 @@ where
             .borrow()
             .as_ref()
             .expect("executor::spawn called outside Executor::block_on")
-            .spawn(name, future)
+            .spawn(name, current_owner(), future)
+    })
+}
+
+/// Spawn the root task of the simulated process at `owner`: every task it
+/// spawns inherits the owner ([`current_owner`]).
+///
+/// # Panics
+///
+/// As [`spawn`].
+pub(crate) fn spawn_owned<T, F>(name: &str, owner: std::net::IpAddr, future: F) -> JoinHandle<T>
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    CURRENT.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .expect("executor::spawn called outside Executor::block_on")
+            .spawn(name, Some(owner), future)
     })
 }
 
@@ -435,7 +472,9 @@ impl Executor {
             );
 
             IN_TASK.with(|flag| flag.set(true));
+            CURRENT_OWNER.with(|owner| owner.set(runnable.metadata().owner));
             runnable.run();
+            CURRENT_OWNER.with(|owner| owner.set(None));
             IN_TASK.with(|flag| flag.set(false));
         }
     }
