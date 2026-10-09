@@ -83,6 +83,7 @@
 mod batch;
 mod error;
 mod format;
+mod hooks;
 mod io;
 mod journal;
 mod meta;
@@ -92,4 +93,5 @@ mod segment;
 pub use batch::Batch;
 pub use error::{CommitError, Durable, OpenError, ReadError};
 pub use format::{BLOCK, Geometry, ID_SIZE, Id, MAX_BATCH_RECORDS, META_MAX, RECORD_SIZE};
+pub use hooks::{CommitHooks, CommitPoint, NoCommitHooks};
 pub use journal::{Durability, Entry, Journal, JournalConfig, JournalId, Layout, Recovery, State};

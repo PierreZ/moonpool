@@ -8,8 +8,8 @@ use std::net::IpAddr;
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
-    Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
-    Layout, OpenError, ReadError, Recovery, State,
+    Batch, CommitError, CommitHooks, CommitPoint, Durability, Geometry, ID_SIZE, Id, Journal,
+    JournalConfig, JournalId, Layout, OpenError, ReadError, Recovery, State,
 };
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 
@@ -737,6 +737,66 @@ fn acknowledged_commits_survive_a_crash() {
                 matches!(journal.state(2), State::Live { .. }),
                 "{durability:?}"
             );
+        }
+    });
+}
+
+/// Records every [`CommitPoint`] a commit reaches.
+#[derive(Default)]
+struct Recorder(std::sync::Mutex<Vec<CommitPoint>>);
+
+impl CommitHooks for Recorder {
+    fn at(&self, point: CommitPoint) {
+        self.0
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .push(point);
+    }
+}
+
+#[test]
+fn a_commit_asks_its_hooks_at_every_point_in_order() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(40);
+            let mut journal = create(&mut sim, durability).await;
+            let recorder = std::sync::Arc::new(Recorder::default());
+            journal.set_hooks(recorder.clone());
+            let taken = |recorder: &Recorder| {
+                std::mem::take(
+                    &mut *recorder
+                        .0
+                        .lock()
+                        .expect("Mutex poisoned: prior task panicked"),
+                )
+            };
+            // A batch that leaves the metainfo alone: no metainfo point.
+            let journal = put(&mut sim, journal, &[(1, 1, 10)]).await;
+            assert_eq!(
+                taken(&recorder),
+                vec![CommitPoint::EntriesWritten, CommitPoint::RecordsWritten],
+                "{durability:?}"
+            );
+            // A batch that changes the metainfo: its update comes last.
+            let mut batch = Batch::new();
+            batch.put(2, id(2, 1), payload(2, 1, 10));
+            batch.set_meta("moved");
+            let journal = commit(&mut sim, journal, batch).await.expect("commit");
+            assert_eq!(
+                taken(&recorder),
+                vec![
+                    CommitPoint::EntriesWritten,
+                    CommitPoint::RecordsWritten,
+                    CommitPoint::BeforeMeta
+                ],
+                "{durability:?}"
+            );
+            // A metainfo-only commit writes no batch: no point at all.
+            let mut batch = Batch::new();
+            batch.set_meta("again");
+            let journal = commit(&mut sim, journal, batch).await.expect("commit");
+            assert!(taken(&recorder).is_empty(), "{durability:?}");
+            drop(journal);
         }
     });
 }

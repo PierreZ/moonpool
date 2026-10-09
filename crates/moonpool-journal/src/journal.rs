@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
+use std::sync::Arc;
 
 use moonpool_core::{DirectIo, LayoutRegion, StorageProvider};
 
@@ -11,6 +12,7 @@ use crate::format::{
     Meta, RECORD_SIZE, Record, align_up, clear_id, entry_crc, first_batch_of, generation_of,
     journal_tag, u64_of, usize_of,
 };
+use crate::hooks::{CommitHooks, CommitPoint, NoCommitHooks};
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{Located, Op, Stale, entry_matches, scan};
 use crate::segment::{Segment, is_segment_leftover, parse_segment_name};
@@ -151,6 +153,8 @@ pub struct Journal<P: StorageProvider> {
     /// This open's generation: the high bits of every batch it writes.
     generation: u32,
     poisoned: bool,
+    /// Asked at every [`CommitPoint`] (see [`Journal::set_hooks`]).
+    hooks: Arc<dyn CommitHooks>,
 }
 
 impl<P: StorageProvider> std::fmt::Debug for Journal<P> {
@@ -301,6 +305,7 @@ impl<P: StorageProvider> Journal<P> {
             ambiguous_batch: None,
             generation: 1,
             poisoned: false,
+            hooks: Arc::new(NoCommitHooks),
         })
     }
 
@@ -411,6 +416,7 @@ impl<P: StorageProvider> Journal<P> {
             ambiguous_batch,
             generation,
             poisoned: false,
+            hooks: Arc::new(NoCommitHooks),
         };
         for op in scanned.ops {
             journal.apply(&op);
@@ -624,6 +630,12 @@ impl<P: StorageProvider> Journal<P> {
         Ok(out)
     }
 
+    /// Ask `hooks` at every [`CommitPoint`] of every later commit (see
+    /// [`CommitHooks`]; [`NoCommitHooks`] until this is called).
+    pub fn set_hooks(&mut self, hooks: Arc<dyn CommitHooks>) {
+        self.hooks = hooks;
+    }
+
     // ---- writes ----
 
     /// Make `batch` durable, then return. See [`Durability`] for the
@@ -685,8 +697,15 @@ impl<P: StorageProvider> Journal<P> {
         prepared.place(segment.persist_next, segment.entry_next);
         let ordered = self.config.durability == Durability::Ordered;
         let meta = meta_changes.then_some(&next_meta);
-        if let Err((error, durable)) =
-            write_protocol(segment, &self.meta_file, &prepared, meta, ordered).await
+        if let Err((error, durable)) = write_protocol(
+            segment,
+            &self.meta_file,
+            &prepared,
+            meta,
+            ordered,
+            &*self.hooks,
+        )
+        .await
         {
             self.poisoned = true;
             return Err(CommitError::Io { error, durable });
@@ -1006,11 +1025,13 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
     batch: &Prepared,
     meta: Option<&Meta>,
     ordered: bool,
+    hooks: &dyn CommitHooks,
 ) -> Result<(), (std::io::Error, Durable)> {
     segment
         .write(batch.entry_at, &batch.entries)
         .await
         .map_err(|error| (error, Durable::No))?;
+    hooks.at(CommitPoint::EntriesWritten);
     let unknown = |error| (error, Durable::Unknown);
     if ordered {
         segment.sync().await.map_err(unknown)?;
@@ -1019,8 +1040,10 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
         .write(batch.persist_at, &batch.records)
         .await
         .map_err(unknown)?;
+    hooks.at(CommitPoint::RecordsWritten);
     segment.sync().await.map_err(unknown)?;
     if let Some(meta) = meta {
+        hooks.at(CommitPoint::BeforeMeta);
         meta_file.update(meta).await.map_err(unknown)?;
     }
     Ok(())

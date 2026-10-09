@@ -183,6 +183,37 @@ damage a position on some replicas and never on all of them.
 `journal.layout(position)` gives one position's two regions, which is how
 the tests aim a single bit flip at a record or an entry.
 
+## Cutting the Power Mid-Commit
+
+Aiming bytes is half the story. The other half is **when** the power goes.
+A crash from attrition lands at a random instant, and a commit's unsynced
+window is a few microseconds wide, so the recovery paths that matter most
+(a torn record, a record rebuilt from its entry, an ambiguous last batch)
+almost never run.
+
+So the commit itself names the moments. `Journal::set_hooks` installs a
+`CommitHooks`, and every commit calls `at(CommitPoint)` with writes issued
+and not yet synced: `EntriesWritten`, `RecordsWritten`, and `BeforeMeta`
+when the batch changes the metainfo. Production passes `NoCommitHooks`,
+which does nothing. A simulation answers by cutting the process's power
+right there:
+
+```rust,ignore
+impl CommitHooks for PowerCut {
+    fn at(&self, _point: CommitPoint) {
+        // The kill lands before the commit's next storage completion, so
+        // every unsynced sector resolves by the disk's crash physics.
+        if buggify!() {
+            let _ = self.crash.crash(RebootKind::Crash, Some(restart));
+        }
+    }
+}
+```
+
+The decision point lives in the shipped code, and the harness only answers
+the question. That keeps the fault next to the protocol step it attacks,
+and a new step in the commit protocol gets its point in the same change.
+
 ## The Example Simulation
 
 [`journal.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/journal.rs)
