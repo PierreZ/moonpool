@@ -1000,6 +1000,11 @@ impl Prepared {
 /// once the batch is synced, copy B once copy A is. A durable metainfo
 /// therefore always vouches for a durable batch; the reverse (the batch
 /// durable, its metainfo not) is what a crash between the two leaves.
+/// How often an active commit point fires per commit. A commit is short
+/// and a cut inside it is the case its recovery exists for, so the rate is
+/// the buggify default rather than the lower rate of a hot-path point.
+const COMMIT_HINT_PROB: f64 = 0.25;
+
 async fn write_protocol<F: moonpool_core::StorageFile>(
     segment: &Segment<F>,
     meta_file: &MetaFile<F>,
@@ -1011,6 +1016,12 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
         .write(batch.entry_at, &batch.entries)
         .await
         .map_err(|error| (error, Durable::No))?;
+    // A power loss here tears entries no record points at yet.
+    moonpool_buggify::hint!(
+        "journal commit: entries written, not synced",
+        COMMIT_HINT_PROB
+    )
+    .await;
     let unknown = |error| (error, Durable::Unknown);
     if ordered {
         segment.sync().await.map_err(unknown)?;
@@ -1019,8 +1030,21 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
         .write(batch.persist_at, &batch.records)
         .await
         .map_err(unknown)?;
+    // The commit's window: a power loss here may tear the records, rebuild
+    // them from their entries, or leave the last batch ambiguous.
+    moonpool_buggify::hint!(
+        "journal commit: records written, not synced",
+        COMMIT_HINT_PROB
+    )
+    .await;
     segment.sync().await.map_err(unknown)?;
     if let Some(meta) = meta {
+        // The batch is durable and the metainfo still names the old one.
+        moonpool_buggify::hint!(
+            "journal commit: batch synced, metainfo stale",
+            COMMIT_HINT_PROB
+        )
+        .await;
         meta_file.update(meta).await.map_err(unknown)?;
     }
     Ok(())

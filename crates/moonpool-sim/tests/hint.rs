@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, Process, SimContext,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, HintVeto, Process, SimContext,
     SimulationBuilder, SimulationError, SimulationResult, TaskProvider, TimeProvider, Workload,
     hint,
 };
@@ -20,6 +20,9 @@ use moonpool_sim::{
 /// other kill lands at the sleep, where the mark is cleared.
 struct Hinter {
     killed_at_hint: Arc<AtomicU64>,
+    /// When set, the harness's veto: every reboot it is asked about is
+    /// counted here and refused.
+    vetoed: Option<Arc<AtomicU64>>,
 }
 
 #[async_trait]
@@ -34,6 +37,15 @@ impl Process for Hinter {
             self.killed_at_hint.fetch_add(1, Ordering::Relaxed);
         }
         ctx.state().publish(&armed, false);
+        if let Some(vetoed) = &self.vetoed {
+            let vetoed = Arc::clone(vetoed);
+            HintVeto::new(move |_ip, label| {
+                assert_eq!(label, "test: a moment worth a reboot");
+                vetoed.fetch_add(1, Ordering::Relaxed);
+                false
+            })
+            .publish(ctx.state());
+        }
         let state = ctx.state().clone();
         let time = ctx.time().clone();
         let _worker = ctx.task().spawn_task("hinting worker", async move {
@@ -78,8 +90,15 @@ impl Workload for OutsideHinter {
 
 /// Run `seeds` seeds of three hinting processes under one crash-only
 /// attrition regime with `max_dead`; returns (kills at a hint, workload
-/// hints resolved).
-fn run(max_dead: usize, seeds: usize, check_determinism: bool) -> (u64, u64) {
+/// hints resolved). With `vetoed`, the harness's veto refuses and counts
+/// every reboot.
+fn run(
+    max_dead: usize,
+    seeds: usize,
+    check_determinism: bool,
+    vetoed: Option<&Arc<AtomicU64>>,
+) -> (u64, u64) {
+    let vetoed = vetoed.cloned();
     let killed_at_hint = Arc::new(AtomicU64::new(0));
     let resolved = Arc::new(AtomicU64::new(0));
     let process_kills = Arc::clone(&killed_at_hint);
@@ -88,6 +107,7 @@ fn run(max_dead: usize, seeds: usize, check_determinism: bool) -> (u64, u64) {
         .processes(3, move || {
             Box::new(Hinter {
                 killed_at_hint: Arc::clone(&process_kills),
+                vetoed: vetoed.clone(),
             })
         })
         .workload_factory(move || {
@@ -126,7 +146,7 @@ fn a_hint_reboots_its_process_under_the_attrition_regime() {
     // A point is activated on half of the runs, so a seed may well never
     // fire it: 20 seeds leave one chance in a million of no hinted reboot.
     let seeds = 20;
-    let (killed_at_hint, resolved) = run(1, seeds, false);
+    let (killed_at_hint, resolved) = run(1, seeds, false, None);
     assert!(
         killed_at_hint > 0,
         "some seed rebooted a process at its hint"
@@ -140,7 +160,7 @@ fn a_hint_reboots_its_process_under_the_attrition_regime() {
 
 #[test]
 fn a_regime_that_never_reboots_never_reboots_on_a_hint() {
-    let (killed_at_hint, _) = run(0, 5, false);
+    let (killed_at_hint, _) = run(0, 5, false, None);
     assert_eq!(killed_at_hint, 0, "max_dead = 0 refuses every hint");
 }
 
@@ -148,6 +168,24 @@ fn a_regime_that_never_reboots_never_reboots_on_a_hint() {
 fn a_hinted_reboot_replays_deterministically() {
     // Every seed runs twice under the canary; a divergence fails the run.
     // 16 seeds: one chance in 65,536 that the point never activates.
-    let (killed_at_hint, _) = run(1, 16, true);
+    let (killed_at_hint, _) = run(1, 16, true, None);
     assert!(killed_at_hint > 0, "the canary saw hinted reboots");
+}
+
+#[test]
+fn the_harness_veto_is_asked_last_and_a_refusal_leaves_the_process_alive() {
+    let vetoed = Arc::new(AtomicU64::new(0));
+    let (killed_at_hint, _) = run(1, 20, false, Some(&vetoed));
+    assert_eq!(killed_at_hint, 0, "a refused reboot never lands");
+    assert!(
+        vetoed.load(Ordering::Relaxed) > 0,
+        "the veto was asked once a reboot fit the regime"
+    );
+    let never_asked = Arc::new(AtomicU64::new(0));
+    run(0, 5, false, Some(&never_asked));
+    assert_eq!(
+        never_asked.load(Ordering::Relaxed),
+        0,
+        "a reboot the regime refuses never reaches the veto"
+    );
 }

@@ -122,6 +122,27 @@ stand between a hint and a reboot, and none of them commands:
 3. The regime's `max_dead` budget, reboot-kind weights and recovery
    delays, exactly as for its own timed reboots.
 
+The harness may add a fourth: a budget the simulator cannot see. A
+replicated store can lose copies at only so many replicas before a crash
+stops being survivable, and only the harness keeps that count. It
+publishes a `HintVeto` in the run's state, and the sink asks it last,
+once the regime has agreed. A yes is a reboot, so the harness can count
+it as spent:
+
+```rust
+use moonpool_sim::HintVeto;
+
+let ledger = ledger.clone();
+HintVeto::new(move |ip, _label| ledger.permit_cut(ip)).publish(ctx.state());
+```
+
+`moonpool-journal` names three moments inside its own commit: entries
+written but not synced, records written but not synced, and a synced
+batch whose metainfo is stale. A reboot there tears the batch in flight,
+and the journal's recovery (a torn record, a record rebuilt from its
+entry, an ambiguous last batch) runs on every seed that activates them.
+Every user of the journal gets these power cuts with no code of its own.
+
 When the simulator reboots, the future never resolves: the kill lands
 within one scheduler tick, and every write not yet synced resolves by the
 disk's crash physics. Otherwise, and always in production, the future
