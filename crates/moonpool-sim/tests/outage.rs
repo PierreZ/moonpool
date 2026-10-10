@@ -12,8 +12,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     Chaos, ChaosMode, FaultContext, FaultInjector, NetworkProvider, OUTAGE_STATE_KEY, Outage,
-    OutageLanded, Process, SimContext, SimulationBuilder, SimulationError, SimulationResult,
-    TcpListenerTrait, TimeProvider, Workload,
+    OutageLanded, OutageVeto, Process, SimContext, SimulationBuilder, SimulationError,
+    SimulationResult, TcpListenerTrait, TimeProvider, VETO_RETRY, Workload,
 };
 
 const CHAOS: Duration = Duration::from_secs(5);
@@ -299,4 +299,95 @@ fn a_straggler_range_inside_down_is_refused() {
         matches!(result, Err(SimulationError::InvalidConfiguration(ref m)) if m.contains("straggler")),
         "{result:?}"
     );
+}
+
+/// Publishes an [`OutageVeto`] at the opening of the run that refuses every
+/// outage before `hold`, recording each victim set it was asked about.
+struct VetoInjector {
+    hold: Duration,
+    asked: Shared<Vec<(Duration, Vec<String>)>>,
+}
+
+#[async_trait]
+impl FaultInjector for VetoInjector {
+    fn name(&self) -> &'static str {
+        "outage_veto"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let hold = self.hold;
+        let asked = self.asked.clone();
+        let time = ctx.time().clone();
+        OutageVeto::new(move |victims| {
+            let now = time.now();
+            lock(&asked).push((now, victims.to_vec()));
+            now >= hold
+        })
+        .publish(ctx.state());
+        Ok(())
+    }
+}
+
+/// One seed under a veto that holds the outage until `hold`.
+fn run_vetoed(seed: u64, hold: Duration) -> (Probe, Vec<(Duration, Vec<String>)>) {
+    let boots: Boots = Arc::default();
+    let probe: Shared<Probe> = Arc::default();
+    let asked: Shared<Vec<(Duration, Vec<String>)>> = Arc::default();
+    let factory_probe = probe.clone();
+    let factory_asked = asked.clone();
+    let report = SimulationBuilder::new()
+        .processes(3, node("acceptor", &boots))
+        .workload(Patience)
+        .enable_chaos([Chaos::Outage {
+            config: Outage {
+                start: Duration::from_secs(1)..Duration::from_secs(2),
+                ..outage()
+            },
+            mode: ChaosMode::Random,
+        }])
+        .fault_factory(move || Box::new(ProbeInjector(factory_probe.clone())))
+        .fault_factory(move || {
+            Box::new(VetoInjector {
+                hold,
+                asked: factory_asked.clone(),
+            })
+        })
+        .chaos_duration(CHAOS)
+        .set_iterations(1)
+        .set_debug_seeds(vec![seed])
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "seed {seed}: {report}");
+    let probe = lock(&probe).clone();
+    let asked = lock(&asked).clone();
+    (probe, asked)
+}
+
+#[test]
+fn a_vetoed_outage_strikes_once_the_veto_permits_it() {
+    let hold = Duration::from_secs(3);
+    for seed in [1, 2, 3] {
+        let (probe, asked) = run_vetoed(seed, hold);
+        let landed = probe.landed.expect("the outage landed");
+        assert!(landed.at >= hold, "seed {seed}: struck at {:?}", landed.at);
+        assert!(
+            landed.at < hold + VETO_RETRY + Duration::from_millis(1),
+            "seed {seed}: struck at {:?}",
+            landed.at
+        );
+        assert_eq!(probe.all_down_at_once, Some(true), "seed {seed}");
+        assert!(asked.len() > 1, "seed {seed}: asked {} times", asked.len());
+        for (_, victims) in &asked {
+            assert_eq!(victims, &["10.0.1.1", "10.0.1.2", "10.0.1.3"]);
+        }
+    }
+}
+
+#[test]
+fn a_veto_that_never_permits_holds_the_outage_past_the_window() {
+    let (probe, asked) = run_vetoed(1, Duration::MAX);
+    assert_eq!(probe.landed, None);
+    assert!(!asked.is_empty());
+    let last = asked.iter().map(|(at, _)| *at).max().unwrap_or_default();
+    assert!(last <= CHAOS + VETO_RETRY, "asked last at {last:?}");
 }

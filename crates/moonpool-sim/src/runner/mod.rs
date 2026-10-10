@@ -42,7 +42,7 @@ pub use fault_injector::{FaultContext, FaultInjector};
 pub use groups::GroupRegistry;
 pub use hint::{HINT_VETO_KEY, HintVeto};
 pub use locality::{LocalityConfig, MachineRegistry};
-pub use outage::{OUTAGE_STATE_KEY, Outage, OutageLanded};
+pub use outage::{OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, VETO_RETRY};
 pub use process::{Attrition, AttritionScope, AttritionVictims, Process, RebootKind};
 pub use report::{SimulationMetrics, SimulationReport};
 pub use tags::{ProcessTags, TagRegistry};
