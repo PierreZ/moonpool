@@ -14,8 +14,8 @@ the others.
 
 | Surface | Config type and sampling | Applied in | Masked by |
 |---|---|---|---|
-| network | `network/config.rs`: the chaos section of `NetworkConfiguration` with `default()`, `random_for_seed()`, `swarm_for_seed()` | `network/sim/engine.rs` (+ `delay.rs`, `stream.rs`) | `NetworkFault` enum + `NetworkFaultMask` (a `u16` of bits: `Clog`, `Partition`, `BitFlip`, `RandomClose`, `ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, `PairLatency`, `BlackHole`), set with `SimulationBuilder::network_fault_mask` |
-| storage | `storage/config.rs`: `StorageConfiguration` with `random_for_seed()`, `swarm_for_seed()` | `storage/sim/engine.rs` | the swarm subset drawn per seed |
+| network | `network/config.rs`: the chaos section of `NetworkConfiguration` with `default()`, `random_for_seed()`, `swarm_for_seed()` | `network/sim/engine.rs`, `delivery.rs`, `faults.rs` (+ `delay.rs`, `stream.rs`) | `NetworkFault` enum + `NetworkFaultMask` (a `u16` of bits: `Clog`, `Partition`, `BitFlip`, `RandomClose`, `ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, `PairLatency`, `BlackHole`), set with `SimulationBuilder::network_fault_mask` |
+| storage | `storage/config.rs`: `StorageConfiguration` with `random_for_seed()`, `swarm_for_seed()` | `storage/sim/engine.rs`, `complete.rs`, `namespace.rs` | the swarm subset drawn per seed |
 | attrition | `runner/process.rs`: `Attrition` (eight fields) with `swarm_for_seed()`, `AttritionScope`, `AttritionVictims` | `runner/process_manager.rs` | `victims` scopes the draw and `max_dead` to a group or tag |
 | knobs | `Chaos::BuggifyKnobs` perturbs enabled network and storage knobs to extremes | the config samplers | per-seed buggify activation |
 

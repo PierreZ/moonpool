@@ -1,7 +1,9 @@
 //! Deterministic storage simulation engine.
 
+mod complete;
 mod engine;
 mod event;
+mod namespace;
 mod state;
 
 pub use engine::StorageEngine;

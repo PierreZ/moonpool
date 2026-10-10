@@ -27,6 +27,7 @@ pub mod outage;
 pub mod process;
 pub(crate) mod process_manager;
 pub mod report;
+mod run_loop;
 pub(crate) mod stall;
 pub mod tags;
 pub mod topology;

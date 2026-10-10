@@ -12,7 +12,7 @@ iteration per seed, `process_manager.rs` boots and reboots processes,
 builder, so an addition here is public API with a book chapter, and the
 per-iteration lifecycle is where determinism is won or lost.
 
-## The per-iteration lifecycle (`builder.rs`)
+## The per-iteration lifecycle (`run_loop.rs`; setters in `builder.rs`)
 
 1. `reset_per_iteration_state(seed, ..)`: reset the observability layer for
    the seed, `reset_sim_rng` + `set_sim_seed(seed)`, `install_select_offset`
