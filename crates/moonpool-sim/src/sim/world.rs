@@ -28,6 +28,7 @@ use super::{
     wakers::{WakeBatch, Wakers},
 };
 use crate::storage::sim::{OperationId, StorageEngine};
+use moonpool_core::SystemSample;
 
 /// Poison-checking lock boundary shared by simulation handles.
 #[derive(Debug)]
@@ -49,6 +50,9 @@ impl<T> WorldLock<T> {
     }
 }
 
+/// How many system samples [`SimWorld::system_samples`] keeps per process.
+pub const SYSTEM_SAMPLES_KEPT: usize = 64;
+
 /// State shared by the scheduler and the independent resource engines.
 #[derive(Debug)]
 pub(crate) struct SimInner {
@@ -58,6 +62,9 @@ pub(crate) struct SimInner {
     pub(crate) network_schedules: BTreeMap<NetworkOperationId, ScheduleId>,
     pub(crate) storage: StorageEngine,
     pub(crate) storage_schedules: BTreeMap<OperationId, ScheduleId>,
+    /// The last system samples handed to each process, newest last (see
+    /// [`SimWorld::system_samples`]).
+    pub(crate) system_samples: BTreeMap<IpAddr, std::collections::VecDeque<SystemSample>>,
     pub(crate) wakers: Wakers,
     timer_schedules: BTreeMap<u64, ScheduleId>,
     pub(crate) next_task_id: u64,
@@ -98,6 +105,7 @@ impl SimInner {
             events_processed: 0,
             last_processed_event: None,
             pending_faults: Vec::new(),
+            system_samples: BTreeMap::new(),
             buggified_delay_window: BuggifiedDelayWindow::Unbounded,
             recovery_mode: false,
         }
@@ -260,6 +268,8 @@ impl SimWorld {
                         inner.scheduler.cancel(schedule_id);
                         inner.network.fail_operation(operation_id);
                     }
+                    let now = inner.now();
+                    inner.storage.advance_clock(now);
                     let storage_actions = inner.storage.shutdown();
                     wakes.append(super::storage_ops::apply_storage_actions(
                         &mut inner,
@@ -427,6 +437,55 @@ impl SimWorld {
         ip: IpAddr,
     ) -> Option<crate::storage::sim::DiskDegradationState> {
         self.inner.read().storage.disk_episode_for(ip)
+    }
+
+    /// The cumulative counters of `ip`'s simulated disk now.
+    ///
+    /// The same numbers the [`SimSystemProvider`](crate::SimSystemProvider)
+    /// of a process on `ip` reports, so a harness can check what a process
+    /// says about its own disk against the simulator's ground truth.
+    #[must_use]
+    pub fn disk_counters(&self, ip: IpAddr) -> moonpool_core::DiskCounters {
+        let inner = self.inner.read();
+        inner.storage.disk_counters(ip, inner.now())
+    }
+
+    /// Take one system sample for the process at `ip`, and remember it.
+    pub(crate) fn system_sample(&self, ip: IpAddr) -> SystemSample {
+        let mut inner = self.inner.write();
+        let at = inner.now();
+        let sample = SystemSample {
+            at,
+            process_cpu: Duration::ZERO,
+            cores: 1,
+            machine_busy: Duration::ZERO,
+            machine_total: at,
+            run_loop_busy: Some(Duration::ZERO),
+            disk: Some(inner.storage.disk_counters(ip, at)),
+        };
+        let kept = inner.system_samples.entry(ip).or_default();
+        if kept.len() == SYSTEM_SAMPLES_KEPT {
+            kept.pop_front();
+        }
+        kept.push_back(sample.clone());
+        sample
+    }
+
+    /// The last system samples the [`SimSystemProvider`](crate::SimSystemProvider)
+    /// of `ip` handed out, oldest first, at most
+    /// [`SYSTEM_SAMPLES_KEPT`].
+    ///
+    /// A harness checks a window a process reports against these: the
+    /// simulator's own record of what the process read, never the process's
+    /// word for it.
+    #[must_use]
+    pub fn system_samples(&self, ip: IpAddr) -> Vec<SystemSample> {
+        self.inner
+            .read()
+            .system_samples
+            .get(&ip)
+            .map(|kept| kept.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Whether `ip`'s disk has failed and parks every operation forever (see

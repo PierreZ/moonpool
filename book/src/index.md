@@ -39,7 +39,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [The Provider Pattern](./part2-foundations/04-provider-pattern.md) — Five traits (Time, Network, Task, Random, Storage) abstract all I/O; swap real vs simulated
 - [Quick Start: Swapping Implementations](./part2-foundations/05-providers-quickstart.md) — Practical example: generic function running against TokioProviders or SimProviders
 - [Deep Dive: Why Providers Exist](./part2-foundations/06-providers-deepdive.md) — Problems with `#[cfg(test)]` and mocks; providers eliminate both
-- [The Five Providers](./part2-foundations/07-provider-traits.md) — TimeProvider, NetworkProvider, TaskProvider, RandomProvider, StorageProvider details
+- [The Six Providers](./part2-foundations/07-provider-traits.md) — TimeProvider, NetworkProvider, TaskProvider, RandomProvider, StorageProvider, SystemProvider details
 - [System Under Test vs Test Driver](./part2-foundations/08-process-workload.md) — Process (server code) vs Workload (test driver); two distinct roles
 - [Process: Your Server](./part2-foundations/09-process.md) — Process trait: `name()`, `run()`; recreated fresh on every boot from factory
 - [Workload: Your Test Driver](./part2-foundations/10-workload.md) — Workload trait: `setup()`, `run()`, `check()`; survives reboots; drives and validates

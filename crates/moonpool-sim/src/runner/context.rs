@@ -98,6 +98,27 @@ impl SimContext {
         self.providers.storage()
     }
 
+    /// The cumulative counters of the simulated disk of the process at `ip`
+    /// now, the simulator's ground truth (see
+    /// [`SimWorld::disk_counters`](crate::SimWorld::disk_counters)). `None`
+    /// once the simulation is gone.
+    #[must_use]
+    pub fn disk_counters(&self, ip: std::net::IpAddr) -> Option<moonpool_core::DiskCounters> {
+        let world = self.providers.weak_world().upgrade().ok()?;
+        Some(world.disk_counters(ip))
+    }
+
+    /// The last system samples the process at `ip` was handed, oldest first
+    /// (see [`SimWorld::system_samples`](crate::SimWorld::system_samples)).
+    #[must_use]
+    pub fn system_samples(&self, ip: std::net::IpAddr) -> Vec<moonpool_core::SystemSample> {
+        self.providers
+            .weak_world()
+            .upgrade()
+            .map(|world| world.system_samples(ip))
+            .unwrap_or_default()
+    }
+
     /// Get this workload's IP address.
     #[must_use]
     pub fn my_ip(&self) -> &str {

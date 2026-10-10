@@ -59,6 +59,8 @@ pub(crate) fn handle_storage_event(
     event: StorageEvent,
     wakes: &mut WakeBatch,
 ) {
+    let now = inner.now();
+    inner.storage.advance_clock(now);
     let actions = inner.storage.handle_event(event);
     wakes.append(apply_storage_actions(inner, actions));
 }
@@ -73,6 +75,8 @@ impl SimWorld {
     ) -> R {
         let (result, wakes) = {
             let mut inner = self.inner.write();
+            let now = inner.now();
+            inner.storage.advance_clock(now);
             let (result, actions) = transition(&mut inner);
             (result, apply_storage_actions(&mut inner, actions))
         };

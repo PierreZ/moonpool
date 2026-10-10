@@ -13,8 +13,9 @@ So how do we actually deploy it?
 ## The production backend
 
 Simulation swaps in `SimProviders`. Production swaps in `TokioProviders` — a
-zero-cost bundle of the five real implementations: wall-clock time, tokio task
-spawning, real TCP, OS randomness, and real filesystem I/O. Code that is generic
+zero-cost bundle of the six real implementations: wall-clock time, tokio task
+spawning, real TCP, OS randomness, real filesystem I/O, and the kernel's CPU
+and disk counters. Code that is generic
 over `P: Providers` accepts either one.
 
 ```rust

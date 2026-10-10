@@ -29,7 +29,7 @@
 - [The Provider Pattern](./part2-foundations/04-provider-pattern.md)
   - [Quick Start: Swapping Implementations](./part2-foundations/05-providers-quickstart.md)
   - [Deep Dive: Why Providers Exist](./part2-foundations/06-providers-deepdive.md)
-  - [The Five Providers](./part2-foundations/07-provider-traits.md)
+  - [The Six Providers](./part2-foundations/07-provider-traits.md)
 - [System Under Test vs Test Driver](./part2-foundations/08-process-workload.md)
   - [Process: Your Server](./part2-foundations/09-process.md)
   - [Workload: Your Test Driver](./part2-foundations/10-workload.md)

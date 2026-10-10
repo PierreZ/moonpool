@@ -31,4 +31,4 @@ pub use rng::{
     uninstall_select_offset,
 };
 pub use sleep::SleepFuture;
-pub use world::{SimFaultRecord, SimWorld, WeakSimWorld};
+pub use world::{SYSTEM_SAMPLES_KEPT, SimFaultRecord, SimWorld, WeakSimWorld};

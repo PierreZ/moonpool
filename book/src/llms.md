@@ -102,6 +102,7 @@ fn main() -> Result<(), moonpool_sim::SimulationError> {
 | `thread_rng`, OS randomness, random UUIDs | `ctx.random()` or `sim_random_*` |
 | real sockets | `ctx.network()` |
 | real files for process state | `ctx.storage()` |
+| `getrusage`, `/proc/stat`, `/proc/diskstats` | `providers.system().sample(data_dir)` |
 | background OS threads | tasks spawned through the task provider |
 
 The executor uses one OS thread but futures must still be `Send + 'static`.

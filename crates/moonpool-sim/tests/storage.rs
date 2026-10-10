@@ -53,6 +53,8 @@ mod basic;
 mod concurrent;
 #[path = "storage/config.rs"]
 mod config;
+#[path = "storage/counters.rs"]
+mod counters;
 #[path = "storage/crash_api.rs"]
 mod crash_api;
 #[path = "storage/crash_model.rs"]

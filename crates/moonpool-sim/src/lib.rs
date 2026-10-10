@@ -73,9 +73,9 @@
 
 // Re-export core types for convenience
 pub use moonpool_core::{
-    Detach, LayoutRegion, NetworkProvider, OpenOptions, Providers, RandomProvider, Resolver,
-    SimulationError, SimulationResult, StorageFile, StorageProvider, TaskProvider,
-    TcpListenerTrait, TimeError, TimeProvider,
+    Detach, DiskCounters, LayoutRegion, NetworkProvider, OpenOptions, Providers, RandomProvider,
+    Resolver, SimulationError, SimulationResult, StorageFile, StorageProvider, SystemProvider,
+    SystemSample, TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
 };
 // The deterministic select! (moonpool-sim always enables core's
 // deterministic-select, so this is tokio's expansion with a seeded start
@@ -87,7 +87,7 @@ pub use moonpool_core::select;
 // net/fs/time. A wasm-able sim (`--no-default-features`) omits these.
 #[cfg(feature = "tokio-providers")]
 pub use moonpool_core::{
-    TokioNetworkProvider, TokioProviders, TokioTaskProvider, TokioTimeProvider,
+    TokioNetworkProvider, TokioProviders, TokioSystemProvider, TokioTaskProvider, TokioTimeProvider,
 };
 
 // =============================================================================
@@ -128,12 +128,13 @@ pub mod storage;
 // Sim module re-exports
 pub use network::sim::NetworkEvent;
 pub use sim::{
-    DeterminismViolation, Event, ProcessKillKind, ScheduleError, ScheduleId, Scheduled, Scheduler,
-    SimFaultRecord, SimWorld, SleepFuture, StorageOperation, WeakSimWorld, begin_determinism_check,
-    begin_determinism_record, clear_rng_breakpoints, clear_swarm_op_mask, current_sim_seed,
-    draw_swarm_op_mask, finish_determinism_check, reset_rng_call_count, reset_sim_rng,
-    rng_call_count, set_rng_breakpoints, set_sim_seed, sim_random, sim_random_bool, sim_random_f64,
-    sim_random_range, sim_random_range_or_default, stop_determinism_canary, swarm_op_enabled,
+    DeterminismViolation, Event, ProcessKillKind, SYSTEM_SAMPLES_KEPT, ScheduleError, ScheduleId,
+    Scheduled, Scheduler, SimFaultRecord, SimWorld, SleepFuture, StorageOperation, WeakSimWorld,
+    begin_determinism_check, begin_determinism_record, clear_rng_breakpoints, clear_swarm_op_mask,
+    current_sim_seed, draw_swarm_op_mask, finish_determinism_check, reset_rng_call_count,
+    reset_sim_rng, rng_call_count, set_rng_breakpoints, set_sim_seed, sim_random, sim_random_bool,
+    sim_random_f64, sim_random_range, sim_random_range_or_default, stop_determinism_canary,
+    swarm_op_enabled,
 };
 
 // Locality vocabulary re-exports (shared by engine and runner)
@@ -205,7 +206,8 @@ pub use storage::{
 
 // Provider exports
 pub use providers::{
-    ScriptedResolver, SimProviders, SimRandomProvider, SimTaskProvider, SimTimeProvider,
+    ScriptedResolver, SimProviders, SimRandomProvider, SimSystemProvider, SimTaskProvider,
+    SimTimeProvider,
 };
 
 // Assertion vocabulary — always available (dependency-free accounting layer).

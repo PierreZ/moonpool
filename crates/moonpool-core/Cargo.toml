@@ -14,7 +14,14 @@ categories.workspace = true
 [features]
 default = ["tokio-providers", "select"]
 # Umbrella: the full production bundle (TokioProviders needs all five slots).
-tokio-providers = ["tokio-task", "tokio-time", "tokio-net", "tokio-fs", "tokio-random"]
+tokio-providers = [
+    "tokio-task",
+    "tokio-time",
+    "tokio-net",
+    "tokio-fs",
+    "tokio-random",
+    "tokio-system",
+]
 # Granular per-provider features. A consumer that only needs one provider (e.g.
 # moonpool-sim bundles the real TokioTaskProvider) enables just that one and stays
 # free of net/fs/time — keeping the crate wasm-clean where those aren't used.
@@ -24,6 +31,9 @@ tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
 # tokio/rt is needed for spawn_blocking (positioned file I/O runs on the
 # blocking pool); libc supplies O_DIRECT for direct-I/O opens.
 tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "tokio/rt", "dep:tokio-util", "dep:libc"]
+# TokioSystemProvider: getrusage and sysconf from libc, the runtime metrics
+# (worker busy time, stable since tokio 1.45) from tokio/rt.
+tokio-system = ["dep:tokio", "tokio/rt", "dep:libc"]
 # TokioRandomProvider uses rand's ThreadRng; no tokio involved.
 tokio-random = ["rand/thread_rng"]
 # `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
@@ -38,7 +48,7 @@ futures = "0.3"
 libc = { version = "0.2", optional = true }
 rand = { version = "0.10", default-features = false }
 thiserror = "2.0"
-tokio = { version = "1", default-features = false, optional = true }
+tokio = { version = "1.45", default-features = false, optional = true }
 tokio-util = { version = "0.7", features = ["compat"], optional = true }
 tracing = "0.1"
 
