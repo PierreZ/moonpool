@@ -1,9 +1,11 @@
 //! Simulated networking implementation.
 
 mod delay;
+mod delivery;
 mod engine;
 mod event;
 mod facade;
+mod faults;
 mod provider;
 mod state;
 mod stream;
