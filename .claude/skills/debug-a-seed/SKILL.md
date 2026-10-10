@@ -37,8 +37,8 @@ kinds and where they are produced:
 | Event | Producer |
 |---|---|
 | `Timer` | `sim/sleep.rs` via the `Scheduler` |
-| `DataDelivery` / `FinDelivery` / `ConnectionReady` / `PartitionRestore` | `network/sim/engine.rs` |
-| `Storage` completions | `storage/sim/engine.rs` (all ops are `Pending` then an event) |
+| `DataDelivery` / `FinDelivery` / `ConnectionReady` / `PartitionRestore` | `network/sim/delivery.rs` (send, land, in-flight hold) and `faults.rs` (partitions); `engine.rs` for connect/accept |
+| `Storage` completions | `storage/sim/complete.rs` (all ops are `Pending` then an event; scheduling in `engine.rs`) |
 | `ProcessGracefulShutdown` / `ProcessForceKill` / `ProcessRestart` | `runner/process_manager.rs` |
 | `sim_fault` (`kind = ..`) | `chaos/fault_events.rs`, merged from `SimWorld::take_faults()` |
 
