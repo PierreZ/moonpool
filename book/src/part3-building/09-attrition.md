@@ -227,6 +227,8 @@ Two properties make the fault trustworthy. Every draw comes from the simulation 
 
 The injector also tells you when it has landed. Once every victim's kill has run, it publishes an `OutageLanded` (the instant, the victims in IP order, each one's time down, the straggler) under `OUTAGE_STATE_KEY` in the `StateHandle`. A custom fault injector that waits for that key can plan latent disk damage at the one moment no copy lives in memory anywhere.
 
+The harness can also hold an outage back. Publish an `OutageVeto` under `OUTAGE_VETO_KEY`: at the outage instant the injector asks it with every victim's IP, in ascending order, before it draws anything. A `false` answer leaves every victim alive, and the injector asks again `VETO_RETRY` (1 ms) later, until the veto permits the outage or the chaos window closes. Use it for a budget the simulator cannot see, for example a commit in flight that a crash would leave ambiguous. It is the outage's form of `HintVeto`: one answer for the whole victim set, so a budget that counts victims together is judged once. The veto must not draw randomness.
+
 ## Custom Fault Injection
 
 Attrition covers the common case of random process reboots. For more targeted fault injection, implement the `FaultInjector` trait:

@@ -786,6 +786,9 @@ groups crashes in one tick and each restarts after its own `down` draw (one
 optional `straggler` last). Restarts are scheduled events, so they land even
 after the chaos window closes. Once every victim is down, an `OutageLanded`
 is published in the `StateHandle` under `OUTAGE_STATE_KEY`.
+An `OutageVeto` published under `OUTAGE_VETO_KEY` is asked with every
+victim at the outage instant; a refusal retries every `VETO_RETRY` until
+it permits or the chaos window closes.
 
 `.chaos_duration(...)` bounds the window in which Moonpool may inject **new**
 faults of any kind. At the cutoff the runner stops attrition and custom fault

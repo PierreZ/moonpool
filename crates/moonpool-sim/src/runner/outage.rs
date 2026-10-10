@@ -13,9 +13,16 @@
 //! that carries its own restart delay, so the restart is a scheduled
 //! `ProcessRestart` event, not a step of the injector: it runs even once the
 //! chaos window has closed and the injector is gone.
+//!
+//! The harness may hold an outage back with an [`OutageVeto`] published in
+//! the run's state: the budget a [`HintVeto`](crate::HintVeto) keeps for one
+//! process, kept for the whole victim set at once. A refused outage waits
+//! [`VETO_RETRY`] and asks again, until the veto permits it or the chaos
+//! window closes.
 
 use std::net::IpAddr;
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,6 +35,52 @@ use crate::{SimulationResult, assert_reachable};
 /// [`OutageLanded`] under, once every victim is down.
 pub const OUTAGE_STATE_KEY: &str = "moonpool.outage";
 
+/// The run's state key an [`OutageVeto`] is published under.
+pub const OUTAGE_VETO_KEY: &str = "moonpool:outage-veto";
+
+/// How long a refused outage waits before it asks its [`OutageVeto`] again.
+pub const VETO_RETRY: Duration = Duration::from_millis(1);
+
+/// A harness's budget over the outages it lets strike.
+///
+/// The injector asks the veto with every victim's IP, in ascending order,
+/// at the outage instant and before any draw of that instant. A `true`
+/// answer is an outage that crashes every victim at once, so the harness
+/// may record it as done. A `false` answer leaves every victim alive; the
+/// injector asks again [`VETO_RETRY`] later, with the victims live then.
+///
+/// Use it for a budget the simulator cannot see, such as a replicated
+/// store's commit in flight that a crash would leave ambiguous. The veto
+/// must not draw randomness: the answer must not change the draw schedule.
+#[derive(Clone)]
+pub struct OutageVeto(Arc<OutagePermits>);
+
+/// What an [`OutageVeto`] asks: may every one of these processes crash now.
+type OutagePermits = dyn Fn(&[String]) -> bool + Send + Sync;
+
+impl OutageVeto {
+    /// A veto answering `permits(victims)`.
+    pub fn new(permits: impl Fn(&[String]) -> bool + Send + Sync + 'static) -> Self {
+        Self(Arc::new(permits))
+    }
+
+    /// Install this veto for the run that owns `state`, replacing any
+    /// earlier one.
+    pub fn publish(self, state: &crate::StateHandle) {
+        state.publish(OUTAGE_VETO_KEY, self);
+    }
+
+    fn permits(&self, victims: &[String]) -> bool {
+        (self.0)(victims)
+    }
+}
+
+impl std::fmt::Debug for OutageVeto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutageVeto")
+    }
+}
+
 /// A correlated outage regime (see [`Chaos::Outage`](crate::Chaos::Outage)).
 ///
 /// At most one outage per run, inside the chaos window: with probability
@@ -39,7 +92,8 @@ pub const OUTAGE_STATE_KEY: &str = "moonpool.outage";
 /// Every runtime draw is made from the simulation stream, the probability
 /// and start when the window opens, the delays at the outage instant in
 /// ascending IP order, so a seed (or an exploration recipe) replays the same
-/// kill and restart schedule.
+/// kill and restart schedule. A published [`OutageVeto`] may move the
+/// outage instant later (see the module doc).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outage {
     /// The process groups (their [`Process::name`](crate::Process::name))
@@ -48,7 +102,8 @@ pub struct Outage {
     /// The probability a seed has an outage at all.
     pub probability: f64,
     /// When the outage strikes, from the opening of the chaos window. A
-    /// draw past the window's end means no outage.
+    /// draw past the window's end means no outage, and so does an
+    /// [`OutageVeto`] that holds the outage past it.
     pub start: Range<Duration>,
     /// How long each victim stays down.
     pub down: Range<Duration>,
@@ -163,6 +218,45 @@ impl OutageInjector {
     }
 }
 
+impl OutageInjector {
+    /// The live victims, once the run's [`OutageVeto`] permits them all;
+    /// `None` when the chaos window closes first or no victim is live.
+    async fn permitted_victims(&self, ctx: &FaultContext) -> SimulationResult<Option<Vec<IpAddr>>> {
+        let mut refused = false;
+        loop {
+            if ctx.chaos_shutdown().is_cancelled() {
+                if refused {
+                    assert_reachable!("outage: the veto holds an outage past the chaos window");
+                } else {
+                    assert_reachable!("outage: the drawn start fell past the chaos window");
+                }
+                return Ok(None);
+            }
+            let victims = self.victims(ctx);
+            if victims.is_empty() {
+                assert_reachable!("outage: no live victim");
+                return Ok(None);
+            }
+            let names: Vec<String> = victims.iter().map(ToString::to_string).collect();
+            let veto = ctx.state().get::<OutageVeto>(OUTAGE_VETO_KEY);
+            if veto.is_none_or(|veto| veto.permits(&names)) {
+                if refused {
+                    assert_reachable!("outage: a refused outage strikes later");
+                }
+                return Ok(Some(victims));
+            }
+            if !refused {
+                assert_reachable!("outage: the harness's veto holds an outage back");
+            }
+            refused = true;
+            ctx.time()
+                .sleep(VETO_RETRY)
+                .await
+                .map_err(|error| sleep_failed(&error))?;
+        }
+    }
+}
+
 /// A uniform draw from `range`, in whole milliseconds (the restart
 /// resolution); an empty range draws nothing.
 fn draw_ms(range: &Range<Duration>) -> u64 {
@@ -190,15 +284,9 @@ impl FaultInjector for OutageInjector {
             .sleep(Duration::from_millis(start))
             .await
             .map_err(|error| sleep_failed(&error))?;
-        if ctx.chaos_shutdown().is_cancelled() {
-            assert_reachable!("outage: the drawn start fell past the chaos window");
+        let Some(victims) = self.permitted_victims(ctx).await? else {
             return Ok(());
-        }
-        let victims = self.victims(ctx);
-        if victims.is_empty() {
-            assert_reachable!("outage: no live victim");
-            return Ok(());
-        }
+        };
 
         // Every draw at the outage instant, in IP order.
         let mut down: Vec<u64> = victims.iter().map(|_| draw_ms(&self.config.down)).collect();
