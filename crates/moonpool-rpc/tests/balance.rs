@@ -931,6 +931,10 @@ async fn credentials_reach_every_balanced_attempt() {
         .expect("the replaced set carries the credential");
     assert_eq!(again.reply.id, 2);
 
+    // The slow copy's late reply must be in the model first: until then
+    // the model has no latency for the slow server, the hedge delay is
+    // only its base, and the hedge can start before the refusal arrives.
+    assert!(settled(&model).await, "the late loser is collected");
     // Anonymous: refused by the first alternative, no failover.
     let anonymous =
         BalancedClient::new(&rpc, set(1, &fast, &[&slow]), model.clone(), config()).expect("valid");
