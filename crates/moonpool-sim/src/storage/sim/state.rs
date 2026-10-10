@@ -102,6 +102,59 @@ pub(crate) struct PendingStorageOp {
     /// A positioned operation (`read_at` / `write_at`): it addresses `offset`
     /// literally and never moves the handle's stream cursor.
     pub(crate) positioned: bool,
+    /// The process whose disk serves the operation.
+    pub(crate) owner_ip: IpAddr,
+    /// When the operation entered the disk; set at registration.
+    pub(crate) issued_at: Duration,
+}
+
+/// Cumulative activity of one process's disk, as `/proc/diskstats` counts it.
+///
+/// An operation is in flight from its registration until it leaves
+/// `pending_ops`, whatever the reason (completion, cancel, crash, shutdown);
+/// a parked operation on a failed disk stays in flight. `io_ticks` grows
+/// while at least one operation is in flight. Counts, bytes and times grow
+/// only on a completed read or write. Nothing here is drawn from the seed.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DiskActivity {
+    pub(crate) in_flight: u64,
+    /// When `in_flight` last went from 0 to 1.
+    pub(crate) busy_since: Duration,
+    /// Busy time of the busy periods that ended.
+    pub(crate) io_ticks_done: Duration,
+    pub(crate) reads: u64,
+    pub(crate) writes: u64,
+    pub(crate) read_bytes: u64,
+    pub(crate) write_bytes: u64,
+    pub(crate) read_time: Duration,
+    pub(crate) write_time: Duration,
+}
+
+impl DiskActivity {
+    pub(crate) fn start(&mut self, now: Duration) {
+        if self.in_flight == 0 {
+            self.busy_since = now;
+        }
+        self.in_flight += 1;
+    }
+
+    pub(crate) fn finish(&mut self, now: Duration) {
+        assert!(self.in_flight > 0, "disk activity: finish without start");
+        self.in_flight -= 1;
+        if self.in_flight == 0 {
+            self.io_ticks_done += now.saturating_sub(self.busy_since);
+        }
+    }
+
+    /// Busy time up to `now`, as the kernel computes it at read time. A
+    /// sample never counts time after `now`.
+    pub(crate) fn io_ticks(&self, now: Duration) -> Duration {
+        if self.in_flight == 0 {
+            self.io_ticks_done
+        } else {
+            self.io_ticks_done + now.saturating_sub(self.busy_since)
+        }
+    }
 }
 
 /// A name in a process's namespace: the owning process and the path.
@@ -136,6 +189,10 @@ pub(crate) struct StorageState {
     /// Directory entries made durable by syncing their parent directory.
     pub(crate) durable_directories: BTreeSet<Name>,
     pub(crate) pending_ops: BTreeMap<OperationId, PendingStorageOp>,
+    /// The latest simulation time a transition saw. Never goes back.
+    pub(crate) clock: Duration,
+    /// Per-process disk activity counters (see [`DiskActivity`]).
+    pub(crate) activity: BTreeMap<IpAddr, DiskActivity>,
     /// Consulted before any random fault damages a sector (see
     /// [`StorageEligibilityMask`]).
     pub(crate) eligibility: EligibilitySlot,
@@ -175,6 +232,8 @@ impl StorageState {
             directories: BTreeSet::new(),
             durable_directories: BTreeSet::new(),
             pending_ops: BTreeMap::new(),
+            clock: Duration::ZERO,
+            activity: BTreeMap::new(),
             eligibility: EligibilitySlot::default(),
             focus: BTreeMap::new(),
             replication: Vec::new(),

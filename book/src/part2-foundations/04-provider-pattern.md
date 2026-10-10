@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-Every distributed system does five things: it talks over the network, it reads the clock, it spawns concurrent tasks, it generates random values, and it reads and writes files. That is the entire surface area where non-determinism leaks in. Moonpool's provider pattern seals all five.
+Every distributed system does five things: it talks over the network, it reads the clock, it spawns concurrent tasks, it generates random values, and it reads and writes files. That is the entire surface area where non-determinism leaks in. Moonpool's provider pattern seals all five, and a sixth provider reads how busy the process and its disk are, so that measurement runs in simulation too.
 
 ## The Core Idea
 
@@ -24,14 +24,14 @@ This is **interface swapping**, the same technique FoundationDB used with their 
 
 ## The Providers Bundle
 
-Carrying five separate type parameters through every function signature would be painful:
+Carrying six separate type parameters through every function signature would be painful:
 
 ```rust
 // Nobody wants to write this
-fn run_server<N, T, K, R, S>(net: N, time: T, task: K, rand: R, storage: S)
+fn run_server<N, T, K, R, S, Y>(net: N, time: T, task: K, rand: R, storage: S, sys: Y)
 where
     N: NetworkProvider, T: TimeProvider, K: TaskProvider,
-    R: RandomProvider, S: StorageProvider,
+    R: RandomProvider, S: StorageProvider, Y: SystemProvider,
 { /* ... */ }
 ```
 
@@ -44,12 +44,14 @@ pub trait Providers: Clone + Send + Sync + 'static {
     type Task: TaskProvider;
     type Random: RandomProvider;
     type Storage: StorageProvider;
+    type System: SystemProvider;
 
     fn network(&self) -> &Self::Network;
     fn time(&self) -> &Self::Time;
     fn task(&self) -> &Self::Task;
     fn random(&self) -> &Self::Random;
     fn storage(&self) -> &Self::Storage;
+    fn system(&self) -> &Self::System;
 }
 ```
 

@@ -60,7 +60,8 @@ select only `tokio`, then add `hyper` if it speaks HTTP or gRPC.
 - `NetworkProvider` for TCP streams and listeners
 - `RandomProvider` for runtime-controlled randomness
 - `StorageProvider` for file operations
-- `Providers` for carrying the five implementations as one bundle
+- `SystemProvider` for cumulative CPU and disk counters (busyness)
+- `Providers` for carrying the six implementations as one bundle
 - `Resolver`, outside the bundle, for `host:port` name resolution
   (`TokioResolver`; the simulation's `ScriptedResolver`)
 

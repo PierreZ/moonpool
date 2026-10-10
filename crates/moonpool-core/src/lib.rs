@@ -39,6 +39,7 @@
 //! | [`RandomProvider`] | Seeded RNG | System RNG | Deterministic randomness |
 //! | [`NetworkProvider`] | Simulated TCP | Real TCP | Connect, listen, accept |
 //! | [`StorageProvider`] | Fault-injected I/O | Real filesystem | File open, read, write, sync |
+//! | [`SystemProvider`] | Simulated disk counters | `getrusage`, `/proc` | CPU and disk busyness counters |
 //! | [`Resolver`] (optional, outside the bundle) | Scripted table | OS lookup | `host:port` to addresses |
 //!
 //! **Important**: Never call tokio directly in application code.
@@ -60,6 +61,7 @@ mod select;
 #[cfg(feature = "deterministic-select")]
 pub mod select_support;
 mod storage;
+mod system;
 mod task;
 mod time;
 
@@ -106,6 +108,9 @@ pub use storage::{
 };
 #[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};
+#[cfg(feature = "tokio-system")]
+pub use system::TokioSystemProvider;
+pub use system::{DiskCounters, SystemProvider, SystemSample, parse_diskstats, parse_proc_stat};
 pub use task::{Detach, JoinError, TaskProvider};
 #[cfg(feature = "tokio-task")]
 pub use task::{TokioJoinHandle, TokioTaskProvider};
@@ -124,7 +129,7 @@ pub use time::{TimeError, TimeProvider};
 /// ```
 pub mod prelude {
     pub use crate::{
-        NetworkProvider, Providers, RandomProvider, StorageProvider, TaskProvider,
+        NetworkProvider, Providers, RandomProvider, StorageProvider, SystemProvider, TaskProvider,
         TcpListenerTrait, TimeProvider,
     };
 

@@ -1,8 +1,8 @@
-# The Five Providers
+# The Six Providers
 
 <!-- toc -->
 
-Moonpool abstracts every interaction between your code and the outside world into five provider traits. Each trait covers one category of I/O. Together, they form a complete boundary around your application, giving the simulator full control over every source of non-determinism.
+Moonpool abstracts every interaction between your code and the outside world into six provider traits. Each trait covers one category of I/O. Together, they form a complete boundary around your application, giving the simulator full control over every source of non-determinism.
 
 The sim runs single-threaded on the [moonpool deterministic executor](./11-executor.md), but every provider trait is **`Send + Sync + 'static`**. One OS thread runs everything for determinism, yet the **types** are Send-bounded so customer code stays normal: `Arc<RwLock<…>>`, `DashMap`, `Arc<AtomicBool>`, and Send-bounded task spawning all just work. The async methods use **native AFIT** (`async fn` in trait) with explicit `-> impl Future<…> + Send` desugarings to propagate the Send bound, so no `#[async_trait]` and no `?Send` anywhere in the provider layer.
 
@@ -278,9 +278,26 @@ Each `SimStorageProvider` is scoped to a process IP
 (`SimStorageProvider::new(sim, ip)`), so the engine resolves the correct
 per-process configuration and disk-degradation episode for every operation.
 
+## SystemProvider
+
+How busy is this process? FoundationDB answers with cumulative counters it reads every few seconds: CPU seconds from `getrusage`, machine CPU from `/proc/stat`, and the disk's busy time from `/proc/diskstats`. Two readings and a division give `cpu.usage_cores` and `disk.busy`. `SystemProvider` is that reading:
+
+```rust
+pub trait SystemProvider: Clone + Send + Sync + 'static {
+    // Cumulative counters now. `data_dir` selects the disk device.
+    fn sample(&self, data_dir: &str) -> io::Result<SystemSample>;
+}
+```
+
+A `SystemSample` carries the instant, the process CPU time, the usable cores, the machine's busy and total CPU time, the run loop's busy time, and the `DiskCounters` of the device that holds `data_dir`: `io_ticks` (time with at least one I/O in flight), I/Os in flight, completed reads and writes, their bytes and their times. The provider does no arithmetic. Every counter only grows, so a counter that goes back tells the caller the window is not valid.
+
+**Production**: `TokioSystemProvider` reads `getrusage(RUSAGE_SELF)`, `/proc/stat` and the `/proc/diskstats` line whose major and minor numbers match `stat(data_dir)`, the same method FoundationDB uses. On btrfs, overlayfs and some containers no line matches, so `disk` is `None`. The run loop's busy time is the busiest Tokio worker's (`worker_total_busy_duration`). Remember that `io_ticks` is iostat's `%util`: on flash and RAID it reaches 100% long before the device runs out of throughput.
+
+**Simulation**: FoundationDB switches its system monitor off in simulation, so its busyness code never runs there. Moonpool does the opposite. `StorageEngine` counts, per process, the time its disk has at least one operation in flight, parked operations on a failed disk included. A stall or throttle episode makes `io_ticks` rise, and a sample never counts time past its own instant. `SimWorld::disk_counters(ip)` returns the same numbers, so a harness can check what a process reports about its own disk against the simulator's ground truth. A task poll takes no simulated time yet, so the CPU counters stay at zero. Nothing here draws from the seed.
+
 ## The Providers Bundle
 
-All five come together in the `Providers` trait:
+All six come together in the `Providers` trait:
 
 ```rust
 pub trait Providers: Clone + Send + Sync + 'static {
@@ -289,16 +306,18 @@ pub trait Providers: Clone + Send + Sync + 'static {
     type Task: TaskProvider;
     type Random: RandomProvider;
     type Storage: StorageProvider;
+    type System: SystemProvider;
 
     fn network(&self) -> &Self::Network;
     fn time(&self) -> &Self::Time;
     fn task(&self) -> &Self::Task;
     fn random(&self) -> &Self::Random;
     fn storage(&self) -> &Self::Storage;
+    fn system(&self) -> &Self::System;
 }
 ```
 
-`TokioProviders` bundles all five production implementations. `SimProviders` bundles all five simulation implementations and requires an IP address at construction (`SimProviders::new(sim, seed, ip)`) so that the storage provider is scoped to the correct process. Your application code sees `P: Providers` and nothing else.
+`TokioProviders` bundles all six production implementations. `SimProviders` bundles all six simulation implementations and requires an IP address at construction (`SimProviders::new(sim, seed, ip)`) so that the storage and system providers are scoped to the correct process. Your application code sees `P: Providers` and nothing else.
 
 ## Resolver (Optional)
 

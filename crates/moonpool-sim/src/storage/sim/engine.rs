@@ -28,6 +28,9 @@ use crate::{
     },
 };
 
+/// Device name the simulated disk reports in its counters.
+pub(crate) const SIM_DISK_DEVICE: &str = "simdisk";
+
 /// One storage event requested at an absolute simulation time.
 #[derive(Debug)]
 pub(crate) struct ScheduledStorageEvent {
@@ -740,6 +743,7 @@ impl StorageEngine {
         positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
+        self.advance_clock(now);
         self.ensure_readable(handle_id)?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
@@ -753,6 +757,8 @@ impl StorageEngine {
             data: None,
             append: false,
             positioned,
+            owner_ip,
+            issued_at: Duration::ZERO,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -775,6 +781,7 @@ impl StorageEngine {
         positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
+        self.advance_clock(now);
         self.ensure_writable(handle_id, "write")?;
         let file_id = self.open_file_id(handle_id)?;
         // Append mode moves the stream cursor, never a positioned write.
@@ -791,6 +798,8 @@ impl StorageEngine {
             data: Some(data),
             append,
             positioned,
+            owner_ip,
+            issued_at: Duration::ZERO,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -810,6 +819,7 @@ impl StorageEngine {
         handle_id: HandleId,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
+        self.advance_clock(now);
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
         let pending = PendingStorageOp {
@@ -821,6 +831,8 @@ impl StorageEngine {
             data: None,
             append: false,
             positioned: false,
+            owner_ip,
+            issued_at: Duration::ZERO,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -847,6 +859,7 @@ impl StorageEngine {
         new_len: u64,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
+        self.advance_clock(now);
         self.ensure_writable(handle_id, "set_len")?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
@@ -859,6 +872,8 @@ impl StorageEngine {
             data: None,
             append: false,
             positioned: false,
+            owner_ip,
+            issued_at: Duration::ZERO,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -964,19 +979,80 @@ impl StorageEngine {
 
     fn register_operation(
         &mut self,
-        pending: PendingStorageOp,
+        mut pending: PendingStorageOp,
     ) -> Result<OperationId, StorageError> {
         let operation_id = OperationId(self.state.next_operation_id);
         self.state.next_operation_id += 1;
         let handle = self.open_handle_mut(pending.handle_id)?;
         handle.pending_ops.insert(operation_id);
+        let now = self.state.clock;
+        pending.issued_at = now;
+        self.state
+            .activity
+            .entry(pending.owner_ip)
+            .or_default()
+            .start(now);
         self.state.pending_ops.insert(operation_id, pending);
         Ok(operation_id)
     }
 
+    /// Remove one operation from the in-flight set, ending its disk activity.
+    fn take_pending(&mut self, operation_id: OperationId) -> Option<PendingStorageOp> {
+        let pending = self.state.pending_ops.remove(&operation_id)?;
+        let now = self.state.clock;
+        self.state
+            .activity
+            .get_mut(&pending.owner_ip)
+            .expect("an in-flight operation has disk activity")
+            .finish(now);
+        Some(pending)
+    }
+
+    /// Count one completed read or write in its disk's activity.
+    fn count_transfer(&mut self, pending: &PendingStorageOp) {
+        let now = self.state.clock;
+        let activity = self.state.activity.entry(pending.owner_ip).or_default();
+        let took = now.saturating_sub(pending.issued_at);
+        let bytes = u64::try_from(pending.len).unwrap_or(u64::MAX);
+        match pending.op_type {
+            PendingOpType::Read => {
+                activity.reads += 1;
+                activity.read_bytes = activity.read_bytes.saturating_add(bytes);
+                activity.read_time += took;
+            }
+            PendingOpType::Write => {
+                activity.writes += 1;
+                activity.write_bytes = activity.write_bytes.saturating_add(bytes);
+                activity.write_time += took;
+            }
+            PendingOpType::Sync | PendingOpType::SetLen => {}
+        }
+    }
+
+    /// Move the engine's clock to `now`. The clock never goes back.
+    pub(crate) fn advance_clock(&mut self, now: Duration) {
+        self.state.clock = self.state.clock.max(now);
+    }
+
+    /// The disk counters of `ip` at `now` (see [`DiskActivity`]).
+    pub(crate) fn disk_counters(&self, ip: IpAddr, now: Duration) -> moonpool_core::DiskCounters {
+        let activity = self.state.activity.get(&ip).copied().unwrap_or_default();
+        moonpool_core::DiskCounters {
+            device: SIM_DISK_DEVICE.to_string(),
+            io_ticks: activity.io_ticks(now),
+            in_flight: activity.in_flight,
+            reads: activity.reads,
+            writes: activity.writes,
+            read_bytes: activity.read_bytes,
+            write_bytes: activity.write_bytes,
+            read_time: activity.read_time,
+            write_time: activity.write_time,
+        }
+    }
+
     pub(crate) fn handle_event(&mut self, event: StorageEvent) -> StorageActions {
         let mut actions = StorageActions::default();
-        let Some(pending) = self.state.pending_ops.remove(&event.operation_id()) else {
+        let Some(pending) = self.take_pending(event.operation_id()) else {
             return actions;
         };
         if pending.handle_id != event.handle_id() {
@@ -986,13 +1062,27 @@ impl StorageEngine {
                 actual_handle = ?event.handle_id(),
                 "storage completion targeted the wrong handle"
             );
-            self.state.pending_ops.insert(event.operation_id(), pending);
+            // Put it back in flight: the completion was not for this handle.
+            let operation_id = event.operation_id();
+            self.state
+                .activity
+                .entry(pending.owner_ip)
+                .or_default()
+                .start(self.state.clock);
+            self.state.pending_ops.insert(operation_id, pending);
             return actions;
         }
         if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
             handle.pending_ops.remove(&event.operation_id());
         }
 
+        if matches!(
+            (pending.op_type, event.operation()),
+            (PendingOpType::Read, StorageOperation::ReadComplete { .. })
+                | (PendingOpType::Write, StorageOperation::WriteComplete { .. })
+        ) {
+            self.count_transfer(&pending);
+        }
         let result = match (pending.op_type, event.operation()) {
             (PendingOpType::Read, StorageOperation::ReadComplete { .. }) => {
                 self.complete_read(&pending, &mut actions)
@@ -1063,7 +1153,7 @@ impl StorageEngine {
 
     pub(crate) fn cancel_operation(&mut self, operation_id: OperationId) -> StorageActions {
         let mut actions = StorageActions::default();
-        if let Some(pending) = self.state.pending_ops.remove(&operation_id) {
+        if let Some(pending) = self.take_pending(operation_id) {
             if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
                 handle.pending_ops.remove(&operation_id);
             }
@@ -1075,7 +1165,7 @@ impl StorageEngine {
     }
 
     pub(crate) fn fail_scheduled_operation(&mut self, operation_id: OperationId) -> WakeBatch {
-        let Some(pending) = self.state.pending_ops.remove(&operation_id) else {
+        let Some(pending) = self.take_pending(operation_id) else {
             return WakeBatch::default();
         };
         if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
@@ -1118,7 +1208,7 @@ impl StorageEngine {
             return actions;
         };
         for operation_id in handle.pending_ops {
-            self.state.pending_ops.remove(&operation_id);
+            self.take_pending(operation_id);
             self.results.remove(&operation_id);
             actions.cancel(operation_id);
             actions.wakes.push(self.wakers.take(&operation_id));
@@ -1240,7 +1330,7 @@ impl StorageEngine {
         }
         let operation_ids = self.state.pending_ops.keys().copied().collect::<Vec<_>>();
         for operation_id in operation_ids {
-            let Some(pending) = self.state.pending_ops.remove(&operation_id) else {
+            let Some(pending) = self.take_pending(operation_id) else {
                 continue;
             };
             if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
@@ -1276,7 +1366,7 @@ impl StorageEngine {
         let operation_ids = std::mem::take(&mut handle.pending_ops);
         handle.is_closed |= close_handle;
         for operation_id in operation_ids {
-            self.state.pending_ops.remove(&operation_id);
+            self.take_pending(operation_id);
             self.results.insert(
                 operation_id,
                 Err(StorageError::OperationInterrupted {

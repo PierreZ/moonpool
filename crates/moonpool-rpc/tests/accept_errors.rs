@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use moonpool_core::{
     NetworkProvider, Providers, TcpListenerTrait, TokioNetworkProvider, TokioRandomProvider,
-    TokioStorageProvider, TokioTaskProvider, TokioTcpListener, TokioTimeProvider,
+    TokioStorageProvider, TokioSystemProvider, TokioTaskProvider, TokioTcpListener,
+    TokioTimeProvider,
 };
 use moonpool_rpc::{
     AccessClass, IncomingRequest, MethodId, RpcConfig, RpcDriver, RpcMethod, SchemaVersion,
@@ -90,6 +91,7 @@ struct ScriptedProviders {
     task: TokioTaskProvider,
     random: TokioRandomProvider,
     storage: TokioStorageProvider,
+    system: TokioSystemProvider,
 }
 
 impl Providers for ScriptedProviders {
@@ -98,6 +100,7 @@ impl Providers for ScriptedProviders {
     type Task = TokioTaskProvider;
     type Random = TokioRandomProvider;
     type Storage = TokioStorageProvider;
+    type System = TokioSystemProvider;
 
     fn network(&self) -> &ScriptedNetwork {
         &self.network
@@ -114,6 +117,9 @@ impl Providers for ScriptedProviders {
     fn storage(&self) -> &TokioStorageProvider {
         &self.storage
     }
+    fn system(&self) -> &TokioSystemProvider {
+        &self.system
+    }
 }
 
 fn providers(script: &[io::ErrorKind]) -> ScriptedProviders {
@@ -126,6 +132,7 @@ fn providers(script: &[io::ErrorKind]) -> ScriptedProviders {
         task: TokioTaskProvider,
         random: TokioRandomProvider::new(),
         storage: TokioStorageProvider::new(),
+        system: TokioSystemProvider::new(),
     }
 }
 

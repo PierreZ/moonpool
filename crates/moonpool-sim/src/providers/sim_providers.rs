@@ -8,7 +8,9 @@ use crate::network::SimNetworkProvider;
 use crate::sim::WeakSimWorld;
 use crate::storage::SimStorageProvider;
 
-use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider, TaskPanicReporter};
+use super::{
+    SimRandomProvider, SimSystemProvider, SimTaskProvider, SimTimeProvider, TaskPanicReporter,
+};
 
 /// Simulation providers bundle for deterministic testing.
 ///
@@ -39,6 +41,7 @@ use super::{SimRandomProvider, SimTaskProvider, SimTimeProvider, TaskPanicReport
 ///   randomness (seeded once per run by the runner or by `SimWorld`
 ///   construction; building a bundle never reseeds it)
 /// - Uses `SimStorageProvider` for simulated file I/O with per-process fault injection
+/// - Uses `SimSystemProvider` for the per-process simulated disk counters
 #[derive(Clone)]
 pub struct SimProviders {
     network: SimNetworkProvider,
@@ -46,6 +49,7 @@ pub struct SimProviders {
     task: SimTaskProvider,
     random: SimRandomProvider,
     storage: SimStorageProvider,
+    system: SimSystemProvider,
     sim: WeakSimWorld,
 }
 
@@ -64,6 +68,7 @@ impl SimProviders {
             task: SimTaskProvider::default(),
             random: SimRandomProvider::new(),
             storage: SimStorageProvider::new(sim.clone(), ip),
+            system: SimSystemProvider::new(sim.clone(), ip),
             sim,
         }
     }
@@ -99,4 +104,5 @@ impl_providers_bundle!(SimProviders {
     task: SimTaskProvider,
     random: SimRandomProvider,
     storage: SimStorageProvider,
+    system: SimSystemProvider,
 });
