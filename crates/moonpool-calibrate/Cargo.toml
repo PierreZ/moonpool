@@ -31,7 +31,7 @@ hdrhistogram = { version = "7.6", default-features = false }
 # Only to type-check that the generated constants match the real moonpool API
 # (tests/generated_api.rs). Never used on the measurement path.
 [dev-dependencies]
-moonpool = { path = "../moonpool", version = "0.8.0" }
+moonpool = { path = "../moonpool", version = "0.9.0" }
 
 [[bin]]
 name = "moonpool-calibrate"

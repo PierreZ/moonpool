@@ -15,17 +15,17 @@ categories.workspace = true
 # over `TokioStorageProvider` in production and `SimStorageProvider` under
 # simulation. No production providers are pulled in here.
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", default-features = false }
 # `hint!` names the moments inside a commit where a power loss is worth
 # testing; zero dependencies, inert outside a simulation.
-moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
+moonpool-buggify = { path = "../moonpool-buggify", version = "0.9.0" }
 crc32c = "0.6"
 thiserror = "2.0"
 
 [dev-dependencies]
 # The example runs the journal on the real filesystem.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-fs"] }
-moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", default-features = false, features = ["tokio-fs"] }
+moonpool-sim = { path = "../moonpool-sim", version = "0.9.0" }
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [lints]
