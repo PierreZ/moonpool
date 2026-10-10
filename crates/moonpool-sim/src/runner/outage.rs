@@ -102,7 +102,8 @@ pub struct Outage {
     /// The probability a seed has an outage at all.
     pub probability: f64,
     /// When the outage strikes, from the opening of the chaos window. A
-    /// draw past the window's end means no outage.
+    /// draw past the window's end means no outage, and so does an
+    /// [`OutageVeto`] that holds the outage past it.
     pub start: Range<Duration>,
     /// How long each victim stays down.
     pub down: Range<Duration>,
