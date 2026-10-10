@@ -779,7 +779,7 @@ impl SimulationBuilder {
     /// Returns [`SimulationError::InvalidConfiguration`] when exploration or
     /// [`Self::check_determinism`] is combined with an instance workload (its
     /// state cannot be reconstructed for each rerun), or when fault injectors
-    /// ([`Self::fault_factory`], [`Chaos::Attrition`]) are registered without
+    /// ([`Self::fault_factory`], [`Chaos::Attrition`](super::config::Chaos::Attrition)) are registered without
     /// [`Self::chaos_duration`].
     ///
     /// # Panics
