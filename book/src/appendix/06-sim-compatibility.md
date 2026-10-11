@@ -57,7 +57,7 @@ Storage operations return `Poll::Pending` and complete through scheduled events.
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `rand::thread_rng`, `rand::random`, random UUIDs | `random.random::<T>()`, `random.random_range(r)`, `random.random_bool(p)`, `random.random_ratio(n, d)` |
+| `rand::thread_rng`, `rand::random`, random UUIDs | `random.random::<T>()`, `random.random_range(r)`, `random.random_bool(p)`, `random.random_ratio()` |
 | `OsRng`, `getrandom`, `/dev/urandom` | `RandomProvider` |
 
 One ungoverned `thread_rng` call makes a seed unreproducible.
