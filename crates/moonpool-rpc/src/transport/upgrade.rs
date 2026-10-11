@@ -38,10 +38,13 @@ impl PeerContext {
     }
 
     /// Attach an identity an upgrade **authenticated** (for example the
-    /// server name a TLS client verified). Never set it from anything the
-    /// peer merely claimed: nothing in this crate grants trust from it, but
-    /// applications read it as authenticated. Plaintext never sets one, and
-    /// the server side of a TLS session has none (no client certificates).
+    /// server name a TLS client verified, or the name of a client
+    /// certificate a TLS server verified). Never set it from anything the
+    /// peer merely claimed: applications read it as authenticated, and
+    /// [`SecurityConfig::admit_authenticated_peers`](crate::security::SecurityConfig::admit_authenticated_peers)
+    /// grants access from it. Plaintext never sets one, and the server side
+    /// of a TLS session has one only when the client presented a verified
+    /// certificate.
     #[must_use]
     pub fn with_identity(mut self, identity: impl Into<String>) -> Self {
         self.identity = Some(identity.into());

@@ -129,7 +129,9 @@ traits, see [Typed RPC with moonpool-rpc](./02-rpc.md).
 - Congestion windows and slow start
 - DNS resolution (hostnames reach the simulation only through a
   `moonpool_core::Resolver` the application supplies)
-- TLS handshakes inside the network engine
+- TLS handshakes inside the network engine (TLS runs above it, in
+  `moonpool-rpc`'s session upgrade, and the `sim-rpc-tls` campaign
+  simulates it)
 - Nagle's algorithm and delayed ACKs: a simulated write is delivered after
   its scheduled latency and is never held back for an earlier segment's
   acknowledgement

@@ -891,7 +891,12 @@ where
         let Some(outgoing) = next else {
             // Closed from this side: close the stream too (a TLS session
             // sends its close_notify, TCP its FIN), within `close_bound`, so
-            // the peer sees an orderly end rather than a truncation.
+            // the peer sees an orderly end rather than a truncation. A
+            // simulation sometimes skips it: the peer must cope with a
+            // truncated session too.
+            if moonpool_buggify::buggify_with_prob!(0.05) {
+                return CloseReason::Local;
+            }
             let bound = close_bound();
             futures::pin_mut!(bound);
             let _ = futures::future::select(writer.close(), bound).await;

@@ -166,8 +166,36 @@ provider's own streams (rustls through `futures-rustls`, TLS 1.3, the `ring`
 provider), passed to `RpcDriver::listen_with` or `client_only_with`. The
 client verifies the server's chain and the name it expects (`ServerNames`,
 by default the IP it dialed). `RotatingCertificate::replace` and
-`TlsClient::replace_roots` rotate for new sessions. **Mutual TLS is not
-provided**: clients are authenticated by their request credentials.
+`TlsClient::replace_roots` rotate for new sessions.
+
+**Mutual TLS.** A server asks for client certificates with
+`TlsServer::with_client_auth`: `ClientAuth::Required(roots)` refuses a client
+without a certificate that chains to `roots` and is valid at the injected
+UTC, `ClientAuth::Optional(roots)` verifies one when presented, and
+`ClientAuth::Off` (the default) asks for none. A client presents one with
+`TlsClient::with_certificate`, and rotates it through
+`TlsClient::certificate()`. `TlsServer::replace_client_roots` rotates the
+trusted client authorities. The verified certificate's first URI name (else
+its first DNS name, else its first IP address) becomes the session's
+`PeerContext::identity`. It grants access only on a runtime that says so
+with `SecurityConfig::admit_authenticated_peers()`: a request without a
+credential then runs as `Principal::new(identity)` with issuer `"tls"`, and
+the access policy judges it like any other principal.
+
+**Certificates** (feature `tls-pki`). `security::tls::pki::Authority` makes
+Ed25519 roots and the leaves they sign (`LeafSpec`: names, UTC validity, use,
+key seed). `KeySeed::Random` draws operating-system entropy;
+`KeySeed::Bytes` derives the key from 32 bytes, so a simulation seed always
+makes the same certificates. In a simulation, buggify sites in
+`Authority::issue` sometimes issue a flawed leaf (short-lived, not valid
+yet, a name dropped, the wrong use) and say so in `Issued::flaw`.
+
+**TLS under simulation.** The `sim-rpc-tls` campaign runs this same TLS
+code over the simulated network, with the seed's client authentication
+mode, an impostor server whose stray authority copies the real one's name,
+certificate rotation, UTC jumps past certificate lifetimes, and bit flips.
+Ed25519 and X25519 keep every handshake the same size, so the determinism
+canary holds; the ciphertext bytes still differ between runs.
 
 **Two clocks.** `TimeProvider::now` is scheduling time, never Unix time, so
 credential and certificate validity read a separate `UtcClock`: `SystemUtc`

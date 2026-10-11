@@ -121,13 +121,13 @@ Every row of parity.md, its owned evidence (the P1–P6 sections) and what the q
 | Late losers and model updates | P5 | "late loser completed after its call returned" | Proven |
 | Stale alternative sets | P5 | "stale incarnation skipped for a healthy one", stale sets replaced explicitly | Proven |
 | Generic duplication/comparison/busy-score hooks | P5 | Not recombined (observation hook only) | Proven |
-| TLS and peer trust | P6 (real TCP only; the simulation runs no TLS) | — | Proven |
+| TLS and peer trust | P6, mutual TLS (2026-10-11) | `sim-rpc-tls`: "rpc tls impostor server refused by its client", "rpc tls stranger refused by a private endpoint", "rpc tls member reached a private endpoint over mutual TLS", "rpc tls member served after the faults"; real TCP `tests/tls.rs`, `tests/mtls.rs` | Proven |
 | Allowed addresses and private/public access | P6 | — | Proven |
 | Authorization and key/JWKS rotation | P6 | "expired credential denied before dispatch", "rotated key denied then new key accepted"; mutated-token property test | Proven |
 | Protocol RNG versus crypto entropy | P6 | Replay equality with EdDSA tokens (deterministic signatures) | Proven |
 | Logical time versus UTC | P6 | Host-speed replay equality with scripted UTC | Proven |
 | Transport/schema evolution and stored interfaces | P6 | Legacy v1 peer interoperates; v1 client refused; mutated golden envelopes and references | Proven |
-| mTLS deferral | P6 | Non-claims audited in the book and these documents | Excluded (user decision) |
+| Mutual TLS | P6, requested 2026-10-11 (the deferral is lifted) | `tests/mtls.rs` (required, optional, untrusted, expired, wrong use, rotation) and the `sim-rpc-tls` campaign | Proven |
 | Task lifetime and structured cancellation | P1 | `is_at_baseline` after every process death | Proven |
 | Ordering/fairness/control progress | P4 | Overload bursts beside streams | Proven |
 | Admission and resource limits | P4 | "request refused overloaded before admission", "service recovered after an overload burst"; soak overload table | Proven |
@@ -220,4 +220,4 @@ Budgets recorded for regressions (this machine, release): unary p99 at 5,000/s o
 
 ## Non-claims
 
-The release documentation claims none of the following: exactly-once delivery, a durable reliable queue or duplicate suppression; stream resumption; transparent incarnation or endpoint refresh; mutual TLS (deferred by user decision); FoundationDB wire compatibility; confidentiality or peer authentication in plaintext mode; internet-scale multi-tenant isolation; platforms beyond Moonpool's Linux and macOS on Tokio (wasm: protocol and simulation only); performance envelopes beyond the calibration points above.
+The release documentation claims none of the following: exactly-once delivery, a durable reliable queue or duplicate suppression; stream resumption; transparent incarnation or endpoint refresh; FoundationDB wire compatibility; confidentiality or peer authentication in plaintext mode; internet-scale multi-tenant isolation; platforms beyond Moonpool's Linux and macOS on Tokio (wasm: protocol and simulation only); performance envelopes beyond the calibration points above.

@@ -16,7 +16,9 @@ description = "Deterministic-simulation harness, oracles and campaigns for moonp
 # `jwt`: the security campaign verifies real signed tokens (EdDSA, which
 # signs deterministically) with the production JWT/JWKS adapter, under an
 # injected UTC; the simulation is never built for wasm.
-moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0", features = ["derive", "jwt"] }
+# `tls-pki`: the TLS campaign runs the production TLS layer and makes its
+# certificates with the production authority, from seeded key bytes.
+moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0", features = ["derive", "jwt", "tls-pki"] }
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
 
 async-trait = "0.1"
@@ -56,6 +58,10 @@ path = "src/bin/sim/rpc_streams.rs"
 [[bin]]
 name = "sim-rpc-security"
 path = "src/bin/sim/rpc_security.rs"
+
+[[bin]]
+name = "sim-rpc-tls"
+path = "src/bin/sim/rpc_tls.rs"
 
 [[bin]]
 name = "sim-rpc-qualification"

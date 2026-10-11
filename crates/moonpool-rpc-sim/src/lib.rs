@@ -84,6 +84,7 @@ pub mod interfaces;
 pub mod qualification;
 pub mod security;
 pub mod streams;
+pub mod tls;
 
 use moonpool_sim::{NetworkFault, NetworkFaultMask};
 

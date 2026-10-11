@@ -73,8 +73,6 @@ These are deliberate:
   application's decision.
 - **No transparent incarnation or endpoint refresh.** A stale reference
   fails. Learning the new one is explicit.
-- **No mutual TLS.** Servers are authenticated by TLS, clients by request
-  credentials only.
 - **No FoundationDB wire compatibility.** The frame, envelope and codec are
   this crate's own.
 - **No confidentiality or peer authentication in plaintext mode.**

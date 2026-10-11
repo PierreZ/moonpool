@@ -7,9 +7,12 @@
 //! - A TCP address or an endpoint token is **not** an identity. An
 //!   [`IpAllowList`] restricts which peers can open a session; it grants
 //!   nothing.
-//! - Server-authenticated TLS (the `tls` module, behind feature `tls`) authenticates the
-//!   **server** to its clients. Clients are not authenticated by the
-//!   handshake: mutual TLS is deliberately not provided.
+//! - TLS (the `tls` module, behind feature `tls`) authenticates the
+//!   **server** to its clients, and, when the server asks for it
+//!   (`tls::ClientAuth`), the **client** to the server (mutual TLS). A
+//!   verified certificate's name becomes the session's peer identity; it
+//!   grants something only on a runtime that opts in with
+//!   [`SecurityConfig::admit_authenticated_peers`].
 //! - A **client** is identified per request, by a credential it attaches
 //!   ([`Credential`], from a [`CredentialSource`]) and the server verifies
 //!   ([`RequestVerifier`], for example the JWT/JWKS adapter in the `jwt`
@@ -474,7 +477,21 @@ pub struct SecurityConfig {
     max_credential_bytes: usize,
     plaintext_credentials: bool,
     send_plaintext: bool,
+    peer_identities: PeerIdentities,
 }
+
+/// Whether a session's authenticated peer identity counts as a caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PeerIdentities {
+    /// It grants nothing (the default).
+    Ignored,
+    /// It is the caller of a request without a credential.
+    Admitted,
+}
+
+/// The issuer of a [`Principal`] taken from a session's authenticated peer
+/// identity ([`SecurityConfig::admit_authenticated_peers`]).
+pub const PEER_IDENTITY_ISSUER: &str = "tls";
 
 impl Default for SecurityConfig {
     /// Verify nothing: public endpoints answer anyone, private endpoints
@@ -490,6 +507,7 @@ impl Default for SecurityConfig {
             max_credential_bytes: DEFAULT_MAX_CREDENTIAL_BYTES,
             plaintext_credentials: false,
             send_plaintext: false,
+            peer_identities: PeerIdentities::Ignored,
         }
     }
 }
@@ -592,6 +610,27 @@ impl SecurityConfig {
         self
     }
 
+    /// Treat a session's authenticated peer identity (the name a verified
+    /// TLS certificate proves, mutual TLS on the accepting side) as the
+    /// caller of a request that carries no credential: a principal with
+    /// that subject and issuer [`PEER_IDENTITY_ISSUER`], which the policy
+    /// then judges like any other. A request that carries a credential is
+    /// judged by its credential alone.
+    ///
+    /// Without it (the default) a peer identity grants nothing. Plaintext
+    /// sessions never carry one.
+    #[must_use]
+    pub fn admit_authenticated_peers(mut self) -> Self {
+        self.peer_identities = PeerIdentities::Admitted;
+        self
+    }
+
+    /// Whether a session's authenticated peer identity counts as a caller.
+    #[must_use]
+    pub fn admits_authenticated_peers(&self) -> bool {
+        self.peer_identities == PeerIdentities::Admitted
+    }
+
     /// Whether this runtime's requests may carry credentials over
     /// unencrypted sessions.
     #[must_use]
@@ -673,7 +712,14 @@ impl SecurityConfig {
             }
             // Nothing here can verify it: it grants nothing, the caller is
             // anonymous.
-            (Some(_), None) | (None, _) => None,
+            (Some(_), None) => None,
+            // No credential: the session's authenticated peer, if trusted.
+            (None, _) => match request.origin {
+                RequestOrigin::Remote(peer) if self.admits_authenticated_peers() => peer
+                    .identity()
+                    .map(|identity| Principal::new(identity).with_issuer(PEER_IDENTITY_ISSUER)),
+                _ => None,
+            },
         };
         self.policy.authorize(request, principal.as_ref())?;
         Ok(principal)
@@ -690,6 +736,7 @@ impl std::fmt::Debug for SecurityConfig {
             .field("max_credential_bytes", &self.max_credential_bytes)
             .field("plaintext_credentials", &self.plaintext_credentials)
             .field("send_plaintext", &self.send_plaintext)
+            .field("peer_identities", &self.peer_identities)
             .finish_non_exhaustive()
     }
 }
@@ -718,6 +765,7 @@ impl PartialEq for SecurityConfig {
             && self.max_credential_bytes == other.max_credential_bytes
             && self.plaintext_credentials == other.plaintext_credentials
             && self.send_plaintext == other.send_plaintext
+            && self.peer_identities == other.peer_identities
     }
 }
 
