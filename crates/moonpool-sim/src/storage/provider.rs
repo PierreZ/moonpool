@@ -15,12 +15,17 @@ use tracing::instrument;
 ///
 /// # Example
 ///
-/// ```ignore
-/// let sim = SimWorld::new();
-/// let ip: IpAddr = "10.0.1.1".parse().unwrap();
-/// let provider = SimStorageProvider::new(sim.weak(), ip);
+/// Inside a simulation, take it from
+/// [`SimContext::storage`](crate::SimContext::storage). A test that drives
+/// a [`SimWorld`](crate::SimWorld) by hand builds one per process:
 ///
-/// let file = provider.open("test.txt", OpenOptions::create_write()).await?;
+/// ```rust
+/// use moonpool_sim::{SimStorageProvider, SimWorld};
+///
+/// let sim = SimWorld::new();
+/// let ip = std::net::IpAddr::from([10, 0, 1, 1]);
+/// let _provider = SimStorageProvider::new(sim.downgrade(), ip);
+/// // provider.open(...) returns a future the world's events complete.
 /// ```
 #[derive(Debug, Clone)]
 pub struct SimStorageProvider {

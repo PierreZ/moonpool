@@ -7,13 +7,13 @@
 //! - A TCP address or an endpoint token is **not** an identity. An
 //!   [`IpAllowList`] restricts which peers can open a session; it grants
 //!   nothing.
-//! - Server-authenticated TLS (feature `tls`, [`tls`]) authenticates the
+//! - Server-authenticated TLS (the `tls` module, behind feature `tls`) authenticates the
 //!   **server** to its clients. Clients are not authenticated by the
 //!   handshake: mutual TLS is deliberately not provided.
 //! - A **client** is identified per request, by a credential it attaches
 //!   ([`Credential`], from a [`CredentialSource`]) and the server verifies
-//!   ([`RequestVerifier`], for example the JWT/JWKS adapter behind feature
-//!   `jwt`, [`jwt`]) into a [`Principal`].
+//!   ([`RequestVerifier`], for example the JWT/JWKS adapter in the `jwt`
+//!   module, behind feature `jwt`) into a [`Principal`].
 //! - An [`AccessPolicy`] decides, per request, whether that principal (or
 //!   an anonymous caller) may call the endpoint. The default
 //!   ([`DefaultPolicy`]) lets anyone who passes verification call a

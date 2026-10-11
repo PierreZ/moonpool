@@ -2,31 +2,32 @@
 
 <!-- toc -->
 
-Every distributed system does five things: it talks over the network, it reads the clock, it spawns concurrent tasks, it generates random values, and it reads and writes files. That is the entire surface area where non-determinism leaks in. Moonpool's provider pattern seals all five, and a sixth provider reads how busy the process and its disk are, so that measurement runs in simulation too.
+Every distributed system does five things with the outside world: it reads the clock, it spawns concurrent tasks, it talks over the network, it draws random numbers, and it reads and writes files. That is the whole surface where non-determinism leaks in. Moonpool seals all five behind traits, and adds a sixth trait that reads how busy the process and its disk are, so that measurement runs in simulation too.
 
 ## The Core Idea
 
-Define a trait for each category of I/O. Implement the trait twice: once backed by real tokio calls for production, once backed by a deterministic simulation engine for testing. Your application code is generic over the trait. It never knows which implementation it is running against.
+Define a trait for each category of I/O. Implement the trait twice: once over real tokio calls for production, once over the deterministic world for testing. Your application code is generic over the trait. It never knows which implementation it runs against.
 
 ```text
                   Application Code
-           (generic over Providers trait)
+             (generic over P: Providers)
                         |
             +-----------+-----------+
             |                       |
       TokioProviders          SimProviders
-     (real TCP, real         (simulated TCP,
-      clock, real disk)       logical clock,
-                              fault-injected disk)
+     (real TCP, wall         (simulated TCP,
+      clock, real disk,       logical clock,
+      OS entropy)             fault-injected disk,
+                              seeded RNG)
 ```
 
-This is **interface swapping**, the same technique FoundationDB used with their `INetwork` interface (production `Net2` vs. simulation `Sim2`). The difference is that Rust's type system enforces it at compile time. If your code compiles with `P: Providers`, it works with both implementations. No runtime surprises.
+This is **interface swapping**, the technique FoundationDB uses with its `INetwork` interface: `Net2` in production, `Sim2` in simulation. The difference is that Rust enforces it at compile time. If your code compiles with `P: Providers`, it works with both implementations.
 
 ## The Providers Bundle
 
-Carrying six separate type parameters through every function signature would be painful:
+Six type parameters through every signature would be painful:
 
-```rust
+```rust,ignore
 // Nobody wants to write this
 fn run_server<N, T, K, R, S, Y>(net: N, time: T, task: K, rand: R, storage: S, sys: Y)
 where
@@ -35,9 +36,9 @@ where
 { /* ... */ }
 ```
 
-Moonpool solves this with a single bundle trait called `Providers`:
+Moonpool bundles them in one trait, `Providers`:
 
-```rust
+```rust,ignore
 pub trait Providers: Clone + Send + Sync + 'static {
     type Network: NetworkProvider;
     type Time: TimeProvider;
@@ -57,35 +58,38 @@ pub trait Providers: Clone + Send + Sync + 'static {
 
 Now your code carries one type parameter:
 
-```rust
+```rust,ignore
 fn run_server<P: Providers>(providers: P) {
     let time = providers.time().clone();
     let net = providers.network().clone();
-    // Use them naturally
+    // use them like tokio
 }
 ```
 
-Two implementations exist: `TokioProviders` for production, and `SimProviders` (in moonpool-sim) for simulation. `SimProviders::new(sim, seed, ip)` takes an IP address so its storage provider is scoped to the correct process. Your application code never imports either one directly. It only sees `P: Providers`.
+Two implementations exist. `TokioProviders::new()` in moonpool-core is production. `SimProviders::new(sim, ip)` in moonpool-sim is simulation: it takes a weak handle on the `SimWorld` and the IP of the process it serves, so its network, storage and system providers are scoped to that process's machine. Your application code imports neither. It sees `P: Providers` and nothing else.
+
+Each provider in the bundle is `Clone`. Clone the one you need and move it into a spawned task, the way you would clone an `Arc`.
 
 ## One Line Changes Everything
 
-The swap between "testing a real distributed system" and "testing inside a deterministic simulation" happens at the call site, not inside your application logic:
+The swap between production and simulation happens at the call site, not inside the logic:
 
-```rust
+```rust,ignore
 // Production
 let providers = TokioProviders::new();
 run_server(providers);
 
-// Simulation (inside a workload, the builder provides SimProviders via SimContext)
-let providers = ctx.providers().clone();  // SimProviders
+// Simulation: inside a Process or Workload, the runner hands out SimProviders
+let providers = ctx.providers().clone();
 run_server(providers);
 ```
 
-Same `run_server`. Same code path. Same binary. The only difference is which `Providers` implementation gets plugged in. This is the architectural foundation that makes everything else in moonpool possible: chaos testing, assertion coverage, multiverse exploration, all of it rests on the guarantee that your production code runs unmodified inside the simulator.
+Same `run_server`. Same code path. The only difference is which `Providers` is plugged in. This is the foundation that everything else in moonpool stands on. Chaos, assertion coverage, hints, exploration: all of it rests on the guarantee that the shipped code runs unmodified inside the simulator. [Same Code in Production and Simulation](./12-same-code.md) states that rule in full.
 
-On the simulation side, each provider is intentionally thin. Time requests go
-to the global `Scheduler<Event>`. Network calls go to `NetworkSimulation`, and
-storage calls go to `StorageEngine`. The engines own their state, exact pending
-results, faults, and wakers, then return scheduling effects to `SimWorld`. This
-keeps the application-facing trait familiar without collapsing the simulator
-back into one global state object.
+## Thin Providers, Stateful Engines
+
+On the simulation side each provider is deliberately thin. `SimTimeProvider::sleep` schedules a timer in the global `Scheduler<Event>`. `SimNetworkProvider::connect` asks `NetworkSimulation` for a delayed connect operation. `SimStorageProvider::open` asks `StorageEngine`. The engines own the state, the exact pending results, the faults and the wakers. They return scheduling effects to `SimWorld`, which puts them on the one timeline. The application-facing trait stays familiar, and the simulator never collapses into one global state object.
+
+## What Stays Outside the Bundle
+
+Name resolution is a separate trait, `Resolver`, with `TokioResolver` in production and `ScriptedResolver` in simulation. Most code never resolves a name, and code that does picks its resolver next to its providers. `moonpool_core::select!` is a macro, not a provider: it is tokio's own `select!` expansion with a seeded start offset once moonpool-sim is in the build graph. [The Six Providers](./07-provider-traits.md) lists every trait, method by method.

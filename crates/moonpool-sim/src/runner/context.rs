@@ -1,16 +1,23 @@
-//! Simulation context for workloads.
+//! The simulation context handed to processes and workloads.
 //!
-//! [`SimContext`] is the single entry point for workloads to access simulation
-//! infrastructure: providers, topology, shared state, and shutdown signaling.
+//! [`SimContext`] is the single entry point from inside the simulation to
+//! its infrastructure: the providers, the topology, the shared state, the
+//! shutdown signal, the observability timeline, per-node metrics, and a
+//! process's own crash.
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use moonpool_sim::SimContext;
+//! ```rust
+//! use moonpool_sim::{NetworkProvider, SimContext, SimulationResult};
 //!
-//! async fn my_workload(ctx: &SimContext) -> SimulationResult<()> {
-//!     let server_ip = ctx.peer("server").expect("server not found");
-//!     let stream = ctx.network().connect(&server_ip).await?;
+//! async fn client(ctx: &SimContext) -> SimulationResult<()> {
+//!     // Process IPs come from the topology; groups are named after their
+//!     // process type.
+//!     let Some(server) = ctx.topology().ips_in_group("server").first().cloned() else {
+//!         return Ok(());
+//!     };
+//!     let _stream = ctx.network().connect(&server).await?;
+//!     // Tell the other actors of this run what happened.
 //!     ctx.state().publish("connected", true);
 //!     Ok(())
 //! }
@@ -31,10 +38,14 @@ use moonpool_core::Providers;
 use super::app_metrics::MetricsHandle;
 use super::topology::WorkloadTopology;
 
-/// Simulation context provided to workloads.
+/// Simulation context provided to processes and workloads.
 ///
 /// Wraps all simulation infrastructure into a single, non-generic struct.
-/// For code generic over `P: Providers`, pass `ctx.providers()`.
+/// For code generic over `P: Providers`, pass `ctx.providers()`: that is how
+/// shipped code, written against the provider traits, runs in simulation.
+///
+/// A process gets a fresh context on every boot, with fresh providers. A
+/// workload keeps one context for the whole iteration.
 pub struct SimContext {
     providers: SimProviders,
     topology: WorkloadTopology,
@@ -45,6 +56,9 @@ pub struct SimContext {
 
 impl SimContext {
     /// Create a new simulation context.
+    ///
+    /// The runner builds one per process boot and per workload; call this
+    /// only to drive a [`SimWorld`](crate::SimWorld) by hand.
     #[must_use]
     pub fn new(
         providers: SimProviders,
@@ -63,36 +77,57 @@ impl SimContext {
     }
 
     /// Get the full providers bundle for passing to generic code.
+    ///
+    /// Code that takes `P: Providers` (the same type parameter production
+    /// fills with `TokioProviders`) gets this bundle in simulation.
     #[must_use]
     pub fn providers(&self) -> &SimProviders {
         &self.providers
     }
 
-    /// Get the simulated network provider.
+    /// Get the simulated network provider, bound to this actor's IP.
+    ///
+    /// Bind with [`my_ip`](Self::my_ip) as the address; connect to an IP
+    /// from the [`topology`](Self::topology).
     #[must_use]
     pub fn network(&self) -> &SimNetworkProvider {
         self.providers.network()
     }
 
-    /// Get the simulated time provider.
+    /// Get the simulated time provider: logical time that moves only when
+    /// the world steps.
+    ///
+    /// Use it for every sleep, timeout and timestamp. Durations measured
+    /// with it replay identically; wall-clock time does not.
     #[must_use]
     pub fn time(&self) -> &SimTimeProvider {
         self.providers.time()
     }
 
-    /// Get the task provider.
+    /// Get the task provider, which spawns on the deterministic executor.
+    ///
+    /// Tasks a process spawns belong to that process: a reboot aborts them,
+    /// and the CPU gate charges their polls to its core.
     #[must_use]
     pub fn task(&self) -> &crate::providers::SimTaskProvider {
         self.providers.task()
     }
 
     /// Get the seeded random provider.
+    ///
+    /// Every draw comes from the simulation's one random stream, so it is
+    /// part of the seed's replay. Never use an OS random source in
+    /// simulated code.
     #[must_use]
     pub fn random(&self) -> &SimRandomProvider {
         self.providers.random()
     }
 
-    /// Get the simulated storage provider.
+    /// Get the simulated storage provider, scoped to this actor's IP.
+    ///
+    /// Files opened through it belong to this process: its crashes resolve
+    /// their unsynced writes, a wipe deletes them, and storage chaos aims at
+    /// them. Files survive a process reboot; in-memory state does not.
     #[must_use]
     pub fn storage(&self) -> &SimStorageProvider {
         self.providers.storage()
@@ -130,37 +165,43 @@ impl SimContext {
             .map_or(crate::Slowness::HEALTHY, |world| world.slowness(ip))
     }
 
-    /// Get this workload's IP address.
+    /// Get this actor's IP address: `10.0.{group}.{n}` for a process,
+    /// `10.0.0.{n}` for a workload.
     #[must_use]
     pub fn my_ip(&self) -> &str {
         &self.topology.my_ip
     }
 
-    /// Get this workload's client ID.
+    /// Get this actor's client ID.
     ///
-    /// Sequential from 0 among the instances of this workload's builder entry
-    /// (FDB-style); a single `.workload(instance)` is always client 0.
+    /// For a workload: sequential from 0 among the instances of its builder
+    /// entry (FDB-style); a single `.workload(instance)` is always client 0.
+    /// For a process: its index within its own process group.
     #[must_use]
     pub fn client_id(&self) -> usize {
         self.topology.client_id
     }
 
-    /// Get the total number of workload instances sharing this entry.
+    /// Get the total number of instances sharing this actor's entry.
     ///
     /// For single `.workload()` entries this is 1.
     /// For `.workloads(count, factory)` entries this is the resolved count.
+    /// For a process, it is the size of its process group on this seed.
     #[must_use]
     pub fn client_count(&self) -> usize {
         self.topology.client_count
     }
 
-    /// Find a peer's IP address by workload name.
+    /// Find a peer workload's IP address by its [`Workload::name`](crate::Workload::name).
+    ///
+    /// For process IPs, use [`topology`](Self::topology) and
+    /// [`WorkloadTopology::ips_in_group`].
     #[must_use]
     pub fn peer(&self, name: &str) -> Option<String> {
         self.topology.peer_by_name(name)
     }
 
-    /// Get all peers as (name, ip) pairs.
+    /// Get every peer workload as `(name, ip)` pairs.
     #[must_use]
     pub fn peers(&self) -> Vec<(String, String)> {
         self.topology
@@ -172,6 +213,12 @@ impl SimContext {
     }
 
     /// Get the shutdown cancellation token.
+    ///
+    /// It fires for everyone once the first workload returns from
+    /// [`Workload::run`](crate::Workload::run), or when a stall guard trips.
+    /// A process's token also fires at the start of a graceful reboot, and
+    /// the process then has a grace period to return. Long-running loops should
+    /// `select!` on `shutdown().cancelled()`.
     #[must_use]
     pub fn shutdown(&self) -> &tokio_util::sync::CancellationToken {
         &self.topology.shutdown_signal
@@ -214,13 +261,19 @@ impl SimContext {
         })
     }
 
-    /// Get the workload topology (peer IPs, process IPs, tags, etc.).
+    /// Get the topology this actor sees: process IPs by group, tag and
+    /// failure domain, peer workloads, and its own tags and locality.
     #[must_use]
     pub fn topology(&self) -> &WorkloadTopology {
         &self.topology
     }
 
-    /// Get the shared state handle for cross-workload communication.
+    /// Get the shared state handle for this run.
+    ///
+    /// Processes, workloads, fault injectors and the harness's vetoes
+    /// ([`HintVeto`](crate::HintVeto), [`OutageVeto`](crate::OutageVeto))
+    /// share it. It is fresh for each iteration and survives process
+    /// reboots.
     #[must_use]
     pub fn state(&self) -> &StateHandle {
         &self.state

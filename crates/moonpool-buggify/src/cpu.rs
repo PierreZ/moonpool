@@ -14,7 +14,7 @@
 //! batch, a checksum, a fold. A simulated task poll costs a small base cost
 //! already; the explicit charges carry the signal.
 //!
-//! Like [`hint!`](crate::hint), a charge is **inert** outside a simulation:
+//! Like [`hint!`](crate::hint!), a charge is **inert** outside a simulation:
 //! no sink is installed, so the call does nothing and costs one thread-local
 //! read. A simulator installs its sink with [`set_sink`] only while its CPU
 //! model is on.

@@ -17,7 +17,7 @@
 //!   slowness`. Every byte it sends or writes, and every explicit
 //!   [`cpu_charge`](moonpool_buggify::cpu_charge), moves the local clock on.
 //!   At poll end the slot is free at the local clock.
-//! - While a poll is active, [`SimInner::now`] is the local clock. So the
+//! - While a poll is active, `SimInner::now` is the local clock. So the
 //!   timers, storage submits and the time provider of the process see the
 //!   CPU time; what the process does happens after the work.
 //! - The network engine keeps the scheduler's clock (a connection's clog and

@@ -85,7 +85,22 @@ pub(super) enum WorkloadEntry {
     },
 }
 
-/// Builder pattern for configuring and running simulation experiments.
+/// Configures and runs a campaign of simulation seeds.
+///
+/// A builder collects four kinds of settings, then [`run`](Self::run)
+/// executes one iteration per seed and returns a
+/// [`SimulationReport`](crate::SimulationReport):
+///
+/// | Settings | Methods |
+/// |----------|---------|
+/// | The system under test | [`processes`](Self::processes), [`cluster`](Self::cluster), [`tags`](Self::tags) |
+/// | The test driver | [`workload_factory`](Self::workload_factory), [`workloads`](Self::workloads), [`workload`](Self::workload) |
+/// | Chaos | [`enable_chaos`](Self::enable_chaos), [`chaos_duration`](Self::chaos_duration), [`fault_factory`](Self::fault_factory), [`network_fault_mask`](Self::network_fault_mask), [`storage_fault_mask`](Self::storage_fault_mask), [`replicated_storage_faults`](Self::replicated_storage_faults), [`swarm_operations`](Self::swarm_operations) |
+/// | Deployment shape | [`link_latency`](Self::link_latency), [`tcp_send_window_bytes`](Self::tcp_send_window_bytes), [`accept_backlog_capacity`](Self::accept_backlog_capacity) |
+/// | Checks and observation | [`invariant`](Self::invariant), [`invariant_fn`](Self::invariant_fn), [`trace_level`](Self::trace_level), [`metrics_factory`](Self::metrics_factory), [`metric`](Self::metric), [`check_determinism`](Self::check_determinism) |
+/// | Seeds and stopping | [`until_coverage_stable`](Self::until_coverage_stable), [`set_iterations`](Self::set_iterations), [`set_debug_seeds`](Self::set_debug_seeds), [`replay_timeline`](Self::replay_timeline), [`run_time_budget`](Self::run_time_budget), `enable_exploration` (feature `exploration`) |
+///
+/// The crate-level documentation has a complete example.
 pub struct SimulationBuilder {
     pub(super) iteration_control: IterationControl,
     pub(super) entries: Vec<WorkloadEntry>,
@@ -158,7 +173,16 @@ impl Default for SimulationBuilder {
 }
 
 impl SimulationBuilder {
-    /// Create a new empty simulation builder.
+    /// Create a builder with no processes, no workloads and no chaos.
+    ///
+    /// Defaults:
+    ///
+    /// - stop rule: [`until_coverage_stable(10, 1000)`](Self::until_coverage_stable);
+    /// - seeds: drawn by the runner (pin them with
+    ///   [`set_debug_seeds`](Self::set_debug_seeds));
+    /// - chaos: every surface off, both fault masks retain every family;
+    /// - trace floor: `INFO`;
+    /// - [`run_time_budget`](Self::run_time_budget): one simulated hour.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -199,12 +223,13 @@ impl SimulationBuilder {
 
     /// Add a single workload instance to the simulation.
     ///
-    /// The instance is reused across iterations (the `run()` method is called
-    /// each iteration on the same struct). Gets `client_id = 0`, `client_count = 1`.
-    /// This form is intentionally rejected when exploration is enabled because
-    /// an arbitrary trait object cannot be reconstructed with fresh state for
-    /// each continuation. Use [`Self::workload_factory`] or [`Self::workloads`]
-    /// for exploration.
+    /// The instance is reused across iterations: every seed calls its
+    /// lifecycle methods on the same value, so state left in its fields
+    /// carries over. It gets `client_id = 0` and `client_count = 1`.
+    ///
+    /// Exploration and [`check_determinism`](Self::check_determinism) reject
+    /// this form, because a used trait object cannot be rebuilt with fresh
+    /// state. Prefer [`Self::workload_factory`] or [`Self::workloads`].
     #[must_use]
     pub fn workload(mut self, w: impl Workload) -> Self {
         self.entries
@@ -221,8 +246,28 @@ impl SimulationBuilder {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// builder.workload_factory(|| Box::new(ClientWorkload::new()))
+    /// ```rust
+    /// # use async_trait::async_trait;
+    /// # use moonpool_sim::{SimContext, SimulationBuilder, SimulationResult, Workload};
+    /// #[derive(Default)]
+    /// struct ClientWorkload {
+    ///     requests_sent: u64,
+    /// }
+    ///
+    /// #[async_trait]
+    /// impl Workload for ClientWorkload {
+    ///     fn name(&self) -> &str {
+    ///         "client"
+    ///     }
+    ///     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+    ///         self.requests_sent += 1;
+    ///         Ok(())
+    ///     }
+    /// }
+    ///
+    /// // Every seed starts with `requests_sent == 0`.
+    /// let _builder = SimulationBuilder::new()
+    ///     .workload_factory(|| Box::new(ClientWorkload::default()));
     /// ```
     #[must_use]
     pub fn workload_factory(mut self, factory: impl Fn() -> Box<dyn Workload> + 'static) -> Self {
@@ -270,17 +315,32 @@ impl SimulationBuilder {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// // Fixed 3 server processes
-    /// builder.processes(3, || Box::new(MyNode::new()))
+    /// ```rust
+    /// # use async_trait::async_trait;
+    /// # use moonpool_sim::{Process, SimContext, SimulationResult};
+    /// # struct Acceptor;
+    /// # struct Matchmaker;
+    /// # impl Acceptor { fn new() -> Self { Acceptor } }
+    /// # impl Matchmaker { fn new() -> Self { Matchmaker } }
+    /// # #[async_trait]
+    /// # impl Process for Acceptor {
+    /// #     fn name(&self) -> &str { "acceptor" }
+    /// #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// # #[async_trait]
+    /// # impl Process for Matchmaker {
+    /// #     fn name(&self) -> &str { "matchmaker" }
+    /// #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// use moonpool_sim::SimulationBuilder;
     ///
-    /// // 3 to 7 processes, randomized per iteration
-    /// builder.processes(3..=7, || Box::new(MyNode::new()))
+    /// // Three acceptors on every seed.
+    /// let _fixed = SimulationBuilder::new().processes(3, || Box::new(Acceptor::new()));
     ///
-    /// // Two roles: 3–5 acceptors on 10.0.1.x, 0–3 matchmakers on 10.0.2.x
-    /// builder
+    /// // Two roles: 3 to 5 acceptors on 10.0.1.x, 0 to 3 matchmakers on 10.0.2.x.
+    /// let _two_roles = SimulationBuilder::new()
     ///     .processes(3..=5, || Box::new(Acceptor::new()))
-    ///     .processes(0..=3, || Box::new(Matchmaker::new()))
+    ///     .processes(0..=3, || Box::new(Matchmaker::new()));
     /// ```
     #[must_use]
     pub fn processes(
@@ -334,13 +394,22 @@ impl SimulationBuilder {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// // 3 datacenters × 3 zones × 3 machines × 1 process = 27 processes,
-    /// // with the datacenter count randomized per seed.
-    /// builder.cluster(
-    ///     LocalityConfig::new(1..=3, 3, 3, 1),
-    ///     || Box::new(MyNode::new()),
-    /// )
+    /// ```rust
+    /// # use async_trait::async_trait;
+    /// # use moonpool_sim::{Process, SimContext, SimulationResult};
+    /// # struct MyNode;
+    /// # impl MyNode { fn new() -> Self { MyNode } }
+    /// # #[async_trait]
+    /// # impl Process for MyNode {
+    /// #     fn name(&self) -> &str { "node" }
+    /// #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// use moonpool_sim::{LocalityConfig, SimulationBuilder};
+    ///
+    /// // 1 to 3 datacenters x 3 zones x 3 machines x 1 process: 9 to 27
+    /// // processes, the datacenter count drawn per seed.
+    /// let _builder = SimulationBuilder::new()
+    ///     .cluster(LocalityConfig::new(1..=3, 3, 3, 1), || Box::new(MyNode::new()));
     /// ```
     #[must_use]
     pub fn cluster(
@@ -362,10 +431,21 @@ impl SimulationBuilder {
     ///
     /// # Examples
     ///
-    /// ```ignore
-    /// SimulationBuilder::new()
+    /// ```rust
+    /// # use async_trait::async_trait;
+    /// # use moonpool_sim::{Process, SimContext, SimulationResult};
+    /// # struct MyNode;
+    /// # impl MyNode { fn new() -> Self { MyNode } }
+    /// # #[async_trait]
+    /// # impl Process for MyNode {
+    /// #     fn name(&self) -> &str { "node" }
+    /// #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// use moonpool_sim::{LinkLatencyConfig, LocalityConfig, SimulationBuilder};
+    ///
+    /// let _builder = SimulationBuilder::new()
     ///     .cluster(LocalityConfig::new(2, 2, 2, 1), || Box::new(MyNode::new()))
-    ///     .link_latency(LinkLatencyConfig::default())
+    ///     .link_latency(LinkLatencyConfig::default());
     /// ```
     #[must_use]
     pub fn link_latency(mut self, config: crate::network::LinkLatencyConfig) -> Self {
@@ -429,11 +509,25 @@ impl SimulationBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// SimulationBuilder::new()
-    ///     .cluster(LocalityConfig::new(1, 3, 1..=2, 1), make_node)
+    /// ```rust
+    /// # use async_trait::async_trait;
+    /// # use moonpool_sim::{Process, SimContext, SimulationResult};
+    /// # struct MyNode;
+    /// # impl MyNode { fn new() -> Self { MyNode } }
+    /// # #[async_trait]
+    /// # impl Process for MyNode {
+    /// #     fn name(&self) -> &str { "node" }
+    /// #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// use moonpool_sim::{
+    ///     Chaos, ChaosMode, DomainLevel, LocalityConfig, ReplicatedFaults, SimulationBuilder,
+    /// };
+    ///
+    /// // Three zones; at most one zone's copy of any record takes damage.
+    /// let _builder = SimulationBuilder::new()
+    ///     .cluster(LocalityConfig::new(1, 3, 1..=2, 1), || Box::new(MyNode::new()))
     ///     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
-    ///     .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone).group("node"))
+    ///     .replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Zone).group("node"));
     /// ```
     #[must_use]
     pub fn replicated_storage_faults(mut self, config: crate::storage::ReplicatedFaults) -> Self {
@@ -450,15 +544,18 @@ impl SimulationBuilder {
     /// order, exploration recipes, and replay remain unchanged. The default
     /// mask retains every family and is behaviorally inert.
     ///
+    /// Use it for a family the harness cannot judge. A protocol without
+    /// checksums, for example, cannot survive bit flips, so a bit flip there
+    /// says nothing about its logic.
+    ///
     /// # Example
     ///
-    /// ```ignore
-    /// SimulationBuilder::new()
+    /// ```rust
+    /// use moonpool_sim::{Chaos, ChaosMode, NetworkFault, NetworkFaultMask, SimulationBuilder};
+    ///
+    /// let _builder = SimulationBuilder::new()
     ///     .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
-    ///     .network_fault_mask(
-    ///         NetworkFaultMask::all().without(NetworkFault::BitFlip),
-    ///     )
-    ///     .enable_exploration(exploration_config)
+    ///     .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip));
     /// ```
     #[must_use]
     pub fn network_fault_mask(mut self, mask: crate::NetworkFaultMask) -> Self {
@@ -476,12 +573,14 @@ impl SimulationBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// SimulationBuilder::new()
+    /// ```rust
+    /// use moonpool_sim::{Chaos, ChaosMode, SimulationBuilder, StorageFault, StorageFaultMask};
+    ///
+    /// // A failed disk parks every operation forever; this harness cannot
+    /// // tell that apart from a hang, so it masks the family.
+    /// let _builder = SimulationBuilder::new()
     ///     .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
-    ///     .storage_fault_mask(
-    ///         StorageFaultMask::all().without(StorageFault::DiskFailure),
-    ///     )
+    ///     .storage_fault_mask(StorageFaultMask::all().without(StorageFault::DiskFailure));
     /// ```
     #[must_use]
     pub fn storage_fault_mask(mut self, mask: crate::StorageFaultMask) -> Self {
@@ -500,15 +599,30 @@ impl SimulationBuilder {
     /// Returns `SimulationError::InvalidState` if called without a preceding
     /// `.processes()` / `.cluster()` call.
     ///
+    /// Inside the simulation, read tags with
+    /// [`WorkloadTopology::my_tags`](crate::WorkloadTopology::my_tags) and
+    /// [`WorkloadTopology::ips_tagged`](crate::WorkloadTopology::ips_tagged);
+    /// target them with [`AttritionVictims::tagged`](crate::AttritionVictims::tagged).
+    ///
     /// # Examples
     ///
-    /// ```ignore
-    /// // 5 processes: dc cycles east/west/eu, rack cycles r1/r2
-    /// builder.processes(5, || Box::new(MyNode::new()))
-    ///     .tags(&[
-    ///         ("dc", &["east", "west", "eu"]),
-    ///         ("rack", &["r1", "r2"]),
-    ///     ])?
+    /// ```rust
+    /// # use async_trait::async_trait;
+    /// # use moonpool_sim::{Process, SimContext, SimulationResult};
+    /// # struct MyNode;
+    /// # impl MyNode { fn new() -> Self { MyNode } }
+    /// # #[async_trait]
+    /// # impl Process for MyNode {
+    /// #     fn name(&self) -> &str { "node" }
+    /// #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// use moonpool_sim::SimulationBuilder;
+    ///
+    /// // 5 processes: dc cycles east/west/eu, rack cycles r1/r2.
+    /// let _builder = SimulationBuilder::new()
+    ///     .processes(5, || Box::new(MyNode::new()))
+    ///     .tags(&[("dc", &["east", "west", "eu"]), ("rack", &["r1", "r2"])])
+    ///     .expect("tags follow a process group");
     /// ```
     pub fn tags(mut self, dimensions: &[(&str, &[&str])]) -> Result<Self, SimulationError> {
         let entry = self.process_entries.last_mut().ok_or_else(|| {
@@ -520,9 +634,6 @@ impl SimulationBuilder {
         Ok(self)
     }
 
-    /// Add built-in attrition for automatic process reboots during the chaos
-    /// phase, sampled as written every seed ([`ChaosMode::Random`]).
-    ///
     /// Add multiple workload instances from a factory.
     ///
     /// The factory receives an instance index (0-based) and must return a fresh
@@ -532,14 +643,31 @@ impl SimulationBuilder {
     /// The workload is responsible for its own `name()` — use the index to
     /// produce unique names when count > 1 (e.g., `format!("client-{i}")`).
     ///
+    /// Each instance gets its own IP on `10.0.0.x`, and reads its index and
+    /// the resolved count from [`SimContext::client_id`](crate::SimContext::client_id)
+    /// and [`SimContext::client_count`](crate::SimContext::client_count).
+    ///
     /// # Examples
     ///
-    /// ```ignore
-    /// // 3 fixed replicas
-    /// builder.workloads(WorkloadCount::Fixed(3), |i| Box::new(ReplicaWorkload::new(i)))
+    /// ```rust
+    /// # use async_trait::async_trait;
+    /// # use moonpool_sim::{SimContext, SimulationResult, Workload};
+    /// # struct ClientWorkload { name: String }
+    /// # impl ClientWorkload { fn new(i: usize) -> Self { Self { name: format!("client-{i}") } } }
+    /// # #[async_trait]
+    /// # impl Workload for ClientWorkload {
+    /// #     fn name(&self) -> &str { &self.name }
+    /// #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// use moonpool_sim::{SimulationBuilder, WorkloadCount};
     ///
-    /// // 1–5 random clients
-    /// builder.workloads(WorkloadCount::Random(1..6), |i| Box::new(ClientWorkload::new(i)))
+    /// // Exactly three clients.
+    /// let _fixed = SimulationBuilder::new()
+    ///     .workloads(WorkloadCount::Fixed(3), |i| Box::new(ClientWorkload::new(i)));
+    ///
+    /// // One to five clients, drawn per seed (a half-open range).
+    /// let _random = SimulationBuilder::new()
+    ///     .workloads(WorkloadCount::Random(1..6), |i| Box::new(ClientWorkload::new(i)));
     /// ```
     #[must_use]
     pub fn workloads(
@@ -573,13 +701,34 @@ impl SimulationBuilder {
     }
 
     /// Add an invariant to be checked after every simulation step.
+    ///
+    /// An [`Invariant`] reads the captured trace timeline through a
+    /// [`TraceQuery`] and reports a violation with `assert_always!` (or a
+    /// panic), so the seed fails with the step that broke the property. Use it for properties that span
+    /// processes (one leader per term, no lost acknowledged write). See
+    /// [`observability`](crate::observability).
     #[must_use]
     pub fn invariant<I: Invariant>(mut self, i: I) -> Self {
         self.invariants.push(Box::new(i));
         self
     }
 
-    /// Add a closure-based invariant.
+    /// Add a closure-based invariant, checked after every simulation step.
+    ///
+    /// The closure receives the timeline and the simulated time in
+    /// milliseconds. It is [`invariant`](Self::invariant) without a named
+    /// type.
+    ///
+    /// ```rust
+    /// use moonpool_sim::{SimulationBuilder, TraceQuery};
+    ///
+    /// let _builder = SimulationBuilder::new().invariant_fn(
+    ///     "at most one leader election per run",
+    ///     |q: &dyn TraceQuery, _sim_time_ms| {
+    ///         assert!(q.len("leader_elected") <= 1, "two leaders were elected");
+    ///     },
+    /// );
+    /// ```
     #[must_use]
     pub fn invariant_fn(
         mut self,
@@ -742,7 +891,11 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set the number of iterations to run.
+    /// Run exactly `iterations` seeds ([`IterationControl::FixedCount`]).
+    ///
+    /// Combine it with [`set_debug_seeds`](Self::set_debug_seeds) to replay
+    /// known seeds. `set_iterations(1)` plus one pinned seed is the usual
+    /// setup to debug a failure.
     #[must_use]
     pub fn set_iterations(mut self, iterations: usize) -> Self {
         self.iteration_control = IterationControl::FixedCount(iterations);
@@ -794,7 +947,13 @@ impl SimulationBuilder {
         self
     }
 
-    /// Set specific seeds for deterministic debugging and regression testing.
+    /// Use these seeds, in order, instead of runner-drawn ones.
+    ///
+    /// The same seed replays the same run, bit for bit. Pin the seed a
+    /// report lists in [`seeds_failing`](crate::SimulationReport::seeds_failing)
+    /// to debug it, or keep a list of past failures as a regression test.
+    /// Set the iteration count to match with
+    /// [`set_iterations`](Self::set_iterations).
     #[must_use]
     pub fn set_debug_seeds(mut self, seeds: Vec<u64>) -> Self {
         self.seeds = seeds;
@@ -803,7 +962,13 @@ impl SimulationBuilder {
 
     /// Replay one explored timeline: run a single iteration with `seed` and
     /// install the recipe's RNG breakpoints, reproducing the exact timeline
-    /// an exploration bug recipe describes (`BugRecipe { seed, recipe }`).
+    /// an exploration bug recipe describes.
+    ///
+    /// Take `seed` and `recipe` from a [`BugRecipe`](crate::BugRecipe) in the
+    /// report's [`exploration`](crate::SimulationReport::exploration)
+    /// section. Each recipe entry is an `(rng_call_count, seed)` pair: at that
+    /// draw count, the stream reseeds. The workloads must be factory-built,
+    /// as during exploration.
     #[must_use]
     pub fn replay_timeline(mut self, seed: u64, recipe: Vec<(u64, u64)>) -> Self {
         self.seeds = vec![seed];
@@ -814,8 +979,9 @@ impl SimulationBuilder {
 
     /// Enable chaos surfaces and choose how each is sampled per seed.
     ///
-    /// Each [`Chaos`] entry turns on one surface (network / storage / attrition)
-    /// in a given [`ChaosMode`] — `Random` (full surface every seed) or `Swarm`
+    /// Each [`Chaos`] entry turns on one surface (network, storage,
+    /// attrition, outage, CPU, gray failure, buggify knobs) in a given
+    /// [`ChaosMode`] — `Random` (full surface every seed) or `Swarm`
     /// (a per-seed random *subset* of sub-families, the rest fully off). A surface
     /// not listed stays off. Later entries override earlier ones for the same
     /// surface, except attrition: every [`Chaos::Attrition`] entry adds one
@@ -838,32 +1004,59 @@ impl SimulationBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// builder.enable_chaos([
-    ///     Chaos::Network(ChaosMode::Swarm),
-    ///     Chaos::Storage(ChaosMode::Swarm),
-    /// ]);
+    /// ```rust
+    /// use std::time::Duration;
+    /// use moonpool_sim::{
+    ///     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, GrayFailure, Outage,
+    ///     SimulationBuilder,
+    /// };
     ///
-    /// // One reboot regime per process group: acceptors lose at most one
-    /// // node at a time, matchmakers are hammered independently.
-    /// builder.enable_chaos([
-    ///     Chaos::Attrition {
-    ///         config: Attrition {
-    ///             max_dead: 1,
-    ///             victims: AttritionVictims::group("acceptor"),
-    ///             ..acceptor_regime
+    /// let crashes = Attrition {
+    ///     max_dead: 1,
+    ///     prob_graceful: 0.0,
+    ///     prob_crash: 1.0,
+    ///     prob_wipe: 0.0,
+    ///     recovery_delay_ms: None,
+    ///     grace_period_ms: None,
+    ///     scope: AttritionScope::PerProcess,
+    ///     victims: AttritionVictims::Any,
+    /// };
+    ///
+    /// let _builder = SimulationBuilder::new()
+    ///     .enable_chaos([
+    ///         Chaos::Network(ChaosMode::Swarm),
+    ///         Chaos::Storage(ChaosMode::Swarm),
+    ///         // One reboot regime per process group: acceptors lose at most
+    ///         // one node at a time, matchmakers up to three.
+    ///         Chaos::Attrition {
+    ///             config: Attrition {
+    ///                 victims: AttritionVictims::group("acceptor"),
+    ///                 ..crashes.clone()
+    ///             },
+    ///             mode: ChaosMode::Swarm,
     ///         },
-    ///         mode: ChaosMode::Swarm,
-    ///     },
-    ///     Chaos::Attrition {
-    ///         config: Attrition {
-    ///             max_dead: 3,
-    ///             victims: AttritionVictims::group("matchmaker"),
-    ///             ..matchmaker_regime
+    ///         Chaos::Attrition {
+    ///             config: Attrition {
+    ///                 max_dead: 3,
+    ///                 victims: AttritionVictims::group("matchmaker"),
+    ///                 ..crashes
+    ///             },
+    ///             mode: ChaosMode::Random,
     ///         },
-    ///         mode: ChaosMode::Random,
-    ///     },
-    /// ]);
+    ///         // The whole acceptor group loses power once, on some seeds.
+    ///         Chaos::Outage {
+    ///             config: Outage::groups(["acceptor"]),
+    ///             mode: ChaosMode::Swarm,
+    ///         },
+    ///         // CPU costs, and one slow machine at a time.
+    ///         Chaos::Cpu(ChaosMode::Random),
+    ///         Chaos::GrayFailure {
+    ///             config: GrayFailure::new(1),
+    ///             mode: ChaosMode::Swarm,
+    ///         },
+    ///         Chaos::BuggifyKnobs,
+    ///     ])
+    ///     .chaos_duration(Duration::from_secs(30));
     /// ```
     #[must_use]
     pub fn enable_chaos(mut self, surfaces: impl IntoIterator<Item = Chaos>) -> Self {

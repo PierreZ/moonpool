@@ -4,13 +4,25 @@ use std::ops::{Range, RangeInclusive};
 
 use super::process::Attrition;
 
-/// Configuration for how many iterations a simulation should run.
+/// When a campaign stops running new seeds.
+///
+/// Set it with [`SimulationBuilder::set_iterations`](super::SimulationBuilder::set_iterations)
+/// or [`SimulationBuilder::until_coverage_stable`](super::SimulationBuilder::until_coverage_stable).
+/// A deadlocked seed stops the campaign under either rule.
 #[derive(Debug, Clone)]
 pub enum IterationControl {
-    /// Run a fixed number of iterations with specific seeds.
+    /// Run exactly this many seeds: the pinned ones from
+    /// [`set_debug_seeds`](super::SimulationBuilder::set_debug_seeds) first,
+    /// then runner-drawn ones.
     FixedCount(usize),
-    /// Stop when every observed sometimes/reachable assertion has fired and
-    /// code coverage has not grown for several consecutive seeds.
+    /// Stop when every observed `assert_sometimes!` / `assert_reachable!`
+    /// fired and code coverage has not grown for `plateau_seeds`
+    /// consecutive seeds, or after `max_iterations` seeds. This is the
+    /// default (`plateau_seeds: 10`, `max_iterations: 1000`).
+    ///
+    /// Coverage is real LLVM sancov edge coverage when the binary is
+    /// instrumented (`cargo xtask sim run`), otherwise assertion-slot
+    /// coverage.
     UntilCoverageStable {
         /// Number of consecutive seeds without coverage growth required to stop.
         plateau_seeds: usize,
@@ -72,12 +84,23 @@ impl From<RangeInclusive<usize>> for ProcessCount {
 /// How an enabled chaos surface is sampled each seed.
 ///
 /// This sampling strategy is independent of which [`Chaos`] surface is
-/// enabled and of workload operation-alphabet swarming.
+/// enabled and of workload operation-alphabet swarming
+/// ([`SimulationBuilder::swarm_operations`](super::SimulationBuilder::swarm_operations)).
+///
+/// Prefer `Swarm`. When every family is a little bit on in every seed, the
+/// families crowd each other out, and the extreme configurations that find
+/// bugs (only partitions, at a high rate) almost never happen. Swarm
+/// testing turns most families fully off on each seed, so each seed is a
+/// different, sharper experiment. All decisions are draws on the
+/// simulation stream, so a seed always rebuilds the same subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChaosMode {
-    /// Enable the complete surface and randomize its intensities each seed.
+    /// Enable the complete surface and randomize its intensities each seed
+    /// (`random_for_seed` on the surface's configuration).
     Random,
-    /// Enable a random subset of the surface's fault families each seed.
+    /// Enable a random subset of the surface's fault families each seed and
+    /// turn the rest fully off (`swarm_for_seed` on the surface's
+    /// configuration).
     Swarm,
 }
 
@@ -127,17 +150,59 @@ impl ChaosMode {
 }
 
 /// A chaos surface to enable and its per-seed sampling strategy.
+///
+/// Pass a list of them to
+/// [`SimulationBuilder::enable_chaos`](super::SimulationBuilder::enable_chaos).
+/// A surface not listed stays off. Every surface that injects faults over
+/// time (attrition, outages, gray failures) runs only inside the chaos
+/// window, so it needs
+/// [`SimulationBuilder::chaos_duration`](super::SimulationBuilder::chaos_duration).
+/// When the window closes,
+/// [`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)
+/// turns the configuration-driven network and storage faults off.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Chaos {
-    /// Network faults such as partitions, corruption, and random close.
+    /// Network faults: clogs, partitions, bit flips, random closes, connect
+    /// failures, clock drift, buggified delays, slow IP pairs and black
+    /// holes (see [`NetworkFault`](crate::NetworkFault) and
+    /// [`ChaosConfiguration`](crate::ChaosConfiguration)).
+    ///
+    /// `Random` samples [`NetworkConfiguration::random_for_seed`](crate::NetworkConfiguration::random_for_seed);
+    /// `Swarm` samples [`NetworkConfiguration::swarm_for_seed`](crate::NetworkConfiguration::swarm_for_seed).
+    /// [`SimulationBuilder::network_fault_mask`](super::SimulationBuilder::network_fault_mask)
+    /// removes families afterward. A later entry replaces an earlier one.
+    ///
+    /// Without this entry the network is not fault-free: it uses
+    /// [`NetworkConfiguration::default`](crate::NetworkConfiguration::default),
+    /// with `FoundationDB`'s always-on rates (rare random closes, clock
+    /// drift, buggified delays, buggified connects that fail or hang).
     Network(ChaosMode),
-    /// Storage faults such as corruption, misdirection, and sync failure.
+    /// Storage faults: corruption, `EIO`, misdirected I/O, phantom writes,
+    /// sync failures, short transfers, directory-entry loss, crash damage,
+    /// disk stalls and throttles, and disk failure (see
+    /// [`StorageFault`](crate::StorageFault) and
+    /// [`StorageConfiguration`](crate::StorageConfiguration)).
+    ///
+    /// `Random` samples [`StorageConfiguration::random_for_seed`](crate::StorageConfiguration::random_for_seed);
+    /// `Swarm` samples [`StorageConfiguration::swarm_for_seed`](crate::StorageConfiguration::swarm_for_seed).
+    /// [`SimulationBuilder::storage_fault_mask`](super::SimulationBuilder::storage_fault_mask)
+    /// removes families afterward. A later entry replaces an earlier one.
     Storage(ChaosMode),
-    /// Process attrition using the supplied reboot regime.
+    /// Process reboots under a [`Attrition`] regime: graceful shutdowns,
+    /// crashes and crash-and-wipes, never more than `max_dead` of the
+    /// regime's victims down at once.
+    ///
+    /// Each entry adds one independent injector, so each process group can
+    /// have its own regime ([`AttritionVictims`](crate::AttritionVictims)).
+    /// The regime also decides whether a [`hint!`](crate::hint!) point may
+    /// reboot its process.
     Attrition {
         /// Base reboot regime.
         config: Attrition,
-        /// Per-seed sampling strategy.
+        /// Per-seed sampling strategy: `Random` uses the regime as written;
+        /// `Swarm` draws a per-seed variant of it
+        /// ([`Attrition::swarm_for_seed`]), including a regime that never
+        /// reboots.
         mode: ChaosMode,
     },
     /// A correlated outage: every process of the named groups loses power
@@ -152,7 +217,12 @@ pub enum Chaos {
         /// on half the seeds, and its straggler on half the rest.
         mode: ChaosMode,
     },
-    /// Occasionally perturb enabled network and storage knobs to extremes.
+    /// On some seeds, push the knobs of the enabled network and storage
+    /// surfaces to extremes (`apply_buggify_knobs` on
+    /// [`ChaosConfiguration`](crate::ChaosConfiguration) and
+    /// [`StorageConfiguration`](crate::StorageConfiguration)), the way
+    /// `FoundationDB` randomizes its knobs under `BUGGIFY`. It has no effect
+    /// on a surface that is off.
     BuggifyKnobs,
     /// The CPU model: every poll of a process's task takes CPU time on the
     /// process's one core (see [`CpuModel`](crate::CpuModel) and

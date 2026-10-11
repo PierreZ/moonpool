@@ -7,20 +7,34 @@
 //! This is separate from [`Workload`](super::workload::Workload), which
 //! represents the **test driver** that survives server reboots.
 //!
+//! A process name is its group's identity: each
+//! [`processes`](super::builder::SimulationBuilder::processes) or
+//! [`cluster`](super::builder::SimulationBuilder::cluster) call registers
+//! one group named after [`Process::name`].
+//!
 //! # Usage
 //!
-//! ```ignore
-//! use moonpool_sim::{Process, SimContext, SimulationResult};
+//! ```rust
+//! use async_trait::async_trait;
+//! use moonpool_sim::{Process, SimContext, SimulationError, SimulationResult};
 //!
 //! struct PaxosNode;
 //!
 //! #[async_trait]
 //! impl Process for PaxosNode {
-//!     fn name(&self) -> &str { "paxos" }
+//!     fn name(&self) -> &str {
+//!         "paxos"
+//!     }
+//!
 //!     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-//!         let role = ctx.topology().my_tags().get("role")
-//!             .ok_or_else(|| moonpool_sim::SimulationError::InvalidState("missing role tag".into()))?;
-//!         // Run based on assigned role from tags...
+//!         // Fresh in-memory state on every boot; read the role from tags.
+//!         let _role = ctx
+//!             .topology()
+//!             .my_tags()
+//!             .get("role")
+//!             .ok_or_else(|| SimulationError::InvalidState("missing role tag".into()))?;
+//!         // Serve until shutdown (or until a reboot cancels this task).
+//!         ctx.shutdown().cancelled().await;
 //!         Ok(())
 //!     }
 //! }
@@ -179,8 +193,10 @@ impl AttritionVictims {
 ///
 /// # Example
 ///
-/// ```ignore
-/// Attrition {
+/// ```rust
+/// use moonpool_sim::{Attrition, AttritionScope, AttritionVictims};
+///
+/// let _regime = Attrition {
 ///     max_dead: 1,
 ///     prob_graceful: 0.3,
 ///     prob_crash: 0.5,
@@ -189,7 +205,7 @@ impl AttritionVictims {
 ///     grace_period_ms: None,
 ///     scope: AttritionScope::PerProcess,
 ///     victims: AttritionVictims::Any,
-/// }
+/// };
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attrition {

@@ -2,420 +2,264 @@
 
 <!-- toc -->
 
-This chapter documents every configuration type in Moonpool with its fields, types, and default values. All values are sourced directly from the codebase.
+Every value on this page is read from the current source. The code wins when the two disagree. Builder-level options come from `SimulationBuilder`. World-level options (network and storage profiles) are drawn per seed by the runner or set on `SimWorld` directly in low-level tests.
 
 ## SimulationBuilder
 
-The builder pattern for configuring and running simulation experiments. Created via `SimulationBuilder::new()`.
+| Method | Default | Purpose |
+|--------|---------|---------|
+| `new()` | | Start a builder. |
+| `processes(count, factory)` | | Register one server group. `count` is `usize` or `RangeInclusive<usize>` (`ProcessCount`). The g-th group lives on `10.0.{g+1}.x`. Duplicate group names panic. |
+| `cluster(LocalityConfig, factory)` | | Register a group whose count comes from a sampled topology. The group may draw zero processes. |
+| `tags(&[(key, &[values])]) -> Result<Self>` | | Round-robin tag dimensions over the last registered group. |
+| `workload(instance)` | | One test driver instance. Not valid with exploration or `check_determinism`. |
+| `workload_factory(\|\| Box<dyn Workload>)` | | A fresh driver per run. |
+| `workloads(WorkloadCount, \|i\| Box<dyn Workload>)` | | `Fixed(n)` or `Random(range)` drivers per run. |
+| `enable_chaos([Chaos, ..])` | no chaos | Enable chaos surfaces (table below). |
+| `chaos_duration(Duration)` | none | The fault-generation window. Required by `fault_factory`. After it, `enter_recovery_mode` turns off every configuration-driven family and heals held partitions. |
+| `fault_factory(\|\| Box<dyn FaultInjector>)` | | A custom injector per run. `run()` returns `InvalidConfiguration` without `chaos_duration`. |
+| `network_fault_mask(NetworkFaultMask)` | `all()` | Remove network fault families after the per-seed draw. |
+| `storage_fault_mask(StorageFaultMask)` | `all()` | Remove storage fault families after the per-seed draw. |
+| `replicated_storage_faults(ReplicatedFaults)` | none | Bound storage damage to a tolerated set of failure domains. |
+| `swarm_operations()` | off | Draw a per-seed subset of each workload's operation alphabet. |
+| `link_latency(LinkLatencyConfig)` | none | Locality-aware link latency. |
+| `tcp_send_window_bytes(usize)` | 64 KiB | Byte window per stream direction. |
+| `accept_backlog_capacity(usize)` | 128 | Unaccepted connections per listener. Must be above 0. |
+| `invariant(impl Invariant)` | | Run a cursor-based check after every step. |
+| `invariant_fn(name, \|q, time_ms\| ..)` | | Closure form of `invariant`. |
+| `trace_level(LevelFilter)` | `INFO` | Capture level for the timeline. |
+| `metrics_factory(..)` | | One `MetricsSource` per node. |
+| `metric(MetricQueryPlan)` | | A metric query reported per campaign. |
+| `set_iterations(n)` | | `IterationControl::FixedCount(n)`. |
+| `until_coverage_stable(plateau_seeds, max_iterations)` | `10, 1000` | `IterationControl::UntilCoverageStable`. This is the default. |
+| `set_debug_seeds(Vec<u64>)` | | Pin seeds. They run first. |
+| `run_time_budget(Duration)` | 1 simulated hour | A run past this budget is reported as a stall. |
+| `replay_timeline(seed, recipe)` | | One seed, one iteration, the recipe installed as RNG breakpoints. |
+| `enable_exploration(ExplorationConfig)` | off | Multiverse exploration. Needs factory workloads. Panics on a zero bound. |
+| `check_determinism()` | off | Run every seed twice and fail on a diverging draw. Needs factory workloads. |
+| `run() -> SimulationResult<SimulationReport>` | | Run the campaign. |
 
-| Method | Parameters | Description |
-|--------|-----------|-------------|
-| `workload(w)` | `impl Workload` | Add a single workload instance, reused across iterations |
-| `workloads(count, factory)` | `WorkloadCount`, `Fn(usize) -> Box<dyn Workload>` | Add factory-created workload instances |
-| `processes(count, factory)` | `impl Into<ProcessCount>`, `Fn() -> Box<dyn Process>` | Add one group of server processes (system under test); repeatable, one group per role, each on its own `10.0.{group}.x` range |
-| `cluster(config, factory)` | `LocalityConfig`, `Fn() -> Box<dyn Process>` | Add one group of processes laid out across a datacenter/zone/machine topology (repeatable like `processes`) |
-| `link_latency(config)` | `LinkLatencyConfig` | Give links a distance-dependent latency, resolved through the `cluster` topology |
-| `tcp_send_window_bytes(bytes)` | `usize` | End-to-end byte window of every stream direction (default 64 KiB); a small window makes a slow reader back its writer up early |
-| `network_fault_mask(mask)` | `NetworkFaultMask` | Suppress selected families after each Random/Swarm network profile is sampled; deterministic and exploration-safe |
-| `storage_fault_mask(mask)` | `StorageFaultMask` | Suppress selected families after each Random/Swarm storage profile is sampled; deterministic and exploration-safe |
-| `tags(dimensions)` | `&[(&str, &[&str])]` | Attach round-robin tag distribution to processes |
-| `invariant(i)` | `impl Invariant` | Add an invariant checked after every simulation event |
-| `invariant_fn(name, f)` | `String`, closure | Add a closure-based invariant |
-| `fault_factory(f)` | `Fn() -> Box<dyn FaultInjector>` | Add a custom fault injector for the chaos phase, rebuilt fresh for every root and explored timeline |
-| `chaos_duration(dur)` | `Duration` | Bound the window in which new faults may be injected (see [Chaos duration and recovery mode](#chaos-duration-and-recovery-mode)) |
-| `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
-| `set_debug_seeds(seeds)` | `Vec<u64>` | Use specific seeds for deterministic debugging |
-| `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition/outage/CPU/gray-failure chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
-| `swarm_operations()` | -- | Enable per-seed swarm of each workload's operation alphabet |
-| `check_determinism()` | -- | Run every seed twice and fail it if the replay's draw fingerprints differ (see [The Determinism Canary](../part2-foundations/03-seeds.md#the-determinism-canary)) |
-| `enable_exploration(config)` | `ExplorationConfig` | Enable fork-based multiverse exploration |
-| `replay_timeline(seed, recipe)` | `u64`, `Vec<(u64, u64)>` | Replay one explored timeline (a bug recipe) exactly |
-| `run()` | -- | Execute the simulation, returns `SimulationReport` |
+There is no builder method that takes a `NetworkConfiguration` or `StorageConfiguration`. The runner draws both per seed. Low-level tests set them on `SimWorld` with `new_with_network_config`, `set_network_config`, `set_storage_config` and `set_process_storage_config`.
 
-### Default state
+### Enums
 
-A freshly created `SimulationBuilder::new()` has:
+| Enum | Variants |
+|------|----------|
+| `IterationControl` | `FixedCount(usize)`, `UntilCoverageStable { plateau_seeds, max_iterations }` |
+| `ProcessCount` | `Fixed(usize)`, `Range(RangeInclusive<usize>)` |
+| `WorkloadCount` | `Fixed(usize)`, `Random(Range<usize>)` |
+| `ChaosMode` | `Random` (every family on, rates drawn per seed), `Swarm` (a per-seed subset of families) |
+| `Chaos` | `Network(ChaosMode)`, `Storage(ChaosMode)`, `Attrition { config, mode }`, `Outage { config, mode }`, `BuggifyKnobs`, `Cpu(ChaosMode)`, `GrayFailure { config, mode }` |
 
-- **iteration_control**: `IterationControl::UntilCoverageStable { plateau_seeds: 10, max_iterations: 1000 }`
-- **chaos**: all surfaces off (network/storage use `default()`, no attrition)
-- **swarm_operations**: `false` (workloads see the full operation alphabet)
-- **check_determinism**: `false` (each seed runs once)
-- **exploration**: disabled
-- **seeds**: empty (auto-generated)
-- No workloads, processes, invariants, or fault injectors
+Without `Chaos::Network`, the network is **not** fault-free. It uses `NetworkConfiguration::default()`, whose `ChaosConfiguration::default()` keeps random closes, clock drift, buggified delays and probabilistic connect failures on, as FoundationDB does. Without `Chaos::Storage`, storage uses `StorageConfiguration::default()`, where every fault probability is 0.
 
-## IterationControl
+### Draw Order
 
-Controls how many iterations a simulation runs.
+Every random decision is a counted draw on the one simulation stream. The runner draws in this order per seed:
 
-| Variant | Type | Description |
-|---------|------|-------------|
-| `UntilCoverageStable { plateau_seeds, max_iterations }` | `usize`, `usize` | **Default.** Stop once every observed `assert_sometimes!` / `assert_reachable!` has fired AND code coverage has not grown for `plateau_seeds` consecutive seeds. `max_iterations` is a safety cap. |
-| `FixedCount(n)` | `usize` | Run exactly `n` iterations |
+1. Network profile and storage profile, **before** the reset that starts the RNG count. A replay breakpoint can never land on them.
+2. The world reset.
+3. Swarm operation masks (when enabled).
+4. Attrition, outage, replicated faults, CPU model and gray-failure regimes.
+5. The run itself.
 
-**Note**: `UntilCoverageStable` uses real LLVM sancov code coverage when the binary is instrumented (built via `cargo xtask sim run`) and falls back to assertion-slot coverage otherwise. The report names the signal it used.
-
-## ProcessCount
-
-Controls how many process instances to spawn per iteration.
-
-| Variant | Type | Description |
-|---------|------|-------------|
-| `Fixed(n)` | `usize` | Spawn exactly `n` processes every iteration |
-| `Range(range)` | `RangeInclusive<usize>` | Spawn a seeded random count from the inclusive range |
-
-Accepts `usize` or `RangeInclusive<usize>` via `Into<ProcessCount>`.
-
-## WorkloadCount
-
-Controls how many workload instances to spawn per iteration.
-
-| Variant | Type | Description |
-|---------|------|-------------|
-| `Fixed(n)` | `usize` | Spawn exactly `n` instances |
-| `Random(range)` | `Range<usize>` | Spawn a seeded random count from the half-open range |
-
-## Chaos duration and recovery mode
-
-`.chaos_duration(dur)` bounds the period during which Moonpool may inject **new**
-faults. When it expires the runner crosses the chaos → recovery boundary in one
-step: `ctx.chaos_shutdown()` is cancelled so fault injectors wind down, and
-`SimWorld::enter_recovery_mode()` switches off every configuration-driven fault
-family and heals the partitions the simulator is holding.
-
-| At the cutoff | |
-|---|---|
-| Stopped | Network: partitions, clogs, bit flips, spontaneous closes, black holes, connect failures, clock drift, buggified sleep delays, new per-pair latency degradation |
-| Stopped | Storage: read and write EIO, read- and write-time corruption, misdirected and phantom writes, sync failures, short transfers, unsynced directory-entry loss, lying syncs, new disk stall and throttle episodes, new disk failures |
-| Unchanged | The crash *model* — how an unsynced sector resolves is the disk's physics, not an environment generating faults. Recovery mode stops the simulator from generating crashes; one that still happens resolves the way it always would |
-| Stopped | Fault injectors, including built-in attrition |
-| Healed | Every partition in force — directed pair cuts and asymmetric send-side / receive-side blocks alike |
-| Preserved | Corrupted sectors, lost/misdirected/phantom writes already applied, connections already closed or black-holed, processes already killed, a disk that already failed (and the operations it parked), application state, the fixed extra latency a slow link already sampled |
-| Left to expire | Finite effects already started: disk stall and throttle episodes, clogs, packets already scheduled with a delay |
-
-The persistent consequences of faults already injected remain part of the
-simulated state. **The cluster is not healthy at the cutoff** — only the
-environment stops generating new faults. Recovering from the damage is the
-simulated system's job.
-
-The recovery window is the quiet tail between the cutoff and workload
-completion, while the processes are still alive. The settle phase that follows
-is *not* a recovery window: processes are aborted before it, so it only drains
-the events left in the scheduler.
+Adding a draw anywhere shifts every later seed. That is intended. The same seed must still replay identically.
 
 ## Attrition
 
-Built-in configuration for automatic process reboots during the chaos phase. Requires `.chaos_duration()` to be set.
+`Attrition` has no `Default`. Set every field:
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `max_dead` | `usize` | -- | Maximum number of simultaneously dead processes |
-| `prob_graceful` | `f64` | -- | Weight for graceful reboots (signal + grace period) |
-| `prob_crash` | `f64` | -- | Weight for crash reboots (immediate kill) |
-| `prob_wipe` | `f64` | -- | Weight for crash + storage wipe reboots |
-| `recovery_delay_ms` | `Option<Range<usize>>` | `1000..10000` | Delay before restarting a killed process (ms) |
-| `grace_period_ms` | `Option<Range<usize>>` | `2000..5000` | Time allowed for graceful shutdown before force-kill (ms) |
-| `scope` | `AttritionScope` | `PerProcess` | Failure domain each reboot targets (see below) |
-| `victims` | `AttritionVictims` | `Any` | Eligible victims: `Any`, `group(name)`, or `tagged(key, value)`; scopes the draw and `max_dead` to that pool |
+| Field | Type | Default when `None` | Meaning |
+|-------|------|---------------------|---------|
+| `max_dead` | `usize` | | Simultaneously dead processes among this injector's victims. |
+| `prob_graceful` | `f64` | | Weight for `RebootKind::Graceful`. |
+| `prob_crash` | `f64` | | Weight for `RebootKind::Crash`. |
+| `prob_wipe` | `f64` | | Weight for `RebootKind::CrashAndWipe`. |
+| `recovery_delay_ms` | `Option<Range<usize>>` | `1000..10000` | Restart delay after a kill. |
+| `grace_period_ms` | `Option<Range<usize>>` | `2000..5000` | Time between token cancel and force kill. |
+| `scope` | `AttritionScope` | `PerProcess` | `PerProcess`, `PerMachine`, `PerZone`, `PerDatacenter`. |
+| `victims` | `AttritionVictims` | `Any` | `Any`, `Group(String)` via `::group(name)`, `Tagged { key, value }` via `::tagged(key, value)`. |
 
-The `prob_*` fields are **weights**, not probabilities. They are normalized internally and do not need to sum to 1.0.
-
-In `ChaosMode::Swarm`, the recovery range is scaled per seed to 50%-200% of
-its configured values. Clustered campaigns also swarm among topology-backed
-scopes whose groups fit `max_dead`. Both decisions are draws on the simulation
-stream, taken once at build time.
-
-### AttritionScope
-
-Which failure domain a reboot kills. `PerMachine`, `PerZone`, and `PerDatacenter` require a [`.cluster()`](../part3-building/09-attrition.md#failure-domains-correlated-reboots) topology; without locality they are a no-op.
-
-| Variant | Behavior |
-|---------|----------|
-| `PerProcess` | Reboot one random process at a time (the default) |
-| `PerMachine` | Reboot every process on a random machine together, atomically against `max_dead` |
-| `PerZone` | Reboot every process in a random zone together, atomically against `max_dead` |
-| `PerDatacenter` | Reboot every process in a random datacenter together, atomically against `max_dead` |
-
-### RebootKind
-
-The type of reboot chosen based on attrition probabilities:
-
-| Variant | Behavior |
-|---------|----------|
-| `Graceful` | Signal shutdown token, wait grace period, drain send buffers, then restart |
-| `Crash` | Immediate task cancel, all connections abort, no buffer drain |
-| `CrashAndWipe` | Same as Crash plus immediate storage wipe for the process (scoped by IP) |
+The weights are relative. `Attrition::swarm_for_seed()` (used by `ChaosMode::Swarm`) draws 6 times: `max_dead` becomes 0 with probability 0.5, each weight is masked with probability 0.5, the recovery delay is scaled between 50% and 200%, and the scope is drawn among the scopes the topology supports.
 
 ## Outage
 
-A correlated group outage (`Chaos::Outage { config, mode }`), built from `Outage::groups([...])`. Requires `.chaos_duration()`. See [Correlated Outages](../part3-building/09-attrition.md#correlated-outages-the-whole-rack-goes-dark).
+`Outage::groups(["acceptors", ..])` builds the default regime:
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `groups` | `Vec<String>` | -- | Process groups that lose power together; each must be registered |
-| `probability` | `f64` | `1.0` | Chance a seed has an outage at all |
-| `start` | `Range<Duration>` | `0s..10s` | When it strikes, from the chaos window's opening; a draw past the window means no outage |
-| `down` | `Range<Duration>` | `1s..10s` | Each victim's time down |
-| `straggler` | `Option<Range<Duration>>` | `None` | One victim's time down instead; must start at or after `down`'s end |
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `groups` | as given | Process groups that lose power together. |
+| `probability` | 1.0 | Chance a seed has the outage at all. |
+| `start` | `0s..10s` | When it strikes, from the start of the chaos window. A draw past the window means no outage. |
+| `down` | `1s..10s` | How long each victim stays down. |
+| `straggler` | `None` | One victim that stays down longer. Must start at or after `down`'s end. |
 
-In `ChaosMode::Swarm`, each seed keeps the outage with probability 0.5 and its straggler with probability 0.5 (two build-time draws).
+At most one outage per run. Under `Swarm` the outage is dropped on half the seeds and its straggler on half the rest. A workload publishes `OutageVeto::new(|victims: &[String]| bool)` through `ctx.state()` under `OUTAGE_VETO_KEY` (`"moonpool:outage-veto"`) to hold an outage. The simulator retries every `VETO_RETRY` (1 ms). The landed outage is published as `OutageLanded { at, victims, down, straggler }` under `OUTAGE_STATE_KEY` (`"moonpool.outage"`).
 
-## CpuModel
+## Gray Failure
 
-The simulated CPU (`Chaos::Cpu(mode)`, or `SimWorld::set_cpu_model` directly). See [CPU Time and Gray Failures](../part3-building/26-cpu-and-gray-failure.md).
+`GrayFailure::new(max_slow)`:
 
-| Field | Type | Per-seed range | Description |
-|-------|------|----------------|-------------|
-| `poll_cost` | `Duration` | 500 ns..=5 µs (`POLL_COST_NS`) | The cost of one poll of one task of a process |
-| `sent_byte_cost_ps` | `u64` | 500..=5000 (`BYTE_COST_PS`) | Picoseconds per byte the process sends |
-| `written_byte_cost_ps` | `u64` | 500..=5000 (`BYTE_COST_PS`) | Picoseconds per byte the process writes |
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `victims` | `AttritionVictims::Any` | Which processes may be slowed. |
+| `max_slow` | as given | Machines slow at the same time. Use the tolerated loss `f`. |
+| `window` | `0.3..=1.0` | Slow window as a fraction of the chaos window. |
+| `cpu` | `10..=1000` | CPU slowdown factor range. |
+| `disk` | `5..=100` | Disk latency factor range. |
+| `network` | `2..=20` | Network latency factor range. |
+| `kinds` | `GrayKinds::ALL` | `cpu`, `disk`, `network` flags. `Swarm` masks each per seed. |
 
-`CpuModel::random_for_seed()` makes three draws. In `ChaosMode::Swarm`, `CpuModel::swarm_for_seed()` first draws whether the model is on (probability 0.5), then the three costs only when it is. The draws come after every other surface's, so registering `Chaos::Cpu` shifts no other sample.
+`SimContext::slowness(ip)` and `FaultContext::slowness(ip)` return the current `Slowness { cpu, disk, network }`. `Slowness::HEALTHY` is all ones.
 
-## GrayFailure
+## CPU Model
 
-A gray-failure regime (`Chaos::GrayFailure { config, mode }`), built from `GrayFailure::new(max_slow)`. Requires `.chaos_duration()`.
+`Chaos::Cpu(mode)` installs a `CpuModel` per seed:
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `victims` | `AttritionVictims` | `Any` | Eligible machines, as for attrition; a named group must be registered |
-| `max_slow` | `usize` | -- | At most this many machines are slow at once |
-| `window` | `RangeInclusive<f64>` | `0.3..=1.0` | Each slow window's length, as a fraction of the chaos window |
-| `cpu` | `RangeInclusive<u32>` | `10..=1000` | CPU factor (applied only when the CPU model is on) |
-| `disk` | `RangeInclusive<u32>` | `5..=100` | Disk latency factor |
-| `network` | `RangeInclusive<u32>` | `2..=20` | Network latency factor |
-| `kinds` | `GrayKinds` | `ALL` | Which of CPU, disk and network apply |
+| Field | Drawn from | Meaning |
+|-------|-----------|---------|
+| `poll_cost` | `POLL_COST_NS` = `500..5001` ns | Cost of one poll of one task. |
+| `sent_byte_cost_ps` | `BYTE_COST_PS` = `500..5001` ps | Cost per byte sent. |
+| `written_byte_cost_ps` | `BYTE_COST_PS` = `500..5001` ps | Cost per byte written to disk. |
 
-In `ChaosMode::Swarm`, each seed masks each kind with probability 0.5 (three build-time draws). `Slowness { cpu, disk, network }` is the per-machine factor set, applied with `FaultContext::set_slowness` or `SimWorld::set_slowness` and cleared by recovery mode.
+`CpuModel::random_for_seed()` draws 3 times. `CpuModel::swarm_for_seed() -> Option<CpuModel>` draws one coin (0.5) and then the three costs. `cpu_charge(Duration)` adds explicit CPU time from application code. `SimWorld::set_cpu_model` installs a model by hand.
+
+## Locality
+
+`LocalityConfig::new(datacenters, zones_per_datacenter, machines_per_zone, processes_per_machine)`. Each argument is a `usize` or a `RangeInclusive<usize>` sampled per seed. `DomainLevel` is `Datacenter`, `Zone` or `Machine`. `LinkClass` is `SameMachine`, `SameZone`, `SameDatacenter` or `CrossDatacenter`.
+
+`LinkLatencyConfig::default()`:
+
+| Link class | Latency |
+|------------|---------|
+| `same_machine` | 10 µs to 50 µs |
+| `same_zone` | 100 µs to 500 µs |
+| `same_datacenter` | 500 µs to 2 ms |
+| `cross_datacenter` | 20 ms to 80 ms |
 
 ## NetworkConfiguration
 
-Top-level network simulation parameters.
+| Field | Default | `fast_local()` |
+|-------|---------|----------------|
+| `bind_latency` | Uniform 50 µs to 150 µs | 1 µs to 10 µs |
+| `accept_latency` | Uniform 1 ms to 6 ms | 1 µs to 10 µs |
+| `connect_latency` | Uniform 1 ms to 11 ms | 1 µs to 10 µs |
+| `write_latency` | Uniform 100 µs to 600 µs | 1 µs to 10 µs |
+| `link_latency` | `None` | `None` |
+| `tcp_send_window_bytes` | 65536 (`DEFAULT_TCP_SEND_WINDOW_BYTES`) | same |
+| `accept_backlog_capacity` | 128 (`DEFAULT_ACCEPT_BACKLOG_CAPACITY`) | same |
+| `chaos` | `ChaosConfiguration::default()` | `ChaosConfiguration::disabled()` |
 
-Bind, connect, and accept use their latency fields as genuinely delayed
-operations. Each call remains pending until its targeted scheduler completion
-fires. The accept latency is the exception to "per call": it belongs to the
-connection, drawn once when the connection enters the listener's backlog, as a
-kernel completes the handshake whether or not an `accept()` is pending.
-Dropping an accept future (a `select!` that re-creates its accept arm every
-pass) returns the connection with its clock intact, and a later accept waits
-only for what is left of it. Established reads wait on buffered byte delivery or a network waker.
-Write and link latency apply to ordered byte delivery after the stream accepts
-the bytes into its send window (see
-[Flow control](../part3-building/10-network-faults.md#flow-control)).
+`NetworkConfiguration::random_for_seed()` and `swarm_for_seed()` draw the chaos block (below). `disable_fault_injection()` is what recovery mode calls.
 
-| Field | Type | Default |
-|-------|------|---------|
-| `bind_latency` | `LatencyDistribution` | `Uniform` 50us..150us |
-| `accept_latency` | `LatencyDistribution` | `Uniform` 1ms..6ms |
-| `connect_latency` | `LatencyDistribution` | `Uniform` 1ms..11ms |
-| `write_latency` | `LatencyDistribution` | `Uniform` 100us..600us |
-| `link_latency` | `Option<LinkLatencyConfig>` | `None` (distance-blind) |
-| `tcp_send_window_bytes` | `usize` | 64 KiB (`DEFAULT_TCP_SEND_WINDOW_BYTES`) |
-| `chaos` | `ChaosConfiguration` | See below |
+`LatencyDistribution` variants: `Uniform { start, end }`, `Exponential { min, mean }`, `Bimodal { fast_range, slow_range, slow_probability }`. `sample_latency` and `sample_duration` draw from them.
 
-### Constructor variants
+## ChaosConfiguration (network)
 
-| Constructor | Description |
-|-------------|-------------|
-| `NetworkConfiguration::default()` | Standard defaults with chaos enabled |
-| `NetworkConfiguration::random_for_seed()` | Randomized per seed for chaos testing |
-| `NetworkConfiguration::swarm_for_seed()` | Randomized per seed, then restricted to a per-seed subset of fault families |
-| `NetworkConfiguration::fast_local()` | Minimal latencies, all chaos disabled |
+| Field | `default()` | `random_for_seed()` range |
+|-------|-------------|---------------------------|
+| `clog_probability` | 0.0 | 0 to 0.20 |
+| `clog_duration` | 100 ms to 300 ms | start 50 to 300 ms, end 100 to 500 ms |
+| `partition_probability` | 0.0 | 0 to 0.15 |
+| `partition_duration` | 200 ms to 2 s | start 100 ms to 1 s, end 500 ms to 3 s |
+| `bit_flip_probability` | 0.0 | 0.00001 to 0.0002 |
+| `bit_flip_min_bits` | 1 | 1 |
+| `bit_flip_max_bits` | 32 | 32 |
+| `bit_flip_cooldown` | 0 | 0 to 100 ms |
+| `partial_write_max_bytes` | 1000 | 100 to 2000 |
+| `partial_read_max_bytes` | 1000 | 100 to 2000 |
+| `random_close_probability` | 0.00001 | 0.000001 to 0.0001 |
+| `random_close_cooldown` | 5 s | 1 s to 10 s |
+| `random_close_explicit_ratio` | 0.3 | 0.20 to 0.40 |
+| `black_hole_probability` | 0.0 | 0.000001 to 0.0001 |
+| `black_hole_cooldown` | 5 s | 1 s to 10 s |
+| `clock_drift_enabled` | true | true |
+| `clock_drift_max` | 100 ms | 50 ms to 150 ms |
+| `buggified_delay_enabled` | true | true |
+| `buggified_delay_max` | 100 ms | 50 ms to 150 ms |
+| `buggified_delay_probability` | 0.25 | 0.20 to 0.30 |
+| `connect_failure_mode` | `Probabilistic` | one of `Disabled`, `AlwaysFail`, `Probabilistic` |
+| `connect_failure_probability` | 0.5 | 0.40 to 0.60 |
+| `max_pair_latency` | 0 to 0 (off) | 0 to 0..100 ms |
+| `partition_strategy` | `Random` | one of the 7 strategies |
 
-### Network fault mask
+`disabled()` zeroes every probability and turns every flag off. `swarm_for_seed()` draws `random_for_seed()` then 9 coins (0.5 each) that keep or drop clog, partition, bit flip, random close, connect failure, clock drift, buggified delay, pair latency and black hole. `apply_buggify_knobs()` (under `Chaos::BuggifyKnobs`) spikes clog to 0.5..1.0, partition to 0.3..0.8, random close to 0.01..0.1, black hole to 0.01..0.1, and bit flip to 0.001..0.01 when it was already above 0.
 
-`SimulationBuilder::network_fault_mask()` applies a typed allow-mask after the
-per-seed Random or Swarm profile and buggify knob perturbations, but before the
-`SimWorld` is created. The mask consumes no simulation or configuration RNG
-draws, so it is compatible with frontier exploration and exact recipe replay.
-The default is `NetworkFaultMask::all()`, which leaves existing builders
-unchanged.
+`PartitionStrategy`: `Random`, `UniformSize`, `IsolateSingle`, `IsolateZone`, `IsolateDatacenter`, `AsymmetricSend`, `AsymmetricRecv`. `ConnectFailureMode`: `Disabled`, `AlwaysFail`, `Probabilistic`.
 
-```rust
-SimulationBuilder::new()
-    .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
-    .network_fault_mask(
-        NetworkFaultMask::all().without(NetworkFault::BitFlip),
-    )
-    .enable_exploration(exploration_config)
-```
+## StorageConfiguration
 
-The mask covers `Clog`, `Partition`, `BitFlip`, `RandomClose`,
-`ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, `PairLatency`, and
-`BlackHole`. Removing a
-family can only suppress a fault; it cannot enable a family the sampled profile
-turned off. Partial reads and writes are TCP/buggify behavior rather than
-independently sampled fault families and remain active.
+| Field | `default()` | `random_for_seed()` range | `fast_local()` |
+|-------|-------------|---------------------------|----------------|
+| `iops` | 25 000 | 10 000 to 100 000 | 1 000 000 |
+| `bandwidth` (bytes/s) | 150 000 000 | 50 MB/s to 500 MB/s | 1 GB/s |
+| `read_latency` | 50 µs to 200 µs | | 1 µs |
+| `write_latency` | 100 µs to 500 µs | | 1 µs |
+| `sync_latency` | 1 ms to 5 ms | | 1 µs |
+| `read_corruption_probability` | 0.0 | 0 to 0.001 | 0 |
+| `write_corruption_probability` | 0.0 | 0 to 0.001 | 0 |
+| `read_eio_probability` | 0.0 | 0 to 0.001 | 0 |
+| `write_eio_probability` | 0.0 | 0 to 0.001 | 0 |
+| `clean_crash_probability` | 0.1 | | |
+| `correlated_rollback_probability` | 0.25 | | |
+| `correlated_rollback_max_run` | 8 | | |
+| `crash_lost_probability` | 0.0 | 0 to 0.1 | 0 |
+| `crash_latent_fault_probability` | 0.0 | 0 to 0.05 | 0 |
+| `shorn_write_probability` | 0.0 | | 0 |
+| `length_survives_crash_probability` | 0.5 | | |
+| `garbage_fill_probability` | 1.0 | 0.5 | |
+| `barrier_violation_probability` | 0.0 | | 0 |
+| `misdirect_write_probability` | 0.0 | 0 to 0.0001 | 0 |
+| `misdirect_read_probability` | 0.0 | 0 to 0.0001 | 0 |
+| `phantom_write_probability` | 0.0 | 0 to 0.0002 | 0 |
+| `sync_failure_probability` | 0.0 | 0 to 0.0005 | 0 |
+| `direct_io_alignment` | 4096 | | |
+| `direct_io_supported` | true | | |
+| `unsynced_dir_entry_loss_probability` | 0.0 | 0 to 0.005 | 0 |
+| `short_transfer_probability` | 0.0 | 0 to 0.002 | 0 |
+| `disk_stall_probability` | 0.0 | 0 to 0.001 | 0 |
+| `disk_stall_duration` | 0 | 50 ms to 500 ms | |
+| `disk_throttle_probability` | 0.0 | 0 to 0.001 | 0 |
+| `disk_throttle_duration` | 0 | 500 ms to 5 s | |
+| `disk_throttle_iops_multiplier` | 1.0 | 2 to 20 | |
+| `disk_throttle_bandwidth_multiplier` | 1.0 | 2 to 20 | |
+| `disk_failure_probability` | 0.0 | 0 to 0.0001 | 0 |
 
-### Storage fault mask
+`swarm_for_seed()` draws `random_for_seed()` then 14 coins over the families. `apply_buggify_knobs()` spikes iops to 100..5000, bandwidth to 1 MB/s..20 MB/s, sync failure to 0.05..0.2, disk stall to 0.1..0.5 with 100 ms to 500 ms episodes, throttle to 0.1..0.5 with 1 s to 5 s episodes, and disk failure to 0.001..0.01. `disable_fault_injection()` zeroes every family, including barrier violation. Sectors are `SECTOR_SIZE` = 512 bytes.
 
-`SimulationBuilder::storage_fault_mask()` is the storage twin: a typed
-allow-mask applied after the per-seed storage profile and buggify knob
-perturbations, consuming no randomness. A harness that cannot observe a
-family's effect removes it rather than judging runs it cannot explain — a
-disk that fails silently (every later operation pending forever) is the
-usual one:
+## Aiming Storage Faults
 
-```rust
-SimulationBuilder::new()
-    .enable_chaos([Chaos::Storage(ChaosMode::Swarm)])
-    .storage_fault_mask(
-        StorageFaultMask::all().without(StorageFault::DiskFailure),
-    )
-```
-
-The mask covers `Corruption`, `Eio`, `Misdirect`, `PhantomWrite`,
-`SyncFailure`, `ShortTransfer`, `DirEntryLoss`, `CrashDamage`, `Degradation`
-(stall and throttle episodes) and `DiskFailure`. Like the network mask it can
-only suppress a family the sampled profile kept.
-
-### Latency distribution
-
-Each per-operation latency field above is a `LatencyDistribution`, not a plain range. This lets a simulation exercise the heavy P99 tail where timeout cascades and retry storms live. Every variant samples deterministically through the simulation RNG. Reads do not add a separate delay: they wait for bytes whose delivery already includes write and link latency.
-
-| Variant | Shape | Models |
-|---------|-------|--------|
-| `Uniform { start, end }` | Flat over `[start, end)`, the default with unchanged behavior | Baseline jitter |
-| `Exponential { min, mean }` | `min + mean * (-ln u)`, a long right tail | Slow disks, GC pauses (TigerBeetle) |
-| `Bimodal { fast_range, slow_range, slow_probability }` | Fast cluster with a rare slow tail | Cross-datacenter hops, GC spikes (FoundationDB) |
-
-`default()` and `fast_local()` keep every field `Uniform`, so behavior is unchanged unless you opt in. `random_for_seed()` mixes all three shapes per field for chaos seeds. The same `LatencyDistribution` type configures storage `read_latency`, `write_latency`, and `sync_latency`.
-
-To replace the hand-picked defaults with values measured on a real machine, see [Calibrating Against a Real Machine](./07-calibration.md).
-
-Every sampled delay enters the global `Scheduler<Event>`. Same-time events keep
-their insertion order through stable schedule IDs, and dropping a delayed
-network future cancels its live schedule.
-
-### Link latency (distance-based)
-
-`link_latency` is realism, not chaos: it lives on `NetworkConfiguration` and is applied whatever the chaos mode. Each ordered IP pair is classified through the installed locality topology, samples its class distribution once at first contact, and keeps that value for the run. The result lands in the same per-pair budget as `max_pair_latency` and is summed with it. A pair where either endpoint has no locality gets nothing.
-
-| Field | Type | Default |
-|-------|------|---------|
-| `same_machine` | `LatencyDistribution` | `Uniform` 10us..50us |
-| `same_zone` | `LatencyDistribution` | `Uniform` 100us..500us |
-| `same_datacenter` | `LatencyDistribution` | `Uniform` 500us..2ms |
-| `cross_datacenter` | `LatencyDistribution` | `Uniform` 20ms..80ms |
-
-## ChaosConfiguration
-
-All fault injection settings for the simulated network. Part of `NetworkConfiguration`.
-
-### Clogging
-
-| Field | Type | Default |
-|-------|------|---------|
-| `clog_probability` | `f64` | 0.0 |
-| `clog_duration` | `Range<Duration>` | 100ms..300ms |
-
-### Per-Pair Permanent Latency
-
-| Field | Type | Default |
-|-------|------|---------|
-| `max_pair_latency` | `Range<Duration>` | `ZERO..ZERO` (off) |
-
-Each ordered IP pair samples one fixed latency from this range at first contact and adds it to every delivery on that pair for the whole run (FoundationDB's `SimClogging`). An all-zero range disables it. FDB's `MAX_CLOGGING_LATENCY * random01()` is the `ZERO..MAX` case.
-
-### Network Partitions
-
-| Field | Type | Default |
-|-------|------|---------|
-| `partition_probability` | `f64` | 0.0 |
-| `partition_duration` | `Range<Duration>` | 200ms..2s |
-| `partition_strategy` | `PartitionStrategy` | `Random` |
-
-**PartitionStrategy** variants: `Random`, `UniformSize`, `IsolateSingle`, `IsolateZone`, `IsolateDatacenter`, `AsymmetricSend`, `AsymmetricRecv`. The two `Isolate{Zone,Datacenter}` arms need a [`.cluster()`](../part3-building/09-attrition.md#failure-domains-correlated-reboots) topology and degrade to `Random` selection without one. The two `Asymmetric*` arms cut a single node one way, using the same primitives as `partition_send_from()` / `partition_recv_to()`.
-
-### Bit Flips
-
-| Field | Type | Default |
-|-------|------|---------|
-| `bit_flip_probability` | `f64` | 0.0 (off; Random/Swarm profiles sample it) |
-| `bit_flip_min_bits` | `u32` | 1 |
-| `bit_flip_max_bits` | `u32` | 32 |
-| `bit_flip_cooldown` | `Duration` | 0 |
-
-### Partial Writes
-
-| Field | Type | Default |
-|-------|------|---------|
-| `partial_write_max_bytes` | `usize` | 1000 |
-
-### Partial Reads
-
-| Field | Type | Default |
-|-------|------|---------|
-| `partial_read_max_bytes` | `usize` | 1000 |
-
-### Random Connection Close
-
-| Field | Type | Default |
-|-------|------|---------|
-| `random_close_probability` | `f64` | 0.00001 (0.001%) |
-| `random_close_cooldown` | `Duration` | 5s |
-| `random_close_explicit_ratio` | `f64` | 0.3 (30% explicit) |
-
-### Black Hole
-
-A direction that delivers nothing, for the rest of the connection's life: it
-accepts writes until its send window is full, then blocks; see
-[Black Holes](../part3-building/10-network-faults.md#black-holes).
-
-| Field | Type | Default |
-|-------|------|---------|
-| `black_hole_probability` | `f64` | 0.0 (off) |
-| `black_hole_cooldown` | `Duration` | 5s |
-
-### Clock Drift
-
-| Field | Type | Default |
-|-------|------|---------|
-| `clock_drift_enabled` | `bool` | `true` |
-| `clock_drift_max` | `Duration` | 100ms |
-
-### Buggified Delay
-
-| Field | Type | Default |
-|-------|------|---------|
-| `buggified_delay_enabled` | `bool` | `true` |
-| `buggified_delay_max` | `Duration` | 100ms |
-| `buggified_delay_probability` | `f64` | 0.25 (25%) |
-
-Builder campaigns apply this fault only to sleeps scheduled inside
-`.chaos_duration()`. Setup and the post-chaos quiet tail do not consume its RNG
-draws or receive extra delay (recovery mode also clears the flag outright at the
-cutoff). A directly constructed `SimWorld` has no campaign window and applies the
-configured fault for its whole lifetime, unless you call
-`SimWorld::enter_recovery_mode()` yourself.
-
-### Connection Failures
-
-| Field | Type | Default |
-|-------|------|---------|
-| `connect_failure_mode` | `ConnectFailureMode` | `Probabilistic` |
-| `connect_failure_probability` | `f64` | 0.5 (50%) |
-
-**ConnectFailureMode** variants: `Disabled`, `AlwaysFail`, `Probabilistic` (refused with `connect_failure_probability`, otherwise hang).
-
-### Handshake Delay
-
-| Field | Type | Default |
-|-------|------|---------|
-| `handshake_delay_enabled` | `bool` | `true` |
-| `handshake_delay_max` | `Duration` | 10ms |
+| Type | API |
+|------|-----|
+| `StorageEligibilityMask` | `Arc<dyn Fn(&str, u64) -> bool>` over `(path, sector)`. `SimWorld::set_storage_eligibility_mask`, `clear_storage_eligibility_mask`. |
+| `FaultFocus` | `FaultFocus::new().background(w).spot(path, bytes, w).layout(regions, \|r\| w)`. `weight(path, sector)` is the heaviest spot or the background. `SimWorld::set_fault_focus`, `clear_fault_focus`, `SimStorageProvider::focus_faults`. |
+| `LayoutRegion` | `{ path, bytes: Range<u64>, kind: &'static str, stripe: Option<u64> }` from `moonpool_core`. Published with `SimWorld::publish_layout`. |
+| `ReplicatedFaults` | `ReplicatedFaults::new(DomainLevel).tolerance(n).group("name")`. The pattern per seed is a `FaultPattern`: `Minority { domains }`, `Striped { domains, local }`, `Rolling { .. }`, `Spared`. |
 
 ## ExplorationConfig
 
-Configuration for frontier-based exploration. Passed to `SimulationBuilder::enable_exploration()`.
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `workers` | 0 | Forked workers. 0 runs in-process and deterministic. |
+| `max_runs_per_seed` | 512 | Ceiling on timelines per root seed. |
+| `branching_factor` | 4 | Children per productive run. |
+| `max_frontier` | 1024 | Queued jobs. |
+| `max_recipe_len` | 64 | Depth in replay segments. |
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `workers` | `usize` | Max concurrent worker processes; `0` = in-process (sequential, deterministic, fork-free) |
-| `max_runs_per_seed` | `u64` | Total timelines (root + exploration runs) per root seed |
-| `branching_factor` | `u32` | Children enqueued when a run makes a new discovery (one expansion per run) |
-| `max_frontier` | `usize` | Cap on queued jobs |
-| `max_recipe_len` | `usize` | Depth cap in replay segments |
+`validate()` rejects a zero in any bound except `workers`. The worker wall-clock ceiling is `DEFAULT_WORKER_TIMEOUT` = 5 minutes (`Explorer::set_worker_timeout`).
 
-Live processes are bounded by `1 + workers` regardless of exploration depth. `max_runs_per_seed` is a ceiling, not a quota: a seed whose root run discovers nothing globally new stops after a single timeline.
+## Buggify
+
+| Item | Value |
+|------|-------|
+| `buggify_init(activation_prob)` | The runner calls `buggify_init(0.5)` per run: each site is active on half the seeds. |
+| `buggify!()` | Fires with probability 0.25 at an active site. |
+| `buggify_with_prob!(p)` | Fires with probability `p` at an active site. |
+| `buggify_fault_with_prob!(p)` | Same, but silent in recovery mode. |
+| `buggify_named!("label", p)` | Same, under a label that `set_activation(label, bool)` controls. |
+| `buggify_pick!(p, n) -> Option<usize>` | An index below `n`, or `None`. |
+| `buggify_range!(p, range) -> Option<u64>` | A value in `range`, or `None`. |
+| `buggify_knob!(default, lo..hi)` | `moonpool-sim` only. The value in `lo..hi` with probability 0.25 at an active site, else `default`. |
+| `hint!("label")`, `hint!("label", p)` | A fault moment. Default point probability 0.05. A no-op in production. |
+
+See [Fault Reference](./04-fault-reference.md) for what each fault does.

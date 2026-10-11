@@ -1,39 +1,76 @@
 # moonpool-core
 
-Core abstractions for the moonpool simulation framework.
+Provider traits and core types for the moonpool simulation framework.
 
-## Why: Interface Swapping
+## Same code, two sets of providers
 
-The same application code runs in both simulation and production. The only difference is which provider implementations you use.
+A distributed system touches the outside world through a few operations:
+time, tasks, networking, randomness, storage and system counters. This crate
+puts each one behind a trait. Application code depends on the traits. In
+production it runs on `TokioProviders`. In tests `moonpool-sim` supplies
+deterministic providers, and the code does not change. There are no mocks
+and no `Sim*` variants of shipped types. This is FoundationDB's rule.
 
-This is FoundationDB's core insight: no mocks, no stubs—real code runs in both environments. A global network pointer switches between production (real TCP via tokio) and simulation (fake connections to in-memory buffers).
+| Trait | Production | Simulation | Purpose |
+|-------|------------|------------|---------|
+| `TimeProvider` | Wall clock | Logical time, clock drift | `sleep`, `timeout`, `now`, `timer` |
+| `TaskProvider` | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now` |
+| `NetworkProvider` | Real TCP | Simulated TCP with faults | `bind`, `connect`, `accept` |
+| `RandomProvider` | Thread-local RNG | The run's one seeded stream | `random`, `random_range`, `random_bool` |
+| `StorageProvider` | Real filesystem, direct I/O | Simulated disk with faults | `open`, `rename`, `sync_dir`, positioned I/O |
+| `SystemProvider` | `getrusage`, `/proc` | Simulated CPU and disk counters | Cumulative CPU and disk busyness |
+| `Resolver` (outside the bundle) | OS lookup | Scripted table | `host:port` to addresses |
 
-## How: Provider Traits
+`Providers` bundles the six provider types into one type parameter.
 
-Application code depends on traits, not concrete implementations:
+```rust
+use std::time::Duration;
 
-| Trait | Purpose | Production | Simulation |
-|-------|---------|------------|------------|
-| `TimeProvider` | Sleep, timeout, now() | Wall clock | Logical time |
-| `NetworkProvider` | Connect, listen, accept | Real TCP | Simulated TCP |
-| `TaskProvider` | Spawn async tasks | Tokio spawn | Event-driven |
-| `RandomProvider` | Random numbers | System RNG | Seeded RNG |
-| `StorageProvider` | File I/O | Real filesystem | Fault-injected I/O |
+use moonpool_core::TimeError;
+use moonpool_core::prelude::*;
 
-## The Golden Rule
+async fn backoff<P: Providers>(providers: &P, attempt: u32) -> Result<(), TimeError> {
+    let base_ms = 10_u64 << attempt;
+    let jitter_ms = providers.random().random_range(0..base_ms);
+    providers.time().sleep(Duration::from_millis(base_ms + jitter_ms)).await
+}
+```
 
-**Never call tokio directly in application code.**
+Production calls `backoff(&TokioProviders::new(), 0)`. A simulation calls it
+with the simulator's bundle, where the sleep advances logical time.
 
-Instead of `tokio::time::sleep()`, use `time_provider.sleep()`. This ensures your code works identically in simulation and production.
+**Never call tokio directly in application code.** Use
+`providers.time().sleep()`, not `tokio::time::sleep()`, and use `select!`
+from `moonpool-sim` or `moonpool`, not `tokio::select!`.
 
-## Core Types
+## Other core types
 
-The crate also defines the shared provider bundle, provider error types, and
-runtime-neutral file/network traits used by both production and simulation.
+- **Storage**: `OpenOptions` with `DirectIo`, `StorageFile` with positioned
+  I/O and sync barriers, `IoConstraints` and `AlignedBuf` for direct I/O,
+  `BlockFile` for block addressing, and `LayoutRegion` so a storage format
+  can tell a fault injector where its bytes live.
+- **System**: `SystemSample` and `DiskCounters`, with the `/proc` parsers.
+- **Metrics**: `MetricsSource`, the registry-agnostic seam the simulation
+  report scrapes, and the `metrics::query` engine (rate, bucketize, fill,
+  map, reduce, percentiles).
+- **Errors**: `SimulationError`, `TimeError` and `JoinError`.
+
+## Features
+
+| Feature | Default | Adds |
+|---------|---------|------|
+| `tokio-providers` | yes | `TokioProviders`: all six `tokio-*` features |
+| `tokio-task`, `tokio-time`, `tokio-net`, `tokio-fs`, `tokio-random`, `tokio-system` | via umbrella | One production provider each (`tokio-net` also adds `TokioResolver`) |
+| `select` | yes | `select!` as tokio's macro, unchanged |
+| `deterministic-select` | no | `select!` with a seeded branch offset (enabled by `moonpool-sim`) |
+
+With `default-features = false` the crate holds only the traits and plain
+types, and it compiles for `wasm32-unknown-unknown`.
 
 ## Documentation
 
-- [API Documentation](https://docs.rs/moonpool-core)
+- [The Six Providers](https://pierrez.github.io/moonpool/part2-foundations/07-provider-traits.html) in the Sim Book
+- [API documentation](https://docs.rs/moonpool-core)
 - [Repository](https://github.com/PierreZ/moonpool)
 
 ## License

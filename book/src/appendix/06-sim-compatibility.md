@@ -2,37 +2,27 @@
 
 <!-- toc -->
 
-Consult this list when bringing an existing crate into a moonpool simulation.
-Determinism is the contract: every source of wall-clock time, real I/O,
-untracked concurrency, or platform entropy must be routed through a
-**provider** or replaced with a deterministic alternative. Each section below
-pairs the calls that break determinism with the moonpool equivalents that
-preserve it. The
-[Axum web service example](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/axum_web.rs)
-shows the full pattern end to end, including how `HyperIo` presents a
-provider-backed stream to hyper.
+Use this list when you bring an existing crate into a moonpool simulation. Determinism is the contract: every source of wall-clock time, real I/O, untracked concurrency or platform entropy goes through a **provider** or is replaced by a deterministic alternative. Each table pairs the calls that break replay with the moonpool equivalents. The [axum example](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/axum_web.rs) shows the whole pattern end to end.
 
 ## 1. Time
 
 | Forbidden | Use instead |
 |-----------|-------------|
 | `tokio::time::sleep`, `tokio::time::timeout`, `tokio::time::Instant` | `time.sleep(d)`, `time.timeout(d, fut)`, `time.now()` |
-| `std::time::Instant::now`, `std::time::SystemTime::now` | `time.now()` for canonical time, `time.timer()` for drifted time |
+| `std::time::Instant::now`, `std::time::SystemTime::now` | `time.now()` for canonical time, `time.timer()` for the node's drifted clock |
 
-The `TimeProvider` trait gives us a single seam. In simulation `sleep` advances logical time; in production it falls through to tokio. Never measure elapsed time against a real clock.
+`TimeProvider` is the one seam. In simulation `sleep` advances logical time. In production it falls through to tokio. Never measure elapsed time against a real clock.
 
-## 2. Tasks and concurrency
+## 2. Tasks and Concurrency
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `std::thread::spawn`, raw OS threads | `task.spawn_task(name, fut)` |
+| `std::thread::spawn`, OS threads | `task.spawn_task(name, fut)` |
 | `tokio::task::spawn_local`, `tokio::task::LocalSet` | `task.spawn_task(name, fut)` (Send-bounded) |
 | `tokio::spawn` | `task.spawn_task(name, fut)`, or `moonpool_sim::executor::spawn(name, fut)` in sim-only code |
-| Bare `tokio::select!` | `moonpool_sim::select!` / `moonpool::select!` (same grammar) |
+| `tokio::select!` | `moonpool_sim::select!` or `moonpool::select!` (same grammar) |
 
-There is no tokio runtime inside a simulation: everything runs on the [moonpool deterministic executor](../part2-foundations/11-executor.md), so a direct `tokio::spawn` panics. `moonpool_sim::executor::spawn(name, fut)` is the escape hatch when we genuinely need a raw driver task, but default to `spawn_task` so the same code runs against production providers.
-
-The same goes for branch selection. Bare `tokio::select!` draws its polling offset from OS entropy off a tokio runtime, which breaks seed replay. Moonpool's `select!` keeps the exact tokio grammar but draws the offset from the seed. Write guard-style selects (work vs shutdown or timeout) as `select! { biased; ... }` with the work branch first, and leave peer races (two data sources that can be ready together) in the default form so the seed explores both orders.
+There is no tokio runtime inside a simulation. Everything runs on the [deterministic executor](../part2-foundations/11-executor.md), so a bare `tokio::spawn` panics. Bare `tokio::select!` draws its branch offset from OS entropy. Moonpool's `select!` keeps the grammar and draws the offset from the seed. Write guard-style selects (work versus shutdown) as `select! { biased; .. }` with the work branch first. Leave peer races in the default form so the seed explores both orders.
 
 ## 3. Network
 
@@ -40,76 +30,88 @@ The same goes for branch selection. Bare `tokio::select!` draws its polling offs
 |-----------|-------------|
 | `tokio::net::{TcpStream, TcpListener, UdpSocket}` | `network.connect(addr)`, `network.bind(addr)` |
 | `std::net::*` for live I/O | `NetworkProvider` |
-| `tokio::net::lookup_host`, `ToSocketAddrs` | a `Resolver` (`TokioResolver` / `ScriptedResolver`) |
+| `tokio::net::lookup_host`, `ToSocketAddrs` | a `Resolver`: `TokioResolver` in production, `moonpool_sim::ScriptedResolver` in simulation |
+| `hyper_util::rt::TokioIo`, `tokio_util::compat` | `moonpool_hyper::HyperIo` |
+| `tonic::transport` | tonic with `default-features = false`, `ReconnectingChannel`, `H2Server` |
 
-`NetworkProvider::TcpStream` implements `futures::io::AsyncRead + AsyncWrite`. For hyper (and therefore axum and tonic), wrap it in `moonpool_hyper::HyperIo`, which presents that shape as hyper's own `rt::Read` and `rt::Write`. That replaces the older two-hop bridge through `tokio_util::compat::Compat` and `hyper_util::rt::TokioIo`, so neither of those crates needs to appear in your dependency list.
+`NetworkProvider::TcpStream` implements `futures::io::AsyncRead + AsyncWrite`. `HyperIo` presents it as hyper's `rt::Read` and `rt::Write`. Opt into vectored writes with `HyperIo::new(stream).with_vectored_writes(true)` or the `vectored_writes` flag on `ChannelConfig` and `H2ServerConfig`; the simulated stream then delivers each `IoSlice` as its own event. `HyperExecutor` routes hyper's h2 tasks to the `TaskProvider`, `HyperTimer` answers its clock reads from the `TimeProvider`. See [The hyper Stack](../part4-integration/08-hyper-stack.md).
 
-Name resolution is its own optional capability, outside the `Providers` bundle: `moonpool_core::Resolver` turns a `host:port` string into every address it names. Production uses `TokioResolver` (the operating system's lookup); a simulation uses `moonpool_sim::ScriptedResolver`, a table the run edits while it goes, so a renamed or moved service, a failing lookup and a stale cache are deterministic. Caching and invalidation stay with the caller.
-
-Provider conformance tests run the same network contract against both Tokio and simulation providers. The contract checks that concurrent `:0` binds return distinct usable ports, then verifies connect, echo, EOF, and refusal of an unbound target.
-
-For gRPC via tonic, skip `tonic::transport` entirely: it hard-codes `tokio::spawn`, `TokioExecutor`, and `TokioTimer` with no override hooks. Use tonic with `default-features = false` (the runtime-free gRPC framing core) and let `moonpool-hyper` drive hyper for you. `ReconnectingChannel` plays the role `tonic::transport::Channel` plays in production (lazy connect, deterministic backoff, one multiplexed connection shared by every generated client), and `H2Server::serve_connection_with_shutdown` serves each accepted connection with a graceful drain wired to your shutdown token. Underneath, `HyperExecutor` routes hyper's internal h2 tasks to the `TaskProvider` and `HyperTimer` answers hyper's clock reads from the `TimeProvider`, so h2 keepalive ping/pong runs on deterministic sim time. h2 connections are `Send`, so unlike the HTTP/1 case they spawn as ordinary sim tasks. See [The hyper Stack](../part4-integration/08-hyper-stack.md) for the worked example, and [`crates/moonpool-sim-examples/src/tonic_grpc.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/tonic_grpc.rs) (`cargo xtask sim run tonic-grpc`) for the code: generated protobuf stubs, concurrent unary RPCs multiplexed on one connection, server streaming, deadlines via the time provider, keepalive, reconnection, and Attrition server reboots.
-
-The simulated stream overrides `poll_write_vectored`: each `IoSlice` becomes its own ordered delivery event (so the chaos pack can act on individual segments), and it follows `writev(2)` partial-accept semantics, accepting the bytes that fit under send-buffer pressure and reporting a short count rather than blocking all-or-nothing. Reaching that path takes an IO layer that advertises the capability. `HyperIo` reports no vectored support by default, because futures-io gives it no way to ask the stream, so opt in with `HyperIo::new(stream).with_vectored_writes(true)` (or the `vectored_writes` flag on `ChannelConfig` and `H2ServerConfig`). Both examples switch it on.
-
-## 4. Filesystem and storage
+## 4. Filesystem and Storage
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `tokio::fs::*`, `std::fs::*` | `storage.create_dir_all(path)`, `storage.open(path, options)`, `storage.exists`, `storage.delete`, `storage.rename`, `storage.list_dir(path)`, `storage.sync_dir(path)` |
-| Direct file handles | `StorageFile` with `sync_all`, `sync_data`, `size`, `set_len` |
+| `tokio::fs::*`, `std::fs::*` | `storage.open(path, OpenOptions)`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` |
+| Direct file handles, `O_DIRECT` by hand | `StorageFile` (`read_at`, `write_at`, `sync_all`, `sync_data`, `size`, `set_len`), `OpenOptions::direct_io(DirectIo::..)`, `BlockFile<F>` |
 
-Storage operations return `Poll::Pending` and require simulation stepping. See the **Storage Testing Patterns** section of the project `AGENTS.md` for the step-loop required when driving storage from a test.
+Storage operations return `Poll::Pending` and complete through scheduled events. A low-level test must step `SimWorld` while it polls (the `drive` helper in the root `AGENTS.md`). File durability is not directory-entry durability: `sync_dir` after a create or rename.
 
-## 5. Randomness
+## 5. System Metrics
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `rand::thread_rng`, `rand::random` | `random.random::<T>()`, `random.random_range(r)` |
+| `getrusage`, `/proc/stat`, `/proc/diskstats`, `sysconf` | `system.sample(data_dir) -> SystemSample` |
+
+`SystemProvider::sample` returns process CPU, core count, machine busy and total time, run-loop busy time and optional `DiskCounters`. In simulation it reports the CPU model's charges and the simulated disk, so an admission controller that watches its own load sees the chaos.
+
+## 6. Randomness
+
+| Forbidden | Use instead |
+|-----------|-------------|
+| `rand::thread_rng`, `rand::random`, random UUIDs | `random.random::<T>()`, `random.random_range(r)`, `random.random_bool(p)`, `random.random_ratio(n, d)` |
 | `OsRng`, `getrandom`, `/dev/urandom` | `RandomProvider` |
-| Any system entropy source | `RandomProvider` |
 
-Every random decision must be seeded by the simulation. A single ungoverned `thread_rng` call is enough to make a seed unreproducible.
+One ungoverned `thread_rng` call makes a seed unreproducible.
 
-## 6. Collections and iteration
-
-| Forbidden | Use instead |
-|-----------|-------------|
-| `HashMap` / `HashSet` | `BTreeMap` / `BTreeSet` |
-| Iterating an unordered dependency collection | Copy into a `Vec` and sort before acting on it |
-
-`HashMap`'s default hasher randomizes iteration order per process. That is fatal under replay and fork-based exploration. Moonpool enforces this internally with Clippy's `disallowed_types` lint so unordered standard collections cannot silently re-enter simulation infrastructure.
-
-## 7. Type bounds
-
-- Trait-crossing futures must be **`Send + 'static`**. The sim runs on the single-threaded moonpool executor, but spawned futures are Send-bounded.
-- Shared mutable state: **`Arc<RwLock<…>>`**, `Arc<AtomicBool>`, `DashMap`, and similar. Not `Rc<RefCell<…>>`.
-- `Process`, `Workload`, and `FaultInjector` are dyn-stored. Use
-  `#[async_trait]` with `Send + Sync + 'static` supertraits.
-- Provider traits (`TimeProvider`, `TaskProvider`, `NetworkProvider`, `RandomProvider`, `StorageProvider`) use native AFIT with `-> impl Future<…> + Send`. No `#[async_trait]`.
-- Never hold a `MutexGuard` (or `RwLockGuard`) across `.await`. Drop the guard first, then await.
-
-## 8. External processes and syscalls
+## 7. Collections and Iteration
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `std::process::Command`, `tokio::process::Command` | Encapsulate behind a trait and provide an in-memory fake |
-| Raw `mmap`, `socket`, direct `libc` calls | Mediate through a provider or trait you control |
-| Linking native libraries that perform their own I/O | Wrap them, or replace with a deterministic fake |
+| `HashMap`, `HashSet` | `BTreeMap`, `BTreeSet` |
+| Iterating an unordered collection from a dependency | Copy into a `Vec` and sort before acting |
 
-If the dependency cannot be mediated, that call is the boundary of the simulation. Mock it at the highest level you control.
+`HashMap` randomizes iteration order per process. That is fatal under replay and forked exploration. The workspace `clippy.toml` disallows both types.
 
-## 9. Observability
+## 8. Fault Sites and Probes
+
+| In library code | Purpose |
+|-----------------|---------|
+| `hint!("entries written, not synced")` | Name a crash moment. A no-op in production. The simulator may reboot the process there. |
+| `buggify!()`, `buggify_with_prob!(p)`, `buggify_fault_with_prob!(p)`, `buggify_named!("label", p)` | Fire a rare path on seeded coins. Inert in production. |
+| `cpu_charge(Duration)` | Account CPU work the poll model cannot see (a checksum, a compaction). |
+| `reachable!("msg")`, `sometimes!(cond, "msg")` | Coverage probes from `moonpool-assertions`, without a `moonpool-sim` dependency. |
+
+All of these come from `moonpool-buggify` and `moonpool-assertions`, which have zero dependencies, so a library can carry them without pulling in the simulator.
+
+## 9. Type Bounds
+
+- Futures that cross a trait are `Send + 'static`. The executor is single-threaded, but spawned futures are Send-bounded.
+- Shared state: `Arc<RwLock<..>>`, `Arc<AtomicBool>`, `DashMap`. Not `Rc<RefCell<..>>`.
+- `Process`, `Workload` and `FaultInjector` are dyn-stored: `#[async_trait]` with `Send + Sync + 'static`.
+- Provider traits use native `async fn` with `-> impl Future<..> + Send`. No `#[async_trait]`.
+- Never hold a `MutexGuard` or `RwLockGuard` across `.await`.
+- No `unwrap()`. For lock poison use `.expect("RwLock poisoned: prior task panicked")`.
+
+## 10. External Processes and Syscalls
 
 | Forbidden | Use instead |
 |-----------|-------------|
-| `println!`, `eprintln!`, `dbg!` for event-relevant output | `tracing::info!`, `tracing::warn!`, `tracing::error!` |
-| Custom log sinks that bypass `tracing` | A `tracing` layer; the sim wires a `SimulationLayer` automatically |
+| `std::process::Command`, `tokio::process::Command` | A trait with an in-memory fake |
+| Raw `mmap`, `socket`, direct `libc` calls | A provider or a trait you control |
+| Native libraries that do their own I/O | Wrap them, or replace them with a deterministic fake |
 
-Per the project Rust conventions, every public function carries `#[instrument]`. The sim's tracing layer feeds the **event timeline** invariants read from. Bare `println!` bypasses that capture and hides what happened.
+When a dependency cannot be mediated, that call is the boundary of the simulation. Mock it at the highest level you control. See [Where to Draw the Line](../part4-integration/02-mock-boundaries.md).
 
-## 10. Assertions and fault injection
+## 11. Observability
 
-- Use `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, and their numeric and compound variants. Full table in [Assertion Reference](./01-assertion-reference.md).
-- Use `buggify!()` and `buggify_with_prob!(p)` for deterministic fault injection at strategic points: error paths, timeouts, retries, resource limits. Decisions are seeded, so failures replay.
-- Standard `assert!` / `assert_eq!` still panic and abort the simulation. Prefer moonpool assertions for invariants that should be recorded and explored, not crashed on.
+| Forbidden | Use instead |
+|-----------|-------------|
+| `println!`, `eprintln!`, `dbg!` for facts an invariant needs | `tracing::info!(target: "raft", term, leader = %ip, "leader_elected")` |
+| A custom log sink that bypasses `tracing` | A `tracing` layer; the runner installs `SimulationLayer` |
+
+The layer captures INFO and above with a constant message, inside a process or workload task. Use `%` for strings. Do not add a `time_ms` field; the layer stamps simulated time.
+
+## 12. Assertions
+
+- Use `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!` and the numeric and compound variants. Full table in the [Assertion Reference](./01-assertion-reference.md).
+- Standard `assert!` and `assert_eq!` panic and abort the run. Prefer moonpool assertions for invariants that should be recorded and explored.
+- Never delete an assertion that catches a bug. Fix the bug.

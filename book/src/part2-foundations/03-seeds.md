@@ -2,89 +2,89 @@
 
 <!-- toc -->
 
-One number. A single `u64`. That is all moonpool needs to fully determine a simulation: which connections fail, when packets arrive, whether BUGGIFY triggers, how long disk writes take, what order events process. Same seed, same execution, same bugs. This is the property that makes everything else work.
+One number. A single `u64`. That is all moonpool needs to determine a simulation in full: which connections fail, when packets arrive, which buggify sites fire, how long disk writes take, which task polls next. Same seed, same execution, same bugs. This property makes everything else work.
 
 ## The RNG Core
 
-Moonpool uses `ChaCha8Rng` from the `rand_chacha` crate, seeded from the `u64` value. ChaCha8 is fast, produces high-quality randomness, and is deterministic across platforms. The RNG lives in thread-local storage, which is correct because each simulation runs on a single thread.
+Moonpool uses `ChaCha8Rng` from the `rand_chacha` crate, seeded from the `u64`. ChaCha8 is fast, produces good randomness and is deterministic across platforms. The generator lives in thread-local storage. That is correct because each simulation runs on one thread, and parallel test threads never share a stream.
 
-```rust
-// At the start of every simulation run
-set_sim_seed(seed);
+```rust,ignore
+// The runner does this at the start of every iteration
+moonpool_sim::reset_sim_rng();
+moonpool_sim::set_sim_seed(seed);
 
-// Inside the simulation engine, every decision uses the thread-local RNG:
-let latency: u64 = sim_random_range(1..50);  // network delay in ms
-let should_fail: bool = sim_random_f64() < 0.25;  // 25% fault probability
-let value: f64 = sim_random();  // general-purpose random value
+// Inside the engine, every decision draws from the thread-local stream
+let latency: u64 = sim_random_range(1..50);   // a message delay
+let fail: bool = sim_random_bool(0.25);       // a fault coin, always one draw
+let ratio: f64 = sim_random_f64();            // FDB's random01()
 ```
 
-These are **framework-internal** functions used by the simulation engine itself. Your application code should use `providers.random().random()` and `providers.random().random_range()` instead, which route through the same underlying RNG but go through the provider abstraction.
+`sim_random`, `sim_random_range`, `sim_random_f64` and `sim_random_bool` are the framework's own entry points. Your application code uses `providers.random().random()` and `providers.random().random_range()` instead. The simulation's `SimRandomProvider` routes those calls to the same stream.
 
-There is exactly one stream. `sim_random()`, `sim_random_range()`, `sim_random_f64()`, the `RandomProvider` your code sees, the executor's choice of which task to poll next, `select!` branch offsets, the per-seed swarm subsets, buggify activation and firing, and every network, storage and block-device fault coin all draw from the same thread-local RNG. Moonpool keeps no private stream for its own decisions: the framework draws its randomness the way the code it simulates does. This means the **order of calls matters**. Adding a new `sim_random()` call anywhere in the simulation shifts every subsequent random value. This is intentional. It means small code changes produce different simulation trajectories, naturally exploring new parts of the state space.
+There is exactly **one stream**. The executor's choice of the next task, the `select!` start offset, the per-seed swarm masks, buggify activation and firing, every network, storage and CPU fault coin, and every `RandomProvider` call your code makes all draw from the same generator. Moonpool keeps no private stream for its own decisions. So the **order of draws matters**. Add one `sim_random()` call anywhere and every later value shifts. This is intended: a small code change gives a different trajectory and explores new state.
 
 ## Call Count Tracking
 
-Every RNG call increments a thread-local counter. You can read it with `get_rng_call_count()`. This sounds mundane, but it is one of the most useful debugging tools in the framework.
+Every draw increments a thread-local counter, readable with `rng_call_count()`. This sounds mundane. It is one of the most useful debugging tools in the framework.
 
-When a seed produces a bug, you can narrow down exactly where the execution diverges from expected behavior by watching the call count. "The bug triggers after RNG call 847" tells you precisely which decision in the simulation started the chain of events leading to failure. Combined with breakpoints and logging, this turns a mysterious distributed failure into a step-through debugging session.
-
-The explorer framework takes this further: it records call counts at fork points, creating a "recipe" of `count@seed` transitions that can replay an exact exploration path.
+When a seed produces a bug, "the bug triggers after draw 847" tells you which decision started the chain of events. `set_rng_breakpoints(vec![(count, new_seed)])` reseeds the stream when the count passes `count`. The explorer records these `count@seed` pairs at each discovery and replays an exact path with `SimulationBuilder::replay_timeline(seed, recipe)`. Because scheduling and `select!` offsets are draws on the same stream, a recipe replays the task order along with the faults. [Multiverse Exploration](../part5-building-on-top/01-exploration.md) builds on this.
 
 ## The Determinism Canary
 
-Everything above assumes nothing escapes the seed. Something always tries to: a `HashMap` iterated in its randomized order, a `static` that survives from one run into the next, a wall-clock timestamp, an OS random number pulled in by a dependency. Each one makes the simulation draw something different, or draw at a different moment, and the seed stops reproducing anything. moonpool ships a canary for exactly this, the mechanism madsim's `Runtime::check_determinism` uses:
+Everything above assumes nothing escapes the seed. Something always tries to: a `HashMap` iterated in its randomized order, a `static` that survives from one iteration into the next, a wall-clock timestamp, an OS random number from a dependency. Each one makes the simulation draw something different, or draw at a different moment, and the seed stops reproducing. Moonpool ships a canary for exactly this, the mechanism madsim's `Runtime::check_determinism` uses:
 
-```rust
+```rust,ignore
 SimulationBuilder::new()
     .check_determinism()
     .workload_factory(|| Box::new(MyWorkload::new()))
     .run()?;
 ```
 
-Every seed now runs twice. During the first run, each draw on the simulation stream records a 64-bit fingerprint: a probe of the generator's state *after* the draw, taken on a clone so the check consumes no randomness, mixed with the logical clock. During the second run the same hook compares each draw's fingerprint against the record, and when the run ends the whole record must have been consumed. Because task scheduling, `select!` offsets, swarm masks and every fault coin are draws on that one stream, any uncontrolled difference in scheduling, ordering, draw count or simulated timing shows up as a fingerprint that does not match, and the seed fails with the always-assertion `determinism canary: replay matched the recorded draw sequence`, naming the first diverging draw. A replay that matches a prefix and then stops early fails too: the leftover record is the evidence. The replay is also judged as a full run of the seed. If its workloads return an error, it violates an always-assertion, or it deadlocks, the seed fails even when every fingerprint matched. A `static` that changes a verdict without changing a draw is caught this way.
+Every seed now runs twice. During the first run, each draw records a 64-bit fingerprint: a probe of the generator's state after the draw, taken on a clone so the check consumes no randomness, mixed with the logical clock. During the second run the same hook compares each draw against the record. At the end the whole record must have been consumed. Any uncontrolled difference in scheduling, draw count or simulated timing shows up as a mismatch, and the seed fails with the always-assertion `determinism canary: replay matched the recorded draw sequence`, naming the first diverging draw. A replay that stops early fails too. The replay is also judged as a full run: a workload error, an always-violation or a deadlock fails the seed even when every fingerprint matched.
 
-Two things to know. It is a canary, not a trace: it tells you *that* the runs diverged and at which draw, and the call-count tools above take it from there. And it doubles the cost of every seed, so it belongs in a dedicated CI job or a debugging session, not in the default sweep. Like exploration it needs factory workloads; an instance workload would carry its state into the second run and diverge by construction.
+Two things to know. It is a canary, not a trace: it says **that** the runs diverged and at which draw. The call-count tools take it from there. And it doubles the cost of every seed, so it belongs in a dedicated CI job or a debugging session. Like exploration it needs factory workloads (`workload_factory` or `workloads`), because an instance workload would carry its state into the second run.
 
-## Multi-Seed Testing
+The end-to-end tripwire for moonpool itself is `crates/moonpool-sim/tests/determinism.rs`: two full `SimulationBuilder` runs of racing workloads on the same seed must produce byte-identical traces.
 
-A single seed tests one execution path. To build confidence, you need many paths. Moonpool's builder supports two modes:
+## Many Seeds
 
-**FixedCount** runs a set number of iterations, each with a different random seed:
+One seed tests one path. Confidence needs many. The builder has two iteration modes.
 
-```rust
+**UntilCoverageStable** is the default: `plateau_seeds: 10, max_iterations: 1000`. The run keeps drawing seeds until every observed `assert_sometimes!` and `assert_reachable!` has fired and code coverage has not grown for 10 consecutive seeds, capped at 1,000. Under `cargo xtask sim run` the coverage signal is real sancov edge coverage. Otherwise it is assertion-slot coverage. Tune it with:
+
+```rust,ignore
 SimulationBuilder::new()
-    .set_iterations(100)  // 100 different seeds
-    // ... workloads ...
-    .run()?;
+    .until_coverage_stable(10, 5_000)   // 10 quiet seeds, 5,000 cap
 ```
 
-**UntilCoverageStable** (the default) keeps drawing seeds until every observed `assert_sometimes!` / `assert_reachable!` has fired and code coverage has stopped growing, capped at a safety limit:
+**FixedCount** runs a set number of seeds:
 
-```rust
+```rust,ignore
 SimulationBuilder::new()
-    .until_coverage_stable(10, 5_000)  // 10 quiet seeds, 5_000 safety cap
-    // ... workloads ...
-    .run()?;
+    .set_iterations(100)
 ```
 
-The power of seed-driven testing compounds over time. Run 1,000 seeds in CI on every commit. Run 100,000 overnight. Each seed explores a different combination of timing, faults, and ordering. Bugs that require three independent unlikely events to coincide will surface within a few thousand seeds because the simulation amplifies failure probability through BUGGIFY.
+Each seed also draws its own **swarm**: with `ChaosMode::Swarm` a seed enables a random subset of fault families, and `swarm_operations()` enables a random subset of each workload's operations. Two seeds therefore differ in which behaviours are even possible, not only in timing. [Swarm Testing](../part3-building/28-swarm-testing.md) explains why this finds more bugs than every fault on at once.
+
+Seed-driven testing compounds. Run 1,000 seeds in CI on every commit. Run 100,000 overnight. A bug that needs three unlikely events to coincide surfaces within a few thousand seeds, because buggify amplifies the probability of each event.
 
 ## Debugging a Failing Seed
 
-When CI reports a failure, the output includes the seed:
+When a run fails, the report lists the seeds:
 
+```text
+  Faulty seeds: [17429853261]
 ```
-FAILED seed=17429853261 — connection timeout during leader election
-```
 
-Pin that seed and run it locally with logging enabled:
+Pin that seed and run it alone:
 
-```rust
+```rust,ignore
 SimulationBuilder::new()
     .set_iterations(1)
     .set_debug_seeds(vec![17429853261])
-    // ... same workloads ...
+    .trace_level(tracing::level_filters::LevelFilter::DEBUG)
+    // ... the same processes and workloads ...
     .run()?;
 ```
 
-The simulation replays the exact same execution. Set a breakpoint. Step through. The bug is deterministic now.
+The simulation replays the exact same execution. `trace_level` changes what the timeline captures and never changes scheduling or randomness, so the seed replays identically at any level. Set a breakpoint. Step through. The bug is deterministic now. [Debugging a Failing Seed](../part3-building/20-debugging.md) walks through the full procedure.

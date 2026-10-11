@@ -2,244 +2,84 @@
 
 <!-- toc -->
 
-Moonpool is organized as a layered workspace. Core defines runtime-neutral
-provider contracts. Simulation and hyper integrations build on those contracts
-without depending on each other. The facade gathers the pieces applications
-usually need.
+The workspace has 16 members at version 0.8.0. Application code depends on `moonpool` (the facade) or directly on the crate it needs.
 
-## Dependency Diagram
+## Dependency Graph
 
 ```text
-                              moonpool
-                           (facade crate)
-                         /       |       \
-                        v        v        v
-             moonpool-core  moonpool-sim  moonpool-hyper  moonpool-prometheus
-                    ^        /    |    \           |
-                    |       v     v     v          |
-                    |  moonpool- moonpool- moonpool-   |
-                    |  assertions buggify  explorer    |
-                    |                        |         |
-                    |                       libc       |
-                    +----------------------------------+
+moonpool (facade)
+ |- moonpool-core                    provider traits, core types
+ |- moonpool-sim (feature sim)       simulation runtime
+ |   |- moonpool-core [deterministic-select]
+ |   |- moonpool-assertions
+ |   |- moonpool-buggify
+ |   `- moonpool-explorer (feature exploration)
+ |        `- moonpool-assertions
+ |- moonpool-hyper (feature hyper)        -> moonpool-core
+ |- moonpool-prometheus (feature prometheus) -> moonpool-core
+ `- moonpool-rpc (feature rpc)            -> moonpool-core, moonpool-buggify
+      `- moonpool-rpc-derive (feature rpc-derive)
 
-  moonpool-rpc            (typed RPC over moonpool-core; depends on no sim crate)
-  moonpool-rpc-derive     (optional typed-interface attribute for moonpool-rpc)
-  moonpool-rpc-sim        (RPC simulation campaigns and oracles)
-  moonpool-sim-examples  (raw TCP, axum, tonic, topology)
-  moonpool-wasm-demo      (browser simulation over raw TCP)
-  moonpool-calibrate      (measures the real host; depends on no moonpool crate)
-  xtask                   (simulation command runner)
+moonpool-journal   -> moonpool-core, moonpool-buggify   (not in the facade)
+moonpool-rpc-sim   -> moonpool-rpc, moonpool-sim, moonpool-core (unpublished campaigns)
+moonpool-sim-examples -> moonpool-sim, moonpool-hyper, moonpool-prometheus, moonpool-journal
+moonpool-wasm-demo -> moonpool-sim (no default features)
+moonpool-calibrate -> no moonpool crate (standalone CLI)
+xtask              -> no moonpool crate
 ```
+
+Production builds keep the simulation out: `moonpool = { default-features = false, features = ["tokio"] }`. `moonpool-sim` is never a dependency of `moonpool-rpc`, `moonpool-hyper`, `moonpool-journal` or `moonpool-prometheus` (only a dev-dependency).
 
 ## Library Crates
 
-### moonpool
+| Crate | Role | Key public items | Features |
+|-------|------|------------------|----------|
+| `moonpool` | Facade. Re-exports `moonpool_core::*` and, with `sim`, `moonpool_sim::*`. Modules `hyper`, `prometheus`, `rpc` behind features. `prelude` with `Process`, `SimContext`, `SimulationBuilder`, `Workload`. | everything below | `default = ["sim", "tokio"]`, `sim`, `tokio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-jwt` |
+| `moonpool-core` | Provider traits and core types. wasm-clean with all features off. | `TimeProvider`, `TaskProvider`, `NetworkProvider`, `TcpListenerTrait`, `RandomProvider`, `StorageProvider`, `StorageFile`, `SystemProvider`, `Providers`, `Resolver`, `Detach`, `JoinError`, `OpenOptions`, `DirectIo`, `IoConstraints`, `AlignedBuf`, `BlockFile`, `LayoutRegion`, `SystemSample`, `DiskCounters`, `SimulationError`, `SimulationResult`, `MetricsSource`, `MetricSample`, `MetricValue`, `select!`, `Tokio*` providers | `default = ["tokio-providers", "select"]`; `tokio-providers` = `tokio-task` + `tokio-time` + `tokio-net` + `tokio-fs` + `tokio-random` + `tokio-system`; `select`; `deterministic-select` |
+| `moonpool-sim` | Simulation runtime: executor, `SimWorld`, network and storage simulation, chaos, runner, assertions wiring, observability. | `SimulationBuilder`, `SimContext`, `Process`, `Workload`, `FaultInjector`, `FaultContext`, `Chaos`, `ChaosMode`, `IterationControl`, `SimulationReport`, `SimWorld`, `SimProviders`, `Invariant`, `TraceQuery`, assertion macros, `buggify_knob!`, `ExplorationConfig` | `default = ["tokio-providers", "exploration"]` |
+| `moonpool-assertions` | Assertion accounting. Pure std, zero dependencies, wasm-able. Heap table by default, `MAP_SHARED` overlay under exploration. | `AssertKind`, `AssertCmp`, `DiscoveryKind`, `DiscoveryHooks`, `reachable!`, `sometimes!`, `MAX_ASSERTION_SLOTS`, `MAX_EACH_BUCKETS`, `MAX_EACH_KEYS` | none |
+| `moonpool-buggify` | Fault-injection macros and state. Pure std, zero dependencies, wasm-able. Inert until a random source is installed. | `buggify!`, `buggify_with_prob!`, `buggify_fault_with_prob!`, `buggify_named!`, `buggify_pick!`, `buggify_range!`, `hint!`, `cpu_charge`, `set_activation`, `buggify_init`, `buggify_reset`, `is_simulated` | none |
+| `moonpool-explorer` | Frontier exploration controller: recipes, bounded worker pool, shared memory, sancov. `libc` only. Never wasm. | `Explorer`, `ExplorationConfig`, `ExploreJob`, `Recipe`, `DiscoveryEvent`, `format_timeline`, `parse_timeline`, `set_rng_count_hook`, `sancov_is_available`, `sancov_edges_covered`, `explorer_is_child` | none |
+| `moonpool-hyper` | hyper 1.x over the providers. Generic over `P: Providers`. | `HyperIo`, `HyperExecutor`, `HyperTimer`, `TowerToHyperService`, `ReconnectingChannel`, `H2Channel`, `ChannelConfig`, `KeepAlive`, `H2Server`, `H2ServerConfig`, `DEFAULT_DRAIN_TIMEOUT` | `default = ["client", "server"]` |
+| `moonpool-rpc` | Typed dynamic-endpoint RPC over the providers. | `RpcDriver`, `RpcHandle`, `ServiceClient`, `RequestStream`, `IncomingRequest`, `ReplyHandle`, `ServiceRef`, `InterfaceRef`, `ServiceGroup`, `RpcConfig`, `EndpointQueue`, `ResourceLimits`, `FailureMonitor`, `RpcError`, `ErrorReason`, `Wire`, `CodecId`, `Connector`, `Acceptor`, `Plaintext`, `#[moonpool_rpc::service]` | `default = ["prost"]`, `prost`, `derive`, `tls`, `jwt` |
+| `moonpool-rpc-derive` | Proc macro behind `moonpool-rpc/derive`. | `service` attribute | none |
+| `moonpool-prometheus` | Prometheus registry adapter: one `PrometheusSource` per node, scraped into the report. | `PrometheusSource`, `SimCounter`, `SimCounterVec`, `SimGauge`, `SimGaugeVec`, `SimHistogram`, `SimHistogramVec`, `SimTimer` | none |
+| `moonpool-journal` | CLSTORE write-ahead journal over `StorageProvider`. Positions in any order, crash told apart from corruption, identified damage, three `hint!` moments per commit. | `Journal`, `Batch`, `JournalConfig`, `JournalId`, `Durability`, `Geometry`, `Id`, `ID_SIZE`, `State`, `Recovery`, `Layout`, `Entry`, `CommitError`, `OpenError`, `ReadError`, `Durable`, `BLOCK`, `RECORD_SIZE`, `META_MAX`, `MAX_BATCH_RECORDS` | none |
 
-**Role**: Facade crate. It re-exports core provider traits and, behind features,
-the simulation runtime, the namespaced hyper integration and typed RPC.
+## Binary and Harness Crates
 
-Use the default feature set for simulation work. A production application can
-select only `tokio`, then add `hyper` if it speaks HTTP or gRPC.
+| Crate | Role | Binaries |
+|-------|------|----------|
+| `moonpool-sim-examples` | Runnable simulation workloads that xtask discovers. | `sim-maze-explore`, `sim-dungeon-explore`, `sim-axum-web`, `sim-metrics-service`, `sim-topology`, `sim-tonic-grpc`, `sim-journal` |
+| `moonpool-explorer` | Also ships the explorer's own ladder scenario. | `sim-frontier-explore` |
+| `moonpool-rpc-sim` | Simulation harness, oracles and campaigns for `moonpool-rpc`. Unpublished. | `sim-rpc-foundations`, `sim-rpc-delivery`, `sim-rpc-interfaces`, `sim-rpc-balance`, `sim-rpc-streams`, `sim-rpc-security`, `sim-rpc-qualification` |
+| `moonpool-calibrate` | Measures real storage and network latency on the host and prints `LatencyDistribution` constants as Rust. Depends on no moonpool crate. | `moonpool-calibrate` |
+| `moonpool-wasm-demo` | Browser demo embedded in the book. `run_seed(seed)`, `run_seed_json(seed)`. | wasm library |
+| `xtask` | Cargo automation: the simulation binary runner. See [Running Simulation Binaries with xtask](./08-xtask.md). | `cargo xtask` |
 
-| Feature | Adds |
-|---------|------|
-| `rpc` | `moonpool::rpc` (moonpool-rpc with its prost codec) |
-| `rpc-derive` | the `#[moonpool_rpc::service]` attribute (re-exported as `moonpool::rpc::service`; its generated code names `moonpool_rpc`, so depend on `moonpool-rpc` directly to use it) |
-| `rpc-tls` | server-authenticated TLS sessions (rustls + ring, native only) |
-| `rpc-jwt` | JWT/JWKS request verification (jsonwebtoken, native only) |
+The `moonpool` facade also carries examples: `retrying_worker` and `metastable_grpc_retry_storm`. `moonpool-rpc` carries `recruitment`, `balanced_mutation` and `stream_saturation`.
 
-### moonpool-core
+## Choosing a Dependency
 
-**Role**: The boundary between application logic and its runtime.
+| You want | Depend on |
+|----------|-----------|
+| Write a service that runs in production and in simulation | `moonpool` with `default-features = false, features = ["tokio"]` in the library, `moonpool` (defaults) in dev-dependencies |
+| Write a library with no simulation dependency, but with probes | `moonpool-core` (no default features), `moonpool-assertions`, `moonpool-buggify` |
+| Run simulations from a test or binary | `moonpool-sim` or `moonpool` with `sim` |
+| HTTP/2, gRPC through tonic | `moonpool-hyper` or `moonpool` with `hyper` |
+| Typed RPC between processes | `moonpool-rpc` or `moonpool` with `rpc` (`rpc-derive` for the attribute) |
+| Report your Prometheus metrics in the simulation report | `moonpool-prometheus` or `moonpool` with `prometheus` |
+| A crash-aware log for a consensus node | `moonpool-journal` |
+| Compile to `wasm32-unknown-unknown` | `moonpool-sim` with `default-features = false` |
 
-**Provider traits**:
+## Validation Commands
 
-- `TimeProvider` for sleeps, timeouts, and monotonic time
-- `TaskProvider` for spawned futures
-- `NetworkProvider` for TCP streams and listeners
-- `RandomProvider` for runtime-controlled randomness
-- `StorageProvider` for file operations
-- `SystemProvider` for cumulative CPU and disk counters (busyness)
-- `Providers` for carrying the six implementations as one bundle
-- `Resolver`, outside the bundle, for `host:port` name resolution
-  (`TokioResolver`; the simulation's `ScriptedResolver`)
-
-The Tokio implementations provide real production I/O. Simulation supplies
-deterministic implementations of the same traits.
-
-It also holds the registry-agnostic metrics vocabulary (`MetricsSource`,
-`MetricSample`, `SeriesRecorder`) and, in `metrics::query`, the typed
-SELECT / RATE / BUCKETIZE / MAP / REDUCE model a runner uses to declare what it
-wants summarized. Both are pure std and wasm-clean. See
-[Application Metrics](../part3-building/25-metrics.md).
-
-### moonpool-assertions
-
-**Role**: Antithesis-style assertion accounting with no dependencies.
-
-The default table lives on the heap. Explorer workers can overlay a shared
-region so discoveries and watermarks survive process boundaries. The crate is
-also usable without the simulation runner and compiles to wasm.
-
-### moonpool-buggify
-
-**Role**: Standalone `buggify!` / `buggify_with_prob!` fault-injection macros,
-`buggify_fault_with_prob!` for disruptive points that fall silent in the
-recovery tail, and their per-run activation state, with no dependencies.
-`hint!` names a moment where a crash would be interesting; the simulator
-decides whether to reboot the calling process there.
-
-Buggify is inert by default: outside a simulation every call site evaluates to
-`false`. moonpool-sim installs its seeded random source at the start of each
-run and re-exports the macros, so production and sans-I/O code can depend on
-this crate directly without pulling in the simulation runtime. `buggify_knob!`
-stays in moonpool-sim. The crate compiles to wasm.
-
-### moonpool-sim
-
-**Role**: Deterministic execution, simulated time/network/storage, chaos,
-process lifecycle, workloads, tracing invariants, and assertion wiring.
-
-**Key types**:
-
-- `SimulationBuilder` configures processes, workloads, chaos, and iterations
-- `SimContext` exposes providers, topology, shared state, and shutdown
-- `SimWorld` coordinates lifecycle and the global `Scheduler<Event>`
-- `Scheduler<Event>` owns monotonic logical time, same-time FIFO ordering, and cancellation
-- `NetworkSimulation` owns network state, topology, faults, operations, results, and wakers
-- `StorageEngine` owns persistent files, independent handles, disk behavior, operations, results, and wakers
-- `Process` describes the system under test
-- `Workload` describes the test driver
-- `Invariant` checks cross-process properties from trace events
-- `NetworkConfiguration` and `StorageConfiguration` tune fault surfaces
-
-The optional default-on `exploration` feature connects the runner to
-moonpool-explorer. Disable it for `wasm32-unknown-unknown`.
-
-### moonpool-hyper
-
-**Role**: Run real hyper, axum, and tonic stacks over provider-backed streams.
-
-**Key types**:
-
-- `HyperIo` adapts a futures-io stream to hyper's I/O traits
-- `HyperExecutor` routes hyper tasks through `TaskProvider`
-- `HyperTimer` answers hyper clock requests through `TimeProvider`
-- `TowerToHyperService` bridges tower and hyper services
-- `ReconnectingChannel` provides a lazy reconnecting h2 client channel
-- `H2Server` serves h2 connections with provider-driven shutdown and timing
-
-Client and server features are individually selectable. The featureless crate
-contains only the runtime adapters.
-
-### moonpool-journal
-
-**Role**: A CLSTORE journal (the storage layer of PAR/CTRL, FAST '18) over the
-provider traits: entries at `u64` positions written in any order, crash told
-apart from corruption, damaged entries identified. See
-[A Crash-Aware Journal](../part5-building-on-top/08-journal.md).
-
-**Key types**:
-
-- `Journal` creates, opens (recovers), commits, reads and replays
-- `Batch` stages `put`, `clear`, `truncate_prefix` and `set_meta` for one commit
-- `JournalConfig`, `Durability` (one sync or two per commit) and `Geometry`
-- `Id` (the caller's 24-byte identity) and `JournalId`
-- `State` (`Live`, `Corrupt`, `Ambiguous`) and `Recovery` report what is known
-- `Layout` and `Journal::regions` list the on-disk regions for aiming faults
-
-### moonpool-rpc
-
-**Role**: Typed request/reply RPC between dynamically allocated endpoints,
-over provider TCP. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.md).
-
-**Key types**:
-
-- `RpcDriver` owns the listener, connections, registry and pending calls
-- `RpcHandle` registers endpoints and endpoint groups (`ServiceGroup`)
-- `ServiceRef` / `InterfaceRef` are protobuf-encoded references, decodable
-  without a runtime and embeddable in application messages
-- `SecurityConfig`, `AccessPolicy`, `RequestVerifier` and `UtcClock` decide
-  who may call what (always compiled, wasm included)
-
-Features: `prost` (default codec), `derive`, and the native-only `tls`
-(`security::tls`, rustls + ring) and `jwt` (`security::jwt`, jsonwebtoken).
-Without `tls` and `jwt` the crate builds for `wasm32-unknown-unknown`.
-- `ServiceClient::try_get_reply` is one at-most-once attempt
-- `RequestStream`, `IncomingRequest` and `ReplyHandle` are the serving side
-- `RpcError` pairs an `ErrorReason` with `Execution` knowledge
-- `Wire` / `CodecId` is the body codec seam (prost by default)
-- `Connector` / `Acceptor` / `Plaintext` is the session upgrade seam
-
-It depends only on moonpool-core, never on moonpool-sim, and builds for wasm
-with or without its `prost` feature. The optional `derive` feature adds
-`#[moonpool_rpc::service]` (the `moonpool-rpc-derive` proc-macro crate), which
-generates typed interfaces on top of the manual API.
-
-### moonpool-prometheus
-
-**Role**: Report the metrics your application already keeps as simulation
-output.
-
-**Key types**:
-
-- `PrometheusSource` wraps a `prometheus::Registry` and implements
-  `MetricsSource`
-- `SimCounter`, `SimGauge`, `SimHistogram` are instrumented handles that record
-  every mutation on the simulated clock
-- `SimTimer` times a histogram observation from `TimeProvider`, not the wall
-  clock
-
-It depends only on moonpool-core, never on moonpool-sim, so the adapter is
-equally usable in production and moonpool-sim stays wasm-clean. See
-[Application Metrics](../part3-building/25-metrics.md).
-
-### moonpool-explorer
-
-**Role**: Frontier exploration through replay recipes, discovery journals,
-exemplars, and a bounded worker pool.
-
-The explorer depends on moonpool-assertions for the shared discovery contract
-and on `libc` for `fork`, `waitpid`, and shared mappings. It remains optional so
-the simulation runtime can build on wasm.
-
-## Workspace Applications
-
-### moonpool-sim-examples
-
-Runnable examples cover raw TCP topology, axum over HTTP/1, tonic over HTTP/2,
-and exploration workloads. They are demonstration binaries, not library
-dependencies.
-
-### moonpool-rpc-sim
-
-The simulation harness for moonpool-rpc: process and workload definitions, the
-receipt-ledger oracle, the `sim-rpc-foundations`, `sim-rpc-delivery`,
-`sim-rpc-interfaces`, `sim-rpc-balance`, `sim-rpc-streams` and
-`sim-rpc-security` campaigns and real-TCP examples
-(including the `balance_latency` comparison). Not published, so the RPC crate never
-depends on the simulator.
-
-### moonpool-wasm-demo
-
-A single-seed raw TCP ping/pong simulation compiled to wasm. It exports a JSON
-timeline consumed by the browser animation embedded in the book.
-
-### moonpool-calibrate
-
-A calibration CLI that measures the real host and prints
-`LatencyDistribution` constants for moonpool's storage and network latency
-knobs. Uniquely in this workspace it depends on **no moonpool crate at
-runtime**: the measurement path is raw `std::fs`, `std::net`, and
-`std::time::Instant`, because measuring through the providers would measure the
-simulator rather than the machine. See
-[Calibrating Against a Real Machine](./07-calibration.md).
-
-### xtask
-
-Cargo automation for discovering and running simulation binaries:
-
-- `cargo xtask sim list`
-- `cargo xtask sim run <filter>`
-- `cargo xtask sim run-all`
+| Command | Checks |
+|---------|--------|
+| `nix develop --command cargo fmt` | formatting |
+| `nix develop --command cargo clippy` | pedantic lints, all crates |
+| `nix develop --command cargo nextest run` | all tests |
+| `nix develop --command cargo clippy -p moonpool-sim --no-default-features --all-targets -- -D warnings` | the feature-less sim |
+| `nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features` | the wasm build |
+| `nix develop --command cargo xtask sim run-all` | every simulation binary with sancov |
+| `nix develop --command mdbook build book/` | this book |

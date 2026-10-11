@@ -1,14 +1,10 @@
 # Application Metrics
 
-Your service is probably already instrumented. There is a `prometheus::Registry`
-somewhere, a `requests_total` counter, a latency histogram, a gauge for the
-queue depth. That instrumentation exists because it is how you understand the
-system in production.
+<!-- toc -->
 
-Moonpool can report on it. Register a metrics source per simulated node and the
-counters, gauges and histograms your code already keeps show up in the
-simulation report — aggregated across seeds, attributed per node, with an exact
-time series of every mutation.
+Your service is already instrumented. Somewhere there is a `prometheus::Registry`, a `requests_total` counter, a latency histogram, a gauge for queue depth. That instrumentation exists because it is how you understand the system in production.
+
+Moonpool reports on it. Register one metrics source per simulated node, and the counters, gauges and histograms your code already keeps appear in the simulation report: aggregated across seeds, attributed per node, with an exact time series of every change.
 
 ```rust,ignore
 use std::sync::Arc;
@@ -16,8 +12,8 @@ use moonpool_prometheus::PrometheusSource;
 
 let report = SimulationBuilder::new()
     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
-    .processes(3, || Box::new(MyNode::new()))
-    .workload(MyWorkload::default())
+    .processes(3, || Box::new(MeteredKvNode::new()))
+    .workload(MeteredKvWorkload::default())
     .set_iterations(10)
     .run()?;
 
@@ -33,54 +29,42 @@ report.eprint();
   kv_requests_served_total{instance="10.0.1.1"}        6,667 total  666.70 per seed
 ```
 
-## Reading your metrics from process code
+The runnable version is [`crates/moonpool-sim-examples/src/metrics_service.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/metrics_service.rs): a key/value node with admission control, metered the way a production service is.
+
+## Reading Metrics from Process Code
 
 The source is reachable from any process or workload through its context:
 
 ```rust,ignore
-let metrics = ctx.metrics::<PrometheusSource>()
-    .ok_or_else(|| SimulationError::InvalidState("no metrics factory".into()))?;
+let source = ctx.metrics::<PrometheusSource>()
+    .ok_or_else(|| invalid_state("no metrics factory registered"))?;
 
-let served = metrics.counter("requests_served_total", "Requests served")?;
-let in_flight = metrics.gauge("requests_in_flight", "Requests running")?;
-let latency = metrics.histogram_with_buckets(
-    "request_latency_seconds",
+let served = source.counter("kv_requests_served_total", "Requests served")?;
+let in_flight = source.gauge("kv_requests_in_flight", "Requests currently being served")?;
+let latency = source.histogram_with_buckets(
+    "kv_request_latency_seconds",
     "Time to serve one request",
-    vec![0.001, 0.005, 0.010, 0.050, 0.100],
+    vec![0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250],
 )?;
 
 served.inc();
 ```
 
-These are get-or-register, which matters because a source outlives process
-reboots (see below). A rebooted process looks its metrics up instead of failing
-with `AlreadyReg`.
+`counter`, `gauge`, `histogram`, `histogram_with_buckets` and `histogram_with_opts` are get-or-register. The vector forms `counter_vec`, `gauge_vec` and `histogram_vec` take label names and hand out children with `with_label_values`. Get-or-register matters because a source outlives process reboots. A rebooted process looks its metrics up instead of failing with `AlreadyReg`.
 
-To wrap a registry your application already built, use
-`PrometheusSource::new(my_registry)`.
+To wrap a registry your application already built, use `PrometheusSource::new(registry)`.
 
-## Why per node, and why per iteration
+## Why Per Node, and Why Per Iteration
 
-Every simulated node shares one OS process. A single shared registry would
-merge three nodes' counters into one number, so the factory is keyed by IP and
-each node gets its own registry. Each sample is stamped with an `instance`
-label naming the node — Prometheus' own label for a scrape target.
+Every simulated node shares one OS process. One shared registry would merge three nodes' counters into one number. So the factory is keyed by IP, and each sample carries an `instance` label with the node's IP, Prometheus's own label for a scrape target.
 
-The factory also runs afresh every iteration. Most registries have no reset, so
-a reused instance would make seed 50 report the sum of fifty runs. This is the
-same reason a custom fault injector is registered through
-[`fault_factory`](./09-attrition.md) rather than as an instance.
+The factory also runs again every iteration. Most registries have no reset, so a reused instance would make seed 50 report the sum of fifty runs. A [custom fault injector](./31-custom-faults.md) uses `fault_factory` for the same reason.
 
-A **reboot** is the exception: a source is keyed by IP, so a crashed and
-restarted process keeps its counters, exactly as a real node's `/metrics` does
-across a restart on the same host.
+A **reboot** is the exception. The source is keyed by IP, so a restarted process keeps its counters, as a real node's `/metrics` does across a restart on the same host.
 
-## Time series, not samples
+## Time Series, Not Samples
 
-Metrics created through the source hand back instrumented handles. Every
-`inc()`, `set()` and `observe()` records a point, stamped with the **simulated**
-clock. There is no scrape interval and no sampling: the series is exact, and it
-replays bit-for-bit for a given seed.
+Metrics created through the source return instrumented handles: `SimCounter`, `SimGauge`, `SimHistogram`. Every `inc()`, `set()` and `observe()` records a point stamped with the **simulated** clock. There is no scrape interval. The series is exact, and it replays bit for bit for a given seed.
 
 ```rust,ignore
 let metrics = report.individual_metrics[0].as_ref().expect("seed passed");
@@ -92,21 +76,46 @@ for (series, points) in &metrics.app_series {
 }
 ```
 
-That is what makes a latency spike line up with the partition that caused it.
-The aggregated view on `report.app_metrics` uses this series for `min`, `max`
-and `mean`, which is why a gauge reports the range it actually moved over
-rather than whatever value it happened to rest at when the run ended.
+That is what lines a latency spike up with the partition that caused it. The aggregate on `report.app_metrics` (`MetricAggregate`) uses the series for `min`, `max` and `mean`, so a gauge reports the range it moved over, not the value it rested at when the run ended.
 
-Series are capped (10,000 points each by default; see
-`PrometheusSource::set_series_capacity`) so a hot loop cannot grow a test's
-memory without bound. `SimulationMetrics::dropped_metric_points` is non-zero
-when a series was truncated.
+Series are capped at 10,000 points each (`DEFAULT_SERIES_CAPACITY`, tunable with `PrometheusSource::set_series_capacity`), so a hot loop cannot grow a test's memory without bound. `SimulationMetrics::dropped_metric_points` is non-zero when a series was truncated.
 
-## Asking questions: metric queries
+## Timing on the Simulated Clock
 
-A raw series is data, not an answer. After five hundred seeds the question is
-usually "what throughput did this hold, and which seed was the worst?" — so the
-**runner declares what it wants to know**, and the report answers it.
+Use the handle's `start_timer`, not `prometheus`'s own:
+
+```rust,ignore
+let timer = latency.start_timer(ctx.time());
+let response = client.request(req).await?;
+timer.stop_and_record();
+```
+
+`prometheus::Histogram::start_timer()` reads the wall clock. Inside a simulation that records how fast your laptop was, and it differs on every replay of the same seed. `SimHistogram::start_timer` takes any `TimeProvider` and reads the simulated clock. `stop_and_discard()` drops a timing you do not want, and `observe_duration(d)` records a `Duration` you measured yourself.
+
+Pick bucket bounds that bracket what the simulation produces. Prometheus's defaults are tuned for real HTTP latency. A distribution that lands in one bucket tells you nothing.
+
+## Reading Metrics in check()
+
+A workload can read every node's source through `ctx.metrics_handle()`. That is how a test asserts on what the system recorded about itself:
+
+```rust,ignore
+async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+    let handle = ctx.metrics_handle();
+    let samples = handle.collect_all();
+    assert_always!(!samples.is_empty(), "the nodes recorded something over five simulated seconds");
+
+    let series = handle.collect_series();
+    assert_sometimes!(
+        series.keys().any(|k| k.starts_with("kv_request_latency")),
+        "latency observations are recorded as a time series"
+    );
+    Ok(())
+}
+```
+
+## Asking Questions: Metric Queries
+
+A raw series is data, not an answer. After five hundred seeds the question is "what throughput did this hold, and which seed was worst?" So the **runner declares what it wants to know**, and the report answers:
 
 ```rust,ignore
 use std::time::Duration;
@@ -145,52 +154,35 @@ let report = SimulationBuilder::new()
     across runs:  p50 5,991  p95 6,071  p99 6,094
 ```
 
-`min` and `max` name the seed that produced them, so the worst run goes
-straight into `set_debug_seeds(vec![9182])`.
+`min` and `max` name the seed, so the worst run goes straight into `set_debug_seeds(vec![9182])`. Results travel with the report in `SimulationReport::metric_queries`, one `MetricQueryReport` per query, with every per-seed `MetricQueryRow`.
 
-Queries are declared before `run()` and their results travel with the report,
-in `SimulationReport::metric_queries`. Nothing reconstructs them afterwards
-from raw snapshots: the runner already knew what mattered.
-
-### The operations
+### The Operations
 
 | Op | What it does |
 |----|--------------|
 | `select(name)` + `.label(k, v)` | pick series by name and label subset |
-| `.rate()` | monotonic counter → per-second rate, on simulated time |
+| `.rate()` | monotonic counter to per-second rate, on simulated time |
 | `.bucketize(width, agg)` | regularize into fixed simulated-time buckets |
-| `.fill(policy)` | repeat an existing value into the empty buckets |
-| `.interpolate()` | compute the empty buckets from their neighbours |
-| `.map(window, agg)` | rolling window over one series' points |
+| `.fill(policy)` | repeat an existing value into empty buckets |
+| `.interpolate()` | compute empty buckets from their neighbours |
+| `.map(window, agg)` | rolling window over one series |
 | `.reduce(agg)` / `.reduce_by(label, agg)` | combine across series |
+| `.named(name)` | finish the plan |
 
-The aggregators are `Min`, `Mean`, `Max` and `Percentile(p)` — nothing else.
+The aggregators are `Min`, `Mean`, `Max` and `Percentile(p)`. Nothing else.
 
-**Counter semantics are explicit.** `.rate()` is the only place a series is
-read as a counter; `bucketize(_, Mean)` on a raw counter honestly reports the
-mean *cumulative value*, not a throughput. A drop in a counter's value is read
-as a reset, Prometheus style. Because a fresh source is built per iteration,
-every counter is zero at simulated time zero, so the very first increment is
-rated too.
+**Counter semantics are explicit.** `.rate()` is the only place a series is read as a counter. `bucketize(_, Mean)` on a raw counter reports the mean cumulative value, not a throughput. A drop in a counter is read as a reset, Prometheus style. Every counter starts at zero at simulated time zero, so the first increment is rated too.
 
-### Empty buckets
+### Empty Buckets
 
-`bucketize` omits a bucket nothing landed in, because a gap and a zero are
-different facts: a workload that stopped reporting is not a workload reporting
-zero. Two ops say which one this metric means, split the way Warp 10 splits
-them — `.fill(policy)` **repeats a value the series already has**, while
-`.interpolate()` **computes one it never had**:
+`bucketize` omits a bucket nothing landed in, because a gap and a zero are different facts. Two ops say which one you mean, the way Warp 10 splits them. `.fill` **repeats a value the series has**. `.interpolate` **computes one it never had**.
 
 | Op | Gives empty buckets | Leaves empty |
 |----|---------------------|--------------|
 | `.fill(Fill::Previous)` | the last known value | leading gaps |
 | `.fill(Fill::Next)` | the next known value | trailing gaps |
-| `.fill(Fill::Value(v))` | `v` — no neighbour needed | nothing |
-| `.interpolate()` | a point on the line between the two neighbours | leading and trailing gaps |
-
-Reach for a fill when the quantity holds its value between observations (or is
-simply zero when nothing happened), and `.interpolate()` when it moves
-continuously — a queue depth, a replication lag.
+| `.fill(Fill::Value(v))` | `v`, no neighbour needed | nothing |
+| `.interpolate()` | a point on the line between neighbours | leading and trailing gaps |
 
 ```text
 bucket                     0 |    1 |    2 |    3 |    4
@@ -201,55 +193,15 @@ no fill                   10 |    - |    - |   40 |    -
 .interpolate()            10 |   20 |   30 |   40 |    -
 ```
 
-They compose, in call order: `.interpolate().fill(Fill::Value(0.0))` draws the
-line through the interior gaps and zeroes the ends interpolation cannot reach.
+Use a fill when the quantity holds between observations, or is zero when nothing happened. Use `.interpolate()` when it moves continuously: a queue depth, a replication lag. They compose in call order. The grid runs from bucket zero to the run's end, so with `Fill::Value(0.0)` every window sees every seed and `min` and `max` compare like with like.
 
-Either way the grid runs from bucket zero to the bucket holding the run's end,
-so a workload that went quiet halfway through gets buckets for the silence
-instead of the series just stopping.
+**Series identity is name plus label set.** Matching is by subset: a query naming `operation="write"` also matches a series carrying `instance="10.0.1.1"`. Every result row carries `seed` and `run_id` as moonpool fields, never injected into your labels.
 
-That matters for more than tidiness. Without a fill, a seed's bucket set
-depends on when *that* seed happened to be busy, so the across-run summary
-splits one window into several — each with a fraction of the runs in it, and
-`min`/`max` no longer comparing like with like:
+### Percentiles That Mean Something
 
-```text
-# unfilled: two seeds busy in different minutes
-[0s,60s)     runs: 1
-[120s,180s)  runs: 1
+`mean(p99(node_a), p99(node_b))` is not a p99, and neither is `p99(p99(a), p99(b))`. Once observations collapse into a percentile, a percentile of that has no meaning.
 
-# Fill::Value(0.0): one grid, every window sees every seed
-[0s,60s)     runs: 2   min 0  max 5
-[60s,120s)   runs: 2   min 0  max 0
-[120s,180s)  runs: 2   min 0  max 5
-```
-
-Neither op collapses nor restores a distribution, so both leave the stage — and
-with it whether `Percentile` still applies — unchanged. Both read the
-*recorded* buckets only, never the ones they just synthesized, so a carried
-value is the last real observation and a run of interpolated gaps is one
-straight line rather than a curve that drifts. A series that recorded nothing
-at all stays empty: a policy alone must not conjure a metric the run never
-touched.
-
-**Series identity is name plus label set**, canonically ordered, so two
-label sets that differ only in insertion order are the same series. Matching is
-by subset: a query naming `operation="write"` also matches a series carrying
-`instance="10.0.1.1"`.
-
-**Moonpool's own metadata stays out of your labels.** Every result row carries
-`seed` (the replayable identity of one iteration) and `run_id` (the identity of
-the whole `run()` invocation) as moonpool-side fields, never injected into the
-application's Prometheus labels.
-
-### Percentiles that mean something
-
-`mean(p99(node_a), p99(node_b))` is not a p99, and `p99(p99(a), p99(b))` is not
-one either. Once observations are collapsed into a percentile, the percentile
-of *that* is a number without a meaning.
-
-The builder enforces this at compile time. Each stage tracks what its values
-are, and `Percentile` only applies where the individual observations survive:
+The builder enforces this at compile time. Each stage tracks what its values are, and `Percentile` applies only where the observations survive:
 
 ```rust,ignore
 // Compiles: the raw histogram observations are still there.
@@ -264,85 +216,30 @@ MetricQuery::select("request_latency_seconds")
     .named("nonsense");
 ```
 
-`Min`, `Mean` and `Max` apply anywhere — "the mean of each node's p99" is a
-useful number as long as nobody calls it a p99, which is why the report prints
-each query's provenance (`observations`, `scalar` or `percentile-derived`).
+`Min`, `Mean` and `Max` apply anywhere. "The mean of each node's p99" is a useful number as long as nobody calls it a p99, which is why the report prints each query's provenance: `observations`, `scalar` or `percentile-derived`. The `p50`, `p95` and `p99` in the summary block are a different dimension, taken **across runs** with one value per seed.
 
-The percentiles in the summary block are a different dimension: they are taken
-*across runs*, where every seed contributes one equally-weighted value. `p95`
-there names the 95th-percentile run, which is why the report labels it
-`across runs`.
+## Worked Example: a Metastable Failure
 
-## Worked example: watching a metastable failure
-
-Totals tell you what a run did; the recorded series tells you *when* it went
-wrong, which is the only way to see a failure that outlives its cause.
-[`crates/moonpool/examples/metastable_grpc_retry_storm.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool/examples/metastable_grpc_retry_storm.rs)
-is the demonstration: a real gRPC service with a bounded worker pool, an
-open-loop client with an aggressive timeout and retries, and exactly one
-temporary slowdown in the middle of the run.
+Totals say what a run did. The series says **when** it went wrong, which is the only way to see a failure that outlives its cause. [`crates/moonpool/examples/metastable_grpc_retry_storm.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool/examples/metastable_grpc_retry_storm.rs) is the demonstration: a real gRPC service with a bounded worker pool, an open-loop client with an aggressive timeout and retries, and one temporary slowdown in the middle of the run.
 
 ```bash
 cargo run --release --example metastable_grpc_retry_storm \
     --features hyper,prometheus -- --seed 1
 ```
 
-It reads back the series the run recorded, runs the query pipelines above over
-them — `.rate().bucketize(1s, Mean).fill(Fill::Value(0.0))` for counters,
-`.bucketize(1s, Mean).fill(Fill::Previous)` for gauges — and prints the buckets
-as an ASCII graph on stdout, one column per simulated second, with the trigger
-window marked. No Grafana, no browser, no export step.
+It runs query pipelines over the recorded series and prints the buckets as an ASCII graph, one column per simulated second. The slowdown lasts 650 ms. The service never recovers: retries from that window keep the server saturated for the remaining 29 seconds at the same offered load it carried before. The trigger is gone, the bad state is not.
 
-What the graph shows is a *metastable* failure. The slowdown lasts 650 ms. The
-service never recovers from it: retries provoked by that excursion keep the
-server saturated for the remaining 29 seconds, at exactly the offered load it
-carried comfortably before. The trigger is gone; the bad state is not.
+`--search 0..64` runs a range of seeds and prints one line each. Some seeds absorb the trigger and others fall into the storm. Same code, same configuration, different seed. That is the evidence that the bad state is a second stable operating point.
 
-`--search 0..64` runs a range of seeds and prints one summary line each. The
-trigger sits on the tipping point, so some seeds absorb it and return to the
-healthy operating point while others fall into the storm and stay there — same
-code, same configuration, different seed. That is the clearest evidence
-available that the bad state is a second stable operating point rather than a
-broken setting, and it is exactly the kind of question the recorded series is
-there to answer.
+## What Metrics Are Not
 
-## Timing on the simulated clock
+Metric values are **reported, never used to steer the simulation**. Not everything in a registry is deterministic. A metric fed from the wall clock is not. The runner treats a scrape as an observation. To enforce a property, [assert](./12-assertions.md) on it: metrics tell you the shape of a run, assertions tell you whether it was correct.
 
-Use `start_timer` from this crate, not `prometheus`' own:
-
-```rust,ignore
-let timer = latency.start_timer(ctx.time());
-let response = client.request(req).await?;   // observed even on an early return
-timer.stop_and_record();
-```
-
-`prometheus::Histogram::start_timer()` reads the wall clock. Inside a
-simulation that records how fast your laptop happened to be, not the latency
-the simulation modeled, and it gives a different answer on every replay of the
-same seed. `SimHistogram::start_timer` reads the provider clock instead.
-
-Pick bucket bounds that bracket what your simulation produces.
-Prometheus' defaults are tuned for real HTTP latency; simulated latencies often
-live on a different scale, and a distribution that lands entirely in the last
-bucket tells you nothing.
-
-## What metrics are not
-
-Metric values are **reported, never used to steer the simulation**. Not
-everything in a registry is deterministic — a metric fed from the wall clock,
-or from a library's own internal timing, is not — so the runner treats a scrape
-as an observation. If you want a property enforced, assert on it: metrics tell
-you the shape of a run, [assertions](./12-assertions.md) tell you whether it was
-correct.
-
-Under [fork-based exploration](../part5-building-on-top/01-exploration.md), only
-root timelines are scraped. Explored timelines report back through the shared
-assertion table, which carries no metric values.
+Under [fork-based exploration](../part5-building-on-top/01-exploration.md), only root timelines are scraped. Explored timelines report through the shared assertion table, which carries no metric values.
 
 ## Beyond Prometheus
 
-`PrometheusSource` is one implementation of `MetricsSource`, a registry-agnostic
-trait in `moonpool-core`:
+`PrometheusSource` is one implementation of `MetricsSource`, a registry-agnostic trait in `moonpool-core`:
 
 ```rust,ignore
 pub trait MetricsSource: Send + Sync + 'static {
@@ -353,8 +250,4 @@ pub trait MetricsSource: Send + Sync + 'static {
 }
 ```
 
-`collect` alone is enough for a scrape-only adapter over any registry. The other
-three are what an adapter implements to deliver an exact time series
-(`dropped_points` reports how many points a capped series discarded). An
-OpenTelemetry adapter slots in the same way, with no change to the simulation
-runner.
+`collect` alone makes a scrape-only adapter over any registry. The other three deliver an exact time series, with `SeriesRecorder` from `moonpool-core` doing the stamping and capping. An OpenTelemetry adapter slots in the same way, with no change to the runner.

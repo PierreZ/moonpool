@@ -2,27 +2,21 @@
 
 <!-- toc -->
 
-The explorer is most useful for Paxos, Raft, and replicated logs when it is
-given two different kinds of signal: strict safety invariants that catch bugs,
-and semantic progress assertions that tell the frontier which prefixes are
-worth continuing. Code coverage alone reports that a branch ran; it does not
-provide the RNG-coordinate anchor used to build a recipe.
+Paxos, Raft and replicated logs are where exploration pays off. Their worst bugs need a sequence: a leader change, then a stale acceptor, then a client retry inside the gap. The explorer finds such sequences when the workload gives it two different signals. **Safety invariants** catch the bug. **Semantic progress assertions** tell the frontier which prefixes are worth continuing. Code coverage reports that a branch ran, but it carries no RNG coordinate, so it never anchors a recipe.
 
-## Start Conservatively
+## Start With Workers 0
 
-Use fork-free exploration while validating a new integration:
+Validate a new integration without `fork()`:
 
 ```rust,ignore
 use moonpool_sim::{ExplorationConfig, SimulationBuilder, WorkloadCount};
 
 let report = SimulationBuilder::new()
     .processes(3, || Box::new(PaxosNode::new()))
-    .workloads(WorkloadCount::Fixed(1), |_| {
-        Box::new(PaxosWorkload::new())
-    })
+    .workloads(WorkloadCount::Fixed(1), |_| Box::new(PaxosWorkload::new()))
     .invariant(AgreementInvariant::default())
     .enable_exploration(ExplorationConfig {
-        workers: 0,
+        workers: 0,              // deterministic search order, no fork
         max_runs_per_seed: 2_000,
         branching_factor: 4,
         max_frontier: 512,
@@ -32,55 +26,49 @@ let report = SimulationBuilder::new()
     .run()?;
 ```
 
-`workers: 0` makes controller order deterministic and avoids `fork()` while
-the test-driver lifecycle is being audited. Increase the worker count only in
-a standalone simulation binary on Linux or macOS, after confirming the host
-process has no unrelated threads or external resources that a child could
-inherit.
-
-Use `.workload_factory(...)` or `.workloads(...)` for the client driver.
-Exploration rejects a single `.workload(instance)` and custom fault-injector
-instances because those opaque values cannot be reconstructed for every
-continuation. Built-in `Chaos` surfaces are supported.
-Keep authoritative test state inside fresh processes and factory-created
-workloads; do not depend on external clocks, randomness, threads, files, or
-sockets outside Moonpool providers.
+Exploration needs factory workloads (`workload_factory` or `workloads`). A single `.workload(instance)` cannot be rebuilt for every continuation, so `run()` returns `InvalidConfiguration`. Processes are always factory-built, and a custom `FaultInjector` comes through `fault_factory`, so both work under exploration. Raise `workers` only in a standalone simulation binary on Linux or macOS, once the harness has no unrelated threads, sockets or files that a child could inherit.
 
 ## Put Safety in Invariants
 
-Emit stable, structured facts from the Paxos implementation:
+Emit the protocol's facts as plain `tracing` events from the node code:
 
 ```rust,ignore
-tracing::info!(
-    target: "paxos",
-    slot,
-    ballot,
-    value = %value_hash,
-    "value_chosen"
-);
+tracing::info!(target: "paxos", slot, ballot, value = %value_hash, "value_chosen");
 ```
 
-Then check cross-node and cross-time properties with cursor-based invariants.
-For Paxos, the minimum useful set is:
+Then check cross-node, cross-time properties after every simulation step with a cursor-based `Invariant`. The canonical pattern is `crates/moonpool-sim/tests/leader_election.rs`:
 
-- **Agreement:** two chosen events for the same slot never name different
-  values.
-- **Validity:** every chosen value was proposed by a client.
-- **Acceptor persistence:** after a promise or acceptance survives `sync_all`,
-  a reboot never reveals an older ballot or a conflicting accepted value.
-- **Prefix consistency:** for Multi-Paxos, committed logs on any two nodes agree
-  throughout their common prefix.
-- **Client semantics:** retries do not create two successful outcomes for one
-  non-idempotent command.
+```rust,ignore
+fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+    let mut seen = self.seen.borrow_mut();
+    for e in q.since("leader_elected", &self.cursor) {
+        let term = e.u64("term").expect("leader_elected carries a term");
+        let leader = e.str("leader").expect("leader_elected carries a leader").to_owned();
+        if let Some(prior) = seen.get(&term) {
+            // One leader per term. A second claim is split-brain.
+            assert_always!(prior == &leader, format!("split-brain at term {term}: {prior} vs {leader}"));
+        } else {
+            seen.insert(term, leader);
+        }
+    }
+}
+```
 
-The agreement example in [Events and Invariants](../part3-building/17-events-and-invariants.md)
-shows the full `TraceQuery::since` pattern. Run these checks after every
-simulation step; do not wait until the workload finishes, because a later
-state can hide a transient safety violation.
+The minimum useful set for Paxos:
+
+| Property | Check |
+|----------|-------|
+| Agreement | Two `value_chosen` events for one slot never name different values. |
+| Validity | Every chosen value was proposed by a client. |
+| Acceptor persistence | After a promise survives `sync_all`, a reboot never reveals an older ballot. |
+| Prefix consistency | Committed logs on any two nodes agree on their common prefix. |
+| Client semantics | A retry never produces two successful outcomes for one non-idempotent command. |
+
+Run the checks every step. A later state can hide a transient violation that a final check would miss. See [Events and Invariants](../part3-building/17-events-and-invariants.md) for the full pattern.
 
 ## Add Semantic Replay Anchors
 
-Use discovery assertions for qualitatively different protocol states:
+Discovery assertions name the protocol states the frontier should return to. Only the sometimes family creates discoveries. The always family records violations and a reporting watermark but never guides the search.
 
 ```rust,ignore
 assert_sometimes!(leader_changed, "paxos leader changed");
@@ -94,8 +82,7 @@ assert_sometimes_all!("failover made progress", [
 ]);
 ```
 
-Use watermarks for monotonic depth. They let later runs improve a frontier
-instead of consuming one static discovery:
+Watermarks give the explorer monotonic depth. Each improvement is a `WatermarkImprovement` discovery, so a later timeline can push the frontier instead of consuming one static milestone:
 
 ```rust,ignore
 assert_sometimes_greater_than!(decided_slots, 32, "many slots decided");
@@ -103,53 +90,36 @@ assert_sometimes_greater_than!(ballot_changes, 4, "repeated ballot changes");
 assert_sometimes_greater_than!(retry_depth, 3, "deep client retry chain");
 ```
 
-Use `assert_sometimes_each!` for a small, bounded state vocabulary:
+Use `assert_sometimes_each!` for a small, bounded state vocabulary with a quality value:
 
 ```rust,ignore
-assert_sometimes_each!(
-    "paxos transition",
+assert_sometimes_each!("paxos transition",
     [("phase", phase_code), ("fault regime", fault_regime_code)],
-    [("decided slots", decided_slots)]
-);
+    [("decided slots", decided_slots)]);
 ```
 
-Keep identity keys coarse. The shared table holds 2048 assertion sites and 256
-`sometimes_each` buckets. Bucketing every node, ballot, slot, and value tuple
-will exhaust it quickly and teaches the controller identifiers rather than
-protocol structure. Good identity dimensions are phase, role, quorum state,
-recovery mode, and fault regime; good quality values are decided-slot count,
-ballot depth, retry depth, and inverse replica lag.
+Keep identity keys coarse. The shared table holds 2048 assertion sites, 256 `sometimes_each` buckets, and at most 6 keys per site. Bucketing every node, ballot, slot and value exhausts the table and teaches the controller identifiers instead of protocol structure. Good identity dimensions: phase, role, quorum state, recovery mode, fault regime. Good quality values: decided slot count, ballot depth, retry depth, inverse replica lag.
 
-## Combine Exploration with Broad Seeds
+## Combine Exploration With Broad Seeds
 
-Exploration is semantic-guided randomized testing, not exhaustive model
-checking or a proof of Paxos safety. Recipes change the counted simulation RNG
-after an anchor, while executor and `select!` ordering remain derived from the
-root seed. Discovery latches are cumulative across seeds, so static boolean
-milestones mostly guide the first seed that reaches them.
+Exploration is semantic-guided randomized testing. It is not model checking and not a proof of safety. Discovery latches are cumulative across seeds, so a static boolean milestone guides only the first seed that reaches it. Watermarks and buckets let later seeds still contribute progress.
 
-Keep broad multi-seed testing enabled. Dynamic buckets and watermarks let later
-seeds contribute new semantic progress, while `UntilCoverageStable` samples
-new root schedules until assertion and code coverage plateau.
+Keep the default `UntilCoverageStable` control. It samples new root profiles (network, storage, attrition regimes) until the coverage signal plateaus, while exploration deepens each root. The two are complementary: breadth across profiles, depth inside each one.
 
 ## Replay Every Failure
 
-An exploration bug marks its root seed as failed and appears in
-`report.exploration.bug_recipes`. Reproduce it with a fresh builder and fresh
-driver state:
+An exploration bug marks its root seed failed and lands in `report.exploration.bug_recipes`. Reproduce it with a fresh builder before diagnosing it:
 
 ```rust,ignore
 let bug = report
     .exploration
     .as_ref()
-    .and_then(|exploration| exploration.bug_recipes.first())
+    .and_then(|e| e.bug_recipes.first())
     .expect("exploration found a bug recipe");
 
 let replay = SimulationBuilder::new()
     .processes(3, || Box::new(PaxosNode::new()))
-    .workloads(WorkloadCount::Fixed(1), |_| {
-        Box::new(PaxosWorkload::new())
-    })
+    .workloads(WorkloadCount::Fixed(1), |_| Box::new(PaxosWorkload::new()))
     .invariant(AgreementInvariant::default())
     .replay_timeline(bug.seed, bug.recipe.clone())
     .run()?;
@@ -157,24 +127,17 @@ let replay = SimulationBuilder::new()
 assert_eq!(replay.failed_runs, 1);
 ```
 
-If replay does not reproduce, audit the integration for direct Tokio calls,
-unseeded collections or randomness, reused workload state, and external I/O. A recipe is exact only when the entire test harness is
-deterministic and starts each timeline from the same logical state.
+If the replay does not reproduce, the harness is not deterministic. Audit for direct `tokio::` calls, `tokio::select!` instead of `moonpool_sim::select!`, `HashMap` iteration order, `std::time`, threads, or I/O outside the providers. `SimulationBuilder::check_determinism()` runs each seed twice and reports a `DeterminismViolation` with the first diverging draw.
 
-## Current Operational Limits
+## Operational Limits
 
-Before treating explorer results as a CI gate for a consensus system, account
-for these limits:
+Account for these before using the explorer as a CI gate:
 
-- Forked workers have no independent wall-clock deadline; blocking code in a
-  child can stall the controller. Moonpool's simulated-time budget only helps
-  when the deterministic executor continues making events.
-- Parallel workers may discover shared assertion novelty in finish order, so
-  search order is not reproducible even though each captured recipe is.
-- A worker crash after claiming a discovery can lose that discovery's journal
-  anchor for the rest of the run.
-- Sanitizer coverage is a reporting and plateau signal, not a frontier anchor.
+| Limit | Consequence |
+|-------|-------------|
+| Workers > 0 finish in wall-clock order | Each recipe replays exactly, but the **search order** and the set of found bugs can differ between campaigns. |
+| A worker crash loses its journal | The recipe is kept as a crash reproducer, but discoveries it claimed are not expanded. |
+| Sancov is a plateau signal only | Code coverage never anchors a recipe. Use assertions for guidance. |
+| The 5-minute worker ceiling | A worker blocked outside the simulation is killed and recorded as a crash with its recipe. |
 
-For a correctness-critical Paxos suite today, use exploration to supplement
-the ordinary multi-seed simulation, keep `workers: 0` for deterministic CI,
-and replay every captured failure before diagnosing it.
+For a correctness-critical consensus suite today: keep `workers: 0` in `cargo nextest`, run the forked binary through `cargo xtask sim run`, and replay every captured failure.

@@ -1,6 +1,18 @@
-//! Simulation metrics and reporting.
+//! The result of a campaign: [`SimulationReport`] and its parts.
 //!
-//! This module provides types for collecting and reporting simulation results.
+//! [`SimulationBuilder::run`](crate::SimulationBuilder::run) returns a
+//! report. Failing seeds are data in the report, not an `Err`:
+//!
+//! - [`SimulationReport::is_failure`] is the gate for a test: a failing
+//!   seed, an assertion violation or a dropped assertion slot.
+//! - [`SimulationReport::seeds_failing`] lists the seeds to replay with
+//!   [`set_debug_seeds`](crate::SimulationBuilder::set_debug_seeds).
+//! - [`SimulationReport::coverage_violations`] lists `sometimes` assertions
+//!   that never fired.
+//! - [`SimulationReport::exploration`] holds the [`ExplorationReport`] and
+//!   its [`BugRecipe`]s when exploration ran.
+//! - [`SimulationReport::eprint`] prints the report to stderr, with colour
+//!   on a terminal; its `Display` output is the same text without colour.
 
 use std::collections::BTreeMap;
 use std::fmt;

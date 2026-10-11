@@ -1,39 +1,90 @@
 //! # moonpool-rpc-derive
 //!
-//! The optional `#[service]` attribute of `moonpool-rpc`, re-exported as
-//! `moonpool_rpc::service` behind its `derive` feature. Do not depend on
-//! this crate directly.
+//! The optional `#[service]` attribute of `moonpool-rpc`. It is re-exported
+//! as `moonpool_rpc::service` behind the `derive` feature of `moonpool-rpc`.
+//! Do not depend on this crate directly.
 //!
-//! From one trait it generates a typed interface built **only** on the
-//! manual API — the attribute owns no registry, protocol, delivery or
-//! retry semantics:
+//! From one trait, the attribute generates a typed interface that is built
+//! **only** on the manual API of `moonpool-rpc`. The attribute owns no
+//! registry, protocol, delivery or retry semantics. Everything it generates
+//! can be written by hand, and `moonpool-rpc/tests/derive.rs` tests both
+//! forms for the same ids, bytes and behavior.
 //!
-//! ```text
+//! # Quick example
+//!
+//! ```rust
+//! # use moonpool_rpc::__private::Providers;
+//! use moonpool_rpc::{AccessClass, RpcError, RpcHandle, RpcInterface, RpcMethod};
+//!
 //! #[moonpool_rpc::service(id = 0x6b76_0001, version = 1)]
 //! pub trait Kv {
+//!     /// Read a key.
 //!     #[method(id = 1, schema = 1)]
-//!     async fn get(&self, request: GetRequest) -> GetReply;
+//!     async fn get(&self, key: String) -> String;
+//!     /// Record a key; nothing to answer.
 //!     #[method(id = 2, schema = 1)]
-//!     async fn put(&self, request: PutRequest) -> PutReply;
+//!     async fn touch(&self, key: String);
 //! }
+//!
+//! // The handler implements the rewritten trait.
+//! struct Store;
+//! impl Kv for Store {
+//!     async fn get(&self, key: String) -> String {
+//!         format!("value of {key}")
+//!     }
+//!     async fn touch(&self, _key: String) {}
+//! }
+//!
+//! /// Register the group and serve it until every request stream ends.
+//! async fn serve<P: Providers>(rpc: &RpcHandle<P>) -> Result<(), RpcError> {
+//!     let server = KvServer::register(rpc, AccessClass::Public)?;
+//!     // Hand this reference (protobuf bytes) to the callers.
+//!     let _published: KvRef = server.interface_ref();
+//!     server.serve(&Store).await;
+//!     Ok(())
+//! }
+//!
+//! /// Call one method; every delivery mode of `ServiceClient` is there.
+//! async fn call<P: Providers>(rpc: &RpcHandle<P>, kv: &KvRef) -> Result<String, RpcError> {
+//!     KvClient::bind(kv, rpc)?.get().try_get_reply(&"a".to_string()).await
+//! }
+//!
+//! assert_eq!(KvInterface::INTERFACE.get(), 0x6b76_0001);
+//! assert_eq!(KvTouch::METHOD.get(), 2);
 //! ```
 //!
-//! expands to, beside the rewritten handler trait `Kv` (each method
-//! returning a `Send` future):
+//! # Generated items
+//!
+//! For a trait `Kv`, the attribute keeps the handler trait `Kv` (each
+//! method rewritten to return a `Send` future) and adds:
 //!
 //! | Item | What it is |
 //! |---|---|
-//! | `KvInterface` | the [`RpcInterface`] marker, with the explicit id and version |
-//! | `KvGet`, `KvPut` | one [`RpcMethod`] + `InterfaceMethod<KvInterface>` marker per method, with the explicit method id and schema |
+//! | `KvInterface` | The [`RpcInterface`] marker, with the explicit id and version |
+//! | `KvGet`, `KvTouch` | One [`RpcMethod`] and `InterfaceMethod<KvInterface>` marker per method, with the explicit method id and schema |
 //! | `KvRef` | `InterfaceRef<KvInterface>`: the serialisable reference |
-//! | `KvClient<P>` | a bound reference: `kv.get()` is a `ServiceClient` with every delivery mode |
-//! | `KvRequest` | one variant per method, holding the `IncomingRequest` (and so its `ReplyHandle`) |
-//! | `KvServer` | the registered group and its request streams: `next()` pulls the next request of any method, `dispatch` runs a handler and replies, `serve` loops |
+//! | `KvClient<P>` | A bound reference: `KvClient::bind(&reference, &rpc)`, then `kv.get()` is a `ServiceClient` with every delivery mode |
+//! | `KvRequest` | One variant per method, holding the `IncomingRequest` (and so its `ReplyHandle`) |
+//! | `KvServer` | The registered group and its request streams: `register`, `interface_ref`, `group`, `next` (the next request of any method), `dispatch` (run a handler and reply), `serve` (loop) |
 //!
-//! Ids are required and explicit, never derived from names or order; a
-//! duplicate method id is a compile error. Nothing is hidden: a server
-//! that needs another reply policy (never reply, reply later, look at the
-//! peer) matches on `KvRequest` and uses the `ReplyHandle` itself.
+//! # Rules
+//!
+//! - **Explicit ids.** The attribute takes `id` (the `u32` interface id)
+//!   and `version` (the `u16` interface version). Each method takes
+//!   `#[method(id = <u32>, schema = <u16>)]`. Ids never come from names or
+//!   order.
+//! - **No duplicates.** A duplicate method id is a compile error, also
+//!   when it hides behind a constant.
+//! - **Wire types.** Every method is `async fn name(&self, request: T) ->
+//!   R`, where `T` and `R` implement `moonpool_rpc::Wire`. A method with no
+//!   return type replies `()`.
+//! - **Nothing hidden.** A server that needs another reply policy (never
+//!   reply, reply later, look at the peer) matches on `KvRequest` and uses
+//!   the `ReplyHandle` itself.
+//!
+//! # Feature flags
+//!
+//! None. Enable the `derive` feature of `moonpool-rpc` instead.
 //!
 //! [`RpcInterface`]: https://docs.rs/moonpool-rpc/latest/moonpool_rpc/trait.RpcInterface.html
 //! [`RpcMethod`]: https://docs.rs/moonpool-rpc/latest/moonpool_rpc/trait.RpcMethod.html

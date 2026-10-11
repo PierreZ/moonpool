@@ -400,7 +400,22 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
 
 /// Assert that a condition is always true.
 ///
-/// Tracks pass/fail in shared memory for cross-process visibility.
+/// A violation fails the seed at the end of the iteration. The optional
+/// third argument prints details with the violation:
+///
+/// ```rust
+/// use moonpool_sim::assert_always;
+///
+/// let (acked, durable) = (7_u64, 7_u64);
+/// assert_always!(durable >= acked, "no acknowledged write is lost");
+/// assert_always!(durable >= acked, "no acknowledged write is lost", {
+///     "acked" => acked,
+///     "durable" => durable,
+/// });
+/// ```
+///
+/// Tracks pass/fail in the assertion table (shared memory under the
+/// `exploration` feature, so forked timelines count too).
 /// Does **not** panic — records the violation via `record_always_violation()`
 /// and logs at ERROR level with the seed, following the Antithesis principle
 /// that assertions never crash the program.
@@ -700,7 +715,10 @@ macro_rules! assert_sometimes_less_than_or_equal_to {
 ///
 /// # Usage
 ///
-/// ```ignore
+/// ```rust
+/// use moonpool_sim::assert_sometimes_all;
+///
+/// let (node_a_healthy, node_b_healthy, node_c_healthy) = (true, true, false);
 /// assert_sometimes_all!("all_nodes_healthy", [
 ///     ("node_a", node_a_healthy),
 ///     ("node_b", node_b_healthy),
@@ -722,7 +740,10 @@ macro_rules! assert_sometimes_all {
 ///
 /// # Usage
 ///
-/// ```ignore
+/// ```rust
+/// use moonpool_sim::assert_sometimes_each;
+///
+/// let (lock_id, depth, floor, hp) = (3_u32, 2_u32, 5_i64, 40_i64);
 /// // Identity keys only
 /// assert_sometimes_each!("gate", [("lock", lock_id), ("depth", depth)]);
 ///

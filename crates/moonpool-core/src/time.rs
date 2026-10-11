@@ -1,7 +1,26 @@
-//! Time provider abstraction for simulation and real time.
+//! Time: [`TimeProvider`], with [`TokioTimeProvider`] for production.
 //!
-//! This module provides a unified interface for time operations that works
-//! seamlessly with both simulation time and real wall-clock time.
+//! Every sleep, timeout and clock read in application code goes through this
+//! trait. In production it is the wall clock. In simulation it is logical
+//! time: the simulator jumps the clock to the next event, so a test that
+//! sleeps for an hour of simulated time finishes in microseconds. The
+//! simulated [`timer`](TimeProvider::timer) also drifts ahead of
+//! [`now`](TimeProvider::now), so leases and heartbeats meet clock drift.
+//!
+//! ```rust
+//! use std::time::Duration;
+//!
+//! use moonpool_core::{TimeError, TimeProvider};
+//!
+//! /// Wait for `ready`, but never longer than one second.
+//! async fn bounded<T: TimeProvider>(time: &T, ready: impl Future<Output = ()> + Send) -> bool {
+//!     match time.timeout(Duration::from_secs(1), ready).await {
+//!         Ok(()) => true,
+//!         Err(TimeError::Elapsed) => false,
+//!         Err(TimeError::Shutdown) => false,
+//!     }
+//! }
+//! ```
 
 use std::time::Duration;
 use thiserror::Error;
@@ -18,11 +37,11 @@ pub enum TimeError {
     Shutdown,
 }
 
-/// Provider trait for time operations.
+/// Provider trait for time operations: sleep, timeout and two clocks.
 ///
-/// This trait allows code to work with both simulation time and real wall-clock time
-/// in a unified way. Implementations handle sleeping and getting current time
-/// appropriate for their environment.
+/// Production uses [`TokioTimeProvider`]. Simulation uses
+/// `moonpool_sim::SimTimeProvider`, which runs on the simulator's logical
+/// clock.
 ///
 /// ## Time Semantics
 ///
@@ -77,7 +96,12 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
         T: Send;
 }
 
-/// Real time provider using Tokio's time facilities.
+/// Production time provider: `tokio::time` for sleeps and timeouts, and a
+/// monotonic [`Instant`](std::time::Instant) for the clocks.
+///
+/// [`now`](TimeProvider::now) counts from the creation of the provider, and
+/// [`timer`](TimeProvider::timer) equals it. Sleeps and timeouts need a
+/// running Tokio runtime with the time driver enabled.
 #[cfg(feature = "tokio-time")]
 #[derive(Debug, Clone)]
 pub struct TokioTimeProvider {
@@ -87,7 +111,7 @@ pub struct TokioTimeProvider {
 
 #[cfg(feature = "tokio-time")]
 impl TokioTimeProvider {
-    /// Create a new Tokio time provider.
+    /// Create a Tokio time provider whose clock starts at zero now.
     #[must_use]
     pub fn new() -> Self {
         Self {

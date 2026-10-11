@@ -2,6 +2,7 @@
 
 ## Writing Style
 
+- **Language**: ASD-STE100 Simplified Technical English most of the time. Short sentences (20 words for procedures, 25 for descriptions), one idea per sentence, active voice, present tense, one word for one meaning. Procedures are numbered steps with one action each.
 - **Voice**: Senior colleague explaining at a whiteboard over coffee. Use "we"/"our" naturally. Direct, warm, technically authoritative. Like a great conference talk, not a textbook.
 - **Narrative flow**: Every chapter is a journey, not a list of facts. Use questions as transitions ("But what happens when...?"). Build mental models progressively. Each paragraph sets up the next.
 - **Bold for emphasis**, never italics or em dashes. No semicolons for style.
@@ -23,10 +24,11 @@ The book lives in `book/src/` with chapters organized into:
 - **Foreword**: Project status
 - **Part I (Why)**: Motivation and philosophy
 - **Part II (Foundations)**: Determinism, providers, process/workload
-- **Part III (Building)**: First simulation, chaos, assertions, invariants, debugging
+- **Part II** also holds "Same Code in Production and Simulation", the design rule behind providers and `hint!`
+- **Part III (Building)**: First simulation, process groups, chaos (buggify, `hint!`, swarm testing, attrition, outages, network/storage/CPU faults, custom injectors), assertions, invariants, metrics, debugging
 - **Part IV (Integration)**: Standalone moonpool-sim, mock boundaries, axum example
-- **Part V (Networking)**: Raw TCP simulation through `NetworkProvider`
-- **Part VI (Building on Top)**: Multiverse exploration
+- **Part V (Networking)**: Raw TCP simulation through `NetworkProvider`, moonpool-rpc
+- **Part VI (Building on Top)**: Multiverse exploration, moonpool-journal
 - **Appendix**: Reference tables, glossary, configuration
 
 ## Adding or Renaming Chapters

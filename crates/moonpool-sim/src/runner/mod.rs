@@ -1,15 +1,28 @@
-//! Simulation runner and orchestration framework.
+//! The runner: configure a campaign of seeds, run it, report it.
 //!
-//! This module provides the infrastructure for running simulation experiments,
-//! collecting metrics, and generating comprehensive reports.
+//! [`SimulationBuilder`] is the entry point. For each seed the runner builds
+//! a fresh [`SimWorld`](crate::SimWorld) and executor, boots the
+//! [`Process`] groups, runs the [`Workload`]s, runs the fault injectors
+//! during the chaos window, and checks the result. The campaign returns a
+//! [`SimulationReport`].
 //!
-//! ## Submodules
-//!
-//! - `builder` - SimulationBuilder for configuring experiments
-//! - `report` - SimulationMetrics and SimulationReport types
-//! - `app_metrics` - per-node application metrics scraped from a user registry
-//! - `topology` - WorkloadTopology and workload configuration
-//! - `orchestrator` - Internal workload orchestration
+//! | Module | Contents |
+//! |--------|----------|
+//! | [`builder`] | [`SimulationBuilder`], [`Chaos`], [`ChaosMode`], [`IterationControl`], [`WorkloadCount`] |
+//! | [`process`] | [`Process`] (the system under test), [`RebootKind`], [`Attrition`] and its victim filters |
+//! | [`workload`] | [`Workload`] (the test driver) |
+//! | [`context`] | [`SimContext`], [`SelfCrash`] |
+//! | [`fault_injector`] | [`FaultInjector`], [`FaultContext`], the built-in attrition injector |
+//! | [`outage`] | [`Outage`], [`OutageVeto`], [`OutageLanded`] |
+//! | [`gray_failure`] | [`GrayFailure`], [`GrayKinds`] |
+//! | [`hint`] | The hint sink and [`HintVeto`] |
+//! | [`groups`] | [`GroupRegistry`]: process groups and their IP ranges |
+//! | [`tags`] | [`ProcessTags`], [`TagRegistry`]: round-robin tags |
+//! | [`locality`] | [`LocalityConfig`], [`MachineRegistry`]: failure-domain topology |
+//! | [`topology`] | [`WorkloadTopology`]: what one process or workload sees of the cluster |
+//! | [`app_metrics`] | [`MetricsHandle`]: per-node application metrics |
+//! | [`report`] | [`SimulationReport`], [`SimulationMetrics`], [`BugRecipe`](report::BugRecipe) |
+//! | [`display`] | The report renderer |
 
 pub mod app_metrics;
 pub mod builder;

@@ -2,55 +2,97 @@
 
 <!-- toc -->
 
-## The Philosophy: Make Rare Bugs Common
+## Make Rare Bugs Common
 
-Real distributed systems fail in ways that are individually rare but collectively inevitable. A network partition happens once a month. A disk corrupts a write once a year. A process crashes during recovery once in a thousand deployments. Individually, each event is unlikely. But multiply enough low-probability events across enough nodes and enough time, and the question is not **if** but **when**.
+Real distributed systems fail in ways that are individually rare and collectively certain. A partition happens once a month. A disk tears a write once a year. A process dies during recovery once in a thousand deployments. Multiply enough small probabilities across enough nodes and enough time, and the question is not **if** but **when**.
 
-The core philosophy of chaos in moonpool is simple: **amplify failure probabilities so that rare bugs become common**. If a network partition happens once a month in production, make it happen every few seconds in simulation. If a disk write corrupts once a year, corrupt one every hundred writes. If a process crashes at the worst possible moment once in a thousand runs, make it crash at the worst possible moment every run.
+The principle behind chaos in moonpool is simple: **amplify failure probabilities so that rare bugs become common**. A monthly partition happens every few seconds in simulation. A yearly torn write happens every hundred writes. A crash at the worst possible moment happens on the seed that chose that moment.
 
-This is not reckless. It is strategic. By making failures frequent, we force the code to handle them **every time**, not just when a developer remembers to write a test for them. And because everything runs inside a deterministic simulation, every failure is reproducible. A bug found at high fault probability is the same bug that would have appeared at low probability in production, just found a thousand times faster.
+This is not reckless. Because every fault is drawn from the seed, the bug found at high probability is the same bug that would appear at low probability in production, found a thousand times faster, with a replay attached.
 
-## Five Dimensions of Chaos
+## Two Sides of a Fault
 
-Moonpool provides chaos injection along five distinct dimensions, each targeting a different layer of the system:
+Faults enter the simulation from two sides, and the split matters.
 
-### Code Paths: Buggify
+The **environment** side is the builder. `SimulationBuilder::enable_chaos` takes a list of `Chaos` surfaces. The runner samples each one per seed, runs it during the chaos window, and switches it off when the window closes. The code under test never knows a surface exists.
 
-Inspired by FoundationDB's BUGGIFY macro, `buggify!()` scatters fault injection points throughout your application code. Each point randomly activates once per simulation run, then fires probabilistically on each call. This forces your code down error paths, timeout branches, and recovery logic that would otherwise require precise failure timing to exercise.
+The **code** side is the shipped program. `buggify!` makes a rare-but-legal decision of the code's own (a tiny batch, a skipped resend). `hint!` names a moment where an environmental fault would be interesting (a batch is durable but not yet sent), and the simulator decides whether to strike. Both are no-ops in production, so the code that ships is the code that runs under chaos.
 
-### Infrastructure: Attrition
+## Every Chaos Surface
 
-Processes crash. Processes restart. Sometimes they restart cleanly, sometimes they lose all their data. Attrition automatically cycles your server processes through graceful shutdowns, crashes, and data-wiping restarts during the chaos phase, while respecting a `max_dead` constraint that keeps enough processes alive for the system to remain operational.
+`enable_chaos` accepts any mix of these variants. Each one is sampled by a `ChaosMode` where it has one.
 
-### Network Faults
+| Variant | What it does | Chapter |
+|---------|--------------|---------|
+| `Chaos::Network(mode)` | Clogs, partitions, bit flips, random closes, connect failures, clock drift, buggified delays, slow pairs, black holes, at the TCP connection level. | [Network Faults](10-network-faults.md) |
+| `Chaos::Storage(mode)` | Corruption, EIO, misdirected and phantom writes, sync failures, short transfers, lost directory entries, crash damage, stalls and throttles, disk failure. | [Storage Faults](11-storage-faults.md), [Aiming Storage Faults](33-aimed-faults.md) |
+| `Chaos::Attrition { config, mode }` | Reboots processes one at a time (or one failure domain at a time) under a `max_dead` budget. One injector per entry, so each process group can have its own regime. | [Attrition](09-attrition.md) |
+| `Chaos::Outage { config, mode }` | A correlated outage: every process of the named groups loses power in the same tick, and each comes back on its own delay. At most once per run. | [Correlated Outages](30-outages.md) |
+| `Chaos::BuggifyKnobs` | A modifier. On surfaces already enabled, some seeds push a knob to an extreme (a disk at 100 IOPS, 1% of sends corrupted). Never switches a surface on by itself. | [Buggify](08-buggify.md#spiking-config-knobs) |
+| `Chaos::Cpu(mode)` | The CPU model: every poll of a process task costs CPU time on the process's one core, so a busy machine answers late. | [CPU Time and Gray Failures](26-cpu-and-gray-failure.md) |
+| `Chaos::GrayFailure { config, mode }` | One or more machines stay alive and slow for a long window: CPU, disk or network multiplied by a factor. At most `max_slow` at once. | [CPU Time and Gray Failures](26-cpu-and-gray-failure.md) |
 
-TCP connections fail in subtle ways. Moonpool simulates connection drops, latency spikes, byte corruption, clock drift, partial writes, and both symmetric and one-way network partitions. The simulation operates at the **TCP connection level**, not the packet level, because connection-level faults are what distributed systems actually need to handle.
+Two surfaces are not in the list because they are not sampled per seed. Custom fault injectors are registered with `fault_factory` and script whatever they want through `FaultContext`, see [Custom Fault Injectors](31-custom-faults.md). Replicated fault patterns are a shaping of `Chaos::Storage`, registered with `replicated_storage_faults`, see [Aiming Storage Faults](33-aimed-faults.md).
 
-### Storage Faults
+```rust
+use moonpool_sim::{Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, SimulationBuilder};
 
-Disks lie. Following TigerBeetle's fault model, moonpool injects read corruption, write corruption, torn writes, misdirected I/O, phantom writes, and sync failures. These are the faults that data-integrity code must survive, and they are nearly impossible to test without simulation.
+SimulationBuilder::new()
+    .processes(3, || Box::new(MyProcess))
+    .workload(MyWorkload)
+    .enable_chaos([
+        Chaos::Network(ChaosMode::Swarm),
+        Chaos::Storage(ChaosMode::Swarm),
+        Chaos::Attrition {
+            config: Attrition {
+                max_dead: 1,
+                prob_graceful: 0.3,
+                prob_crash: 0.5,
+                prob_wipe: 0.2,
+                recovery_delay_ms: None,
+                grace_period_ms: None,
+                scope: AttritionScope::PerProcess,
+                victims: AttritionVictims::Any,
+            },
+            mode: ChaosMode::Swarm,
+        },
+        Chaos::BuggifyKnobs,
+    ])
+    .chaos_duration(Duration::from_secs(30))
+    .run()?;
+```
 
-### Time and Slowness: CPU and Gray Failures
+A surface absent from the list stays off. Its configuration is the default: low latency, no faults.
 
-A busy machine answers late, and a slow machine answers later still. The CPU model gives every process one core and makes each task poll cost time, so busyness counters are real and a burst queues. Gray failures keep a machine alive but slow its CPU, disk or network for a long window, the failure that a crash detector never sees.
+## ChaosMode: Random or Swarm
 
-## Determinism Is Non-Negotiable
+Every sampled surface takes one of two modes.
 
-Every chaos mechanism in moonpool is controlled by the simulation seed. The same seed produces the same faults in the same order at the same times. This means:
+**`ChaosMode::Random`** turns on the whole surface and draws its intensities per seed. Every network family is a little bit on, on every seed. For attrition and outages, `Random` runs the configured regime as written.
 
-- A failing seed is a permanent, reproducible bug report
-- You can debug a failure by replaying it with logging turned up
-- Fixing a bug and re-running the seed verifies the fix
-- Different seeds explore different fault combinations automatically
+**`ChaosMode::Swarm`** turns on a random **subset** of the surface's fault families per seed and fully disables the rest. One seed is clog-only. Another is partition plus bit flip. Another is the all-off baseline. For attrition, `Swarm` draws the reboot regime itself, including the never-reboot regime. For outages, `Swarm` drops the outage on half the seeds.
 
-This is what separates simulation chaos from production chaos. In production, a network partition happened and something went wrong, but you cannot reproduce the exact sequence of events. In simulation, you hand someone a seed number and they see exactly what you saw.
+Swarm is the mode we recommend. [Swarm Testing: Masks and Budgets](28-swarm-testing.md) explains why, lists every mask and budget, and shows how one workload under swarm covers more than many workloads without it.
 
-## The Next Five Chapters
+## The Chaos Window
 
-Each dimension of chaos has its own chapter with configuration details, code examples, and the design reasoning behind the choices moonpool makes:
+Every surface runs inside the window `chaos_duration` sets. The builder refuses a campaign that registers attrition, an outage, a gray failure or a `fault_factory` without one: `run()` returns `SimulationError::InvalidConfiguration` instead of never running the injector.
 
-- [Buggify: Fault Injection](08-buggify.md) covers the `buggify!()` macro and code-level fault injection patterns
-- [Attrition: Process Reboots](09-attrition.md) covers automatic process lifecycle chaos
-- [Network Faults](10-network-faults.md) covers TCP-level network fault simulation
-- [Storage Faults](11-storage-faults.md) covers TigerBeetle-inspired storage fault patterns
-- [CPU Time and Gray Failures](26-cpu-and-gray-failure.md) covers the simulated core and machines that are slow but alive
+When the window closes, the runner ends chaos in one step:
+
+1. It cancels `FaultContext::chaos_shutdown`, so injector loops wind down.
+2. It calls `SimWorld::enter_recovery_mode`, which turns off every configuration-driven network, storage and block-device fault family and heals the partitions it holds.
+3. It calls `moonpool_buggify::buggify_enter_recovery`, so disruptive buggify sites and every `hint!` fall silent.
+
+The cutoff bounds **fault generation**, nothing else. Corrupted sectors stay corrupted. Lost writes stay lost. A process already killed restarts on its own schedule. The cluster is not healthy at the cutoff. The environment has stopped making it worse, and recovering is now the system's job. The quiet tail between the cutoff and workload completion is where a rebooted process rejoins and a cluster reconverges. Give the workload enough simulated time there, then assert on convergence.
+
+## Determinism Is Not Negotiable
+
+Every chaos decision is a draw on the one simulation stream. The same seed produces the same faults in the same order at the same times. So:
+
+- A failing seed is a permanent, reproducible bug report.
+- You debug a failure by replaying it with tracing turned up.
+- Fixing a bug and re-running the seed verifies the fix.
+- Different seeds explore different fault combinations on their own.
+
+The draw order is a contract. Network and storage profiles are drawn before the world reseeds the stream. The operation-alphabet mask comes next, then attrition regimes in registration order, then outages, then the CPU model and gray failures. Moving one draw shifts every seed, which is why the runner pins the order and why a surface you leave off costs no draw. The [Fault Reference](../appendix/04-fault-reference.md) lists every family, its default rate and its mask bit.

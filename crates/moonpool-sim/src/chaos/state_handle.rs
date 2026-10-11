@@ -8,7 +8,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```rust
 //! use moonpool_sim::StateHandle;
 //!
 //! let state = StateHandle::new();

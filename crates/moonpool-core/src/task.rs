@@ -1,7 +1,19 @@
-//! Task spawning abstraction.
+//! Tasks: [`TaskProvider`], with [`TokioTaskProvider`] for production.
 //!
-//! This module provides task provider abstractions for spawning `Send` tasks
-//! that work with both simulation and real Tokio execution.
+//! Application code spawns through this trait, never through
+//! `tokio::spawn`. In simulation the spawned task runs on moonpool's
+//! deterministic single-threaded executor, which picks the next ready task
+//! from the seed and charges the task to the process that spawned it. A
+//! reboot of that process cancels its tasks.
+//!
+//! ```rust
+//! use moonpool_core::{Detach, TaskProvider};
+//!
+//! fn start_heartbeat<T: TaskProvider>(tasks: &T) {
+//!     // The name shows in traces; detach states that nobody joins it.
+//!     tasks.spawn_task("heartbeat", async { /* loop { send; sleep } */ }).detach();
+//! }
+//! ```
 
 use std::future::Future;
 
@@ -37,11 +49,11 @@ pub trait Detach {
 
 /// Provider for spawning tasks.
 ///
-/// This trait abstracts task spawning to enable both real tokio tasks
-/// and simulation-controlled task scheduling. The simulation runtime
-/// runs on a single OS thread, but the spawned futures are Send-bounded
-/// so customer call graphs can use `Arc<RwLock<…>>`, `DashMap`, and other
-/// `Send + Sync` primitives without contortion.
+/// Production uses [`TokioTaskProvider`]. Simulation uses
+/// `moonpool_sim::SimTaskProvider`. The simulation runs on one OS thread, but
+/// spawned futures are still `Send`, so application code can use
+/// `Arc<RwLock<…>>`, `DashMap` and other `Send + Sync` types without
+/// change.
 pub trait TaskProvider: Clone + Send + Sync + 'static {
     /// Future returned by [`Self::spawn_task`].
     ///

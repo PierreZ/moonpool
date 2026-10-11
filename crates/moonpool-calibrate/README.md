@@ -2,10 +2,10 @@
 
 Measure the real machine, then write moonpool configuration for it.
 
-`moonpool-calibrate` answers one question: *what latency should the simulation
-pretend to have?* It measures the host it runs on and prints Rust source
-containing `LatencyDistribution` constants that feed moonpool's existing storage
-and network knobs.
+`moonpool-calibrate` answers one question: **what latency should the
+simulation use?** It measures the host it runs on and prints Rust source with
+`LatencyDistribution` constants for moonpool's storage and network knobs. The
+crate is not published.
 
 ```text
 real storage / network
@@ -15,35 +15,31 @@ real storage / network
     p01 .. p99 envelope
         ↓  code generation
     LatencyDistribution::Uniform { start, end }
-        ↓  existing seed-driven sampling
+        ↓  seed-driven sampling, as for the hand-written defaults
     deterministic simulated world
 ```
 
 ## moonpool is bypassed while measuring
 
 This is the architectural rule of the crate. A measurement taken through
-moonpool's providers would measure the simulator, not the machine, and the result
-would be circular. The measurement path therefore uses only:
+moonpool's providers would measure the simulator, not the machine. The
+measurement path therefore uses only:
 
 | Concern | What is used |
-|---------|--------------|
-| storage | `std::fs::File`, `std::io::{Read, Write, Seek}`, `File::sync_all` |
-| network | `std::net::TcpListener`, `std::net::TcpStream` |
-| time    | `std::time::Instant` |
+|---|---|
+| Storage | `std::fs::File`, `std::io::{Read, Write, Seek}`, `File::sync_all` |
+| Network | `std::net::TcpListener`, `std::net::TcpStream` |
+| Time | `std::time::Instant` |
 
-No provider trait, no simulated clock, no simulated randomness, no async runtime.
-moonpool appears only in the *generated output* — and in
+No provider trait, no simulated clock, no simulated randomness, no async
+runtime. moonpool appears only in the generated output, and in
 `tests/generated_api.rs`, which type-checks that output against the real API.
 
 ## Usage
 
-The CLI is defined with `clap`'s `derive` feature, so the command surface *is*
-the `Command` / `NetworkCommand` enums in `src/cli.rs` — adding a subcommand
-means adding a variant. clap's own help and error rendering is redirected onto
-stderr, because stdout is reserved for generated Rust.
-
-Diagnostics go to stderr and generated Rust goes to stdout, so a run can be
-redirected straight into a source file.
+Diagnostics go to stderr and generated Rust goes to stdout, so you can
+redirect a run straight into a source file. clap's help and errors also go to
+stderr.
 
 ### Storage
 
@@ -53,30 +49,33 @@ Run this on the machine whose disk the simulation should imitate:
 moonpool-calibrate storage > measured_storage.rs
 ```
 
-Flags: `--file PATH` (scratch file, default `$TMPDIR/moonpool-calibrate.scratch`),
-`--samples N` (default 1000 per operation), `--warmup N` (default 100).
+| Flag | Default |
+|---|---|
+| `--file PATH` | `$TMPDIR/moonpool-calibrate.scratch` |
+| `--samples N` | 1000 per operation |
+| `--warmup N` | 100 per operation |
 
 ### Network
 
-On host B:
+1. On host B, start the echo server:
 
-```bash
-moonpool-calibrate network listen
-```
+   ```bash
+   moonpool-calibrate network listen
+   ```
 
-On host A:
+2. On host A, measure the round trip to host B:
 
-```bash
-moonpool-calibrate network measure host-b:7777 > measured_network.rs
-```
+   ```bash
+   moonpool-calibrate network measure host-b:7777 > measured_network.rs
+   ```
 
-Flags: `--port P` on `listen` (default 7777), `--samples N` / `--warmup N` on
-`measure`.
+`listen` takes `--port P` (default 7777). `measure` takes `--samples N`
+(default 1000) and `--warmup N` (default 100).
 
 ## Using the generated values
 
-The generated file is ordinary Rust that assigns into the configuration types
-moonpool already has:
+The generated file is ordinary Rust that assigns into moonpool's existing
+configuration types:
 
 ```rust
 mod measured_storage;
@@ -101,26 +100,34 @@ let network = NetworkConfiguration {
 };
 ```
 
-The calibrator determines plausible real-world *bounds*. moonpool still
-determines the simulated *realization*: `sample_latency` draws from these
-distributions through the seeded simulation RNG, exactly as it does for the
-hand-written defaults.
+The calibrator finds plausible real-world **bounds**. moonpool still picks
+each simulated value: it samples these distributions with the seeded
+simulation RNG.
 
-Note that `NETWORK_RTT_LATENCY` is the measured round trip while
-`NETWORK_LATENCY` is that round trip halved. moonpool's link knobs are
-documented as one-way delays, so `NETWORK_LATENCY` is the one to plug in.
+`NETWORK_RTT_LATENCY` is the measured round trip. `NETWORK_LATENCY` is half
+of it. moonpool's link knobs are one-way delays, so plug in
+`NETWORK_LATENCY`.
+
+## Library
+
+The binary is built from public modules: `storage`, `network`, `stats`
+(`Latencies`, `Summary`, `Bounds`), `codegen` (`GeneratedFile`, `Constant`)
+and `cli`. There are no cargo features.
 
 ## Deliberate limits
 
-- **p01 .. p99, not min .. max.** The extremes of a latency sample are dominated
-  by scheduler preemption and page faults; using them would stretch the simulated
-  world far past what the machine actually does day to day.
-- **Storage calibration is intentionally simplistic.** One scratch file, 4 KiB
-  blocks, a deterministic block-pick pattern, and no attempt to defeat the page
-  cache. There is no `O_DIRECT`, no queue-depth exploration, no payload sweep.
-- **Network calibration measures small-message TCP round-trip time only.** One
-  connection, 8-byte ping/pong, `TCP_NODELAY` on. Connection establishment is not
-  timed (moonpool has a separate `connect_latency` knob), and there is no
-  bandwidth or packet-loss measurement.
-- **This is not `fio` and not `iperf`.** It is a calibration utility whose only
-  job is to put plausible numbers on moonpool's existing latency knobs.
+- **p01 .. p99, not min .. max.** Scheduler preemption and page faults
+  dominate the extremes of a latency sample. Using them would stretch the
+  simulated world far past what the machine does day to day.
+- **Simple storage method.** One scratch file, 4 KiB blocks, a deterministic
+  block-pick pattern, and no attempt to defeat the page cache. No
+  `O_DIRECT`, no queue-depth exploration, no payload sweep.
+- **Small-message TCP round trips only.** One connection, 8-byte ping/pong,
+  `TCP_NODELAY` on. Connection setup is not timed (moonpool has a separate
+  `connect_latency` knob). No bandwidth or packet-loss measurement.
+- **Not `fio` and not `iperf`.** The only job is to put plausible numbers on
+  moonpool's existing latency knobs.
+
+## Documentation
+
+- [Calibrating Against a Real Machine](https://pierrez.github.io/moonpool/appendix/07-calibration.html) in the Sim Book

@@ -1,80 +1,149 @@
 # Where to Draw the Line
 <!-- toc -->
 
-The instinct when someone says "fake your dependencies" is to feel like you're cutting corners. Real databases catch real bugs. Test containers give you the real thing. A BTreeMap pretending to be Postgres is a compromise.
+When someone says "fake your dependencies", it sounds like cutting corners.
+Real databases catch real bugs. Test containers give you the real thing. A
+`BTreeMap` that pretends to be Postgres looks like a compromise.
 
-That instinct is wrong. **Fakes aren't a compromise. They're more powerful than real dependencies.**
+That instinct is wrong. **Fakes are not a compromise. They are more powerful
+than real dependencies**, because you control their failures.
 
 ## The Partial Failure Problem
 
-Test containers give you binary failure: the whole service is up, or the whole service is down. Docker kills the container, your test sees a connection refused, you verify your retry logic works.
+A test container gives you binary failure. The whole service is up, or the
+whole service is down. Docker kills the container, your test sees "connection
+refused", and you verify that your retry logic works.
 
-Production failures are never binary. Kafka loses partition 3 while partitions 1, 2, and 4 stay healthy. A Postgres replica lags 800ms behind the primary while the primary is fine. One Redis shard OOMs while five others serve traffic normally. Your S3 bucket returns 503 on 2% of PUTs while GETs succeed at full speed.
+Production failures are never binary. Kafka loses partition 3 while partitions
+1, 2 and 4 stay healthy. A Postgres replica lags 800 ms behind the primary
+while the primary is fine. One Redis shard runs out of memory while five others
+serve traffic. Your S3 bucket returns 503 on 2% of PUTs while GETs succeed at
+full speed.
 
-These partial failures are where bugs hide. The request that reads from the lagging replica and writes to the healthy primary. The consumer that rebalances partitions and loses its offset for exactly one topic. The cache lookup that fails for one key prefix while the rest of the keyspace works.
+These partial failures are where bugs hide. The request that reads from the
+lagging replica and writes to the healthy primary. The consumer that
+rebalances and loses its offset for exactly one topic. The cache lookup that
+fails for one key prefix while the rest of the keyspace works.
 
-Test containers **cannot produce these failures**. A container is a black box. You can start it or stop it. You cannot reach inside and make partition 3 return errors while partition 4 succeeds.
+A container **cannot produce these failures**. It is a black box. You can start
+it or stop it. You cannot reach inside and make partition 3 fail while
+partition 4 succeeds.
 
 ## Fakes Give You Control
 
-A trait-based fake controls the failure surface at arbitrary granularity. Your `MessageBroker` trait fake can return `Ok` for partition 1 and `Err` for partition 3 in the same call. Your `Database` fake can inject 200ms latency on reads from replica 2 while replica 1 responds instantly. Your `Cache` fake can evict entries for keys matching a pattern while retaining everything else.
+A trait-based fake controls the failure surface at any granularity. Your
+`MessageBroker` fake can return `Ok` for partition 1 and `Err` for partition 3
+in the same call. Your `Database` fake can add 200 ms of latency on reads from
+replica 2 while replica 1 answers at once.
 
-Combined with moonpool's `buggify!()` macro, these fakes become **probabilistic fault injectors**. Every operation has a chance of failure, controlled by a deterministic seed. When a test fails, you replay the exact same seed and get the exact same sequence of partial failures.
+Combined with moonpool's buggify macros, a fake becomes a **probabilistic
+fault injector**. Every operation has a chance to fail, and the chance is
+drawn from the seeded RNG. When a seed fails, you replay it and get the same
+sequence of partial failures.
 
 ```rust
 impl Store for InMemoryStore {
     fn create(&self, name: &str) -> Result<Item, StoreError> {
-        // 25% chance of write failure when buggify is enabled.
-        // A real Postgres can only be fully up or fully down.
-        // This fake can fail individual writes.
-        if buggify!() {
+        // Active at this site in about half the seeds, then fires at 25%
+        // per call. A real Postgres is up or down; this fake can fail
+        // one write and let the next read succeed.
+        if moonpool_sim::buggify!() {
             return Err(StoreError::WriteFailed("buggified".into()));
         }
-        // ... normal implementation
+        // normal path
     }
 }
 ```
 
+Three macros cover most fakes. `buggify!()` fires at 25% once the site is
+active. `buggify_with_prob!(0.05)` sets the per-call rate. `buggify_named!("replica-lag", 1.0)`
+keys the site by a label instead of its `file:line`, so a harness can switch
+that failure family on or off per seed with `set_activation`. That is how a
+single fake joins [swarm testing](../part3-building/28-swarm-testing.md): each
+seed enables a random subset of failure families, and the seeds that fail tell
+you which combination matters.
+
+The macros come from `moonpool-buggify`, a crate with zero dependencies. Outside
+a simulation every site evaluates to `false` with no side effects. A fake that
+ships in a production binary (a local development mode, for example) costs
+nothing. [Buggify](../part3-building/08-buggify.md) covers the activation
+model in detail.
+
 ## The Fidelity Spectrum
 
-Not every dependency needs full simulation. Think of fakes on a spectrum:
+Not every dependency needs the same fidelity. Think of fakes on a spectrum:
 
-**No-op**: Returns `Ok(())` for everything. Useful when you don't care about a dependency's behavior, just that calls don't crash. Logging, metrics, tracing facades.
+| Level | What it does | Use it for |
+|-------|--------------|------------|
+| **No-op** | Returns `Ok(())` for everything | Logging, metrics, tracing facades |
+| **In-memory** | `BTreeMap` storage, `VecDeque` queues, correct behavior, no persistence | Most unit and integration tests |
+| **Fault-injectable** | In-memory plus buggify sites on each operation | Most simulation fakes |
+| **Full simulation** | The dependency runs as a `Process` on the simulated network | Your own services, consensus protocols |
 
-**In-memory**: BTreeMap-based storage, VecDeque-based queues. Correct behavior without persistence. Good for most unit and integration tests.
-
-**Fault-injectable**: In-memory with `buggify!()` on operations. Correct behavior most of the time, controllable failures when chaos is enabled. This is where most simulation fakes live.
-
-**Full simulation via moonpool**: The dependency runs as a Process in the simulation. Network traffic is simulated with latency, drops, and corruption. Reserved for components where the network interaction IS the interesting behavior (your own services, consensus protocols).
+Most fakes live on the third row. The fourth row is for components where the
+network interaction **is** the behavior under test.
 
 ## Per-Dependency Guidance
 
-**Network (HTTP, gRPC, TCP)**: Simulate via moonpool. This is the sweet spot. Real HTTP parsing, real serialization, simulated transport. Your handlers run unchanged.
+**Network (HTTP, gRPC, TCP)**: simulate with moonpool. Real HTTP parsing, real
+serialization, simulated transport. Your handlers run unchanged.
 
-**Database**: Trait fake with BTreeMap. Model the operations your code actually uses (CRUD, transactions, queries by index). Inject failures per-operation. Don't try to simulate SQL parsing.
+**Database**: a trait with a `BTreeMap` behind it. Model the operations your
+code uses (CRUD, transactions, queries by index). Inject failures per
+operation. Do not simulate SQL parsing.
 
-**Message brokers**: Trait fake with per-partition control. A `VecDeque<Message>` per partition, with injectable failures per-partition. Model consumer group rebalancing if your code depends on it.
+**Message brokers**: a trait with per-partition control. One `VecDeque<Message>`
+per partition and a buggify site per partition. Model consumer group
+rebalancing only if your code depends on it.
 
-**External HTTP APIs**: Canned responses with injectable failures. Your Stripe client fake returns a known charge object, but `buggify!()` returns a 429 or network timeout 10% of the time.
+**External HTTP APIs**: canned responses with injectable failures. Your Stripe
+client fake returns a known charge object, and `buggify_with_prob!(0.1)` turns
+it into a 429 or a timeout.
 
-**Cache**: Trait fake with partial cluster modeling if you need it, simple `BTreeMap` if you don't. Inject evictions and connection failures.
+**Cache**: a trait with a `BTreeMap`. Inject evictions and connection failures.
+
+**Local disk**: not a fake. Write against `StorageProvider` and let the
+simulator supply the disk, crashes included. See
+[Storage Faults](../part3-building/11-storage-faults.md).
 
 ## Rules of Engagement
 
-**BTreeMap, not HashMap**. Deterministic iteration order matters for reproducibility. A HashMap iterating in different order across runs makes your simulation non-deterministic.
+**`BTreeMap`, not `HashMap`.** Iteration order must be the same on every run.
+A `HashMap` iterates in a different order per process, and that makes the
+simulation non-deterministic.
 
-**Send + Sync for axum State**. Axum requires `State` to be `Send + Sync`. Reach for `Arc<RwLock<BTreeMap<...>>>`, not `Rc<RefCell<...>>`. Everything in moonpool is Send-bounded now, so `Arc<RwLock<…>>` is the natural shape and plugs straight into axum without contortions. Execution still happens on a single OS thread (the moonpool deterministic executor), so in practice the lock is never contended, but it's the Send bounds that make the type fit, not the thread count.
+**`Send + Sync` state.** axum requires `State` to be `Send + Sync`, and every
+moonpool trait is Send-bounded. Use `Arc<RwLock<BTreeMap<…>>>`, not
+`Rc<RefCell<…>>`. The executor runs on one OS thread, so the lock is never
+contended. The bounds make the type fit, not the thread count.
 
-**The Oxide convention**. Oxide's [omicron](https://github.com/oxidecomputer/omicron) and [crucible](https://github.com/oxidecomputer/crucible) projects keep fakes in a `fakes/` module alongside the real implementation. The trait and the fake ship together. When you change the trait, you update the fake in the same PR. This keeps fakes from drifting.
+**No wall clock, no OS entropy inside the fake.** A fake that calls
+`Instant::now()` or `rand::random()` breaks replay. Take time and randomness
+from the providers, or from the buggify macros.
+
+**The Oxide convention.** Oxide's [omicron](https://github.com/oxidecomputer/omicron)
+and [crucible](https://github.com/oxidecomputer/crucible) keep fakes in a
+`fakes/` module next to the real implementation. The trait and the fake ship
+together. When the trait changes, the fake changes in the same PR.
 
 ## The 80% Argument
 
-A fake covering 80% of a dependency's behavior with determinism and fault injection is **strictly better** than a test container covering 100% with no control over failures.
+A fake that covers 80% of a dependency's behavior, with determinism and fault
+injection, is **strictly better** than a container that covers 100% with no
+control over failures.
 
-Test containers are non-deterministic. They're slow (seconds to start). They require Docker (not available in all CI environments). They break across versions (Postgres 15 vs 16 container images). They can't produce partial failures. A failing test gives you a log and a prayer.
+Containers are non-deterministic. They take seconds to start. They need Docker.
+They break across versions. They cannot produce partial failures. A failing
+test gives you a log and a guess.
 
-A fake compiles with your project. It runs in microseconds. It reproduces from a seed. It produces failures that containers physically cannot. The 80% you model covers the behavior your code actually depends on.
+A fake compiles with your project. It runs in microseconds. It reproduces from
+a seed. It produces failures that containers cannot. The 80% you model covers
+the behavior your code depends on.
 
-The remaining 20% you don't model? That belongs in separate integration tests, run less often, against real infrastructure. Nightly CI with actual Postgres and Kafka containers. Those tests verify your fakes are faithful. The simulation tests, run on every commit, verify your code handles failure correctly.
-
-Both kinds of tests improve each other. When an integration test reveals a failure mode your fake doesn't model, you add it to the fake. When a simulation test finds a bug under partial failure, you verify the fix against real infrastructure. The two approaches compound.
+The other 20% belongs in separate integration tests against real
+infrastructure, run less often. Those tests verify that the fakes are faithful.
+The simulation tests, run on every commit, verify that your code handles
+failure. When an integration test reveals a failure mode the fake does not
+model, add it to the fake. When a simulation finds a bug under partial failure,
+confirm the fix against the real thing. The two kinds of tests improve each
+other.

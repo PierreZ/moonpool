@@ -1,24 +1,49 @@
-//! Workload trait for simulation testing.
+//! The [`Workload`] trait: the test driver of a simulation.
 //!
-//! Workloads define the distributed system behavior to test. Each workload
-//! goes through three lifecycle phases:
+//! A workload drives the system under test and judges it. It is the
+//! client, the load generator and the oracle. Unlike a
+//! [`Process`](super::process::Process), it is never rebooted: its
+//! in-memory state (what it sent, what was acknowledged) survives every
+//! fault, so it can check the system against it.
 //!
-//! 1. **Setup**: Bind listeners, initialize state (sequential)
-//! 2. **Run**: Main logic, all workloads run concurrently
-//! 3. **Check**: Validate correctness after quiescence (sequential)
+//! Each workload goes through three lifecycle phases:
+//!
+//! 1. **Setup**: initialize state; workloads set up one after another.
+//! 2. **Run**: the main logic; all workloads run concurrently. When the
+//!    first one returns, the shutdown token fires for everyone.
+//! 3. **Check**: validate the final state after the run and the drain;
+//!    workloads check one after another.
+//!
+//! Prefer one workload that does many things, with
+//! [`swarm_operations`](super::builder::SimulationBuilder::swarm_operations)
+//! choosing a per-seed subset of its operations, over many narrow workloads.
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use moonpool_sim::{Workload, SimContext, SimulationResult};
+//! ```rust
+//! use async_trait::async_trait;
+//! use moonpool_sim::{SimContext, SimulationResult, Workload, assert_always};
 //!
-//! struct MyServer;
+//! #[derive(Default)]
+//! struct Counter {
+//!     sent: u64,
+//! }
 //!
 //! #[async_trait]
-//! impl Workload for MyServer {
-//!     fn name(&self) -> &str { "server" }
-//!     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-//!         // server logic...
+//! impl Workload for Counter {
+//!     fn name(&self) -> &str {
+//!         "counter"
+//!     }
+//!
+//!     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+//!         // Drive the system; remember what was sent.
+//!         self.sent += 1;
+//!         Ok(())
+//!     }
+//!
+//!     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+//!         // Judge the final state against what the workload remembers.
+//!         assert_always!(self.sent == 1, "the run sent exactly one request");
 //!         Ok(())
 //!     }
 //! }

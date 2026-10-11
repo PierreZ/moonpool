@@ -2,15 +2,9 @@
 
 <!-- toc -->
 
-Every latency knob in the [Configuration Reference](./03-configuration.md) ships
-with a hand-picked default: storage reads at 50-200µs, cross-datacenter links at
-20-80ms. Those numbers are plausible, but they are not your numbers. A simulation
-whose disk is ten times faster than production will never surface the timeout
-cascade production is one bad afternoon away from.
+Every latency knob in the [Configuration Reference](./03-configuration.md) ships with a hand-picked default: storage reads at 50 to 200 µs, cross-datacenter links at 20 to 80 ms. Those numbers are plausible. They are not your numbers. A simulated disk ten times faster than production never shows the timeout cascade production is one bad afternoon away from.
 
-`moonpool-calibrate` closes that gap. It measures the machine it runs on and
-prints Rust source containing `LatencyDistribution` constants we paste into the
-configuration types moonpool already has.
+`moonpool-calibrate` closes that gap. It measures the machine it runs on and prints Rust source with `LatencyDistribution` constants for the configuration types moonpool already has.
 
 ```text
 real storage / network
@@ -24,76 +18,53 @@ real storage / network
     deterministic simulated world
 ```
 
-The calibrator determines plausible real-world **bounds**. moonpool still
-determines the simulated **realization**: `sample_latency` draws from these
-distributions through the seeded simulation RNG, exactly as it does for the
-hand-written defaults. Nothing about determinism or replay changes.
+The calibrator decides plausible real-world **bounds**. Moonpool still decides the simulated **realization**: `sample_latency` draws from these distributions through the seeded simulation RNG, exactly as it does for the defaults. Determinism and replay do not change.
 
-## moonpool is deliberately bypassed during measurement
+## Moonpool Is Bypassed While Measuring
 
-This is the architectural rule of the tool, and it is worth stating plainly. A
-measurement taken through moonpool's providers would measure the **simulator**,
-not the machine, and the result would be circular. So the measurement path
-touches no moonpool code at all.
+This is the architectural rule of the tool. A measurement taken through moonpool's providers would measure the simulator, not the machine. So the measurement path touches no moonpool code:
 
 | Concern | What the calibrator uses |
 |---------|--------------------------|
 | Storage | `std::fs::File`, `std::io::{Read, Write, Seek}`, `File::sync_all` |
 | Network | `std::net::TcpListener`, `std::net::TcpStream` |
-| Time    | `std::time::Instant` |
+| Time | `std::time::Instant` |
 
-No `StorageProvider`, no `NetworkProvider`, no `TimeProvider`, no simulated
-clock, no simulated randomness, no async runtime. moonpool appears only in the
-generated output, and in the crate's `tests/generated_api.rs`, which type-checks
-that output against the real API.
+No provider trait, no simulated clock, no simulated randomness, no async runtime. Moonpool appears only in the generated output, and in the crate's `tests/generated_api.rs`, which type-checks that output against the real API.
 
-## Bounds are p01 .. p99, not min .. max
+## Bounds Are p01 to p99, Not Min to Max
 
-The generated range is the 1st-to-99th percentile envelope of the samples. Raw
-extremes are dominated by scheduler preemption, page faults, and one-off kernel
-work. Feeding them into a simulation stretches the simulated world far past what
-the machine does on an ordinary day. Full diagnostics (`p01`, `p50`, `p95`,
-`p99`, `max`, and the sample count) go to stderr, so we can see the tail we chose
-not to encode.
+The generated range is the 1st-to-99th percentile envelope of the samples. The raw extremes come from scheduler preemption, page faults and one-off kernel work. Feeding them into a simulation stretches the simulated world far past what the machine does on an ordinary day. Full diagnostics (`p01`, `p50`, `p95`, `p99`, `max` and the sample count) go to stderr, so you can see the tail you chose not to encode.
 
-Samples accumulate into an HDR histogram (1ns to 60s, three significant figures)
-rather than a growing vector, so sample count costs nothing in memory.
+Samples go into an HDR histogram (1 ns to 60 s, three significant figures), not a growing vector, so the sample count costs nothing in memory.
 
-## The command surface
+## The Command Surface
 
-The CLI is a `clap` derive: the commands are enum variants (`Command`,
-`NetworkCommand`), so the parser and the dispatch `match` cannot drift apart.
-One deviation from clap's defaults is deliberate. Help, version, and parse errors
-are rendered onto **stderr** rather than stdout, because stdout belongs to
-generated Rust. `moonpool-calibrate --help > out.rs` leaves `out.rs` empty rather
-than full of usage text.
+The crate is a workspace member and is not published. Run it with `cargo run -p moonpool-calibrate -- <command>`, or install the binary. The CLI is a `clap` derive: the commands are the `Command` and `NetworkCommand` enums, so the parser and the dispatch cannot drift apart.
+
+One rule shapes the surface: **stdout belongs to generated Rust**. Help, version and parse errors go to stderr, so `moonpool-calibrate --help > out.rs` leaves `out.rs` empty instead of full of usage text.
 
 ## Storage
 
 Run this on the machine whose disk the simulation should imitate:
 
-```bash
-moonpool-calibrate storage > measured_storage.rs
-```
-
-Diagnostics land on stderr, generated Rust on stdout, so the redirect above
-produces a compilable file.
+1. Run `moonpool-calibrate storage > measured_storage.rs`.
+2. Read the percentile table on stderr.
+3. Add `measured_storage.rs` to your crate.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--file PATH` | `$TMPDIR/moonpool-calibrate.scratch` | Scratch file to measure against |
-| `--samples N` | 1000 | Recorded samples per operation |
+| `--samples N` | 1000 | Recorded samples per operation (at least 1) |
 | `--warmup N` | 100 | Unrecorded warmup iterations per operation |
 
-The methodology maps one-to-one onto moonpool's three storage latency knobs:
+The method maps one-to-one onto moonpool's three storage latency knobs:
 
-- **read**: seek to a block, `read_exact` 4096 bytes, fold the bytes into a
-  checksum handed to `std::hint::black_box` so the work cannot be optimised away.
-- **write**: seek to a block, `write_all` 4096 bytes. `sync` is not included.
-- **sync**: dirty one block untimed, then time `sync_all` on its own.
+- **read**: seek to a block, `read_exact` 4096 bytes, fold the bytes into a checksum handed to `std::hint::black_box` so the work cannot be optimized away.
+- **write**: seek to a block, `write_all` 4096 bytes. No sync.
+- **sync**: dirty one block untimed, then time `sync_all` alone.
 
-The 4 MiB scratch file is created and filled before timing starts, and removed by
-a drop guard even when the run fails.
+The 4 MiB scratch file (1024 blocks) is created and filled before timing starts, and removed by a drop guard, also on the error path. Each read and write targets a block chosen by a small deterministic PRNG, so the pattern is reproducible and not purely sequential.
 
 A real run on a container filesystem, 5000 samples per operation:
 
@@ -104,28 +75,21 @@ A real run on a container filesystem, 5000 samples per operation:
   sync        109.695µs   140.927µs   202.623µs   253.311µs  3.248127ms     5000
 ```
 
-Note how far the `max` column sits from `p99`. That gap is exactly why the
-generated bounds stop at p99.
+The `max` column sits far from `p99`. That gap is why the generated bounds stop at p99.
 
 ## Network
 
-The measuring side needs a peer. On host B:
+The measuring side needs a peer.
 
-```bash
-moonpool-calibrate network listen
-```
-
-On host A:
-
-```bash
-moonpool-calibrate network measure host-b:7777 > measured_network.rs
-```
+1. On host B, run `moonpool-calibrate network listen`.
+2. On host A, run `moonpool-calibrate network measure host-b:7777 > measured_network.rs`.
+3. Stop the listener with ctrl-c.
 
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `--port P` (on `listen`) | 7777 | Port to bind on all interfaces |
-| `--samples N` | 1000 | Recorded round trips |
-| `--warmup N` | 100 | Unrecorded warmup round trips |
+| `--samples N` (on `measure`) | 1000 | Recorded round trips |
+| `--warmup N` (on `measure`) | 100 | Unrecorded warmup round trips |
 
 The protocol is the smallest thing that can be measured:
 
@@ -136,11 +100,9 @@ client                          server
   RTT = elapsed
 ```
 
-One connection carries every sample, `TCP_NODELAY` is on so the measurement is
-not the delayed-ack timer, and each response is verified against the request that
-produced it.
+One connection carries every sample. `TCP_NODELAY` is on, so the measurement is not the delayed-ack timer. Each response is verified against the request that produced it. The listener serves one connection at a time, in accept order, because concurrency would only add scheduling noise.
 
-## Plugging the values in
+## Plugging the Values In
 
 The generated file is ordinary Rust:
 
@@ -159,7 +121,7 @@ pub const STORAGE_READ_LATENCY: LatencyDistribution = LatencyDistribution::Unifo
 };
 ```
 
-Assign the constants into the existing configuration types:
+The storage command emits `STORAGE_READ_LATENCY`, `STORAGE_WRITE_LATENCY` and `STORAGE_SYNC_LATENCY`. The network command emits `NETWORK_RTT_LATENCY` and `NETWORK_LATENCY`. Assign them into the existing configuration types:
 
 ```rust
 use moonpool::{LinkLatencyConfig, NetworkConfiguration, StorageConfiguration};
@@ -181,25 +143,15 @@ let network = NetworkConfiguration {
 };
 ```
 
-### RTT versus one-way
+In a `SimulationBuilder` campaign, `.link_latency(LinkLatencyConfig { .. })` takes the measured network value for the distance you measured. A hand-driven `SimWorld` takes both configurations through `set_network_config` and `set_storage_config`, and `set_process_storage_config(ip, config)` gives one process a measured disk. Measure each link class between the hosts that span it: a loopback run gives `same_machine`, two racks give `same_datacenter`, two regions give `cross_datacenter`.
 
-The network command emits two constants. `NETWORK_RTT_LATENCY` is the round trip
-as measured. `NETWORK_LATENCY` is that round trip halved. moonpool's link knobs
-are documented as **one-way** delays, so `NETWORK_LATENCY` is the one that
-belongs in `LinkLatencyConfig` and `write_latency`. The RTT is kept for
-reference, because it is the number we can compare against `ping`.
+### RTT Versus One-Way
 
-## What this tool is not
+`NETWORK_RTT_LATENCY` is the round trip as measured. `NETWORK_LATENCY` is that round trip halved. Moonpool's link knobs are documented as **one-way** delays, so `NETWORK_LATENCY` is the one that belongs in `LinkLatencyConfig` and `write_latency`. The RTT is kept for reference, because it is the number you can compare against `ping`.
 
-- Not `fio`. Storage calibration is intentionally simplistic: one scratch file,
-  4 KiB blocks, a deterministic block-pick pattern, and no attempt to defeat the
-  page cache. There is no `O_DIRECT`, no queue-depth exploration, no payload
-  sweep, no bandwidth or IOPS measurement.
-- Not `iperf`. Network calibration measures small-message TCP round-trip time
-  only. Connection establishment is not timed, because moonpool has a separate
-  `connect_latency` knob, and there is no bandwidth or packet-loss measurement.
-- Not a distribution fitter. The output is always `Uniform`. A workload that
-  needs the `Exponential` or `Bimodal` tail shapes picks them by hand from the
-  percentile diagnostics. The calibrator will not guess a shape.
-- Not a new configuration mechanism. It emits values for the knobs that already
-  exist, and those knobs are still sampled by the same seed-driven RNG.
+## What This Tool Is Not
+
+- **Not `fio`.** One scratch file, 4 KiB blocks, a deterministic block-pick pattern, and no attempt to defeat the page cache. No `O_DIRECT`, no queue-depth exploration, no payload sweep, no bandwidth or IOPS measurement. `iops` and `bandwidth` stay yours to set.
+- **Not `iperf`.** Small-message TCP round-trip time only. Connection establishment is not timed, because moonpool has a separate `connect_latency` knob, and there is no bandwidth or packet-loss measurement.
+- **Not a distribution fitter.** The output is always `Uniform`. A workload that needs the `Exponential` or `Bimodal` tail shapes picks them by hand from the percentile diagnostics.
+- **Not a new configuration mechanism.** It emits values for the knobs that already exist, and those knobs are still sampled by the same seed-driven RNG.

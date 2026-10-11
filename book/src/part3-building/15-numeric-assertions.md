@@ -2,86 +2,106 @@
 
 <!-- toc -->
 
-Boolean assertions answer yes-or-no questions. But many of the properties we care about in distributed systems are numeric: latency must stay below a threshold, throughput should reach a target, queue depth should not exceed a bound. Numeric assertions let us express these properties directly and give the explorer something extra to work with: a value to optimize.
+Boolean assertions answer yes or no. Many properties of a distributed system are numbers: queue depth stays under a bound, a cluster reaches a level, latency drops below a target. Eight macros compare two integers. Four are invariants. Four are guidance, and they give the explorer a value to improve.
 
-## Always: Numeric Bounds
+## The Eight Macros
 
-The always-numeric macros state bounds that must hold on every check. They work like `assert_always!` but compare two numeric values:
+| Macro | Checks | Kind | Watermark |
+|-------|--------|------|-----------|
+| `assert_always_greater_than!(v, t, msg)` | `v > t` | invariant | lowest `v` |
+| `assert_always_greater_than_or_equal_to!(v, t, msg)` | `v >= t` | invariant | lowest `v` |
+| `assert_always_less_than!(v, t, msg)` | `v < t` | invariant | highest `v` |
+| `assert_always_less_than_or_equal_to!(v, t, msg)` | `v <= t` | invariant | highest `v` |
+| `assert_sometimes_greater_than!(v, t, msg)` | `v > t` | guidance | highest `v` |
+| `assert_sometimes_greater_than_or_equal_to!(v, t, msg)` | `v >= t` | guidance | highest `v` |
+| `assert_sometimes_less_than!(v, t, msg)` | `v < t` | guidance | lowest `v` |
+| `assert_sometimes_less_than_or_equal_to!(v, t, msg)` | `v <= t` | guidance | lowest `v` |
 
-```rust
-assert_always_less_than!(queue_depth, max_queue_size, "queue must not overflow");
-assert_always_greater_than_or_equal_to!(replica_count, 1, "must have at least one replica");
-```
+Both operands go through `to_i64_saturating`. Any integer type with `TryInto<i64>` works, so a `u8`, a `usize` or a `u64` needs no cast. A value that does not fit becomes `i64::MAX`. Floats do not convert: scale a latency to milliseconds or microseconds first.
 
-Four comparison operators are available: `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_always_less_than!`, and `assert_always_less_than_or_equal_to!`. Each takes a value, a threshold, and a message.
+## Always: Bounds That Never Break
 
-When the comparison fails, the behavior is the same as boolean always-assertions: the violation is recorded, an error is logged, and the simulation continues.
-
-But something extra happens behind the scenes. The framework tracks a **watermark** for the value: the most extreme value observed across all checks. For `assert_always_less_than!(x, 100, ...)`, the framework remembers the highest `x` it has seen. Even if `x` never reaches 100, the watermark tells you how close the system came to the boundary.
-
-Why does this matter? Because `assert_always_less_than!(x, 100)` implicitly tells the explorer to **maximize** `x`. The explorer gravitates toward states where `x` is highest, naturally pushing toward the boundary condition. If there is a bug that only manifests when `x` reaches 99, the explorer will find it faster than random exploration would.
-
-This boundary-seeking behavior is automatic. You write a bound, and the framework tries to find states that approach or violate it.
-
-## Sometimes: Numeric Goals
-
-The sometimes-numeric macros state goals that should eventually be achieved. The comparison must hold at least once across all iterations:
+The four `assert_always_*` macros are invariants with a comparison instead of a bool.
 
 ```rust
-assert_sometimes_greater_than!(throughput, 500, "should achieve >500 ops/sec");
-assert_sometimes_less_than!(p99_latency, 100, "p99 should sometimes drop below 100ms");
+assert_always_less_than_or_equal_to!(
+    queue.len(),
+    MAX_QUEUE,
+    "the request queue never exceeds its bound",
+    { "ip" => ctx.my_ip(), "depth" => queue.len() }
+);
 ```
 
-Like their boolean counterparts, these are coverage assertions. If the goal is never achieved after all iterations, the validation reports a coverage violation.
+A failed comparison records a fail, marks the seed failed, and the run continues. The first failure of a slot prints `[NUMERIC ASSERTION FAILED] <msg> (left=.., right=.., cmp=Le)`. With a details block, every failure prints the operands, the seed and your values. The report lists the slot under `num-always` with `N pass  M fail  best: W`.
 
-The difference from boolean sometimes is in how they interact with the explorer. **Sometimes-numeric assertions signal a discovery when the comparison distance improves.** Guidance tracks `left - right`, while the report still shows the best value of `left`. Including both operands matters when the threshold changes during a run: a larger left value is not progress toward `left > right` if the right value grew even faster.
+`best` is the **watermark**: the most extreme value of the left operand seen in the whole run. For a `less_than` bound it is the highest value, for a `greater_than` bound the lowest. Even when the bound never breaks, the watermark tells you how close the system came. A queue bound of 1,000 with `best: 998` is a different story from `best: 12`.
 
-This creates a ratchet. Suppose you write:
+The watermark is for the report only. An always-numeric assertion never calls the discovery hook. It does not fork timelines and does not steer the explorer. If you want the explorer to push a value toward a bound, add a `sometimes` twin that names the direction.
+
+Unlike `assert_always!`, a numeric invariant that is never reached is not a violation. The contract check only inspects its fail count.
+
+## Sometimes: Goals That Ratchet
+
+The four `assert_sometimes_*` macros are guidance. The comparison must hold at least once across all seeds, and every improvement is a discovery.
 
 ```rust
-assert_sometimes_greater_than!(committed_transactions, 1000, "high commit throughput");
+// From the dungeon example: push deeper, and arrive with health left.
+assert_sometimes_greater_than!(
+    i64::from(self.game.status().level),
+    0,
+    "dungeon level reached"
+);
+assert_sometimes_greater_than!(i64::from(hp_after), 0, "health remaining");
 ```
 
-The first time committed_transactions reaches 50, the explorer branches. Then it finds a timeline where it reaches 200 and branches again. Then 450. Then 800. Each improvement creates a new branch point, and the explorer explores from progressively better states. The watermark only moves in one direction: toward the goal.
+Each evaluation records a pass or a fail and updates two watermarks in the slot:
 
-## Watermark Mechanics
+- The **reporting watermark** is the best left operand, shown as `best:` in the report.
+- The **discovery watermark** is the best comparison distance, `left - right`. A `greater_than` goal maximizes it, a `less_than` goal minimizes it.
 
-Every numeric assertion, whether always or sometimes, maintains a reporting watermark in shared memory. This watermark is the best value of the left operand observed so far:
+When the discovery watermark improves, the slot calls the hook with `DiscoveryKind::WatermarkImprovement`. Under exploration that is a fork point. The first improvement happens on the first evaluation, so the explorer branches from level 1, then from level 2, then from level 3. Each better state is a new base for continuations. The watermark only moves one way.
 
-- For assertions that track the **highest** value (`maximize=true`): `assert_always_less_than!`, `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!`, `assert_sometimes_greater_than_or_equal_to!`. These seek the boundary from below (always) or ratchet upward (sometimes).
-- For assertions that track the **lowest** value (`maximize=false`): `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_sometimes_less_than!`, `assert_sometimes_less_than_or_equal_to!`. These seek the boundary from above (always) or ratchet downward (sometimes).
+Why track the distance and not the left value? Because the threshold can move during a run. If the right operand grows faster than the left, a larger left value is not progress toward `left > right`. Antithesis made the same choice. The report still prints the plain left value because that is the number a human wants to read.
 
-The watermark lives in the shared assertion region, so in multiverse mode every timeline sees the same current best. When one timeline improves it, the improvement is immediately visible to all subsequent timelines. This means the explorer collectively pushes toward the boundary rather than each timeline searching independently.
+Two contract rules apply:
 
-For sometimes-numeric assertions, a second watermark tracks the best comparison distance, `left - right`, seen by the explorer. Greater-than goals maximize this distance; less-than goals minimize it. A new discovery only fires when that distance improves past the shared mark, so a moving threshold cannot falsely steer exploration in the wrong direction.
+1. A slot that was evaluated but never passed is a coverage violation: `numeric assert_sometimes ('...') has 0% success rate (N checks)`.
+2. The slot counts for `UntilCoverageStable`. The coverage test `NeverHitNumericGate` pins this: `assert_sometimes_greater_than!(0, 1, "numeric gate")` keeps the run from saturating until the cap.
+
+The `sometimes` numeric macros take no details block. There is no failure to describe: a miss is expected.
+
+## Where the Watermark Lives
+
+The watermarks sit in the slot, in the shared assertion region. Under exploration every forked worker reads the same current best, and a `fetch_max` or `fetch_min` updates it atomically. One worker that reaches level 4 raises the bar for every later worker. The search is collective, not one timeline at a time.
+
+Across seeds without exploration the effect is the same but slower: the table is not reset between seeds, so seed 300 is measured against the best of seeds 1 to 299.
 
 ## Use Cases
 
-**Resource bounds:**
-```rust
-assert_always_less_than!(
-    memory_usage_mb, max_memory_mb,
-    "memory must stay within budget"
-);
-```
-The explorer pushes toward high memory states, testing the system under pressure.
+**A resource bound, with a twin that seeks it.**
 
-**Convergence targets:**
 ```rust
-assert_sometimes_less_than!(
-    convergence_time_ms, 500,
-    "cluster should converge within 500ms"
-);
+assert_always_less_than!(bytes_in_flight, BUDGET, "memory stays within budget");
+// Same value, opposite direction: the explorer now hunts for high memory.
+assert_sometimes_greater_than!(bytes_in_flight, BUDGET / 2, "memory pressure reached");
 ```
-The explorer ratchets toward fast convergence, branching each time it finds a faster path.
 
-**Throughput validation:**
+The invariant catches the overflow. The guidance drives the explorer to states where overflow is likely.
+
+**A convergence target.**
+
 ```rust
-assert_always_greater_than_or_equal_to!(
-    processed_count, expected_count,
-    "must process all submitted requests"
-);
+assert_sometimes_less_than!(convergence_ms, 500, "cluster converges within 500ms");
 ```
-Catches dropped requests. The explorer seeks states where the gap between processed and expected is smallest (i.e., where the system is closest to dropping something).
 
-The key insight with numeric assertions is that expressing a bound **also** expresses a direction for exploration. You get correctness checking and guided search from the same line of code.
+The watermark ratchets downward. Each faster convergence is a branch point, and the report's `best:` is the fastest convergence any seed achieved.
+
+**A throughput floor across seeds.**
+
+```rust
+assert_sometimes_greater_than_or_equal_to!(committed, 1_000, "a seed commits 1,000 transactions");
+```
+
+Under chaos most seeds fall short. One seed that gets there clears the coverage violation and tells you the throughput ceiling is reachable at all.
+
+A bound and a direction are two different statements. Write the bound as an invariant. Write the direction as guidance. The two lines together give you correctness and search from the same number.

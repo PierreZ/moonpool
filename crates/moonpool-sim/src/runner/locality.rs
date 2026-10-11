@@ -13,9 +13,20 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! // 3 datacenters × 3 zones × 3 machines × 1 process = 27 processes.
-//! .cluster(LocalityConfig::new(3, 3, 3, 1), || Box::new(MyNode::new()))
+//! ```rust
+//! # use async_trait::async_trait;
+//! # use moonpool_sim::{Process, SimContext, SimulationResult};
+//! # struct MyNode;
+//! # #[async_trait]
+//! # impl Process for MyNode {
+//! #     fn name(&self) -> &str { "node" }
+//! #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+//! # }
+//! use moonpool_sim::{LocalityConfig, SimulationBuilder};
+//!
+//! // 3 datacenters x 3 zones x 3 machines x 1 process = 27 processes.
+//! let _builder = SimulationBuilder::new()
+//!     .cluster(LocalityConfig::new(3, 3, 3, 1), || Box::new(MyNode));
 //! ```
 
 use std::collections::BTreeMap;
