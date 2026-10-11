@@ -455,6 +455,18 @@ impl Executor {
                 queue.swap_remove(index)
             };
 
+            // A process's task polls only when its CPU slot is free (the
+            // CPU model, `crate::sim::cpu`); otherwise the world parks the
+            // runnable until its `CpuFree` event. Not runnable, so not here.
+            let owner = runnable.metadata().owner;
+            let runnable = match owner {
+                Some(ip) => match crate::sim::cpu::admit(ip, runnable) {
+                    Some(runnable) => runnable,
+                    None => continue,
+                },
+                None => runnable,
+            };
+
             polls += 1;
             assert!(
                 polls < DRAIN_POLL_BOUND,
@@ -472,10 +484,13 @@ impl Executor {
             );
 
             IN_TASK.with(|flag| flag.set(true));
-            CURRENT_OWNER.with(|owner| owner.set(runnable.metadata().owner));
+            CURRENT_OWNER.with(|current| current.set(owner));
             runnable.run();
-            CURRENT_OWNER.with(|owner| owner.set(None));
+            CURRENT_OWNER.with(|current| current.set(None));
             IN_TASK.with(|flag| flag.set(false));
+            if let Some(ip) = owner {
+                crate::sim::cpu::finish_poll(ip);
+            }
         }
     }
 }
@@ -508,6 +523,11 @@ impl Drop for Executor {
         };
         for waker in wakers {
             waker.wake();
+        }
+        // The runnables the CPU model parked are not in the queue: drop them
+        // here too, so their tasks die with the executor.
+        for runnable in crate::sim::cpu::take_all_parked() {
+            drop(runnable);
         }
 
         // Drop Runnables until the queue is empty: dropping one cancels its

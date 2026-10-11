@@ -396,6 +396,52 @@ impl SimulationBuilder {
         sim
     }
 
+    /// Resolve this seed's CPU model (installed on `sim`) and gray-failure
+    /// regimes, then build every fault injector of the timeline. The CPU
+    /// model, then the gray failures, draw last of all: a campaign without
+    /// them makes none of these draws, so opting in shifts no other surface's
+    /// sample (the draw-order contract).
+    fn fault_injectors_for_seed(
+        &self,
+        sim: &crate::SimWorld,
+        attritions: Vec<Attrition>,
+        outages: Vec<crate::runner::outage::Outage>,
+    ) -> Vec<Box<dyn FaultInjector>> {
+        let cpu_model = self.cpu_chaos.and_then(|mode| {
+            ChaosMode::resolve(
+                Some(mode),
+                || None,
+                || Some(crate::CpuModel::random_for_seed()),
+                crate::CpuModel::swarm_for_seed,
+            )
+        });
+        if cpu_model.is_some() {
+            crate::assert_reachable!("cpu: a seed runs with the CPU model on");
+        } else if self.cpu_chaos.is_some() {
+            crate::assert_reachable!("cpu: a seed runs with the CPU model off");
+        }
+        sim.set_cpu_model(cpu_model);
+        let gray_failures = self
+            .gray_failures
+            .iter()
+            .map(|(base, mode)| {
+                ChaosMode::resolve(
+                    Some(*mode),
+                    || base.clone(),
+                    || base.clone(),
+                    || base.swarm_for_seed(),
+                )
+            })
+            .collect();
+        Self::collect_fault_injectors(
+            &self.fault_factories,
+            attritions,
+            outages,
+            gray_failures,
+            self.chaos_duration,
+        )
+    }
+
     /// Build one fresh injector per registered factory and one built-in
     /// attrition injector per resolved attrition regime. Every injector is
     /// rebuilt for every timeline and dropped with it (mirroring factory
@@ -404,6 +450,8 @@ impl SimulationBuilder {
         fault_factories: &[Box<dyn Fn() -> Box<dyn FaultInjector> + 'static>],
         attritions: Vec<Attrition>,
         outages: Vec<crate::runner::outage::Outage>,
+        gray_failures: Vec<crate::runner::gray_failure::GrayFailure>,
+        chaos_duration: Option<Duration>,
     ) -> Vec<Box<dyn FaultInjector>> {
         let mut fault_injectors: Vec<Box<dyn FaultInjector>> =
             fault_factories.iter().map(|factory| factory()).collect();
@@ -414,6 +462,14 @@ impl SimulationBuilder {
         }
         for outage in outages {
             fault_injectors.push(Box::new(crate::runner::outage::OutageInjector::new(outage)));
+        }
+        // Without a chaos window no injector runs (validated up front).
+        if let Some(chaos_duration) = chaos_duration {
+            for gray in gray_failures {
+                fault_injectors.push(Box::new(
+                    crate::runner::gray_failure::GrayFailureInjector::new(gray, chaos_duration),
+                ));
+            }
         }
         fault_injectors
     }
@@ -436,6 +492,13 @@ impl SimulationBuilder {
         {
             return Err(SimulationError::InvalidConfiguration(reason));
         }
+        if let Some(reason) = self
+            .gray_failures
+            .iter()
+            .find_map(|(gray, _)| gray.invalid(&registered))
+        {
+            return Err(SimulationError::InvalidConfiguration(reason));
+        }
         if self.chaos_duration.is_some() {
             return Ok(());
         }
@@ -454,6 +517,12 @@ impl SimulationBuilder {
         }
         if !self.outages.is_empty() {
             unrun.push(format!("{} Chaos::Outage regime(s)", self.outages.len()));
+        }
+        if !self.gray_failures.is_empty() {
+            unrun.push(format!(
+                "{} Chaos::GrayFailure regime(s)",
+                self.gray_failures.len()
+            ));
         }
         if unrun.is_empty() {
             return Ok(());
@@ -1210,8 +1279,7 @@ impl SimulationBuilder {
                 }
             }
         }
-        let fault_injectors =
-            Self::collect_fault_injectors(&self.fault_factories, attritions, outages);
+        let fault_injectors = self.fault_injectors_for_seed(&sim, attritions, outages);
         let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
             seed,
             metrics_factory: self.metrics_factory.as_ref(),

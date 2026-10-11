@@ -128,13 +128,13 @@ pub mod storage;
 // Sim module re-exports
 pub use network::sim::NetworkEvent;
 pub use sim::{
-    DeterminismViolation, Event, ProcessKillKind, SYSTEM_SAMPLES_KEPT, ScheduleError, ScheduleId,
-    Scheduled, Scheduler, SimFaultRecord, SimWorld, SleepFuture, StorageOperation, WeakSimWorld,
-    begin_determinism_check, begin_determinism_record, clear_rng_breakpoints, clear_swarm_op_mask,
-    current_sim_seed, draw_swarm_op_mask, finish_determinism_check, reset_rng_call_count,
-    reset_sim_rng, rng_call_count, set_rng_breakpoints, set_sim_seed, sim_random, sim_random_bool,
-    sim_random_f64, sim_random_range, sim_random_range_or_default, stop_determinism_canary,
-    swarm_op_enabled,
+    CpuModel, DeterminismViolation, Event, ProcessKillKind, SYSTEM_SAMPLES_KEPT, ScheduleError,
+    ScheduleId, Scheduled, Scheduler, SimFaultRecord, SimWorld, SleepFuture, Slowness,
+    StorageOperation, WeakSimWorld, begin_determinism_check, begin_determinism_record,
+    clear_rng_breakpoints, clear_swarm_op_mask, current_sim_seed, draw_swarm_op_mask,
+    finish_determinism_check, reset_rng_call_count, reset_sim_rng, rng_call_count,
+    set_rng_breakpoints, set_sim_seed, sim_random, sim_random_bool, sim_random_f64,
+    sim_random_range, sim_random_range_or_default, stop_determinism_canary, swarm_op_enabled,
 };
 
 // Locality vocabulary re-exports (shared by engine and runner)
@@ -143,11 +143,11 @@ pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 // Runner module re-exports
 pub use runner::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, FaultContext, FaultInjector,
-    GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl, LocalityConfig,
-    MachineRegistry, MetricsHandle, OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage, OutageLanded,
-    OutageVeto, Process, ProcessTags, RebootKind, SelfCrash, SimContext, SimulationBuilder,
-    SimulationMetrics, SimulationReport, TagRegistry, VETO_RETRY, Workload, WorkloadCount,
-    WorkloadTopology,
+    GrayFailure, GrayKinds, GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL,
+    IterationControl, LocalityConfig, MachineRegistry, MetricsHandle, OUTAGE_STATE_KEY,
+    OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SelfCrash,
+    SimContext, SimulationBuilder, SimulationMetrics, SimulationReport, TagRegistry, VETO_RETRY,
+    Workload, WorkloadCount, WorkloadTopology,
 };
 
 // Application-metrics vocabulary, re-exported from moonpool-core so a
@@ -173,7 +173,7 @@ pub use moonpool_core::metrics::query::{
 // working and share the same state as direct moonpool-buggify users.
 pub use moonpool_buggify::{
     buggify, buggify_fault_with_prob, buggify_named, buggify_pick, buggify_range,
-    buggify_with_prob, hint, set_activation,
+    buggify_with_prob, cpu_charge, hint, set_activation,
 };
 
 // Chaos module re-exports

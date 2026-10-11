@@ -6,11 +6,13 @@
 //! ## Submodules
 //!
 //! - `world` - Core SimWorld and WeakSimWorld types
+//! - `cpu` - The CPU model: one core per process, the executor's gate
 //! - `events` - Event types and queue for scheduling
 //! - `wakers` - Waker management for async coordination
 //! - `sleep` - Sleep future for simulation time
 //! - `rng` - Thread-local random number generation
 
+pub mod cpu;
 pub mod events;
 pub mod rng;
 pub mod sleep;
@@ -19,6 +21,7 @@ pub mod wakers;
 pub mod world;
 
 // Re-export main types at module level
+pub use cpu::{CpuModel, Slowness};
 pub use events::{
     Event, ProcessKillKind, ScheduleError, ScheduleId, Scheduled, Scheduler, StorageOperation,
 };

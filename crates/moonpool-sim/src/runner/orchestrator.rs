@@ -1164,6 +1164,9 @@ impl WorkloadOrchestrator {
                 // storage wake the process, and a dead process must not run
                 // application work during its recovery delay.
                 process_manager.abort_process(ip);
+                // Its parked runnables die with it, and its CPU slot starts
+                // over: a free core and zero counters for the next boot.
+                sim.reset_cpu_owner(ip);
                 sim.abort_all_connections_for_ip(ip);
                 match cause {
                     ProcessKillKind::GracePeriodExpired | ProcessKillKind::RestartInPlace => {}
@@ -1201,6 +1204,7 @@ impl WorkloadOrchestrator {
                         },
                     );
                     process_manager.abort_process(ip);
+                    sim.reset_cpu_owner(ip);
                     sim.abort_all_connections_for_ip(ip);
                     sim.schedule_process_restart(ip, Duration::from_nanos(1));
                     assert_reachable!(

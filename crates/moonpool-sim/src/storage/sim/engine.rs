@@ -743,7 +743,7 @@ impl StorageEngine {
         positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
-        self.advance_clock(now);
+        self.set_clock(now);
         self.ensure_readable(handle_id)?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
@@ -781,7 +781,7 @@ impl StorageEngine {
         positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
-        self.advance_clock(now);
+        self.set_clock(now);
         self.ensure_writable(handle_id, "write")?;
         let file_id = self.open_file_id(handle_id)?;
         // Append mode moves the stream cursor, never a positioned write.
@@ -819,7 +819,7 @@ impl StorageEngine {
         handle_id: HandleId,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
-        self.advance_clock(now);
+        self.set_clock(now);
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
         let pending = PendingStorageOp {
@@ -846,6 +846,7 @@ impl StorageEngine {
         {
             latency = latency.saturating_add(expires_at.saturating_sub(now));
         }
+        let latency = latency.saturating_mul(self.slow_factor(owner_ip));
         self.schedule_operation(
             pending,
             StorageOperation::SyncComplete,
@@ -859,7 +860,7 @@ impl StorageEngine {
         new_len: u64,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
-        self.advance_clock(now);
+        self.set_clock(now);
         self.ensure_writable(handle_id, "set_len")?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
@@ -905,6 +906,7 @@ impl StorageEngine {
             episode,
             now,
         )
+        .saturating_mul(self.slow_factor(owner_ip))
     }
 
     /// Shorten one transfer to a deterministic prefix, the way a real
@@ -1029,9 +1031,30 @@ impl StorageEngine {
         }
     }
 
-    /// Move the engine's clock to `now`. The clock never goes back.
-    pub(crate) fn advance_clock(&mut self, now: Duration) {
-        self.state.clock = self.state.clock.max(now);
+    /// Set the engine's clock to the caller's `now`: the scheduler's clock
+    /// for a completion, or the local clock of the polling process for a
+    /// submit (see [`StorageState::clock`](super::state::StorageState)).
+    pub(crate) fn set_clock(&mut self, now: Duration) {
+        self.state.clock = now;
+    }
+
+    /// Set the disk slowness of `ip` (1 is healthy).
+    pub(crate) fn set_slow_factor(&mut self, ip: IpAddr, factor: u32) {
+        if factor <= 1 {
+            self.state.slow_factors.remove(&ip);
+        } else {
+            self.state.slow_factors.insert(ip, factor);
+        }
+    }
+
+    /// The disk slowness of `ip` (1 is healthy).
+    pub(crate) fn slow_factor(&self, ip: IpAddr) -> u32 {
+        self.state.slow_factors.get(&ip).copied().unwrap_or(1)
+    }
+
+    /// Forget every disk slowness: every disk is healthy again.
+    pub(crate) fn clear_slow_factors(&mut self) {
+        self.state.slow_factors.clear();
     }
 
     /// The disk counters of `ip` at `now` (see [`DiskActivity`]).

@@ -29,6 +29,18 @@ pub enum Event {
     Storage(StorageEvent),
     /// Shutdown event to wake all tasks for graceful termination.
     Shutdown,
+    /// The CPU slot of the process at `ip` is free: its parked runnables go
+    /// back on the ready queue (see [`SimWorld::set_cpu_model`](crate::SimWorld::set_cpu_model)).
+    CpuFree {
+        /// The process whose slot is free.
+        ip: std::net::IpAddr,
+    },
+    /// Wakes a process's poll caused, released at the poll's local clock
+    /// under the CPU model.
+    CpuWake {
+        /// The deferred batch.
+        id: u64,
+    },
     /// Process restart event: a rebooted process is ready to boot again.
     ProcessRestart {
         /// The IP address of the process to restart.

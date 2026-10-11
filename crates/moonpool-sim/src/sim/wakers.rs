@@ -70,6 +70,11 @@ impl WakeBatch {
         self.0.append(&mut other.0);
     }
 
+    /// Whether the batch holds no waker.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Invokes all collected wakers.
     pub(crate) fn wake(self) {
         for waker in self.0 {

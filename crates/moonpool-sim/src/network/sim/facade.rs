@@ -20,7 +20,7 @@ impl SimWorld {
         transition: impl FnOnce(&mut SimInner, Duration) -> NetworkActions,
     ) {
         let mut inner = self.inner.write();
-        let now = inner.now();
+        let now = inner.scheduler_now();
         let actions = transition(&mut inner, now);
         inner.apply_network(actions);
     }
@@ -33,12 +33,12 @@ impl SimWorld {
     ) {
         let wakes = {
             let mut inner = self.inner.write();
-            let now = inner.now();
+            let now = inner.scheduler_now();
             let (actions, wakes) = transition(&mut inner, now);
             inner.apply_network(actions);
             wakes
         };
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     /// Installs process localities in the network engine.
@@ -83,7 +83,7 @@ impl SimWorld {
     /// Release the address a dropped listener held.
     pub(crate) fn unbind_listener(&self, id: ListenerId) {
         let wakes = self.inner.write().network.unbind_listener(id);
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     pub(crate) fn listener_matches(&self, addr: &str, id: ListenerId) -> bool {
@@ -98,7 +98,7 @@ impl SimWorld {
         let (result, wakes) = self.inner.write().network.read(id, buf);
         // The bytes just read return window to the peer's writer; wake it
         // outside the lock like every other waiter.
-        wakes.wake();
+        self.release_wakes(wakes);
         result
     }
 
@@ -108,8 +108,12 @@ impl SimWorld {
 
     pub(crate) fn buffer_send(&self, id: ConnectionId, data: Vec<u8>) -> SimulationResult<()> {
         let mut inner = self.inner.write();
-        let now = inner.now();
-        let actions = inner.network.buffer_send(id, data, now)?;
+        // Sending costs CPU time under the CPU model; the chunk leaves no
+        // earlier than the sender's local clock after that cost.
+        inner.cpu_charge_sent(data.len());
+        let now = inner.scheduler_now();
+        let ready_at = inner.now();
+        let actions = inner.network.buffer_send(id, data, now, ready_at)?;
         inner.apply_network(actions);
         Ok(())
     }
@@ -127,7 +131,7 @@ impl SimWorld {
 
     pub(crate) fn discard_connection_pair(&self, id: ConnectionId) {
         let wakes = self.inner.write().network.discard_connection_pair(id);
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     pub(crate) fn register_read_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
@@ -157,18 +161,18 @@ impl SimWorld {
 
     pub(crate) fn cancel_accept(&self, addr: &str, id: AcceptWaiterId) {
         let wakes = self.inner.write().network.cancel_accept(addr, id);
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     pub(crate) fn complete_accept(&self, id: AcceptWaiterId) {
         let wakes = self.inner.write().network.complete_accept(id);
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     /// The rest of `id`'s accept latency, measured from its backlog entry.
     pub(crate) fn accept_remaining(&self, id: ConnectionId) -> Duration {
         let inner = self.inner.read();
-        inner.network.accept_remaining(id, inner.now())
+        inner.network.accept_remaining(id, inner.scheduler_now())
     }
 
     pub(crate) fn refresh_accept_reservation_waker(&self, id: AcceptWaiterId, waker: Waker) {
@@ -199,18 +203,18 @@ impl SimWorld {
     ) -> PendingPublish {
         let (status, wakes) = {
             let mut inner = self.inner.write();
-            let now = inner.now();
+            let now = inner.scheduler_now();
             inner
                 .network
                 .poll_store_pending(addr, connection_id, id, context_waker, now)
         };
-        wakes.wake();
+        self.release_wakes(wakes);
         status
     }
 
     pub(crate) fn cancel_connect_waiter(&self, addr: &str, id: ConnectWaiterId) {
         let wakes = self.inner.write().network.cancel_connect_waiter(addr, id);
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     /// Publish an arriving connection to the listener on `addr`. Returns
@@ -219,12 +223,12 @@ impl SimWorld {
     pub(crate) fn store_pending_connection(&self, addr: &str, id: ConnectionId) -> bool {
         let wakes = {
             let mut inner = self.inner.write();
-            let now = inner.now();
+            let now = inner.scheduler_now();
             inner.network.store_pending(addr, id, now)
         };
         match wakes {
             Some(wakes) => {
-                wakes.wake();
+                self.release_wakes(wakes);
                 true
             }
             None => false,
@@ -243,7 +247,14 @@ impl SimWorld {
             )
         })?;
         let event = Event::Network(NetworkEvent::OperationReady { operation_id });
-        match inner.scheduler.schedule_after(delay, event) {
+        // From the caller's clock: a process's poll under the CPU model
+        // waits out its own CPU time first.
+        let scheduled = inner
+            .now()
+            .checked_add(delay)
+            .ok_or(crate::sim::ScheduleError::TimeOverflow)
+            .and_then(|at| inner.schedule_effect_at(at, event));
+        match scheduled {
             Ok(schedule_id) => {
                 inner.network_schedules.insert(operation_id, schedule_id);
                 Ok(NetworkDelay::new(
@@ -285,7 +296,7 @@ impl SimWorld {
     #[must_use]
     pub fn should_clog_write(&self, id: ConnectionId) -> bool {
         let inner = self.inner.read();
-        inner.network.should_clog_write(id, inner.now())
+        inner.network.should_clog_write(id, inner.scheduler_now())
     }
 
     /// Starts a write clog.
@@ -298,7 +309,7 @@ impl SimWorld {
     #[must_use]
     pub fn is_write_clogged(&self, id: ConnectionId) -> bool {
         let inner = self.inner.read();
-        inner.network.is_write_clogged(id, inner.now())
+        inner.network.is_write_clogged(id, inner.scheduler_now())
     }
 
     pub(crate) fn register_clog_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
@@ -309,7 +320,7 @@ impl SimWorld {
     #[must_use]
     pub fn should_clog_read(&self, id: ConnectionId) -> bool {
         let inner = self.inner.read();
-        inner.network.should_clog_read(id, inner.now())
+        inner.network.should_clog_read(id, inner.scheduler_now())
     }
 
     /// Starts a read clog.
@@ -322,7 +333,7 @@ impl SimWorld {
     #[must_use]
     pub fn is_read_clogged(&self, id: ConnectionId) -> bool {
         let inner = self.inner.read();
-        inner.network.is_read_clogged(id, inner.now())
+        inner.network.is_read_clogged(id, inner.scheduler_now())
     }
 
     pub(crate) fn register_read_clog_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
@@ -421,7 +432,7 @@ impl SimWorld {
     #[instrument(level = "debug", skip(self))]
     pub fn close_connection_abort(&self, id: ConnectionId) {
         let wakes = self.inner.write().network.close_aborted(id);
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     /// Closes selected directions of a connection.
@@ -437,7 +448,7 @@ impl SimWorld {
             .write()
             .network
             .close_asymmetric(id, close_send, close_recv);
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 
     /// Injects a random asymmetric close when configured.
@@ -446,12 +457,12 @@ impl SimWorld {
     pub fn roll_random_close(&self, id: ConnectionId) -> Option<bool> {
         let (result, wakes) = {
             let mut inner = self.inner.write();
-            let now = inner.now();
+            let now = inner.scheduler_now();
             let (result, actions, wakes) = inner.network.roll_random_close(id, now);
             inner.apply_network(actions);
             (result, wakes)
         };
-        wakes.wake();
+        self.release_wakes(wakes);
         result
     }
 
@@ -531,7 +542,9 @@ impl SimWorld {
     #[must_use]
     pub fn is_partitioned(&self, from: IpAddr, to: IpAddr) -> bool {
         let inner = self.inner.read();
-        inner.network.is_partitioned(from, to, inner.now())
+        inner
+            .network
+            .is_partitioned(from, to, inner.scheduler_now())
     }
 
     /// Aborts every connection involving an IP.
@@ -549,6 +562,6 @@ impl SimWorld {
             wakes.append(inner.network.unbind_listeners_for_ip(ip));
             wakes
         };
-        wakes.wake();
+        self.release_wakes(wakes);
     }
 }

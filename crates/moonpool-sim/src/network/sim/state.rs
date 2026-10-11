@@ -192,6 +192,18 @@ impl ConnectionFlags {
     }
 }
 
+/// One chunk the application wrote, waiting in the local send queue.
+#[derive(Debug, Clone)]
+pub(crate) struct SendChunk {
+    pub(crate) data: Vec<u8>,
+    /// The writer's clock when it wrote the chunk: the scheduler's, or the
+    /// local clock of the writing process's poll under the CPU model. The
+    /// chunk goes on the wire no earlier, so a process's send happens after
+    /// the CPU time of the poll that made it, even when an earlier chunk's
+    /// send is still in progress.
+    pub(crate) ready_at: Duration,
+}
+
 /// State for one endpoint of a simulated TCP connection.
 ///
 /// The sending half (`send_buffer`, `in_flight`, the delivery clock) belongs
@@ -205,7 +217,7 @@ pub(crate) struct ConnectionState {
     pub(crate) receive_buffer: VecDeque<u8>,
     pub(crate) paired_connection: Option<ConnectionId>,
     /// Chunks accepted from the application and not yet put on the wire.
-    pub(crate) send_buffer: VecDeque<Vec<u8>>,
+    pub(crate) send_buffer: VecDeque<SendChunk>,
     /// Chunks (and at most one trailing FIN) on the wire towards the peer, in
     /// delivery order.
     pub(crate) in_flight: VecDeque<InFlight>,
@@ -230,7 +242,7 @@ pub(crate) struct ConnectionState {
 impl ConnectionState {
     /// Bytes waiting in the local send queue.
     pub(crate) fn queued_bytes(&self) -> usize {
-        self.send_buffer.iter().map(Vec::len).sum()
+        self.send_buffer.iter().map(|chunk| chunk.data.len()).sum()
     }
 
     /// Bytes on the wire (excluding the FIN, which carries none).
@@ -352,9 +364,18 @@ pub(crate) struct NetworkState {
     pub(crate) last_random_close_time: Duration,
     pub(crate) last_black_hole_time: Duration,
     pub(crate) pair_latencies: BTreeMap<(IpAddr, IpAddr), Duration>,
+    /// Per-process network slowness of a gray failure (see
+    /// [`Slowness`](crate::Slowness)): the latency of every chunk to or from
+    /// that process is multiplied by it. A process absent here is healthy.
+    pub(crate) slow_factors: BTreeMap<IpAddr, u32>,
 }
 
 impl NetworkState {
+    /// The network slowness of `ip` (1 is healthy).
+    pub(crate) fn slow_factor(&self, ip: IpAddr) -> u32 {
+        self.slow_factors.get(&ip).copied().unwrap_or(1)
+    }
+
     pub(crate) fn new(config: NetworkConfiguration) -> Self {
         Self {
             next_connection_id: 0,
@@ -372,6 +393,7 @@ impl NetworkState {
             last_random_close_time: Duration::ZERO,
             last_black_hole_time: Duration::ZERO,
             pair_latencies: BTreeMap::new(),
+            slow_factors: BTreeMap::new(),
         }
     }
 
