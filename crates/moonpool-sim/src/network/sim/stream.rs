@@ -198,15 +198,6 @@ impl SimTcpStream {
             return Some(Poll::Pending);
         }
 
-        // Check if this write should be clogged
-        if sim.should_clog_write(self.connection_id) {
-            sim.clog_write(self.connection_id);
-            if !sim.register_clog_waker(self.connection_id, cx.waker()) {
-                return Some(Poll::Ready(Err(sim_shutdown_error())));
-            }
-            return Some(Poll::Pending);
-        }
-
         None
     }
 }
@@ -297,15 +288,6 @@ impl AsyncRead for SimTcpStream {
         }
         if sim.is_recv_closed(self.connection_id) {
             return Poll::Ready(Ok(0));
-        }
-
-        // Check if this read should be clogged
-        if sim.should_clog_read(self.connection_id) {
-            sim.clog_read(self.connection_id);
-            if !sim.register_read_clog_waker(self.connection_id, cx.waker()) {
-                return Poll::Ready(Err(sim_shutdown_error()));
-            }
-            return Poll::Pending;
         }
 
         // Try to read from connection's receive buffer first

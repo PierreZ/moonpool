@@ -1,7 +1,7 @@
 //! Automatic partition rotation: strategy selection, including the
 //! locality-shaped and one-way arms.
 //!
-//! Each test forces the rotation on (`partition_probability = 1.0`) with a
+//! Each test forces the rotation on (`partition_rate = f64::INFINITY`) with a
 //! degenerate partition duration, so `sample_duration` consumes no RNG draw and
 //! the only randomness left is the strategy's own selection.
 
@@ -27,7 +27,7 @@ fn ip(last_octet: u8) -> IpAddr {
 /// Network config with the automatic partition rotation forced on.
 fn rotation_config(strategy: PartitionStrategy) -> NetworkConfiguration {
     let mut config = NetworkConfiguration::fast_local();
-    config.chaos.partition_probability = 1.0;
+    config.chaos.partition_rate = f64::INFINITY;
     // Degenerate range: `sample_duration` returns `start` without an RNG draw,
     // and 30s outlives the microsecond-scale `fast_local` timings.
     config.chaos.partition_duration = Duration::from_secs(30)..Duration::from_secs(30);

@@ -152,7 +152,7 @@ fn no_progress_io_polls_do_not_consume_simulation_rng() {
     let mut chaos = NetworkConfiguration::fast_local();
     chaos.chaos.random_close_probability = 0.5;
     chaos.chaos.random_close_cooldown = Duration::ZERO;
-    chaos.chaos.clog_probability = 0.5;
+    chaos.chaos.clog_rate = 0.5;
     sim.set_network_config(chaos);
     // Keep random-close call sites enabled but inactive. Their first encounter
     // would still consume an activation draw, making this a sensitive check

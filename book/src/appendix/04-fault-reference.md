@@ -10,8 +10,8 @@ Enabled by `Chaos::Network(mode)`, limited by `network_fault_mask`. Each family 
 
 | `NetworkFault` | Bit | What happens | Config fields |
 |----------------|-----|--------------|---------------|
-| `Clog` | `1 << 0` | Delivery of a write is held for a duration, then resumes. | `clog_probability`, `clog_duration` |
-| `Partition` | `1 << 1` | Directed partitions. Sends between the chosen IPs are dropped until healed. | `partition_probability`, `partition_duration`, `partition_strategy` |
+| `Clog` | `1 << 0` | One IP's sends, receives or both are held for a duration, then resume. Arrivals are a rate per simulated second. | `clog_rate`, `clog_duration` |
+| `Partition` | `1 << 1` | Directed partitions. Sends between the chosen IPs are stalled until healed. Arrivals are a rate per simulated second, one partition at a time. | `partition_rate`, `partition_duration`, `partition_strategy` |
 | `BitFlip` | `1 << 2` | 1 to 32 bits of in-flight data are flipped. | `bit_flip_probability`, `bit_flip_min_bits`, `bit_flip_max_bits`, `bit_flip_cooldown` |
 | `RandomClose` | `1 << 3` | A connection closes during I/O. A share is an explicit close, the rest a reset. | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` |
 | `ConnectFailure` | `1 << 4` | `connect` fails or hangs. | `connect_failure_mode`, `connect_failure_probability` |
@@ -138,8 +138,8 @@ Reboots are bounded by `max_dead` per injector pool. The restart runs the proces
 
 | Surface | Knob | Spiked range |
 |---------|------|--------------|
-| Network | `clog_probability` | 0.5 to 1.0 |
-| Network | `partition_probability` | 0.3 to 0.8 |
+| Network | `clog_rate` | 2 to 5 per second (only when the seed has clogs) |
+| Network | `partition_rate` | 0.5 to 2 per second (only when the seed has partitions) |
 | Network | `random_close_probability` | 0.01 to 0.1 |
 | Network | `black_hole_probability` | 0.01 to 0.1 |
 | Network | `bit_flip_probability` (if already on) | 0.001 to 0.01 |
@@ -159,6 +159,7 @@ The engine records `SimFaultEvent`s. The runner merges them into the trace under
 | `process_graceful_shutdown`, `process_force_kill`, `process_restart` | process lifecycle |
 | `partition_created`, `partition_healed` | directed partitions |
 | `send_partition_created`, `send_partition_healed`, `recv_partition_created`, `recv_partition_healed` | one-sided partitions |
+| `interface_clogged` | clogs |
 | `random_close`, `black_hole`, `bit_flip` | connection faults |
 | `storage_read_fault`, `storage_write_fault`, `storage_sync_fault` | storage I/O faults |
 | `storage_disk_failure`, `storage_crash`, `storage_wipe` | disk and crash |

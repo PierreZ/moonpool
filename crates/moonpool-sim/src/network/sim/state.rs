@@ -363,6 +363,12 @@ pub(crate) struct NetworkState {
     pub(crate) recv_partitions: BTreeMap<IpAddr, Duration>,
     pub(crate) last_random_close_time: Duration,
     pub(crate) last_black_hole_time: Duration,
+    /// When the next random partition starts; `None` until the rate is first
+    /// seen non-zero (and again once it drops to zero).
+    pub(crate) next_partition_at: Option<Duration>,
+    /// When the next random interface clog starts; `None` like
+    /// [`next_partition_at`](Self::next_partition_at).
+    pub(crate) next_clog_at: Option<Duration>,
     pub(crate) pair_latencies: BTreeMap<(IpAddr, IpAddr), Duration>,
     /// Per-process network slowness of a gray failure (see
     /// [`Slowness`](crate::Slowness)): the latency of every chunk to or from
@@ -392,6 +398,8 @@ impl NetworkState {
             recv_partitions: BTreeMap::new(),
             last_random_close_time: Duration::ZERO,
             last_black_hole_time: Duration::ZERO,
+            next_partition_at: None,
+            next_clog_at: None,
             pair_latencies: BTreeMap::new(),
             slow_factors: BTreeMap::new(),
         }

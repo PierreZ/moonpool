@@ -353,7 +353,7 @@ fn test_random_close_with_partitions() {
     local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.01;
-        config.chaos.partition_probability = 0.05;
+        config.chaos.partition_rate = 0.05;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));

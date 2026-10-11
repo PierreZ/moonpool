@@ -13,6 +13,12 @@ use tracing::instrument;
 
 use super::{ConnectWaiterId, ConnectionId, PendingPublish};
 
+/// Share of the buggified, unrefused connects that hang forever under
+/// `ConnectFailureMode::Probabilistic` (FDB hangs all of them): with buggify's
+/// 25% and a 40-60% refusal, about one connect in a hundred hangs, rare
+/// enough that a retrying client still reaches its peers.
+const CONNECT_HANG_SHARE: f64 = 0.1;
+
 struct PendingConnectionPair {
     sim: WeakSimWorld,
     client: ConnectionId,
@@ -175,7 +181,11 @@ impl NetworkProvider for SimNetworkProvider {
                 }
             }
             ConnectFailureMode::Probabilistic => {
-                // Probabilistic - refused with `failure_probability`, else hang forever
+                // Probabilistic - a buggified connect is refused with
+                // `failure_probability`. FDB hangs every other buggified
+                // connect forever; that starves a client retrying a fixed peer
+                // set, so only a small share of the rest hangs here: the hang
+                // is still reached, rarely.
                 if buggify!() {
                     if sim_random::<f64>() < failure_probability {
                         // Throw connection_failed error
@@ -185,11 +195,13 @@ impl NetworkProvider for SimNetworkProvider {
                             "Connection establishment failed (Probabilistic mode)",
                         ));
                     }
-                    // Hang forever - create a future that never completes
-                    // This tests timeout handling in connection retry logic
-                    tracing::debug!(addr = %addr, "Connection hanging forever (Probabilistic mode - hang)");
-                    std::future::pending::<()>().await;
-                    unreachable!("pending() never resolves");
+                    if sim_random::<f64>() < CONNECT_HANG_SHARE {
+                        // Hang forever - create a future that never completes
+                        // This tests timeout handling in connection retry logic
+                        tracing::debug!(addr = %addr, "Connection hanging forever (Probabilistic mode - hang)");
+                        std::future::pending::<()>().await;
+                        unreachable!("pending() never resolves");
+                    }
                 }
             }
         }

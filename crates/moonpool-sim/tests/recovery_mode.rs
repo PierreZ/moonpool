@@ -55,13 +55,13 @@ fn tick_maintenance(sim: &mut SimWorld, ticks: usize) {
 // 1. New configuration-driven faults stop at the boundary
 // ===========================================================================
 
-/// Random partitioning is rolled on every event, straight from the network
+/// Random partitioning arrives at its rate, straight from the network
 /// configuration — it never went through the fault-injector token, which is
 /// exactly why the cutoff used to leak new cuts into the quiet tail.
 #[test]
 fn recovery_mode_stops_new_random_partitions() {
     let mut config = NetworkConfiguration::fast_local();
-    config.chaos.partition_probability = 1.0;
+    config.chaos.partition_rate = f64::INFINITY;
     config.chaos.partition_duration = Duration::from_millis(50)..Duration::from_millis(51);
     config.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
     let mut sim = SimWorld::new_with_network_config_and_seed(config, 20_260_901);
@@ -86,7 +86,7 @@ fn recovery_mode_stops_new_random_partitions() {
         "recovery mode heals the partitions in force at the boundary"
     );
 
-    // A partition would be rolled on *every* one of these ticks before.
+    // An infinite rate would start a partition on every one of these ticks.
     tick_maintenance(&mut sim, 200);
     assert!(
         !sim.is_partitioned(ip(1), ip(2)) && !sim.is_partitioned(ip(2), ip(1)),
@@ -493,8 +493,8 @@ fn recovery_mode_keeps_non_chaos_configuration() {
         start: WRITE,
         end: WRITE,
     };
-    network.chaos.partition_probability = 1.0;
-    network.chaos.clog_probability = 1.0;
+    network.chaos.partition_rate = f64::INFINITY;
+    network.chaos.clog_rate = f64::INFINITY;
     let mut sim = SimWorld::new_with_network_config_and_seed(network, 20_260_901);
 
     let mut storage = StorageConfiguration::fast_local();
@@ -529,13 +529,10 @@ fn recovery_mode_keeps_non_chaos_configuration() {
             "write latency is deployment shape, not chaos"
         );
         assert_zero(
-            config.chaos.partition_probability,
+            config.chaos.partition_rate,
             "partitioning is chaos and must be off",
         );
-        assert_zero(
-            config.chaos.clog_probability,
-            "clogging is chaos and must be off",
-        );
+        assert_zero(config.chaos.clog_rate, "clogging is chaos and must be off");
     });
 
     sim.with_storage_config(|config| {
@@ -610,7 +607,7 @@ fn an_already_degraded_pair_keeps_its_latency() {
 #[test]
 fn recovery_mode_is_idempotent_and_consumes_no_randomness() {
     let mut config = NetworkConfiguration::fast_local();
-    config.chaos.partition_probability = 1.0;
+    config.chaos.partition_rate = f64::INFINITY;
     let mut sim = SimWorld::new_with_network_config_and_seed(config, 20_260_901);
     sim.partition_pair(ip(1), ip(2), Duration::from_hours(1));
 
@@ -798,9 +795,9 @@ fn set_network_config_cannot_rearm_faults_after_recovery() {
     sim.enter_recovery_mode();
 
     let mut rearmed = NetworkConfiguration::fast_local();
-    rearmed.chaos.partition_probability = 1.0;
+    rearmed.chaos.partition_rate = f64::INFINITY;
     rearmed.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
-    rearmed.chaos.clog_probability = 1.0;
+    rearmed.chaos.clog_rate = f64::INFINITY;
     rearmed.chaos.clock_drift_enabled = true;
     rearmed.connect_latency = LatencyDistribution::Uniform {
         start: CONNECT,
@@ -810,11 +807,11 @@ fn set_network_config_cannot_rearm_faults_after_recovery() {
 
     sim.with_network_config(|config| {
         assert_zero(
-            config.chaos.partition_probability,
+            config.chaos.partition_rate,
             "partitioning must not be re-armable after the boundary",
         );
         assert_zero(
-            config.chaos.clog_probability,
+            config.chaos.clog_rate,
             "clogging must not be re-armable after the boundary",
         );
         assert!(

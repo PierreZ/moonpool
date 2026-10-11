@@ -158,9 +158,9 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 
 | Field | `default()` | `random_for_seed()` range |
 |-------|-------------|---------------------------|
-| `clog_probability` | 0.0 | 0 to 0.20 |
+| `clog_rate` | 0.0 | 0.05 to 1 clogs per simulated second |
 | `clog_duration` | 100 ms to 300 ms | start 50 to 300 ms, end 100 to 500 ms |
-| `partition_probability` | 0.0 | 0 to 0.15 |
+| `partition_rate` | 0.0 | 0.05 to 0.5 partitions per simulated second |
 | `partition_duration` | 200 ms to 2 s | start 100 ms to 1 s, end 500 ms to 3 s |
 | `bit_flip_probability` | 0.0 | 0.00001 to 0.0002 |
 | `bit_flip_min_bits` | 1 | 1 |
@@ -183,7 +183,7 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 | `max_pair_latency` | 0 to 0 (off) | 0 to 0..100 ms |
 | `partition_strategy` | `Random` | one of the 7 strategies |
 
-`disabled()` zeroes every probability and turns every flag off. `swarm_for_seed()` draws `random_for_seed()` then 9 coins (0.5 each) that keep or drop clog, partition, bit flip, random close, connect failure, clock drift, buggified delay, pair latency and black hole. `apply_buggify_knobs()` (under `Chaos::BuggifyKnobs`) spikes clog to 0.5..1.0, partition to 0.3..0.8, random close to 0.01..0.1, black hole to 0.01..0.1, and bit flip to 0.001..0.01 when it was already above 0.
+`disabled()` zeroes every probability and turns every flag off. `swarm_for_seed()` draws `random_for_seed()` then 9 coins (0.5 each) that keep or drop clog, partition, bit flip, random close, connect failure, clock drift, buggified delay, pair latency and black hole. `apply_buggify_knobs()` (under `Chaos::BuggifyKnobs`) spikes clog to 2..5 per second, partition to 0.5..2 per second, random close to 0.01..0.1, black hole to 0.01..0.1, and bit flip to 0.001..0.01. It spikes a family only when it was already above 0, so a family the swarm turned off stays off.
 
 `PartitionStrategy`: `Random`, `UniformSize`, `IsolateSingle`, `IsolateZone`, `IsolateDatacenter`, `AsymmetricSend`, `AsymmetricRecv`. `ConnectFailureMode`: `Disabled`, `AlwaysFail`, `Probabilistic`.
 

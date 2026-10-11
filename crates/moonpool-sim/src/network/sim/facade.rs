@@ -292,13 +292,6 @@ impl SimWorld {
         inner.network.cancel_operation(operation_id);
     }
 
-    /// Returns whether write clog chaos should trigger.
-    #[must_use]
-    pub fn should_clog_write(&self, id: ConnectionId) -> bool {
-        let inner = self.inner.read();
-        inner.network.should_clog_write(id, inner.scheduler_now())
-    }
-
     /// Starts a write clog.
     #[instrument(level = "trace", skip(self))]
     pub fn clog_write(&self, id: ConnectionId) {
@@ -314,13 +307,6 @@ impl SimWorld {
 
     pub(crate) fn register_clog_waker(&self, id: ConnectionId, waker: &Waker) -> bool {
         self.inner.write().network.register_write_clog(id, waker)
-    }
-
-    /// Returns whether read clog chaos should trigger.
-    #[must_use]
-    pub fn should_clog_read(&self, id: ConnectionId) -> bool {
-        let inner = self.inner.read();
-        inner.network.should_clog_read(id, inner.scheduler_now())
     }
 
     /// Starts a read clog.
