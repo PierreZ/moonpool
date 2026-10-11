@@ -266,6 +266,7 @@ jobs:
           - axum-web
           - metrics-service
           - topology
+          - operator
           - tonic-grpc
           - journal
           - rpc-foundations

@@ -45,6 +45,7 @@
   - [Configuring the SimulationBuilder](./part3-building/04-simulation-builder.md)
   - [Running and Observing](./part3-building/05-running.md)
   - [Process Groups, Tags and Topology](./part3-building/27-process-groups.md)
+  - [Changing the Deployment Mid-Run](./part3-building/34-deployment.md)
 - [Chaos Testing vs Simulation](./part3-building/06-chaos-vs-simulation.md)
 - [Chaos in Moonpool](./part3-building/07-chaos.md)
   - [Buggify: Fault Injection](./part3-building/08-buggify.md)

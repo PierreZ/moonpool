@@ -117,7 +117,7 @@ impl Workload for TopologyWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let process_ips: Vec<String> = ctx.topology().all_process_ips().to_vec();
+        let process_ips: Vec<String> = ctx.topology().all_process_ips();
         assert_always!(
             !process_ips.is_empty(),
             "workload should see server processes"

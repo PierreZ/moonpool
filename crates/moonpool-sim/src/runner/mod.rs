@@ -12,6 +12,8 @@
 //! | [`process`] | [`Process`] (the system under test), [`RebootKind`], [`Attrition`] and its victim filters |
 //! | [`workload`] | [`Workload`] (the test driver) |
 //! | [`context`] | [`SimContext`], [`SelfCrash`] |
+//! | [`deployment`] | [`Deployment`]: a workload spawns and retires processes mid-run |
+//! | [`membership`] | [`Membership`], [`DomainSpec`], [`DeploymentChanges`]: the live process set |
 //! | [`fault_injector`] | [`FaultInjector`], [`FaultContext`], the built-in attrition injector |
 //! | [`outage`] | [`Outage`], [`OutageVeto`], [`OutageLanded`] |
 //! | [`gray_failure`] | [`GrayFailure`], [`GrayKinds`] |
@@ -28,6 +30,7 @@ pub mod app_metrics;
 pub mod builder;
 mod config;
 pub mod context;
+pub mod deployment;
 pub mod display;
 pub mod fault_injector;
 pub mod gray_failure;
@@ -35,6 +38,7 @@ pub mod groups;
 pub mod hint;
 pub(crate) mod iteration;
 pub mod locality;
+pub mod membership;
 pub(crate) mod metrics;
 pub(crate) mod orchestrator;
 pub mod outage;
@@ -51,13 +55,15 @@ pub mod workload;
 // Re-export main types at module level
 pub use app_metrics::{INSTANCE_LABEL, MetricsHandle};
 pub use builder::{Chaos, ChaosMode, WorkloadCount};
-pub use builder::{IterationControl, SimulationBuilder};
+pub use builder::{DEFAULT_MAX_SPAWNS, IterationControl, SimulationBuilder};
 pub use context::{SelfCrash, SimContext};
+pub use deployment::Deployment;
 pub use fault_injector::{FaultContext, FaultInjector};
 pub use gray_failure::{GrayFailure, GrayKinds};
 pub use groups::GroupRegistry;
 pub use hint::{HINT_VETO_KEY, HintVeto};
 pub use locality::{LocalityConfig, MachineRegistry};
+pub use membership::{DeploymentChanges, DomainSpec, Membership};
 pub use outage::{OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, VETO_RETRY};
 pub use process::{Attrition, AttritionScope, AttritionVictims, Process, RebootKind};
 pub use report::{SimulationMetrics, SimulationReport};

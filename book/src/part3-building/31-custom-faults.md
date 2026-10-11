@@ -19,7 +19,7 @@ impl FaultInjector for RollingRestart {
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         // Restart each process in order, with time to recover between each.
-        for ip in ctx.process_ips().to_vec() {
+        for ip in ctx.process_ips() {
             ctx.reboot(&ip, RebootKind::Graceful)?;
             ctx.time().sleep(Duration::from_secs(15)).await
                 .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
@@ -56,8 +56,8 @@ A fault factory requires `chaos_duration`. `run()` returns `SimulationError::Inv
 
 | Method | What it does |
 |--------|--------------|
-| `process_ips()` | Every server process IP. `ips_in_group(name)` narrows to one group, ascending. |
-| `group_registry()`, `machine_registry()` | Group and failure-domain queries. |
+| `process_ips()` | Every live server process IP, read now (spawned included, retired excluded). `ips_in_group(name)` narrows to one group, ascending. |
+| `group_registry()`, `machine_registry()` | Copies of the live group and failure-domain registries. `membership()` and `membership_version()` read the live set itself. |
 | `time()`, `random()` | The simulated time and the seeded random provider. |
 | `state()` | The per-iteration `StateHandle` workloads and processes share. |
 | `chaos_shutdown()` | The token cancelled when the chaos window closes. |

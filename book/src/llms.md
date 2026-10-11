@@ -70,6 +70,7 @@ impl Workload for Driver {
 | Identity | `my_ip()`, `client_id()`, `client_count()`, `peer(name)`, `peers()` |
 | Topology | `topology()` → `WorkloadTopology { groups, ips_in_group, group_for, my_group, peer_by_name, all_process_ips, ips_tagged, tags_for, my_tags, my_locality, locality_for, peers_on_my_machine, ips_in_domain }` |
 | Lifecycle | `shutdown()` (a `CancellationToken`), `crash_self(kind, Option<Duration>)`, `self_crash() -> SelfCrash` |
+| Deployment | `deployment() -> &Deployment { spawn(group), spawn_in(group, DomainSpec), spawn_group(name, count, factory), retire(ip), version() }`; refuses from a process; topology queries read the live `Membership` |
 | Shared state | `state()` → `StateHandle { publish(key, v), get::<T>(key), contains(key) }` |
 | Observation | `observability()` (a `TraceQuery`), `disk_counters(ip)`, `system_samples(ip)`, `slowness(ip)` |
 | Metrics | `metrics::<S>()`, `metrics_handle()` |
@@ -104,6 +105,7 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `replicated_storage_faults(ReplicatedFaults)` | Bound damage to tolerated domains. |
 | `swarm_operations()` | Per-seed operation subsets; test with `swarm_op_enabled(op_id)`. |
 | `link_latency(cfg)`, `tcp_send_window_bytes(n)`, `accept_backlog_capacity(n)` | Deployment shape. Defaults none, 64 KiB, 128. |
+| `max_spawns(n)` | Cap on processes workloads spawn per run through `ctx.deployment()`. Default 16. |
 | `invariant(i)`, `invariant_fn(name, \|q, t\| ..)`, `trace_level(level)` | Invariants run after every step. |
 | `metrics_factory(\|ip\| Arc<S>)`, `metric(MetricQuery::select("m").label(k, v).rate().bucketize(d, Mean).reduce(Mean).named("x"))` | App metrics in the report. |
 | `set_iterations(n)`, `until_coverage_stable(10, 1000)` (default), `set_debug_seeds(seeds)`, `run_time_budget(d)` (1 h) | Campaign control. |
@@ -207,7 +209,7 @@ impl FaultInjector for Partitioner {
 | Network | `partition(a, b)`, `heal_partition(a, b)`, `is_partitioned(a, b)` |
 | Storage | `durable_bytes(ip, path)`, `corrupt_bytes(..)`, `fail_file_with_eio(..)`, `clear_file_eio(..)` |
 | Slowness | `set_slowness(ip, Slowness)`, `slowness(ip)`, `cpu_model()` |
-| Topology | `process_ips()`, `group_registry()`, `ips_in_group(name)`, `machine_registry()` |
+| Topology | `process_ips()`, `group_registry()`, `ips_in_group(name)`, `machine_registry()` (live, owned copies), `membership()`, `membership_version()` |
 | Misc | `state()`, `random()`, `time()`, `chaos_shutdown()` |
 
 ## Exploration
@@ -239,6 +241,7 @@ For provider tests without the runner: `SimWorld::new_with_seed(seed)`, `new_wit
 |-------|------|
 | Invariant from traces | `crates/moonpool-sim/tests/leader_election.rs` |
 | Process groups, tags, topology | `crates/moonpool-sim/tests/process_groups.rs`, `crates/moonpool-sim-examples/src/topology.rs` |
+| Spawn and retire mid-run | `crates/moonpool-sim/tests/deployment.rs`, `crates/moonpool-sim-examples/src/operator.rs` |
 | Swarm operations | `crates/moonpool-sim/tests/swarm_op_alphabet.rs` |
 | Custom injectors, targeted faults | `crates/moonpool-sim/tests/scripted_faults.rs`, `targeted_faults.rs` |
 | Hints, outages, self crash | `crates/moonpool-sim/tests/hint.rs`, `outage.rs`, `crash_self.rs` |

@@ -341,6 +341,8 @@ impl SimWorld {
                     ));
                 }
                 Event::ProcessRestart { .. }
+                | Event::ProcessSpawn { .. }
+                | Event::ProcessRetire { .. }
                 | Event::ProcessGracefulShutdown { .. }
                 | Event::ProcessForceKill { .. } => {}
             }
@@ -470,6 +472,7 @@ impl SimWorld {
             app_metrics: Vec::new(),
             app_series: std::collections::BTreeMap::new(),
             dropped_metric_points: 0,
+            deployment: crate::runner::membership::DeploymentChanges::default(),
         }
     }
 

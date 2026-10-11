@@ -222,7 +222,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - No deprecation needed — delete old APIs when replacing them
 
 ## Documentation
-**Keep the book up to date**: When changing public APIs, adding features, or modifying behavior in any moonpool crate, update the corresponding chapters in `book/src/`. Build with `nix develop --command mdbook build book/` to verify.
+**Keep the book and the README up to date**: When you add a feature, change a public API, or modify behavior in any moonpool crate, update the corresponding chapters in `book/src/` (and `book/src/llms.md`) and the root `README.md` (feature list, examples) in the same PR. A feature PR without its book and README changes is not done. Build with `nix develop --command mdbook build book/` to verify.
 
 ## API Design Principles
 **Keep APIs familiar**: APIs should match what developers expect from tokio objects

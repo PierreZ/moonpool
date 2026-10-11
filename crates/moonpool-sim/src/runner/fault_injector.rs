@@ -44,7 +44,7 @@
 //!     }
 //!
 //!     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-//!         let ips = ctx.process_ips().to_vec();
+//!         let ips = ctx.process_ips();
 //!         while !ctx.chaos_shutdown().is_cancelled() && ips.len() >= 2 {
 //!             if ctx.random().random_bool(self.probability) {
 //!                 ctx.partition(&ips[0], &ips[1])?;
@@ -75,22 +75,16 @@ use crate::locality::DomainLevel;
 use crate::providers::{SimRandomProvider, SimTimeProvider};
 use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::MachineRegistry;
+use crate::runner::membership::Membership;
 use crate::runner::process::{AttritionScope, AttritionVictims, RebootKind};
-use crate::runner::tags::TagRegistry;
 use crate::sim::{ProcessKillKind, SimWorld};
 use crate::{assert_always, assert_reachable, assert_sometimes_each};
 
 /// Process-related state for fault injection targeting.
 pub struct ProcessInfo {
-    /// Server process IP addresses.
-    pub process_ips: Vec<String>,
-    /// Tag registry mapping process IPs to their resolved tags.
-    pub tag_registry: TagRegistry,
-    /// Machine registry mapping process IPs to their failure-domain locality.
-    pub machine_registry: MachineRegistry,
-    /// Group registry mapping process IPs to their `.processes()` / `.cluster()`
-    /// registration.
-    pub group_registry: GroupRegistry,
+    /// The run's live membership: groups, tags and failure domains of every
+    /// process now, spawned and retired ones included.
+    pub membership: Membership,
     /// The processes currently dead (killed but not yet restarted), shared
     /// with the process manager.
     pub dead: DeadSet,
@@ -369,16 +363,31 @@ impl FaultContext {
         &self.chaos_shutdown
     }
 
-    /// Get all server process IPs.
+    /// Get every live server process IP (booted or spawned, not retired),
+    /// read now.
     #[must_use]
-    pub fn process_ips(&self) -> &[String] {
-        &self.process_info.process_ips
+    pub fn process_ips(&self) -> Vec<String> {
+        self.process_info.membership.process_ips()
     }
 
-    /// The group registry, for process-group queries during fault injection.
+    /// The run's live membership.
     #[must_use]
-    pub fn group_registry(&self) -> &GroupRegistry {
-        &self.process_info.group_registry
+    pub fn membership(&self) -> &Membership {
+        &self.process_info.membership
+    }
+
+    /// The membership version: +1 on every spawned process that boots and
+    /// every retire.
+    #[must_use]
+    pub fn membership_version(&self) -> u64 {
+        self.process_info.membership.version()
+    }
+
+    /// A copy of the live group registry, for process-group queries during
+    /// fault injection.
+    #[must_use]
+    pub fn group_registry(&self) -> GroupRegistry {
+        self.process_info.membership.group_registry()
     }
 
     /// Get the IPs of every process in a group (a `.processes()` /
@@ -386,7 +395,7 @@ impl FaultContext {
     #[must_use]
     pub fn ips_in_group(&self, group: &str) -> Vec<String> {
         self.process_info
-            .group_registry
+            .membership
             .ips_in_group(group)
             .into_iter()
             .map(|ip| ip.to_string())
@@ -439,6 +448,9 @@ impl FaultContext {
         grace_period_range_ms: &std::ops::Range<usize>,
     ) -> SimulationResult<()> {
         let ip_addr = parse_ip(ip)?;
+        if self.retired(ip_addr) {
+            return Ok(());
+        }
         if self.is_dead(ip) {
             assert_reachable!("reboot: target already dead, skipped");
             tracing::debug!("Skipped reboot of already-dead process at IP {}", ip);
@@ -515,6 +527,9 @@ impl FaultContext {
     /// Returns an error if IP parsing fails.
     pub fn crash(&self, ip: &str) -> SimulationResult<()> {
         let ip_addr = parse_ip(ip)?;
+        if self.retired(ip_addr) {
+            return Ok(());
+        }
         assert_reachable!("crash: hold-down path");
         self.mark_dead(ip_addr);
         self.sim.schedule_event(
@@ -539,6 +554,9 @@ impl FaultContext {
     /// Returns an error if IP parsing fails.
     pub fn crash_for(&self, ip: &str, down: Duration) -> SimulationResult<()> {
         let ip_addr = parse_ip(ip)?;
+        if self.retired(ip_addr) {
+            return Ok(());
+        }
         if self.is_dead(ip) {
             assert_reachable!("crash_for: target already dead, skipped");
             return Ok(());
@@ -577,6 +595,9 @@ impl FaultContext {
     /// Returns an error if IP parsing fails.
     pub fn restart(&self, ip: &str) -> SimulationResult<()> {
         let ip_addr = parse_ip(ip)?;
+        if self.retired(ip_addr) {
+            return Ok(());
+        }
         assert_reachable!("restart: explicit restart path");
         self.sim.schedule_event(
             crate::sim::Event::ProcessRestart { ip: ip_addr },
@@ -595,10 +616,9 @@ impl FaultContext {
     ///
     /// Returns an error if IP parsing fails or the operation is rejected by the simulator.
     pub fn reboot_random(&self, kind: RebootKind) -> SimulationResult<Option<String>> {
-        let alive: Vec<&String> = self
-            .process_info
-            .process_ips
-            .iter()
+        let alive: Vec<String> = self
+            .process_ips()
+            .into_iter()
             .filter(|ip| !self.is_dead(ip))
             .collect();
         if alive.is_empty() {
@@ -624,7 +644,7 @@ impl FaultContext {
     ) -> SimulationResult<Vec<String>> {
         let matching_ips: Vec<String> = self
             .process_info
-            .tag_registry
+            .membership
             .ips_tagged(key, value)
             .into_iter()
             .map(|ip| ip.to_string())
@@ -637,10 +657,20 @@ impl FaultContext {
         Ok(matching_ips)
     }
 
-    /// The machine registry, for failure-domain queries during fault injection.
+    /// A copy of the live machine registry, for failure-domain queries
+    /// during fault injection.
     #[must_use]
-    pub fn machine_registry(&self) -> &MachineRegistry {
-        &self.process_info.machine_registry
+    pub fn machine_registry(&self) -> MachineRegistry {
+        self.process_info.membership.machine_registry()
+    }
+
+    /// Whether `ip` was retired: faults leave it alone.
+    fn retired(&self, ip: std::net::IpAddr) -> bool {
+        let retired = self.process_info.membership.is_retired(ip);
+        if retired {
+            assert_reachable!("deployment: a fault aimed at a retired process is dropped");
+        }
+        retired
     }
 
     /// Reboot every process collocated on a single machine — modeling correlated
@@ -675,7 +705,8 @@ impl FaultContext {
     ) -> SimulationResult<Vec<String>> {
         let ips: Vec<String> = self
             .process_info
-            .machine_registry
+            .membership
+            .machine_registry()
             .ips_in_domain(level, id)
             .into_iter()
             .map(|ip| ip.to_string())
@@ -789,6 +820,9 @@ impl AttritionInjector {
         if self.config.victims != AttritionVictims::Any {
             assert_reachable!("attrition: victim filter narrowed the pool");
         }
+        if ip.parse().is_ok_and(|ip| ctx.membership().was_spawned(ip)) {
+            assert_reachable!("deployment: attrition picks a process spawned mid-run");
+        }
     }
 
     /// Reboot `ip` at its own [hint](moonpool_buggify::hint), under this
@@ -807,7 +841,8 @@ impl AttritionInjector {
         if ctx.is_dead(ip) {
             return Ok(false);
         }
-        let eligible = self.eligible(ctx, ctx.process_ips());
+        let ips = ctx.process_ips();
+        let eligible = self.eligible(ctx, &ips);
         if Self::dead_among(ctx, &eligible) >= self.config.max_dead {
             assert_reachable!("attrition: max_dead limit refuses a reboot hint");
             return Ok(false);
@@ -825,7 +860,8 @@ impl AttritionInjector {
     /// Reboot a single random live eligible process, respecting the
     /// `max_dead` budget over the whole eligible pool.
     fn inject_process(&self, ctx: &FaultContext) -> SimulationResult<()> {
-        let eligible = self.eligible(ctx, ctx.process_ips());
+        let ips = ctx.process_ips();
+        let eligible = self.eligible(ctx, &ips);
         if Self::dead_among(ctx, &eligible) >= self.config.max_dead {
             assert_reachable!("attrition: max_dead limit enforced");
             return Ok(());
@@ -885,7 +921,8 @@ impl AttritionInjector {
         let ips = domain_ips(domains[di]);
         // Whole-group gate: reboot the group atomically only if all of its
         // processes fit within the remaining budget of the eligible pool.
-        let eligible = self.eligible(ctx, ctx.process_ips());
+        let pool = ctx.process_ips();
+        let eligible = self.eligible(ctx, &pool);
         if Self::dead_among(ctx, &eligible) + ips.len() > self.config.max_dead {
             assert_reachable!("attrition: max_dead limit enforced (group)");
             return Ok(());

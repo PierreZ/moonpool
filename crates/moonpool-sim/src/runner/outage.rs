@@ -205,7 +205,7 @@ impl OutageInjector {
             .config
             .groups
             .iter()
-            .flat_map(|group| ctx.group_registry().ips_in_group(group))
+            .flat_map(|group| ctx.membership().ips_in_group(group))
             .collect();
         ips.sort_unstable();
         ips.dedup();

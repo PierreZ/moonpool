@@ -178,7 +178,7 @@ impl GrayFailureInjector {
     fn pool(&self, ctx: &FaultContext) -> Vec<IpAddr> {
         let mut ips: Vec<IpAddr> = ctx
             .process_ips()
-            .iter()
+            .into_iter()
             .filter_map(|ip| ip.parse().ok())
             .filter(|ip| self.config.victims.admits(*ip, ctx.process_info()))
             .collect();
@@ -258,25 +258,24 @@ impl FaultInjector for GrayFailureInjector {
     }
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let drawn_version = ctx.membership_version();
         let windows = self.draw_windows(ctx);
         // The timeline: each window's start and end, in time order; a start
         // and an end at one instant apply in drawing order.
-        let mut changes: Vec<(Duration, IpAddr, Slowness)> = windows
+        let mut changes: Vec<(Duration, usize, bool)> = windows
             .iter()
-            .filter(|window| !window.slowness.is_healthy())
-            .flat_map(|window| {
-                [
-                    (window.start, window.ip, window.slowness),
-                    (window.end, window.ip, Slowness::HEALTHY),
-                ]
-            })
+            .enumerate()
+            .filter(|(_, window)| !window.slowness.is_healthy())
+            .flat_map(|(index, window)| [(window.start, index, true), (window.end, index, false)])
             .collect();
         if changes.is_empty() && !windows.is_empty() {
             assert_reachable!("gray: the seed's mask keeps no kind");
         }
         changes.sort_by_key(|(at, _, _)| *at);
+        // The machine each window slowed, once it started.
+        let mut slowed: Vec<Option<IpAddr>> = vec![None; windows.len()];
         let origin = ctx.time().now();
-        for (at, ip, slowness) in changes {
+        for (at, index, starts) in changes {
             let wait = origin.saturating_add(at).saturating_sub(ctx.time().now());
             ctx.time().sleep(wait).await.map_err(|error| {
                 crate::SimulationError::InvalidState(format!("sleep failed: {error}"))
@@ -285,22 +284,59 @@ impl FaultInjector for GrayFailureInjector {
                 // Recovery mode made every machine healthy already.
                 return Ok(());
             }
-            ctx.set_slowness(&ip.to_string(), slowness)?;
-            if slowness.is_healthy() {
-                assert_reachable!("gray: machine healthy again");
-                tracing::info!(%ip, "gray failure: machine healthy again");
-            } else {
-                reach_slow(slowness);
+            let window = &windows[index];
+            if starts {
+                let Some(ip) = self.victim_now(ctx, window.ip, drawn_version, &slowed) else {
+                    continue;
+                };
+                slowed[index] = Some(ip);
+                ctx.set_slowness(&ip.to_string(), window.slowness)?;
+                reach_slow(window.slowness);
                 tracing::info!(
                     %ip,
-                    cpu = slowness.cpu,
-                    disk = slowness.disk,
-                    network = slowness.network,
+                    cpu = window.slowness.cpu,
+                    disk = window.slowness.disk,
+                    network = window.slowness.network,
                     "gray failure: machine slow"
                 );
+            } else if let Some(ip) = slowed[index].take() {
+                ctx.set_slowness(&ip.to_string(), Slowness::HEALTHY)?;
+                assert_reachable!("gray: machine healthy again");
+                tracing::info!(%ip, "gray failure: machine healthy again");
             }
         }
         Ok(())
+    }
+}
+
+impl GrayFailureInjector {
+    /// The machine a window slows when it starts: the one drawn at the start
+    /// of the chaos window while the deployment is unchanged. Once a workload
+    /// spawned or retired a process, one draw picks a victim from the live
+    /// pool, leaving out the machines other windows slow now, so a spawned
+    /// process can go slow and a retired one never does. `None` when no
+    /// machine is left.
+    fn victim_now(
+        &self,
+        ctx: &FaultContext,
+        drawn: IpAddr,
+        drawn_version: u64,
+        slowed: &[Option<IpAddr>],
+    ) -> Option<IpAddr> {
+        if ctx.membership_version() == drawn_version {
+            return Some(drawn);
+        }
+        let pool: Vec<IpAddr> = self
+            .pool(ctx)
+            .into_iter()
+            .filter(|ip| !slowed.contains(&Some(*ip)))
+            .collect();
+        if pool.is_empty() {
+            assert_reachable!("gray: the changed deployment leaves no machine to slow");
+            return None;
+        }
+        assert_reachable!("gray: a window picks its victim from the changed deployment");
+        Some(pool[sim_random_range(0..pool.len())])
     }
 }
 

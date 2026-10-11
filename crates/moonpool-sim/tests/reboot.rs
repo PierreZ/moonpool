@@ -1028,7 +1028,7 @@ impl FaultInjector for RandomAmongLiveInjector {
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         let _ = ctx.time().sleep(Duration::from_millis(100)).await;
-        let ips = ctx.process_ips().to_vec();
+        let ips = ctx.process_ips();
         ctx.crash(&ips[0])?;
         ctx.crash(&ips[1])?;
         let first = ctx.reboot_random(RebootKind::Crash)?;

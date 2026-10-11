@@ -99,6 +99,7 @@ pub mod dungeon;
 pub mod journal;
 pub mod maze;
 pub mod metrics_service;
+pub mod operator;
 pub mod support;
 pub mod tonic_grpc;
 pub mod topology;

@@ -22,10 +22,11 @@ use std::net::IpAddr;
 /// Registry mapping process IPs to the group they were registered in.
 ///
 /// Parallel to [`TagRegistry`](super::tags::TagRegistry) and
-/// [`MachineRegistry`](super::locality::MachineRegistry): built once per
-/// iteration by the builder, cloned into every
-/// [`WorkloadTopology`](super::topology::WorkloadTopology) and into the
-/// [`FaultContext`](super::fault_injector::FaultContext).
+/// [`MachineRegistry`](super::locality::MachineRegistry): built per
+/// iteration by the builder, then kept live in the run's
+/// [`Membership`](super::membership::Membership), which every
+/// [`WorkloadTopology`](super::topology::WorkloadTopology) and
+/// [`FaultContext`](super::fault_injector::FaultContext) reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupRegistry {
     /// Group names in registration order.
@@ -62,6 +63,18 @@ impl GroupRegistry {
     pub fn register(&mut self, ip: IpAddr, group: &str) {
         let index = self.declare(group);
         self.ip_group.insert(ip, index);
+    }
+
+    /// Remove `ip` from its group (a retired process). The group stays
+    /// declared, so its index and IP range never move.
+    pub fn remove(&mut self, ip: IpAddr) {
+        self.ip_group.remove(&ip);
+    }
+
+    /// The index of `group` in registration order, if it is declared.
+    #[must_use]
+    pub fn index_of(&self, group: &str) -> Option<usize> {
+        self.names.iter().position(|name| name == group)
     }
 
     /// All group names, in registration order.

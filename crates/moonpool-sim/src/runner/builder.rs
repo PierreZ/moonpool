@@ -96,7 +96,7 @@ pub(super) enum WorkloadEntry {
 /// | The system under test | [`processes`](Self::processes), [`cluster`](Self::cluster), [`tags`](Self::tags) |
 /// | The test driver | [`workload_factory`](Self::workload_factory), [`workloads`](Self::workloads), [`workload`](Self::workload) |
 /// | Chaos | [`enable_chaos`](Self::enable_chaos), [`chaos_duration`](Self::chaos_duration), [`fault_factory`](Self::fault_factory), [`network_fault_mask`](Self::network_fault_mask), [`storage_fault_mask`](Self::storage_fault_mask), [`replicated_storage_faults`](Self::replicated_storage_faults), [`swarm_operations`](Self::swarm_operations) |
-/// | Deployment shape | [`link_latency`](Self::link_latency), [`tcp_send_window_bytes`](Self::tcp_send_window_bytes), [`accept_backlog_capacity`](Self::accept_backlog_capacity) |
+/// | Deployment shape | [`link_latency`](Self::link_latency), [`tcp_send_window_bytes`](Self::tcp_send_window_bytes), [`accept_backlog_capacity`](Self::accept_backlog_capacity), [`max_spawns`](Self::max_spawns) |
 /// | Checks and observation | [`invariant`](Self::invariant), [`invariant_fn`](Self::invariant_fn), [`trace_level`](Self::trace_level), [`metrics_factory`](Self::metrics_factory), [`metric`](Self::metric), [`check_determinism`](Self::check_determinism) |
 /// | Seeds and stopping | [`until_coverage_stable`](Self::until_coverage_stable), [`set_iterations`](Self::set_iterations), [`set_debug_seeds`](Self::set_debug_seeds), [`replay_timeline`](Self::replay_timeline), [`run_time_budget`](Self::run_time_budget), `enable_exploration` (feature `exploration`) |
 ///
@@ -164,7 +164,12 @@ pub struct SimulationBuilder {
     /// Recipe installed for every iteration (set by [`Self::replay_timeline`]).
     pub(super) replay_recipe: Option<Vec<(u64, u64)>>,
     pub(super) run_time_budget: Duration,
+    /// How many processes the workloads may spawn per run.
+    pub(super) max_spawns: usize,
 }
+
+/// The default [`SimulationBuilder::max_spawns`] cap.
+pub const DEFAULT_MAX_SPAWNS: usize = 16;
 
 impl Default for SimulationBuilder {
     fn default() -> Self {
@@ -182,7 +187,8 @@ impl SimulationBuilder {
     ///   [`set_debug_seeds`](Self::set_debug_seeds));
     /// - chaos: every surface off, both fault masks retain every family;
     /// - trace floor: `INFO`;
-    /// - [`run_time_budget`](Self::run_time_budget): one simulated hour.
+    /// - [`run_time_budget`](Self::run_time_budget): one simulated hour;
+    /// - [`max_spawns`](Self::max_spawns): 16 processes per run.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -218,6 +224,7 @@ impl SimulationBuilder {
             pending_replay: None,
             replay_recipe: None,
             run_time_budget: super::stall::DEFAULT_RUN_TIME_BUDGET,
+            max_spawns: DEFAULT_MAX_SPAWNS,
         }
     }
 
@@ -924,6 +931,20 @@ impl SimulationBuilder {
     #[must_use]
     pub fn run_time_budget(mut self, budget: Duration) -> Self {
         self.run_time_budget = budget;
+        self
+    }
+
+    /// Cap how many processes the workloads may start per run through
+    /// [`SimContext::deployment`](crate::SimContext::deployment)
+    /// ([`spawn`](crate::Deployment::spawn), [`spawn_in`](crate::Deployment::spawn_in),
+    /// every process of a [`spawn_group`](crate::Deployment::spawn_group)).
+    /// A spawn past the cap returns an error, so a buggy operator workload
+    /// cannot fill a group's `/24`.
+    ///
+    /// Default: 16 ([`DEFAULT_MAX_SPAWNS`]). Draws no randomness.
+    #[must_use]
+    pub fn max_spawns(mut self, max_spawns: usize) -> Self {
+        self.max_spawns = max_spawns;
         self
     }
 

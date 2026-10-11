@@ -134,6 +134,10 @@ and under the simulator in its own `#[test]`.
 - `SimulationBuilder`: `processes` with fixed or random counts, `cluster`
   with datacenter, zone and machine locality, `tags`, `workload`,
   `workload_factory` and `workloads`.
+- `ctx.deployment()`: a workload changes the deployment mid-run. `spawn`,
+  `spawn_in` and `spawn_group` boot new processes, `retire` stops one for
+  good, and topology queries and chaos victim pools follow the live
+  membership. An operator is an ordinary workload (`max_spawns` caps it).
 - Iteration control: `set_iterations`, `until_coverage_stable`,
   `set_debug_seeds`, `run_time_budget`, `replay_timeline`.
 - `check_determinism` runs each seed twice and fails it when the draw

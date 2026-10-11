@@ -50,6 +50,7 @@ const SIM_BINARIES: &[SimBinary] = &[
     SimBinary::example("sim-axum-web"),
     SimBinary::example("sim-metrics-service"),
     SimBinary::example("sim-topology"),
+    SimBinary::example("sim-operator"),
     SimBinary::example("sim-tonic-grpc"),
     SimBinary::new(
         "sim-journal",

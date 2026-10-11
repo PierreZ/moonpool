@@ -296,7 +296,7 @@ impl Workload for RangeTopologyWorkload {
         let topo = ctx.topology();
         // Every process IP resolves to a locality.
         for ip in topo.all_process_ips() {
-            if topo.locality_for(ip).is_none() {
+            if topo.locality_for(&ip).is_none() {
                 return Err(SimulationError::InvalidState(format!(
                     "process {ip} has no locality"
                 )));

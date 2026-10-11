@@ -6,6 +6,7 @@
 //! through `fmt_report`, so the plain text and the coloured text never
 //! drift apart.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{IsTerminal, Write};
 
@@ -216,6 +217,43 @@ fn write_report_timing(w: &mut impl Write, report: &SimulationReport) {
         w,
         "  Events       {} avg",
         fmt_num(f64_to_u64(report.average_events_processed().round())),
+    );
+    write_report_deployment(w, report);
+}
+
+/// The processes workloads spawned and retired, by group, over the
+/// successful seeds. Silent when no seed changed the deployment.
+fn write_report_deployment(w: &mut impl Write, report: &SimulationReport) {
+    let mut spawned: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut retired: BTreeMap<&str, usize> = BTreeMap::new();
+    for metrics in report.individual_metrics.iter().flatten() {
+        for (group, ips) in &metrics.deployment.spawned {
+            *spawned.entry(group.as_str()).or_default() += ips.len();
+        }
+        for (group, ips) in &metrics.deployment.retired {
+            *retired.entry(group.as_str()).or_default() += ips.len();
+        }
+    }
+    if spawned.is_empty() && retired.is_empty() {
+        return;
+    }
+    let mut groups: Vec<&str> = spawned.keys().chain(retired.keys()).copied().collect();
+    groups.sort_unstable();
+    groups.dedup();
+    let per_group: Vec<String> = groups
+        .iter()
+        .map(|group| {
+            format!(
+                "{group} +{} -{}",
+                spawned.get(group).copied().unwrap_or(0),
+                retired.get(group).copied().unwrap_or(0)
+            )
+        })
+        .collect();
+    let _ = writeln!(
+        w,
+        "  Deployment   {} (spawned, retired)",
+        per_group.join(", ")
     );
 }
 

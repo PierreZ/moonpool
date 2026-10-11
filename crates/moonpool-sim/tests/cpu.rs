@@ -121,7 +121,7 @@ impl Workload for Pinger {
             .await
             .map_err(|error| sleep_failed(&error))?;
         let started = ctx.time().now();
-        let servers = ctx.topology().all_process_ips().to_vec();
+        let servers = ctx.topology().all_process_ips();
         while ctx.time().now().saturating_sub(started) < CHAOS + Duration::from_secs(1) {
             for server in &servers {
                 Self::ping(ctx, server).await;
@@ -240,7 +240,7 @@ impl FaultInjector for GrayWatch {
         while !ctx.chaos_shutdown().is_cancelled() {
             let mut slow = Vec::new();
             for ip in ctx.process_ips() {
-                if !ctx.slowness(ip)?.is_healthy() {
+                if !ctx.slowness(&ip)?.is_healthy() {
                     slow.push(ip.clone());
                 }
             }

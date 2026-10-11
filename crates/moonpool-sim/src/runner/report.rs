@@ -69,6 +69,10 @@ pub struct SimulationMetrics {
     /// Points dropped because a series hit its capacity. Non-zero means
     /// [`app_series`](Self::app_series) is truncated.
     pub dropped_metric_points: u64,
+    /// The processes workloads spawned and retired in this iteration, by
+    /// group (see [`Deployment`](crate::Deployment)). Empty in the
+    /// aggregate: read it per iteration.
+    pub deployment: crate::runner::membership::DeploymentChanges,
 }
 
 impl Default for SimulationMetrics {
@@ -80,6 +84,7 @@ impl Default for SimulationMetrics {
             app_metrics: Vec::new(),
             app_series: BTreeMap::new(),
             dropped_metric_points: 0,
+            deployment: crate::runner::membership::DeploymentChanges::default(),
         }
     }
 }

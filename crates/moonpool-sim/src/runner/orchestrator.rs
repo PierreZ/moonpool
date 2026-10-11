@@ -17,10 +17,10 @@ use crate::providers::TaskPanicTracker;
 use crate::runner::app_metrics::{MetricsHandle, SourceFactory};
 use crate::runner::builder::WorkloadClientInfo;
 use crate::runner::context::SimContext;
+use crate::runner::deployment::{Deployment, SpawnFactories};
 use crate::runner::fault_injector::{FaultContext, FaultInjector};
-use crate::runner::groups::GroupRegistry;
-use crate::runner::locality::MachineRegistry;
-use crate::runner::tags::{ProcessTags, TagRegistry};
+use crate::runner::membership::Membership;
+use crate::runner::tags::ProcessTags;
 use crate::runner::topology::{TopologyFactory, TopologyInputs};
 use crate::runner::workload::Workload;
 use crate::sim::{ProcessKillKind, SimWorld};
@@ -80,6 +80,10 @@ struct IterationEnv<'a> {
     /// Per-workload client identity info parallel to `workload_info`.
     client_info: &'a [WorkloadClientInfo],
     topology: &'a TopologyMetadata,
+    /// Factories of the groups workloads start mid-run.
+    spawn_factories: &'a SpawnFactories,
+    /// The application-metrics factory, to give a spawned node its source.
+    metrics_factory: Option<&'a SourceFactory>,
     seed: u64,
     iteration_count: usize,
     run_time_budget: Duration,
@@ -99,7 +103,19 @@ impl IterationEnv<'_> {
             obs: self.obs,
             metrics: self.metrics,
             shutdown_signal: self.shutdown_signal,
+            membership: &self.topology.membership,
+            spawn_factories: self.spawn_factories,
         }
+    }
+
+    /// The deployment handle of a workload context.
+    fn workload_deployment(&self, sim: &SimWorld) -> Deployment {
+        Deployment::new(
+            self.topology.membership.clone(),
+            sim.downgrade(),
+            self.spawn_factories.clone(),
+            false,
+        )
     }
 }
 
@@ -193,6 +209,8 @@ pub(crate) struct OrchestrateInputs<'a> {
     /// this bound while workloads are still running, the run is declared a
     /// deadlock. See [`DEFAULT_RUN_TIME_BUDGET`](super::stall::DEFAULT_RUN_TIME_BUDGET).
     pub(crate) run_time_budget: Duration,
+    /// How many processes workloads may spawn in this run.
+    pub(crate) max_spawns: usize,
     /// Per-iteration accounting for detached task panics.
     pub(crate) task_panics: TaskPanicTracker,
 }
@@ -210,10 +228,8 @@ pub(crate) struct OrchestrateOutput {
 /// Topology metadata derived from a workload/process configuration: the
 /// per-iteration registries every workload and process context is built from.
 struct TopologyMetadata {
-    process_ips: Vec<String>,
-    tag_registry: TagRegistry,
-    machine_registry: MachineRegistry,
-    group_registry: GroupRegistry,
+    /// The run's live membership, starting from the boot shape.
+    membership: Membership,
     all_entities: Vec<(String, String)>,
 }
 
@@ -263,12 +279,15 @@ impl WorkloadOrchestrator {
             metrics_factory,
             iteration_count,
             run_time_budget,
+            max_spawns,
             task_panics,
         } = inputs;
 
         Self::log_orchestration_start(&workloads, &fault_injectors, process_config.as_ref());
 
-        let topology = Self::build_topology_metadata(workload_info, process_config.as_ref());
+        let topology =
+            Self::build_topology_metadata(workload_info, process_config.as_ref(), max_spawns);
+        let spawn_factories = SpawnFactories::default();
 
         // Shared state for cross-workload publish/get communication. Event
         // timelines and invariants live on `obs` (SimulationLayer).
@@ -284,6 +303,8 @@ impl WorkloadOrchestrator {
             workload_info,
             client_info,
             topology: &topology,
+            spawn_factories: &spawn_factories,
+            metrics_factory,
             seed,
             iteration_count,
             run_time_budget,
@@ -300,7 +321,7 @@ impl WorkloadOrchestrator {
                     return Ok(OrchestrateOutput {
                         workloads,
                         results,
-                        metrics: Self::extract_metrics(&sim, &metrics),
+                        metrics: Self::extract_metrics(&sim, &metrics, &topology.membership),
                     });
                 }
             };
@@ -330,27 +351,28 @@ impl WorkloadOrchestrator {
     fn build_topology_metadata(
         workload_info: &[(String, String)],
         process_config: Option<&ProcessConfig<'_>>,
+        max_spawns: usize,
     ) -> TopologyMetadata {
-        let process_ips = process_config.map(|pc| pc.ips.clone()).unwrap_or_default();
-        let tag_registry = process_config
-            .map(|pc| pc.tag_registry.clone())
-            .unwrap_or_default();
-        let machine_registry = process_config
-            .map(|pc| pc.machine_registry.clone())
-            .unwrap_or_default();
-        let group_registry = process_config
-            .map(|pc| pc.group_registry.clone())
-            .unwrap_or_default();
+        let membership = process_config.map_or_else(
+            || {
+                Membership::new(
+                    crate::runner::groups::GroupRegistry::new(),
+                    crate::runner::tags::TagRegistry::new(),
+                    crate::runner::locality::MachineRegistry::new(),
+                    std::collections::BTreeMap::new(),
+                    Vec::new(),
+                    max_spawns,
+                )
+            },
+            |pc| pc.membership(max_spawns),
+        );
         let all_entities = workload_info
             .iter()
             .chain(process_config.map_or(&[][..], |pc| pc.info.as_slice()))
             .cloned()
             .collect();
         TopologyMetadata {
-            process_ips,
-            tag_registry,
-            machine_registry,
-            group_registry,
+            membership,
             all_entities,
         }
     }
@@ -463,7 +485,7 @@ impl WorkloadOrchestrator {
             return Ok(OrchestrateOutput {
                 workloads: returned_workloads,
                 results: vec![Err(settle_err)],
-                metrics: Self::extract_metrics(sim, env.metrics),
+                metrics: Self::extract_metrics(sim, env.metrics, &env.topology.membership),
             });
         }
         // Faults recorded during settle carry their own timestamps; one pump
@@ -480,7 +502,7 @@ impl WorkloadOrchestrator {
         results.extend(check_results);
         // Scraped last, after `check()` has run: a workload that drives its
         // final requests from `check()` still has them counted.
-        let sim_metrics = Self::extract_metrics(sim, env.metrics);
+        let sim_metrics = Self::extract_metrics(sim, env.metrics, &env.topology.membership);
 
         Ok(OrchestrateOutput {
             workloads: final_workloads,
@@ -767,10 +789,15 @@ impl WorkloadOrchestrator {
         env: &IterationEnv<'_>,
     ) -> Result<ProcessManager<'pm>, ()> {
         let Some(pc) = process_config else {
-            return Ok(ProcessManager::empty());
+            return Ok(ProcessManager::empty(
+                env.topology.membership.clone(),
+                env.topology.all_entities.clone(),
+                env.task_panics.clone(),
+            ));
         };
         let mut process_manager = ProcessManager::new(
             pc,
+            env.topology.membership.clone(),
             env.topology.all_entities.clone(),
             env.task_panics.clone(),
         );
@@ -796,15 +823,11 @@ impl WorkloadOrchestrator {
             let ip_addr: std::net::IpAddr = ip.parse().map_err(|_| ())?;
             let topology = TopologyFactory::create_topology_with_processes(TopologyInputs {
                 ip,
-                client_id,
-                client_count,
+                workload_rank: Some((client_id, client_count)),
                 all_entities: &env.topology.all_entities,
-                process_ips: &env.topology.process_ips,
                 my_tags: ProcessTags::default(),
-                tag_registry: env.topology.tag_registry.clone(),
                 my_locality: None,
-                machine_registry: env.topology.machine_registry.clone(),
-                group_registry: env.topology.group_registry.clone(),
+                membership: env.topology.membership.clone(),
                 shutdown_signal: env.shutdown_signal.clone(),
             });
             let providers = crate::SimProviders::new(sim.downgrade(), ip_addr)
@@ -815,7 +838,8 @@ impl WorkloadOrchestrator {
                 env.state.clone(),
                 env.obs.clone(),
                 env.metrics.clone(),
-            );
+            )
+            .with_deployment(env.workload_deployment(sim));
             contexts.push(ctx);
         }
         Ok(contexts)
@@ -1112,8 +1136,13 @@ impl WorkloadOrchestrator {
     /// The scrape happens once per iteration rather than per step: reading a
     /// registry is an observation, and doing it on every step would cost more
     /// than it reveals while producing a timeline nothing consumes.
-    fn extract_metrics(sim: &SimWorld, metrics: &MetricsHandle) -> SimulationMetrics {
+    fn extract_metrics(
+        sim: &SimWorld,
+        metrics: &MetricsHandle,
+        membership: &Membership,
+    ) -> SimulationMetrics {
         let mut out = sim.extract_metrics();
+        out.deployment = membership.changes();
         out.app_metrics = metrics.collect_all();
         out.app_series = metrics.collect_series();
         out.dropped_metric_points = metrics.dropped_points();
@@ -1182,6 +1211,23 @@ impl WorkloadOrchestrator {
                     sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
                 }
             }
+            Some(crate::sim::Event::ProcessSpawn { ip }) => {
+                Self::handle_spawn(sim, process_manager, env, ip);
+            }
+            Some(crate::sim::Event::ProcessRetire { ip }) => {
+                assert_reachable!("event: ProcessRetire");
+                obs.record_sim_fault(
+                    Self::sim_now_ms(sim),
+                    &SimFaultEvent::ProcessRetire { ip: ip.to_string() },
+                );
+                // Kill first, as a force kill does: a dead process must not
+                // run again. No crash physics and no wipe: its disk keeps
+                // what it held, for a checker to read.
+                process_manager.retire(ip);
+                sim.reset_cpu_owner(ip);
+                sim.abort_all_connections_for_ip(ip);
+                sim.set_slowness(ip, crate::Slowness::HEALTHY);
+            }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
                 if process_manager.is_running(ip) {
@@ -1222,6 +1268,39 @@ impl WorkloadOrchestrator {
             }
             _ => {}
         }
+    }
+
+    /// Boot a process a workload spawned: it joins the live membership, its
+    /// node gets a metrics source and its locality reaches the network, then
+    /// it boots from its group's factory.
+    fn handle_spawn(
+        sim: &mut SimWorld,
+        process_manager: &mut ProcessManager<'_>,
+        env: &IterationEnv<'_>,
+        ip: std::net::IpAddr,
+    ) {
+        let membership = &env.topology.membership;
+        let Some(group) = membership.activate(ip) else {
+            tracing::warn!(%ip, "ProcessSpawn for an IP no spawn reserved");
+            return;
+        };
+        assert_reachable!("event: ProcessSpawn");
+        let ip_string = ip.to_string();
+        if let Some(factory) = env.metrics_factory {
+            env.metrics.register_node(factory, &ip_string, env.obs);
+        }
+        if membership.locality_for(ip).is_some() {
+            sim.set_localities(membership.machine_registry().locality_map());
+        }
+        env.obs.record_sim_fault(
+            Self::sim_now_ms(sim),
+            &SimFaultEvent::ProcessSpawn {
+                ip: ip_string,
+                group,
+            },
+        );
+        let weak_sim = sim.downgrade();
+        process_manager.add(ip, &env.process_env(&weak_sim));
     }
 
     /// Trigger shutdown and let each simulation engine drain its own waiters.

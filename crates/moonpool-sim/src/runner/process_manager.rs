@@ -1,6 +1,6 @@
 //! Process lifecycle state for simulation runs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
@@ -12,9 +12,11 @@ use crate::observability::SimulationLayerHandle;
 use crate::providers::{TaskPanicTracker, panic_message};
 use crate::runner::app_metrics::MetricsHandle;
 use crate::runner::context::SimContext;
+use crate::runner::deployment::{Deployment, SpawnFactories};
 use crate::runner::fault_injector::{DeadSet, ProcessInfo};
 use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::MachineRegistry;
+use crate::runner::membership::{GroupPlan, Membership};
 use crate::runner::process::Process;
 use crate::runner::tags::TagRegistry;
 use crate::runner::topology::{TopologyFactory, TopologyInputs};
@@ -25,14 +27,33 @@ pub(crate) type ProcessFactory<'a> = &'a dyn Fn() -> Box<dyn Process>;
 
 /// Resolved server-process configuration for one iteration.
 pub(crate) struct ProcessConfig<'a> {
-    /// One factory per process, parallel to `ips`. Every process of a group
-    /// shares its group's factory.
-    pub(crate) factories: Vec<ProcessFactory<'a>>,
+    /// Each builder group's factory, by group name (groups that drew zero
+    /// processes included, so a spawn can still boot one).
+    pub(crate) factories: BTreeMap<String, ProcessFactory<'a>>,
     pub(crate) info: Vec<(String, String)>,
     pub(crate) ips: Vec<String>,
     pub(crate) tag_registry: TagRegistry,
     pub(crate) machine_registry: MachineRegistry,
     pub(crate) group_registry: GroupRegistry,
+    /// How each group tags and places its next spawned process.
+    pub(crate) plans: BTreeMap<String, GroupPlan>,
+}
+
+impl ProcessConfig<'_> {
+    /// The run's live membership, starting from this boot shape.
+    pub(crate) fn membership(&self, max_spawns: usize) -> Membership {
+        Membership::new(
+            self.group_registry.clone(),
+            self.tag_registry.clone(),
+            self.machine_registry.clone(),
+            self.plans.clone(),
+            self.ips
+                .iter()
+                .map(|ip| ip.parse().expect("a process IP is a valid address"))
+                .collect(),
+            max_spawns,
+        )
+    }
 }
 
 /// Everything a booted or restarted process needs to build its [`SimContext`].
@@ -45,6 +66,8 @@ pub(crate) struct ProcessEnv<'a> {
     pub(crate) obs: &'a SimulationLayerHandle,
     pub(crate) metrics: &'a MetricsHandle,
     pub(crate) shutdown_signal: &'a tokio_util::sync::CancellationToken,
+    pub(crate) membership: &'a Membership,
+    pub(crate) spawn_factories: &'a SpawnFactories,
 }
 
 /// A panic that killed a process task: which process, and what it said.
@@ -131,14 +154,15 @@ pub(crate) fn spawn_process(
 
 /// Owns running process tasks and their restart state.
 pub(crate) struct ProcessManager<'a> {
-    /// Per-process factories, parallel to `ips` (empty without processes).
-    factories: Vec<ProcessFactory<'a>>,
+    /// Each builder group's factory, by group name.
+    factories: BTreeMap<String, ProcessFactory<'a>>,
     handles: Vec<Option<ProcessBoot>>,
     process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
+    /// Every process ever booted this iteration, retired ones included, in
+    /// boot order; parallel to `handles` and `process_tokens`.
     ips: Vec<String>,
-    tag_registry: TagRegistry,
-    machine_registry: MachineRegistry,
-    group_registry: GroupRegistry,
+    /// The run's live membership: groups, tags, localities, retirements.
+    membership: Membership,
     all_entities: Vec<(String, String)>,
     /// The processes currently dead (killed but not yet restarted), shared
     /// with every [`FaultContext`](crate::FaultContext) so injectors can
@@ -151,19 +175,23 @@ pub(crate) struct ProcessManager<'a> {
 }
 
 impl<'a> ProcessManager<'a> {
-    pub(crate) fn empty() -> Self {
+    /// A manager with no process yet: a run without `.processes()`, where a
+    /// workload may still start a group mid-run.
+    pub(crate) fn empty(
+        membership: Membership,
+        all_entities: Vec<(String, String)>,
+        task_panics: TaskPanicTracker,
+    ) -> Self {
         Self {
-            factories: Vec::new(),
+            factories: BTreeMap::new(),
             handles: Vec::new(),
             process_tokens: Vec::new(),
             ips: Vec::new(),
-            tag_registry: TagRegistry::default(),
-            machine_registry: MachineRegistry::default(),
-            group_registry: GroupRegistry::default(),
-            all_entities: Vec::new(),
+            membership,
+            all_entities,
             dead: Arc::new(Mutex::new(BTreeSet::new())),
             panics: Arc::default(),
-            task_panics: TaskPanicTracker::default(),
+            task_panics,
         }
     }
 
@@ -171,25 +199,17 @@ impl<'a> ProcessManager<'a> {
     /// [`Self::boot_all`]).
     pub(crate) fn new(
         config: ProcessConfig<'a>,
+        membership: Membership,
         all_entities: Vec<(String, String)>,
         task_panics: TaskPanicTracker,
     ) -> Self {
-        let ProcessConfig {
-            factories,
-            info: _,
-            ips,
-            tag_registry,
-            machine_registry,
-            group_registry,
-        } = config;
+        let ProcessConfig { factories, ips, .. } = config;
         Self {
             factories,
             handles: ips.iter().map(|_| None).collect(),
             process_tokens: ips.iter().map(|_| None).collect(),
             ips,
-            tag_registry,
-            machine_registry,
-            group_registry,
+            membership,
             all_entities,
             dead: Arc::new(Mutex::new(BTreeSet::new())),
             panics: ProcessPanics::default(),
@@ -211,6 +231,39 @@ impl<'a> ProcessManager<'a> {
         Ok(())
     }
 
+    /// Boot a process spawned mid-run at `ip` (already active in the
+    /// membership) from its group's factory.
+    pub(crate) fn add(&mut self, ip: std::net::IpAddr, env: &ProcessEnv<'_>) {
+        if self.index_for_ip(ip).is_some() {
+            tracing::warn!(%ip, "ProcessSpawn for a known IP");
+            return;
+        }
+        let index = self.ips.len();
+        self.ips.push(ip.to_string());
+        self.handles.push(None);
+        self.process_tokens.push(None);
+        self.boot(index, ip, env);
+        tracing::info!(%ip, index, "spawned process booted");
+    }
+
+    /// Stop the retired process at `ip` for good: kill its boot and drop it
+    /// from the dead set, since it no longer counts against any budget.
+    pub(crate) fn retire(&mut self, ip: std::net::IpAddr) {
+        let Some(index) = self.index_for_ip(ip) else {
+            tracing::warn!(%ip, "ProcessRetire for unknown IP");
+            return;
+        };
+        if let Some(boot) = self.handles[index].take() {
+            boot.kill();
+        }
+        self.process_tokens[index] = None;
+        self.dead
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .remove(&ip);
+        tracing::info!(%ip, index, "retired process stopped for good");
+    }
+
     /// Take the panics recorded so far, leaving the ledger empty.
     pub(crate) fn take_panics(&self) -> Vec<ProcessPanic> {
         std::mem::take(
@@ -224,10 +277,7 @@ impl<'a> ProcessManager<'a> {
     /// Snapshot the process metadata needed by a fault injector.
     pub(crate) fn process_info(&self) -> ProcessInfo {
         ProcessInfo {
-            process_ips: self.ips.clone(),
-            tag_registry: self.tag_registry.clone(),
-            machine_registry: self.machine_registry.clone(),
-            group_registry: self.group_registry.clone(),
+            membership: self.membership.clone(),
             dead: self.dead.clone(),
         }
     }
@@ -242,6 +292,9 @@ impl<'a> ProcessManager<'a> {
             tracing::warn!(%ip, "ProcessGracefulShutdown for unknown IP");
             return;
         };
+        if self.membership.is_retired(ip) {
+            return;
+        }
         if let Some(token) = &self.process_tokens[index] {
             token.cancel();
             let dead_count = {
@@ -274,6 +327,9 @@ impl<'a> ProcessManager<'a> {
             tracing::warn!(%ip, "ProcessForceKill for unknown IP");
             return;
         };
+        if self.membership.is_retired(ip) {
+            return;
+        }
         if let Some(boot) = self.handles[index].take() {
             boot.kill();
             tracing::info!(%ip, index, "force-killed process");
@@ -293,8 +349,8 @@ impl<'a> ProcessManager<'a> {
             tracing::warn!(%ip, "ProcessRestart for unknown IP");
             return;
         };
-        if self.factories.get(index).is_none() {
-            tracing::warn!("ProcessRestart but no process factory configured");
+        if self.membership.is_retired(ip) {
+            assert_reachable!("deployment: a retired process is never restarted");
             return;
         }
 
@@ -308,6 +364,9 @@ impl<'a> ProcessManager<'a> {
             .expect("Mutex poisoned: prior task panicked")
             .remove(&ip);
         assert_reachable!("process_manager: process restarted");
+        if self.membership.was_spawned(ip) {
+            assert_reachable!("deployment: a process spawned mid-run restarts");
+        }
         tracing::info!(ip = %ip, index, "process restarted");
     }
 
@@ -321,29 +380,40 @@ impl<'a> ProcessManager<'a> {
             obs,
             metrics,
             shutdown_signal,
+            membership,
+            spawn_factories,
         } = *env;
+        let Some(group) = self.membership.group_for(ip) else {
+            tracing::warn!(%ip, "boot of a process outside every group");
+            return;
+        };
+        let process = if let Some(factory) = self.factories.get(&group) {
+            factory()
+        } else {
+            let factory = spawn_factories
+                .lock()
+                .expect("Mutex poisoned: prior task panicked")
+                .get(&group)
+                .cloned();
+            let Some(factory) = factory else {
+                tracing::warn!(%ip, group, "boot of a process whose group has no factory");
+                return;
+            };
+            factory()
+        };
         let ip_string = ip.to_string();
         let process_token = shutdown_signal.child_token();
         let scope = tokio_util::sync::CancellationToken::new();
         self.process_tokens[index] = Some(process_token.clone());
-        let process = (self.factories[index])();
-        // A process is numbered within its own group, so a role can index its
-        // instances without knowing what the other groups drew.
-        let (client_id, client_count) = self
-            .group_registry
-            .position_in_group(ip)
-            .unwrap_or((index, self.ips.len()));
+        // A process is ranked within its own group, read live, so a role can
+        // index its instances without knowing what the other groups drew.
         let topology = TopologyFactory::create_topology_with_processes(TopologyInputs {
             ip: &ip_string,
-            client_id,
-            client_count,
+            workload_rank: None,
             all_entities: &self.all_entities,
-            process_ips: &self.ips,
-            my_tags: self.tag_registry.tags_for(ip).cloned().unwrap_or_default(),
-            tag_registry: self.tag_registry.clone(),
-            my_locality: self.machine_registry.locality_for(ip).cloned(),
-            machine_registry: self.machine_registry.clone(),
-            group_registry: self.group_registry.clone(),
+            my_tags: self.membership.tags_for(ip).unwrap_or_default(),
+            my_locality: self.membership.locality_for(ip),
+            membership: self.membership.clone(),
             shutdown_signal: process_token,
         });
         let ctx = SimContext::new(
@@ -356,7 +426,13 @@ impl<'a> ProcessManager<'a> {
             state.clone(),
             obs.clone(),
             metrics.clone(),
-        );
+        )
+        .with_deployment(Deployment::new(
+            membership.clone(),
+            sim.clone(),
+            spawn_factories.clone(),
+            true,
+        ));
         self.handles[index] = Some(spawn_process(process, ctx, &ip_string, &self.panics, scope));
     }
 

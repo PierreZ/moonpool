@@ -61,7 +61,7 @@ impl Process for RoleProcess {
         // A process is numbered within its own group: `client_id` indexes the
         // group's members and `client_count` is the group's size.
         assert_always!(
-            topo.my_group() == Some(self.role),
+            topo.my_group().as_deref() == Some(self.role),
             "process_groups: a process knows its own group",
             { "ip" => ctx.my_ip(), "group" => format!("{:?}", topo.my_group()) }
         );
@@ -156,7 +156,7 @@ impl Workload for ShapeWorkload {
             && matchmakers == expected_matchmakers
             && topo.all_process_ips().len() == acceptors.len() + matchmakers.len()
             && topo.groups() == ["acceptor", "matchmaker"]
-            && topo.group_for("10.0.1.1") == Some("acceptor")
+            && topo.group_for("10.0.1.1").as_deref() == Some("acceptor")
             && topo.my_group().is_none();
         if !ok {
             return Err(SimulationError::InvalidState(format!(
