@@ -57,6 +57,7 @@ A sitemap of every chapter in the Moonpool book. Each entry links to a chapter w
 - [Attrition: Process Reboots](./part3-building/09-attrition.md) — Graceful, crash, wipe reboot types; randomized kills; recovery delay
 - [Network Faults](./part3-building/10-network-faults.md) — Delayed connection establishment, latency, partitions, drops, reordering, and clogging
 - [Storage Faults](./part3-building/11-storage-faults.md) — Exact delayed operations, independent handles, corruption, misdirected I/O, crash errors, and per-process disk behavior
+- [CPU Time and Gray Failures](./part3-building/26-cpu-and-gray-failure.md) — One simulated core per process, per-seed poll and byte costs, real busyness counters, and machines that stay alive but slow
 - [Assertions: Finding Bugs](./part3-building/12-assertions.md) — Record and continue (Antithesis principle); cascade discovery
 - [Invariants vs Discovery vs Guidance](./part3-building/13-assertion-concepts.md) — Three assertion categories: invariants, sometimes, numeric
 - [Always and Sometimes](./part3-building/14-always-sometimes.md) — `assert_always!` (must hold) vs `assert_sometimes!` (exploration guidance)

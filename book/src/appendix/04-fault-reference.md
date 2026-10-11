@@ -207,6 +207,20 @@ custom [`FaultInjector`](../part3-building/07-chaos.md) implementations.
 | Correlated reboot | `AttritionScope::PerMachine` / `PerZone` / `PerDatacenter` | Reboot every process of one failure domain together; only fires when the whole group fits in `max_dead` |
 | Correlated outage | `Chaos::Outage` / `Outage` config | At most once per run, crash every live process of the named groups in one tick; each restarts after its own `down` draw, one optional straggler last; restarts land even after the chaos window; publishes `OutageLanded` under `OUTAGE_STATE_KEY`; an `OutageVeto` under `OUTAGE_VETO_KEY` may defer it |
 
+## CPU and Gray Failures
+
+See [CPU Time and Gray Failures](../part3-building/26-cpu-and-gray-failure.md).
+
+| Fault | Mechanism | Behavior |
+|-------|-----------|----------|
+| CPU contention | `Chaos::Cpu` / `CpuModel` | One core per process; each poll costs `poll_cost`, each sent or written byte its per-byte cost; a busy core parks the next task until `CpuFree` |
+| Explicit CPU work | `moonpool_buggify::cpu_charge(d)` | The polling process's local clock moves by `d` times its CPU slowness |
+| Gray CPU | `Chaos::GrayFailure`, `Slowness::cpu` | Every CPU cost of the machine multiplied (×10–×1000 by default) |
+| Gray disk | `Chaos::GrayFailure`, `Slowness::disk` | Every transfer and sync latency of the machine's disk multiplied (×5–×100) |
+| Gray network | `Chaos::GrayFailure`, `Slowness::network` | Every chunk to or from the machine is delayed by its latency times the larger factor of the two ends (×2–×20) |
+
+A gray machine stays alive. At most `max_slow` are slow at once, and recovery mode makes every machine healthy.
+
 ## Configuration Presets
 
 | Preset | Description |

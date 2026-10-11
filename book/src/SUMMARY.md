@@ -49,6 +49,7 @@
   - [Attrition: Process Reboots](./part3-building/09-attrition.md)
   - [Network Faults](./part3-building/10-network-faults.md)
   - [Storage Faults](./part3-building/11-storage-faults.md)
+  - [CPU Time and Gray Failures](./part3-building/26-cpu-and-gray-failure.md)
 - [Assertions: Finding Bugs](./part3-building/12-assertions.md)
   - [Invariants vs Discovery vs Guidance](./part3-building/13-assertion-concepts.md)
   - [Always and Sometimes](./part3-building/14-always-sometimes.md)
