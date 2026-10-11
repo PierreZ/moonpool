@@ -75,6 +75,18 @@ pub enum SimFaultEvent {
         /// IP address of the process.
         ip: String,
     },
+    /// A process spawned mid-run booted.
+    ProcessSpawn {
+        /// IP address of the process.
+        ip: String,
+        /// Its process group.
+        group: String,
+    },
+    /// A process was retired mid-run: killed, never restarted.
+    ProcessRetire {
+        /// IP address of the process.
+        ip: String,
+    },
 
     // -- Network --
     /// Directed network partition edge created between two IPs.
@@ -184,6 +196,8 @@ impl SimFaultEvent {
             Self::ProcessGracefulShutdown { .. } => "process_graceful_shutdown",
             Self::ProcessForceKill { .. } => "process_force_kill",
             Self::ProcessRestart { .. } => "process_restart",
+            Self::ProcessSpawn { .. } => "process_spawn",
+            Self::ProcessRetire { .. } => "process_retire",
             Self::PartitionCreated { .. } => "partition_created",
             Self::PartitionHealed { .. } => "partition_healed",
             Self::SendPartitionCreated { .. } => "send_partition_created",

@@ -136,6 +136,11 @@ impl MachineRegistry {
         self.ip_locality.insert(ip, locality);
     }
 
+    /// Remove `ip`'s locality (a retired process).
+    pub fn remove(&mut self, ip: IpAddr) {
+        self.ip_locality.remove(&ip);
+    }
+
     /// Whether any locality has been registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {

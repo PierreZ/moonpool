@@ -171,9 +171,9 @@ impl AttritionVictims {
     pub fn admits(&self, ip: std::net::IpAddr, info: &super::fault_injector::ProcessInfo) -> bool {
         match self {
             Self::Any => true,
-            Self::Group(group) => info.group_registry.group_for(ip) == Some(group.as_str()),
+            Self::Group(group) => info.membership.group_for(ip).as_deref() == Some(group.as_str()),
             Self::Tagged { key, value } => info
-                .tag_registry
+                .membership
                 .tags_for(ip)
                 .is_some_and(|tags| tags.matches(key, value)),
         }

@@ -46,6 +46,18 @@ pub enum Event {
         /// The IP address of the process to restart.
         ip: std::net::IpAddr,
     },
+    /// A process spawned mid-run by a workload's
+    /// [`Deployment`](crate::Deployment) boots.
+    ProcessSpawn {
+        /// The IP the spawn reserved.
+        ip: std::net::IpAddr,
+    },
+    /// A process retired mid-run by a workload's
+    /// [`Deployment`](crate::Deployment) is killed for good.
+    ProcessRetire {
+        /// The IP of the retired process.
+        ip: std::net::IpAddr,
+    },
     /// Graceful shutdown initiated for a process.
     ProcessGracefulShutdown {
         /// The IP address of the process being gracefully shut down.

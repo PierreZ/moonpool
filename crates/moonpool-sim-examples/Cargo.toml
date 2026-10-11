@@ -65,6 +65,10 @@ name = "sim-topology"
 path = "src/bin/sim/topology.rs"
 
 [[bin]]
+name = "sim-operator"
+path = "src/bin/sim/operator.rs"
+
+[[bin]]
 name = "sim-tonic-grpc"
 path = "src/bin/sim/tonic_grpc.rs"
 

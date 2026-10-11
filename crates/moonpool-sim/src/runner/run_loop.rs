@@ -39,6 +39,7 @@ struct RunOrchestratorInputs<'a> {
     chaos_duration: Option<Duration>,
     obs_handle: SimulationLayerHandle,
     run_time_budget: Duration,
+    max_spawns: usize,
 }
 
 /// Outcome of an orchestration attempt.
@@ -277,6 +278,7 @@ impl SimulationBuilder {
             chaos_duration,
             obs_handle,
             run_time_budget,
+            max_spawns,
         } = inputs;
         // Fresh executor per iteration: dropping it cancels every task that
         // leaked past the settle phase, so no state crosses into the next seed
@@ -299,6 +301,7 @@ impl SimulationBuilder {
                 metrics_factory,
                 iteration_count,
                 run_time_budget,
+                max_spawns,
                 task_panics: tracker,
             })
             .await
@@ -699,7 +702,8 @@ impl SimulationBuilder {
         if entries.is_empty() {
             return None;
         }
-        let mut factories = Vec::new();
+        let mut factories = std::collections::BTreeMap::new();
+        let mut plans = std::collections::BTreeMap::new();
         let mut registry = crate::runner::tags::TagRegistry::new();
         let mut machine_registry = MachineRegistry::new();
         let mut group_registry = GroupRegistry::new();
@@ -710,6 +714,15 @@ impl SimulationBuilder {
             let base_name = &entry.name;
             // Listed even when this seed drew zero members.
             group_registry.declare(base_name);
+            factories.insert(base_name.clone(), &*entry.factory);
+            plans.insert(
+                base_name.clone(),
+                crate::runner::membership::GroupPlan {
+                    tags: entry.tags.clone(),
+                    cluster: entry.locality.is_some(),
+                    next_host: count + 1,
+                },
+            );
             for i in 0..count {
                 let ip = process_ip(group, i);
                 let ip_addr: std::net::IpAddr = ip.parse().expect("valid process IP");
@@ -718,7 +731,6 @@ impl SimulationBuilder {
                     machine_registry.register(ip_addr, localities[i].clone());
                 }
                 group_registry.register(ip_addr, base_name);
-                factories.push(&*entry.factory);
                 ips.push(ip.clone());
                 let name = if count == 1 {
                     base_name.clone()
@@ -735,6 +747,7 @@ impl SimulationBuilder {
             tag_registry: registry,
             machine_registry,
             group_registry,
+            plans,
         })
     }
 
@@ -1293,6 +1306,7 @@ impl SimulationBuilder {
             chaos_duration: self.chaos_duration,
             obs_handle: obs_handle.clone(),
             run_time_budget: self.run_time_budget,
+            max_spawns: self.max_spawns,
         });
         (outcome, start_time)
     }

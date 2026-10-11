@@ -42,14 +42,16 @@ A group's members are contiguous and recognisable at a glance, and a single-grou
 | `my_group()` | the caller's own group, `None` for a workload |
 | `all_process_ips()` | every process IP except the caller's own |
 
-Inside a process, `ctx.client_id()` and `ctx.client_count()` are its index within and the size of **its own group**. An acceptor numbers itself `0..n` without knowing how many matchmakers this seed drew. The integration test `crates/moonpool-sim/tests/process_groups.rs` pins all of this:
+Every answer is read live: a process a workload spawns mid-run shows up once it boots, and a retired one is gone at once (see [Changing the Deployment Mid-Run](./34-deployment.md)).
+
+Inside a process, `ctx.client_id()` and `ctx.client_count()` are its index within and the size of **its own group**, now. An acceptor numbers itself `0..n` without knowing how many matchmakers this seed drew. The integration test `crates/moonpool-sim/tests/process_groups.rs` pins all of this:
 
 ```rust
 async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
     let topo = ctx.topology();
     let members = topo.ips_in_group(self.role);
     assert_always!(
-        topo.my_group() == Some(self.role),
+        topo.my_group().as_deref() == Some(self.role),
         "process_groups: a process knows its own group"
     );
     assert_always!(

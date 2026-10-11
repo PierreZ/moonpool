@@ -883,7 +883,7 @@ impl FaultInjector for CutEverything {
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         for process in ctx.process_ips() {
-            ctx.partition("10.0.0.1", process)?;
+            ctx.partition("10.0.0.1", &process)?;
         }
         ctx.chaos_shutdown().cancelled().await;
         Ok(())

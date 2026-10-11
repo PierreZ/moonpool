@@ -36,6 +36,7 @@ use crate::storage::SimStorageProvider;
 use moonpool_core::Providers;
 
 use super::app_metrics::MetricsHandle;
+use super::deployment::Deployment;
 use super::topology::WorkloadTopology;
 
 /// Simulation context provided to processes and workloads.
@@ -52,6 +53,7 @@ pub struct SimContext {
     state: StateHandle,
     obs: SimulationLayerHandle,
     metrics: MetricsHandle,
+    deployment: Deployment,
 }
 
 impl SimContext {
@@ -73,7 +75,25 @@ impl SimContext {
             state,
             obs,
             metrics,
+            deployment: Deployment::detached(),
         }
+    }
+
+    /// Attach the run's deployment handle.
+    pub(crate) fn with_deployment(mut self, deployment: Deployment) -> Self {
+        self.deployment = deployment;
+        self
+    }
+
+    /// The handle a workload changes the deployment with: spawn a process,
+    /// start a group, retire a process (see [`Deployment`]).
+    ///
+    /// A process gets a handle too, but its calls refuse: only a client
+    /// changes the deployment. A hand-built context's handle is detached and
+    /// refuses as well.
+    #[must_use]
+    pub fn deployment(&self) -> &Deployment {
+        &self.deployment
     }
 
     /// Get the full providers bundle for passing to generic code.
@@ -176,20 +196,22 @@ impl SimContext {
     ///
     /// For a workload: sequential from 0 among the instances of its builder
     /// entry (FDB-style); a single `.workload(instance)` is always client 0.
-    /// For a process: its index within its own process group.
+    /// For a process: its rank within its own process group now, read live
+    /// (a spawned process takes the next rank; a retire moves the ranks
+    /// above it down).
     #[must_use]
     pub fn client_id(&self) -> usize {
-        self.topology.client_id
+        self.topology.client_id()
     }
 
     /// Get the total number of instances sharing this actor's entry.
     ///
     /// For single `.workload()` entries this is 1.
     /// For `.workloads(count, factory)` entries this is the resolved count.
-    /// For a process, it is the size of its process group on this seed.
+    /// For a process, it is the size of its process group now.
     #[must_use]
     pub fn client_count(&self) -> usize {
-        self.topology.client_count
+        self.topology.client_count()
     }
 
     /// Find a peer workload's IP address by its [`Workload::name`](crate::Workload::name).
@@ -250,7 +272,7 @@ impl SimContext {
         let ip: std::net::IpAddr = self.my_ip().parse().map_err(|error| {
             crate::SimulationError::InvalidState(format!("invalid IP '{}': {error}", self.my_ip()))
         })?;
-        if self.topology.group_registry.group_for(ip).is_none() {
+        if self.topology.membership.group_for(ip).is_none() {
             return Err(crate::SimulationError::InvalidState(
                 "crash_self: only a process can crash itself, not a workload".to_string(),
             ));

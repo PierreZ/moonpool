@@ -70,7 +70,7 @@
 //!     }
 //!
 //!     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-//!         let servers = ctx.topology().all_process_ips().to_vec();
+//!         let servers = ctx.topology().all_process_ips();
 //!         assert_always!(servers.len() == 1, "one server process per seed");
 //!         for _ in 0..20 {
 //!             // Bound every step with simulated time, so no fault wedges the client.

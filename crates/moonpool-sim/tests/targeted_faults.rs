@@ -67,7 +67,7 @@ impl FaultInjector for Corrupter {
     }
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-        let ips = ctx.process_ips().to_vec();
+        let ips = ctx.process_ips();
         while !ips.iter().all(|ip| {
             ctx.state()
                 .get::<bool>(&format!("written:{ip}"))
@@ -100,7 +100,7 @@ impl Workload for Judge {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let ips = ctx.topology().all_process_ips().to_vec();
+        let ips = ctx.topology().all_process_ips();
         loop {
             let seen: Vec<Option<Vec<u64>>> = ips
                 .iter()

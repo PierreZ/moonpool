@@ -97,6 +97,24 @@ impl MetricsHandle {
         handle
     }
 
+    /// Register a source for a node that joined mid-run (a spawned
+    /// process), armed like the boot-time ones. A node already registered
+    /// keeps its source.
+    pub(crate) fn register_node(
+        &self,
+        factory: &SourceFactory,
+        ip: &str,
+        clock: &SimulationLayerHandle,
+    ) {
+        if self.read().contains_key(ip) {
+            return;
+        }
+        let (source, concrete) = factory(ip);
+        source.set_clock(Arc::new(SimClock(clock.clone())));
+        self.write()
+            .insert(ip.to_owned(), SourceEntry { source, concrete });
+    }
+
     /// Whether any source is registered.
     #[must_use]
     pub fn is_empty(&self) -> bool {

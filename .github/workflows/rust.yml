@@ -16,6 +16,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   HANG_TRACE_AFTER: 8
+  # `nix develop` downloads the flake inputs from api.github.com. One slow
+  # answer (curl's 15 s connect timeout, five attempts) failed a whole job
+  # before its first test, so give each fetch more time and more attempts.
+  NIX_CONFIG: |
+    connect-timeout = 60
+    download-attempts = 10
 
 jobs:
   clippy:
@@ -266,6 +272,7 @@ jobs:
           - axum-web
           - metrics-service
           - topology
+          - operator
           - tonic-grpc
           - journal
           - rpc-foundations

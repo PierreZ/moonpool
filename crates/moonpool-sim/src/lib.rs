@@ -405,12 +405,13 @@ pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 
 // Runner module re-exports
 pub use runner::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, FaultContext, FaultInjector,
-    GrayFailure, GrayKinds, GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL,
-    IterationControl, LocalityConfig, MachineRegistry, MetricsHandle, OUTAGE_STATE_KEY,
-    OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SelfCrash,
-    SimContext, SimulationBuilder, SimulationMetrics, SimulationReport, TagRegistry, VETO_RETRY,
-    Workload, WorkloadCount, WorkloadTopology,
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, DEFAULT_MAX_SPAWNS, Deployment,
+    DeploymentChanges, DomainSpec, FaultContext, FaultInjector, GrayFailure, GrayKinds,
+    GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl, LocalityConfig,
+    MachineRegistry, Membership, MetricsHandle, OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage,
+    OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SelfCrash, SimContext,
+    SimulationBuilder, SimulationMetrics, SimulationReport, TagRegistry, VETO_RETRY, Workload,
+    WorkloadCount, WorkloadTopology,
 };
 
 // Application-metrics vocabulary, re-exported from moonpool-core so a

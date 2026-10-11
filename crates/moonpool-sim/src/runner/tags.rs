@@ -140,6 +140,11 @@ impl TagRegistry {
         self.ip_tags.insert(ip, tags);
     }
 
+    /// Remove `ip`'s tags (a retired process).
+    pub fn remove(&mut self, ip: IpAddr) {
+        self.ip_tags.remove(&ip);
+    }
+
     /// Get tags for a specific IP.
     #[must_use]
     pub fn tags_for(&self, ip: IpAddr) -> Option<&ProcessTags> {
