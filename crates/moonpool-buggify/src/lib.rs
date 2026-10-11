@@ -1,36 +1,124 @@
-//! Standalone buggify fault injection following `FoundationDB`'s approach.
+//! Fault-injection points for shipped code: `buggify!`, `hint!` and
+//! `cpu_charge`, with zero dependencies.
 //!
-//! Buggify marks code locations where a rare-but-legal behavior can be forced
-//! during simulation testing: an early timeout, a dropped buffer, a slow path.
-//! Each location is randomly **activated** once per simulation run; active
-//! locations then fire probabilistically on each call.
+//! Shipped code marks the places where a simulator may make life hard. In
+//! production every mark is inert. In a `moonpool-sim` run the simulator
+//! decides, from the seed, what happens there. The code never runs a
+//! `Sim*` variant of itself. This crate holds only the marks and their
+//! disabled-by-default state, so a production crate or a sans-I/O library
+//! can depend on it without pulling in a simulation runtime. It compiles on
+//! `wasm32-unknown-unknown`, macOS and Linux.
 //!
-//! This crate is dependency-free and owns only the disabled-by-default state
-//! and the [`buggify!`] / [`buggify_with_prob!`] macros, so production and
-//! sans-I/O code can depend on it without pulling in a simulation runtime:
+//! ## Three kinds of marks
 //!
-//! - Outside an active simulation, buggify is **inert**: every call site
-//!   evaluates to `false` with no side effects.
-//! - A simulation runtime (such as `moonpool-sim`) enables buggify at the
-//!   start of a run via [`buggify_init`] after installing its deterministic
-//!   seeded random source via [`set_random_source`], and disables it again
-//!   with [`buggify_reset`].
+//! | Mark | The code says | The simulator may |
+//! |------|---------------|-------------------|
+//! | [`buggify!`] and friends | "a rare but legal branch is here" | force the branch |
+//! | [`hint!`] | "a crash right here would be interesting" | reboot the calling process |
+//! | [`cpu_charge`] | "I just did this much CPU work" | move the process clock forward |
 //!
-//! State is thread-local, matching the single-threaded deterministic executors
-//! that drive moonpool simulations, and shared by every path into this crate —
-//! macros invoked through a re-export (e.g. `moonpool_sim::buggify!`) hit the
-//! same state as macros invoked through `moonpool_buggify::buggify!`.
+//! ## Buggify: two-phase activation
 //!
-//! # Usage
+//! Buggify comes from `FoundationDB`. Each location is **activated** once per
+//! simulation run, on its first encounter. `moonpool-sim` activates a location
+//! with probability 0.5. An active location then **fires** on some of its
+//! calls: 25% for [`buggify!`], a site rate for [`buggify_with_prob!`]. A bug
+//! that needs a rare branch becomes likely instead of lucky, and a location
+//! that stays inactive for a whole run lets the other paths run clean.
 //!
-//! ```
-//! use moonpool_buggify::buggify;
+//! ```rust
+//! use moonpool_buggify::{buggify, buggify_range, buggify_with_prob};
 //!
-//! // Inert unless a simulation runtime has enabled buggify on this thread.
-//! if buggify!() {
-//!     // Simulate a rare failure path.
+//! fn flush(buffer: &mut Vec<u8>) -> usize {
+//!     if buggify!() {
+//!         // An active location fires on 25% of calls: take the slow path.
+//!     }
+//!     if buggify_with_prob!(0.01) {
+//!         // A site rate of its own.
+//!     }
+//!     // Stretch a value: `Some` only when the location is active and fires.
+//!     let batch = buggify_range!(0.1, 1..4).unwrap_or(64);
+//!     buffer.clear();
+//!     usize::try_from(batch).unwrap_or(64)
 //! }
+//!
+//! // Outside a simulation every site is inert.
+//! let mut buffer = vec![1, 2, 3];
+//! assert_eq!(flush(&mut buffer), 64);
 //! ```
+//!
+//! | Macro | Result | Silent in the recovery tail |
+//! |-------|--------|-----------------------------|
+//! | [`buggify!`] | `bool`, 25% per call while active | no |
+//! | [`buggify_with_prob!`] | `bool`, at a site rate | no |
+//! | [`buggify_fault_with_prob!`] | `bool`, for a site that makes an operation fail | yes |
+//! | [`buggify_named!`] | `bool`, keyed by a label a harness can force with [`set_activation`] | yes |
+//! | [`buggify_pick!`] | `Option<usize>`: an index in `0..n` | no |
+//! | [`buggify_range!`] | `Option<u64>`: a value in a range | no |
+//!
+//! `buggify_knob!`, which moves a tunable to an extreme value on some seeds,
+//! needs the simulation's random helpers and lives in `moonpool-sim`.
+//!
+//! ### Per-seed scenarios
+//!
+//! [`buggify_named!`] keys a location by a stable label instead of its
+//! `file:line`. A harness then calls [`set_activation`] at the start of a
+//! run to switch that location on or off together with the other parts of a
+//! scenario. The scenario does not depend on the product of independent
+//! activation coins. This is swarm testing at the level of code paths.
+//!
+//! ### The recovery tail
+//!
+//! When the simulation's chaos window closes, the runtime calls
+//! [`buggify_enter_recovery`]. From then on the disruptive sites
+//! ([`buggify_fault_with_prob!`], [`buggify_named!`] and [`hint!`]) stay
+//! silent, so the system gets a quiet tail to recover in and liveness
+//! checks are fair.
+//!
+//! ## Hints
+//!
+//! [`hint!`] names a moment, never a fault:
+//!
+//! ```rust
+//! # async fn commit() {
+//! // ... the batch is synced ...
+//! moonpool_buggify::hint!("batch durable, not sent").await;
+//! // ... now send it to the peers ...
+//! # }
+//! ```
+//!
+//! In a simulation the point is a disruptive buggify location of its own.
+//! When it fires, the simulator's sink may reboot the calling process there,
+//! under the seed's attrition regime, its `max_dead` budget and an optional
+//! harness veto. A killed caller's future never resolves. Outside a
+//! simulation the future resolves at once. See the [`hint`](mod@hint) module.
+//!
+//! ## CPU charges
+//!
+//! [`cpu_charge`] tells a simulator with a CPU model that the caller just
+//! did a known amount of work. The calling process's clock moves forward by
+//! that cost times its slowness, so gray-failure (slow machine) scenarios
+//! reach the code. Outside such a simulation the call does nothing. See the
+//! [`cpu`] module.
+//!
+//! ## How a simulation runtime drives this crate
+//!
+//! 1. It installs its seeded random source with [`set_random_source`].
+//! 2. It enables buggify for a run with [`buggify_init`], which also clears
+//!    every activation decision.
+//! 3. It installs the [`hint::Sink`] and, with a CPU model, the [`cpu::Sink`].
+//! 4. It calls [`buggify_enter_recovery`] when the chaos window closes.
+//! 5. It disables buggify again with [`buggify_reset`].
+//!
+//! Every draw comes from the installed source, in a stable order, so a seed
+//! replays the same activations and firings. [`is_simulated`] says whether a
+//! simulation is running. Code may use it to tilt rates or add checks, but
+//! never to change an outcome a caller can observe.
+//!
+//! State is thread-local, which matches the single-threaded deterministic
+//! executor of a simulation. Every path into this crate shares it: a macro
+//! called through `moonpool_sim::buggify!` hits the same state as
+//! `moonpool_buggify::buggify!`.
 
 #![deny(missing_docs)]
 
@@ -76,7 +164,7 @@ pub fn is_simulated() -> bool {
     with_state(|state| state.enabled && state.random_source.is_some())
 }
 
-/// Install the deterministic random source used for activation and firing draws.
+/// Install the deterministic random source for activation and firing draws.
 ///
 /// Called by the simulation runtime before [`buggify_init`]. Without an
 /// installed source, buggify stays inert even if enabled.
@@ -200,7 +288,19 @@ pub fn buggify_internal(prob: f64, location: &'static str) -> bool {
     })
 }
 
-/// Buggify with 25% probability
+/// A rare-branch site that fires on 25% of calls while its location is
+/// active.
+///
+/// The location is the call site's `file:line`. It is activated once per run
+/// on its first encounter. Outside a simulation it evaluates to `false` and
+/// draws nothing.
+///
+/// ```rust
+/// use moonpool_buggify::buggify;
+///
+/// let timeout_ms = if buggify!() { 1 } else { 500 };
+/// assert_eq!(timeout_ms, 500); // inert outside a simulation
+/// ```
 #[macro_export]
 macro_rules! buggify {
     () => {
@@ -208,7 +308,21 @@ macro_rules! buggify {
     };
 }
 
-/// Buggify with custom probability
+/// A rare-branch site that fires at the site rate `$prob` per call while its
+/// location is active.
+///
+/// Same two-phase model as [`buggify!`]: activation is decided once per run,
+/// firing on every call. Use a low rate on a hot path. Outside a simulation it
+/// evaluates to `false`.
+///
+/// ```rust
+/// use moonpool_buggify::buggify_with_prob;
+///
+/// fn should_drop_cache() -> bool {
+///     buggify_with_prob!(0.01)
+/// }
+/// assert!(!should_drop_cache());
+/// ```
 #[macro_export]
 macro_rules! buggify_with_prob {
     ($prob:expr) => {
@@ -248,10 +362,22 @@ macro_rules! buggify_named {
     };
 }
 
-/// Report an interesting moment; see [`hint::at`]. Await the result.
+/// Name an interesting moment; the simulator decides whether to strike there.
+/// Await the result.
 ///
-/// `hint!("label")` fires at [`hint::POINT_PROB`] while active;
-/// `hint!("label", 0.2)` at a site rate.
+/// `hint!("label")` fires at [`hint::POINT_PROB`] (5%) per call while its
+/// location is active, and `hint!("label", 0.2)` at a site rate. The label is
+/// a string literal. It reaches the simulator's sink and any harness veto, so
+/// keep it stable. See [`hint::at`] for the full contract.
+///
+/// ```rust
+/// # async fn demo() {
+/// use moonpool_buggify::hint;
+///
+/// hint!("entries written, records not synced").await;
+/// hint!("leader stepped down", 0.2).await;
+/// # }
+/// ```
 #[macro_export]
 macro_rules! hint {
     ($label:literal) => {

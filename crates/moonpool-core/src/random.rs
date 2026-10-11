@@ -1,8 +1,11 @@
-//! Random number generation provider abstraction.
+//! Randomness: [`RandomProvider`], with [`TokioRandomProvider`] for
+//! production.
 //!
-//! This module provides a provider pattern for random number generation,
-//! consistent with other provider abstractions in the simulation framework
-//! like `TimeProvider`, `NetworkProvider`, and `TaskProvider`.
+//! Every random choice in application code (jitter, a peer to try, a
+//! request ID) goes through this trait. In simulation each draw comes from
+//! the run's one seeded stream, the same stream the scheduler and the fault
+//! injectors use, so one seed replays every choice. A draw from
+//! `rand::rng()` or the OS breaks that replay.
 
 #[cfg(feature = "tokio-random")]
 use rand::RngExt as _;
@@ -11,10 +14,9 @@ use std::ops::Range;
 
 /// Provider trait for random number generation.
 ///
-/// This trait abstracts random number generation to enable both
-/// deterministic simulation randomness and real random numbers
-/// in a unified way. Implementations handle the source of randomness
-/// appropriate for their environment.
+/// Production uses [`TokioRandomProvider`] (a thread-local generator).
+/// Simulation uses `moonpool_sim::SimRandomProvider`, which draws from the
+/// seeded simulation stream.
 pub trait RandomProvider: Clone + Send + Sync + 'static {
     /// Generate a random value of type T.
     ///

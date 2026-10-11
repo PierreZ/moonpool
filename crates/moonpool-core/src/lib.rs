@@ -1,50 +1,100 @@
 //! # moonpool-core
 //!
-//! Core abstractions for the moonpool simulation framework.
+//! Provider traits and core types for the moonpool simulation framework.
 //!
-//! This crate provides the foundational traits and types that enable
-//! moonpool's simulation capabilities. Application code depends on
-//! these abstractions rather than concrete implementations, allowing
-//! seamless switching between simulation and production environments.
-//!
-//! ## The Provider Pattern
-//!
-//! The key insight is that distributed systems interact with the outside
-//! world through a small set of operations: time, networking, task spawning,
-//! and randomness. By abstracting these behind traits, we can substitute
-//! deterministic simulation implementations during testing.
+//! A distributed system touches the outside world through a few operations:
+//! time, task spawning, networking, randomness, storage and system counters.
+//! This crate puts each one behind a trait. Application code depends on the
+//! traits, never on tokio. In production the code runs on [`TokioProviders`].
+//! In tests `moonpool-sim` supplies deterministic providers, and the code
+//! does not change. This is `FoundationDB`'s rule: no mocks and no `Sim*`
+//! variants of shipped types, the same code in both places.
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────┐
-//! │                 Application Code                      │
-//! │     Uses: TimeProvider, NetworkProvider, etc.         │
-//! └───────────────────────┬──────────────────────────────┘
-//!                         │ depends on traits
+//!                 application code
+//!        (generic over P: Providers, never tokio)
+//!                         │
 //!          ┌──────────────┴──────────────┐
 //!          ▼                             ▼
-//!   ┌─────────────────┐         ┌─────────────────┐
-//!   │   Simulation    │         │   Production    │
-//!   │ SimTimeProvider │         │ TokioTimeProvider│
-//!   │ SimNetworkProv. │         │ TokioNetworkProv.│
-//!   │ (deterministic) │         │  (real I/O)     │
-//!   └─────────────────┘         └─────────────────┘
+//!   TokioProviders                 SimProviders
+//!   (this crate,                   (moonpool-sim,
+//!    real I/O)                      deterministic)
 //! ```
 //!
-//! ## Provider Traits
+//! ## Provider traits
 //!
-//! | Trait | Simulation | Production | Purpose |
-//! |-------|------------|------------|---------|
-//! | [`TimeProvider`] | Logical time | Wall clock | Sleep, timeout, `now()` |
-//! | [`TaskProvider`] | Event-driven | Tokio spawn | Task spawning |
-//! | [`RandomProvider`] | Seeded RNG | System RNG | Deterministic randomness |
-//! | [`NetworkProvider`] | Simulated TCP | Real TCP | Connect, listen, accept |
-//! | [`StorageProvider`] | Fault-injected I/O | Real filesystem | File open, read, write, sync |
-//! | [`SystemProvider`] | Simulated disk counters | `getrusage`, `/proc` | CPU and disk busyness counters |
-//! | [`Resolver`] (optional, outside the bundle) | Scripted table | OS lookup | `host:port` to addresses |
+//! | Trait | Production (`Tokio*`) | Simulation (`moonpool-sim`) | Purpose |
+//! |-------|-----------------------|-----------------------------|---------|
+//! | [`TimeProvider`] | Wall clock | Logical time, clock drift | `sleep`, `timeout`, `now`, `timer` |
+//! | [`TaskProvider`] | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now` |
+//! | [`NetworkProvider`] | Real TCP (`TCP_NODELAY`) | Simulated TCP with faults | `bind`, `connect`, `accept` |
+//! | [`RandomProvider`] | Thread-local RNG | The run's one seeded stream | `random`, `random_range`, `random_bool` |
+//! | [`StorageProvider`] | Real filesystem, direct I/O | Simulated disk with faults | `open`, `rename`, `sync_dir`, positioned I/O |
+//! | [`SystemProvider`] | `getrusage`, `/proc` | Simulated CPU and disk counters | Cumulative CPU and disk busyness |
+//! | [`Resolver`] (outside the bundle) | OS lookup | Scripted table | `host:port` to addresses |
 //!
-//! **Important**: Never call tokio directly in application code.
-//! - ❌ `tokio::time::sleep()`
-//! - ✅ `time_provider.sleep()`
+//! [`Providers`] bundles the six provider types into one type parameter.
+//!
+//! ## Writing code against the providers
+//!
+//! The function below never names a runtime. Production calls it with
+//! [`TokioProviders`]. A simulation test calls it with the simulator's
+//! bundle, where the sleep advances logical time and the draws come from
+//! the seed.
+//!
+//! ```rust
+//! use std::time::Duration;
+//!
+//! use moonpool_core::TimeError;
+//! use moonpool_core::prelude::*;
+//!
+//! async fn backoff<P: Providers>(providers: &P, attempt: u32) -> Result<(), TimeError> {
+//!     let base_ms = 10_u64 << attempt;
+//!     let jitter_ms = providers.random().random_range(0..base_ms);
+//!     providers.time().sleep(Duration::from_millis(base_ms + jitter_ms)).await
+//! }
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> Result<(), TimeError> {
+//! let providers = TokioProviders::new();
+//! backoff(&providers, 0).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! **Never call tokio directly in application code.** Use
+//! `providers.time().sleep()`, not `tokio::time::sleep()`, and use
+//! [`select!`] (re-exported by `moonpool-sim` and `moonpool`), not
+//! `tokio::select!`.
+//!
+//! ## Other core types
+//!
+//! - Storage: [`OpenOptions`] with [`DirectIo`], [`StorageFile`] positioned
+//!   I/O and sync barriers, [`IoConstraints`] and [`AlignedBuf`] for direct
+//!   I/O, [`BlockFile`] for block addressing, and [`LayoutRegion`] so a
+//!   storage format can tell a fault injector where its bytes live.
+//! - System: [`SystemSample`] and [`DiskCounters`], with the
+//!   [`parse_proc_stat`] and [`parse_diskstats`] parsers.
+//! - Metrics: [`MetricsSource`], the registry-agnostic seam the simulation
+//!   report scrapes, and the [`metrics::query`] engine.
+//! - Errors: [`SimulationError`], [`TimeError`] and [`JoinError`].
+//!
+//! ## Cargo features
+//!
+//! | Feature | Default | Adds |
+//! |---------|---------|------|
+//! | `tokio-providers` | yes | [`TokioProviders`]: all six `tokio-*` features below |
+//! | `tokio-task` | via umbrella | [`TokioTaskProvider`] |
+//! | `tokio-time` | via umbrella | [`TokioTimeProvider`] |
+//! | `tokio-net` | via umbrella | [`TokioNetworkProvider`] and [`TokioResolver`] |
+//! | `tokio-fs` | via umbrella | [`TokioStorageProvider`], with `O_DIRECT` support |
+//! | `tokio-random` | via umbrella | [`TokioRandomProvider`] |
+//! | `tokio-system` | via umbrella | [`TokioSystemProvider`] |
+//! | `select` | yes | [`select!`] as tokio's macro, unchanged |
+//! | `deterministic-select` | no | [`select!`] with a seeded branch offset (`moonpool-sim` turns it on) |
+//!
+//! With `default-features = false` the crate holds only the traits and plain
+//! types, and it compiles for `wasm32-unknown-unknown`.
 //!
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]

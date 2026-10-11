@@ -2,1063 +2,250 @@
 
 <!-- toc -->
 
-This is the end-to-end implementation guide for a coding agent adding
-deterministic simulation to a system with Moonpool. It is deliberately
-gradual: make one layer trustworthy before adding the next. The specialist
-chapters explain each mechanism in depth; this page explains how to combine
-them without losing determinism, correctness, or useful search guidance.
+This page is a dense map of moonpool for a coding agent that adds deterministic simulation to a system. Every name on it exists in the current source. When this page and the code disagree, the code wins: read the source and update this page with the change. The narrative chapters explain each mechanism; this page shows how to combine them.
 
-If this page disagrees with the current Rust API, inspect the source and update
-the page with the code change. The most important API anchors are
-`SimulationBuilder`, `Process`, `Workload`, `SimContext`, `Invariant`, the
-assertion macros, and the Buggify macros.
+## The Rules
 
-## The Target Architecture
+1. Production code is generic over `P: Providers`. It calls `time.sleep`, `task.spawn_task`, `network.connect`, `storage.open`, `random.random_range`, `system.sample`. Never `tokio::spawn`, `tokio::time`, `tokio::select!`, `std::fs`, `std::net`, `thread_rng`, `Instant::now`.
+2. The same code runs in production over `TokioProviders` and in simulation over `SimProviders`. No `Sim*` wrapper in application code.
+3. `Process` is the server, rebuilt by its factory on every reboot. `Workload` is the test driver and survives reboots. Never merge them.
+4. Facts go out as `tracing` events. Cross-process safety goes in an `Invariant`. Local checks go in `assert_always!`. Rare paths get `assert_sometimes!`. Dangerous moments get `buggify!` or `hint!`.
+5. Every random decision is a counted draw on one seeded stream. `BTreeMap`, not `HashMap`. Futures are `Send + 'static`. No `unwrap()`.
+6. Replay before diagnosis: `set_debug_seeds(vec![seed]).set_iterations(1)` or `replay_timeline(seed, recipe)`.
+7. Never delete an assertion that catches a bug. Fix the bug.
+8. Validate with `nix develop --command cargo fmt`, `cargo clippy`, `cargo nextest run`, and `mdbook build book/` when a public API changes.
 
-Keep the system, driver, oracle, and search policy separate:
+## Crates and Features
 
-```text
-production logic generic over Providers
-                |
-       Process factory (system under test)
-                |
- simulated network / time / task / random / storage
-                |
-  Workload factory (operations + reference model)
-                |
- tracing facts ──────────────> Invariant (global safety)
- assertion macros ───────────> coverage + exploration guidance
- Buggify / Chaos ─────────────> dangerous but valid situations
-                |
-      SimulationBuilder (seeds, budget, replay, report)
-```
+| Crate | Depend on it for | Features |
+|-------|------------------|----------|
+| `moonpool` | The facade. `moonpool_core::*`, `moonpool_sim::*` under `sim`, modules `hyper`, `prometheus`, `rpc`. | `default = ["sim", "tokio"]`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-jwt` |
+| `moonpool-core` | Provider traits and core types. | `default = ["tokio-providers", "select"]`, granular `tokio-task/-time/-net/-fs/-random/-system`, `deterministic-select` |
+| `moonpool-sim` | The runtime, builder, chaos, assertions, observability. | `default = ["tokio-providers", "exploration"]` |
+| `moonpool-assertions`, `moonpool-buggify` | Probes and fault sites for libraries. Zero dependencies. | none |
+| `moonpool-explorer` | Multiverse exploration (`fork`, `mmap`). | none |
+| `moonpool-hyper`, `moonpool-rpc`, `moonpool-prometheus`, `moonpool-journal` | HTTP/2, typed RPC, metrics, a CLSTORE journal. | see the [Crate Map](./appendix/02-crate-map.md) |
 
-The `Process` is the server code being tested. It is killed and recreated on a
-reboot. The `Workload` is the test driver. It issues operations, remembers
-expected outcomes, and survives process reboots within one timeline. An
-`Invariant` observes facts from all actors after every simulation step. The
-builder creates many fresh timelines with different deterministic seeds.
+Production: `moonpool = { default-features = false, features = ["tokio"] }`. Simulation harness: `moonpool-sim` in dev-dependencies or a separate binary crate. wasm: `moonpool-sim` with `default-features = false`.
 
-Do not put all four responsibilities in one workload. Doing so bypasses the
-reboot model and makes bugs much harder to localize.
+## Providers
 
-## Stage 0: Map the System Before Writing Code
+| Trait | Methods | Simulation type |
+|-------|---------|-----------------|
+| `TimeProvider` | `sleep(d)`, `now() -> Duration`, `timer()` (drifted), `timeout(d, fut)` | `SimTimeProvider` |
+| `TaskProvider` | `spawn_task(name, fut) -> JoinHandle`, `yield_now()`; `Detach` | `SimTaskProvider` |
+| `NetworkProvider` | `bind(addr)`, `connect(addr)`; `TcpStream: AsyncRead + AsyncWrite`; `TcpListenerTrait::{accept, local_addr}` | `SimNetworkProvider` |
+| `RandomProvider` | `random::<T>()`, `random_range(r)`, `random_ratio()`, `random_bool(p)` | `SimRandomProvider` |
+| `StorageProvider` | `open(path, OpenOptions)`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` | `SimStorageProvider` |
+| `StorageFile` | `read_at`, `write_at`, `sync_all`, `sync_data`, `size`, `set_len`, `constraints()`, `is_direct_io()` | simulated file image |
+| `SystemProvider` | `sample(data_dir) -> SystemSample { at, process_cpu, cores, machine_busy, machine_total, run_loop_busy, disk: Option<DiskCounters> }` | `SimSystemProvider` |
+| `Providers` | `network()`, `time()`, `task()`, `random()`, `storage()`, `system()` | `SimProviders` |
+| `Resolver` | `resolve(host_port)` | `ScriptedResolver` |
 
-First write down the following map. An agent should not start implementing the
-harness until every row has an answer.
+`OpenOptions::direct_io(DirectIo::{Disabled, Optional, Required})`, `BlockFile<F>` for block arithmetic over one open file, `LayoutRegion { path, bytes, kind, stripe }` to name byte ranges. `moonpool_sim::select!` replaces `tokio::select!` with the same grammar. `moonpool_sim::executor::spawn(name, fut)` is the sim-only raw spawn.
 
-| Question | Moonpool representation |
-|---|---|
-| What is restarted when a server crashes? | A `Process` factory |
-| What persists across a reboot? | Simulated storage, never process fields |
-| What drives client operations? | A factory-created `Workload` |
-| What is the independent expected result? | Workload reference model |
-| What must never be transiently false? | Tracing fact plus `Invariant` |
-| What local condition must never fail? | `assert_always!` or an always numeric macro |
-| Which rare situations prove the test is effective? | Sometimes/reachability guidance |
-| Which high-level dangerous choices are too rare naturally? | A Buggify point |
-| Which operation families can suppress one another? | Operation swarm IDs |
-| Which nondeterministic APIs does production code call? | Provider boundaries |
-
-Prefer a small abstract model. For a key-value service, use a `BTreeMap` of
-expected keys rather than copying the server implementation. For consensus,
-track proposed and chosen values rather than reproducing Paxos inside the
-driver. A reference model that shares the implementation's algorithm can share
-the same bug.
-
-Before proceeding, identify how ambiguous results are reconciled. A timed-out
-write might have committed. The workload must query the system, use idempotency
-keys, or model both legal outcomes; it must not blindly assume that an error
-means no state change.
-
-## Stage 1: Establish the Deterministic Boundary
-
-All behavior that can affect a result must use Moonpool providers.
-
-Keep the production dependency lean (`moonpool` with production provider
-features, without `sim`) and put `moonpool-sim` in a separate harness package
-or simulation-only target. This keeps the deterministic engine and explorer
-out of production artifacts. Follow the repository's simulation-binary layout
-so `cargo xtask sim list` discovers the harness.
-
-A standalone simulation binary needs no Tokio runtime:
+## Process, Workload, Context
 
 ```rust,ignore
-fn main() -> Result<(), moonpool_sim::SimulationError> {
-    moonpool_sim::init_sim_tracing(tracing::Level::WARN);
-    let report = build_simulation().run()?;
-    report.eprint();
-    Ok(())
-}
-```
-
-| Do not use in simulated code | Use instead |
-|---|---|
-| `tokio::spawn` | `ctx.task().spawn_task(...)` |
-| `tokio::time::sleep` | `ctx.time().sleep(...)` |
-| `tokio::time::timeout` | `ctx.time().timeout(...)` |
-| `tokio::select!` | `moonpool_sim::select!` |
-| `std::time::Instant` for behavior | `ctx.time()` and simulated time |
-| `thread_rng`, OS randomness, random UUIDs | `ctx.random()` or `sim_random_*` |
-| real sockets | `ctx.network()` |
-| real files for process state | `ctx.storage()` |
-| `getrusage`, `/proc/stat`, `/proc/diskstats` | `providers.system().sample(data_dir)` |
-| background OS threads | tasks spawned through the task provider |
-
-The executor uses one OS thread but futures must still be `Send + 'static`.
-Use `Arc<RwLock<_>>`, atomics, or another `Send` structure when state is shared
-between tasks. Do not use `LocalSet`, `spawn_local`, or direct Tokio runtime
-construction.
-
-Behavior-affecting iteration over an unordered collection is also a source of
-nondeterminism. Prefer `BTreeMap`/`BTreeSet`, sort keys before choosing, or make
-the choice through the seeded random provider. Logging order alone is less
-important; protocol decisions are not.
-
-External services, real clocks, environment changes, and global mutable state
-are outside recipe replay. Move them behind providers or keep them outside the
-simulated decision path.
-
-Exit criterion: the same seed must produce the same observable trace twice.
-
-## Stage 2: Put the System Under Test in `Process`
-
-A process factory creates a fresh in-memory instance on first boot and every
-reboot. Only simulated storage survives.
-
-```rust,ignore
-use async_trait::async_trait;
-use moonpool_sim::{
-    NetworkProvider, Process, SimContext, SimulationResult, TcpListenerTrait,
-};
-
-#[derive(Default)]
-struct Node;
-
 #[async_trait]
 impl Process for Node {
-    fn name(&self) -> &str {
-        "node"
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let listener = ctx.network().bind(ctx.my_ip()).await?;
-
-        loop {
-            moonpool_sim::select! {
-                biased;
-                accepted = listener.accept() => {
-                    let (stream, peer) = accepted?;
-                    // Spawn connection handling through ctx.task().
-                    // Pass ctx.providers().clone() into generic production code.
-                    // The handler should serve at least one healthy request.
-                    let _ = (stream, peer);
-                }
-                () = ctx.shutdown().cancelled() => return Ok(()),
-            }
-        }
-    }
-}
-```
-
-Use `ctx.my_ip()` to bind the node. Read role tags and locality through
-`ctx.topology()`. Handle `ctx.shutdown()` for graceful reboot, but do not rely
-on it for crash reboot: a crash cancels the task immediately. Reopen listeners,
-connections, and files on every boot.
-
-Keep the production algorithm generic over `P: Providers` when possible. The
-`Process` should be a thin simulation entry point that supplies
-`ctx.providers()` to the same logic used with production providers.
-
-A `Process::run` error ends that process and is logged, but is not by itself a
-client-test failure. The workload or an invariant must observe and validate the
-effect that the process exit has on the protocol.
-
-Exit criterion: one node can boot, serve a healthy request, and stop without
-leaking a task or pending event.
-
-## Stage 3: Build a Finite, Stateful `Workload`
-
-Workloads have three phases:
-
-1. `setup`: setup tasks may run concurrently, followed by a barrier before
-   any workload `run` method starts.
-2. `run`: all workload instances execute concurrently. The first workload to
-   finish triggers the shared shutdown token.
-3. `check`: check tasks run after processes have been aborted and the timeline
-   has settled.
-
-The workload should be finite. Background server loops belong in `Process` and
-end through shutdown. A useful workload owns a reference model and chooses from
-a small, explicit operation alphabet.
-
-```rust,ignore
-use std::collections::BTreeMap;
-
-use async_trait::async_trait;
-use moonpool_sim::{SimContext, SimulationError, SimulationResult, Workload};
-
-struct ClientWorkload {
-    expected: BTreeMap<String, Vec<u8>>,
-    operations: usize,
-}
-
-impl ClientWorkload {
-    fn new(operations: usize) -> Self {
-        Self {
-            expected: BTreeMap::new(),
-            operations,
-        }
-    }
+    fn name(&self) -> &str { "node" }
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> { .. }
 }
 
 #[async_trait]
-impl Workload for ClientWorkload {
-    fn name(&self) -> &str {
-        "client"
-    }
-
-    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        if ctx.topology().all_process_ips().is_empty() {
-            return Err(SimulationError::InvalidState("no server processes".into()));
-        }
-        Ok(())
-    }
-
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        for _ in 0..self.operations {
-            // Choose an enabled operation with ctx.random(), execute it through
-            // ctx.network(), and update `expected` only after reconciling
-            // success, failure, and ambiguous timeout outcomes.
-        }
-        Ok(())
-    }
-
-    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        // Validate the retained model and captured timeline. Processes have
-        // already stopped, so do not attempt a live RPC here.
-        let _ = ctx;
-        Ok(())
-    }
+impl Workload for Driver {
+    fn name(&self) -> &str { "driver" }
+    async fn setup(&mut self, ctx: &SimContext) -> SimulationResult<()> { Ok(()) }  // default
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> { .. }
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> { Ok(()) }  // default, after chaos
 }
 ```
 
-Choose registration by lifecycle, not convenience:
+`SimContext` methods:
 
-| Builder method | Lifecycle | Use |
-|---|---|---|
-| `.workload(instance)` | Reuses that value across root iterations | Only a deliberate stateful non-exploration test |
-| `.workload_factory(|| Box::new(...))` | One fresh driver per timeline | Default for one client and required for exploration |
-| `.workloads(count, |i| Box::new(...))` | Fresh indexed drivers per timeline | Concurrent clients and required for exploration |
+| Group | Methods |
+|-------|---------|
+| Providers | `providers()`, `network()`, `time()`, `task()`, `random()`, `storage()` |
+| Identity | `my_ip()`, `client_id()`, `client_count()`, `peer(name)`, `peers()` |
+| Topology | `topology()` → `WorkloadTopology { groups, ips_in_group, group_for, my_group, peer_by_name, all_process_ips, ips_tagged, tags_for, my_tags, my_locality, locality_for, peers_on_my_machine, ips_in_domain }` |
+| Lifecycle | `shutdown()` (a `CancellationToken`), `crash_self(kind, Option<Duration>)`, `self_crash() -> SelfCrash` |
+| Shared state | `state()` → `StateHandle { publish(key, v), get::<T>(key), contains(key) }` |
+| Observation | `observability()` (a `TraceQuery`), `disk_counters(ip)`, `system_samples(ip)`, `slowness(ip)` |
+| Metrics | `metrics::<S>()`, `metrics_handle()` |
 
-Prefer a factory from the beginning. It prevents one seed's driver state from
-contaminating another and keeps later exploration/replay migration simple.
-
-For multiple clients, use `ctx.client_id()` and `ctx.client_count()` to divide
-work without overlap. Names should be useful in reports. Use
-`ctx.topology().all_process_ips()` or tag queries instead of hard-coding IPs.
-Coordinate their termination: because the first completed workload triggers
-global shutdown, one short driver can cancel longer peers. A single workload
-that spawns coordinated client tasks is often simpler when all clients must
-finish together.
-
-Perform any final live query during `run`, before returning. Use `check` for
-the retained reference model and `ctx.observability()` timeline. A check error
-or panic is currently logged rather than reliably becoming a workload result,
-so record check contracts with Moonpool always assertions as well.
-
-Exit criterion: the happy-path reference model agrees with the system for one
-fixed seed.
-
-## Stage 4: Start with a Reproducible Smoke Runner
-
-Begin with one known seed and one iteration. Do not add every fault surface at
-once.
+## SimulationBuilder
 
 ```rust,ignore
-use moonpool_sim::SimulationBuilder;
-
 let report = SimulationBuilder::new()
-    .processes(3, || Box::new(Node))
-    .workload_factory(|| Box::new(ClientWorkload::new(20)))
-    .set_debug_seeds(vec![1])
-    .set_iterations(1)
-    .run()?;
-
-report.eprint();
-assert_eq!(report.failed_runs, 0, "smoke seed failed: {report}");
-assert!(
-    report.assertion_violations.is_empty(),
-    "safety property failed: {report}"
-);
-```
-
-`SimulationBuilder::run()` is synchronous; do not add `.await` or create a
-Tokio runtime around it.
-
-No explicit `Chaos` entry means the runner uses its baseline network and
-storage configurations. This is not the same as a perfectly inert network:
-the current baseline network includes seeded timing variation, probabilistic
-connect failure, partial I/O, rare corruption/close, clock drift, and
-buggified delay, while baseline storage faults are off. `Chaos::Network` and
-`Chaos::Storage` select per-seed randomized or swarm configurations.
-
-If a process topology matters, replace `.processes` with `.cluster` and add
-`.link_latency`. If the system has several kinds of server (acceptors and
-matchmakers, a tier and a spare pool), call `.processes` once per role: each
-call is an independent group named after its process type, with its own
-per-seed count and its own `10.0.{group}.x` IP range, queried with
-`ctx.topology().ips_in_group("name")`; a process's `client_id` /
-`client_count` are its index within and the size of its own group. If roles
-inside one group matter, call `.tags(...)` after that group's registration;
-remember that `.tags` returns a `Result`.
-
-Exit criterion: the seed succeeds repeatedly and the report has no safety
-violations.
-
-## Stage 5: Add the Correctness Oracle Before More Chaos
-
-Use four complementary oracles:
-
-1. Return `SimulationError` when an operation cannot complete its test
-   contract.
-2. Use always-type macros for local facts.
-3. Emit stable tracing facts and use `Invariant` for global, cross-process,
-   cross-time safety.
-4. Make the final live query in `Workload::run`, then use `Workload::check` for
-   retained model/timeline assertions after processes stop.
-
-### Local safety
-
-```rust,ignore
-moonpool_sim::assert_always!(
-    applied_index <= committed_index,
-    "replica: applied index never exceeds commit index",
-    { "committed" => committed_index, "applied" => applied_index }
-);
-```
-
-Moonpool's assertion macros record failures; they do not immediately panic.
-The simulation report is the authority. Never delete or weaken a failing
-assertion to make a run pass.
-
-### Global safety through tracing
-
-Emit plain INFO-or-higher tracing events inside a `Process` or `Workload` task:
-
-```rust,ignore
-tracing::info!(
-    target: "protocol",
-    slot,
-    ballot,
-    value = %value_hash,
-    "value_chosen"
-);
-```
-
-The event message must be a non-empty constant name. Use `%` for string values.
-The run's subscriber is floored at `INFO` by default, so `DEBUG`/`TRACE` spans
-and events (`#[tracing::instrument(level = "trace")]` on hot paths) cost one
-level compare and are never allocated; `.trace_level(LevelFilter::DEBUG)` on
-the builder lowers the floor to debug one seed, capturing those events too.
-Do not add simulated time manually; the observability layer stamps it. Actor
-spans provide source attribution automatically.
-
-Built-in network, storage, and process faults join the same timeline as
-`"sim_fault"` events (`SIM_FAULT_EVENT_NAME`), with `source = "sim"` and a
-`kind` field. An invariant can use a separate cursor for that event stream to
-correlate a timeout, reboot, corruption, or partition with later application
-facts. This is usually more reliable than reconstructing fault history from
-formatted logs.
-
-An invariant reads only new events using a cursor and resets its own state for
-the next timeline:
-
-```rust,ignore
-use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
-
-use moonpool_sim::{Invariant, TraceQuery};
-
-struct Agreement {
-    cursor: Cell<usize>,
-    chosen: RefCell<BTreeMap<u64, String>>,
-}
-
-impl Agreement {
-    fn new() -> Self {
-        Self {
-            cursor: Cell::new(0),
-            chosen: RefCell::new(BTreeMap::new()),
-        }
-    }
-}
-
-impl Invariant for Agreement {
-    fn name(&self) -> &str {
-        "agreement"
-    }
-
-    fn observe(&self, query: &dyn TraceQuery, _sim_time_ms: u64) {
-        let mut chosen = self.chosen.borrow_mut();
-        for event in query.since("value_chosen", &self.cursor) {
-            let Some(slot) = event.u64("slot") else {
-                moonpool_sim::assert_unreachable!(
-                    "protocol: value_chosen event missing slot"
-                );
-                continue;
-            };
-            let Some(value) = event.str("value") else {
-                moonpool_sim::assert_unreachable!(
-                    "protocol: value_chosen event missing value"
-                );
-                continue;
-            };
-            if let Some(previous) = chosen.get(&slot) {
-                moonpool_sim::assert_always!(
-                    previous == value,
-                    "protocol: one chosen value per slot"
-                );
-            } else {
-                chosen.insert(slot, value.to_owned());
-            }
-        }
-    }
-
-    fn reset(&mut self) {
-        self.cursor.set(0);
-        self.chosen.get_mut().clear();
-    }
-}
-```
-
-Register it with `.invariant(Agreement { ... })`. Invariants run after every
-simulation step, so keep them cursor-based and inexpensive. Treat `observe` as
-read-only; do not emit new tracing facts or mutate the system from it.
-
-Exit criterion: the harness can detect a deliberately planted wrong result.
-Remove the planted bug, not the oracle.
-
-## Stage 6: Choose Guidance Macros Deliberately
-
-Antithesis describes assertions as both properties and clues for search. Its
-guidance is useful here too: line coverage says a location ran, while a
-sometimes assertion describes a meaningful *situation*. Moonpool uses the
-successful encounters, watermarks, and frontiers below as semantic replay
-anchors.
-
-| Intent | Macro | Search/report behavior |
-|---|---|---|
-| A condition at a regularly evaluated site must always hold | `assert_always!` | Safety violation on any false encounter |
-| A condition must hold if an optional path executes | `assert_always_or_unreachable!` | Safety violation only when reached and false |
-| A path must never execute | `assert_unreachable!` | Safety violation when reached |
-| A boolean situation should occur | `assert_sometimes!` | First true encounter is a discovery |
-| Mark an already-entered path as interesting | `assert_reachable!` | Encounter is a discovery |
-| A numeric bound must always hold | `assert_always_{greater,less}_than...!` | Numeric safety violation |
-| Drive a quantity toward a numeric goal | `assert_sometimes_{greater,less}_than...!` | Every better `left - right` comparison distance can guide deeper search |
-| Several conditions should coincide | `assert_sometimes_all!` | Guides on frontier advances and new partial truth combinations |
-| Explore a bounded vocabulary of states | `assert_sometimes_each!` | New identity bucket and better per-bucket quality guide search |
-
-The exact numeric safety macros are
-`assert_always_greater_than!`,
-`assert_always_greater_than_or_equal_to!`,
-`assert_always_less_than!`, and
-`assert_always_less_than_or_equal_to!`. The exact numeric guidance macros use
-the same four suffixes after `assert_sometimes_`. Do not invent shortened
-spellings.
-
-### Stable messages are property IDs
-
-Assertion slots are keyed by the message hash, not by file and line. Use one
-short, stable, human-readable message for one property. Do not interpolate a
-node ID, ballot, slot, key, or seed into the message. Do not reuse one message
-for different macro kinds. Messages are stored in fixed-size shared slots, so
-put dynamic context in supported detail fields or tracing events instead.
-Detail maps are supported by boolean always/optional-always/unreachable and
-numeric always macros; the sometimes guidance macros do not accept them.
-
-Unlike Antithesis's build-time assertion catalog, Moonpool allocates an
-assertion slot only when the macro executes. Consequently:
-
-- `assert_reachable!("retry entered")` is an anchor once the retry path runs;
-  it cannot report a path that was never executed because no slot exists yet.
-- To prove a condition from an always-executed location, use
-  `assert_sometimes!(retry_count > 0, "client: retry occurred")`.
-- A sometimes site that never executes is likewise unknown. Put important
-  coverage checks at a stable observation point, not only inside the rare arm.
-- An adaptive run with no observed boolean sometimes/reachable slot cannot
-  satisfy its “all reached” gate and will run to the iteration cap. Add at
-  least one repeatedly evaluated boolean coverage contract to a campaign.
-
-### Boolean guidance
-
-Use `assert_sometimes!` for a single meaningful state:
-
-```rust,ignore
-moonpool_sim::assert_sometimes!(
-    retry_count > 0,
-    "client: request completed after retry"
-);
-```
-
-Use `assert_sometimes_all!` when the hard part is making several facts true at
-the same time. Name each proposition; all expressions are evaluated.
-
-```rust,ignore
-moonpool_sim::assert_sometimes_all!("protocol: failover completed", [
-    ("old leader unavailable", old_leader_unavailable),
-    ("new quorum formed", new_quorum_formed),
-    ("client completed", client_completed),
-]);
-```
-
-This macro guides on frontier improvement: a run with two of three facts is
-more useful than a run with one. It also distinguishes bounded partial truth
-combinations, so "only old leader unavailable" and "only new quorum formed"
-can both become replayable states even though each has frontier one. The final
-report and adaptive coverage gate remain incomplete until all propositions are
-true together; do not duplicate it with a separate boolean completion check.
-
-Partial combinations use a 64-bit per-site bitmap. This is bounded guidance,
-not exhaustive subset accounting: collisions may merge optional hints. Use
-`assert_sometimes_each!` with a deliberately small identity vocabulary when
-exact per-value reporting matters.
-
-### Numeric guidance
-
-Use numeric sometimes macros for depth. A boolean such as `depth > 3` produces
-one discovery; a maximizing watermark can keep producing useful discoveries as
-depth improves.
-
-```rust,ignore
-moonpool_sim::assert_sometimes_greater_than!(
-    decided_slots,
-    32,
-    "protocol: decided slot watermark"
-);
-
-moonpool_sim::assert_sometimes_less_than!(
-    healthy_replicas,
-    3,
-    "protocol: low healthy replica watermark"
-);
-```
-
-Choose direction carefully. Greater/greater-or-equal guidance maximizes
-`left - right`; less/less-or-equal guidance minimizes it. The human report
-still displays the best observed left operand. Tracking the distance means a
-dynamic threshold cannot report false progress merely because both operands
-grew. Values are converted to `i64`, so avoid relying on larger unsigned
-ranges.
-
-The first numeric evaluation establishes a watermark discovery even when the
-comparison has not passed yet. Later improvements can therefore guide a search
-gradually from 1 toward a target of 100.
-
-### Bucketed guidance
-
-Use `assert_sometimes_each!` to explore a small semantic vocabulary:
-
-```rust,ignore
-moonpool_sim::assert_sometimes_each!(
-    "protocol state",
-    [("phase", phase_code), ("fault regime", fault_regime)],
-    [("decided slots", decided_slots)]
-);
-```
-
-Identity keys, names and values in their supplied order, decide which bucket
-this is: the same values under different names are different buckets. Quality keys rank better
-exemplars inside that bucket. Keep identity coarse: phase, role, recovery mode,
-quorum shape, or fault regime. Put progress such as decided slots, inverse lag,
-or remaining health in quality.
-
-The shared tables are bounded: 2048 assertion sites and 256
-`assert_sometimes_each!` buckets. Supply no more than six identity keys; extra
-values affect the bucket hash but are not retained for display. Never bucket
-unbounded keys, request IDs, ballots, or log slots. Bucket them into a finite
-range first. Once a shared table is full, additional sites or buckets are not
-tracked and the run reports an always-violation naming the overflowed table:
-exhaustion destroys guidance, so it is never silent.
-
-A message is a site's identity, so one message must belong to one kind of
-assertion. An `assert_always!` and an `assert_sometimes!` that share a message,
-or two numeric sites that disagree on the watermark direction, are not merged:
-the second call site is left unaccounted and the run reports an
-always-violation naming the message. The same applies to a bucket whose
-identity collides with a different key set.
-
-Quality always maximizes, supports at most four values, and packs the low 16
-bits of each value in order. Normalize values into `0..=32767`, put the most
-important value first, and invert a cost when lower is better.
-
-Bucket guidance has no final “all expected identities were visited” contract.
-Inspect `report.bucket_summaries` or add stable outer `assert_sometimes!`
-contracts for states that the campaign must reach.
-
-Exit criterion: every important rare state has a stable semantic signal, and
-the signals describe situations rather than implementation lines.
-
-## Stage 7: Add Buggify at High-Level Danger Points
-
-Random network and disk faults naturally exercise low-level failure handling.
-They may take an enormous number of trials to create a high-level dangerous
-sequence such as two minimal-quorum elections followed by a retry. Buggify lets
-the application cooperate with the simulator by making those valid but rare
-choices directly.
-
-Moonpool's model has two decisions:
-
-1. On first encounter, each source `file:line` Buggify location is activated or
-   disabled for the whole timeline. `SimulationBuilder` currently uses 50%
-   activation.
-2. An active location fires on each call with the macro probability: 25% for
-   `buggify!()` and `buggify_knob!()`, or the argument to
-   `buggify_with_prob!(p)`.
-
-The first encounter of a default point therefore has a 12.5% marginal firing
-chance. If the point is activated, later calls each have a 25% chance; if it is
-disabled, it never fires in that timeline. Keep custom probabilities in
-`0.0..=1.0`.
-
-Buggify is initialized for every builder iteration independently of
-`.enable_chaos(...)`. There is no builder switch for ordinary call-site
-Buggify. Outside an active simulation iteration it returns false. Moving a
-Buggify call to a different line changes its identity and seeded behavior.
-Adding, removing, or reordering Buggify points also changes simulation RNG
-consumption and can invalidate exact recipes against the changed binary. Do
-not call `buggify_init` or `buggify_reset` from a builder-managed workload.
-Two macro expansions on the same `file:line` share one activation identity.
-
-Start with one point and pair it with a coverage signal and a safety oracle:
-
-```rust,ignore
-let use_minimal_quorum = moonpool_sim::buggify!();
-moonpool_sim::assert_sometimes!(
-    use_minimal_quorum,
-    "protocol: minimal quorum path selected"
-);
-
-let responders = if use_minimal_quorum {
-    quorum_size
-} else {
-    all_replicas
-};
-```
-
-Buggify itself is not an explorer discovery. The paired sometimes assertion,
-reachability marker, watermark, frontier, or bucket creates the semantic
-anchor after the injected behavior becomes meaningful.
-
-Good Buggify candidates are:
-
-- perform only the minimum correct amount of optional work;
-- substitute a retryable error after a lower layer succeeded, forcing
-  ambiguous-result handling;
-- add or lengthen a delay through `ctx.time()` at a concurrency-sensitive
-  boundary;
-- choose a valid edge configuration, such as a batch size of one;
-- activate an alternate supported path that defaults rarely or never.
-
-Use `buggify_fault_with_prob!(p)` for a point that makes an operation fail
-rather than take a rare path: it fires like `buggify_with_prob!(p)` during the
-chaos window and never after the runner enters its recovery tail, so recovery
-checks are not failed by injection that should have stopped with the chaos.
-
-Use `buggify_named!("label", p)` for a disruptive per-seed decision a harness
-must be able to switch on or off with other ingredients of a scenario: it is keyed by
-its label, and `set_activation("label", on)` decides it for the run. Labels
-must be unique.
-
-Use `buggify_with_prob!(p)` when a frequently evaluated point would otherwise
-dominate the run. Use `buggify_knob!(default, lo..hi)` for an application knob:
-
-```rust,ignore
-let batch_size = moonpool_sim::buggify_knob!(128_usize, 1_usize..16_usize);
-```
-
-Always supply a valid, non-empty half-open range. A fired invalid range falls
-back to `range.start`, not to the default value.
-
-Use `hint!("label")` in production code to name a moment where a crash would
-be interesting (writes durable but unannounced, staged but unsynced). Await
-it. It never crashes on its own: a fired point asks the simulator, which
-reboots the calling process only under the first `Chaos::Attrition` regime
-whose victim filter admits it, within that regime's `max_dead` budget, kind
-weights and recovery delays. A killed caller's future never resolves; every
-other caller, and every caller outside a simulation, resolves at once. Use
-`hint!("label", p)` for a site rate (default 5%). Never write a sim wrapper
-that races a timer against your code to crash it: hint the moment instead.
-
-```rust,ignore
-storage.sync().await?;
-moonpool_buggify::hint!("batch durable, not sent").await;
-send(messages).await;
-```
-
-For probes in production code, use `moonpool_assertions::reachable!(msg)` and
-`sometimes!(cond, msg)`: inert outside a simulation, and one slot with the
-simulation's `assert_reachable!` of the same message.
-
-`Chaos::BuggifyKnobs` is different. It asks the builder to spike selected
-built-in network/storage configuration values, and it only modifies a surface
-that is also explicitly enabled:
-
-```rust,ignore
-.enable_chaos([
-    Chaos::Network(ChaosMode::Swarm),
-    Chaos::Storage(ChaosMode::Swarm),
-    Chaos::BuggifyKnobs,
-])
-```
-
-Do not use Buggify to invent impossible states, violate the protocol's own
-preconditions, or simulate a process crash. Use built-in attrition for
-graceful, crash, and crash-and-wipe lifecycle behavior. Keep injection code in
-simulation-specific adapters or behind the application's simulation feature so
-production builds can omit `moonpool-sim` and the explorer.
-
-The practical rule from FoundationDB-style Buggify is “do bad things, but not
-too many of them.” Preserve enough successful work for the system to make
-progress and recover. A chaos phase should eventually stop injecting
-background lifecycle faults so the workload can settle and validate recovery.
-
-Exit criterion: each Buggify point is observed across seeds, has a named reason
-to find bugs, and leaves the system in a state the real implementation could
-encounter.
-
-## Stage 8: Layer Runner Chaos One Axis at a Time
-
-Once the oracle catches planted bugs and the smoke seed is stable, expand
-breadth gradually:
-
-1. Multiple baseline/default seeds.
-2. Network `Random` mode.
-3. Storage `Random` mode if the system persists state.
-4. Attrition with at most one unavailable process.
-5. `Swarm` mode for each fault surface.
-6. Workload operation swarming.
-7. Correlated locality failures and distance latency if deployment shape
-   matters.
-
-```rust,ignore
-use std::time::Duration;
-
-use moonpool_sim::{Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode};
-
-let report = SimulationBuilder::new()
-    .processes(3, || Box::new(Node))
-    .workload_factory(|| Box::new(ClientWorkload::new(200)))
-    .chaos_duration(Duration::from_secs(30))
+    .processes(3, || Box::new(Node::default()))              // group 0 on 10.0.1.{1..3}
+    .tags(&[("role", &["leader", "follower"])])?             // round-robin over the last group
+    .workloads(WorkloadCount::Fixed(2), |i| Box::new(Driver::new(i)))
     .enable_chaos([
         Chaos::Network(ChaosMode::Swarm),
         Chaos::Storage(ChaosMode::Swarm),
-        Chaos::Attrition {
-            config: Attrition {
-                max_dead: 1,
-                prob_graceful: 1.0,
-                prob_crash: 2.0,
-                prob_wipe: 0.0,
-                recovery_delay_ms: None,
-                grace_period_ms: None,
-                scope: AttritionScope::PerProcess,
-                victims: AttritionVictims::Any,
-            },
-            mode: ChaosMode::Swarm,
-        },
-        Chaos::BuggifyKnobs,
+        Chaos::Attrition { config: attrition, mode: ChaosMode::Swarm },
     ])
-    .until_coverage_stable(10, 5_000)
+    .chaos_duration(Duration::from_secs(60))
+    .invariant(NoSplitBrain::new())
     .run()?;
+if report.is_failure() { report.eprint(); std::process::exit(1); }
 ```
 
-The attrition `prob_*` values are weights, not percentages. Wipe is only valid
-when the model permits losing that process's durable state. Failure-domain
-attrition needs `.cluster(...)` and a budget large enough to remove the chosen
-machine, zone, or datacenter. With several process groups, set `victims` to
-`AttritionVictims::group("acceptor")` (or `::tagged(key, value)`) so kills land
-on the role under test rather than on spares; `max_dead` then counts dead
-processes in that pool only, and one `Chaos::Attrition` entry per group gives
-each role its own regime and budget.
+| Method | Note |
+|--------|------|
+| `processes(count, factory)`, `cluster(LocalityConfig, factory)` | `count`: `usize` or `RangeInclusive<usize>`. One call per role. |
+| `tags(&[(key, &[values])]) -> Result` | Over the last group. |
+| `workload(w)`, `workload_factory(f)`, `workloads(WorkloadCount, f)` | Exploration and `check_determinism` need a factory. |
+| `enable_chaos([Chaos..])` | `Network(mode)`, `Storage(mode)`, `Attrition { config, mode }`, `Outage { config, mode }`, `BuggifyKnobs`, `Cpu(mode)`, `GrayFailure { config, mode }`. |
+| `chaos_duration(d)` | Required by `fault_factory`. After it: recovery mode. |
+| `fault_factory(\|\| Box<dyn FaultInjector>)` | Custom injector per run. |
+| `network_fault_mask(m)`, `storage_fault_mask(m)` | Remove families after the draw. |
+| `replicated_storage_faults(ReplicatedFaults)` | Bound damage to tolerated domains. |
+| `swarm_operations()` | Per-seed operation subsets; test with `swarm_op_enabled(op_id)`. |
+| `link_latency(cfg)`, `tcp_send_window_bytes(n)`, `accept_backlog_capacity(n)` | Deployment shape. Defaults none, 64 KiB, 128. |
+| `invariant(i)`, `invariant_fn(name, \|q, t\| ..)`, `trace_level(level)` | Invariants run after every step. |
+| `metrics_factory(\|ip\| Arc<S>)`, `metric(MetricQuery::select("m").label(k, v).rate().bucketize(d, Mean).reduce(Mean).named("x"))` | App metrics in the report. |
+| `set_iterations(n)`, `until_coverage_stable(10, 1000)` (default), `set_debug_seeds(seeds)`, `run_time_budget(d)` (1 h) | Campaign control. |
+| `enable_exploration(ExplorationConfig)`, `replay_timeline(seed, recipe)`, `check_determinism()` | Exploration, replay, canary. |
 
-`Chaos::Outage { config: Outage::groups(["acceptor"]), mode }` is the
-correlated counterpart: at most once per run, every live process of the named
-groups crashes in one tick and each restarts after its own `down` draw (one
-optional `straggler` last). Restarts are scheduled events, so they land even
-after the chaos window closes. Once every victim is down, an `OutageLanded`
-is published in the `StateHandle` under `OUTAGE_STATE_KEY`.
-An `OutageVeto` published under `OUTAGE_VETO_KEY` is asked with every
-victim at the outage instant; a refusal retries every `VETO_RETRY` until
-it permits or the chaos window closes.
+No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Without `Chaos::Network` the network still has FoundationDB's always-on faults (random close, clock drift, buggified delay, probabilistic connect failure). Without `Chaos::Storage` storage has no faults.
 
-`.chaos_duration(...)` bounds the window in which Moonpool may inject **new**
-faults of any kind. At the cutoff the runner stops attrition and custom fault
-injectors *and* calls `SimWorld::enter_recovery_mode()`, which switches off every
-configuration-driven network, storage, and block-device fault family and heals
-the partitions in force.
+## SimulationReport
 
-It stops fault generation, it does not repair anything: corrupted sectors, lost
-or misdirected writes, connections already closed, and processes already killed
-all survive the cutoff, and finite effects already started (disk stall/throttle
-episodes, clogs, delayed packets) expire on their own schedule. The cluster is
-not healthy at the cutoff — the environment merely stops making it worse.
+| Field | Meaning |
+|-------|---------|
+| `iterations`, `successful_runs`, `failed_runs`, `seeds_used`, `seeds_failing` | Campaign outcome. `is_failure()` is true when a seed failed, an always-assertion was violated, or assertion slots were dropped. |
+| `assertion_results`, `assertion_details`, `bucket_summaries`, `assertion_violations`, `coverage_violations`, `dropped_assertion_allocations` | Assertion accounting. |
+| `saturation: Option<SaturationReport { signal, edges_covered, edges_total, sometimes_hit, sometimes_total, plateau_seeds }>`, `convergence_timeout` | How `UntilCoverageStable` stopped. |
+| `exploration: Option<ExplorationReport { total_timelines, expansions, discoveries, bugs_found, bug_recipes, max_active_workers, sancov_edges_total, sancov_edges_covered, converged, per_seed_timelines }>` | Exploration. |
+| `metrics`, `individual_metrics`, `app_metrics`, `metric_queries`, `run_id` | Timing and application metrics. |
 
-Leave a recovery segment inside `Workload::run` after the cutoff for
-reconvergence and final live queries: that quiet tail, with the processes still
-alive, is the only window where protocol recovery can happen (settle runs after
-the processes are aborted). Then use `check` for retained state and timeline
-assertions.
+`report.eprint()` prints it. `success_rate()`, `average_wall_time()`, `average_simulated_time()`.
 
-### Swarm the operation alphabet
+## Assertions
 
-Faults can suppress one another, and so can workload actions. Assign stable
-`u8` IDs to operation families and filter them with `swarm_op_enabled`:
+| Macro | Role |
+|-------|------|
+| `assert_always!(cond, "msg" [, { "k" => v }])`, `assert_always_or_unreachable!` | Invariant. Violation fails the seed. |
+| `assert_sometimes!(cond, "msg")`, `assert_reachable!("msg")`, `assert_unreachable!("msg")` | Coverage. First pass is a discovery. |
+| `assert_always_{greater_than, greater_than_or_equal_to, less_than, less_than_or_equal_to}!(val, thresh, "msg")` | Bound. Watermark for reporting only. |
+| `assert_sometimes_{..}!(val, thresh, "msg")` | Depth. Watermark improvements guide the explorer. |
+| `assert_sometimes_all!("msg", [("a", a), ("b", b)])` | Facts that must coincide. Frontier advances guide. |
+| `assert_sometimes_each!("msg", [("phase", p)], [("quality", q)])` | Per-identity coverage. At most 6 keys, 256 buckets. No contract. |
+| `reachable!("msg")`, `sometimes!(cond, "msg")` | Probes from `moonpool-assertions` for libraries. |
+
+Limits: 2048 sites, 256 buckets. Only sometimes-style assertions create discoveries. Full table: [Assertion Reference](./appendix/01-assertion-reference.md).
+
+## Invariants and Traces
 
 ```rust,ignore
-const PUT: u8 = 0;
-const GET: u8 = 1;
-const DELETE: u8 = 2;
+tracing::info!(target: "raft", term, leader = %my_ip, "leader_elected");   // emit, in process code
 
-let mut enabled: Vec<u8> = [PUT, GET, DELETE]
-    .into_iter()
-    .filter(|op| moonpool_sim::swarm_op_enabled(*op))
-    .collect();
-if enabled.is_empty() {
-    enabled.extend([PUT, GET, DELETE]);
+impl Invariant for NoSplitBrain {
+    fn name(&self) -> &'static str { "no_split_brain" }
+    fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        for e in q.since("leader_elected", &self.cursor) {       // cursor: Cell<usize>
+            let term = e.u64("term"); let leader = e.str("leader");
+            assert_always!(.., "one leader per term");
+        }
+    }
+    fn reset(&mut self) { .. }                                    // per seed
 }
 ```
 
-Opt in with `.swarm_operations()`. Keep the operation picker RNG discipline
-stable: consume the same number of simulation RNG draws per logical step where
-practical. This keeps exploration recipe coordinates meaningful when the
-enabled alphabet changes.
+Capture rule: INFO and above, constant message, inside a process or workload task. `TraceEvent { seq, time_ms, source, target, level, name, fields }` with `u64`, `i64`, `f64`, `bool`, `str` accessors. `TraceQuery { len(name), since(name, &cursor), snapshot(name) }`. Sim faults appear as `"sim_fault"` events with a `kind` field. `init_sim_tracing(Level)` in a binary's `main`.
 
-Exit criterion: each chaos axis has passed alone before the combined campaign
-is trusted.
+## Buggify and Hints
 
-## Stage 9: Configure Seeds and Stop Conditions for the Job
+| Macro | Effect |
+|-------|--------|
+| `buggify!()` | 25% at an active site (sites are active on half the seeds). |
+| `buggify_with_prob!(p)`, `buggify_fault_with_prob!(p)` | `p` at an active site. The fault form is silent in recovery mode. |
+| `buggify_named!("label", p)` + `set_activation("label", bool)` | Named sites a harness can mask. |
+| `buggify_pick!(p, n)`, `buggify_range!(p, range)` | `Option<usize>`, `Option<u64>`. |
+| `buggify_knob!(default, lo..hi)` | A knob value in range on some seeds (`moonpool-sim`). |
+| `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it. |
+| `cpu_charge(Duration)` | Explicit CPU work under `Chaos::Cpu`. |
 
-Use the runner mode that matches the current stage:
+All are no-ops in production. `moonpool-journal` shows the pattern: three `hint!` moments per commit.
 
-| Task | Configuration |
-|---|---|
-| Smoke test | one fixed seed plus `.set_iterations(1)` |
-| Reproduce ordinary failure | `.set_debug_seeds(vec![seed])` and one iteration |
-| Main campaign | default or explicit `.until_coverage_stable(plateau, cap)` |
-| Fixed-size CI campaign | `.set_iterations(n)` |
-| Replay explorer failure | `.replay_timeline(seed, recipe)` |
-| Hunt an entropy leak | `.check_determinism()` (every seed runs twice; a diverging replay fails the seed) |
+## Chaos Configuration
 
-`UntilCoverageStable` is the builder default: 10 quiet seeds and a 1,000-seed
-cap. Under `cargo xtask sim run`, LLVM sanitizer coverage supplies the plateau
-signal. Under ordinary test execution, Moonpool falls back to reached
-sometimes/reachable assertion slots. `report.saturation` names the signal.
+| Type | Construction |
+|------|--------------|
+| `Attrition` | `{ max_dead, prob_graceful, prob_crash, prob_wipe, recovery_delay_ms: None (1–10 s), grace_period_ms: None (2–5 s), scope: AttritionScope::PerProcess, victims: AttritionVictims::Any }`. `AttritionVictims::group("name")`, `::tagged("key", "value")`. |
+| `Outage` | `Outage::groups(["acceptors"])`: probability 1.0, start 0–10 s, down 1–10 s, no straggler. `OutageVeto::new(\|victims\| bool).publish(ctx.state())`. |
+| `GrayFailure` | `GrayFailure::new(max_slow)`: window 0.3–1.0 of the chaos window, cpu 10–1000, disk 5–100, network 2–20, `GrayKinds::ALL`. |
+| `CpuModel` | Drawn per seed under `Chaos::Cpu`; `SimWorld::set_cpu_model` by hand. |
+| `NetworkFaultMask`, `StorageFaultMask` | `all()`, `none()`, `.with(f)`, `.without(f)`. `NetworkFault::{Clog, Partition, BitFlip, RandomClose, ConnectFailure, ClockDrift, BuggifiedDelay, PairLatency, BlackHole}`. `StorageFault::{Corruption, Eio, Misdirect, PhantomWrite, SyncFailure, ShortTransfer, DirEntryLoss, CrashDamage, Degradation, DiskFailure}`. |
+| `ReplicatedFaults` | `ReplicatedFaults::new(DomainLevel::Machine).tolerance(1).group("acceptors")`. Patterns `Minority`, `Striped`, `Rolling`, `Spared`. |
+| `FaultFocus` | `FaultFocus::new().background(0.0).layout(journal.regions().iter(), \|r\| if r.kind == Layout::RECORD { 1.0 } else { 0.0 })` (`Journal::regions()` returns `Vec<LayoutRegion>`). |
+| `LocalityConfig` | `LocalityConfig::new(datacenters, zones, machines, processes)` with `cluster(..)`. |
+| `ExplorationConfig` | `{ workers: 0, max_runs_per_seed: 512, branching_factor: 4, max_frontier: 1024, max_recipe_len: 64 }`. |
 
-`set_debug_seeds` supplies seeds but does not change the iteration limit; pair
-it with `.set_iterations(seeds.len())`. Campaign seeds that are not supplied
-explicitly start from wall-clock entropy. Always retain `report.seeds_used` and
-`report.seeds_failing` so individual timelines remain reproducible.
+Every default and range: [Configuration Reference](./appendix/03-configuration.md). Every fault: [Fault Reference](./appendix/04-fault-reference.md).
 
-Set `.run_time_budget(...)` to catch self-perpetuating simulated-time loops;
-the default is intentionally generous.
-
-A strict campaign binary should print the report and fail CI on all of these:
+## FaultContext (custom injectors)
 
 ```rust,ignore
-report.eprint();
-
-let failed = report.failed_runs > 0
-    || !report.assertion_violations.is_empty()
-    || !report.coverage_violations.is_empty()
-    || report.convergence_timeout;
-
-if failed {
-    std::process::exit(1);
+#[async_trait]
+impl FaultInjector for Partitioner {
+    fn name(&self) -> &str { "partitioner" }
+    async fn inject(&mut self, ctx: &FaultContext) {
+        while !ctx.chaos_shutdown().is_cancelled() {
+            if let Some(ip) = ctx.reboot_random(RebootKind::Crash).ok().flatten() { .. }
+            ctx.time().sleep(Duration::from_secs(5)).await.ok();
+        }
+    }
 }
 ```
 
-For a deliberately short smoke or single-seed replay, coverage misses are
-expected; fail only on run and safety failures there. Never silently accept
-`convergence_timeout` in the campaign intended to establish coverage.
+| Group | Methods |
+|-------|---------|
+| Reboots | `reboot(ip, kind)`, `reboot_with_delays(..)`, `crash(ip)`, `crash_for(ip, down)`, `restart(ip)`, `reboot_random(kind)`, `reboot_tagged(..)`, `reboot_machine(..)`, `reboot_domain(..)`, `dead_count()`, `is_dead(ip)` |
+| Network | `partition(a, b)`, `heal_partition(a, b)`, `is_partitioned(a, b)` |
+| Storage | `durable_bytes(ip, path)`, `corrupt_bytes(..)`, `fail_file_with_eio(..)`, `clear_file_eio(..)` |
+| Slowness | `set_slowness(ip, Slowness)`, `slowness(ip)`, `cpu_model()` |
+| Topology | `process_ips()`, `group_registry()`, `ips_in_group(name)`, `machine_registry()` |
+| Misc | `state()`, `random()`, `time()`, `chaos_shutdown()` |
 
-Run simulation binaries through xtask:
-
-```bash
-nix develop --command cargo xtask sim list
-nix develop --command cargo xtask sim run my-system
-```
-
-Exit criterion: the report policy distinguishes safety failure, coverage miss,
-and saturation timeout.
-
-## Stage 10: Enable Exploration Last
-
-Exploration adds depth after the deterministic lifecycle, oracle, and semantic
-signals are trustworthy. It replays every timeline from the beginning, reaches
-an assertion discovery coordinate, and then changes the counted simulation RNG
-for the continuation.
-
-Start in deterministic in-process mode:
+## Exploration
 
 ```rust,ignore
-use moonpool_sim::ExplorationConfig;
-
-let report = SimulationBuilder::new()
-    .processes(3, || Box::new(Node))
-    .workload_factory(|| Box::new(ClientWorkload::new(200)))
-    .invariant(Agreement::new())
-    .enable_exploration(ExplorationConfig {
-        workers: 0,
-        max_runs_per_seed: 2_000,
-        branching_factor: 4,
-        max_frontier: 512,
-        max_recipe_len: 32,
-    })
-    .until_coverage_stable(10, 1_000)
-    .run()?;
+.workload_factory(|| Box::new(Driver::default()))
+.enable_exploration(ExplorationConfig { workers: 0, max_runs_per_seed: 2400, branching_factor: 4, max_frontier: 512, max_recipe_len: 32 })
 ```
 
-Exploration rejects `.workload(instance)` because it cannot be reconstructed
-with fresh state. Use workload factories; fault injectors are always
-factory-built (`fault_factory` and the built-in `Chaos` surfaces). Increase `workers` only
-in a standalone single-threaded simulation binary after the fork boundary has
-been audited.
+`workers: 0` is deterministic and fork-free: use it in tests. `workers > 0` only in a standalone binary run through `cargo xtask sim run <name>`. Bugs land in `report.exploration.bug_recipes` as `BugRecipe { seed, recipe }`; replay with `replay_timeline(seed, recipe)`. `format_timeline` / `parse_timeline` convert `"151@8837201 -> 80@1293847"`. Guidance comes from sometimes-style assertions only. See [Multiverse Exploration](./part5-building-on-top/01-exploration.md).
 
-Assertion discoveries guide the frontier. Sanitizer code coverage is a report
-and plateau signal, not a recipe anchor. Numeric watermarks,
-`assert_sometimes_all!`, and bounded `assert_sometimes_each!` states provide
-more sustained guidance than many one-shot booleans.
+## Low-Level SimWorld
 
-Recipes change the counted simulation RNG; executor scheduling, `select!`
-offsets, and configuration/swarm choices still derive from the root seed. Use
-many root seeds for scheduling breadth and exploration for semantic depth.
+For provider tests without the runner: `SimWorld::new_with_seed(seed)`, `new_with_network_config(cfg)`, `set_storage_config`, `set_process_storage_config(ip, cfg)`, `storage_provider(ip)`, `network_provider(ip)`, `time_provider()`, `step()`, `has_pending_events()`, `run_until_empty()`, `take_faults()`, `partition_pair(from, to, d)`, `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, EioTarget)`, `simulate_crash_for_process(ip, close_files)`, `set_fault_focus`, `publish_layout`. Drive futures with `moonpool_sim::executor::Executor::new(seed).block_on(..)` and step the world on `Pending` (the `drive` helper in the root `AGENTS.md`).
 
-Replay every captured failure with a fresh builder:
+## Staged Adoption
 
-```rust,ignore
-let Some(bug) = report
-    .exploration
-    .as_ref()
-    .and_then(|exploration| exploration.bug_recipes.first())
-else {
-    eprintln!("expected an exploration bug recipe");
-    std::process::exit(1);
-};
+1. **Boundary.** Make the code generic over `P: Providers`. Replace every forbidden call ([Sim Compatibility Checklist](./appendix/06-sim-compatibility.md)). Run one seed with no chaos. Add `check_determinism()` and keep it green.
+2. **Driver and oracle.** Write the `Workload` with a small reference model (`BTreeMap` of expected state, not a copy of the server). Reconcile ambiguous results: a timed-out write may have committed.
+3. **Facts and invariants.** Emit `tracing` events for every protocol decision. Write cursor-based invariants for agreement, validity, persistence, prefix, client semantics.
+4. **Guidance.** Add `assert_sometimes!` on every retry, timeout and recovery path. Add watermarks for depth. Keep bucket vocabularies coarse.
+5. **Chaos.** Enable `Chaos::Network(Swarm)`, then `Storage(Swarm)`, then `Attrition`, then `Outage`, `Cpu`, `GrayFailure`. Add `hint!` moments in storage code. Add `buggify!` at dangerous choices. Mask what the harness cannot observe.
+6. **Campaign.** Keep the default `UntilCoverageStable`. Register the binary in xtask ([Running Simulation Binaries with xtask](./appendix/08-xtask.md)). Add exploration when a bug needs a sequence of rare events.
+7. **Debug.** Pin the seed with `set_debug_seeds`, `set_iterations(1)`, `trace_level(LevelFilter::ERROR)`. Read the event trace. Fix the root cause. Re-enable chaos.
 
-let replay = SimulationBuilder::new()
-    .processes(3, || Box::new(Node))
-    .workload_factory(|| Box::new(ClientWorkload::new(200)))
-    .invariant(Agreement::new())
-    .replay_timeline(bug.seed, bug.recipe.clone())
-    .run()?;
-```
+## Code to Read First
 
-If replay differs, audit external I/O, reused state, unseeded collections,
-direct Tokio calls, changed Buggify line locations, and inconsistent RNG draw
-counts. See [Exploring a Consensus Protocol](part5-building-on-top/07-exploring-consensus.md)
-for consensus-specific signals and operational limits.
-
-Exit criterion: a captured planted failure replays on a fresh cluster before
-real findings are trusted.
-
-## Stage 11: Debug in a Narrow Loop
-
-When a safety assertion catches a bug:
-
-1. Stop broad random changes.
-2. Record the ordinary failing seed or exploration recipe.
-3. Rebuild exactly the same processes, workload factories, invariant state,
-   chaos surfaces, and operation alphabet.
-4. Run one seed or one recipe at ERROR logging first.
-5. Add stable structured tracing around the violated state transition.
-6. Trace the full data flow and persistence boundary.
-7. Fix the implementation, never the assertion.
-8. Replay the exact failure.
-9. Restore the full coverage-stable campaign.
-
-Do not turn a discovered bug into a narrow seed-only regression test and stop.
-The value of Moonpool is continuing to search the neighboring state space after
-the root cause is fixed.
-
-## Agent Definition of Done
-
-Before claiming that a simulation integration is complete, verify all of the
-following:
-
-- [ ] Production behavior uses provider traits for task, time, network,
-      storage, and randomness.
-- [ ] Server state lives in a factory-created `Process`; durable state uses
-      simulated storage.
-- [ ] Every timeline receives a fresh workload and reference model.
-- [ ] The operation alphabet is finite, named, and able to reconcile ambiguous
-      results.
-- [ ] Local safety uses always-type macros; global safety uses cursor-based
-      tracing invariants.
-- [ ] Assertion messages are stable, unique, and non-dynamic.
-- [ ] Sometimes signals describe meaningful situations, with numeric/frontier/
-      bucket guidance for depth.
-- [ ] Each Buggify point creates a possible dangerous state and has paired
-      coverage plus safety checks.
-- [ ] Network, storage, attrition, Buggify knobs, and operation swarm were added
-      gradually.
-- [ ] The report is checked for run failures, safety violations, intended
-      coverage misses, and convergence timeout.
-- [ ] Failing seeds and recipes replay from fresh state.
-- [ ] The repository's required formatting, Clippy, tests, portability checks,
-      simulation binaries, and book build pass.
-
-For this repository, the final validation baseline is:
-
-```bash
-nix develop --command cargo fmt
-nix develop --command cargo clippy
-nix develop --command cargo nextest run
-nix develop --command mdbook build book/
-```
-
-Run the relevant `cargo xtask sim run <filter>` campaign as well. When crate
-features or portability change, also run the no-default-feature and wasm checks
-documented in the repository instructions.
-
-## Tested Examples to Read Next
-
-Use current tested code as an API reference instead of inventing one giant
-example:
-
-- `crates/moonpool-sim/tests/exploration/tests.rs`: process, simulated TCP,
-  tracing invariant, semantic guidance, exploration, and recipe replay.
-- `crates/moonpool-sim-examples/src/topology.rs`: topology, provider timeouts,
-  and correlated attrition.
-- `crates/moonpool-sim-examples/src/tonic_grpc.rs`: production-style transport
-  integration and recovery coverage.
-- `crates/moonpool-sim-examples/src/journal.rs`: a storage engine
-  (`moonpool-journal`) crashed by attrition, with a ledger of acknowledged
-  writes kept in the `StateHandle` across reboots.
-- `crates/moonpool-sim-examples/src/dungeon.rs`: fixed-draw operation swarming,
-  compound guidance, and quality watermarks.
-- `crates/moonpool-sim/tests/chaos/swarm.rs`: layering
-  `Chaos::BuggifyKnobs` onto enabled fault surfaces.
-- `crates/moonpool/examples/metastable_grpc_retry_storm.rs`: open-loop load over
-  gRPC, Prometheus series read back through `MetricQuery`, and an ASCII
-  time-series graph printed to stdout.
-
-Then use the detailed chapters on [Process and Workload](part2-foundations/08-process-workload.md),
-[assertion concepts](part3-building/13-assertion-concepts.md),
-[events and invariants](part3-building/17-events-and-invariants.md), and
-[designing workloads](part3-building/19-designing-workloads.md).
-
-## External Design Sources
-
-Moonpool's Buggify placement advice follows the practical patterns documented
-in [BUGGIFY](https://transactional.blog/simulation/buggify): do minimal valid
-work, force rare error handling, emphasize concurrency, vary knobs, and leave a
-recovery phase. The two-stage probabilities above are Moonpool's current
-implementation details, not FoundationDB defaults.
-
-The assertion strategy is informed by Antithesis's official guidance on
-[asserting correctness](https://antithesis.com/docs/product/writing_tests/assertions/)
-and [sometimes assertions](https://antithesis.com/docs/best_practices/sometimes_assertions/):
-properties should have stable human-readable identities, and semantic
-situations are more useful than undifferentiated line coverage. Moonpool's
-fixed shared tables, runtime-only cataloging, and replay-from-start frontier
-are Moonpool-specific and are described explicitly above.
+| Topic | File |
+|-------|------|
+| Invariant from traces | `crates/moonpool-sim/tests/leader_election.rs` |
+| Process groups, tags, topology | `crates/moonpool-sim/tests/process_groups.rs`, `crates/moonpool-sim-examples/src/topology.rs` |
+| Swarm operations | `crates/moonpool-sim/tests/swarm_op_alphabet.rs` |
+| Custom injectors, targeted faults | `crates/moonpool-sim/tests/scripted_faults.rs`, `targeted_faults.rs` |
+| Hints, outages, self crash | `crates/moonpool-sim/tests/hint.rs`, `outage.rs`, `crash_self.rs` |
+| Storage faults and crash model | `crates/moonpool-sim/tests/storage.rs`, `crates/moonpool-sim-examples/src/journal.rs` |
+| CPU and gray failure | `crates/moonpool-sim/tests/cpu.rs` |
+| Exploration | `crates/moonpool-sim-examples/src/maze.rs`, `dungeon.rs`, `crates/moonpool-sim/tests/exploration.rs` |
+| Metrics | `crates/moonpool-sim/tests/metric_queries.rs`, `crates/moonpool-sim-examples/src/metrics_service.rs` |
+| HTTP and gRPC | `crates/moonpool-sim-examples/src/axum_web.rs`, `tonic_grpc.rs` |
+| Determinism | `crates/moonpool-sim/tests/determinism.rs`, `determinism_canary.rs` |
+| RPC campaigns | `crates/moonpool-rpc-sim/src/` |

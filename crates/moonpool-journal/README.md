@@ -2,76 +2,123 @@
 
 A write-ahead journal that implements CLSTORE, the local storage layer of
 *Protocol-Aware Recovery for Consensus-Based Storage* (Alagappan et al.,
-FAST '18): it detects damage, tells a crash apart from corruption, and names
-what was damaged, so a replication layer can repair it from peers instead of
-truncating it away.
+FAST '18). It detects damage, tells a crash apart from corruption, and names
+what was damaged. A replication layer can then repair the entry from its
+peers instead of truncating the log.
+
+The journal uses only moonpool's provider traits. The same code runs over
+`TokioStorageProvider` in production and over `SimStorageProvider` in
+simulation.
 
 ## Why
 
-A log that finds a bad checksum usually has one move: truncate there. That is
-right for a torn write at the tail and silently wrong for an acknowledged
-entry that rotted: truncating it can erase committed data cluster-wide. CLSTORE
-stores every entry's identity in a persist record far from the entry: when the
-entry fails its checksum, the record says it was written, and which entry it
-was.
+A log that finds a bad checksum usually truncates there. That is correct for
+a torn write at the tail. It is wrong for an acknowledged entry that rotted:
+truncation can erase committed data across the whole cluster. CLSTORE keeps
+the identity of every entry in a persist record far from the entry. When the
+entry fails its checksum, the record proves that it was written and says
+which entry it was.
 
-## What
+## Quick start
 
-| Type | Role |
-|------|------|
-| `Journal<P>` | Create, open (recover), commit, read, over any `StorageProvider` |
+```rust
+use moonpool_core::TokioStorageProvider;
+use moonpool_journal::{Batch, ID_SIZE, Journal, JournalConfig, JournalId};
+
+let provider = TokioStorageProvider::new();
+let config = JournalConfig::default();
+let mut journal = match Journal::open(provider.clone(), "wal", JournalId(7), config).await? {
+    Some((journal, _recovery)) => journal,
+    None => Journal::create(provider, "wal", JournalId(7), config, b"vote=none").await?,
+};
+
+// Positions go in any order; the metainfo lands after the entries.
+let mut batch = Batch::new();
+batch.put(9, [3; ID_SIZE], "set y=9").put(4, [3; ID_SIZE], "set x=4").set_meta("vote=3");
+journal.commit(batch).await?;
+```
+
+## Features
+
+| Type or method | Role |
+|---|---|
+| `Journal<P>` | `create`, `open` (recover), `commit`, `read`, `replay`, over any `StorageProvider` |
+| `Journal::peek_meta` | Read a closed journal's metainfo without recovery, repair or sync |
 | `Batch` | What one commit makes durable: `put`, `clear`, `truncate_prefix`, `set_meta` |
-| `JournalConfig` / `Durability` / `Geometry` | One or two syncs per commit; the segment shape |
+| `Batch::fits` / `Batch::fits_another` | Whether a batch fits one segment, so the caller can split it |
+| `JournalConfig` / `Durability` / `Geometry` | One or two syncs per commit; the segment shape; direct I/O |
 | `Id` / `JournalId` | The caller's 24-byte identity per entry; the journal's own identity |
-| `State` / `Recovery` | What a position holds (`Live`, `Corrupt`, `Ambiguous`); what opening found |
-| `OpenError` / `CommitError` / `ReadError` | Operating errors vs. evidence of damage |
+| `State` / `Recovery` | What a position holds (`Live`, `Corrupt`, `Ambiguous`); what opening found and repaired |
+| `Journal::layout` / `Journal::regions` / `Layout` | Byte ranges of records, entries, metainfo and headers, for aiming faults |
+| `OpenError` / `CommitError` / `ReadError` / `Durable` | Operating errors versus evidence of damage |
 
-An entry is a `u64` **position** and an opaque `Id`; the journal knows no
-protocol. Positions are written in any order, with gaps and overwrites (a
-lagging replica fills old positions while new ones arrive); payloads go to an
-arrival-order entry log, so writes stay sequential. `clear` removes a range,
-`truncate_prefix` raises the floor and frees whole segments from the front.
-The caller's node-unique state (a promise, a vote) is up to 4 KiB of
-metainfo, in two copies. No snapshots, no compaction.
+- **Positions in any order.** An entry is a `u64` position and an opaque
+  `Id`. Positions are written in any order, with gaps and overwrites. A
+  lagging replica fills old positions while new ones arrive. Payloads go to
+  an arrival-order entry log, so the writes stay sequential.
+- **Tombstones and a floor.** `clear` removes a range. `truncate_prefix`
+  raises the floor and frees whole segments from the front.
+- **Metainfo.** The caller's node-unique state (a promise, a vote) is up to
+  4 KiB, in two copies. A crash can leave a batch durable without its
+  metainfo, never the metainfo without its batch.
+- **Two protocols.** `Durability::Batched` is the paper's protocol (`write
+  entries; write records; fsync`): one sync, and the last batch's damaged
+  entries are `Ambiguous`. `Durability::Ordered` syncs in between: two syncs,
+  and damage is always told apart.
+- **Crash hints.** Each commit names three moments with
+  `moonpool_buggify::hint!`. They are no-ops in production. In a simulation,
+  the simulator may reboot the process at one of them, under the seed's
+  attrition regime and an optional `HintVeto` budget from the harness.
 
-`<dir>/meta` holds the metainfo, copy A at block 0 and copy B at block 16,
-written one after the other so at most one is ever in flight. Each
+No snapshots and no compaction.
+
+## On disk
+
+`<dir>/meta` holds the metainfo: copy A at block 0, copy B at block 16. Each
 `<dir>/seg-<first batch>.wal` is preallocated and zero-filled: two header
 copies, a persist log of 64-byte records, a guard gap, and an entry log.
-Every batch starts on a fresh block in both logs, so no write ever touches a
-sector holding anything acknowledged.
+Every batch starts on a fresh 4 KiB block in both logs, so no write touches a
+sector that holds acknowledged data.
 
-`Durability::Batched` is the paper's protocol (`write(entries);
-write(records); fsync`): one sync, and the last batch's damaged entries are
-`Ambiguous`, which the paper proves cannot be decided locally.
-`Durability::Ordered` syncs in between: two syncs, and damage is always
-told apart.
+## Feature flags
+
+None. The crate depends on `moonpool-core` with `default-features = false`.
+Enable `moonpool-core/tokio-fs` in your application to use the real
+filesystem.
 
 ## Testing
 
-`tests/journal.rs` runs the journal on the simulator's storage: positions in
-any order, the floor and tombstones, one test per row of the recovery table
-aimed with `Journal::layout`, the metainfo copies, lost batches and segments,
-and crash loops under two fault models (the paper's sector-atomic one, and
-moonpool's full physics: lost, latent and shorn sectors) for each durability
-mode and for a mode drawn afresh every round (one test each), with crashes
-inside recovery too. `JOURNAL_CRASH_SEEDS` raises the seed count,
-`JOURNAL_CRASH_SEED` replays one.
+`tests/journal.rs` runs the journal on the simulator's storage:
+
+- positions in any order, the floor and tombstones, the metainfo copies;
+- one test per row of the recovery table, aimed with `Journal::layout`;
+- lost batches and lost segments;
+- crash loops under two fault models (the paper's sector-atomic model, and
+  moonpool's full model with lost, latent and shorn sectors), for each
+  durability mode and for a mode drawn again every round, with crashes
+  inside recovery too.
+
+`JOURNAL_CRASH_SEEDS` raises the seed count. `JOURNAL_CRASH_SEED` replays one
+seed.
 
 ## Examples
 
-`examples/accept_log.rs` runs the journal on the real filesystem through
-`TokioStorageProvider`: a Paxos acceptor stores accepts at their slots in
-arrival order, restarts, finds one rotted accept reported with its ballot,
-and repairs it as if from a peer:
+`examples/accept_log.rs` runs the journal on the real filesystem. A Paxos
+acceptor stores accepts at their slots in arrival order, restarts, finds one
+rotted accept reported with its ballot, and repairs it as if from a peer:
 
 ```sh
 cargo run -p moonpool-journal --example accept_log
 ```
 
 `crates/moonpool-sim-examples/src/journal.rs` runs the journal inside a full
-simulation, one node crashed over and over by attrition:
+simulation, with one node crashed over and over by attrition:
 
 ```sh
 cargo xtask sim run journal
 ```
+
+## Documentation
+
+- [API documentation](https://docs.rs/moonpool-journal)
+- [A Crash-Aware Journal](https://pierrez.github.io/moonpool/part5-building-on-top/08-journal.html) in the Sim Book

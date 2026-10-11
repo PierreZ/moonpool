@@ -1,7 +1,13 @@
-//! Workload and process topology configuration.
+//! What one process or workload sees of the simulated cluster.
 //!
-//! This module provides types for configuring topology and
-//! creating topology information for workloads and processes.
+//! [`WorkloadTopology`] comes from
+//! [`SimContext::topology`](crate::SimContext::topology). It answers "where
+//! is everyone" by process group
+//! ([`ips_in_group`](WorkloadTopology::ips_in_group)), by tag
+//! ([`ips_tagged`](WorkloadTopology::ips_tagged)) and by failure domain
+//! ([`ips_in_domain`](WorkloadTopology::ips_in_domain),
+//! [`peers_on_my_machine`](WorkloadTopology::peers_on_my_machine)), and
+//! gives the actor its own IP, tags and locality.
 
 use crate::locality::{DomainLevel, LocalityInfo};
 

@@ -2,16 +2,14 @@
 
 <!-- toc -->
 
-Boolean assertions check one condition. Numeric assertions track one value. But the most interesting system states involve multiple things being true at once: a leader is elected **and** all replicas are synced **and** clients are connected. Or we want every distinct configuration to be tested, not just the first one we stumble on. Compound assertions handle both of these cases.
+A boolean assertion checks one condition. A numeric assertion tracks one value. The states that matter most involve several things at once: a leader is elected **and** every replica is caught up **and** no partition is open. Or we want every distinct value covered, not just the first one chaos stumbles on. Two macros handle these cases.
 
-## assert_sometimes_all!: Simultaneous Sub-Goals
+## assert_sometimes_all!: Several Things at Once
 
-Some properties only matter when multiple conditions hold at the same time. A cluster is not truly healthy unless the leader is elected, replicas are caught up, and no partitions are active. Testing each condition individually does not tell you whether the system can achieve them all at once.
-
-`assert_sometimes_all!` takes a message and a list of named boolean sub-goals:
+`assert_sometimes_all!` takes a message and a list of named booleans.
 
 ```rust
-assert_sometimes_all!("cluster_fully_operational", [
+assert_sometimes_all!("cluster fully operational", [
     ("leader_elected", has_leader),
     ("replicas_synced", all_replicas_in_sync),
     ("no_partitions", partition_count == 0),
@@ -19,16 +17,22 @@ assert_sometimes_all!("cluster_fully_operational", [
 ]);
 ```
 
-The assertion tracks a **frontier**: the maximum number of sub-goals that have been simultaneously true. It starts at zero. The first time any sub-goal is true, the frontier advances to 1. When two are true at once, it advances to 2. When all four are true simultaneously, the frontier reaches 4 and the assertion is fully satisfied.
+The slot tracks a **frontier**: the highest number of propositions that were true at the same time. It starts at 0. The first evaluation with one true proposition moves it to 1, the first with two moves it to 2, and so on. The target is the number of propositions, 4 here. The slot kind is `BooleanSometimesAll`, printed as `frontier` in the report:
 
-Each frontier advance is a discovery the explorer schedules continuations from. Distinct truth combinations are useful too: `leader_elected` alone and `replicas_synced` alone both have frontier 1, but they may lead to very different futures. Moonpool therefore records new partial combinations as structured state discoveries even when their true-count does not beat the frontier. A bounded 64-bit bitmap per assertion keeps this extra guidance cheap; hash collisions can discard an optional hint but cannot affect assertion correctness or the reported frontier.
+```text
+  ○  frontier     "cluster fully operational"   1,000 calls  frontier: 3/4  combinations: 5
+```
 
-This creates a progression without collapsing every same-cardinality state: the explorer can retain several ways to satisfy one sub-goal, then continue toward two, three, and finally all of them. Reports show the frontier as `reached/target` and keep the assertion in `MISS` until the full target is reached.
+Three contract rules:
 
-This is powerful for multi-step objectives. Consider a distributed transaction system. The full operation requires: prepare all participants, get all votes, commit, and acknowledge to the client. As a sometimes-all assertion:
+1. The status stays `○` (miss) until the frontier reaches the target.
+2. The coverage violation reads `assert_sometimes_all!('...') reached frontier 3/4`.
+3. `UntilCoverageStable` treats the slot as reached only when the frontier is full.
+
+A frontier advance is a `FrontierAdvance` discovery. That gives the explorer stepping stones. Consider a two-phase commit:
 
 ```rust
-assert_sometimes_all!("distributed_commit_complete", [
+assert_sometimes_all!("distributed commit complete", [
     ("all_prepared", all_participants_prepared),
     ("all_voted_yes", all_votes_received),
     ("committed", transaction_committed),
@@ -36,69 +40,85 @@ assert_sometimes_all!("distributed_commit_complete", [
 ]);
 ```
 
-The explorer works through the stages. First it finds a state where all participants are prepared. It forks from there and pushes for votes. Then it finds committed states. Each stage is a stepping stone to the next.
+The explorer first finds a state where every participant is prepared, forks from there, and pushes for the votes. Then it finds a committed state and forks again. Without the assertion the full sequence must happen by chance in one timeline. With it, each stage is a base for the next.
 
-Without this assertion, the explorer would need to stumble on the complete end-to-end scenario by chance. With it, the explorer gets intermediate checkpoints that guide it through the sequence.
+**Same count, different states.** `leader_elected` alone and `replicas_synced` alone both score 1, but their futures differ. So the slot also keeps a 64-bit bitmap of the truth combinations it has seen. A combination that is new and has at least one true proposition is a `BooleanCombination` discovery, even when the count does not beat the frontier. The bitmap is a bloom filter: a hash collision can lose an optional hint but never touches the frontier or the counts. The report shows the bitmap's population as `combinations:`.
 
-## assert_sometimes_each!: Per-Value Coverage
+Each evaluation records one pass, so the `calls` figure is the number of times the line ran. The frontier field is a byte: more than 255 propositions is not supported.
 
-Sometimes you want to ensure that every **distinct value** of something is explored, not just any one value. If your system has 10 different error codes, you want the simulation to exercise all 10. If a consensus protocol has 5 possible states, you want coverage of each.
+## assert_sometimes_each!: Every Distinct Value
 
-`assert_sometimes_each!` creates a separate assertion for each unique combination of identity keys:
+Sometimes one pass is not enough. A protocol with five states should visit all five. A cluster with four nodes should see every node take the lead. `assert_sometimes_each!` opens one **bucket** per distinct combination of identity keys.
 
 ```rust
-// Ensure every node ID is tested
-assert_sometimes_each!("node_tested", [("node_id", node_id)]);
-
-// Ensure every (state, role) combination is explored
-assert_sometimes_each!("state_coverage", [
-    ("state", state as i64),
-    ("role", role as i64),
-]);
+// From the maze example: five nested probability gates per lock. Each
+// (lock, depth, locks-already-open) tuple is its own bucket, so the report
+// shows how deep each lock's chain was ever reached.
+assert_sometimes_each!(
+    "gate",
+    [("lock", lock_id), ("depth", 1i64), ("locks", locks_open)]
+);
 ```
 
-Each unique combination of key values gets its own bucket. Discovering a new bucket registers a replayable exemplar the explorer can continue from. This equalizes exploration across all discovered values, preventing the simulation from over-concentrating on values it finds easily while neglecting harder-to-reach ones.
+Identity keys are `(&str, integer)` pairs, converted with the same saturating `i64` rule as the numeric macros. A bucket's identity is the FNV-1a hash of the message followed by each key name and value, so `("ab", v)` and `("a", ..), ("b", ..)` cannot collide by concatenation. The first hit of a bucket is a `BucketFirst` discovery. Every later hit adds to the bucket's pass count.
 
-The Antithesis team demonstrated this dramatically with The Legend of Zelda. They used `SOMETIMES_EACH` with screen coordinates to ensure the explorer visited all 128 overworld screens and 230 dungeon rooms. Without per-value bucketing, the explorer would revisit the starting area thousands of times while leaving distant rooms unexplored. With it, every room gets roughly equal attention.
+The report groups buckets by site:
 
-For distributed systems, the same pattern applies. If you have a state machine with states {Follower, Candidate, Leader, Observer}, a sometimes-each assertion ensures the simulation exercises each state rather than getting stuck in the most common one:
+```text
+━━━ Buckets (23 across 2 sites) ━━━━━━━━━━━━━━━━━━━━━━━━━━
+  "gate"                               21 buckets    48,120 hits
+  "lock opens"                          2 buckets        19 hits
+```
+
+`SimulationReport::bucket_summaries` carries the same numbers as `BucketSiteSummary { msg, buckets_discovered, total_hits }`.
+
+The explorer uses buckets to spread its budget. Antithesis showed this with The Legend of Zelda: a `SOMETIMES_EACH` keyed on screen coordinates made the explorer visit all 128 overworld screens instead of circling the start area. For a state machine the same idea is one line:
 
 ```rust
-assert_sometimes_each!("raft_state_exercised", [
+assert_sometimes_each!("raft state exercised", [
     ("node", node_id),
     ("state", raft_state as i64),
 ]);
 ```
 
+Moonpool's runner uses it on itself. Every `hint!` decision records `assert_sometimes_each!("hint_struck", [("killed", i64::from(strike == Strike::Killed))])`, so the report shows both outcomes, struck and spared, as two buckets.
+
 ## Quality Watermarks
 
-Sometimes discovering a value is not enough. You also want to explore each value under good conditions. `assert_sometimes_each!` supports an optional second list of **quality keys** that track watermarks per bucket:
+Reaching a bucket is not the same as reaching it in good shape. Antithesis's Castlevania analysis calls the bad case a **doomed state**: the explorer gets to the boss room with one hit point and nothing useful can follow. An optional second list of **quality keys** fixes that.
 
 ```rust
+// From the dungeon example: every floor, and every floor with health left.
 assert_sometimes_each!(
-    "dungeon_floor_explored",
-    [("floor", floor_number)],           // identity: which floor
-    [("health", current_health)],         // quality: explore each floor with good health
+    "stairs with key",
+    [("floor", i64::from(level))],
+    [("health", i64::from(hp_bucket))]
 );
 ```
 
-Each bucket remembers the best quality values observed. When a bucket is revisited with better quality, the explorer re-forks from that improved state. This prevents the "doomed state" problem described in Antithesis's Castlevania analysis: the explorer reaches an area but in such bad shape that no useful exploration can happen from there. Quality watermarks ensure the representative state for each bucket is the best one found so far.
+Each bucket remembers its best quality score. A hit with a better score is a `BucketQuality` discovery, and the explorer re-forks from the healthier state. Up to four quality keys are packed into one 64-bit score. The first key is the most significant. Each key keeps only its low 16 bits, so scale values into `0..=65535` before passing them, and keep "higher is better" as the convention.
 
-## State Explosion and Practical Limits
+Quality values are not part of the bucket's identity. Health 3 and health 9 on floor 2 are the same bucket with two scores.
 
-Compound assertions can create a lot of buckets. If you use two identity keys with 100 distinct values each, that is 10,000 potential buckets. Each new bucket is a discovery the explorer may anchor continuations to, and the bucket table itself is bounded (256 slots), so individual assertion effectiveness degrades when buckets proliferate.
+## Budgets and Limits
 
-Keep identity keys coarse enough to be useful. If you are tracking screen positions in a 256x256 grid, bucket them into 16x16 regions rather than tracking exact pixels. The goal is coverage of **meaningful** distinct states, not exhaustive enumeration of every possible value.
+The bucket table is fixed. The constants are a contract that changes the saturation history of every campaign, so treat them as a wire format.
 
-A good rule of thumb: if you would not manually write a separate test for each distinct value, it probably should not be its own bucket.
+| Limit | Value | Where |
+|-------|-------|-------|
+| Buckets per run | 256 | `MAX_EACH_BUCKETS` |
+| Identity keys per site | 6 | `MAX_EACH_KEYS`, extra keys are ignored |
+| Quality keys per site | 4 | extra keys are ignored |
+| Message bytes stored per bucket | 32 | longer messages are truncated for identity |
+| Propositions per `sometimes_all` | 255 | the frontier is a `u8` |
+
+Overflow is loud. An observation that finds the table full is counted, and the run fails with `each-bucket table dropped N sometimes_each observations`. A bucket reached by a different message or key set with the same hash is flagged, and the run fails with `bucket [..] collides with another key set`.
+
+256 buckets go fast. Two identity keys with 100 values each would need 10,000. Keep keys coarse: bucket a 256x256 grid into 16x16 regions, bucket hit points into four bands as the dungeon example does with `hp_bucket`. A good test: if you would not write a separate test case for each value, it should not be its own bucket.
 
 ## Choosing Between the Two
 
-The choice is straightforward:
+- Several conditions that must hold **at the same time**: `assert_sometimes_all!`.
+- One condition that must hold **for every value**: `assert_sometimes_each!`.
 
-- **Multiple conditions that must hold simultaneously**: `assert_sometimes_all!`
-- **One condition that must hold for each distinct value**: `assert_sometimes_each!`
-
-Use `assert_sometimes_all!` when the challenge is getting several things true at once. Use `assert_sometimes_each!` when the challenge is covering a space of distinct configurations or states.
-
-Both are guidance assertions. Both trigger forks. Both make the explorer smarter about where to search. And both turn a single line of code into something that would otherwise require dozens of hand-crafted test scenarios.
+`assert_sometimes_all!` has a contract: the run reports a gap until every proposition was true together. `assert_sometimes_each!` has none, because the table cannot list a bucket it never saw. Its coverage statement is the bucket list in the report. Both are guidance assertions. Both fork. Both turn one line into coverage that would otherwise take dozens of hand-written scenarios.

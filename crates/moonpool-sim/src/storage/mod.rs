@@ -1,14 +1,64 @@
-//! Storage simulation and configuration.
+//! Storage simulation: simulated files, their crash model and their faults.
 //!
-//! This module provides simulated storage that integrates with the
-//! deterministic simulation engine for testing disk I/O patterns and faults.
+//! Code opens files through [`StorageProvider`](crate::StorageProvider) and
+//! uses them through [`StorageFile`](crate::StorageFile). In simulation the
+//! provider is a [`SimStorageProvider`], scoped to one process IP, so every
+//! file has an owner and every fault can aim at one process.
 //!
-//! There is exactly one simulated file implementation ([`image::FileImage`](crate::storage::image::FileImage))
-//! and one engine driving it. Every API a caller can reach a file through —
-//! stream I/O, positioned I/O, sync, truncation — lands on those bytes, and
+//! ```rust
+//! use moonpool_sim::{OpenOptions, StorageFile, StorageProvider};
+//!
+//! /// Shipped code: generic over the provider, the same in production and
+//! /// in simulation.
+//! async fn save<S: StorageProvider>(storage: &S, record: &[u8]) -> std::io::Result<()> {
+//!     let file = storage.open("record.dat", OpenOptions::create_write()).await?;
+//!     file.write_at(0, record).await?;
+//!     // Until this sync returns, a crash may lose or tear the write.
+//!     file.sync_all().await
+//! }
+//! ```
+//!
+//! # One file image, one engine
+//!
+//! There is exactly one simulated file implementation ([`FileImage`]) and
+//! one engine driving it ([`sim::StorageEngine`]). Every way to reach a file
+//! (stream I/O, positioned I/O, sync, truncation) lands on those bytes, and
 //! every fault names a file and a flat sector offset inside it. Layers that
-//! give the bytes meaning (a block layer, a pager, a journal) sit above the
-//! file provider and inherit its fault model rather than bringing their own.
+//! give the bytes meaning (a block layer such as `moonpool_core::BlockFile`,
+//! a pager, a journal) sit above the provider and inherit its fault model.
+//!
+//! # Crash model
+//!
+//! A file keeps a committed image (the bytes at the last successful sync)
+//! and a visible image (what reads see). At a crash, each sector written
+//! since the last sync resolves on its own to old, new, lost or damaged
+//! ([`CrashOutcome`]). Nothing synced is ever lost: a lost-synced-write
+//! oracle checks that after every crash, unless the opt-in barrier-violation
+//! family is armed. A crash returns a [`FileCrashReport`] per file.
+//!
+//! # Faults
+//!
+//! [`Chaos::Storage`](crate::Chaos::Storage) samples a
+//! [`StorageConfiguration`] per seed. Its fault families ([`StorageFault`])
+//! are corruption, `EIO`, misdirected I/O, phantom writes, sync failures,
+//! short transfers, directory-entry loss, crash damage, disk stalls and
+//! throttles, and disk failure. Every fault that fires is recorded as a
+//! [`StorageFaultRecord`] of a [`StorageFaultKind`].
+//!
+//! To control where faults land:
+//!
+//! - [`StorageFaultMask`] (through
+//!   [`SimulationBuilder::storage_fault_mask`](crate::SimulationBuilder::storage_fault_mask))
+//!   removes whole families.
+//! - [`FaultFocus`] (through [`SimStorageProvider::focus_faults`]) weighs
+//!   random faults toward byte ranges of one disk.
+//! - [`ReplicatedFaults`] (through
+//!   [`SimulationBuilder::replicated_storage_faults`](crate::SimulationBuilder::replicated_storage_faults))
+//!   spreads damage over failure domains, using the
+//!   [`LayoutRegion`](crate::LayoutRegion)s a process publishes with
+//!   [`SimStorageProvider::publish_layout`].
+//! - [`FaultContext`](crate::FaultContext) lets a custom injector corrupt
+//!   bytes, fail a file with `EIO` and read a file's durable bytes.
 
 /// Storage configuration and settings
 pub mod config;

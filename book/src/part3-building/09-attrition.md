@@ -4,37 +4,25 @@
 
 ## Why Processes Need to Die
 
-A distributed system that only works when all nodes are healthy is not a distributed system. It is a single point of failure with extra network hops. Real clusters lose nodes constantly: rolling deployments restart processes, kernel panics crash them, power failures wipe their storage. Your system must handle all of these, and it must handle them while continuing to serve requests.
+A distributed system that only works while every node is healthy is a single point of failure with extra network hops. Real clusters lose nodes all the time. A rolling deployment restarts a process. A kernel panic kills one. A power failure wipes its storage. Your system must handle all three while it keeps serving requests.
 
-Attrition is moonpool's built-in mechanism for automatically killing and restarting server processes during simulation. It runs during the chaos phase, picks random processes, kills them in various ways, waits a recovery delay, and restarts them. The goal is to continuously verify that your system can tolerate node failures without manual intervention.
+Attrition is moonpool's built-in injector for that drizzle of failures. During the chaos window it waits 1 to 5 simulated seconds, picks a live victim, kills it in one of three ways, and restarts it after a recovery delay. Then it waits again. The goal is to prove the system tolerates node loss without anyone writing a test per failure.
 
 ## Three Kinds of Reboot
 
-Moonpool provides three reboot types, each modeling a different real-world failure:
+`RebootKind` models three real failures.
 
-### Graceful
+**`Graceful`** is the controlled shutdown. The process's `ctx.shutdown()` token fires. The process gets a grace period to drain buffers, close connections and flush writes. If it has not returned when the period ends, it is force-killed. Send buffers drain during the grace period (FIN semantics). Then a fresh instance boots. This models rolling deployments and well-behaved process managers.
 
-The controlled shutdown. A cancellation token fires, giving the process a grace period to drain buffers, close connections cleanly, and flush pending writes. If the process does not exit within the grace period, it gets force-killed. After shutdown, connections deliver remaining buffered data (FIN semantics), then the process restarts with fresh state.
+**`Crash`** is sudden death. The process task is cancelled at the crash instant, before its connections abort, so nothing the crash disturbs can wake it again. Connections abort with no drain. Peers see connection resets. Unsynced storage resolves by the disk's crash physics. The process runs no work until its restart. This models kernel panics, OOM kills and hardware faults.
 
-This models rolling deployments, planned maintenance, and well-behaved process managers. The process has a chance to clean up, but that chance is time-bounded.
-
-### Crash
-
-The sudden death. The process task is cancelled at the crash instant -- before its connections abort, so nothing the crash disturbs can wake it again. All connections abort with no buffer drain. Peers see connection reset errors. Any in-memory state is lost. The process runs no further work until it restarts, after a recovery delay.
-
-This models kernel panics, OOM kills, and hardware failures. There is no warning and no cleanup. Code that assumes a graceful shutdown will always happen gets a rude surprise.
-
-### CrashAndWipe
-
-The worst case. Same as Crash, but all persistent storage for the process is also deleted. The process restarts as if it were a brand new node joining the cluster for the first time.
-
-This models total disk failures, accidental data deletion, or replacing a failed machine with a fresh one. The wipe is scoped to the crashed process's IP address, so other processes' storage is unaffected. Systems that rely on durable state for recovery must handle the case where that state is gone.
+**`CrashAndWipe`** is the worst case. Same as `Crash`, and every file the process owns is deleted. The process restarts as a brand-new node. The wipe is scoped to the process's IP, so other processes keep their disks. This models a replaced machine or a lost disk.
 
 ## The Attrition Configuration
 
-Attrition is configured through the `Attrition` struct:
-
 ```rust
+use moonpool_sim::{Attrition, AttritionScope, AttritionVictims};
+
 Attrition {
     max_dead: 1,
     prob_graceful: 0.3,
@@ -47,24 +35,23 @@ Attrition {
 }
 ```
 
-**`max_dead`** is the most important field. It caps the number of simultaneously dead processes. If you have a 3-node cluster with `max_dead: 1`, attrition will never kill a second node before the first has restarted. A process counts as dead from the moment its reboot is decided, graceful or crash, until its restart runs. Victims are drawn only from live processes, and a reboot aimed at a process that is already dead is skipped, so one outage never schedules two restarts. This ensures the system always has enough live nodes to remain operational (assuming your replication factor matches).
+**`max_dead`** caps the processes dead at the same time **among this injector's victims**. A process counts as dead from the instant its reboot is decided, graceful or crash, until its restart runs. Victims are drawn only from live processes, and a reboot aimed at a dead process is skipped, so one outage never schedules two restarts.
 
-**`prob_graceful`, `prob_crash`, `prob_wipe`** are weights, not probabilities. They do not need to sum to 1.0. The attrition injector normalizes them internally and picks a reboot kind by weighted random selection. Setting `prob_wipe: 0.0` disables wipe reboots entirely.
+**`prob_graceful`, `prob_crash`, `prob_wipe`** are weights, not probabilities. They need not sum to 1.0. The injector normalizes them and draws a kind. `prob_wipe: 0.0` disables wipes. All three at zero means always crash.
 
-**`recovery_delay_ms`** controls how long a dead process stays dead before restarting. The actual delay is drawn randomly from this range, so different seeds test different recovery timings. The default is 1 to 10 seconds of simulated time.
+**`recovery_delay_ms`** is the range a dead process stays dead, drawn per reboot. `None` means `1000..10000`.
 
-**`grace_period_ms`** controls how long a graceful shutdown has to complete. Again, drawn randomly from the range. The default is 2 to 5 seconds.
+**`grace_period_ms`** is the range a graceful shutdown may take, drawn per reboot. `None` means `2000..5000`.
 
-**`scope`** decides which failure domain each reboot targets. The default, `AttritionScope::PerProcess`, kills one random process at a time. `PerMachine`, `PerZone`, and `PerDatacenter` kill **all collocated processes together**, which is the subject of a later section.
+**`scope`** is the failure domain a reboot targets. `PerProcess` kills one process. `PerMachine`, `PerZone` and `PerDatacenter` kill every collocated process together and need a `.cluster()` topology.
 
-**`victims`** decides which processes are eligible at all. The default, `AttritionVictims::Any`, draws over every server process. A group or tag filter keeps attrition on one role, which is the subject of [Role-Aware Victims](#role-aware-victims-one-regime-per-group).
+**`victims`** is who may die at all. `AttritionVictims::Any` draws over every server process. `AttritionVictims::group("acceptor")` and `AttritionVictims::tagged("role", "voter")` narrow the pool.
 
 ## Using Attrition
 
-Attrition is configured on the simulation builder and requires a chaos duration:
-
 ```rust
-use moonpool_sim::{Attrition, Chaos, ChaosMode};
+use std::time::Duration;
+use moonpool_sim::{Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, SimulationBuilder};
 
 SimulationBuilder::new()
     .processes(3, || Box::new(MyProcess::new()))
@@ -74,8 +61,8 @@ SimulationBuilder::new()
             prob_graceful: 0.3,
             prob_crash: 0.5,
             prob_wipe: 0.2,
-            recovery_delay_ms: None,  // use defaults
-            grace_period_ms: None,    // use defaults
+            recovery_delay_ms: None,
+            grace_period_ms: None,
             scope: AttritionScope::PerProcess,
             victims: AttritionVictims::Any,
         },
@@ -86,40 +73,30 @@ SimulationBuilder::new()
     .run()?;
 ```
 
-The `.chaos_duration()` call is required because attrition runs only during the chaos phase: `run()` returns `SimulationError::InvalidConfiguration` for a builder that registers attrition or a `fault_factory` without it, instead of dropping the injectors unrun. After the chaos duration elapses the simulation enters recovery mode: fault injectors stop, every configuration-driven network and storage fault family is switched off, and partitions are healed, while the system continues until all workloads complete. That quiet tail is where a rebooted process rejoins and the cluster reconverges — the damage from the chaos phase is still there to recover from, since recovery mode stops new faults rather than repairing old ones. A settle phase then drains remaining events before checks run, surfacing cleanup bugs rather than hiding them behind an arbitrary timer.
+`chaos_duration` is required. `run()` returns `SimulationError::InvalidConfiguration` for a builder that registers attrition without it, instead of dropping the injector unrun. When the window closes, no new reboot is scheduled. A reboot already decided still completes: its restart is a scheduled event, so no victim is stranded down into the recovery tail. The tail is where the rebooted process rejoins and the cluster reconverges, so give the workload enough time there.
 
-`ChaosMode::Random` uses your configured weights, recovery window, and scope as
-written every seed. Switch to `ChaosMode::Swarm` to swarm the reboot *regime*
-itself. Each seed can select the never-reboot case (which surfaces slow-leak and
-timer bugs that constant restarting hides), a single reboot kind such as
-always-crash or graceful-only, and a recovery-delay range scaled to between 50%
-and 200% of the configured range. With `.cluster()`, the seed also selects among
-`PerProcess` and correlated failure scopes whose groups fit the sampled
-`max_dead` budget. A flat `.processes()` campaign keeps its configured scope
-because it has no failure-domain topology to swarm.
+## Random or Swarm
 
-These regime choices are six draws on the simulation stream, taken once the
-world is built, in registration order. The injector
-still makes its usual single runtime draw per reboot for the actual recovery
-delay and victim, so a regime costs a fixed footprint at a fixed position and
-replays with the seed. Same reasoning as [swarming network
-faults](10-network-faults.md#swarm-testing-less-is-more).
+`ChaosMode::Random` runs the regime as written on every seed. `ChaosMode::Swarm` draws the **regime** per seed, in six draws on the simulation stream:
+
+1. `max_dead` becomes 0 on half the seeds. That is the never-reboot regime, which finds the slow leaks and timer bugs that constant restarting hides.
+2. Each reboot kind is masked off on half the seeds. One kind left is a single-mode regime, such as always-crash or graceful-only.
+3. The recovery-delay range is scaled to between 50% and 200% of the configured one.
+4. With `.cluster()`, the scope is drawn among `PerProcess` and the correlated scopes whose domains all fit `max_dead`. A flat `.processes()` campaign keeps its scope.
+
+The injector still makes its usual draws per reboot for kind, delay and victim. The regime costs a fixed footprint at a fixed position, so it replays with the seed. Regimes are drawn in registration order after the stream is reseeded. [Swarm Testing](28-swarm-testing.md) explains why the never-reboot seed is as valuable as the crash-heavy one.
 
 ## The max_dead Constraint
 
-`max_dead` deserves special attention because it is the bridge between chaos and correctness. Without it, attrition could kill all your nodes simultaneously, which is technically chaos but not useful chaos. No distributed system survives simultaneous failure of all replicas.
+`max_dead` is the bridge between chaos and correctness. Without it, attrition could kill every node at once, which is chaos but not useful chaos. Set it to what your system claims to survive. Replication factor 3 tolerates one failure, so `max_dead: 1`. A system that needs 3 of 5 nodes uses `max_dead: 2`. Attrition then tests failures the system **should** survive, not failures that no design survives.
 
-Set `max_dead` to match your system's fault tolerance. A system with replication factor 3 can tolerate 1 failure, so `max_dead: 1`. A system that needs 3 of 5 nodes alive should use `max_dead: 2`. This ensures attrition tests failures your system **should** survive, not failures that are inherently unrecoverable.
-
-The budget counts dead processes **among the injector's victims**. With `AttritionVictims::Any` that is the whole cluster. With a group or tag filter it is that pool alone, so "at most one dead acceptor" is exactly what it says, whatever is happening to the matchmakers.
+The budget is per victim pool. With `AttritionVictims::Any` it is the whole cluster. With a group or tag filter it is that pool alone, so "at most one dead acceptor" means exactly that, whatever happens to the matchmakers. A reboot hint from the code (see [hint!](29-hints.md)) spends the same budget: the first regime whose filter admits the hinting process decides, and a full budget refuses the hint.
 
 ## Role-Aware Victims: One Regime per Group
 
-A cluster rarely has one kind of node. Once you register [process groups](02-defining-process.md#process-groups), uniform attrition has a problem: it draws its victim over **every** process, so on a seed with three acceptors and five spares most kills land on the spares, and the consensus tier you meant to stress barely notices. The fix is to tell attrition who it is allowed to kill:
+A cluster rarely has one kind of node. Once you register [process groups](27-process-groups.md), uniform attrition draws its victim over **every** process. On a seed with three acceptors and five spares, most kills land on the spares, and the consensus tier you meant to stress barely notices. Tell attrition who it may kill:
 
 ```rust
-use moonpool_sim::AttritionVictims;
-
 Attrition {
     max_dead: 1,
     victims: AttritionVictims::group("acceptor"),   // never a spare
@@ -127,9 +104,9 @@ Attrition {
 }
 ```
 
-`AttritionVictims::group("acceptor")` restricts the draw to one `.processes()` / `.cluster()` group, named after its process type. `AttritionVictims::tagged("role", "voter")` restricts it to processes carrying a tag. The filter costs no randomness of its own: the victim is drawn uniformly over the **eligible** processes, so a filter that excludes nothing leaves every existing seed's draw schedule untouched, and a filter that leaves nothing eligible skips the round without drawing. It applies to every scope too. A machine-scoped reboot only picks machines that host an eligible process and only kills the eligible processes on it.
+The filter costs no randomness. The victim is drawn uniformly over the **eligible** processes, so a filter that excludes nothing leaves every seed's draw schedule untouched, and a filter that leaves nothing eligible skips the round without a draw. It applies to every scope: a machine-scoped reboot only picks machines that host an eligible process and only kills the eligible processes on it.
 
-Because the budget is per pool, you can give each group its own regime. Every `Chaos::Attrition` entry adds one independent injector:
+Because the budget is per pool, each group can have its own regime. Every `Chaos::Attrition` entry adds one independent injector:
 
 ```rust
 .enable_chaos([
@@ -146,161 +123,25 @@ Because the budget is per pool, you can give each group its own regime. Every `C
 ])
 ```
 
-The two injectors run side by side during the chaos phase and never block each other: a dead matchmaker does not spend the acceptors' budget. Swarm regimes are drawn in registration order from the simulation stream, so a campaign with several injectors replays exactly like one with a single injector. In the report each injector carries its filter in its name (`attrition[group=acceptor]`), so a failing seed says which regime was active.
+The two injectors run side by side and never block each other. In the report each carries its filter in its name (`attrition[group=acceptor]`, `attrition[tag=role=voter]`), so a failing seed says which regime was live.
 
 ## Failure Domains: Correlated Reboots
 
-`max_dead: 1` protects you from killing two random nodes at once. But real outages are rarely random and rarely one node at a time. A rack loses power and takes ten machines with it. A datacenter link cuts and a whole region goes dark. A host reboots and every process pinned to it dies together. These are **correlated failures**, and they are exactly the failures that break quorum logic, because the nodes that die were never independent to begin with.
+`max_dead: 1` protects you from two random deaths at once. Real outages are rarely random and rarely one node at a time. A host reboots and every process pinned to it dies together. These are **correlated failures**, and they break quorum logic because the nodes that die were never independent.
 
-Flat IPs cannot express this. `10.0.1.{1..N}` is a list of peers with no notion of which ones share fate. So moonpool borrows FoundationDB's model: a cluster is a hierarchy of **Datacenter → Zone → Machine → Process**, and processes on the same machine fail together because they share a machine.
-
-You describe that hierarchy with `.cluster()` instead of `.processes()`:
-
-```rust
-use moonpool_sim::{LocalityConfig, SimulationBuilder};
-
-SimulationBuilder::new()
-    .cluster(
-        // 3 datacenters × 3 zones × 3 machines × 2 processes = 54 processes.
-        // Ranges like 1..=3 are sampled per seed, so every seed runs a
-        // different cluster shape, the way FoundationDB generates topology.
-        LocalityConfig::new(3, 3, 3, 2),
-        || Box::new(MyProcess::new()),
-    )
-    .workload(MyWorkload::new());
-```
-
-The topology, not a flat count, decides how many processes exist, and a dimension may draw **zero**. `LocalityConfig::new(0..=2, 1, 1, 1)` is an optional role: some seeds run the deployment without it, its group simply empty (no IPs, no attrition victims, no replicated fault pattern), while every later group keeps its own `10.0.{g+1}.x` range. Each one is assigned a globally unique datacenter, zone, and machine id (`dc1`, `dc1-z1`, `dc1-z1-m1`), and processes read their own placement plus query the cluster through their topology:
-
-```rust
-let me = ctx.topology().my_locality().expect("clustered process");
-let machine_mates = ctx.topology().peers_on_my_machine();
-let same_dc = ctx.topology().ips_in_domain(DomainLevel::Datacenter, me.datacenter());
-```
-
-Now `scope` earns its keep. With `AttritionScope::PerMachine`, attrition picks a machine instead of a process and reboots **every process on it in the same instant**. The two processes that share `dc1-z1-m1` die together and recover together, exactly as they would when their host kernel panics. `PerZone` does the same one level up, and `PerDatacenter` one level above that, for the region-wide blackout that only a replication scheme spanning datacenters is supposed to survive.
+Flat IPs cannot express this, so moonpool uses FoundationDB's hierarchy: datacenter, zone, machine, process. You describe it with `.cluster()` and a `LocalityConfig`, which [Process Groups, Tags and Topology](27-process-groups.md) covers. With a topology in place, `scope` earns its keep:
 
 ```rust
 .enable_chaos([Chaos::Attrition {
     config: Attrition {
         max_dead: 2,  // one machine's worth of processes
-        prob_graceful: 0.3,
-        prob_crash: 0.5,
-        prob_wipe: 0.2,
-        recovery_delay_ms: None,
-        grace_period_ms: None,
         scope: AttritionScope::PerMachine,
-        victims: AttritionVictims::Any,
+        ..base
     },
     mode: ChaosMode::Random,
 }])
 ```
 
-`max_dead` still counts dead **processes**, and a machine reboot is atomic against that budget: attrition only kills a machine when the whole group fits within the remaining budget. With two processes per machine, `max_dead: 2` lets exactly one machine be down at a time and never leaves a machine half-dead. Set it to a multiple of your machine size that matches how many machines your replication can lose.
+`PerMachine` picks a machine and reboots **every process on it in the same instant**, as a host kernel panic would. `PerZone` does the same one level up, and `PerDatacenter` takes a region. `max_dead` still counts processes, and a group reboot is atomic against it: the injector only kills a domain when the whole group fits the remaining budget. With two processes per machine, `max_dead: 2` lets exactly one machine be down and never leaves a machine half-dead. A domain with no live eligible process is never drawn. Without a topology the correlated scopes do nothing.
 
-The same topology also shapes the network, not just the reboots. `PartitionStrategy::IsolateZone` and `IsolateDatacenter` cut a whole domain off the rest of the cluster, and `LinkLatencyConfig` gives cross-datacenter links their real cost. Both are covered in [Network Faults](10-network-faults.md).
-
-For targeted correlated faults, `FaultContext` exposes the group reboots directly. `ctx.reboot_machine("dc1-z1-m1", RebootKind::Crash)` kills a named machine and returns the IPs it took down, and `ctx.reboot_domain(DomainLevel::Datacenter, "dc1", kind)` blacks out a whole datacenter. Combined with `ctx.ips_in_domain(...)`, the same domain ids drive network partitions across a zone or datacenter boundary, so you can model a region cut as cleanly as a host reboot.
-
-## Correlated Outages: The Whole Rack Goes Dark
-
-Attrition never takes more than `max_dead` processes at once, and that is the point: it models the steady drizzle of failures a healthy cluster rides through. A rack-wide power loss is a different fault. Every process of a group loses power **at the same instant**, every memory is gone, and what survives is exactly what the disks hold. No peer can repair a copy from memory, because there is no peer left awake. Then the machines come back one by one, each on its own schedule, and one straggler may take much longer than the rest. FoundationDB's simulator models this as `killDataCenter`, and a quorum protocol that never faces it has never had its recovery path tested from cold disks alone.
-
-`Chaos::Outage` is that fault:
-
-```rust
-.enable_chaos([Chaos::Outage {
-    config: Outage {
-        start: Duration::from_secs(10)..Duration::from_secs(25),
-        down: Duration::from_secs(1)..Duration::from_secs(5),
-        straggler: Some(Duration::from_secs(20)..Duration::from_secs(40)),
-        ..Outage::groups(["acceptor"])
-    },
-    mode: ChaosMode::Swarm,
-}])
-.chaos_duration(Duration::from_secs(30))
-```
-
-At most once per run, with `probability` (1.0 by default), at a time drawn from `start` after the chaos window opens, every live process of the named groups crashes in the same tick. Each restarts after its own draw from `down`, and with a `straggler` range one victim, picked at random, is held down for a draw from that range instead. The straggler range must start where `down` ends, so the straggler is always the last one back. `Swarm` drops the outage on half the seeds and the straggler on half the rest.
-
-Two properties make the fault trustworthy. Every draw comes from the simulation stream, in ascending IP order at the outage instant, so a seed or an exploration recipe replays **the same kill and restart schedule**. And each restart is a scheduled `ProcessRestart` event, not a step of the injector, so restarts land even after the chaos window closes: a victim is never stranded down into the recovery tail. Victims count toward `dead_count`, so attrition holds off while they are down. Give the workload enough time after the window for the last straggler to come back.
-
-The injector also tells you when it has landed. Once every victim's kill has run, it publishes an `OutageLanded` (the instant, the victims in IP order, each one's time down, the straggler) under `OUTAGE_STATE_KEY` in the `StateHandle`. A custom fault injector that waits for that key can plan latent disk damage at the one moment no copy lives in memory anywhere.
-
-The harness can also hold an outage back. Publish an `OutageVeto` under `OUTAGE_VETO_KEY`: at the outage instant the injector asks it with every victim's IP, in ascending order, before it draws anything. A `false` answer leaves every victim alive, and the injector asks again `VETO_RETRY` (1 ms) later, until the veto permits the outage or the chaos window closes. Use it for a budget the simulator cannot see, for example a commit in flight that a crash would leave ambiguous. It is the outage's form of `HintVeto`: one answer for the whole victim set, so a budget that counts victims together is judged once. The veto must not draw randomness.
-
-## Custom Fault Injection
-
-Attrition covers the common case of random process reboots. For more targeted fault injection, implement the `FaultInjector` trait:
-
-```rust
-#[async_trait]
-impl FaultInjector for RollingRestart {
-    fn name(&self) -> &str { "rolling_restart" }
-
-    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-        // Restart each process in order, waiting for recovery between each
-        for ip in ctx.process_ips().to_vec() {
-            ctx.reboot(&ip, RebootKind::Graceful)?;
-            ctx.time().sleep(Duration::from_secs(15)).await
-                .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
-
-            if ctx.chaos_shutdown().is_cancelled() {
-                break;
-            }
-        }
-        Ok(())
-    }
-}
-```
-
-The `FaultContext` provides access to process reboots, network partitions, and tag-based targeting. You can combine built-in attrition with custom fault injectors by registering both on the builder.
-
-## Scripted Lifecycle Faults
-
-`reboot()` combines the kill with a timer-based restart, which is right for random attrition but cannot express a scripted sequence like "crash node X, let the workload make progress, then bring X back". For that, `FaultContext` splits the primitives:
-
-- **`ctx.crash(ip)`** force-kills the process **without scheduling a restart**. The node stays down — no application work runs — until an explicit restart.
-- **`ctx.restart(ip)`** boots a fresh instance from the process factory, ending the hold-down. On a process that is still running it is an **in-place restart** at the same address: the old boot is killed like a force kill (its task, the tasks it spawned and its connections, which peers see aborted; storage is left alone, as when a process exits on its own) and recorded in the fault timeline as a `process_force_kill` with cause `restart_in_place`. The fresh boot starts one scheduler tick later, after the executor has dropped the old one, so two boots of one process never overlap: nothing of the previous boot (a listener, a registry, a connection) is alive when the new one first runs. Because the kill aborts connections and the boot moves by a tick, a run that restarts live processes in place draws a different schedule than it did before this rule.
-- **`ctx.state()`** exposes the same per-iteration `StateHandle` that workloads and processes see, so the injector can wait on a deterministic workload milestone (an operation counter, a published flag) instead of a wall of sleeps.
-
-```rust
-async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-    let target = ctx.process_ips()[0].clone();
-    ctx.crash(&target)?;                       // crash now, hold down
-
-    // Wait until the workload has executed 100 operations.
-    while ctx.state().get::<u64>("ops").unwrap_or(0) < 100 {
-        ctx.time().sleep(Duration::from_millis(20)).await
-            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
-        if ctx.chaos_shutdown().is_cancelled() { return Ok(()); }
-    }
-
-    ctx.restart(&target)?;                     // explicit recovery
-    Ok(())
-}
-```
-
-Everything the script reads is per-iteration simulated state, so the crash target, milestone, and restart point replay exactly from the seed.
-
-A process can also crash **itself**, at an exact point of its own protocol, with no round trip through an injector: `ctx.crash_self(RebootKind::Crash, Some(delay))` (or `CrashAndWipe`) schedules the same force kill one scheduler tick later. Issued just before awaiting a sync, it lands while the sync is in flight, so the unsynced sectors resolve by crash physics — the way to keep an ambiguous last append reachable. With `Some(delay)` the process restarts that long after the kill; with `None` it stays down until an injector restarts it. It draws no randomness, counts the process as dead until it restarts, and fails from a workload or for `RebootKind::Graceful` (a process shuts down gracefully by returning). Code that holds no `SimContext`, such as a driver's hooks generic over `Providers`, takes `ctx.self_crash()?` at boot: a `SelfCrash` handle (`Clone + Send + Sync + 'static`) whose `crash(kind, delay)` does the same.
-
-```rust
-file.write_at(offset, &batch).await?;
-ctx.crash_self(RebootKind::Crash, Some(Duration::from_millis(50)))?;
-file.sync_all().await?; // never completes: the kill lands first
-```
-
-### Fault Factories and Exploration
-
-A custom injector is always registered through a **factory**, never as an instance: a mutated instance could not be rewound for every explored timeline, so the runner rebuilds the injector from the factory for every seed and every continuation.
-
-```rust
-SimulationBuilder::new()
-    .processes(3, || Box::new(MyProcess))
-    .workload_factory(|| Box::new(MyWorkload))
-    .fault_factory(|| Box::new(ScriptedCrashInjector::new()))
-    .chaos_duration(Duration::from_secs(30))
-```
-
-Like `workload_factory`, the factory builds a fresh injector for every root seed and every explored continuation timeline, so scripted fault sequences replay exactly from the root seed plus recipe — with in-process exploration (`workers: 0`) and forked workers alike.
+A machine reboot and a rack power loss look alike but differ in one way: attrition stays under `max_dead`, so a quorum always survives. A fault that takes a **whole group** at once, past any budget, is `Chaos::Outage`, in [Correlated Outages and Self-Crashes](30-outages.md). A scripted sequence ("crash node X, wait for the workload, bring X back") is a custom injector, in [Custom Fault Injectors](31-custom-faults.md).

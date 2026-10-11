@@ -2,20 +2,20 @@
 
 Frontier-based exploration for deterministic simulation testing.
 
-## Why: Explore Beyond Independent Seeds
+## Why
 
-A single simulation seed follows one execution path. Independent seeds add
-breadth, but bugs that require a sequence of unlikely states remain difficult
-to reach. The explorer turns globally new assertion outcomes into replayable
-frontier jobs, then continues those proven prefixes with fresh deterministic
-randomness.
+One simulation seed follows one execution path. More independent seeds add
+breadth, but a bug that needs a sequence of unlikely states stays hard to
+reach: each seed starts again from the beginning. The explorer turns each
+globally new assertion outcome into a replayable frontier job, then continues
+that proven prefix with fresh deterministic randomness.
 
-## How: Replay and Continue
+## How
 
-When an `assert_sometimes!`, `assert_reachable!`, bucket, partial truth
-combination, or guidance watermark makes globally new progress, Moonpool
-records the current RNG call count. The controller retains a recipe for that
-timeline and enqueues bounded continuations:
+When an `assert_sometimes!`, `assert_reachable!`, an `assert_sometimes_each!`
+bucket, a partial truth combination or a numeric watermark makes globally new
+progress, moonpool records the current RNG call count. The controller keeps a
+recipe for that timeline and queues bounded continuations:
 
 ```text
 root seed 42
@@ -25,31 +25,29 @@ root seed 42
        └─ replay to 1000, then reseed to C
 ```
 
-Each worker starts the simulation from the beginning, replays the recipe, and
-diverges after its last breakpoint. Forking is only a bounded process-execution
-optimization between runs; workers do not fork recursively and the explorer
-does not snapshot a live simulation.
-
-## Architecture
+A recipe is a list of `(rng_call_count, seed)` breakpoints, printed as
+`1000@A -> 1490@B`. Each worker starts the simulation from the beginning,
+replays the recipe, and diverges after its last breakpoint. Deep states cost
+a longer recipe, not a tree of live processes.
 
 ```text
-controller (frontier, exemplars, statistics)
-    ├─ worker: replay one recipe, report journal, exit
-    ├─ worker: replay one recipe, report journal, exit
-    └─ worker: replay one recipe, report journal, exit
+controller (frontier, exemplars, statistics, bug recipes)
+    ├─ worker: replay one recipe, report its journal, exit
+    ├─ worker: replay one recipe, report its journal, exit
+    └─ worker: replay one recipe, report its journal, exit
 ```
 
-The controller keeps at most `workers` children live. Set `workers` to `0` for
-fork-free, sequential exploration. The `moonpool-explorer` crate stays unaware
-of Moonpool's network, storage, and process internals; `moonpool-sim` installs
-the RNG and assertion hooks that connect them.
+The controller keeps at most `workers` children alive. Workers never fork
+again and never decide anything. With `workers: 0`, exploration runs
+in-process: sequential, deterministic and fork-free. Discovery latches live
+in `MAP_SHARED` memory (from `moonpool-assertions`), so each discovery counts
+once across all workers and seeds.
 
-## Configuration
+## Usage
 
-Most users should configure exploration through
-`moonpool_sim::SimulationBuilder`:
+Configure exploration through `moonpool_sim::SimulationBuilder`:
 
-```rust,ignore
+```rust
 use moonpool_sim::{ExplorationConfig, SimulationBuilder};
 
 let report = SimulationBuilder::new()
@@ -65,33 +63,53 @@ let report = SimulationBuilder::new()
     .run()?;
 ```
 
-- `max_runs_per_seed` is a ceiling, not a quota. A root run that discovers
-  nothing new ends after one timeline.
-- `branching_factor` controls how many continuations a productive run creates.
-- `max_frontier` bounds queued work, and `max_recipe_len` bounds replay depth.
-- The physical process bound is one controller plus `workers` children.
-- Factory-created workloads and built-in chaos surfaces are required so every
-  continuation starts from reconstructible state.
+| Field | Default | Meaning |
+|---|---|---|
+| `workers` | 0 | Live worker processes. 0 runs every job in-process |
+| `max_runs_per_seed` | 512 | Timelines per root seed. A ceiling, not a quota |
+| `branching_factor` | 4 | Continuations queued when a run is productive |
+| `max_frontier` | 1024 | Bound on queued jobs |
+| `max_recipe_len` | 64 | Bound on replay depth, in segments |
 
-Bug recipes in `report.exploration` can be replayed with
-`SimulationBuilder::replay_timeline(seed, recipe)` when every timeline starts
-from fresh deterministic test-driver state.
+Exploration needs factory-created workloads and built-in chaos surfaces, so
+every continuation starts from state it can rebuild. A bug recipe in
+`report.exploration` replays with
+`SimulationBuilder::replay_timeline(seed, recipe)`.
 
-## Platform and Scope
+## Features
 
-Worker processes require POSIX `fork` support (Linux or macOS). Non-Unix
-targets use in-process exploration. Exploration is assertion-guided randomized
-testing, not exhaustive model checking or a formal proof. Reproducibility also
-requires the system under test to use Moonpool providers rather than external
-time, randomness, threads, or I/O. Use worker processes only from a standalone
-single-threaded simulation binary; raw `fork()` is unsafe when unrelated host
-threads may hold inherited locks.
+- `Explorer`: the controller (frontier, exemplars, `ExplorationStats`, bug
+  recipes, per-worker timeout `DEFAULT_WORKER_TIMEOUT`).
+- `Recipe`, `format_timeline`, `parse_timeline`: replay breakpoints and their
+  text form.
+- `journal`: the discoveries one run made, stamped with the RNG call count.
+- `init_assertions` / `cleanup_assertions`: the shared assertion region.
+- `sancov`: LLVM `SanitizerCoverage` edge counters for reports and the
+  `UntilCoverageStable` plateau. `cargo xtask sim run` builds the simulation
+  binaries with this instrumentation. Frontier expansion stays
+  assertion-guided, because only an assertion carries a replay anchor.
+- `simulations`: a synthetic floor-ladder scenario that tests the full
+  controller loop (`cargo xtask sim run frontier-explore`).
+
+## Feature flags
+
+None. The crate uses `libc` (`fork`, `waitpid`, `mmap`) and never builds for
+`wasm32-unknown-unknown`. `moonpool-sim` depends on it behind its
+`exploration` feature (on by default).
+
+## Platform and scope
+
+Worker processes need POSIX `fork` (Linux or macOS). Exploration is
+assertion-guided randomized testing, not exhaustive model checking or a
+formal proof. Reproducibility needs the system under test to use moonpool
+providers, not external time, randomness, threads or I/O. Use worker
+processes only from a standalone single-threaded simulation binary: raw
+`fork()` is unsafe when other host threads may hold inherited locks.
 
 ## Documentation
 
-- [Moonpool book](https://pierrezemb.github.io/moonpool/)
+- [Multiverse Exploration](https://pierrez.github.io/moonpool/part5-building-on-top/01-exploration.html) in the Sim Book
 - [API documentation](https://docs.rs/moonpool-explorer)
-- [Repository](https://github.com/PierreZ/moonpool)
 
 ## License
 

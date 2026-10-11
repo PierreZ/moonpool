@@ -8,23 +8,34 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```rust
 //! use std::cell::Cell;
-//! use moonpool_sim::{Invariant, SIM_FAULT_EVENT_NAME, TraceQuery};
+//! use moonpool_sim::{Invariant, SIM_FAULT_EVENT_NAME, SimulationBuilder, TraceQuery};
 //!
-//! struct FaultCounter { cursor: Cell<usize> }
+//! /// Counts force kills, to correlate them with application events.
+//! #[derive(Default)]
+//! struct KillCounter {
+//!     cursor: Cell<usize>,
+//!     kills: Cell<u64>,
+//! }
 //!
-//! impl Invariant for FaultCounter {
-//!     fn name(&self) -> &str { "fault_counter" }
-//!     fn observe(&self, q: &dyn TraceQuery, _t: u64) {
+//! impl Invariant for KillCounter {
+//!     fn name(&self) -> &str {
+//!         "kill_counter"
+//!     }
+//!     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
 //!         for e in q.since(SIM_FAULT_EVENT_NAME, &self.cursor) {
 //!             if e.str("kind") == Some("process_force_kill") {
-//!                 let ip = e.str("ip");
-//!                 // ...
+//!                 self.kills.set(self.kills.get() + 1);
 //!             }
 //!         }
 //!     }
+//!     fn reset(&mut self) {
+//!         *self = Self::default();
+//!     }
 //! }
+//!
+//! let _builder = SimulationBuilder::new().invariant(KillCounter::default());
 //! ```
 
 use std::collections::BTreeMap;

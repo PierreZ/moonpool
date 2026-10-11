@@ -12,7 +12,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```rust
 //! use moonpool_sim::{SimTime, SimulationLayer};
 //! use tracing_subscriber::layer::SubscriberExt;
 //!

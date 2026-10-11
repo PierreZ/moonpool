@@ -1,13 +1,100 @@
 //! Frontier-based exploration for deterministic simulation testing.
 //!
-//! This crate turns deterministic simulation runs into *accumulated
-//! exploration knowledge*. Timelines that reach globally-new interesting
-//! states (reported by the assertion macros) are remembered as replayable
-//! recipes; a central controller schedules bounded continuations from those
-//! states; timelines that produce nothing new simply die. The logical
-//! exploration space can be huge while the physical footprint stays fixed:
+//! This crate turns deterministic simulation runs into **accumulated
+//! exploration knowledge**. A timeline that reaches a globally new
+//! interesting state (reported by the assertion macros) is kept as a
+//! replayable recipe. A central controller schedules bounded continuations
+//! from those states. Timelines that produce nothing new end. The logical
+//! exploration space can be huge, but the physical footprint stays fixed:
 //! one controller process plus at most `workers` short-lived worker
 //! processes.
+//!
+//! Most users never call this crate directly. `moonpool-sim` drives it
+//! through `SimulationBuilder::enable_exploration` (feature `exploration`,
+//! on by default) and replays a bug with
+//! `SimulationBuilder::replay_timeline(seed, recipe)`. The crate knows
+//! nothing of moonpool's network, storage or processes: `moonpool-sim`
+//! installs the RNG and assertion hooks that connect them.
+//!
+//! # Quick example
+//!
+//! The controller loop, as `moonpool-sim` runs it, against a toy
+//! simulation. The toy draws from the counted RNG in [`simulations`], which
+//! has the same breakpoint replay as the simulator's RNG.
+//!
+//! ```rust
+//! use moonpool_explorer::simulations::{rng_below, rng_count, rng_reset, rng_set_breakpoints};
+//! use moonpool_explorer::{AssertKind, ExplorationConfig, Explorer, Recipe, assertion_bool};
+//!
+//! /// One timeline: three rolls. Reaching the last stage is the "bug".
+//! fn run(root_seed: u64, recipe: &Recipe) -> bool {
+//!     rng_reset(root_seed);
+//!     rng_set_breakpoints(recipe.clone());
+//!     let mut stage = 0;
+//!     for _ in 0..3 {
+//!         if rng_below(4) == 0 {
+//!             stage += 1;
+//!             // A first pass is a discovery: the explorer branches here.
+//!             assertion_bool(AssertKind::Sometimes, true, true, &format!("stage {stage}"));
+//!         }
+//!     }
+//!     stage == 3
+//! }
+//!
+//! # fn main() -> std::io::Result<()> {
+//! // Discoveries are stamped with the RNG call count, the replay anchor.
+//! moonpool_explorer::set_rng_count_hook(rng_count);
+//! let config = ExplorationConfig {
+//!     workers: 0, // in-process: sequential and fully deterministic
+//!     max_runs_per_seed: 200,
+//!     ..ExplorationConfig::default()
+//! };
+//! let mut explorer = Explorer::new(config)?;
+//! explorer.begin_seed(7);
+//! let root_failed = run(7, &Recipe::new());
+//! explorer.observe_root_run(root_failed);
+//! explorer.explore(|job| run(7, &job.recipe));
+//!
+//! let stats = explorer.seed_stats();
+//! assert!(stats.total_timelines <= 200);
+//! for recipe in explorer.bug_recipes() {
+//!     // A bug recipe replays its timeline exactly.
+//!     println!("bug: {}", moonpool_explorer::format_timeline(recipe));
+//!     assert!(run(7, recipe));
+//! }
+//! drop(explorer);
+//! moonpool_explorer::cleanup_assertions();
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Features
+//!
+//! - **Frontier controller.** [`Explorer`] owns the frontier, the exemplar
+//!   store, the statistics ([`ExplorationStats`]) and the bug recipes.
+//! - **Recipes.** A [`Recipe`] is a list of `(rng_call_count, seed)`
+//!   breakpoints. [`format_timeline`] and [`parse_timeline`] turn it into
+//!   the `count@seed -> count@seed` text a report prints.
+//! - **Discovery journal.** [`journal`] records each [`DiscoveryEvent`]
+//!   with the RNG call count from [`set_rng_count_hook`].
+//! - **Bounded workers.** [`ExplorationConfig`] bounds live workers, runs
+//!   per seed, branching, frontier size and recipe length. `workers: 0`
+//!   is fork-free; a worker that runs past [`DEFAULT_WORKER_TIMEOUT`] is
+//!   killed and counted as a crash ([`Explorer::set_worker_timeout`]).
+//! - **Shared assertion region.** [`init_assertions`] moves the
+//!   `moonpool-assertions` tables into `MAP_SHARED` memory, so discovery
+//!   latches are visible across forked workers.
+//! - **Code coverage.** [`sancov`] reads LLVM `SanitizerCoverage` counters
+//!   ([`sancov_edges_covered`], [`sancov_edge_count`]) for reports and the
+//!   `UntilCoverageStable` plateau. `cargo xtask sim run` builds the
+//!   simulation binaries with this instrumentation.
+//!
+//! # Feature flags
+//!
+//! None. The crate uses `libc` (`fork`, `waitpid`, `mmap`), so it never
+//! builds for `wasm32-unknown-unknown`. `moonpool-sim` makes it an optional
+//! dependency behind its `exploration` feature, which keeps it out of wasm
+//! builds and lean production trees.
 //!
 //! # Glossary
 //!

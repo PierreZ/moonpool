@@ -1,37 +1,66 @@
-//! Fault injection for simulation chaos testing.
+//! Custom fault injection: scripted faults the built-in chaos surfaces do
+//! not cover.
 //!
-//! [`FaultInjector`] defines fault injection strategies (partitions, connection drops, etc.)
-//! that run during the chaos phase of a simulation. [`FaultContext`] provides access to
-//! `SimWorld` fault injection primitives.
+//! A [`FaultInjector`] runs beside the workloads during the chaos window
+//! ([`SimulationBuilder::chaos_duration`](crate::SimulationBuilder::chaos_duration)).
+//! Its [`FaultContext`] gives it the fault primitives a workload must not
+//! have:
 //!
-//! When `chaos_duration` is configured on the builder, fault injectors run concurrently
-//! with workloads. At the chaos boundary, `ctx.chaos_shutdown()` is cancelled and the
-//! system settles before running workload checks.
+//! | Need | Methods |
+//! |------|---------|
+//! | Partition the network | [`partition`](FaultContext::partition), [`heal_partition`](FaultContext::heal_partition), [`is_partitioned`](FaultContext::is_partitioned) |
+//! | Kill and restart processes | [`reboot`](FaultContext::reboot), [`reboot_with_delays`](FaultContext::reboot_with_delays), [`crash`](FaultContext::crash), [`crash_for`](FaultContext::crash_for), [`restart`](FaultContext::restart), [`reboot_random`](FaultContext::reboot_random), [`reboot_tagged`](FaultContext::reboot_tagged), [`reboot_machine`](FaultContext::reboot_machine), [`reboot_domain`](FaultContext::reboot_domain) |
+//! | Damage storage | [`corrupt_bytes`](FaultContext::corrupt_bytes), [`fail_file_with_eio`](FaultContext::fail_file_with_eio), [`clear_file_eio`](FaultContext::clear_file_eio), [`durable_bytes`](FaultContext::durable_bytes) |
+//! | Slow a machine | [`set_slowness`](FaultContext::set_slowness), [`slowness`](FaultContext::slowness), [`cpu_model`](FaultContext::cpu_model) |
+//! | Find targets | [`process_ips`](FaultContext::process_ips), [`ips_in_group`](FaultContext::ips_in_group), [`machine_registry`](FaultContext::machine_registry), [`is_dead`](FaultContext::is_dead), [`dead_count`](FaultContext::dead_count) |
+//!
+//! Register an injector with
+//! [`SimulationBuilder::fault_factory`](crate::SimulationBuilder::fault_factory).
+//! The factory builds a fresh injector for every seed and every explored
+//! timeline, so a scripted sequence replays exactly. At the end of the
+//! window, [`chaos_shutdown`](FaultContext::chaos_shutdown) is cancelled:
+//! the injector must return.
 //!
 //! # Usage
 //!
-//! ```ignore
-//! use moonpool_sim::{FaultInjector, FaultContext, SimulationResult};
+//! ```rust
 //! use std::time::Duration;
 //!
-//! struct RandomPartition { probability: f64 }
+//! use async_trait::async_trait;
+//! use moonpool_sim::{
+//!     FaultContext, FaultInjector, RandomProvider, SimulationBuilder, SimulationResult,
+//!     TimeProvider,
+//! };
+//!
+//! /// Cuts the first two processes apart for five seconds, now and then.
+//! struct RandomPartition {
+//!     probability: f64,
+//! }
 //!
 //! #[async_trait]
 //! impl FaultInjector for RandomPartition {
-//!     fn name(&self) -> &str { "random_partition" }
+//!     fn name(&self) -> &str {
+//!         "random_partition"
+//!     }
+//!
 //!     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
-//!         let ips = ctx.process_ips();
-//!         while !ctx.chaos_shutdown().is_cancelled() {
-//!             if ctx.random().random_bool(self.probability) && ips.len() >= 2 {
+//!         let ips = ctx.process_ips().to_vec();
+//!         while !ctx.chaos_shutdown().is_cancelled() && ips.len() >= 2 {
+//!             if ctx.random().random_bool(self.probability) {
 //!                 ctx.partition(&ips[0], &ips[1])?;
-//!                 ctx.time().sleep(Duration::from_secs(5)).await?;
+//!                 let _ = ctx.time().sleep(Duration::from_secs(5)).await;
 //!                 ctx.heal_partition(&ips[0], &ips[1])?;
 //!             }
-//!             ctx.time().sleep(Duration::from_secs(1)).await?;
+//!             let _ = ctx.time().sleep(Duration::from_secs(1)).await;
 //!         }
 //!         Ok(())
 //!     }
 //! }
+//!
+//! let _builder = SimulationBuilder::new()
+//!     .fault_factory(|| Box::new(RandomPartition { probability: 0.1 }))
+//!     // Required: injectors run only inside the chaos window.
+//!     .chaos_duration(Duration::from_secs(60));
 //! ```
 
 use std::collections::BTreeSet;
@@ -74,11 +103,14 @@ pub struct ProcessInfo {
 /// second kill of an already-dead process cannot skew the count.
 pub type DeadSet = Arc<Mutex<BTreeSet<std::net::IpAddr>>>;
 
-/// Context for fault injectors — gives access to `SimWorld` fault injection methods.
+/// Context for fault injectors: the fault primitives of the
+/// [`SimWorld`].
 ///
-/// Unlike `SimContext` (which workloads receive), `FaultContext` provides direct
-/// access to network partitioning, reboot, and other fault primitives that normal
-/// workloads should not use.
+/// Unlike [`SimContext`](crate::SimContext) (which processes and workloads
+/// receive), `FaultContext` gives direct access to network partitions,
+/// reboots, storage damage and machine slowness. It also shares the run's
+/// [`state`](Self::state), so an injector can coordinate with workloads.
+/// See the [module documentation](self) for the full list.
 pub struct FaultContext {
     sim: SimWorld,
     process_info: ProcessInfo,

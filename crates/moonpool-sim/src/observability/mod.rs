@@ -13,7 +13,8 @@
 //! Emit a plain `tracing` event with a constant message (the event name) and
 //! structured fields. No special markers, no derives:
 //!
-//! ```ignore
+//! ```rust
+//! # let (term, my_ip) = (3_u64, "10.0.1.1");
 //! tracing::info!(target: "raft", term, leader = %my_ip, "leader_elected");
 //! ```
 //!
@@ -34,12 +35,34 @@
 //! typed fields by key — the same way you would query a production trace
 //! store:
 //!
-//! ```ignore
-//! fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
-//!     for e in q.since("leader_elected", &self.cursor) {
-//!         let term = e.u64("term");
-//!         let leader = e.str("leader");
-//!         // assert one leader per term...
+//! ```rust
+//! use std::cell::{Cell, RefCell};
+//! use std::collections::BTreeMap;
+//! use moonpool_sim::{Invariant, TraceQuery, assert_always};
+//!
+//! /// At most one leader per term.
+//! #[derive(Default)]
+//! struct OneLeaderPerTerm {
+//!     cursor: Cell<usize>,
+//!     leaders: RefCell<BTreeMap<u64, String>>,
+//! }
+//!
+//! impl Invariant for OneLeaderPerTerm {
+//!     fn name(&self) -> &str {
+//!         "one_leader_per_term"
+//!     }
+//!     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+//!         for e in q.since("leader_elected", &self.cursor) {
+//!             let (Some(term), Some(leader)) = (e.u64("term"), e.str("leader")) else {
+//!                 continue;
+//!             };
+//!             let mut leaders = self.leaders.borrow_mut();
+//!             let first = leaders.entry(term).or_insert_with(|| leader.to_string());
+//!             assert_always!(first == leader, "one leader per term");
+//!         }
+//!     }
+//!     fn reset(&mut self) {
+//!         *self = Self::default();
 //!     }
 //! }
 //! ```

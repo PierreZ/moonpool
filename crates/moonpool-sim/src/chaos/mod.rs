@@ -1,160 +1,111 @@
-//! Chaos testing infrastructure for deterministic fault injection.
+//! Fault injection and assertion accounting.
 //!
-//! This module implements FoundationDB's buggify approach for finding bugs
-//! through comprehensive chaos testing.
+//! `FoundationDB`'s lesson: **bugs hide in error paths**. Production rarely
+//! runs a timeout handler, a retry loop or a recovery path. This module holds
+//! the code-side half of moonpool's chaos: the fault sites inside the code
+//! under test, and the assertions that prove those paths ran.
 //!
-//! # Philosophy
+//! The environment-side half (network, storage, reboots, outages, slow
+//! machines) is turned on with
+//! [`SimulationBuilder::enable_chaos`](crate::SimulationBuilder::enable_chaos)
+//! and documented on [`Chaos`](crate::Chaos).
 //!
-//! FoundationDB's insight: **bugs hide in error paths**. Production code
-//! rarely exercises timeout handlers, retry logic, or failure recovery.
-//! Chaos testing finds these bugs before production does.
+//! # Submodules
 //!
-//! Key principles:
-//! - **Deterministic**: Same seed produces same faults for reproducible debugging
-//! - **Comprehensive**: Test all failure modes (network, timing, corruption)
-//! - **Low probability**: Faults rare enough for progress, frequent enough to find bugs
+//! | Module | Contents |
+//! |--------|----------|
+//! | [`assertions`] | The fifteen `assert_*` macros and their result tables |
+//! | [`buggify`] | Simulation wiring for `moonpool-buggify` and the [`buggify_knob!`](crate::buggify_knob) macro |
+//! | [`fault_events`] | [`SimFaultEvent`]: every injected fault, on the trace timeline |
+//! | [`state_handle`] | [`StateHandle`]: typed values shared inside one run |
+//! | [`exploration_glue`] | The thin layer over the optional `moonpool-explorer` backend |
 //!
-//! # Components
+//! # Buggify
 //!
-//! | Component | Purpose |
-//! |-----------|---------|
-//! | [`buggify!`] | Probabilistic fault injection at code locations |
-//! | [`assert_always!`] | Invariants that must never fail |
-//! | [`assert_sometimes!`] | Behaviors that should occur under chaos |
-//! | [`Invariant`](crate::Invariant) | Cross-workload properties validated after events |
+//! The buggify macros live in the `moonpool-buggify` crate, which has no
+//! dependencies, so shipped code can use them. This crate re-exports them.
+//! Outside a simulation every site returns `false` and draws nothing.
 //!
-//! # The Buggify System
+//! ```rust
+//! use moonpool_sim::{buggify, buggify_with_prob};
 //!
-//! Each buggify location is randomly **activated** once per simulation run,
-//! then fires probabilistically on each call.
-//!
-//! ```ignore
-//! // 25% probability when activated
-//! if buggify!() {
-//!     return Err(SimulatedFailure);
+//! fn send_batch(batch: &[u8]) -> Result<usize, &'static str> {
+//!     // A rare-but-legal path: send only part of the batch.
+//!     if buggify!() {
+//!         return Ok(batch.len() / 2);
+//!     }
+//!     // A site with its own firing rate.
+//!     if buggify_with_prob!(0.02) {
+//!         return Err("simulated transient failure");
+//!     }
+//!     Ok(batch.len())
 //! }
 //!
-//! // Custom probability
-//! if buggify_with_prob!(0.02) {
-//!     corrupt_data();
-//! }
+//! // Outside a simulation, no site fires.
+//! assert_eq!(send_batch(b"abcd"), Ok(4));
 //! ```
 //!
-//! ## Two-Phase Activation
+//! Each site decides in two phases:
 //!
-//! 1. **Activation** (once per location per seed): `random() < activation_prob`
-//! 2. **Firing** (each call): If active, `random() < p`, where `p` is the
-//!    rate the macro names — 25% for `buggify!`, the per-site argument for
-//!    `buggify_with_prob!`
+//! 1. **Activation**, once per site per seed: the site is active with
+//!    probability 50% (the runner calls [`buggify_init`]`(0.5)`).
+//! 2. **Firing**, on each call: an active site fires at its rate, 25% for
+//!    [`buggify!`](crate::buggify), the argument for
+//!    [`buggify_with_prob!`](crate::buggify_with_prob).
 //!
-//! This ensures consistent behavior within a run while varying which
-//! locations are active across different seeds.
+//! So one seed sees a stable set of active sites, and different seeds see
+//! different sets. `FoundationDB` uses the same model (`Buggify.h`).
 //!
-//! ## Disruptive sites and the recovery tail
+//! The other sites:
 //!
-//! A site that makes an operation *fail* (a cut session, a refused request)
-//! uses `buggify_fault_with_prob!` instead: the same two phases during the
-//! chaos window, and silent, drawing nothing, once the runner closes the
-//! window (`moonpool_buggify::buggify_enter_recovery`, called beside
-//! [`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode)).
-//! Rare-but-harmless sites (`buggify!`, `buggify_with_prob!`) keep firing
-//! through the tail.
+//! | Macro | Use it for |
+//! |-------|------------|
+//! | [`buggify_fault_with_prob!`](crate::buggify_fault_with_prob) | A site that makes an operation fail. Silent after the chaos window, so the recovery tail stays quiet. |
+//! | [`buggify_named!`](crate::buggify_named) | A disruptive site with a stable label. The harness decides its activation per seed with [`set_activation`](crate::set_activation). |
+//! | [`buggify_pick!`](crate::buggify_pick) | Override a choice: `Some(i)` in `0..n` when it fires |
+//! | [`buggify_range!`](crate::buggify_range) | Stretch a value: `Some(v)` in a range when it fires |
+//! | [`buggify_knob!`](crate::buggify_knob) | A configuration value that jumps to an extreme on some seeds |
+//! | [`hint!`](crate::hint!) | Name a moment; the simulator may reboot the process there (see [`HintVeto`](crate::HintVeto)) |
+//! | [`cpu_charge`](crate::cpu_charge) | Tell the CPU gate that work costs CPU time |
 //!
-//! | Parameter | Value | FDB Reference |
-//! |-----------|-------|---------------|
-//! | `activation_prob` | 50%, set by the runner's `buggify_init(0.5)` | `Buggify.h:79-88` |
-//! | firing rate | 25% in `buggify!`; per site in `buggify_with_prob!` | `P_GENERAL_BUGGIFIED_SECTION_FIRES` |
-//!
-//! # Fault Injection Mechanisms
-//!
-//! ## Network Faults
-//!
-//! | Mechanism | Default | What it tests |
-//! |-----------|---------|---------------|
-//! | Random connection close | 0.001% | Reconnection, message redelivery |
-//! | Bit flip corruption | 0.01% | CRC32C checksum validation |
-//! | Connect failure | 50% probabilistic | Timeout handling, retries |
-//! | Partial/short writes | 1000 bytes max | Message fragmentation |
-//! | Packet loss | disabled | At-least-once delivery |
-//! | Network partitions | disabled | Split-brain handling |
-//! | One-way partitions | disabled | Asymmetric reachability and failure detection |
-//!
-//! ## Timing Faults
-//!
-//! | Mechanism | Default | What it tests |
-//! |-----------|---------|---------------|
-//! | TCP operation latencies | 1-11ms connect | Async scheduling |
-//! | Clock drift | 100ms max | Leases, heartbeats, leader election |
-//! | Buggified delays | 25% probability | Race conditions |
-//! | Per-connection asymmetric delays | optional | Satellite links, geographic distance |
+//! Place sites at error paths, timeout boundaries, retry entry points,
+//! resource limits and state transitions.
 //!
 //! # Assertions
 //!
-//! ## assert_always!
+//! Assertions never panic. A failed `always` assertion is logged and
+//! counted; the runner fails the seed after the iteration ([`has_always_violations`]).
+//! A `sometimes` assertion that never fires on any seed is a coverage
+//! violation in the report.
 //!
-//! Guards invariants that must **never** fail:
+//! ```rust
+//! use moonpool_sim::{assert_always, assert_sometimes};
 //!
-//! ```ignore
-//! assert_always!(
-//!     sent_count >= received_count,
-//!     "received more than sent"
-//! );
+//! let (sent, received) = (10_u64, 9_u64);
+//! // Safety: must hold every time it is checked.
+//! assert_always!(received <= sent, "never receive more than was sent");
+//! // Coverage: must be true at least once across the campaign.
+//! assert_sometimes!(received < sent, "a message was lost in flight");
 //! ```
 //!
-//! ## assert_sometimes!
+//! With the default stop rule (`UntilCoverageStable`), the runner keeps
+//! trying seeds until every `sometimes` and `reachable` assertion fired and
+//! code coverage stopped growing.
 //!
-//! Validates that error paths **do** execute under chaos:
+//! # The chaos window and the recovery tail
 //!
-//! ```ignore
-//! if buggify!() {
-//!     assert_sometimes!(true, "timeout_triggered");
-//!     return Err(Timeout);
-//! }
-//! ```
-//!
-//! Multi-seed testing with the default `UntilCoverageStable` stop condition
-//! ensures all `assert_sometimes!` statements fire across the seed space and
-//! code coverage plateaus before stopping.
-//!
-//! # Strategic Placement
-//!
-//! Place `buggify!()` calls at:
-//! - Error handling paths
-//! - Timeout boundaries
-//! - Retry logic entry points
-//! - Resource limit checks
-//! - State transitions
-//!
-//! # Configuration
-//!
-//! ```ignore
-//! use moonpool_sim::{ChaosConfiguration, NetworkConfiguration};
-//!
-//! // Full chaos (default)
-//! let chaos = ChaosConfiguration::default();
-//!
-//! // No chaos (fast tests)
-//! let chaos = ChaosConfiguration::disabled();
-//!
-//! // Randomized per seed
-//! let chaos = ChaosConfiguration::random_for_seed();
-//! ```
-//!
-//! # The Chaos → Recovery Boundary
-//!
-//! Every mechanism above is bounded by
+//! Every fault source is bounded by
 //! [`SimulationBuilder::chaos_duration`](crate::SimulationBuilder::chaos_duration).
-//! When it expires the runner calls
-//! [`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode),
-//! which stops all fault injectors, switches off every configuration-driven
-//! network, storage, and block-device fault family, and heals the partitions in
-//! force — giving the system under test a quiet tail to recover in.
+//! When it ends, the runner calls
+//! [`SimWorld::enter_recovery_mode`](crate::SimWorld::enter_recovery_mode):
+//! fault injectors stop, every configuration-driven network, storage and
+//! block-device fault family turns off, the partitions the simulator holds
+//! heal, and `buggify_fault_with_prob!` sites go silent.
 //!
-//! The boundary bounds *fault generation only*. It repairs nothing: corrupted
-//! sectors, lost writes, closed connections, and killed processes all survive
-//! it, and finite effects already running expire on their own schedule. The
-//! cluster is not healthy at the cutoff; the environment has merely stopped
-//! making it worse.
+//! The boundary stops **fault generation** only. It repairs nothing:
+//! corrupted sectors, lost writes, closed connections and killed processes
+//! stay. Finite effects already running expire on their own schedule. The
+//! system under test must recover by itself in the quiet tail.
 
 pub mod assertions;
 pub mod buggify;

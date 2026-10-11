@@ -2,13 +2,13 @@
 
 <!-- toc -->
 
-A Process represents the system under test. It is the code you would ship to production, running inside the simulation where the framework controls time, network, and failure.
+A `Process` is the system under test. It is the code you ship, running inside a simulation where the framework controls time, the network, the disk and failure.
 
 ## The Process Trait
 
 The trait is minimal by design:
 
-```rust
+```rust,ignore
 #[async_trait]
 pub trait Process: Send + Sync + 'static {
     fn name(&self) -> &str;
@@ -16,59 +16,66 @@ pub trait Process: Send + Sync + 'static {
 }
 ```
 
-Two methods. `name()` identifies this process type for reporting. `run()` is where your server logic lives. All Process impls are **`Send + Sync + 'static`**, which makes them composable with `tokio::spawn` and `Arc`-based shared state like `Arc<RwLock<…>>` or `DashMap`. The runtime itself is still single-thread for determinism, but your code reads like ordinary tokio code.
+Two methods. `name()` identifies the process type, and it names the process **group** the builder registers. `run()` holds your server logic. Every `Process` is `Send + Sync + 'static`, so it composes with `Arc<RwLock<…>>` and `DashMap` like ordinary tokio code. The runtime is still one thread.
 
-When `run()` returns `Ok(())` or an `Err`, the process has exited voluntarily. When the simulation kills the process, the future is cancelled and `run()` never returns at all, and so is every task the process spawned through `ctx.task().spawn_task()`, however deep: a crash ends the whole process, not just its root future, so a background worker never survives to run beside the rebooted process's own. When `run()` **panics**, the seed fails: the panic is caught and recorded against the process's IP, and the iteration is reported as failed even if every workload returned `Ok`, so an assertion firing inside a server (or one of its dependencies) never disappears from the report.
+When `run()` returns `Ok(())` or an `Err`, the process has exited on its own. When the simulation kills the process, the future is cancelled and `run()` never returns. So is every task the process spawned through `ctx.task().spawn_task()`, however deep: a crash ends the whole process, not only its root future, so a background worker never survives to run beside the rebooted process. When `run()` **panics**, the seed fails. The panic is caught and recorded against the process's IP, and the iteration is reported as failed even if every workload returned `Ok`.
 
-## The Factory Pattern
+## The Factory
 
-You never construct a Process once. You give the builder a **factory** that can produce fresh instances:
+You never construct a `Process` once. You give the builder a **factory**:
 
-```rust
+```rust,ignore
 SimulationBuilder::new()
     .processes(3, || Box::new(MyServer::new()))
 ```
 
-Why a factory? Because of reboots. When the simulation kills a process and restarts it, the framework calls your factory to get a brand new instance. This guarantees that each boot starts with a clean slate, just like restarting a real server.
+Why a factory? Reboots. When the simulation kills a process and restarts it, the runner calls the factory for a new instance. Each boot starts from a clean slate, as a restarted server does. Three processes with two reboots each means nine factory calls.
 
-The factory is called once per process per boot. Three processes with two reboots each means the factory runs nine times total.
+The count can be a range. `.processes(3..=7, …)` draws a count per seed, so cluster size is one more thing the seeds explore.
 
 ## State and Reboots
 
-This is the rule you must internalize: **all in-memory state is lost on reboot**.
+This is the rule to internalize: **all in-memory state is lost on reboot.**
 
-If your Process has a `BTreeMap<String, Vec<u8>>` field tracking client sessions, that map is gone after a reboot. The new instance from the factory starts empty. Only data written to the simulated storage layer survives.
+If your process keeps a `BTreeMap` of client sessions in a field, that map is gone after a reboot. The new instance starts empty. Only data written to the simulated disk survives, and of that, only what was synced. A write that completed but was not synced resolves by crash physics: kept, lost, or torn, sector by sector. [Storage Faults](../part3-building/11-storage-faults.md) describes the crash model.
 
-This matches reality. When a server process crashes and restarts, it does not magically recover its heap. It reads persistent state from disk and rebuilds from there.
+This matches reality. A crashed server does not recover its heap. It reads persistent state from disk and rebuilds.
 
-## IP Addressing
+To carry a fact across boots **for the test's sake**, use `ctx.state()`, the shared state handle. It belongs to the run, not to the process, so a boot counter published there is visible to the next boot and to every workload and invariant. Use it for test bookkeeping only. Shipped code must not depend on it.
 
-Each process instance gets its own IP address in the `10.0.1.0/24` range:
+## The Context
 
-```
-Process 0 → 10.0.1.1
-Process 1 → 10.0.1.2
-Process 2 → 10.0.1.3
-```
+`run()` receives a `SimContext`. The parts a process uses:
 
-Workloads get IPs in the `10.0.0.0/24` range. This clean separation makes it easy to identify what is a server and what is a test driver when reading logs.
+| Call | What it gives |
+|------|---------------|
+| `ctx.my_ip()` | this process's address, as a `&str` |
+| `ctx.providers()` | the `SimProviders` bundle, for code generic over `P: Providers` |
+| `ctx.network()`, `ctx.time()`, `ctx.task()`, `ctx.random()`, `ctx.storage()` | the individual providers |
+| `ctx.providers().system()` | the system provider: CPU and disk counters |
+| `ctx.topology()` | process IPs, groups, tags, locality |
+| `ctx.client_id()`, `ctx.client_count()` | this process's index within its group, and the group size |
+| `ctx.shutdown()` | the cancellation token a graceful reboot fires |
+| `ctx.state()` | the run's shared state |
+| `ctx.metrics::<S>()` | this node's metrics source, when a `metrics_factory` is set |
+| `ctx.crash_self(kind, delay)`, `ctx.self_crash()` | crash this process now, from inside it |
 
-Your process accesses its IP through `ctx.my_ip()`. Other process IPs are available through `ctx.topology().all_process_ips()`.
+The providers are fresh each boot. Bind listeners, open files and connect to peers inside `run()`, not in the factory.
 
-## Tags for Role Assignment
+## Tags for Roles
 
-Many distributed systems need nodes with different roles: leader and follower, primary and secondary, different data centers. Tags handle this:
+Many systems need nodes with different roles: leader and follower, primary and secondary, several data centres. Tags handle this:
 
-```rust
+```rust,ignore
 SimulationBuilder::new()
     .processes(5, || Box::new(MyNode::new()))
     .tags(&[
         ("role", &["leader", "follower"]),
         ("dc", &["east", "west", "eu"]),
-    ])
+    ])?
 ```
 
-Tags distribute round-robin. With 5 processes and 2 role values, the assignment looks like:
+`tags()` applies to the last registered group and returns a `Result`, because it is an error to call it before `processes()`. Tags distribute round-robin:
 
 | Process | role | dc |
 |---------|---------|-------|
@@ -78,12 +85,11 @@ Tags distribute round-robin. With 5 processes and 2 role values, the assignment 
 | 3 | follower | east |
 | 4 | leader | west |
 
-Inside your process, read tags from the context:
+Read your tags from the topology:
 
-```rust
+```rust,ignore
 async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-    let role = ctx.topology().my_tags().get("role");
-    match role.as_deref() {
+    match ctx.topology().my_tags().get("role") {
         Some("leader") => run_leader(ctx).await,
         Some("follower") => run_follower(ctx).await,
         _ => Ok(()),
@@ -91,44 +97,49 @@ async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
 }
 ```
 
-## Graceful vs Crash Reboots
+`ctx.topology().ips_tagged("role", "leader")` finds the others. For a second role with its own process type, register a second group instead. [Process Groups, Tags and Topology](../part3-building/27-process-groups.md) covers both.
 
-Not all deaths are equal. Moonpool supports three reboot kinds:
+## Three Kinds of Reboot
 
-**Graceful**: The simulation signals the shutdown token. Your process has a grace period to finish in-flight work, flush buffers, and close connections cleanly. If it does not exit in time, it gets force-killed anyway.
+`RebootKind` has three variants:
 
-**Crash**: Instant death. The process task is cancelled immediately. All connections abort. No cleanup, no buffer drain. Peers see connection reset errors.
+**Graceful.** The runner cancels `ctx.shutdown()`. The process has a grace period to finish in-flight work and close connections. Send buffers drain, so peers see a clean FIN. If the process does not return in time, it is force-killed.
 
-**CrashAndWipe**: Same as Crash but also wipes all persistent storage owned by that process. Simulates total disk failure or a fresh node joining the cluster. The wipe is immediate and scoped to the process's IP address, so other processes' storage is unaffected.
+**Crash.** Instant death. The task is cancelled at the crash instant. Connections reset, so peers see `ConnectionReset`. Unsynced storage data may be lost.
 
-To handle graceful shutdown, check the cancellation token in your main loop:
+**CrashAndWipe.** A crash that also deletes every file the process owns. This simulates a lost disk or a fresh node joining the cluster. The wipe is scoped to the process's IP.
 
-```rust
-async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-    let listener = ctx.network().bind(ctx.my_ip()).await?;
+Handle a graceful shutdown by racing your work against the token. The `biased;` form polls the branches in order and draws nothing, which is right when one branch is a guard:
 
-    loop {
-        if ctx.shutdown().is_cancelled() {
-            break;
-        }
-        // Accept connections, handle requests...
-    }
-    Ok(())
+```rust,ignore
+loop {
+    let result = moonpool_sim::select! {
+        biased;
+        r = listener.accept() => r,
+        () = ctx.shutdown().cancelled() => return Ok(()),
+    };
+    // ...
 }
 ```
 
-You do not need to handle crash reboots. There is nothing to handle. The simulation cancels your future and moves on.
+You do not handle a crash. There is nothing to handle. The simulation cancels your future and moves on.
+
+## Crashing Yourself
+
+Sometimes a crash must land at an exact point of your own protocol: between a write and its sync, in the middle of an append. `ctx.crash_self(RebootKind::Crash, Some(Duration::from_millis(10)))` schedules the same force kill a fault injector would, one scheduler tick from now, and restarts the process after the delay. With `None` the process stays down until an injector restarts it. `ctx.self_crash()` returns a `SelfCrash` handle that is `Clone + Send + Sync`, for code that holds no context. A graceful kind is refused: a process shuts down gracefully by returning. This is a test instrument. Shipped code names the moment with `hint!` instead and lets the simulator decide, as [Same Code in Production and Simulation](./12-same-code.md) explains.
 
 ## A Concrete Example
 
-Here is a simple echo server as a Process:
+An echo server as a `Process`, from moonpool's own reboot tests:
 
-```rust
-struct EchoServer;
+```rust,ignore
+use futures::io::{AsyncReadExt, AsyncWriteExt};
+
+struct EchoProcess;
 
 #[async_trait]
-impl Process for EchoServer {
-    fn name(&self) -> &str {
+impl Process for EchoProcess {
+    fn name(&self) -> &'static str {
         "echo"
     }
 
@@ -136,27 +147,27 @@ impl Process for EchoServer {
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
         loop {
-            if ctx.shutdown().is_cancelled() {
-                break;
-            }
+            let result = moonpool_sim::select! {
+                biased;
+                r = listener.accept() => r,
+                () = ctx.shutdown().cancelled() => return Ok(()),
+            };
 
-            match ctx.time().timeout(
-                Duration::from_millis(100),
-                listener.accept()
-            ).await {
-                Ok(Ok((mut stream, _addr))) => {
-                    let mut buf = vec![0u8; 4096];
-                    while let Ok(n) = stream.read(&mut buf).await {
-                        if n == 0 { break; }
-                        let _ = stream.write_all(&buf[..n]).await;
+            match result {
+                Ok((mut stream, _peer)) => {
+                    let mut buf = [0u8; 64];
+                    if let Ok(n) = stream.read(&mut buf).await {
+                        if n > 0 {
+                            let _ = stream.write_all(&buf[..n]).await;
+                        }
                     }
                 }
-                _ => continue,
+                // Under chaos an accept can fail; the server keeps serving.
+                Err(e) => tracing::debug!("accept error: {e}"),
             }
         }
-        Ok(())
     }
 }
 ```
 
-Notice the patterns: use `ctx.network()` for connections, `ctx.time()` for timeouts, `ctx.shutdown()` for graceful termination. Never call tokio directly.
+The patterns: `ctx.network()` for sockets, `ctx.shutdown()` for a graceful stop, `moonpool_sim::select!` for the race. Never call tokio directly. In a real service the body of `run()` would call a function generic over `P: Providers` with `ctx.providers()`, and `main` would call the same function with `TokioProviders`.

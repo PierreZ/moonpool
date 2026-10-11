@@ -1,11 +1,16 @@
 # Wiring a Web Service
 <!-- toc -->
 
-Theory is cheap. Here's a complete worked example: an axum web service running inside moonpool-sim with chaos injection, fault-injectable storage, and assertion-based validation. The full source lives in `crates/moonpool-sim-examples/src/axum_web.rs`.
+Theory is cheap. Here is a complete worked example: an axum web service inside
+moonpool-sim, with a fault-injectable store, network chaos and assertions. The
+full source is
+[`crates/moonpool-sim-examples/src/axum_web.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/axum_web.rs),
+and `cargo xtask sim run axum` runs it.
 
 ## Step 1: The Store Trait
 
-Every dependency boundary starts with a trait. This one models item persistence:
+Every dependency boundary starts with a trait. This one models item
+persistence:
 
 ```rust
 pub trait Store: Send + Sync + 'static {
@@ -14,13 +19,17 @@ pub trait Store: Send + Sync + 'static {
 }
 ```
 
-`Send + Sync + 'static` because axum requires `State` to be `Send + Sync`. In production, this trait is backed by Postgres or SQLite. In simulation, it's backed by a BTreeMap.
+`Send + Sync + 'static` because axum requires `State` to be `Send + Sync`. In
+production, Postgres or SQLite implements this trait. In simulation, a
+`BTreeMap` does.
 
-Notice these are synchronous methods. The real database calls would be async, but for a fake that never does I/O, synchronous is simpler and equally correct. If your production trait has async methods, that works too.
+The methods are synchronous. A fake that never does I/O has no reason to be
+async. If your production trait is async, that works too.
 
 ## Step 2: The InMemoryStore
 
-BTreeMap for deterministic ordering. `AtomicU64` for ID generation. `RwLock` because axum needs `Send + Sync`.
+`BTreeMap` for deterministic iteration order. `AtomicU64` for ID generation.
+`RwLock` because axum needs `Send + Sync`.
 
 ```rust
 pub struct InMemoryStore {
@@ -30,38 +39,39 @@ pub struct InMemoryStore {
 
 impl Store for InMemoryStore {
     fn create(&self, name: &str) -> Result<Item, StoreError> {
-        // Fault injection: randomly fail writes.
         // Models disk full, replication lag, constraint violations.
-        if buggify!() {
-            return Err(StoreError::WriteFailed("buggified".into()));
+        // A Postgres container cannot fail one write and pass the next.
+        if moonpool_sim::buggify!() {
+            return Err(StoreError::WriteFailed("buggified write failure".into()));
         }
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let item = Item { id, name: name.to_string() };
-        self.items.write()
-            .map_err(|e| StoreError::WriteFailed(format!("{e}")))?
-            .insert(id, item.clone());
+        let mut items = self.items.write()
+            .expect("RwLock poisoned: prior task panicked");
+        items.insert(id, item.clone());
         Ok(item)
     }
 
     fn get(&self, id: u64) -> Result<Option<Item>, StoreError> {
-        // Lower probability: reads fail less often than writes in practice.
-        if buggify_with_prob!(0.05) {
-            return Err(StoreError::ReadFailed("buggified".into()));
+        // Reads fail less often than writes in practice.
+        if moonpool_sim::buggify_with_prob!(0.05) {
+            return Err(StoreError::ReadFailed("buggified read failure".into()));
         }
-
-        Ok(self.items.read()
-            .map_err(|e| StoreError::ReadFailed(format!("{e}")))?
-            .get(&id).cloned())
+        let items = self.items.read()
+            .expect("RwLock poisoned: prior task panicked");
+        Ok(items.get(&id).cloned())
     }
 }
 ```
 
-The `buggify!()` calls are the whole point. A Postgres container is either up or down. This fake can fail a write while the next read succeeds. It can fail creates at 25% while gets fail at 5%, modeling asymmetric failure that actually happens in production.
+The buggify sites are the whole point. The fake fails creates at 25% and gets
+at 5%, once the site is active for the seed. That is the asymmetric failure a
+real database shows and a container cannot.
 
 ## Step 3: The Axum Router
 
-Standard axum. Nothing moonpool-specific here:
+Standard axum. Nothing here is moonpool-specific:
 
 ```rust
 pub fn build_router(store: Arc<dyn Store>) -> axum::Router {
@@ -73,42 +83,42 @@ pub fn build_router(store: Arc<dyn Store>) -> axum::Router {
 }
 ```
 
-The handlers use `State(store): State<Arc<dyn Store>>` and return standard axum responses. `create_item` returns 201 on success, 500 when the store fails. `get_item` returns 200, 404, or 500. If you already have an axum app, your existing router works here.
+The handlers take `State(store): State<Arc<dyn Store>>` and return ordinary
+axum responses. `create_item` returns 201 on success and 500 when the store
+fails. `get_item` returns 200, 404 or 500. If you already have an axum app,
+your router goes here unchanged.
 
 ## Step 4: The Process
 
-This is where moonpool enters the picture. A `Process` is the system under test, running on a simulated server node:
+A `Process` is the system under test. It runs on a simulated node:
 
 ```rust
 #[async_trait]
 impl Process for WebProcess {
-    fn name(&self) -> &str { "web" }
+    fn name(&self) -> &'static str { "web" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        use futures::{FutureExt, stream::{FuturesUnordered, StreamExt}};
+        use futures::stream::{FuturesUnordered, StreamExt};
 
         let store = InMemoryStore::new();
         let app = build_router(store);
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
-        // hyper's serve_connection future is !Send (the HTTP1 state machine
-        // holds internal Rc<…>), so no Send-bounded spawn will accept it.
-        // Drive multiple in-flight connections inline via FuturesUnordered.
+        // hyper's HTTP/1 serve_connection future is !Send, so no
+        // Send-bounded spawn accepts it. Drive every in-flight
+        // connection inline from one task.
         let mut connections = FuturesUnordered::new();
 
         loop {
-            // Deliberately NOT `biased;`: accept and connection progress are
-            // peer data sources, so the seed picks which branch wins.
+            // Not `biased;`: a new accept and progress on an existing
+            // connection are peers. The seed decides which wins.
             moonpool_sim::select! {
                 accept = listener.accept() => {
                     let (stream, _addr) = accept?;
 
-                    // SimTcpStream implements the futures-io traits, which is all
-                    // HyperIo needs to present it as hyper's own IO. Vectored
-                    // writes on: the sim delivers each IoSlice separately, with
-                    // its own chance of chaos.
+                    // Vectored writes on: the sim delivers each IoSlice
+                    // separately, each with its own chance of chaos.
                     let io = HyperIo::new(stream).with_vectored_writes(true);
-                    // TowerToHyperService bridges axum's tower::Service to hyper's Service
                     let service = TowerToHyperService::new(app.clone());
 
                     connections.push(async move {
@@ -116,44 +126,57 @@ impl Process for WebProcess {
                             .serve_connection(io, service)
                             .await
                         {
-                            tracing::debug!("hyper error (expected under chaos): {e}");
+                            tracing::warn!("hyper error (expected under chaos): {e}");
                         }
                     });
                 }
                 Some(()) = connections.next(), if !connections.is_empty() => {}
-                _ = ctx.shutdown().cancelled() => return Ok(()),
+                () = ctx.shutdown().cancelled() => return Ok(()),
             }
         }
     }
 }
 ```
 
-Two things to note. First, we use `hyper::server::conn::http1::serve_connection`, **not** `axum::serve()`. `axum::serve` takes `tokio::net::TcpListener` directly, so it can't accept our simulated listener. `serve_connection` takes anything implementing hyper's own IO traits. `SimTcpStream` implements `futures::io::AsyncRead + AsyncWrite` (the runtime-agnostic traits) and is itself `Send + Sync`, so we wrap it in `moonpool_hyper::HyperIo`, which is exactly that adapter. `TowerToHyperService` comes from the same crate, so the axum example needs neither `tokio-util` nor `hyper-util`.
+Two points. First, the process calls
+`hyper::server::conn::http1::Builder::serve_connection`, **not**
+`axum::serve()`. `axum::serve` takes a `tokio::net::TcpListener`, so it cannot
+accept the simulated listener. `serve_connection` takes anything that
+implements hyper's IO traits. `HyperIo` from `moonpool-hyper` is that adapter,
+and `TowerToHyperService` turns the axum router (a tower service) into the
+hyper service the builder wants. The example needs neither `tokio-util` nor
+`hyper-util`.
 
-Second, **`FuturesUnordered` instead of spawning**. Customer code in the sim is `Send + Sync`, and `SimTcpStream` is `Send`. The blocker is **hyper itself**: `http1::serve_connection` returns a future that is `!Send` because the HTTP1 state machine holds internal `Rc<…>` cells. That future cannot cross any Send-bounded spawn, but it polls perfectly well from the accept loop. `FuturesUnordered` lets one task drive any number of in-flight connections concurrently. The accept loop pushes new connections in, the `connections.next()` arm drains completed ones, and shutdown cancels both. The `select!` is moonpool's and stays in its **default form** on purpose: accepting a new connection and progressing an in-flight one are peers that can be ready in the same simulation step, so the seed decides which branch wins and different seeds explore both orders.
+Second, **`FuturesUnordered` instead of spawning.** The blocker is hyper's
+HTTP/1 state machine, which holds `Rc<…>` cells and so is `!Send`. It cannot
+cross a Send-bounded spawn, but it polls fine from the accept loop. The
+`select!` is moonpool's and stays in its default form on purpose. Accepting a
+connection and progressing one are both ready in the same step, and different
+seeds explore both orders.
 
 ## Step 5: The Workload
 
-The workload is the test driver. It connects to the process, sends requests, and validates responses:
+The workload is the test driver. It connects, sends requests and checks the
+answers:
 
 ```rust
 #[async_trait]
 impl Workload for WebWorkload {
-    fn name(&self) -> &str { "client" }
+    fn name(&self) -> &'static str { "client" }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let server_ip = ctx.peer("web").ok_or_else(|| {
-            SimulationError::InvalidState("web process not found".into())
-        })?;
+        let server_ip = peer_ip(ctx, "web")?;
 
         for round in 0..5 {
-            match self.send_round(ctx, &server_ip, round).await {
-                Ok(()) => {}
-                Err(e) => {
-                    // Under chaos, requests can fail. That's expected.
-                    assert_sometimes!(true, "request_round_failed");
-                    tracing::debug!("round {round} failed: {e}");
-                }
+            // Stop cleanly when the orchestrator ends the run mid-round.
+            let Some(result) =
+                unless_shutdown(ctx, self.send_round(ctx, &server_ip, round)).await
+            else { break };
+
+            if let Err(e) = result {
+                // Connection drops and reboots are expected under chaos.
+                moonpool_sim::assert_sometimes!(true, "request_round_failed");
+                tracing::warn!(round, "round failed (expected under chaos): {e}");
             }
         }
         Ok(())
@@ -161,42 +184,69 @@ impl Workload for WebWorkload {
 }
 ```
 
-Inside `send_round`, the workload opens a hyper client connection. The client side has the same `!Send` problem: `hyper::client::conn::http1::handshake` hands back a `conn` driver future that is `!Send`. Rather than spawn it, we **pin it on the stack** and let the request/response future race against it:
+`peer_ip` and `unless_shutdown` are small helpers from the examples crate.
+`unless_shutdown` races a future against `ctx.shutdown().cancelled()` with a
+`biased;` select, so it draws no scheduling randomness.
+
+Inside `send_round`, the workload opens a hyper client connection. The client
+has the same `!Send` problem: `hyper::client::conn::http1::handshake` returns a
+`conn` driver future that must be polled, or every request stays pending
+forever. The workload races the driver against the requests:
 
 ```rust
 let io = HyperIo::new(stream).with_vectored_writes(true);
-let (mut sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+let (sender, conn) = hyper::client::conn::http1::handshake(io).await?;
+let mut client = HttpClient { sender, host: server_ip };
 
-let driver = async move {
-    if let Err(e) = conn.await {
-        tracing::warn!("client conn driver error: {e}");
-    }
-};
-let driver = std::pin::pin!(driver);
-
-// sender.send_request(...) runs below. The surrounding moonpool
-// select! in send_round polls `driver` concurrently.
+moonpool_sim::select! {
+    biased;
+    result = async {
+        Self::check_health(&mut client, round).await?;
+        Self::create_and_read_item(&mut client, round).await?;
+        Self::check_not_found(&mut client, round).await
+    } => result?,
+    // The connection died first: give up the round.
+    () = conn => {}
+}
 ```
 
-Assertions split into two kinds:
+The assertions split into two kinds:
 
-- `assert_always!` for invariants: health returns 200, read-after-write returns the same data, nonexistent items return 404 or 500.
-- `assert_sometimes!` for coverage: items sometimes created successfully, store reads sometimes fail, request rounds sometimes fail under chaos.
+- `assert_always!` for invariants: `/health` returns 200, a read after a
+  successful write returns the same item, a missing item returns 404 or 500.
+- `assert_sometimes!` for coverage: `item_created_successfully`,
+  `store_write_failed`, `store_read_failed`, `request_round_failed`.
 
-The `assert_sometimes!` calls are how moonpool knows it's actually exercising error paths. If `store_write_failed` never triggers across thousands of iterations, something is wrong with the chaos configuration.
+The `assert_sometimes!` calls are how moonpool knows the error paths ran. If
+`store_write_failed` never fires across 50 seeds, the chaos configuration is
+wrong, and the report says so.
 
 ## Step 6: Wire It Together
 
+The `sim-axum-web` binary does the wiring:
+
 ```rust
-SimulationBuilder::new()
+let report = SimulationBuilder::new()
     .processes(1, || Box::new(WebProcess))
     .workload(WebWorkload)
-    .set_iterations(10)
-    .run()?;
+    .set_iterations(50)
+    .run()
+    .expect("simulation configuration is valid");
+
+finish_or_exit_on_failure(&report);
 ```
 
-One web server process, one workload driving requests, ten iterations with different seeds. Each iteration creates a fresh simulation: new network, new processes, new store state, new buggify activation decisions.
+One web process, one workload, 50 seeds. Each iteration starts fresh: new
+network, new process, new store, new buggify activation. The default network
+configuration injects latency and connection faults, so your handlers face
+network chaos and store chaos at the same time.
 
-The default network configuration injects latency and connection faults. Combined with `buggify!()` in the store, your handlers face both network-level chaos (connection drops, latency spikes) and application-level chaos (write failures, stale reads) deterministically and reproducibly.
+When a seed fails, replay it with `.set_debug_seeds(vec![seed])` and
+`.set_iterations(1)`. [Reproducing with FixedCount](../part3-building/21-reproducing.md)
+shows the full loop.
 
-When a seed fails, you replay it with `set_debug_seeds(vec![failing_seed])` and `set_iterations(1)` to reproduce the exact sequence of events that triggered the bug.
+## Going Further
+
+This example runs HTTP/1 by hand. For HTTP/2 and gRPC, `moonpool-hyper`
+supplies the executor and timer hyper needs, plus a reconnecting client channel
+and a serve helper. [The hyper Stack](./08-hyper-stack.md) picks up there.

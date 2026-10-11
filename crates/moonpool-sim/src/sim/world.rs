@@ -195,7 +195,28 @@ pub struct SimFaultRecord {
     pub event: SimFaultEvent,
 }
 
-/// Global deterministic simulation coordinator.
+/// The simulated world: one scheduler, one clock, and the network and
+/// storage engines it drives.
+///
+/// `SimWorld` owns the global [`Scheduler<Event>`](Scheduler), which owns
+/// logical time, same-time FIFO order and cancellation. [`step`](Self::step)
+/// pops the next event, advances the clock to it and dispatches it to the
+/// network engine, the storage engine or the process lifecycle. The engines
+/// return wakes, and the world runs them only after it releases its lock.
+///
+/// The [`SimulationBuilder`](crate::SimulationBuilder) builds one world per
+/// seed. Build one by hand only to drive providers directly in a test:
+///
+/// ```rust
+/// use std::time::Duration;
+/// use moonpool_sim::SimWorld;
+///
+/// let mut sim = SimWorld::new_with_seed(42);
+/// let _sleep = sim.sleep(Duration::from_millis(10));
+/// // The sleep scheduled a timer event; stepping fires it and moves time.
+/// sim.run_until_empty();
+/// assert_eq!(sim.current_time(), Duration::from_millis(10));
+/// ```
 #[derive(Debug)]
 pub struct SimWorld {
     pub(crate) inner: Arc<WorldLock<SimInner>>,

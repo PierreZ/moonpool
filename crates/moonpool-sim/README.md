@@ -1,88 +1,183 @@
 # moonpool-sim
 
-Deterministic simulation engine for distributed systems, inspired by [FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html).
+Deterministic simulation for distributed systems in Rust, after
+[FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html)
+and [Antithesis](https://antithesis.com/).
 
-## Why: Discovery Testing, Not Prevention Testing
+moonpool-sim runs a whole cluster in one OS thread: server processes, test
+clients, the network between them and the disks under them. It runs on
+logical time, from one seed. The same seed gives the same run, bit for bit,
+so a bug found after a million simulated operations replays on demand.
 
-Traditional testing asks: *"Did we break what used to work?"* This is **prevention testing**—regression detection through test coverage.
+## Why
 
-Simulation testing asks: *"What else is broken that we haven't found yet?"* This is **discovery testing**—actively hunting for unknown bugs.
+Traditional tests ask: "did we break what used to work?" That is
+**prevention** testing. Simulation asks: "what else is broken that we have
+not found yet?" That is **discovery** testing.
 
-Bugs hide in rare combinations of events. An API with just six variables creates thousands of unique test cases for happy paths alone. Every new feature multiplies the complexity. Traditional testing cannot cover these combinations—but simulation can explore them autonomously.
+Bugs in distributed systems hide in rare combinations: a crash during a
+sync, a partition during an election, a slow disk on the leader. Production
+meets these combinations after months. The simulator makes them happen
+every second, and the seed makes each one reproducible.
 
-## How: Deterministic Simulation
+- **Deterministic.** One seeded random stream drives every decision: task
+  order, `select!` branch order, latencies, faults, and the code's own
+  draws.
+- **Fast.** Time jumps to the next event. A simulated hour of heartbeats
+  passes in milliseconds.
+- **Hostile.** Packets are lost and corrupted, links partition, writes tear,
+  processes crash, racks lose power, machines go slow.
 
-**Same seed = identical execution.** Given the same seed, the system makes identical decisions every time. When a bug surfaces after millions of simulated operations, you can replay that exact sequence to debug it.
+## Same code in production and simulation
 
-**Time compression.** A single-threaded event loop advances simulated time when all tasks block. Years of uptime can be simulated in seconds. A simulated day passes instantly when nothing is scheduled.
+The code under test is the code you ship. It depends on the provider traits
+of `moonpool-core`: `TimeProvider`, `TaskProvider`, `NetworkProvider`,
+`RandomProvider`, `StorageProvider` and `SystemProvider`. Production passes
+`TokioProviders`; the simulation passes `SimProviders`. There is no
+`SimDisk` or test-only hook in the shipped code.
 
-**Chaos injection.** The simulator deliberately biases execution toward rare code paths. Network delays, disconnects, partitions, bit flips, storage corruption—failures that might take months to occur in production happen continuously in simulation.
+Shipped code can also name its own interesting moments. These calls are
+no-ops in production:
 
-## Runtime Architecture
+- `buggify!()` takes a rare path on some seeds.
+- `hint!("mid-append").await` names a moment. The simulator may reboot the
+  process exactly there, under the seed's attrition budget.
 
-`SimWorld` is the coordinator, not a bucket for every subsystem's mutable
-state. Its global `Scheduler<Event>` owns logical time, deterministic same-time
-FIFO ordering, and cancellation. It dispatches targeted events to two
-independent engines:
+## Quick start
 
-- `NetworkSimulation` owns listeners, connections, topology, network faults,
-  pending operations, results, and network wakers. Bind, connect, and accept
-  complete only after their configured simulated latency.
-- `StorageEngine` owns persistent file contents, independent open handles and
-  cursors, per-process disk configuration, degradation episodes, exact pending
-  operation results, and storage wakers. Read, write, sync, and set-length
-  completions identify the operation that submitted them.
+A simulation has three parts:
 
-Both engines return ordered scheduling and cancellation effects plus wake
-batches to the coordinator. The coordinator applies those effects and invokes
-wakers after releasing the world lock. Shutdown and process crashes cancel or
-fail pending work instead of treating a missing completion as success.
+1. A `Process`: the system under test. It boots fresh on every reboot.
+2. A `Workload`: the test driver. It survives reboots and judges the result.
+3. A `SimulationBuilder`: topology, chaos and seeds.
 
-## Controlled Failure Injection: BUGGIFY
+```rust
+use std::time::Duration;
 
-Rather than hoping rare bugs surface, moonpool deliberately triggers them. `buggify!` points fire with 25% probability during testing, creating a combinatorial explosion across configurations.
+use moonpool_sim::{
+    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, SimulationBuilder,
+};
 
-Strategic placement at error-prone points ensures deep bugs—those needing rare combinations of events—actually get tested.
+let reboots = Attrition {
+    max_dead: 1,
+    prob_graceful: 0.2,
+    prob_crash: 0.7,
+    prob_wipe: 0.1,
+    recovery_delay_ms: None,
+    grace_period_ms: None,
+    scope: AttritionScope::PerProcess,
+    victims: AttritionVictims::Any,
+};
 
-## The Assertion Suite
+let report = SimulationBuilder::new()
+    .processes(3..=5, || Box::new(MyNode::new()))
+    .workload_factory(|| Box::new(MyClient::default()))
+    .enable_chaos([
+        Chaos::Network(ChaosMode::Swarm),
+        Chaos::Storage(ChaosMode::Swarm),
+        Chaos::Attrition { config: reboots, mode: ChaosMode::Swarm },
+    ])
+    .chaos_duration(Duration::from_secs(30))
+    .until_coverage_stable(10, 1_000)
+    .run()?;
 
-Moonpool provides 15 Antithesis-style assertion macros for comprehensive property testing:
+report.eprint();
+assert!(!report.is_failure());
+```
 
-**Boolean assertions** — guard correctness properties:
-- `assert_always!` / `assert_always_or_unreachable!` — invariants that must never fail
-- `assert_sometimes!` — verify that edge cases actually occur
-- `assert_reachable!` / `assert_unreachable!` — code path reachability
+The crate documentation on [docs.rs](https://docs.rs/moonpool-sim) has a
+complete, compiling version with an echo server and a client.
 
-**Numeric assertions** — track watermarks and thresholds:
-- `assert_always_greater_than!`, `assert_always_less_than!` (and `_or_equal_to` variants) — numeric invariants
-- `assert_sometimes_greater_than!`, `assert_sometimes_less_than!` (and `_or_equal_to` variants) — watermark tracking with replay anchors on improvement
+To debug a failing seed, pin it: `.set_debug_seeds(vec![seed])` and
+`.set_iterations(1)`. Raise `.trace_level(...)` to see more.
 
-**Compound assertions** — multi-condition discovery:
-- `assert_sometimes_all!` — frontier tracking across multiple named conditions
-- `assert_sometimes_each!` — per-value bucketed assertions with quality watermarks
+## Chaos
 
-If your error handling code exists but `assert_sometimes!` never fires, you haven't actually tested it. The goal is 100% sometimes coverage—proof that every error path was exercised.
+`enable_chaos` takes a list of surfaces. Each surface has a mode:
+`ChaosMode::Random` turns the whole surface on with per-seed intensities;
+`ChaosMode::Swarm` turns on a random **subset** of its fault families per
+seed, so sharp single-fault configurations happen often.
 
-## Multi-Seed Testing
+| Surface | Faults |
+|---------|--------|
+| `Chaos::Network` | Partitions, clogs, bit flips, random closes, connect failures, clock drift, buggified delays, slow IP pairs, black holes |
+| `Chaos::Storage` | Corruption, `EIO`, misdirected and phantom writes, sync failures, short transfers, crash damage, disk stalls, disk failure |
+| `Chaos::Attrition` | Graceful reboots, crashes and wipes under a `max_dead` budget, per process group |
+| `Chaos::Outage` | A whole group loses power at once; `OutageVeto` lets the harness defer it |
+| `Chaos::Cpu` | The CPU gate: each poll of a process costs time on its one core |
+| `Chaos::GrayFailure` | Machines stay alive but slow for a long window: disk, network, and CPU when `Chaos::Cpu` is on |
+| `Chaos::BuggifyKnobs` | Pushes the enabled network and storage knobs to extremes |
 
-Different seeds explore different execution orderings. The default `UntilCoverageStable` stop condition runs simulations with different seeds until every `assert_sometimes!` / `assert_reachable!` has triggered at least once **and** code coverage has plateaued (capped at `max_iterations`). Tune it with `.until_coverage_stable(plateau_seeds, max_iterations)`.
+More controls:
 
-This transforms testing from "check known behaviors" to "explore the unknown until confident."
+- `network_fault_mask` and `storage_fault_mask` remove fault families a
+  harness cannot judge, without changing any random draw.
+- `swarm_operations` gives each seed a random subset of the workload's own
+  operations (`swarm_op_enabled`).
+- `replicated_storage_faults` spreads disk damage over failure domains, so
+  no replicated record is damaged on every replica.
+- `fault_factory` adds a custom `FaultInjector` for scripted faults.
+- `SimContext::crash_self` lets a process crash itself at an exact point of
+  its protocol.
 
-## Multiverse Exploration
+`chaos_duration` bounds fault **generation**. When it ends, no new faults
+start, but the damage stays: the system must recover in the quiet tail.
 
-Beyond multi-seed testing, moonpool-sim integrates with `moonpool-explorer` for frontier-based exploration. When an assertion discovers new behavior, the explorer records an RNG-coordinate recipe. Bounded workers replay that prefix from the beginning and continue with different deterministic randomness.
+## Storage crash model
 
-The controller expands productive runs once, retains a few semantic-state exemplars, and caps total runs, queued jobs, and recipe depth. Code-edge coverage is reported and drives plateau detection; semantic assertions provide the replay anchors that guide the frontier.
+Each simulated file keeps the bytes of its last successful sync and the
+bytes reads see. At a crash, each sector written since the last sync
+resolves on its own to old, new, lost or damaged, as a real disk allows. A
+lost-synced-write oracle checks that nothing synced is ever lost.
 
-This is assertion-guided randomized testing, not exhaustive model checking.
-Exploration requires `.workload_factory()` or `.workloads()` plus built-in
-chaos surfaces; opaque workload instances and custom fault-injector instances
-are rejected because Moonpool cannot reconstruct them for every continuation.
+## Assertions
+
+Fifteen Antithesis-style macros. They never panic: a failed `always` fails
+the seed at the end of the iteration.
+
+| Kind | Macros |
+|------|--------|
+| Boolean | `assert_always!`, `assert_always_or_unreachable!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!` |
+| Numeric | `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_always_less_than!`, `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!`, `assert_sometimes_greater_than_or_equal_to!`, `assert_sometimes_less_than!`, `assert_sometimes_less_than_or_equal_to!` |
+| Compound | `assert_sometimes_all!`, `assert_sometimes_each!` |
+
+If an error handler exists but its `assert_sometimes!` never fires, it was
+never tested. The default stop rule, `UntilCoverageStable`, keeps trying
+seeds until every `sometimes` and `reachable` assertion fired and code
+coverage stopped growing (capped at `max_iterations`).
+
+## Events and invariants
+
+Code emits ordinary `tracing` events, the same ones production
+observability reads. `SimulationLayer` captures them into a timeline, and
+invariants (`.invariant(...)`, `.invariant_fn(...)`) read it after every
+simulation step. Injected faults appear on the same timeline as
+`SimFaultEvent`s.
+
+## Exploration
+
+With the `exploration` feature (on by default), `enable_exploration` turns on
+`moonpool-explorer`. When a seed reaches a new assertion outcome, the
+explorer records a recipe of RNG call counts and seeds. Bounded workers
+replay that prefix and continue it with fresh randomness. A bug comes back
+as a `BugRecipe`; `replay_timeline(seed, recipe)` reproduces it. This is
+assertion-guided randomized testing, not exhaustive model checking.
+Exploration needs factory workloads (`workload_factory` or `workloads`).
+
+## Feature flags
+
+| Feature | Default | Effect |
+|---------|---------|--------|
+| `tokio-providers` | on | Re-exports `TokioProviders` so one test can drive the same code in production mode and in simulation |
+| `exploration` | on | Fork-based exploration through `moonpool-explorer` (uses `libc`) |
+
+With `--no-default-features` the crate builds for `wasm32`. Every chaos
+surface and the assertion accounting still work.
 
 ## Documentation
 
-- [API Documentation](https://docs.rs/moonpool-sim)
+- [The Sim Book](https://pierrez.github.io/moonpool/): the user guide
+- [API documentation](https://docs.rs/moonpool-sim)
 - [Repository](https://github.com/PierreZ/moonpool)
 
 ## License

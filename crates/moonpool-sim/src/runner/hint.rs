@@ -1,9 +1,9 @@
-//! The simulator's side of [`moonpool_buggify::hint`]: a moment the code
+//! The simulator's side of [`moonpool_buggify::hint!`]: a moment the code
 //! under test names becomes a fault only when the seed's own chaos allows
 //! one.
 //!
-//! A [`hint!`](moonpool_buggify::hint) point that fires asks the
-//! [`HintSink`]. The sink finds the calling process by the task being
+//! A [`hint!`](moonpool_buggify::hint!) point that fires asks the
+//! simulator's hint sink. The sink finds the calling process by the task being
 //! polled (the executor's task owner), then hands the decision to the first
 //! attrition regime whose victim filter admits it. That regime's `max_dead`
 //! budget, reboot-kind weights and recovery delays apply, exactly as for its

@@ -1,10 +1,10 @@
 //! # moonpool-rpc
 //!
-//! Typed request/reply RPC between dynamically allocated endpoints, written
-//! once against the moonpool provider traits so the same code runs over real
-//! TCP (`TokioProviders`) and under deterministic simulation
-//! (`SimProviders`). Inspired by `FoundationDB`'s `fdbrpc`, without its wire
-//! format, global state or Flow runtime.
+//! Typed request/reply RPC between dynamically allocated endpoints. The
+//! crate is written once against the moonpool provider traits, so the same
+//! code runs over real TCP (`TokioProviders`) and under deterministic
+//! simulation (`SimProviders`). It is inspired by `FoundationDB`'s `fdbrpc`,
+//! without its wire format, global state or Flow runtime.
 //!
 //! ```text
 //!  server runtime                                   client runtime
@@ -16,6 +16,110 @@
 //!  └─────────────────────────────┘                  └────────────────────────┘
 //!   ServiceRef<M> / InterfaceRef<I> ── protobuf data, handed out by the app ──►
 //! ```
+//!
+//! ## Quick example
+//!
+//! Two runtimes on real TCP: one serves an echo method, the other calls it
+//! through a reference that travels as plain bytes.
+//!
+//! ```rust
+//! # #[cfg(feature = "prost")] {
+//! use moonpool_core::TokioProviders;
+//! use moonpool_rpc::security::SecurityConfig;
+//! use moonpool_rpc::{
+//!     AccessClass, IncomingRequest, MethodId, RpcConfig, RpcDriver, RpcMethod, SchemaVersion,
+//!     ServiceRef,
+//! };
+//!
+//! /// One method: request and reply types, plus explicit ids.
+//! struct Echo;
+//! impl RpcMethod for Echo {
+//!     type Request = String;
+//!     type Reply = String;
+//!     const METHOD: MethodId = MethodId::new(1);
+//!     const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+//!     const NAME: &'static str = "echo";
+//! }
+//!
+//! let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+//! runtime.block_on(async {
+//!     // Private endpoints fail closed: this demo opts out explicitly.
+//!     let config = RpcConfig {
+//!         security: SecurityConfig::trusted_network(),
+//!         ..RpcConfig::default()
+//!     };
+//!     let (driver, server) =
+//!         RpcDriver::listen(TokioProviders::new(), "127.0.0.1:0", config).await?;
+//!     tokio::spawn(driver.run());
+//!
+//!     // Registering returns the routing data and the owned receiver.
+//!     let (service, mut requests) = server.register::<Echo>(AccessClass::Private)?;
+//!     tokio::spawn(async move {
+//!         while let Some(IncomingRequest { request, reply }) = requests.recv().await {
+//!             let _ = reply.send(&request);
+//!         }
+//!     });
+//!
+//!     let (driver, client) = RpcDriver::client_only(TokioProviders::new(), RpcConfig::default())?;
+//!     tokio::spawn(driver.run());
+//!
+//!     // The reference is protobuf bytes; decoding needs no runtime.
+//!     let echo = ServiceRef::<Echo>::from_bytes(&service.to_bytes())?.bind(&client);
+//!     let reply = echo.try_get_reply(&"hello".to_string()).await?;
+//!     assert_eq!(reply, "hello");
+//!     Ok::<(), Box<dyn std::error::Error>>(())
+//! })?;
+//! # }
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! With the `derive` feature, `#[moonpool_rpc::service]` generates the method markers, a
+//! dispatcher and a typed client from one trait.
+//!
+//! ## Features
+//!
+//! - **Owned runtime.** [`RpcDriver`] owns every connection, registration
+//!   and pending call. [`RpcHandle`] is a weak, cloneable handle.
+//! - **Checked references as data.** [`ServiceRef`] and [`InterfaceRef`]
+//!   are protobuf messages with a 128-bit [`Incarnation`] and a checked
+//!   [`EndpointToken`]. A stale reference is refused, never redirected.
+//! - **Honest delivery.** Every failure is an [`RpcError`]: an
+//!   [`ErrorReason`] plus the [`Execution`] it proves.
+//! - **Interfaces.** Endpoint groups ([`ServiceGroup`], [`RpcInterface`])
+//!   serve several methods from one slot.
+//! - **Reply streams.** [`ReplyStream`] and [`StreamProducer`], paced by
+//!   consumption credit ([`stream`]).
+//! - **Failure detection.** [`FailureMonitor`] and [`PeerPolicy`]: ping,
+//!   idle close, jittered reconnect backoff.
+//! - **Bootstrap endpoints.** [`WellKnownRef`] and [`BootstrapClient`]
+//!   survive restarts and resolve hostnames.
+//! - **Load balancing.** [`balance`]: locality, a queue model, penalties,
+//!   retry and hedge permissions kept apart.
+//! - **Bounded resources.** [`ResourceLimits`], [`StreamPolicy`] and
+//!   per-endpoint admission queues ([`EndpointQueue`]) push back with
+//!   [`ErrorReason::Overloaded`] instead of dropping admitted work.
+//! - **Security.** Per-request credentials, access classes, allow lists
+//!   and key rotation ([`security`]); TLS and JWT behind features.
+//! - **Protocol versions and graceful shutdown.**
+//!   [`RpcConfig::protocol_versions`] and [`RpcHandle::shutdown`].
+//! - **Metrics.** [`observability::RpcMetrics`] and [`RpcStats`].
+//! - **Simulation fault sites.** The runtime carries `moonpool_buggify`
+//!   points (see [Simulation](#simulation)).
+//!
+//! ## Feature flags
+//!
+//! | Feature | Default | What it adds |
+//! |---|---|---|
+//! | `prost` | on | Protobuf bodies: every `prost::Message + Default` type is [`Wire`] |
+//! | `derive` | off | `#[moonpool_rpc::service]`: interfaces, dispatchers and clients from a trait (`moonpool-rpc-derive`) |
+//! | `tls` | off | Server-authenticated TLS 1.3 sessions (`security::tls`, rustls with `ring`); native only |
+//! | `jwt` | off | JWT/JWKS request verification (`security::jwt`, `jsonwebtoken`); native only |
+//!
+//! The frame envelope is hand-written and codec-independent. With
+//! `--no-default-features` the transport still works, applications
+//! implement [`Wire`] themselves, and the crate builds for
+//! `wasm32-unknown-unknown`. The security policy core in [`security`] is
+//! always compiled.
 //!
 //! ## The manual API
 //!
@@ -167,6 +271,24 @@
 //!   session. Control frames go first and the socket reader never waits on
 //!   an application queue; malformed, corrupt or oversized input closes the
 //!   connection observably ([`RpcStats`]).
+//!
+//! ## Simulation
+//!
+//! This crate never depends on `moonpool-sim`. It calls the inert
+//! `moonpool_buggify` macros, which evaluate to `false` outside a
+//! simulation. Under a simulation, these sites force the rare moments that
+//! random network faults seldom hit:
+//!
+//! - a session cut right behind a two-way request (the lost-response
+//!   window): an at-most-once call fails [`Execution::MaybeExecuted`], and a
+//!   reliable call may execute twice;
+//! - a spurious [`ErrorReason::Overloaded`] refusal at admission;
+//! - a stream acknowledgement deferred to the next item;
+//! - a failure-monitor wakeup with nothing changed.
+//!
+//! [`RpcStats`] counts each injected fault. The simulation harness,
+//! workloads and oracles live in the non-published `moonpool-rpc-sim`
+//! crate.
 //!
 //! Wire format: [`protocol`] (frame and envelope), [`codec`] (bodies).
 #![deny(missing_docs)]

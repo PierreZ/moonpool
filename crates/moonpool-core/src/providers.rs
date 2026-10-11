@@ -1,15 +1,10 @@
-//! Provider bundle trait for simplified type parameters.
+//! The [`Providers`] bundle: six provider types behind one type parameter.
 //!
-//! This module provides a unified [`Providers`] trait that bundles all six
-//! provider types into a single type parameter, eliminating type parameter
-//! explosion in downstream code.
-//!
-//! ## Motivation
-//!
-//! Without bundling, code must carry six separate type parameters:
+//! Without a bundle, a component that needs every provider carries six type
+//! parameters:
 //!
 //! ```text
-//! struct MyStruct<N, T, TP, R, S, Y>
+//! struct Node<N, T, TP, R, S, Y>
 //! where
 //!     N: NetworkProvider,
 //!     T: TimeProvider,
@@ -19,20 +14,29 @@
 //!     Y: SystemProvider,
 //! ```
 //!
-//! With bundling, this simplifies to:
+//! With the bundle it carries one, and reaches each provider through an
+//! accessor:
 //!
-//! ```text
-//! struct MyStruct<P: Providers>
+//! ```rust
+//! use moonpool_core::prelude::*;
+//!
+//! struct Node<P: Providers> {
+//!     providers: P,
+//! }
+//!
+//! impl<P: Providers> Node<P> {
+//!     fn uptime(&self) -> std::time::Duration {
+//!         self.providers.time().now()
+//!     }
+//! }
+//!
+//! let node = Node { providers: TokioProviders::new() };
+//! let _ = node.uptime();
 //! ```
 //!
-//! ## Usage
-//!
-//! ```rust,ignore
-//! use moonpool_core::{Providers, TokioProviders};
-//!
-//! let providers = TokioProviders::new();
-//! let time_now = providers.time().now();
-//! ```
+//! Two bundles exist: [`TokioProviders`] here, for production, and
+//! `SimProviders` in `moonpool-sim`, which a simulation hands to each process
+//! and workload through `SimContext::providers`.
 
 use crate::{
     NetworkProvider, RandomProvider, StorageProvider, SystemProvider, TaskProvider, TimeProvider,
@@ -109,14 +113,14 @@ macro_rules! impl_providers_bundle {
 ///
 /// ## Implementations
 ///
-/// - [`TokioProviders`]: Production providers using real Tokio runtime
-/// - `SimProviders` (in moonpool-sim): Simulation providers for deterministic testing
+/// - [`TokioProviders`]: production providers on a real Tokio runtime.
+/// - `SimProviders` (in `moonpool-sim`): deterministic simulation providers.
 ///
 /// ## Design
 ///
-/// The trait uses associated types to preserve type information at compile time
-/// without runtime dispatch. Accessor methods provide convenient access to
-/// individual providers while maintaining the bundle.
+/// Associated types keep every provider type known at compile time, so there
+/// is no dynamic dispatch. The bundle is `Clone + Send + Sync + 'static`, like
+/// each provider, so it moves into spawned tasks.
 pub trait Providers: Clone + Send + Sync + 'static {
     /// Network provider type for TCP connections and listeners.
     type Network: NetworkProvider;
@@ -155,23 +159,26 @@ pub trait Providers: Clone + Send + Sync + 'static {
     fn system(&self) -> &Self::System;
 }
 
-/// Production providers using Tokio runtime.
+/// Production providers: the six Tokio-backed providers in one bundle.
 ///
-/// This struct bundles all six Tokio-based providers into a single
-/// instance that implements [`Providers`].
+/// | Slot | Type |
+/// |------|------|
+/// | network | [`TokioNetworkProvider`] |
+/// | time | [`TokioTimeProvider`] |
+/// | task | [`TokioTaskProvider`] |
+/// | random | [`TokioRandomProvider`] |
+/// | storage | [`TokioStorageProvider`] |
+/// | system | [`TokioSystemProvider`] |
 ///
-/// ## Example
+/// Tasks and timers need a running Tokio runtime. Build the bundle anywhere,
+/// and call the async methods from inside the runtime.
 ///
-/// ```rust,ignore
-/// use moonpool_core::{Providers, TokioProviders};
+/// ```rust
+/// use moonpool_core::prelude::*;
 ///
 /// let providers = TokioProviders::new();
-///
-/// // Access individual providers
-/// let network = providers.network();
-/// let time = providers.time();
-/// let task = providers.task();
-/// let random = providers.random();
+/// let _elapsed = providers.time().now();
+/// let _coin = providers.random().random_bool(0.5);
 /// ```
 #[cfg(feature = "tokio-providers")]
 #[derive(Clone)]
@@ -186,10 +193,8 @@ pub struct TokioProviders {
 
 #[cfg(feature = "tokio-providers")]
 impl TokioProviders {
-    /// Create a new production providers bundle.
-    ///
-    /// Initializes all six Tokio-based providers with their default
-    /// configurations.
+    /// Create the production bundle. Each provider starts with its default
+    /// configuration, and the time and system clocks count from now.
     #[must_use]
     pub fn new() -> Self {
         Self {

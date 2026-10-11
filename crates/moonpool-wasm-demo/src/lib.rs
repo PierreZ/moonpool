@@ -1,9 +1,51 @@
-//! Browser/wasm demo of one deterministic raw-TCP ping-pong simulation.
+//! Browser demo of one deterministic raw-TCP ping-pong simulation.
 //!
-//! The workload emits ordinary `client_*` tracing events. A separate invariant
-//! reconstructs those events into [`Shot`]s, keeping visualization concerns out
-//! of the actors. [`run_seed`] returns the structured result and
-//! [`run_seed_json`] preserves the browser's JSON contract.
+//! The crate runs **one seed** of a small simulation and returns its message
+//! timeline. The same code runs natively and as wasm in a browser tab, where
+//! `web/index.html` animates each round trip and the impact of network
+//! chaos. The Sim Book embeds this page. The crate is not published.
+//!
+//! Two nodes speak a tiny integrity-checked TCP protocol:
+//!
+//! - **Node B** is a server `Process` (the ponger) that echoes every frame.
+//! - **Node A** is a client `Workload` (the pinger) that sends 12 frames.
+//!
+//! `Chaos::Network(ChaosMode::Random)` adds seeded latency, reordering and
+//! connection drops. The global scheduler advances logical time through
+//! delayed network events, so nothing really waits, and a whole run fits in
+//! a browser tab. The same seed gives the same run, byte for byte, natively
+//! and in the browser.
+//!
+//! # Quick example
+//!
+//! ```rust
+//! use moonpool_wasm_demo::{run_seed, run_seed_json};
+//!
+//! let result = run_seed(42);
+//! assert_eq!(result.delivered + result.dropped, result.requests);
+//! assert!(result.shots.iter().all(|shot| shot.arrive_ms >= shot.depart_ms));
+//!
+//! // The browser receives this JSON; the same seed gives the same bytes.
+//! assert_eq!(run_seed_json(42), run_seed_json(42));
+//! ```
+//!
+//! # Features
+//!
+//! - **Observation on top, not inside.** The workload emits only the
+//!   ordinary `client_*` tracing events any instrumented client would. A
+//!   separate `Invariant` reads them from the simulation timeline (through
+//!   `TraceQuery`, with the injected faults under `SIM_FAULT_EVENT_NAME`)
+//!   and rebuilds the [`Shot`]s. The actors hold no visualization code.
+//! - **Stable JSON model.** [`run_seed`] returns a [`RunResult`];
+//!   [`run_seed_json`] serializes it for the browser.
+//! - **wasm entry point.** On `wasm32`, `runSeed(seed)` is exported through
+//!   `wasm-bindgen` and installs `console_error_panic_hook`.
+//!
+//! # Feature flags
+//!
+//! None. The crate depends on `moonpool-sim` with `default-features =
+//! false`: no tokio providers and no fork-based exploration, which is the
+//! configuration that builds for `wasm32-unknown-unknown`.
 
 mod actors;
 mod model;

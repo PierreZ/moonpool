@@ -498,7 +498,8 @@ impl<P: StorageProvider> Journal<P> {
         self.index.keys().next_back().copied()
     }
 
-    /// Where `position`'s persist record and entry live.
+    /// Where `position`'s persist record and entry live, for aiming a
+    /// storage fault at one of them. `None` when the position is empty.
     #[must_use]
     pub fn layout(&self, position: u64) -> Option<Layout> {
         let at = self.index.get(&position)?;
@@ -996,15 +997,15 @@ impl Prepared {
     }
 }
 
-/// The commit protocol (see [`Durability`]), then the metainfo: copy A only
-/// once the batch is synced, copy B once copy A is. A durable metainfo
-/// therefore always vouches for a durable batch; the reverse (the batch
-/// durable, its metainfo not) is what a crash between the two leaves.
 /// How often an active commit point fires per commit. A commit is short
 /// and a cut inside it is the case its recovery exists for, so the rate is
 /// the buggify default rather than the lower rate of a hot-path point.
 const COMMIT_HINT_PROB: f64 = 0.25;
 
+/// The commit protocol (see [`Durability`]), then the metainfo: copy A only
+/// once the batch is synced, copy B once copy A is. A durable metainfo
+/// therefore always vouches for a durable batch; the reverse (the batch
+/// durable, its metainfo not) is what a crash between the two leaves.
 async fn write_protocol<F: moonpool_core::StorageFile>(
     segment: &Segment<F>,
     meta_file: &MetaFile<F>,

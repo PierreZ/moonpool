@@ -20,16 +20,20 @@ use super::{
 ///
 /// ## Usage
 ///
-/// ```rust,ignore
-/// use moonpool_sim::{SimWorld, SimProviders, Providers};
+/// The runner builds one bundle per process and hands it over through
+/// [`SimContext::providers`](crate::SimContext::providers). A test that
+/// drives a [`SimWorld`](crate::SimWorld) by hand builds its own:
+///
+/// ```rust
+/// use moonpool_sim::{Providers, SimProviders, SimWorld};
 ///
 /// let sim = SimWorld::new();
-/// let ip: std::net::IpAddr = "10.0.1.1".parse().unwrap();
+/// let ip = std::net::IpAddr::from([10, 0, 1, 1]);
 /// let providers = SimProviders::new(sim.downgrade(), ip);
 ///
-/// // Access individual providers
-/// let network = providers.network();
-/// let storage = providers.storage();
+/// // Access individual providers.
+/// let _network = providers.network();
+/// let _storage = providers.storage();
 /// ```
 ///
 /// ## Implementation Notes

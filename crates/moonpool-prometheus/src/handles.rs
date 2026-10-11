@@ -194,9 +194,18 @@ impl SimHistogram {
     ///
     /// The timer observes on drop, so an early `?` return still records:
     ///
-    /// ```ignore
-    /// let _timer = latency.start_timer(ctx.time());
-    /// let response = client.request(req).await?;
+    /// ```rust
+    /// use std::time::Duration;
+    ///
+    /// use moonpool_core::{TimeError, TimeProvider};
+    /// use moonpool_prometheus::SimHistogram;
+    ///
+    /// async fn handle<T: TimeProvider>(time: &T, latency: &SimHistogram) -> Result<(), TimeError> {
+    ///     let _timer = latency.start_timer(time);
+    ///     // The timer records even when this `?` returns early.
+    ///     time.sleep(Duration::from_millis(5)).await?;
+    ///     Ok(())
+    /// }
     /// ```
     #[must_use]
     pub fn start_timer<T: TimeProvider>(&self, time: &T) -> SimTimer<T> {

@@ -6,15 +6,24 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```rust
+//! # use async_trait::async_trait;
+//! # use moonpool_sim::{Process, SimContext, SimulationResult};
+//! # struct MyNode;
+//! # #[async_trait]
+//! # impl Process for MyNode {
+//! #     fn name(&self) -> &str { "node" }
+//! #     async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+//! # }
+//! use moonpool_sim::SimulationBuilder;
+//!
 //! // 5 processes with tags distributed round-robin:
 //! // dc: east, west, eu, east, west
 //! // rack: r1, r2, r1, r2, r1
-//! .processes(5, || MyNode::new())
-//!     .tags(&[
-//!         ("dc", &["east", "west", "eu"]),
-//!         ("rack", &["r1", "r2"]),
-//!     ])
+//! let _builder = SimulationBuilder::new()
+//!     .processes(5, || Box::new(MyNode))
+//!     .tags(&[("dc", &["east", "west", "eu"]), ("rack", &["r1", "r2"])])
+//!     .expect("tags follow a process group");
 //! ```
 
 use std::collections::BTreeMap;

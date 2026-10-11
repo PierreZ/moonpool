@@ -265,8 +265,8 @@ impl Trust {
         self.clock.set(UtcTime::from_unix_seconds(self.utc()));
     }
 
-    /// Publish a fresh key and retire the oldest beyond
-    /// [`PUBLISHED_KEYS`]; returns the new generation.
+    /// Publish a fresh key and retire the oldest ones, so at most two keys
+    /// stay published; returns the new generation.
     ///
     /// # Errors
     ///

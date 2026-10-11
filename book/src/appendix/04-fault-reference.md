@@ -2,233 +2,176 @@
 
 <!-- toc -->
 
-Consolidated quick-reference of every fault moonpool-sim can inject, organized
-by category. For detailed explanations and examples, see
-[Network Faults](../part3-building/10-network-faults.md),
-[Storage Faults](../part3-building/11-storage-faults.md), and
-[Attrition: Process Reboots](../part3-building/09-attrition.md).
-
-Every fault listed below is automatically emitted to the `"sim_fault"`
-[event timeline](../part3-building/17-events-and-invariants.md) as a
-`SimFaultEvent`. Invariants can read these to correlate application behavior
-with infrastructure faults.
-
-All defaults below refer to the values in `ChaosConfiguration::default()` and `StorageConfiguration::default()`. When using `random_for_seed()`, these values are randomized per seed within documented ranges.
+Every fault the simulator can inject, with where it is configured and how it shows up. Rates and defaults are in the [Configuration Reference](./03-configuration.md). Every fault is drawn from the one seeded stream, so it replays exactly.
 
 ## Network Faults
 
-Configured via `ChaosConfiguration` (nested under `NetworkConfiguration::chaos`).
+Enabled by `Chaos::Network(mode)`, limited by `network_fault_mask`. Each family is one `NetworkFault` bit.
 
-### Connection Failures
+| `NetworkFault` | Bit | What happens | Config fields |
+|----------------|-----|--------------|---------------|
+| `Clog` | `1 << 0` | Delivery of a write is held for a duration, then resumes. | `clog_probability`, `clog_duration` |
+| `Partition` | `1 << 1` | Directed partitions. Sends between the chosen IPs are dropped until healed. | `partition_probability`, `partition_duration`, `partition_strategy` |
+| `BitFlip` | `1 << 2` | 1 to 32 bits of in-flight data are flipped. | `bit_flip_probability`, `bit_flip_min_bits`, `bit_flip_max_bits`, `bit_flip_cooldown` |
+| `RandomClose` | `1 << 3` | A connection closes during I/O. A share is an explicit close, the rest a reset. | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` |
+| `ConnectFailure` | `1 << 4` | `connect` fails or hangs. | `connect_failure_mode`, `connect_failure_probability` |
+| `ClockDrift` | `1 << 5` | Each node's clock drifts up to a bound. | `clock_drift_enabled`, `clock_drift_max` |
+| `BuggifiedDelay` | `1 << 6` | Timers fire late by an extra random delay. | `buggified_delay_enabled`, `buggified_delay_max`, `buggified_delay_probability` |
+| `PairLatency` | `1 << 7` | One IP pair gets permanent extra latency. | `max_pair_latency` |
+| `BlackHole` | `1 << 8` | A connection whose sends vanish silently and forever. | `black_hole_probability`, `black_hole_cooldown` |
 
-| Fault | Config Field | Default | Real-World Scenario |
-|-------|-------------|---------|---------------------|
-| Random connection close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
-| Close error surfacing | `random_close_explicit_ratio` | 30% immediate error, 70% silent close | Explicit-error and timeout-based detection |
-| Close cooldown | `random_close_cooldown` | 5s | Prevents cascading failures after a close event |
-| Black hole | `black_hole_probability` | 0% (off) | A direction that delivers nothing, forever: writes are accepted until the send window fills, then block. Missing request timeouts, keep-alive and heartbeat detection, half-open connections, writers without a deadline |
-| Black hole cooldown | `black_hole_cooldown` | 5s | Spaces out black holes across connections |
-| Connect failure | `connect_failure_mode` | `Probabilistic` (50% refused, 50% hang) | Connection establishment retries, timeout handling |
-| Connect failure probability | `connect_failure_probability` | 50% | Probability a buggified connect is refused (the rest hang) |
+Partial reads and writes (`partial_write_max_bytes`, `partial_read_max_bytes`) are TCP behaviour exercised through buggify. The mask does not touch them.
 
-### Latency and Congestion
+`PartitionStrategy` picks the victims: `Random`, `UniformSize`, `IsolateSingle`, `IsolateZone`, `IsolateDatacenter`, `AsymmetricSend`, `AsymmetricRecv`. The locality strategies need `cluster(..)` topology.
 
-| Fault | Config Field | Default | Real-World Scenario |
-|-------|-------------|---------|---------------------|
-| Operation latency shape | `bind/accept/connect/write_latency` | `Uniform` | P99/P99.9 tail latency testing |
-| Exponential tail | `LatencyDistribution::Exponential { min, mean }` | opt-in | Slow disks, GC pauses (TigerBeetle model) |
-| Bimodal tail | `LatencyDistribution::Bimodal { fast_range, slow_range, slow_probability }` | opt-in | Rare cross-datacenter hops, GC spikes (FoundationDB model) |
-| Write clogging | `clog_probability` / `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
-| Per-pair permanent latency | `max_pair_latency` | `ZERO..ZERO` (off) | One stably-slow peer blocking quorum, asymmetric link delay |
-| Distance-based link latency | `link_latency` (`LinkLatencyConfig`) | `None` (off) | Loopback vs rack vs region hops, cross-datacenter replication cost |
-| Clock drift | `clock_drift_enabled` / `clock_drift_max` | enabled, 100ms | Lease expiration, distributed consensus, TTL handling |
-| Buggified delay | `buggified_delay_probability` / `buggified_delay_max` | 25%, 100ms | Race conditions, timing-dependent bugs |
-| Handshake delay | `handshake_delay_enabled` / `handshake_delay_max` | enabled, 10ms | TLS negotiation, connection startup overhead |
+`NetworkFaultMask::all()`, `none()`, `.with(fault)`, `.without(fault)`, `.contains(fault)`. Recovery mode (`SimWorld::enter_recovery_mode`) is the `none()` mask plus healing of held partitions.
 
-### Network Partitions
+### Manual network control
 
-| Fault | Config Field | Default | Real-World Scenario |
-|-------|-------------|---------|---------------------|
-| Random partition | `partition_probability` | 0% | Split-brain, quorum loss, leader election |
-| Partition duration | `partition_duration` | 200ms-2s | Recovery time after network heal |
-| Partition strategy | `partition_strategy` | `Random` | `Random` / `UniformSize` / `IsolateSingle` patterns |
-| Failure-domain partition | `partition_strategy = IsolateZone` / `IsolateDatacenter` | `Random` | Rack or region cut (needs a `cluster` topology, else falls back to `Random`) |
-| One-way partition | `partition_strategy = AsymmetricSend` / `AsymmetricRecv` | `Random` | Half-reachable node, failure detectors that infer liveness from the wrong direction |
-
-Manual partition methods are also available on `SimWorld`: `partition_pair()`, `partition_send_from()`, and `partition_recv_to()`. `partition_pair(from, to, ...)` creates one directed pair entry; `restore_partition(from, to)` removes pair entries in both directions so a bidirectional cut can be healed with one call. Send-wide and receive-wide partitions are restored by their own expiry events.
-
-### Data Integrity
-
-| Fault | Config Field | Default | Real-World Scenario |
-|-------|-------------|---------|---------------------|
-| Bit flips | `bit_flip_probability` | 0% (Random/Swarm profiles sample it) | CRC/checksum validation, data corruption detection |
-| Flip range | `bit_flip_min_bits` / `bit_flip_max_bits` | 1-32 bits | Power-law distribution of corruption severity |
-| Flip cooldown | `bit_flip_cooldown` | 0 (no cooldown) | Rate-limiting corruption events |
-| Partial writes | `partial_write_max_bytes` | 1000 bytes | TCP fragmentation, message framing |
-| Partial reads | `partial_read_max_bytes` | 1000 bytes | TCP short reads, message reassembly / framing |
+| Method | On | Effect |
+|--------|----|--------|
+| `partition_pair(from, to, duration)` | `SimWorld` | Drop sends from `from` to `to` for `duration`. |
+| `partition_send_from(ip, duration)` | `SimWorld` | Drop every send from `ip`. |
+| `partition_recv_to(ip, duration)` | `SimWorld` | Drop every send to `ip`. |
+| `restore_partition(from, to)` | `SimWorld` | Heal one direction. |
+| `is_partitioned(from, to)` | `SimWorld` | Query. |
+| `partition(a, b)`, `heal_partition(a, b)`, `is_partitioned(a, b)` | `FaultContext` | The same, by IP string, from a custom injector. |
 
 ## Storage Faults
 
-Configured via `StorageConfiguration`. All fault probabilities default to 0%
-and must be enabled explicitly or via `random_for_seed()`. Storage faults are
-scoped per process. `StorageEngine` owns the default profile, per-process
-overrides, and degradation episodes, then resolves the profile from each
-persistent file's owner. Use
-`SimWorld::set_process_storage_config(ip, config)` to assign different fault
-profiles to individual processes.
+Enabled by `Chaos::Storage(mode)`, limited by `storage_fault_mask`. Fault coordinates are a file path plus a flat 512-byte sector offset.
 
-Each delayed storage completion targets one exact `OperationId`. Crash, wipe,
-and shutdown cancel live schedules, store explicit errors for interrupted
-operations, and wake their registered callers. Missing completion state is
-never interpreted as success.
+| `StorageFault` | What happens | Config fields | Reported as |
+|----------------|--------------|---------------|-------------|
+| `Corruption` | A read or write plants a latent, deterministic sector corruption. | `read_corruption_probability`, `write_corruption_probability` | `StorageFaultKind::ReadCorruption`, `WriteCorruption` |
+| `Eio` | A read or write fails with an I/O error. The bytes are not corrupt. | `read_eio_probability`, `write_eio_probability` | `EioRead`, `EioWrite` |
+| `Misdirect` | A read is served from, or a write lands at, the wrong offset. | `misdirect_read_probability`, `misdirect_write_probability` | `MisdirectedRead`, `MisdirectedWrite` |
+| `PhantomWrite` | A write reports success and never reaches the disk. | `phantom_write_probability` | `PhantomWrite` |
+| `SyncFailure` | `sync_all`, `sync_data` or `sync_dir` fails. | `sync_failure_probability` | `SyncFailure` |
+| `ShortTransfer` | A read or write transfers fewer bytes than asked. | `short_transfer_probability` | |
+| `DirEntryLoss` | A crash loses a directory entry that was not `sync_dir`'d. | `unsynced_dir_entry_loss_probability` | `DirEntryLost` |
+| `CrashDamage` | Unsynced sectors resolve by crash physics (below). | `crash_lost_probability`, `crash_latent_fault_probability`, `shorn_write_probability` | `FileCrashReport` |
+| `Degradation` | Disk stall (operations wait) or throttle (iops and bandwidth divided) episodes. | `disk_stall_*`, `disk_throttle_*` | |
+| `DiskFailure` | The disk fails for good. Every later operation stays pending forever. | `disk_failure_probability` | `storage_disk_failure` event |
 
-| Fault | Config Field | Default | Real-World Scenario |
-|-------|-------------|---------|---------------------|
-| Read corruption | `read_corruption_probability` | 0% | ECC failures, DRAM bit flips, media degradation |
-| Write corruption | `write_corruption_probability` | 0% | Bad sectors, controller bugs, disk full |
-| Read EIO | `read_eio_probability` | 0% | The device refusing a read — an error, not corrupt bytes |
-| Write EIO | `write_eio_probability` | 0% | The device refusing a write |
-| Misdirected write | `misdirect_write_probability` | 0% | Firmware bugs, wrong location written |
-| Misdirected read | `misdirect_read_probability` | 0% | Controller errors, wrong location read |
-| Phantom write | `phantom_write_probability` | 0% | Drive lies about durability |
-| Sync failure | `sync_failure_probability` | 0% | fsync fails, disk full |
-| Short transfer | `short_transfer_probability` | 0% | `read`/`write` moving a prefix and returning the count |
-| Lost directory entry | `unsynced_dir_entry_loss_probability` | 0% | A create, delete, or rename that no `sync_dir` made durable |
+The barrier-violation family (`barrier_violation_probability`) is separate from the mask. When it is 0, a sector a sync reported durable that changes across a crash fails the run with `StorageFaultKind::LostSyncedWrite`. This is the **lost-synced-write oracle**. When it is above 0, the lie is permitted and recorded.
 
-A builder campaign can keep families out of every seed with
-`SimulationBuilder::storage_fault_mask`, applied after the Random or Swarm
-profile and the buggify knobs are sampled, consuming no draw. Each
-`StorageFault` variant zeroes these fields:
+`StorageFaultMask::all()`, `none()`, `.with(fault)`, `.without(fault)`, `.contains(fault)`. `StorageConfiguration::disable_fault_injection()` zeroes every family including barrier violation.
 
-| `StorageFault` | Fields it zeroes |
-|----------------|------------------|
-| `Corruption` | `read_corruption_probability`, `write_corruption_probability` |
-| `Eio` | `read_eio_probability`, `write_eio_probability` |
-| `Misdirect` | `misdirect_read_probability`, `misdirect_write_probability` |
-| `PhantomWrite` | `phantom_write_probability` |
-| `SyncFailure` | `sync_failure_probability` |
-| `ShortTransfer` | `short_transfer_probability` |
-| `DirEntryLoss` | `unsynced_dir_entry_loss_probability` |
-| `CrashDamage` | `crash_lost_probability`, `crash_latent_fault_probability`, `shorn_write_probability` |
-| `Degradation` | `disk_stall_probability`, `disk_throttle_probability` |
-| `DiskFailure` | `disk_failure_probability` |
+### The crash model
 
-### The Crash Model
+A crash (any `RebootKind::Crash`, `CrashAndWipe`, `crash_self`, or a disk crash during `simulate_crash_for_process`) resolves every sector written since the last sync independently:
 
-What a crash *does* to writes a sync had not yet made durable. Not "should a
-crash happen" — the harness decides that — but the physics one resolves with.
-Every sector written since the last sync resolves independently.
+| `CrashOutcome` | Meaning |
+|----------------|---------|
+| `KeptOld` | The sector holds the bytes before the write. |
+| `KeptNew` | The write survived. |
+| `Lost` | The sector holds the fill pattern (`garbage_fill_probability` chooses garbage over zeros). |
+| `LatentFault` | The sector reads back with an error until rewritten. |
+| `Shorn` | Part of the sector is old, part new. |
 
-| Parameter | Config Field | Default | Effect |
-|-----------|-------------|---------|--------|
-| Clean crash | `clean_crash_probability` | 10% | Every unsynced write survives intact (FDB's number) |
-| Correlated rollback | `correlated_rollback_probability` / `correlated_rollback_max_run` | 25%, 8 | A contiguous sector run rolls back together (erase-block damage) |
-| Lost sector | `crash_lost_probability` | 0% | The sector reverts to never-written and reads the fill pattern |
-| Latent fault | `crash_latent_fault_probability` | 0% | The new bytes land, but reads return deterministic damage |
-| Shorn write | `shorn_write_probability` | 0% | A sub-sector mix of old and new bytes (weakens sector atomicity) |
-| Length change | `length_survives_crash_probability` | 50% | Whether an unsynced `set_len` or extension survives |
-| Fill pattern | `garbage_fill_probability` | 100% (50% under `random_for_seed`) | Whether never-written and lost sectors read garbage rather than zeros |
-| Barrier violation | `barrier_violation_probability` | 0% | A sync *lies*: it reports a sector durable and leaves it volatile |
+`clean_crash_probability` makes some crashes lose nothing. `correlated_rollback_probability` and `correlated_rollback_max_run` roll back a run of adjacent sectors together. `length_survives_crash_probability` decides whether an unsynced `set_len` survives. `FileCrashReport` lists the outcome per sector; `SimWorld::take_storage_crash_reports()` drains them.
 
-A sector with no other outcome lands old or new with equal probability. Every
-synced sector is stamped with a CRC of what the caller was told is durable; a
-stamp that no longer matches after a crash fails the run as a simulator bug,
-unless the barrier-violation family is armed, in which case it is reported as
-a `LostSyncedWrite`.
+### Targeted injection
 
-### Targeted Storage Faults
+| Method | On | Effect |
+|--------|----|--------|
+| `corrupt_file(path, sectors)` | `SimWorld` | Corrupt sectors of a file now. |
+| `fail_file_with_eio(path, sectors, EioTarget)` | `SimWorld` | Make reads, writes or both fail on those sectors. |
+| `clear_file_eio(path, EioTarget)` | `SimWorld` | Lift it. |
+| `corrupt_durable_out_of_band(path, sector)` | `SimWorld` | Corrupt a synced sector without a crash (bit rot). |
+| `corrupt_process_file_bytes(ip, path, bytes)` | `SimWorld` | Owner-scoped byte range corruption. |
+| `fail_process_file_with_eio(ip, path, sectors, EioTarget)`, `clear_process_file_eio` | `SimWorld` | Owner-scoped EIO. |
+| `process_file_durable_bytes(ip, path)` | `SimWorld` | The durable image of a file. |
+| `durable_bytes(ip, path)`, `corrupt_bytes(..)`, `fail_file_with_eio(..)`, `clear_file_eio(..)` | `FaultContext` | The same from a custom injector. |
+| `simulate_crash_for_process(ip, close_files)` | `SimWorld` | Run crash resolution on a process's files. |
+| `wipe_storage_for_process(ip)` | `SimWorld` | Delete every file the process owns. |
+| `fail_disk_for_process(ip)` | `SimWorld` | Permanent disk failure. `is_disk_failed(ip)` queries. |
+| `set_storage_eligibility_mask(mask)`, `clear_storage_eligibility_mask()` | `SimWorld` | Gate the random families by `(path, sector)`. |
+| `set_fault_focus(focus)`, `clear_fault_focus()`, `publish_layout(..)` | `SimWorld` | Weight the random families by byte range or `LayoutRegion`. |
+| `draw_replicated_faults(config, localities)` | `SimWorld` | Draw a `FaultPattern` for a replicated group. |
+| `take_storage_fault_records()` | `SimWorld` | Drain `StorageFaultRecord { path, kind, .. }` entries. |
 
-Directed injections, for red tests that need a specific fault rather than a
-sampled one. Coordinates are a file path and a flat sector range.
+`EioTarget` is `Read`, `Write` or `ReadWrite`.
 
-| Method | Description |
-|--------|-------------|
-| `SimWorld::corrupt_file(path, sectors)` | Plant a latent read fault: deterministic damage until the sectors are rewritten |
-| `SimWorld::fail_file_with_eio(path, sectors, target)` | Fail reads and/or writes touching the sectors |
-| `SimWorld::clear_file_eio(path, target)` | Clear the above |
-| `SimWorld::corrupt_durable_out_of_band(path, sector)` | Mutate a durable sector behind the crash model — a deliberate simulator bug, for testing the oracle |
-| `SimWorld::set_storage_eligibility_mask(mask)` | `(path, sector) -> bool`, consulted before any random fault damages a sector |
-| `SimStorageProvider::focus_faults(focus)` / `SimWorld::set_fault_focus(ip, focus)` | Weigh one process's random faults by byte range (`FaultFocus`): probabilities scale with the weight, 0 is immune |
-| `SimulationBuilder::replicated_storage_faults(config)` | Per seed and covered group (`ReplicatedFaults::group`), a minority, striped or rolling `FaultPattern` over the group's domains: a replicated record (a published `stripe`) holds damage in at most `tolerance` domains at once; a rolling turn moves on once its domain's disks show the damage repaired |
-| `SimStorageProvider::publish_layout(regions)` / `SimWorld::publish_layout(ip, regions)` | Describe a disk's regions and the replicated record each holds, for the pattern |
-| `SimWorld::take_storage_fault_records()` | Drain the faults injected so far |
-| `SimWorld::take_storage_crash_reports()` | Drain what each crash did, per file and per sector |
+### Replicated fault patterns
 
-### Per-Process Storage Operations
+`replicated_storage_faults(ReplicatedFaults::new(DomainLevel::Machine).tolerance(1).group("acceptors"))` bounds damage so that a correct replication layer can always repair:
 
-| Method | Parameters | Description |
-|--------|-----------|-------------|
-| `SimWorld::set_process_storage_config(ip, config)` | `IpAddr`, `StorageConfiguration` | Set per-process fault config (overrides global) |
-| `SimWorld::simulate_crash_for_process(ip, close_files)` | `IpAddr`, `bool` | Simulate power loss: resolve every unsynced sector and directory entry, optional file close |
-| `SimWorld::wipe_storage_for_process(ip)` | `IpAddr` | Delete all storage owned by the process |
-| `SimWorld::storage_provider(ip)` | `IpAddr` | Create a `SimStorageProvider` scoped to this process |
+| `FaultPattern` | Damage |
+|----------------|--------|
+| `Minority { domains }` | Only the listed domains, at most `tolerance`. |
+| `Striped { domains, local }` | Stripe `s` may be damaged in the `s mod n`-th domain; the `local` domains anywhere. |
+| `Rolling { domains }` | A window of `tolerance` domains at a time. The window moves once the damage is repaired. |
+| `Spared` | Fewer than two domains: nothing is damaged. |
 
-### Storage Performance Simulation
+The stripe key comes from `LayoutRegion::stripe` (the journal uses the entry position), so one pattern hits the same position on every replica.
 
-Storage also simulates realistic performance characteristics independent of fault injection.
+## Process Faults
 
-| Parameter | Config Field | Default | Description |
-|-----------|-------------|---------|-------------|
-| IOPS | `iops` | 25,000 | I/O operations per second limit |
-| Bandwidth | `bandwidth` | 150 MB/s | Maximum throughput |
-| Read latency | `read_latency` | `Uniform` 50-200us | Per-read operation delay (a `LatencyDistribution`) |
-| Write latency | `write_latency` | `Uniform` 100-500us | Per-write operation delay (a `LatencyDistribution`) |
-| Sync latency | `sync_latency` | `Uniform` 1-5ms | Per-sync/flush delay (a `LatencyDistribution`) |
+| Fault | Source | What happens |
+|-------|--------|--------------|
+| Graceful reboot | `Attrition` (`prob_graceful`), `FaultContext::reboot(ip, RebootKind::Graceful)` | The shutdown token is cancelled. After the grace period the process is force killed, then restarted after the recovery delay. |
+| Crash | `prob_crash`, `RebootKind::Crash`, `FaultContext::crash(ip)` | Tasks aborted, connections reset, storage through crash resolution. |
+| Crash and wipe | `prob_wipe`, `RebootKind::CrashAndWipe` | Crash plus deletion of every owned file. |
+| Timed crash | `FaultContext::crash_for(ip, down)` | Crash, restart after `down`. |
+| Restart | `FaultContext::restart(ip)` | Restart a process that `crash` left down. |
+| Random victim | `FaultContext::reboot_random(kind)`, `reboot_tagged(..)` | One random eligible process. |
+| Domain reboot | `FaultContext::reboot_machine(..)`, `reboot_domain(..)`; `AttritionScope::{PerMachine, PerZone, PerDatacenter}` | Every process of the domain at once. |
+| Self crash | `SimContext::crash_self(kind, Option<Duration>)`, `SimContext::self_crash() -> SelfCrash` | A process kills itself one scheduler tick from now, at an exact point of its protocol. No randomness is drawn. Only a process may call it. |
+| Outage | `Chaos::Outage` | Every process of the named groups loses power at one instant. A workload can hold it with `OutageVeto`. |
+| Hint | `hint!("label")` in library code | The seed's first admitting attrition regime may reboot the process at that moment. A workload can budget it with `HintVeto::new(\|ip, label\| bool).publish(state)` under `HINT_VETO_KEY`. |
 
-### Dynamic Disk Degradation Episodes
-
-Episodic degradation layered on top of steady-state timing (FoundationDB's `DiskFailureInjector`). Off by default and scoped per process (per owning IP): one episode freezes or throttles every file that process owns together, modelling device-level degradation, while other machines stay unaffected. While disabled, the episode state machine never draws from the RNG stream, so steady-state runs stay deterministic.
-
-| Episode | Config Field | Default | While active |
-|---------|-------------|---------|--------------|
-| Stall | `disk_stall_probability` / `disk_stall_duration` | 0%, 0ms | Disk frozen until expiry; I/O waits out the window |
-| Throttle | `disk_throttle_probability` / `disk_throttle_duration` | 0%, 0ms | Effective IOPS/bandwidth divided by the multipliers |
-| Throttle factor | `disk_throttle_iops_multiplier` / `disk_throttle_bandwidth_multiplier` | 1.0 | Divisor applied to IOPS / bandwidth during a throttle |
-
-### Disk Failure
-
-A disk that never answers (FoundationDB's `failedDisk`, where `waitUntilDiskReady()` returns `Never()`). Off by default and scoped per process: every read, write, sync, or `set_len` issued to a failed disk is accepted and stays `Pending` for the rest of the run, with no error and no scheduled completion. At most one disk is failed at a time; a crash or wipe of the owning process replaces it and fails the parked operations with `OperationInterrupted`. Recovery mode stops new failures but keeps one already in force. `SimWorld::fail_disk_for_process(ip)` is the scripted form.
-
-| Fault | Config Field | Default | Effect |
-|-------|-------------|---------|--------|
-| Disk failure | `disk_failure_probability` | 0% | Every later I/O on that process's disk parks forever; only the caller's timeout or a process kill unblocks it |
-
-## Process Lifecycle Faults
-
-Configured via [`Attrition`](../part3-building/09-attrition.md) (built-in) or
-custom [`FaultInjector`](../part3-building/07-chaos.md) implementations.
-
-| Fault | Mechanism | Behavior |
-|-------|-----------|----------|
-| Graceful reboot | `RebootKind::Graceful` | Signal shutdown token, wait grace period (default 2-5s), force kill, restart after recovery delay (default 1-10s) |
-| Crash reboot | `RebootKind::Crash` | Immediate task abort at the crash instant, all connections reset, restart after recovery delay |
-| Crash + wipe | `RebootKind::CrashAndWipe` | Crash behavior + immediate wipe of all persistent storage owned by the process (scoped by IP) |
-| Continuous attrition | `Attrition` config | Random reboots during chaos phase with weighted `prob_graceful`/`prob_crash`/`prob_wipe` and `max_dead` limit |
-| Correlated reboot | `AttritionScope::PerMachine` / `PerZone` / `PerDatacenter` | Reboot every process of one failure domain together; only fires when the whole group fits in `max_dead` |
-| Correlated outage | `Chaos::Outage` / `Outage` config | At most once per run, crash every live process of the named groups in one tick; each restarts after its own `down` draw, one optional straggler last; restarts land even after the chaos window; publishes `OutageLanded` under `OUTAGE_STATE_KEY`; an `OutageVeto` under `OUTAGE_VETO_KEY` may defer it |
+Reboots are bounded by `max_dead` per injector pool. The restart runs the process factory again: a fresh instance, the same IP, the same disk unless wiped.
 
 ## CPU and Gray Failures
 
-See [CPU Time and Gray Failures](../part3-building/26-cpu-and-gray-failure.md).
+| Fault | Source | What happens |
+|-------|--------|--------------|
+| CPU time | `Chaos::Cpu(mode)`, `SimWorld::set_cpu_model` | Every poll, sent byte and written byte costs simulated time on the process's one core. `cpu_charge(Duration)` adds explicit work. |
+| Gray failure | `Chaos::GrayFailure { config, mode }` | Up to `max_slow` machines run slow for a long window: CPU, disk and network multipliers. |
+| Manual slowness | `FaultContext::set_slowness(ip, Slowness)`, `SimWorld::set_slowness` | Install multipliers by hand. `SimContext::slowness(ip)` reads them. |
 
-| Fault | Mechanism | Behavior |
-|-------|-----------|----------|
-| CPU contention | `Chaos::Cpu` / `CpuModel` | One core per process; each poll costs `poll_cost`, each sent or written byte its per-byte cost; a busy core parks the next task until `CpuFree` |
-| Explicit CPU work | `moonpool_buggify::cpu_charge(d)` | The polling process's local clock moves by `d` times its CPU slowness |
-| Gray CPU | `Chaos::GrayFailure`, `Slowness::cpu` | Every CPU cost of the machine multiplied (×10–×1000 by default) |
-| Gray disk | `Chaos::GrayFailure`, `Slowness::disk` | Every transfer and sync latency of the machine's disk multiplied (×5–×100) |
-| Gray network | `Chaos::GrayFailure`, `Slowness::network` | Every chunk to or from the machine is delayed by its latency times the larger factor of the two ends (×2–×20) |
+## Buggify Knob Spikes
 
-A gray machine stays alive. At most `max_slow` are slow at once, and recovery mode makes every machine healthy.
+`Chaos::BuggifyKnobs` calls `apply_buggify_knobs()` on the enabled network and storage profiles for some seeds, the way FoundationDB randomizes knobs under `BUGGIFY`. It has no effect on a surface that is off.
 
-## Configuration Presets
+| Surface | Knob | Spiked range |
+|---------|------|--------------|
+| Network | `clog_probability` | 0.5 to 1.0 |
+| Network | `partition_probability` | 0.3 to 0.8 |
+| Network | `random_close_probability` | 0.01 to 0.1 |
+| Network | `black_hole_probability` | 0.01 to 0.1 |
+| Network | `bit_flip_probability` (if already on) | 0.001 to 0.01 |
+| Storage | `iops` | 100 to 5000 |
+| Storage | `bandwidth` | 1 MB/s to 20 MB/s |
+| Storage | `sync_failure_probability` | 0.05 to 0.2 |
+| Storage | `disk_stall_probability`, `disk_stall_duration` | 0.1 to 0.5, 100 ms to 500 ms |
+| Storage | `disk_throttle_probability`, `disk_throttle_duration` | 0.1 to 0.5, 1 s to 5 s |
+| Storage | `disk_failure_probability` | 0.001 to 0.01 |
 
-| Preset | Description |
-|--------|-------------|
-| `NetworkConfiguration::random_for_seed()` | All chaos parameters randomized per seed for comprehensive testing |
-| `NetworkConfiguration::fast_local()` | 1-10us latencies, all chaos disabled |
-| `ChaosConfiguration::disabled()` | Zero probability for every fault category |
-| `StorageConfiguration::random_for_seed()` | Randomized faults (0.001%-0.1%), varied IOPS (10K-100K), varied bandwidth (50-500 MB/s) |
-| `StorageConfiguration::fast_local()` | 1M IOPS, 1 GB/s bandwidth, 1us latencies, all faults disabled |
+## Fault Events in the Timeline
 
-See [Configuration Reference](./03-configuration.md) for the complete builder API and all configuration types.
+The engine records `SimFaultEvent`s. The runner merges them into the trace under `SIM_FAULT_EVENT_NAME` (`"sim_fault"`) with `source = "sim"` and a `kind` field. An invariant queries them with `q.since("sim_fault", &cursor)`.
+
+| `kind` | Family |
+|--------|--------|
+| `process_graceful_shutdown`, `process_force_kill`, `process_restart` | process lifecycle |
+| `partition_created`, `partition_healed` | directed partitions |
+| `send_partition_created`, `send_partition_healed`, `recv_partition_created`, `recv_partition_healed` | one-sided partitions |
+| `random_close`, `black_hole`, `bit_flip` | connection faults |
+| `storage_read_fault`, `storage_write_fault`, `storage_sync_fault` | storage I/O faults |
+| `storage_disk_failure`, `storage_crash`, `storage_wipe` | disk and crash |
+
+`SimWorld::take_faults()` drains them in a low-level test.
+
+## Presets
+
+| Preset | Use |
+|--------|-----|
+| `NetworkConfiguration::default()` | FoundationDB's always-on rates: rare random closes, clock drift, buggified delays, probabilistic connect failures. No clogs, partitions, bit flips or black holes. |
+| `NetworkConfiguration::fast_local()` | Microsecond latencies, chaos disabled. |
+| `ChaosConfiguration::disabled()` | Every network fault off. |
+| `StorageConfiguration::default()` | Realistic SSD timing, no faults. |
+| `StorageConfiguration::fast_local()` | 1 µs operations, no faults. |
+| `random_for_seed()` / `swarm_for_seed()` | What `ChaosMode::Random` and `ChaosMode::Swarm` draw. |

@@ -2,11 +2,25 @@
 
 <!-- toc -->
 
-Our key-value server is a Process. It listens for connections, handles get/set requests, and respects shutdown signals. Everything it does goes through providers, never raw tokio calls.
+Our key-value server is a Process. It listens for connections, answers get and set requests, and respects the shutdown token. Everything it does goes through providers, never through raw tokio calls.
+
+## The Process Trait
+
+The trait has two methods. `name()` identifies the process type. `run()` is the main loop, called on every boot.
+
+```rust
+#[async_trait]
+pub trait Process: Send + Sync + 'static {
+    fn name(&self) -> &str;
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()>;
+}
+```
+
+`run()` returns when the process exits on its own, or never returns because the simulator cancelled it. Both are normal. The trait is `Send + Sync + 'static` and uses plain `#[async_trait]`, so the process can share state through `Arc<RwLock<..>>` like any production server.
 
 ## The Process Struct
 
-Start with the struct. A Process is recreated from a factory on every boot, so the struct starts empty:
+A Process is created from a factory on every boot, so the struct starts empty.
 
 ```rust
 use async_trait::async_trait;
@@ -15,13 +29,17 @@ use moonpool_sim::{Process, SimContext, SimulationResult};
 struct KvServer;
 ```
 
-No fields. Each time the simulation boots this process, the factory returns a fresh `KvServer`. Any data it accumulates lives only until the next crash.
+No fields. Each boot gets a fresh `KvServer`. Everything it accumulates lives until the next crash. A server that must survive reboots writes through `ctx.storage()`, and [Storage Faults](./11-storage-faults.md) shows what that costs.
 
-## Implementing the Trait
+## Implementing run()
 
-The trait has two methods: `name()` for identification and `run()` for the main logic.
+The main loop binds a listener, then races `accept()` against the shutdown token.
 
 ```rust
+use std::collections::BTreeMap;
+
+use moonpool_sim::{NetworkProvider, TcpListenerTrait};
+
 #[async_trait]
 impl Process for KvServer {
     fn name(&self) -> &str {
@@ -31,143 +49,110 @@ impl Process for KvServer {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let listener = ctx.network().bind(ctx.my_ip()).await?;
 
+        // In memory on purpose: a crash loses it, and the workload's
+        // reference model must cope with that.
         let mut store: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
         loop {
-            if ctx.shutdown().is_cancelled() {
-                break;
-            }
-
-            let accept_result = ctx
-                .time()
-                .timeout(Duration::from_millis(100), listener.accept())
-                .await;
-
-            match accept_result {
-                Ok(Ok((stream, _addr))) => {
-                    handle_connection(stream, &mut store).await;
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!("accept error: {}", e);
-                }
-                Err(_) => {
-                    // Timeout, loop back and check shutdown
-                    continue;
-                }
+            let accepted = moonpool_sim::select! {
+                biased;
+                accepted = listener.accept() => accepted,
+                () = ctx.shutdown().cancelled() => return Ok(()),
+            };
+            if let Ok((stream, _addr)) = accepted {
+                handle_connection(stream, &mut store).await;
             }
         }
-        Ok(())
     }
 }
 ```
 
-Walk through this line by line.
+**Binding the listener.** `ctx.network().bind(ctx.my_ip())` registers this process's IP for incoming connections. No real port opens. The `NetworkProvider` and `TcpListenerTrait` traits must be in scope for `bind()` and `accept()`.
 
-**Binding the listener**: `ctx.network().bind(ctx.my_ip())` creates a TCP listener on the process's assigned IP. In the simulated world, this registers the IP for incoming connections. No real ports are opened.
+**The store.** A `BTreeMap` on the stack. When the process crashes, the map is gone. The ordered map also keeps iteration deterministic, which `HashMap` does not.
 
-**The store**: A plain `BTreeMap` that lives on the stack. When this process crashes, the map vanishes. When the factory creates a new instance, it starts empty. This is the "all in-memory state is lost on reboot" principle in action; the ordered map also keeps iteration deterministic.
+**The select.** `moonpool_sim::select!` is the deterministic twin of `tokio::select!`. With `biased;` it polls the branches in order and draws no randomness. Without `biased;` the branch offset comes from the seed, so the same seed still replays the same choice. `tokio::select!` is forbidden in simulated code: its branch offset comes from entropy the seed does not control.
 
-**The main loop**: We loop forever, checking the shutdown token each iteration. `ctx.shutdown().is_cancelled()` returns `true` during graceful reboots, giving us a chance to break cleanly. For crash reboots, the framework cancels the entire future, so we never reach this check.
-
-**Timeout on accept**: We use `ctx.time().timeout()` instead of `tokio::time::timeout()`. The simulated timer means the framework controls when the timeout fires, keeping everything deterministic.
+**The shutdown token.** During a graceful reboot the simulator cancels `ctx.shutdown()` and waits a grace period. The `return Ok(())` branch lets the process exit cleanly. During a crash reboot the simulator aborts the task at once, so this branch never runs.
 
 ## Handling Requests
 
-The connection handler parses a simple wire protocol. Production systems can
-keep their existing framing or hand the stream to hyper. A raw protocol shows
-the provider boundary directly:
+The connection handler parses a tiny wire protocol: `G<key>` for get and `S<key_len><key><value>` for set. A production system keeps its own framing or hands the stream to hyper, as [The hyper Stack](../part4-integration/08-hyper-stack.md) shows. A raw protocol shows the provider boundary directly.
 
 ```rust
-async fn handle_connection(
-    mut stream: SimTcpStream,
-    store: &mut BTreeMap<String, Vec<u8>>,
-) {
+use futures::io::{AsyncReadExt, AsyncWriteExt};
+use moonpool_sim::network::sim::SimTcpStream;
+
+async fn handle_connection(mut stream: SimTcpStream, store: &mut BTreeMap<String, Vec<u8>>) {
     let mut buf = vec![0u8; 4096];
     loop {
         let n = match stream.read(&mut buf).await {
-            Ok(0) => break,       // Connection closed
+            Ok(0) | Err(_) => return, // closed, or a fault closed it for us
             Ok(n) => n,
-            Err(_) => break,      // Connection error
         };
-
-        // Parse and handle the request
         let request = &buf[..n];
         let response = match request[0] {
-            b'G' => {  // GET
+            b'G' => {
                 let key = String::from_utf8_lossy(&request[1..]);
-                store.get(key.as_ref())
-                    .cloned()
-                    .unwrap_or_default()
+                store.get(key.as_ref()).cloned().unwrap_or_default()
             }
-            b'S' => {  // SET
-                // Format: S<key_len:u8><key><value>
-                let key_len = request[1] as usize;
-                let key = String::from_utf8_lossy(
-                    &request[2..2 + key_len]
-                ).to_string();
+            b'S' => {
+                let key_len = usize::from(request[1]);
+                let key = String::from_utf8_lossy(&request[2..2 + key_len]).to_string();
                 let value = request[2 + key_len..].to_vec();
                 store.insert(key, value.clone());
                 value
             }
-            _ => vec![],
+            _ => Vec::new(),
         };
-
         let _ = stream.write_all(&response).await;
     }
 }
 ```
 
+`SimTcpStream` implements `futures::io::AsyncRead` and `AsyncWrite`. The reads and writes are buffer-driven: a read completes on the current poll when bytes are waiting, and otherwise parks until a `Delivery` event lands them. Under network chaos a read can return an error or zero bytes at any point. The handler treats both as the end of the connection and returns.
+
 ## Registering with the Builder
 
-The Process is registered through `.processes()` on the builder. The first argument is how many instances to run, the second is the factory:
+`.processes()` takes a count and a factory. The factory runs on every boot.
 
 ```rust
 SimulationBuilder::new()
     .processes(3, || Box::new(KvServer))
 ```
 
-This creates 3 KvServer instances at IPs `10.0.1.1`, `10.0.1.2`, and `10.0.1.3`. Each one runs independently. Each one can be killed and restarted independently.
+This creates three servers at `10.0.1.1`, `10.0.1.2` and `10.0.1.3`. Each runs independently. Each can be rebooted independently.
 
-For variable cluster sizes, pass a range:
+A range makes the cluster size part of the seed:
 
 ```rust
 .processes(3..=7, || Box::new(KvServer))
 ```
 
-Now each iteration randomly picks between 3 and 7 servers, deterministically based on the seed.
+Every seed draws a count between 3 and 7 from the simulation stream. The same seed draws the same count. One `.processes()` call is one **group**, named after `name()`. A system with several roles registers one group per role, and [Process Groups, Tags and Topology](./27-process-groups.md) covers how they share the address plan.
 
-## Process Groups
+## What a Process Knows About Itself
 
-Most systems have more than one kind of server. A consensus tier and a pool of spares. Acceptors and the matchmakers that reconfigure them. Each `.processes()` call registers one **group**, named after its process type, with its own factory and its own per-seed count:
-
-```rust
-SimulationBuilder::new()
-    .processes(3..=5, || Box::new(Acceptor))
-    .processes(0..=3, || Box::new(Matchmaker))
-```
-
-Every group owns its own IP range. The first group registered lives on `10.0.1.x`, the second on `10.0.2.x`, and so on, so a group's members are contiguous and a single-group simulation keeps the addresses it always had. Inside a process, `ctx.topology().my_group()` names the group it belongs to and `ctx.topology().ips_in_group("acceptor")` lists a group's members. `ctx.client_id()` and `ctx.client_count()` are the process's index within and the size of **its own group**, so an acceptor can number itself `0..n` without knowing how many matchmakers this seed drew.
-
-The counts are drawn in registration order from the seed, which keeps two things true at once: a seed replays the same shape, and each role's cluster size varies independently of the others'. A `0..=3` group really can draw zero on a plain seed, and it still appears in `ctx.topology().groups()` so the workload can tell "no matchmakers this seed" from "this system has no matchmakers".
+`ctx.my_ip()` is its address. `ctx.client_id()` is its index within its group and `ctx.client_count()` is the group's size, so three servers number themselves 0, 1 and 2. `ctx.topology()` answers the rest: its tags, its group, the other process IPs. A process that must crash itself at an exact point of its own protocol calls `ctx.crash_self(RebootKind::Crash, None)`, which [Correlated Outages and Self-Crashes](./30-outages.md) describes.
 
 ## What the Shutdown Token Gives You
 
-Checking `ctx.shutdown()` is optional but valuable. During graceful reboots, the simulation cancels the token and gives a grace period. Your process can:
+Checking `ctx.shutdown()` is optional. If the process ignores it, a graceful reboot still works: the simulator force-kills the task when the grace period ends. Checking it tests a different code path from a hard crash. The process can:
 
-- Finish in-flight requests
-- Flush write buffers
-- Close connections cleanly so peers see EOF instead of reset errors
+- Finish in-flight requests.
+- Flush write buffers.
+- Close connections so peers see EOF instead of a reset.
 
-If you do not check the token, graceful reboots still work. The framework just force-cancels your future after the grace period expires. But checking gives your process a chance to exit cleanly, which tests a different code path than a hard crash.
+[Attrition: Process Reboots](./09-attrition.md) covers the three reboot kinds and the grace period.
 
 ## Key Takeaways
 
-The pattern for every Process is the same:
+Every Process follows the same pattern:
 
-1. Bind a listener using `ctx.network()`
-2. Accept connections in a loop
-3. Check `ctx.shutdown()` for graceful termination
-4. Use `ctx.time()` for timeouts, never raw tokio
-5. Keep your state in-memory, expect to lose it
+1. Bind a listener with `ctx.network()`.
+2. Race `accept()` against `ctx.shutdown()` with `moonpool_sim::select!`.
+3. Use `ctx.time()` for every sleep and timeout.
+4. Keep state in memory and expect to lose it, or write it through `ctx.storage()`.
+5. Return `Ok(())` on shutdown.
 
-The factory produces a blank instance. The simulation manages the lifecycle. Your job is to write the server logic and let the framework handle chaos.
+The factory produces a blank instance. The simulator manages the lifecycle. Your job is the server logic.

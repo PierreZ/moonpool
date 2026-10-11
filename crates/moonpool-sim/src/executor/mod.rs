@@ -19,7 +19,7 @@
 //! simulation none of that exists; [`SimWorld`](crate::SimWorld)'s event
 //! queue *is* the reactor. Virtual time, network delivery, storage
 //! completion: every external event is a queue entry whose processing wakes
-//! the parked task through its ordinary [`Waker`](std::task::Waker). The executor therefore
+//! the parked task through its ordinary [`Waker`]. The executor therefore
 //! only needs to answer one question: "of the tasks that are runnable right
 //! now, which do I poll next?"
 //!
@@ -72,7 +72,7 @@
 //!
 //! Spawning goes through [`async_task`]: each task splits into a `Runnable`
 //! (scheduled into the ready queue by its waker) and a
-//! [`JoinHandle`](crate::executor::JoinHandle) wrapping the `FallibleTask` (awaitable output). Three
+//! [`JoinHandle`] wrapping the `FallibleTask` (awaitable output). Three
 //! contracts mirror tokio because the orchestrator depends on them:
 //!
 //! - **Detach on drop**: dropping a `JoinHandle` lets the task keep running.
@@ -166,7 +166,7 @@ thread_local! {
 /// The simulated process whose task is being polled right now, if any.
 ///
 /// It is how a hint from code under test
-/// ([`moonpool_buggify::hint_reboot!`]) finds the process to reboot without
+/// ([`moonpool_buggify::hint!`]) finds the process to reboot without
 /// being handed one.
 pub(crate) fn current_owner() -> Option<std::net::IpAddr> {
     CURRENT_OWNER.with(Cell::get)

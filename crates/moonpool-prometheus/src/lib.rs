@@ -3,54 +3,140 @@
 //! Turn the `prometheus` metrics your code already keeps into moonpool
 //! simulation output.
 //!
-//! Register a [`PrometheusSource`] per simulated node and every counter, gauge
-//! and histogram it holds is reported at the end of the run — aggregated
-//! across seeds, per node, with no changes to how your application records
-//! them.
+//! Register a [`PrometheusSource`] per simulated node. Every counter, gauge
+//! and histogram it holds then appears in the simulation report, per node
+//! and aggregated across seeds. Your application records its metrics the
+//! same way as in production.
 //!
-//! ```ignore
+//! The crate depends only on `moonpool-core` (the
+//! [`MetricsSource`] vocabulary and
+//! [`TimeProvider`](moonpool_core::TimeProvider)), never on `moonpool-sim`.
+//! The same source works in production: hand
+//! [`PrometheusSource::registry`] to your `/metrics` handler.
+//!
+//! ## Quick example
+//!
+//! A workload records a counter, a gauge and a latency histogram. The
+//! values reach the report.
+//!
+//! ```rust
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
+//! use async_trait::async_trait;
 //! use moonpool_prometheus::PrometheusSource;
+//! use moonpool_sim::{SimContext, SimulationBuilder, SimulationResult, TimeProvider, Workload};
 //!
-//! SimulationBuilder::new()
+//! struct Metered;
+//!
+//! #[async_trait]
+//! impl Workload for Metered {
+//!     fn name(&self) -> &'static str {
+//!         "metered"
+//!     }
+//!
+//!     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+//!         let metrics = ctx
+//!             .metrics::<PrometheusSource>()
+//!             .expect("metrics factory registered");
+//!         let processed = metrics
+//!             .counter("requests_total", "Requests processed")
+//!             .expect("a valid metric name");
+//!         let latency = metrics
+//!             .histogram_with_buckets("request_latency_seconds", "Request latency", vec![0.005, 0.01, 0.05])
+//!             .expect("ascending buckets");
+//!         for _ in 0..3 {
+//!             // Timed on the simulated clock, so a replay gives the same value.
+//!             let timer = latency.start_timer(ctx.time());
+//!             ctx.time().sleep(Duration::from_millis(10)).await.ok();
+//!             timer.stop_and_record();
+//!             processed.inc();
+//!         }
+//!         Ok(())
+//!     }
+//! }
+//!
+//! let report = SimulationBuilder::new()
+//!     .set_debug_seeds(vec![42])
+//!     .set_iterations(1)
 //!     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
-//!     .processes(3, || Box::new(MyNode::new()))
-//!     .workload(MyWorkload::default())
-//!     .run()?;
+//!     .workload(Metered)
+//!     .run()
+//!     .expect("simulation configuration is valid");
+//!
+//! let requests = report
+//!     .app_metrics
+//!     .iter()
+//!     .find(|metric| metric.name == "requests_total")
+//!     .expect("the counter is in the report");
+//! assert!((requests.total - 3.0).abs() < f64::EPSILON);
 //! ```
+//!
+//! ## Features
+//!
+//! - **Instrumented handles.** [`PrometheusSource::counter`],
+//!   [`gauge`](PrometheusSource::gauge), [`histogram`](PrometheusSource::histogram),
+//!   [`histogram_with_buckets`](PrometheusSource::histogram_with_buckets),
+//!   [`histogram_with_opts`](PrometheusSource::histogram_with_opts) and the
+//!   labelled families ([`counter_vec`](PrometheusSource::counter_vec),
+//!   [`gauge_vec`](PrometheusSource::gauge_vec),
+//!   [`histogram_vec`](PrometheusSource::histogram_vec)) return
+//!   [`SimCounter`], [`SimGauge`], [`SimHistogram`] and their `Vec`
+//!   variants. Each one wraps the real `prometheus` metric
+//!   (`inner()`).
+//! - **Simulated-time series.** Every mutation through a handle is one
+//!   point in a time series, stamped with the simulated clock.
+//! - **Final scrape.** Everything else in the registry is read once at the
+//!   end of the iteration.
+//! - **Deterministic timers.** [`SimHistogram::start_timer`] returns a
+//!   [`SimTimer`] that reads the provider clock.
+//! - **Bounded memory.** [`PrometheusSource::set_series_capacity`] caps the
+//!   points kept per series.
 //!
 //! ## Two ways metrics reach the report
 //!
-//! **Instrumented handles push.** Metrics you create through this source —
-//! [`counter`](PrometheusSource::counter), [`gauge`](PrometheusSource::gauge),
-//! [`histogram`](PrometheusSource::histogram) — hand back wrappers that record
-//! every mutation into a time series, stamped with the *simulated* clock. No
-//! polling interval, no sampling: one point per `inc()`, `set()` and
+//! **Instrumented handles push.** The handles above record every mutation
+//! into a time series, stamped with the **simulated** clock. There is no
+//! polling interval and no sampling: one point per `inc()`, `set()` and
 //! `observe()`, at the simulated instant it happened. The series lands in
 //! `SimulationMetrics::app_series`, ready to plot or assert on.
 //!
-//! **A final scrape catches the rest.** Anything else in the registry —
-//! metrics a library registered itself, `lazy_static!` globals, a collector
-//! from another crate — has no mutation hook to subscribe to, so it is read
-//! once at the end of the iteration into `SimulationMetrics::app_metrics`. You
-//! get totals for those, just not their history.
+//! **A final scrape catches the rest.** Other metrics in the registry
+//! (metrics a library registered itself, `lazy_static!` globals, a
+//! collector from another crate) have no mutation hook. The source reads
+//! them once at the end of the iteration into
+//! `SimulationMetrics::app_metrics`. You get their totals, not their
+//! history.
+//!
+//! ## Feature flags
+//!
+//! None. The crate uses `prometheus` with `default-features = false`, which
+//! drops the protobuf text and encoding stack. The facade crate `moonpool`
+//! exposes this crate as `moonpool::prometheus` behind its `prometheus`
+//! feature.
 //!
 //! ## Determinism
 //!
-//! Use [`SimHistogram::start_timer`] rather than `prometheus`' own
-//! `start_timer()`: the latter reads the wall clock, so it records host noise
-//! instead of simulated latency and gives a different answer on every replay
-//! of the same seed. This one reads the provider clock and replays exactly.
+//! Use [`SimHistogram::start_timer`], not `prometheus`' own `start_timer()`.
+//! The `prometheus` timer reads the wall clock: it records host noise
+//! instead of simulated latency, and it gives a different answer on every
+//! replay of the same seed. This one reads the provider clock and replays
+//! exactly.
 //!
 //! Metric values are reported, never used to steer the simulation.
 //!
 //! ## Reboots
 //!
-//! A source is keyed by node IP, so it outlives process reboots — exactly as a
-//! real node's `/metrics` does across a restart on the same host. The
-//! `counter` / `gauge` / `histogram` methods are therefore get-or-register: a
-//! process that boots a second time looks its metrics up instead of failing
-//! with `AlreadyReg`.
-
+//! A source is keyed by node IP, so it outlives process reboots, exactly as
+//! a real node's `/metrics` does across a restart on the same host. The
+//! `counter`, `gauge` and `histogram` methods are therefore
+//! get-or-register: a process that boots a second time looks its metrics up
+//! instead of failing with `AlreadyReg`.
+//!
+//! ## Examples
+//!
+//! `moonpool-sim-examples/src/metrics_service.rs` instruments a replicated
+//! service and runs it under chaos: `cargo xtask sim run metrics-service`.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 

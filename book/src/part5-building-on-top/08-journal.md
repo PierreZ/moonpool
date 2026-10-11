@@ -5,57 +5,75 @@
 `moonpool-journal` is a write-ahead journal built on nothing but the provider
 traits and [`BlockFile`](../part2-foundations/07-provider-traits.md). It
 implements CLSTORE, the local storage layer of *Protocol-Aware Recovery for
-Consensus-Based Storage* (Alagappan et al., FAST '18), and doubles as a worked
-example of testing a storage engine against the simulator's disk.
+Consensus-Based Storage* (Alagappan et al., FAST '18). It is a real crate:
+production hands it `TokioStorageProvider`, tests hand it the simulator's
+disk, and the code is the same. It is also the worked example of testing a
+storage engine under `Chaos::Storage`.
 
 ## The Problem It Solves
 
 A log that finds a bad checksum usually truncates there. For a torn write at
-the tail that is correct: the entry was never acknowledged. For an entry that
-was acknowledged and later rotted, it silently throws away committed data,
-and in a replicated system a node that truncated can then win an election
-and erase it cluster-wide. The two cases look identical if all the log has
-is the entry.
+the tail that is correct: the entry was never acknowledged. For an entry
+that was acknowledged and later rotted, truncation silently throws away
+committed data. In a replicated system, the node that truncated can then win
+an election and erase that data cluster-wide. The two cases look identical
+if all the log has is the entry.
 
 CLSTORE does three things about it. It **detects** damage (checksums, and a
 medium error read as damaged bytes). It **disentangles** a crash from
-corruption: every entry has a *persist record* stored far from it, and a
-damaged entry whose record survived was written, so it is corruption, never
-a torn write. And it **identifies** what was damaged: the record carries the
-entry's identity, so a replication layer knows exactly what to fetch from a
-peer.
+corruption: every entry has a persist record stored far from it, and a
+damaged entry whose record survived was written, so it is corruption, not a
+torn write. And it **identifies** what was damaged: the record carries the
+entry's identity, so a replication layer knows what to fetch from a peer.
 
 ## Positions, Not Indexes
 
 The journal knows no protocol. An entry is a `u64` **position** and an
-opaque 24-byte [`Id`](https://docs.rs/moonpool-journal) the caller chooses:
-a Paxos acceptor puts its slot in the position and its ballot in the id, a
-Raft log its index and term. Positions are written in any order, with gaps,
-and overwritten:
+opaque 24-byte `Id` the caller chooses. A Paxos acceptor puts its slot in
+the position and its ballot in the id. A Raft log puts its index and term.
+Positions are written in any order, with gaps, and overwritten:
 
 ```rust,ignore
+use moonpool_journal::{Batch, Journal, JournalConfig, JournalId};
+
+let mut journal = Journal::create(provider, "wal", JournalId(0xACCE), JournalConfig::default(), b"promise=0").await?;
 let mut batch = Batch::new();
 batch
-    .put(7, ballot(3), b"set x=7".to_vec())   // a new slot
-    .put(4, ballot(2), b"set w=4".to_vec())   // a lagging acceptor catching up
-    .put(9, ballot(5), b"set y=10".to_vec())  // a re-accept at a higher ballot
-    .set_meta(b"promise=5".to_vec());         // the node-unique state
+    .put(7, ballot_id(3), "set x=7")    // a new slot
+    .put(4, ballot_id(2), "set w=4")    // a lagging acceptor catching up
+    .put(9, ballot_id(5), "set y=10")   // a re-accept at a higher ballot
+    .set_meta("promise=5");             // the node-unique state
 journal.commit(batch).await?;
 ```
 
-That shape is what a Paxos acceptor or a lagging replica needs, and it is
-why the journal stores state rather than a log of operations: there is no
-fold at boot and no checkpoint. `clear(range)` removes positions (a Raft
-suffix truncation), `truncate_prefix(floor)` drops everything below a floor,
-and `set_meta` replaces up to 4 KiB of metainfo kept in two copies. There
-are no snapshots and no compaction: space comes back through the floor and
-tombstones.
+That shape is what an acceptor or a lagging replica needs, and it is why the
+journal stores state rather than a log of operations: there is no fold at
+boot and no checkpoint. `Batch::clear(range)` removes positions (a Raft
+suffix truncation). `Batch::truncate_prefix(floor)` drops everything below
+a floor and frees whole segments from the front. `Batch::set_meta` replaces
+the metainfo (at most `META_MAX` bytes, just under 4 KiB), kept in two
+copies. There are no snapshots and no compaction.
 
-A batch lands in one segment, so it must fit an empty one; a bigger one is
-refused with `BatchTooLarge` before anything is written. A caller with more
-to write than that (a replica catching up a long log at once) packs its
-writes with `Batch::fits_another(geometry, payload_len)` and commits each
-batch in turn, metainfo and floor in the last.
+A batch lands in one segment, so it must fit an empty one. A bigger batch is
+refused with `CommitError::BatchTooLarge` before anything is written. A
+caller with more to write than that (a replica catching up a long log) packs
+its writes with `Batch::fits_another`:
+
+```rust,ignore
+let mut chunk = Batch::new();
+for (position, payload) in puts {
+    if !chunk.fits_another(geometry, payload.len()) {
+        journal.commit(std::mem::take(&mut chunk)).await?;  // every chunk fits
+    }
+    chunk.put(position, id, payload);
+}
+journal.commit(chunk).await?;   // metainfo and floor go in the last one
+```
+
+`Batch::fits(geometry)` is the same bound for a staged batch. The default
+`Geometry` is a 64 MiB segment (32,768 records and 60 MiB of entries).
+`Geometry::small()` is 512 records and 64 KiB of entries, so tests roll over
+segments quickly.
 
 ## Layout
 
@@ -66,26 +84,21 @@ batch in turn, metainfo and floor in the last.
 ```
 
 Each segment holds two append-only logs. The **persist log** is a run of
-64-byte records: kind, position, id, the entry's offset, length and CRC, and
-the batch, its record count and the record's index in it. The **entry log**
-holds the payloads in arrival order, each behind a 64-byte header that
-repeats the record's identity, so a stale or misdirected entry never passes
-for the one a record names, and an intact entry can rebuild a lost record
-whole. A guard gap keeps the two physically apart.
+64-byte records: kind, position, id, the entry's offset, length and CRC, the
+batch, its record count and the record's index. The **entry log** holds the
+payloads in arrival order, each behind a 64-byte header that repeats the
+record's identity, so a misdirected entry never passes for the one a record
+names, and an intact entry can rebuild a lost record. Every batch starts on
+a fresh block in both logs, so **no write ever touches a sector holding
+anything acknowledged**. That one rule is what makes the crash model below
+survivable.
 
-Every batch starts on a fresh block in both logs, so no write ever touches a
-sector holding anything acknowledged. A segment header links to the last
-batch before the segment, so a missing segment file is refused rather than
-read as the end of the log. Segments are deleted only from the front, once
-they hold nothing live, because a later segment may hold the write or the
-tombstone that made an earlier one dead.
-
-The **meta file** is separate: it is the one structure rewritten in place,
-and it must outlive every segment. `LogCabin`, canonical/raft and
-hashicorp/raft-wal keep their term and vote apart from the log for the same
-reasons. Its two copies are written one after the other, each followed by a
-sync, so at most one is ever in flight and a single rotted copy never rolls
-the metainfo back.
+The meta file is separate. It is the one structure rewritten in place, and
+it must outlive every segment. Its two copies are written one after the
+other, each followed by a sync, so at most one is in flight and a single
+rotted copy never rolls the metainfo back. `Journal::peek_meta(&provider,
+dir, id)` reads it without opening the journal: no recovery, no repair, no
+sync, so a probe never changes what the next open finds.
 
 ## Committing: One Sync or Two
 
@@ -94,28 +107,61 @@ the metainfo back.
 | Mode | Protocol | Syncs | Last batch |
 |---|---|---|---|
 | `Batched` | `write(entries)`, `write(records)`, `fsync` | 1 | ambiguous |
-| `Ordered` | `write(entries)`, `fsync`, `write(records)`, `fsync` | 2 | decided |
+| `Ordered` (default) | `write(entries)`, `fsync`, `write(records)`, `fsync` | 2 | decided |
 
-`Batched` is the paper's protocol. Its Appendix A proves the limitation it
-carries: with one sync, a crash can leave an intact record beside a damaged
-entry exactly as corruption would, so the last batch's damaged entries are
-reported `Ambiguous` and the replication layer decides. `Ordered` writes the
-records only once the entries are durable, so a record always proves its
-entry was synced, at the price of a second sync.
+`Batched` is the paper's protocol. With one sync, a crash can leave an intact
+record beside a damaged entry exactly as corruption would. The paper's
+Appendix A proves the two cannot be told apart, so the last batch's damaged
+entries are reported `State::Ambiguous` and the replication layer decides.
+The **ambiguous tail** stays ambiguous until the next batch commits, then
+becomes `Corrupt`. `Ordered` writes the records only once the entries are
+durable, so a record always proves its entry was synced.
 
-When a batch changes the metainfo (or the floor, which lives there), the two
-copies are written only **after** the batch's last sync: copy A, sync, copy
-B, sync. That ordering is a promise to the caller. A crash can leave the
-batch durable without its metainfo, but never the metainfo without its
-batch, so anything that is true only once a batch is on disk (a Paxos chosen
-index, a watermark whose clears ride along) can share that batch's commit
-instead of paying for one of its own.
+Metainfo is written only **after** the batch's last sync: copy A, sync, copy
+B, sync. A crash can leave the batch durable without its metainfo, but never
+the metainfo without its batch. Anything true only once a batch is on disk
+(a chosen index, a watermark) can share that batch's commit.
+
+### Hints Inside a Commit
+
+The commit protocol names its three dangerous moments with `hint!` from
+`moonpool-buggify`:
+
+```rust,ignore
+segment.write(batch.entry_at, &batch.entries).await?;
+// A power loss here tears entries no record points at yet.
+moonpool_buggify::hint!("journal commit: entries written, not synced", COMMIT_HINT_PROB).await;
+...
+segment.write(batch.persist_at, &batch.records).await?;
+moonpool_buggify::hint!("journal commit: records written, not synced", COMMIT_HINT_PROB).await;
+segment.sync().await?;
+if let Some(meta) = meta {
+    moonpool_buggify::hint!("journal commit: batch synced, metainfo stale", COMMIT_HINT_PROB).await;
+    meta_file.update(meta).await?;
+}
+```
+
+In production a hint is a no-op. In a simulation the `HintSink` decides
+whether to crash the owning process at that exact moment, under the seed's
+attrition regime and swarm mask (see
+[hint!: Naming Fault Sites](../part3-building/29-hints.md)). The rate is
+0.25 per call, higher than the default `POINT_PROB`, because a commit is
+short and a cut inside it is the case recovery exists for. A harness with a
+budget the simulator cannot see, such as the copies a replicated store can
+lose before a crash is no longer survivable, publishes a `HintVeto`:
+
+```rust,ignore
+HintVeto::new(move |ip, label| copies_alive.load(Ordering::Relaxed) > quorum)
+    .publish(ctx.state());
+```
+
+The sink asks the veto last, after the regime admits the reboot, so a `true`
+answer is a reboot.
 
 ## Recovering
 
-Opening reads every persist record, locates each batch from any one of its
-records (or from its first entry when every record is damaged), walks the
-entry log to match damaged records with their entries, and judges each one:
+Opening reads every persist record, locates each batch, walks the entry log
+to match damaged records with their entries, and judges each one:
 
 | Entry | Persist record | Verdict |
 |---|---|---|
@@ -123,51 +169,35 @@ entry log to match damaged records with their entries, and judges each one:
 | intact | damaged | live; the record is rebuilt from the entry |
 | damaged | valid | `Corrupt`, or `Ambiguous` in a `Batched` last batch |
 | damaged | damaged, last batch | torn by a crash: discarded |
-| damaged | damaged, earlier | `DoubleFault`: refuse to open |
+| damaged | damaged, earlier | `OpenError::DoubleFault`: refuse to open |
 
 A batch missing while later ones exist, or a log ending before the batch the
 metainfo proves durable, is `LostBatch`. A missing meta file beside segments,
-or two damaged copies, is `MetaLost`. Only the last batch's entries are read
-at open. The rest are checked when read, and `replay` reports a damaged one
-in place and goes on.
+or two damaged copies, is `MetaLost`. Opening returns a `Recovery` that says
+what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`,
+`meta_repaired` (a metainfo copy rewritten from its twin),
+`headers_repaired` and `segments_removed`. Only the last batch's entries are
+read at open. The rest are checked when read: `read(position)` returns
+`ReadError::Damaged { position, id }` with the identity its record kept, and
+`replay(range)` reports a damaged entry in place and goes on.
 
 Three rules keep recovery's own writes honest, and the crash loops found
-each of them:
+each of them. **What opening keeps, it syncs**, because a process that
+restarted without a power loss reads its predecessor's unsynced writes from
+the page cache. **A record never reaches the disk before its entry**, so a
+rebuilt record is written only after the entries are synced. **What an open
+declared the end stays the end**: every open bumps an open generation in the
+metainfo, and a record a crash left unreadable can never read back later as
+evidence.
 
-- **What opening keeps, it syncs.** A process that restarted without a power
-  loss reads its predecessor's unsynced writes from the page cache.
-- **A record never reaches the disk before its entry.** When opening voids a
-  torn record or rebuilds one, it rewrites the last batch's records, and the
-  entries it rebuilt them from may still be in the page cache: it syncs them
-  first, as a commit does.
-- **What an open declared the end stays the end.** Every open durably bumps
-  an *open generation* in the metainfo and records the last batch it found;
-  batch numbers carry their generation in their high bits. A record a crash
-  left unreadable (a latent sector) can read back later, after the log moved
-  on: one from an older generation numbered beyond what the next open found
-  is garbage, never evidence.
+## Testing It Under Chaos::Storage
 
-## Two Fault Models
-
-The integration tests crash a writer over and over against a ledger of what
-it acknowledged and what was in flight:
-
-- **The paper's:** every unsynced sector ends up old or new, plus clean
-  crashes and correlated rollbacks.
-- **Moonpool's full physics:** sectors lost to garbage, latent read faults,
-  shorn writes, on top. These destroy whatever an in-flight sector held.
-
-The promise is the same under both: nothing acknowledged is lost or changed
-or reported damaged, and only a `Batched` batch in flight may come back
-ambiguous. Each runs for `Ordered`, `Batched`, and a mode drawn afresh every
-round, with syncs failing, restarts that keep the page cache, and crashes
-inside recovery itself. `JOURNAL_CRASH_SEEDS` raises the seed count.
-
-## Aiming Faults at the Layout
-
-A random fault rarely lands on the bytes that matter. The journal lists its
-regions as `LayoutRegion`s, so a harness can aim faults by kind without
-knowing the format:
+The integration tests in `tests/journal.rs` run on `SimWorld` storage with
+`StorageConfiguration::fast_local()`. One test per row of the recovery table
+aims a bit flip with `Journal::layout(position)`, which returns the record
+and the entry as two `LayoutRegion`s, each carrying the position as its
+`stripe`. `Journal::regions()` lists every region a fault could hit, so a
+harness aims faults by kind without knowing the format:
 
 ```rust,ignore
 let focus = FaultFocus::new()
@@ -177,27 +207,46 @@ let focus = FaultFocus::new()
     });
 ```
 
-Records and entries carry their position as the region's `stripe`, the key
-every replica's copy of that position shares, so a replicated harness can
-damage a position on some replicas and never on all of them.
-`journal.layout(position)` gives one position's two regions, which is how
-the tests aim a single bit flip at a record or an entry.
+The crash loops in `tests/support/mod.rs` commit random batches, cut the
+writer off mid-commit with `simulate_crash_for_process`, sometimes crash
+inside recovery itself, and judge every reopen against a ledger of what was
+acknowledged and what was in flight. They run under two fault models:
 
-## The Example Simulation
+- **The paper's:** every unsynced sector ends up old or new, plus clean
+  crashes and correlated rollbacks (`clean_crash_probability`,
+  `correlated_rollback_probability`, `garbage_fill_probability`).
+- **Moonpool's full physics:** sectors lost, latent read faults and shorn
+  writes on top (`crash_lost_probability`, `crash_latent_fault_probability`,
+  `shorn_write_probability`), with failed syncs and lost directory entries.
 
-[`journal.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim-examples/src/journal.rs)
-in `moonpool-sim-examples` (`cargo xtask sim run journal`) is the journal
-inside a full simulation: one process owns it on its simulated disk,
-`Chaos::Attrition` crashes that process over and over (never wiping it, since
-a wiped disk is data loss no local journal can recover from), and
-`Chaos::Storage(Random)` runs the disk's fault families underneath, minus the
-ones a lone node has no second copy to repair from (rot, EIO, misdirected and
-phantom writes, a failed disk).
+The promise is the same under both: nothing acknowledged is lost, changed or
+reported damaged, and only a `Batched` batch in flight may come back
+ambiguous. Each model runs for `Ordered`, `Batched` and a mode drawn afresh
+every round. `JOURNAL_CRASH_SEEDS` raises the seed count and
+`JOURNAL_CRASH_SEED` replays one.
+
+The full simulation is `journal.rs` in `moonpool-sim-examples`
+(`cargo xtask sim run journal`). One process owns the journal.
+`Chaos::Attrition` crashes it over and over with `prob_wipe: 0.0`, since a
+wiped disk is data loss no local journal can recover from.
+`Chaos::Storage(ChaosMode::Random)` runs the disk's fault families
+underneath, with a `storage_fault_mask` that removes the ones a lone node has
+no second copy to repair from:
+
+```rust,ignore
+.storage_fault_mask(
+    StorageFaultMask::all()
+        .without(StorageFault::Corruption)
+        .without(StorageFault::Eio)
+        .without(StorageFault::Misdirect)
+        .without(StorageFault::PhantomWrite)
+        .without(StorageFault::DiskFailure),
+)
+```
 
 The node's memory dies with it, so what it acknowledged lives in a `Ledger`
 published in the iteration's `StateHandle`. Every boot draws a durability
-mode, opens the journal, and checks it against that ledger before writing
-again:
+mode, opens the journal and checks it against that ledger:
 
 ```rust,ignore
 assert_always!(written, "a position holds only a value written there");
@@ -208,20 +257,18 @@ assert_always!(
 assert_always!(present, "no acknowledged write is lost");
 ```
 
-Then it commits batches at random positions, with tombstones, floor raises
-and metainfo. A batch joins the ledger only once `commit` returns. When the
-batch in flight at the crash comes back with its metainfo or floor, every
-one of its writes must have come back too.
+A failed sync is an operating error, not a verdict: `CommitError::Io` says
+whether the batch may be durable anyway (`Durable::Unknown`), the journal is
+poisoned, and the node reopens it.
 
 ## On a Real Disk
 
-The journal is written against the provider traits only, so production hands
-it `TokioStorageProvider` instead of the simulator's storage.
-[`accept_log.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-journal/examples/accept_log.rs)
-(`cargo run -p moonpool-journal --example accept_log`) does exactly that, in a
-temporary directory: a Paxos acceptor stores its accepts at their slots in
-arrival order with the ballot as their identity and its promise as
-metainfo, restarts and replays. Then it flips one byte of an acknowledged
-accept on disk, behind the journal's back: reading it reports the slot
-damaged with the ballot its record kept, the acceptor writes a peer's copy
-at the same slot, and a final reopen comes back clean.
+`accept_log.rs` (`cargo run -p moonpool-journal --example accept_log`) runs
+the same journal on the real filesystem through `TokioStorageProvider`, in a
+temporary directory. A Paxos acceptor stores accepts at their slots in
+arrival order with the ballot as identity and its promise as metainfo, then
+restarts and replays. Then it flips one byte of an acknowledged accept
+behind the journal's back. Reading it reports the slot damaged with the
+ballot its record kept, the acceptor writes a peer's copy at the same slot,
+and a final reopen comes back clean. Nothing in the crate names the
+simulator: the provider is the only thing that changes.

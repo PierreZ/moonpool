@@ -17,6 +17,65 @@
 //!     deterministic simulated world
 //! ```
 //!
+//! The crate ships the `moonpool-calibrate` binary. It is not published.
+//!
+//! ```text
+//! moonpool-calibrate storage > measured_storage.rs
+//! moonpool-calibrate network listen                       # on host B
+//! moonpool-calibrate network measure host-b:7777 > measured_network.rs
+//! ```
+//!
+//! # Quick example
+//!
+//! The library is the binary's building blocks. Record latencies, take the
+//! envelope, and render a constant:
+//!
+//! ```rust
+//! use std::time::Duration;
+//!
+//! use moonpool_calibrate::codegen::{Constant, GeneratedFile};
+//! use moonpool_calibrate::stats::Latencies;
+//!
+//! let mut reads = Latencies::new("read");
+//! for micros in 50..150 {
+//!     reads.record(Duration::from_micros(micros));
+//! }
+//! let summary = reads.summary();
+//! assert_eq!(summary.count, 100);
+//!
+//! let source = GeneratedFile::new("moonpool-calibrate storage")
+//!     .constant(Constant::from_summary(
+//!         "STORAGE_READ_LATENCY",
+//!         "Measured latency of a 4096-byte read.",
+//!         summary,
+//!     ))
+//!     .render();
+//! assert!(source.contains("pub const STORAGE_READ_LATENCY: LatencyDistribution"));
+//! ```
+//!
+//! # Features
+//!
+//! - [`storage`]: 4 KiB read, write and `sync_all` latency on one scratch
+//!   file through raw `std::fs`.
+//! - [`network`]: small-message TCP round-trip time through raw
+//!   `std::net`, with an echo server ([`network::serve`]).
+//! - [`stats`]: bounded HDR-histogram accounting ([`stats::Latencies`]) and
+//!   the `p01..p99` envelope ([`stats::Summary`], [`stats::Bounds`]).
+//! - [`codegen`]: Rust source with `LatencyDistribution` constants
+//!   ([`codegen::GeneratedFile`], [`codegen::Constant`]).
+//! - [`cli`]: the `clap` derive command surface. Help and errors go to
+//!   stderr, because stdout carries only generated Rust.
+//!
+//! The generated constants assign into `StorageConfiguration` (`read_latency`,
+//! `write_latency`, `sync_latency`) and `NetworkConfiguration`
+//! (`write_latency`, `LinkLatencyConfig`). `NETWORK_RTT_LATENCY` is the
+//! measured round trip; `NETWORK_LATENCY` is half of it, for moonpool's
+//! one-way link knobs.
+//!
+//! # Feature flags
+//!
+//! None.
+//!
 //! # moonpool is bypassed while measuring
 //!
 //! This is the architectural rule of the crate. A measurement taken through

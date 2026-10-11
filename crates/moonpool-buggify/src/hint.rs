@@ -18,18 +18,29 @@
 //! `FoundationDB`'s server code does the same with `if (buggify()) throw
 //! please_reboot()`, which its simulated worker turns into a reboot.
 //!
-//! Three vetoes stand between a hint and a fault; none of them commands:
+//! Four vetoes stand between a hint and a fault. None of them commands:
 //!
-//! 1. The point is a disruptive buggify location of its own: activated once
-//!    per run, firing at a low rate per call ([`POINT_PROB`], or a rate
-//!    literal at the site), and silent once the run entered its recovery
-//!    tail.
-//! 2. The seed's chaos: a seed whose regime never reboots never reboots.
-//! 3. The budget: a regime's limit on dead processes still applies.
+//! 1. The point is a disruptive buggify location of its own. It is activated
+//!    once per run, fires at a low rate per call ([`POINT_PROB`], or a rate
+//!    literal at the site), and stays silent once the run entered its
+//!    recovery tail.
+//! 2. The seed's chaos: the simulator asks the first attrition regime whose
+//!    victim filter admits the caller. A seed whose regime never reboots
+//!    never reboots on a hint either.
+//! 3. The budget: the regime's `max_dead` limit still applies.
+//! 4. The harness: a `moonpool_sim::HintVeto` published in the run's state
+//!    answers last, for a budget the simulator cannot see (the copies a
+//!    replicated store can lose, say).
+//!
+//! A caller that is no process (a workload, a fault injector) is never
+//! struck: [`Strike::None`].
 //!
 //! Like buggify, a hint is **inert** outside a simulation: buggify is
 //! disabled, so the point draws nothing, asks no one, and the returned
 //! future resolves at once.
+//!
+//! The simulator's side is a [`Sink`], installed per thread with
+//! [`set_sink`] for the chaos window of a run.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -70,12 +81,12 @@ pub fn clear_sink() {
     SINK.with(|slot| *slot.borrow_mut() = None);
 }
 
-/// The default firing rate of an active [`hint!`](crate::hint) point, per
+/// The default firing rate of an active [`hint!`](crate::hint!) point, per
 /// call. Low, because a point on a hot path is reached often.
 pub const POINT_PROB: f64 = 0.05;
 
 /// Report the moment `label` at `location`, firing at `prob` per call while
-/// the location is active. Use [`hint!`](crate::hint), which names the
+/// the location is active. Use [`hint!`](crate::hint!), which names the
 /// location.
 ///
 /// The hint is taken when this function is called, not when the future is

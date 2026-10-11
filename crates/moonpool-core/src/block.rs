@@ -26,9 +26,29 @@
 //! open, create, rename, or delete anything: the caller opens the file and
 //! hands it over.
 //!
-//! ```ignore
-//! let file = provider.open(path, options).await?;
-//! let blocks = BlockFile::new(file, block_size)?;
+//! ```rust
+//! use moonpool_core::{BlockFile, OpenOptions, StorageProvider, TokioStorageProvider};
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> std::io::Result<()> {
+//! # let dir = tempfile::tempdir()?;
+//! # let path = dir.path().join("data");
+//! # let path = path.to_str().ok_or_else(|| std::io::Error::other("path is not UTF-8"))?;
+//! let provider = TokioStorageProvider::new();
+//! // The caller opens the file; BlockFile only counts it in blocks.
+//! let file = provider.open(path, OpenOptions::create_write().read(true)).await?;
+//! let blocks = BlockFile::new(file, 4096)?;
+//!
+//! let mut page = blocks.buffer(1)?;
+//! page.as_mut_slice().fill(7);
+//! blocks.write_blocks(3, page.as_slice()).await?; // visible
+//! blocks.sync().await?; // durable
+//!
+//! let mut read_back = blocks.buffer(1)?;
+//! blocks.read_blocks(3, read_back.as_mut_slice()).await?;
+//! assert_eq!(read_back.as_slice(), page.as_slice());
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! There is deliberately no `BlockFile::open`, no `BlockProvider`, and no
@@ -61,7 +81,12 @@ use crate::{AlignedBuf, IoConstraints, StorageFile};
 /// alignment from; `BlockFile` adds block arithmetic and whole-transfer loops
 /// on top and holds no state of its own beyond the block size.
 ///
-/// See the [module docs](self) for what this deliberately is not.
+/// It never touches the filesystem namespace: it takes no path and cannot
+/// open, create, rename or delete a file. The block size is the caller's
+/// unit only. It is not the file's I/O alignment (though it must be a
+/// multiple of it), not a crash-atomicity unit, and not durability:
+/// [`write_blocks`](Self::write_blocks) makes bytes visible, and only
+/// [`sync`](Self::sync) makes them durable.
 #[derive(Debug)]
 pub struct BlockFile<F> {
     file: F,

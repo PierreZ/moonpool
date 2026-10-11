@@ -1,16 +1,35 @@
-//! Network provider abstraction for simulation and real networking.
+//! Networking: [`NetworkProvider`] and [`TcpListenerTrait`], with
+//! [`TokioNetworkProvider`] for production.
 //!
-//! This module provides trait-based networking that allows seamless swapping
-//! between real Tokio networking and simulated networking for testing.
+//! Streams implement the runtime-neutral `futures::io::AsyncRead` and
+//! `AsyncWrite` traits, so protocol code (and hyper, tonic and moonpool-rpc
+//! on top of it) never names a runtime. In simulation,
+//! `moonpool_sim::SimNetworkProvider` delivers bytes through a simulated
+//! network with latency, partitions, clogs, bit flips, random closes and
+//! connect failures, all drawn from the seed.
+//!
+//! ```rust
+//! use moonpool_core::{NetworkProvider, TcpListenerTrait};
+//!
+//! /// Accept one connection and return the peer's address.
+//! async fn accept_one<N: NetworkProvider>(network: &N, addr: &str) -> std::io::Result<String> {
+//!     let listener = network.bind(addr).await?;
+//!     let (_stream, peer) = listener.accept().await?;
+//!     Ok(peer)
+//! }
+//! ```
 
 use futures::io::{AsyncRead, AsyncWrite};
 use std::io;
 #[cfg(feature = "tokio-net")]
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
-/// Provider trait for creating network connections and listeners.
+/// Provider trait for creating TCP connections and listeners.
 ///
-/// Clone allows sharing providers across multiple peers efficiently.
+/// Addresses are `host:port` strings. Production uses
+/// [`TokioNetworkProvider`]. Simulation uses `moonpool_sim::SimNetworkProvider`,
+/// where each simulated process has its own IP. The provider is cheap to
+/// clone and share between components.
 pub trait NetworkProvider: Clone + Send + Sync + 'static {
     /// The TCP stream type for this provider.
     type TcpStream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
@@ -72,7 +91,7 @@ pub struct TokioNetworkProvider;
 
 #[cfg(feature = "tokio-net")]
 impl TokioNetworkProvider {
-    /// Create a new Tokio network provider.
+    /// Create a Tokio network provider.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -107,7 +126,8 @@ fn disable_nagle(stream: &tokio::net::TcpStream) {
     }
 }
 
-/// Wrapper for Tokio `TcpListener` to implement our trait.
+/// The listener [`TokioNetworkProvider::bind`](NetworkProvider::bind) returns: a
+/// Tokio `TcpListener` whose accepted streams have `TCP_NODELAY` set.
 #[cfg(feature = "tokio-net")]
 #[derive(Debug)]
 pub struct TokioTcpListener {

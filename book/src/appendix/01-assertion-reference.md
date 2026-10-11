@@ -2,204 +2,129 @@
 
 <!-- toc -->
 
-Moonpool provides **15 assertion macros** for testing distributed system properties. All macros follow the Antithesis principle: **assertions never crash your program**. Violations are recorded in shared memory and reported after the simulation completes, allowing the system to continue running and discover cascading failures.
+All macros live in `moonpool_sim` (also through the `moonpool` facade with the `sim` feature). Accounting lives in `moonpool-assertions`, a dependency-free crate with a heap table by default and a `MAP_SHARED` table under exploration. No macro panics. A violated always-style assertion records a failure for the current seed, and the report lists it.
 
-Every macro is tracked in shared memory via moonpool-explorer, enabling cross-process visibility across forked exploration timelines.
+## Macro Summary
 
-## Boolean Assertions
+| Macro | Form | Kind | Fails the seed when | Guides the explorer |
+|-------|------|------|---------------------|---------------------|
+| `assert_always!` | `(cond, msg)` or `(cond, msg, { "k" => v, .. })` | `Always` | `cond` is false, or the site never ran | No |
+| `assert_always_or_unreachable!` | `(cond, msg)` or `(cond, msg, {..})` | `AlwaysOrUnreachable` | `cond` is false | No |
+| `assert_sometimes!` | `(cond, msg)` | `Sometimes` | coverage miss: ran, never true | Yes: first pass |
+| `assert_reachable!` | `(msg)` | `Reachable` | coverage miss: never reached | Yes: first pass |
+| `assert_unreachable!` | `(msg)` or `(msg, {..})` | `Unreachable` | reached at all | No |
+| `assert_always_greater_than!` | `(val, thresh, msg [, {..}])` | `NumericAlways` | `val > thresh` is false | No |
+| `assert_always_greater_than_or_equal_to!` | same | `NumericAlways` | `val >= thresh` is false | No |
+| `assert_always_less_than!` | same | `NumericAlways` | `val < thresh` is false | No |
+| `assert_always_less_than_or_equal_to!` | same | `NumericAlways` | `val <= thresh` is false | No |
+| `assert_sometimes_greater_than!` | `(val, thresh, msg)` | `NumericSometimes` | coverage miss: `val > thresh` never true | Yes: watermark |
+| `assert_sometimes_greater_than_or_equal_to!` | same | `NumericSometimes` | coverage miss | Yes: watermark |
+| `assert_sometimes_less_than!` | same | `NumericSometimes` | coverage miss | Yes: watermark |
+| `assert_sometimes_less_than_or_equal_to!` | same | `NumericSometimes` | coverage miss | Yes: watermark |
+| `assert_sometimes_all!` | `(msg, [(name, bool), ..])` | `BooleanSometimesAll` | coverage miss: never all true at once | Yes: frontier, combination |
+| `assert_sometimes_each!` | `(msg, [(key, val), ..])` or `(msg, [identity..], [quality..])` | bucket table | never (no contract) | Yes: bucket, quality |
 
-These macros test boolean conditions. Always-type assertions record violations but do not panic. Sometimes-type assertions guide exploration by triggering forks on discovery.
+Rules that apply to every macro:
 
-| Macro | Category | Description | Panics? | Forks in exploration? |
-|-------|----------|-------------|---------|----------------------|
-| `assert_always!` | Always | Condition must be true every time it is evaluated | No | No |
-| `assert_always_or_unreachable!` | Always | Condition must be true when reached, but the code path need not be reached | No | No |
-| `assert_sometimes!` | Sometimes | Condition should be true at least once across all iterations | No | Yes, on first success |
-| `assert_reachable!` | Reachable | Code path should be reached at least once | No | Yes, on first reach |
-| `assert_unreachable!` | Unreachable | Code path should never be reached | No | No |
+- `msg` is any `Display` value. It identifies the site, so keep it stable and unique.
+- Numeric values go through `to_i64_saturating`, so any integer type works.
+- The detail map `{ "k" => v, .. }` prints `[ASSERTION FAILED] msg (seed=N) | k=v ...` on failure only. Values must implement `Display`.
+- `assert_sometimes_each!` takes at most 6 identity keys per site (`MAX_EACH_KEYS`). The quality list is optional.
 
-### `assert_always!(condition, message)`
+## Numeric Watermarks
 
-Records a violation if `condition` is false. The simulation continues; violations are collected and reported at the end. Validated by `validate_assertion_contracts()` which flags the assertion if `fail_count > 0`, or if `must_hit` and the assertion was never reached.
+Every numeric site keeps one watermark, the best value seen for its direction:
 
-```rust
-assert_always!(
-    granted_count <= 1,
-    "lock never granted to two nodes simultaneously"
-);
-```
+| Macro family | Watermark tracks |
+|--------------|------------------|
+| `assert_always_greater_than[_or_equal_to]!` | the minimum value (the worst case) |
+| `assert_always_less_than[_or_equal_to]!` | the maximum value (the worst case) |
+| `assert_sometimes_greater_than[_or_equal_to]!` | the maximum value |
+| `assert_sometimes_less_than[_or_equal_to]!` | the minimum value |
 
-### `assert_always_or_unreachable!(condition, message)`
+Always-style watermarks are reporting only. An improvement on a `NumericSometimes` watermark is a `WatermarkImprovement` discovery, so the explorer branches from it.
 
-Like `assert_always!`, but does **not** require the code path to be reached. If the code is never executed, the assertion passes silently. Useful for guarding optional error-handling paths.
+## Discovery Kinds
 
-```rust
-assert_always_or_unreachable!(
-    retry_count < max_retries,
-    "retry count within bounds when retry path taken"
-);
-```
+The accounting layer fires `on_discovery(kind, state_id)` at most once per distinct discovery across every process that shares the table. The `DiscoveryKind` values and the macros that produce them:
 
-### `assert_sometimes!(condition, message)`
+| Kind | Produced by | Explorer priority |
+|------|-------------|-------------------|
+| `WatermarkImprovement` | a `NumericSometimes` watermark moves | progress (2) |
+| `FrontierAdvance` | more `assert_sometimes_all!` facts true at once than before | progress (2) |
+| `BucketQuality` | an `assert_sometimes_each!` bucket's quality value improves | progress (2) |
+| `BucketFirst` | a new `assert_sometimes_each!` identity bucket | structured novelty (1) |
+| `BooleanCombination` | a new partial truth combination in `assert_sometimes_all!` | structured novelty (1) |
+| `SometimesPass` | first pass of `assert_sometimes!` or `assert_reachable!` | coverage (0) |
 
-Records pass/fail statistics. The **first** time the condition is `true` is a discovery: in exploration mode the explorer anchors alternate timelines at that point. Validated by checking that `pass_count > 0` after enough iterations.
+## Contract Validation
 
-```rust
-assert_sometimes!(
-    saw_leader_election,
-    "leader election triggered at least once"
-);
-```
+`validate_assertion_contracts()` returns `(always_violations, coverage_violations)` after the campaign:
 
-### `assert_reachable!(message)`
+| Kind | Always violation | Coverage violation |
+|------|------------------|--------------------|
+| `Always` | `fail_count > 0`, or the site was never evaluated (`must_hit`) | |
+| `AlwaysOrUnreachable` | `fail_count > 0` | |
+| `Unreachable` | `pass_count > 0` | |
+| `NumericAlways` | `fail_count > 0` | |
+| `Sometimes` | | evaluated at least once, never passed |
+| `Reachable` | | never reached |
+| `NumericSometimes` | | evaluated, never passed |
+| `BooleanSometimesAll` | | `frontier < frontier_target` |
 
-Marks a code path as "should be reached." Always passes `true` as the condition. First reach is a discovery. Validated by checking that `pass_count > 0`.
+Table integrity counts as an always violation: dropped slot allocations, dropped bucket allocations, a slot conflict or a bucket conflict (two messages hashing to one slot). `SimulationReport.dropped_assertion_allocations` reports the dropped count.
 
-```rust
-if connection_failed {
-    assert_reachable!("retry path exercised");
-    retry().await;
-}
-```
+Coverage violations do not fail a `FixedCount` campaign by themselves. They stop `UntilCoverageStable` from converging, and the report prints them.
 
-### `assert_unreachable!(message)`
+## Table Limits
 
-Marks a code path that should **never** execute. If reached, records a violation (but does not panic). Validated by checking that `pass_count == 0`.
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `MAX_ASSERTION_SLOTS` | 2048 | distinct assertion sites per campaign |
+| `MAX_EACH_BUCKETS` | 256 | distinct `assert_sometimes_each!` identity buckets |
+| `MAX_EACH_KEYS` | 6 | identity keys per `assert_sometimes_each!` call |
 
-```rust
-match state {
-    State::Valid => { /* ok */ }
-    State::Invalid => {
-        assert_unreachable!("invalid state should never occur");
-    }
-}
-```
+Bucket a coarse vocabulary (phase, role, floor), not identifiers (node id, slot number).
 
-## Numeric Assertions
+## Probe Macros
 
-These macros compare a value against a threshold. Always-type numeric assertions record violations on failure. Sometimes-type numeric assertions track **watermarks** (best observed value); a watermark improvement is a discovery.
+`moonpool-assertions` exports two lightweight probes for library code that must not depend on `moonpool-sim`:
 
-All values are cast to `i64` internally.
+| Macro | Form | Equivalent |
+|-------|------|------------|
+| `reachable!` | `reachable!("msg")` | `assert_reachable!` |
+| `sometimes!` | `sometimes!(cond, "msg")` | `assert_sometimes!` |
 
-| Macro | Category | Comparison | Panics? | Forks in exploration? |
-|-------|----------|------------|---------|----------------------|
-| `assert_always_greater_than!` | NumericAlways | `val > threshold` | No | No |
-| `assert_always_greater_than_or_equal_to!` | NumericAlways | `val >= threshold` | No | No |
-| `assert_always_less_than!` | NumericAlways | `val < threshold` | No | No |
-| `assert_always_less_than_or_equal_to!` | NumericAlways | `val <= threshold` | No | No |
-| `assert_sometimes_greater_than!` | NumericSometimes | `val > threshold` | No | Yes, on watermark improvement |
-| `assert_sometimes_greater_than_or_equal_to!` | NumericSometimes | `val >= threshold` | No | Yes, on watermark improvement |
-| `assert_sometimes_less_than!` | NumericSometimes | `val < threshold` | No | Yes, on watermark improvement |
-| `assert_sometimes_less_than_or_equal_to!` | NumericSometimes | `val <= threshold` | No | Yes, on watermark improvement |
+`moonpool-sim` re-exports them as `moonpool_sim::reachable` and `moonpool_sim::sometimes`.
 
-### Always numeric example
+## Related Functions and Types
 
-```rust
-assert_always_greater_than!(
-    queue.len(),
-    0,
-    "queue never empty during processing"
-);
+| Item | Where | Purpose |
+|------|-------|---------|
+| `assertion_results() -> BTreeMap<String, AssertionStats>` | `moonpool_sim` | per-message `{ total_checks, successes }` |
+| `reset_assertion_results()` | `moonpool_sim` | clear the table (the runner does this per campaign) |
+| `has_always_violations()`, `reset_always_violations()` | `moonpool_sim` | the per-run always flag |
+| `validate_assertion_contracts()` | `moonpool_sim` | the rules above |
+| `AssertKind`, `AssertCmp` | `moonpool_assertions`, re-exported | the kind and comparison enums |
+| `AssertionDetail` | `moonpool_sim` report | `msg, kind, pass_count, fail_count, watermark, frontier, frontier_target, combinations_seen, status` |
+| `AssertionStatus` | `moonpool_sim` report | `Fail`, `Miss`, `Pass` |
+| `BucketSiteSummary` | `moonpool_sim` report | `msg, buckets_discovered, total_hits` per `sometimes_each` site |
+| `SimulationReport.assertion_details` | report | one `AssertionDetail` per slot |
+| `SimulationReport.bucket_summaries` | report | one `BucketSiteSummary` per site |
+| `SimulationReport.assertion_violations` | report | always-style violations found by validation |
+| `SimulationReport.coverage_violations` | report | sometimes-style misses |
 
-assert_always_less_than_or_equal_to!(
-    latency_ms,
-    timeout_ms,
-    "response latency within timeout"
-);
-```
+## Where to Use Which
 
-### Sometimes numeric example
+| Situation | Macro |
+|-----------|-------|
+| An invariant that must hold on every evaluation | `assert_always!` |
+| An invariant on a path that may never run under some seeds | `assert_always_or_unreachable!` |
+| A branch the chaos must reach (retry, timeout, recovery) | `assert_sometimes!` or `assert_reachable!` |
+| A branch that must never run | `assert_unreachable!` |
+| A bound (queue depth, latency, replica lag) | `assert_always_less_than!` and friends |
+| Depth the explorer should push (level reached, slots decided) | `assert_sometimes_greater_than!` |
+| Several facts that must coincide at least once | `assert_sometimes_all!` |
+| Coverage per identity with a quality value | `assert_sometimes_each!` |
 
-```rust
-assert_sometimes_greater_than!(
-    concurrent_connections,
-    5,
-    "achieved high concurrency"
-);
-
-assert_sometimes_less_than!(
-    retry_delay_ms,
-    100,
-    "fast retry path exercised"
-);
-```
-
-**Watermark tracking**: For `sometimes` numeric assertions, the explorer tracks the best value observed so far. When a new evaluation **improves** the watermark (higher for `gt`/`ge`, lower for `lt`/`le`), it creates a replay anchor for timelines that might push the metric even further.
-
-## Compound Assertions
-
-These macros track multi-dimensional properties across multiple conditions or identity keys.
-
-| Macro | Category | Description | Panics? | Guides exploration? |
-|-------|----------|-------------|---------|----------------------|
-| `assert_sometimes_all!` | BooleanSometimesAll | All named booleans should sometimes be true simultaneously | No | Yes, on frontier advance |
-| `assert_sometimes_each!` | EachBucket | Per-identity bucketed assertion with optional quality watermarks | No | Yes, on new bucket or quality improvement |
-
-### `assert_sometimes_all!(message, [(name, bool), ...])`
-
-Tracks a **frontier**: the maximum number of conditions that have been simultaneously true. When the frontier advances (more conditions true at once than ever before), a replay anchor is created.
-
-```rust
-assert_sometimes_all!("all_nodes_healthy", [
-    ("node_a", node_a_healthy),
-    ("node_b", node_b_healthy),
-    ("node_c", node_c_healthy),
-]);
-```
-
-If previously at most 2 of the 3 conditions were true at once, and now all 3 are true, the frontier advances from 2 to 3 and a replay anchor is created.
-
-### `assert_sometimes_each!(message, [(key, value), ...])` / `assert_sometimes_each!(message, [(key, value), ...], [(quality_key, quality_value), ...])`
-
-Each unique combination of identity keys gets its own **bucket**. A new bucket is a discovery. If quality keys are provided, the explorer also tracks quality watermarks per bucket, and a quality improvement is a fresh discovery (registering a healthier exemplar for the same state).
-
-```rust
-// Identity keys only -- guide on first discovery of each (lock, depth) combo
-assert_sometimes_each!("gate", [("lock", lock_id), ("depth", depth)]);
-
-// With quality watermarks -- also guide when health improves for a known bucket
-assert_sometimes_each!("descended", [("to_floor", floor)], [("health", hp)]);
-```
-
-## Validation: `validate_assertion_contracts()`
-
-After the simulation completes, `validate_assertion_contracts()` reads all assertion slots from shared memory and checks each one against its kind-specific contract. It returns two vectors:
-
-### Always violations (definite bugs)
-
-These indicate real bugs and are safe to check regardless of iteration count.
-
-| Kind | Violation condition |
-|------|-------------------|
-| `Always` | `fail_count > 0` (condition was false at least once) |
-| `Always` | `must_hit && total == 0` (assertion was never reached) |
-| `AlwaysOrUnreachable` | `fail_count > 0` (condition was false when reached) |
-| `Unreachable` | `pass_count > 0` (code path was reached) |
-| `NumericAlways` | `fail_count > 0` (comparison failed at least once) |
-| Slot table | `dropped_assertion_allocations > 0` (one or more evaluations could not be tracked: the table was full, or a slot's initializer never published it) |
-| Each-bucket table | `each_bucket_dropped_allocations() > 0` (one or more `assert_sometimes_each!` observations found the 256-bucket table full, or a bucket that was never published) |
-| Slot conflict | a message reached by call sites of different kinds (or watermark directions), or a message hash collision; the mismatched call is not accounted |
-| Bucket conflict | an `assert_sometimes_each!` identity whose hash collides with a different key set; the colliding observation is not accounted |
-
-### Coverage violations (statistical)
-
-These are only meaningful with enough iterations for statistical coverage. A single iteration may not trigger every path.
-
-| Kind | Violation condition |
-|------|-------------------|
-| `Sometimes` | `total > 0 && pass_count == 0` (condition was never true) |
-| `Reachable` | `pass_count == 0` (code path was never reached) |
-| `NumericSometimes` | `total > 0 && pass_count == 0` (comparison never succeeded) |
-| `BooleanSometimesAll` | No simple violation (frontier tracking is the guidance mechanism) |
-
-## Related Functions
-
-| Function | Purpose |
-|----------|---------|
-| `record_always_violation()` | Increment the thread-local violation counter (called by always-type macros) |
-| `reset_always_violations()` | Reset the violation counter (called at the start of each iteration) |
-| `has_always_violations() -> bool` | Check if any always-type violation occurred this iteration |
-| `assertion_results() -> BTreeMap<String, AssertionStats>` | Read all assertion statistics from shared memory in deterministic key order |
-| `reset_assertion_results()` | Zero the shared memory assertion table (between iterations) |
-| `skip_next_assertion_reset()` | Prevent the next reset (used by multi-seed exploration) |
-| `panic_on_assertion_violations(report)` | Panic if the report contains any assertion violations |
+See [Assertions: Finding Bugs](../part3-building/12-assertions.md) for the narrative and [The Frontier Controller](../part5-building-on-top/03-frontier-controller.md) for how discoveries drive exploration.

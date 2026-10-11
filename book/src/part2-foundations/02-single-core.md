@@ -2,36 +2,39 @@
 
 <!-- toc -->
 
-Moonpool runs every simulation on a single OS thread. This is not a limitation we reluctantly accept. It is the first design decision we made, and every other decision follows from it.
+Moonpool runs every simulation on one OS thread. This is not a limitation we accept with regret. It is the first design decision, and every other decision follows from it.
 
 ## One Thread, One Order
 
-A multi-threaded tokio runtime uses a work-stealing thread pool. When a task yields at an `.await`, any thread in the pool might pick it up. Two tasks that resume "at the same time" can execute in either order, and that order changes between runs. This is fine for production throughput. It is fatal for deterministic simulation.
+A multi-threaded tokio runtime uses a work-stealing thread pool. When a task yields at an `.await`, any thread in the pool can pick it up. Two tasks that resume "at the same time" run in either order, and the order changes between runs. This is fine for production throughput. It is fatal for a simulation that must replay.
 
-With a single thread, there is exactly one legal execution order for any given set of ready tasks. Task A resumes before Task B, or Task B before Task A, and the choice is controlled by our scheduler, not the OS. The RNG picks the order. The seed determines the RNG. Done.
+With one thread there is exactly one execution order for a given set of ready tasks. Task A runs before task B, or B before A, and our scheduler makes the choice, not the OS. The RNG picks the order. The seed determines the RNG. Done.
 
 ## How We Get There
 
-Moonpool runs every simulation on its own **deterministic executor**:
+Every simulation runs on the moonpool **deterministic executor**:
 
 ```rust,ignore
+moonpool_sim::reset_sim_rng();
+moonpool_sim::set_sim_seed(seed);
+
 let mut executor = moonpool_sim::executor::Executor::new(seed);
 executor.block_on(async move {
     // the entire simulation runs here
 });
 ```
 
-One OS thread drives the entire simulation. No work-stealing pool. No preemption between yield points. When a future resumes, it resumes on the same thread that suspended it. And which ready task runs **next** is a seeded-random pick from the ready queue: same seed, same order, bit for bit, while a different seed explores a different task interleaving. A FIFO scheduler would run ready tasks in registration order on every seed forever, structurally hiding any race between them. [The Deterministic Executor](./11-executor.md) covers the machinery in depth.
+One OS thread drives the whole simulation. There is no work-stealing pool and no preemption between yield points. When a future resumes, it resumes on the thread that suspended it. Which ready task runs **next** is a seeded draw from the ready queue. The same seed gives the same order, bit for bit. A different seed explores a different interleaving. A FIFO scheduler would run ready tasks in registration order on every seed, forever, and would hide every race between them. [The Deterministic Executor](./11-executor.md) covers the mechanism.
 
-This is the **whole** mechanism. The executor gives us determinism. Nothing fancier is needed.
+There is **no tokio runtime inside a simulation**. A bare `tokio::spawn` panics at runtime, because there is no runtime to spawn onto. Spawn through `ctx.task().spawn_task()` or `moonpool_sim::executor::spawn()`. Sleep through `ctx.time().sleep()`. Select with `moonpool_sim::select!`.
 
 ## Send-Bounded Traits
 
-Here is where moonpool diverges from earlier designs. A single-threaded runtime **could** drop `Send` bounds entirely and let users sprinkle `Rc<RefCell<T>>` across `.await` points. We deliberately do not.
+Here moonpool diverges from earlier single-threaded designs. A single-threaded runtime **could** drop `Send` bounds and let you put `Rc<RefCell<T>>` across `.await` points. We deliberately do not.
 
-Provider traits use native AFIT with `Send + Sync + 'static` supertraits and futures that return `impl Future<…> + Send`:
+Provider traits use native async-fn-in-trait with `Send + Sync + 'static` supertraits, and every async method returns `impl Future<…> + Send`:
 
-```rust
+```rust,ignore
 pub trait TimeProvider: Clone + Send + Sync + 'static {
     fn sleep(&self, duration: Duration) -> impl Future<Output = Result<(), TimeError>> + Send;
     fn now(&self) -> Duration;
@@ -39,30 +42,25 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
 }
 ```
 
-Dyn-stored traits (`Process`, `Workload`, `FaultInjector`) use `#[async_trait]`
-without `?Send`, also with `Send + Sync + 'static` supertraits.
+The traits the runner stores as `dyn` objects (`Process`, `Workload`, `FaultInjector`) use `#[async_trait]` without `?Send`, with the same `Send + Sync + 'static` supertraits.
 
-**Send is paid for interoperability, not for parallelism.**
+**We pay for `Send` to get interoperability, not parallelism.**
 
-The runtime still runs on one thread. Futures and types are never actually moved between threads at runtime. But the **type system** commits to Send + Sync at every trait boundary so customer code can use the ecosystem it already knows:
+The runtime still runs on one thread. No future ever moves between threads at runtime. But the **type system** commits to `Send + Sync` at every trait boundary, so your code can use the ecosystem it already knows:
 
 - `Arc<RwLock<State>>` for shared state
 - `DashMap` for concurrent maps
 - `Arc<AtomicBool>` for flags
-- Send-bounded spawning to fan out work: `task.spawn_task(...)` in the sim, plain `tokio::spawn` in production
+- `Send`-bounded spawning: `ctx.task().spawn_task("name", fut)` in the sim, `tokio::spawn` in production
 
-A team adopting moonpool to test an existing service should not have to rewrite their type hierarchy. If their production code uses `Arc<RwLock<…>>` (it does), moonpool wraps it without contortions. The simulation runtime drives those types on one thread, but the types themselves look exactly like the production ones.
+A team that adopts moonpool to test an existing service should not rewrite its type hierarchy. If the production code uses `Arc<RwLock<…>>` (it does), moonpool runs it as is. The simulation drives those types on one thread, but the types look exactly like production.
 
-## What This Buys, What It Costs
+There is no `LocalSet`, no `spawn_local` and no `build_local` anywhere in moonpool. Spawned futures are `Send + 'static`, as `tokio::spawn` requires.
 
-We get determinism from the runtime and ergonomics from the bounds. The combination is rare. Most deterministic simulators force you to pick: either a single-threaded runtime with `!Send` types that don't compose with anything, or a multi-threaded runtime that loses determinism.
+## What This Costs
 
-The cost is a small one. `Send + Sync` constrains a few exotic patterns (raw `Rc`, non-`Send` futures from external crates). In a year of building on this, we have not hit a case where it mattered. The patterns that **do** matter — locks, channels, spawned tasks — are all Send-friendly already.
+`Send + Sync` rules out a few patterns: raw `Rc`, and non-`Send` futures from external crates. In practice the patterns that matter (locks, channels, spawned tasks) are already `Send`-friendly.
 
-## The Parallelism Trade-Off
+The other cost is CPU parallelism **inside** one run. A simulation of 20 nodes runs on one core, not 20. This rarely matters. Simulated time is compressed: one core simulates hours of cluster time in seconds of wall-clock time, because the scheduler jumps straight to the next event. And we run **many simulations in parallel** across cores, each with its own seed. A 16-core machine runs 16 independent simulations at once, each deterministic on its own thread.
 
-Single-core simulation cannot exploit CPU parallelism **within** a simulation run. A simulation of 20 nodes runs on one core, not 20.
-
-In practice, this barely matters. Simulation time compression means a single core simulates hundreds of seconds of cluster time in a few seconds of wall-clock time. And we run **many simulations in parallel** across cores, each with a different seed. A 16-core machine runs 16 independent simulations concurrently, each fully deterministic on its own thread.
-
-Production code is unaffected. The same code that runs single-threaded under our simulation runtime can run on a multi-threaded tokio runtime in production. The provider pattern (covered next) makes this swap transparent.
+Production code is unaffected. The same code that runs single-threaded in the simulation runs on a multi-threaded tokio runtime in production. The provider pattern, covered next, makes that swap invisible to the code.

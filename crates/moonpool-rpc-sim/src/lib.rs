@@ -1,43 +1,79 @@
 //! # moonpool-rpc-sim
 //!
-//! The deterministic-simulation side of `moonpool-rpc`: process and workload
-//! definitions, independent oracles and the campaigns CI runs. It is not
-//! published, and the production crate never depends on it.
+//! The deterministic-simulation side of `moonpool-rpc`: processes,
+//! workloads, independent oracles and the campaigns that CI runs. This
+//! crate is not published. The production crate never depends on it, nor
+//! on `moonpool-sim`, even through a feature.
 //!
-//! - [`foundations`]: the `sim-rpc-foundations` campaign (#213): typed
-//!   dynamic-endpoint request/reply between two process groups and a
-//!   surviving workload, judged by a handler receipt ledger kept apart from
-//!   the transport.
-//! - [`delivery`]: the `sim-rpc-delivery` campaign (#214): every delivery
-//!   mode, lost replies, crashes, simultaneous connects, bootstrap names
-//!   and failure-monitor transitions, judged by an execution ledger.
-//! - [`interfaces`]: the `sim-rpc-interfaces` campaign (#215): interfaces
-//!   published, stored, recruited and forwarded to a third participant
-//!   across repeated same-address restarts, judged by boot, publication
-//!   and execution ledgers.
-//! - [`balance`]: the `sim-rpc-balance` campaign (#217): balanced calls
-//!   over explicit alternative sets under separate retry and duplicate
-//!   permissions, hedging, comparison copies, cancellation, late losers
-//!   and outages of every alternative, judged by receipt and attempt
-//!   ledgers.
-//! - [`streams`]: the `sim-rpc-streams` campaign (#216): reply streams with
-//!   consumption-based credit, abandonment, saturation, bounded admission
-//!   and producer reboots, judged by producer and consumer ledgers.
-//! - [`security`]: the `sim-rpc-security` campaign (#218): credential
-//!   verification and endpoint access under key rotation, UTC transitions,
-//!   crashes, graceful shutdowns and mixed protocol versions, judged by an
-//!   issue/receipt ledger: no unauthorized execution, ever.
+//! Each campaign runs the **same** `moonpool-rpc` code that runs on real
+//! TCP. The examples (`tcp_echo`, `tcp_latency`, `balance_latency`,
+//! `rpc_soak`) run that code on `TokioProviders`. The oracles never read the
+//! transport: handlers record what they executed in a ledger kept in the
+//! run's state, and the workload judges its own outcomes against it.
 //!
-//! - [`qualification`]: the `sim-rpc-qualification` campaign (#219): all of
-//!   the above at once — Paros-style publication and same-address reboots,
-//!   reliable ambiguity, streams, balancing, credentials, versions,
-//!   graceful shutdown and overload — with a declared recovery phase,
-//!   resource baselines after every process death and at the end, and
-//!   semantic replay across runs and host speeds.
+//! # Quick example
 //!
-//! Only the foundations campaign draws the simulator's bit flips (next to
-//! its own corrupting wire): it is the corruption suite. Every other
-//! campaign runs [`without_corruption`].
+//! Replay one seed of the foundations campaign, as a debugging session
+//! would:
+//!
+//! ```rust,no_run
+//! use std::sync::{Arc, Mutex};
+//!
+//! use moonpool_rpc_sim::foundations::{WorkloadConfig, campaign};
+//!
+//! let observations = Arc::new(Mutex::new(Vec::new()));
+//! let report = campaign(WorkloadConfig::campaign(), &observations)
+//!     .set_debug_seeds(vec![42])
+//!     .set_iterations(1)
+//!     .run()
+//!     .expect("simulation configuration is valid");
+//! assert!(report.seeds_failing.is_empty());
+//! ```
+//!
+//! The binaries run each campaign until coverage is stable, under the
+//! determinism canary:
+//!
+//! ```text
+//! cargo xtask sim run rpc-foundations
+//! cargo xtask sim run rpc
+//! ```
+//!
+//! # Campaigns
+//!
+//! | Module | Binary | What it proves |
+//! |---|---|---|
+//! | [`foundations`] | `sim-rpc-foundations` | Typed request/reply between two process groups and a surviving workload, judged by a handler receipt ledger. The corruption suite: it alone draws bit flips |
+//! | [`delivery`] | `sim-rpc-delivery` | Every delivery mode, lost replies, crashes, simultaneous connects, bootstrap names and failure-monitor transitions, judged by an execution ledger |
+//! | [`interfaces`] | `sim-rpc-interfaces` | Interfaces published, stored, recruited and forwarded to a third participant across same-address restarts |
+//! | [`balance`] | `sim-rpc-balance` | Balanced calls under separate retry and duplicate permissions, hedging, cancellation, late losers and outages of every alternative |
+//! | [`streams`] | `sim-rpc-streams` | Reply streams with consumption credit, abandonment, saturation, bounded admission and producer reboots |
+//! | [`security`] | `sim-rpc-security` | Credentials and endpoint access under key rotation, UTC transitions, crashes, graceful shutdowns and mixed protocol versions: no unauthorized execution, ever |
+//! | [`qualification`] | `sim-rpc-qualification` | All of the above at once, with a declared recovery phase, resource baselines after every process death, and semantic replay across runs and host speeds |
+//!
+//! Each module exposes a campaign function that returns a configured
+//! `moonpool_sim::SimulationBuilder`, plus its processes, workload, fault
+//! injector and records. The tests in `tests/` run each campaign as
+//! bounded, deterministic seed budgets under nextest.
+//!
+//! # Faults
+//!
+//! - **Network chaos.** Swarm network faults per seed. Every campaign but
+//!   foundations masks bit flips with [`without_corruption`]: corruption is
+//!   its own explicit suite, never arbitrary loss on healthy TCP.
+//! - **Process faults.** Scripted crashes (for example, right after a
+//!   handler received a request), same-address restarts and graceful
+//!   shutdowns, through each campaign's `FaultInjector`.
+//! - **Runtime buggify sites.** `moonpool-rpc` carries its own buggify
+//!   points: session cuts behind a request, spurious overload refusals,
+//!   deferred stream acknowledgements and spurious failure-monitor
+//!   wakeups. Each campaign records which ones fired as reachable
+//!   assertions, read from the counters of `moonpool_rpc::RpcStats`.
+//!
+//! # Feature flags
+//!
+//! None. The crate enables the `derive` and `jwt` features of
+//! `moonpool-rpc`: the interfaces campaign serves a generated interface,
+//! and the security campaign verifies real signed tokens.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 

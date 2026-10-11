@@ -2,65 +2,65 @@
 
 <!-- toc -->
 
-You know the assertion macros. You know the buggify patterns. But when you sit down with a fresh Process and Workload, the hardest question is not **how** to assert — it is **what** to assert. Where should `assert_always!` go? Which code paths need `assert_sometimes!`? Where would `buggify!()` expose the most interesting failures?
+You know the fifteen macros. You know `buggify!` and `hint!`. The hard question with a fresh process and workload is not **how** to assert. It is **what** to assert, and **where** a fault would hurt most.
 
-A single unstructured pass through your code will find the obvious properties. The non-obvious ones — the properties that catch real bugs — require looking at the same code from multiple independent angles.
+One read through the code finds the obvious properties. The ones that catch real bugs hide from a single viewpoint. The fix is to read the same code several times, each time through one lens.
 
 ## The Attention Focus Pattern
 
-The idea comes from Antithesis's property discovery methodology. Instead of reading through code once and noting assertions as they occur to you, you examine the same code **eight times**, each time through a different lens. Each lens is called an **attention focus**.
+The idea comes from Antithesis's property-discovery work. Instead of one pass with a notebook, make eight passes. Each pass looks for one failure family and ignores the rest. Each pass is an **attention focus**.
 
-Why does this work? Because different failure modes hide in different mental models. A developer thinking about crash recovery notices different things than one thinking about concurrency. A focus on protocol contracts surfaces properties that a focus on resource boundaries would miss entirely. The structured repetition is the point.
+Why does it work? Different bugs live in different mental models. A reader thinking about crash recovery does not notice a check-then-act race. A reader thinking about races does not notice an unsynced write. The discipline is the repetition: eight narrow readings beat one wide one.
 
-## Eight Focuses for Moonpool Code
+## Eight Focuses
 
-**State Integrity** examines in-memory invariants and storage persistence. What state must survive reboots? What write ordering assumptions exist? If a process is killed between writing field A and field B, does recovery handle the inconsistency? Look for monotonicity properties (ballot numbers, sequence IDs), derived state that could diverge from its source, and reference model expectations that the process might violate.
+Each focus has a question, the moonpool tools that test it, and the assertion it usually produces.
 
-**Concurrency** looks at races between workloads hitting the same process. Moonpool runs on a single OS thread, but our traits are `Send`-bounded so customer code naturally uses `Arc<RwLock<…>>`, `Arc<Mutex<…>>`, or `DashMap`. Async interleaving across `.await` points creates real concurrency hazards even on one thread. Check-then-act patterns where another task could mutate state between the check and the act. Multiple workloads accessing the same key. `Arc<RwLock<…>>` state read, then mutated, with a yield point in between.
+**1. State integrity.** What must survive a reboot? Which numbers only go up? Which derived state can drift from its source? Tools: `assert_always!` on monotonic values, a `StateHandle` model published from the workload and compared in `check`, and an [invariant](./17-events-and-invariants.md) when the property spans nodes. The leader-election test is this focus: one leader per term.
 
-**Crash Recovery** asks what happens when a Process is killed and restarted from its factory. The factory returns a blank instance — all in-memory state is gone. Partially-written storage operations (write without `sync_all()`) may leave corrupt data. Recovery code that assumes clean state will miss torn writes. Operations interrupted between a storage write and a sync are the classic source of subtle bugs.
+**2. Concurrency.** Moonpool runs one OS thread, but every `.await` is an interleaving point. Two workloads hit the same key. A task reads an `Arc<RwLock<..>>`, yields, then writes. Tools: `assert_always!` on read-after-write from each workload's view, and `swarm_operations()` so the operation mix differs per seed.
 
-**Network Faults** examines behavior under connection drops, partitions, and reordering. RPC calls without timeouts. Retry logic that is not idempotent. Stale cached state after a partition heals (old leader references, expired peer info). Fire-and-forget sends where delivery actually matters.
+**3. Crash recovery.** A process factory returns a blank instance. In-memory state is gone, and an unsynced write may be torn. Tools: `Chaos::Attrition` for reboots, `SimContext::crash_self` for a crash the code chooses, and `hint!("label").await` in shipped code at the moment that matters. moonpool-journal names three such moments inside one commit: `entries written, not synced`, `records written, not synced`, `batch synced, metainfo stale`. The simulator decides whether to strike each one. Assert with `assert_sometimes!` that recovery ran, and `assert_always!` that it rebuilt the right state.
 
-**Timing & Scheduling** checks sensitivity to event ordering. Hardcoded timeouts that interact with other timeouts. Logic that assumes timers fire before network events arrive. Election timeouts that could overlap with heartbeat timeouts. Races between timer expiry and data delivery.
+**4. Network faults.** A call without a timeout. A retry that is not idempotent. A cached leader address after a partition heals. Tools: `Chaos::Network(ChaosMode::Swarm)` with a `network_fault_mask`, and the `sim_fault` timeline to correlate. Assert with `assert_always!` that the applied count equals the acknowledged count, and `assert_reachable!` on the retry branch.
 
-**Resource Boundaries** hunts for unbounded growth. `Vec` or `VecDeque` that grows without limit under sustained load. Missing backpressure on incoming requests. Operations that assume connections or file handles are always available. These bugs only surface under chaos, which is exactly when they matter most.
+**5. Timing and scheduling.** An election timeout that overlaps a heartbeat timeout. Logic that assumes a timer fires before a message arrives. Tools: `buggify!` to stretch a delay, `moonpool_sim::select!` so branch order is seeded, `Chaos::GrayFailure` and `SimContext::slowness` for a slow machine. Assert with `assert_sometimes!` that the late branch won at least once.
 
-**Protocol Contracts** looks for guarantees that are claimed but not enforced. Doc comments that say "returns error if not found" but the code returns a default. Ordering assumptions between RPC calls (create before update) that nothing validates. Response types that mask partial failures as success.
+**6. Resource boundaries.** A queue that grows forever under load. No backpressure. Tools: the numeric macros. `assert_always_less_than!` guards the bound. Its `assert_sometimes_greater_than!` twin makes the explorer push toward it. `SystemProvider` counters and [application metrics](./25-metrics.md) show the shape of the pressure.
 
-**Lifecycle Transitions** examines startup, shutdown, and reboot sequences. Requests arriving before initialization completes. In-flight work silently dropped during graceful shutdown. State published to `StateRegistry` before it is valid. Shutdown ordering dependencies where closing connections before flushing storage loses data.
+**7. Protocol contracts.** A doc comment says "returns an error if missing" and the code returns a default. An ordering rule between two RPCs that nothing checks. Tools: `assert_always!` at the boundary, and `assert_unreachable!` on the branch the contract says cannot happen.
 
-## Using the Focuses
+**8. Lifecycle transitions.** A request arrives before setup finished. Graceful shutdown drops in-flight work. State is published before it is valid. Tools: `RebootKind::Graceful` with a grace period, `Chaos::Outage` for a correlated group outage, `assert_sometimes_each!("phase", [("phase", phase as i64)])` to prove every phase was entered.
 
-There are two ways to work through the focuses.
+## Running the Passes
 
-**Ensemble mode** runs all focuses in parallel. For each focus, a separate analysis pass examines the code through that single lens and produces candidate assertions and buggify points. The results are then synthesized: duplicates found by multiple focuses are high-confidence properties, while unique finds from a single focus are high-value catches that a single pass would have missed.
+Two ways work.
 
-**Sequential mode** works through the focuses as a checklist. The key discipline is making an explicit pass for each focus. Do not skip a focus because an earlier pass "already covered" that area. The value is in the independent perspective — the same line of code looks different through the lens of crash recovery than through the lens of concurrency.
+**Sequential.** Walk the focuses as a checklist. Read the whole process once per focus. Do not skip a focus because an earlier pass "already covered" that function. The same line looks different under crash recovery and under concurrency, and that difference is the point.
 
-## What Discovery Produces
+**Ensemble.** Give each focus to a separate reviewer, human or AI agent, with only that focus. Merge the results. A property found by three reviewers is high confidence. A property found by one is the kind a single pass would have missed, and often the best catch of the exercise.
 
-Each discovered property maps to a concrete assertion or buggify placement:
+Either way, write each finding down the same way:
 
-- **Location**: exact file and line range
-- **Macro**: which assertion type (`assert_always!`, `assert_sometimes!`, `buggify!()`, etc.)
-- **Message**: unique, descriptive assertion message
-- **Rationale**: what bug this catches and why it matters
-- **Provenance**: which focus or focuses surfaced it
+- **Location**: file and line range.
+- **Macro**: `assert_always!`, `assert_sometimes!`, `hint!`, `buggify!`, and so on.
+- **Message**: unique, constant, under 64 bytes.
+- **Rationale**: the bug this catches.
+- **Provenance**: which focus found it.
 
-Properties found by multiple focuses independently are strong candidates. They represent invariants that sit at the intersection of multiple failure modes. Properties found by only one focus are equally important — they represent the blind spots that unstructured review misses.
+Then implement, run with the default `UntilCoverageStable`, and read the report. A `sometimes` that stays at 0% is a finding too: chaos never reached that branch, so either the fault mix is wrong or the branch is dead.
 
-## A Quick Example
+## A Short Example
 
-Consider a key-value Process that accepts writes over RPC and persists them to storage. A single review pass might add `assert_always!` for "response matches stored value" and call it done.
+Take a key/value process that accepts writes over RPC and persists them. One pass adds `assert_always!(stored == written, "read-after-write")` and stops.
 
-Running through the focuses reveals more:
+The focuses add four more:
 
-- **State Integrity**: the process maintains a write counter. Is it monotonically increasing? `assert_always!(new_count > old_count, "write counter regression")`
-- **Crash Recovery**: writes go to an in-memory map, then flush to storage on a timer. A crash between write and flush loses data. `buggify!()` on the flush path to test this. `assert_sometimes!` to verify the recovery path is actually exercised.
-- **Concurrency**: two workloads writing the same key. The last-write-wins semantics should hold. `assert_always!` on read-after-write consistency from each workload's perspective.
-- **Network Faults**: the client retries on timeout, but the write is not idempotent. A retry after an ambiguous failure could double-apply. `assert_always!` on the write count matching expected count.
+- **State integrity**: the process keeps a write counter. `assert_always!(new > old, "write counter never regresses")`.
+- **Crash recovery**: writes land in a map and flush to disk on a timer. Put `hint!("kv: written, not flushed").await` between the two. Add `assert_reachable!("kv: recovery replayed the flush log")`.
+- **Concurrency**: two workloads write the same key. `assert_always!` on last-write-wins from each workload's view.
+- **Network faults**: the client retries on timeout and the write is not idempotent. `assert_always_less_than_or_equal_to!(applied, acknowledged, "a retry never double-applies")`.
 
-Four focuses, four distinct properties, one of which (the retry idempotency bug) is the kind of subtle issue that crashes production systems. A single pass would likely have caught only the first.
+The last one is the production outage. A single pass would have found the first.
 
-The `/discover-properties` skill automates this process. It examines your Process and Workload code through all eight focuses and produces a structured list of assertion and buggify placements, ready to implement.
+Properties are not static. Each time a seed fails, ask which focus would have predicted it, and add that focus's missing assertion before you fix the bug. The assertion stays. The bug does not come back.
