@@ -119,6 +119,17 @@ impl SimContext {
             .unwrap_or_default()
     }
 
+    /// How slow the process at `ip` is now: its gray-failure factors (see
+    /// [`SimWorld::slowness`](crate::SimWorld::slowness)). Healthy once the
+    /// simulation is gone.
+    #[must_use]
+    pub fn slowness(&self, ip: std::net::IpAddr) -> crate::Slowness {
+        self.providers
+            .weak_world()
+            .upgrade()
+            .map_or(crate::Slowness::HEALTHY, |world| world.slowness(ip))
+    }
+
     /// Get this workload's IP address.
     #[must_use]
     pub fn my_ip(&self) -> &str {

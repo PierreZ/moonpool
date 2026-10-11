@@ -76,7 +76,7 @@ Each seed draws how many machines are slow (one to `max_slow`, among those the `
 
 `max_slow` is the budget: keep it at the number of machines your system tolerates losing (`f`), so a quorum can still form. `ChaosMode::Swarm` masks each kind per seed, so some seeds slow only the disk, some only the network, and so on. Recovery mode makes every machine healthy again, so the quiet tail runs at full speed. The reach gates `gray: cpu slow`, `gray: disk slow` and `gray: network slow` show which kinds a campaign reached.
 
-A custom injector can do the same by hand with `FaultContext::set_slowness(ip, Slowness { cpu, disk, network })` and read it back with `FaultContext::slowness(ip)`.
+A custom injector can do the same by hand with `FaultContext::set_slowness(ip, Slowness { cpu, disk, network })` and read it back with `FaultContext::slowness(ip)`. A workload reads it with `SimContext::slowness(ip)`, for example to check what a slow process reports about itself.
 
 ## What the Gate Does Not See
 
