@@ -8,7 +8,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_sim::{
     FaultContext, FaultInjector, RandomProvider, SimulationError, SimulationResult, TimeProvider,
-    assert_reachable,
+    assert_reachable, buggify,
 };
 
 use super::state::{Ledger, SCRIPT_DONE_KEY, WORKLOAD_IP_KEY};
@@ -23,6 +23,13 @@ async fn pause(ctx: &FaultContext, millis: std::ops::Range<u64>) -> SimulationRe
         .sleep(Duration::from_millis(millis))
         .await
         .map_err(|error| SimulationError::InvalidState(format!("sleep failed: {error}")))
+}
+
+/// How long a whole outage holds: `usual`, or, when buggified, long enough
+/// to outlast the client's failure detection, its `all_failed_wait` and its
+/// probe, so a call reports that every alternative failed.
+fn outage_millis(usual: std::ops::Range<u64>) -> std::ops::Range<u64> {
+    if buggify!() { 2500..5000 } else { usual }
 }
 
 #[async_trait]
@@ -48,7 +55,7 @@ impl FaultInjector for BalanceFaults {
                         }
                         ledger.set_outage(true);
                         assert_reachable!("rpc balance every alternative partitioned away");
-                        pause(ctx, 400..2000).await?;
+                        pause(ctx, outage_millis(400..2000)).await?;
                         for server in &servers {
                             ctx.heal_partition(&workload, server)?;
                         }
@@ -61,7 +68,7 @@ impl FaultInjector for BalanceFaults {
                     }
                     ledger.set_outage(true);
                     assert_reachable!("rpc balance every server crashed");
-                    pause(ctx, 200..1500).await?;
+                    pause(ctx, outage_millis(200..1500)).await?;
                     for server in &servers {
                         ctx.restart(server)?;
                     }
