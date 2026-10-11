@@ -157,8 +157,9 @@ fn test_connect_failure_mode_probabilistic_hang() {
         .expect("bind settles")
         .expect("bind succeeds");
 
+    // Only a share of the buggified connects hangs, so give it room.
     let mut hang_count = 0;
-    for i in 0..20 {
+    for i in 0..400 {
         match settle(&mut sim, provider.connect(addr)) {
             Some(Ok(_)) => {}
             Some(Err(e)) => {

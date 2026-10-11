@@ -1168,7 +1168,7 @@ mod tests {
     #[test]
     fn closed_connections_are_not_partition_candidates() {
         let mut config = NetworkConfiguration::fast_local();
-        config.chaos.partition_probability = 1.0;
+        config.chaos.partition_rate = f64::INFINITY;
         config.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
         let mut sim = SimWorld::new_with_network_config(config);
         let first = IpAddr::from([10, 0, 0, 1]);

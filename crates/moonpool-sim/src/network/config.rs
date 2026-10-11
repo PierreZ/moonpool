@@ -18,7 +18,7 @@
 //! | Delay Type | Config Field | Default | Real-World Scenario |
 //! |------------|--------------|---------|---------------------|
 //! | Operation latency | `bind/accept/connect/write_latency` | Various ranges | Timeout settings, async operation ordering |
-//! | Write clogging | `clog_probability` + `clog_duration` | 0%, 100-300ms | Backpressure handling, flow control |
+//! | Write clogging | `clog_rate` + `clog_duration` | 0/s, 100-300ms | Backpressure handling, flow control |
 //! | Read clogging | Same as write | Same | Symmetric flow control |
 //! | Clock drift | `clock_drift_enabled` + `clock_drift_max` | true, 100ms | Lease expiration, distributed consensus, TTL handling |
 //! | Buggified delay | `buggified_delay_enabled` + `buggified_delay_max` | true, 100ms | Race conditions, timing-dependent bugs |
@@ -27,7 +27,7 @@
 //!
 //! | Partition Type | Config/Method | Default | Real-World Scenario |
 //! |----------------|---------------|---------|---------------------|
-//! | Random partition | `partition_probability` + `partition_duration` | 0%, 200ms-2s | Split-brain, quorum loss, leader election |
+//! | Random partition | `partition_rate` + `partition_duration` | 0/s, 200ms-2s | Split-brain, quorum loss, leader election |
 //! | Directed pair | `partition_pair()` | Manual | One-way loss between two nodes |
 //! | Pair restore | `restore_partition()` | Manual | Heals both directed pair entries |
 //! | Send-only block | `partition_send_from()` | Manual | Asymmetric network failures |
@@ -73,7 +73,7 @@
 //!
 //! let mut config = NetworkConfiguration::default();
 //! config.chaos.partition_strategy = PartitionStrategy::IsolateSingle;
-//! config.chaos.partition_probability = 0.05; // 5%
+//! config.chaos.partition_rate = 0.2; // one partition every 5 s on average
 //! ```
 //!
 //! ## FDB/TigerBeetle References
@@ -276,10 +276,10 @@ impl NetworkFaultMask {
 
     pub(crate) fn apply_to(self, chaos: &mut ChaosConfiguration) {
         if !self.contains(NetworkFault::Clog) {
-            chaos.clog_probability = 0.0;
+            chaos.clog_rate = 0.0;
         }
         if !self.contains(NetworkFault::Partition) {
-            chaos.partition_probability = 0.0;
+            chaos.partition_rate = 0.0;
         }
         if !self.contains(NetworkFault::BitFlip) {
             chaos.bit_flip_probability = 0.0;
@@ -324,13 +324,27 @@ impl ConnectFailureMode {
 /// following `FoundationDB`'s BUGGIFY patterns for deterministic testing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChaosConfiguration {
-    /// Clogging probability for individual writes (0.0 - 1.0)
-    pub clog_probability: f64,
+    /// Clogs started per connection direction per simulated second.
+    ///
+    /// A rate, not a per-write coin: the chance that an I/O finds a new clog
+    /// is `1 - exp(-rate * elapsed)`, where `elapsed` is the time since the
+    /// direction was last checked or last unclogged. A chatty connection
+    /// therefore sees the same clog rate as a quiet one. `f64::INFINITY`
+    /// clogs every I/O that is not already clogged.
+    pub clog_rate: f64,
     /// Duration range for clog delays
     pub clog_duration: Range<Duration>,
 
-    /// Network partition probability (0.0 - 1.0)
-    pub partition_probability: f64,
+    /// Random partitions started per simulated second.
+    ///
+    /// A rate, not a per-event coin: arrivals are a Poisson process in
+    /// simulated time, so the number of partitions does not grow with the
+    /// number of simulator events. At most one random partition is in force at
+    /// a time: the next arrival is drawn from the moment the current one heals
+    /// (`TigerBeetle`'s partition and unpartition stability), so every partition
+    /// is followed by a healed gap. `f64::INFINITY` starts the next partition
+    /// as soon as the previous one heals.
+    pub partition_rate: f64,
     /// Duration range for network partitions
     pub partition_duration: Range<Duration>,
 
@@ -448,9 +462,9 @@ pub struct ChaosConfiguration {
 impl Default for ChaosConfiguration {
     fn default() -> Self {
         Self {
-            clog_probability: 0.0,
+            clog_rate: 0.0,
             clog_duration: Duration::from_millis(100)..Duration::from_millis(300),
-            partition_probability: 0.0,
+            partition_rate: 0.0,
             partition_duration: Duration::from_millis(200)..Duration::from_secs(2),
             // Off by default: opt-in, like clogs, partitions and black holes.
             // FDB flips bits only where the protocol checksums its packets
@@ -488,9 +502,9 @@ impl ChaosConfiguration {
     #[must_use]
     pub fn disabled() -> Self {
         Self {
-            clog_probability: 0.0,
+            clog_rate: 0.0,
             clog_duration: Duration::ZERO..Duration::ZERO,
-            partition_probability: 0.0,
+            partition_rate: 0.0,
             partition_duration: Duration::ZERO..Duration::ZERO,
             bit_flip_probability: 0.0,
             bit_flip_min_bits: 1,
@@ -519,10 +533,16 @@ impl ChaosConfiguration {
     #[must_use]
     pub fn random_for_seed() -> Self {
         Self {
-            clog_probability: f64::from(sim_random_range(0..20)) / 100.0, // 0-20% for clogging
+            // 0.05-1 clogs per connection direction per simulated second: low,
+            // never zero, so the swarm mask alone decides whether the family is off.
+            clog_rate: f64::from(sim_random_range(1..21)) / 20.0,
             clog_duration: Duration::from_micros(sim_random_range(50_000..300_000))
                 ..Duration::from_micros(sim_random_range(100_000..500_000)),
-            partition_probability: f64::from(sim_random_range(0..15)) / 100.0, // 0-15% (lower than faults)
+            // 0.05-0.5 partitions per simulated second (one every 2-20 s on
+            // average), one at a time. FDB has none by default; TigerBeetle
+            // keeps a partition about every few seconds. Never zero, so the
+            // swarm mask alone decides whether the family is off.
+            partition_rate: f64::from(sim_random_range(1..11)) / 20.0,
             partition_duration: Duration::from_millis(sim_random_range(100..1000))
                 ..Duration::from_millis(sim_random_range(500..3000)),
             // Bit flip probability range: 0.001% to 0.02% (very low, like FDB)
@@ -592,10 +612,10 @@ impl ChaosConfiguration {
     /// is off.
     fn apply_swarm_mask(&mut self) {
         if !sim_random_bool(0.5) {
-            self.clog_probability = 0.0;
+            self.clog_rate = 0.0;
         }
         if !sim_random_bool(0.5) {
-            self.partition_probability = 0.0;
+            self.partition_rate = 0.0;
         }
         if !sim_random_bool(0.5) {
             self.bit_flip_probability = 0.0;
@@ -627,12 +647,27 @@ impl ChaosConfiguration {
     /// unless its own [`buggify_knob!`](crate::buggify_knob) call site fires for the
     /// seed, in which case it jumps to an aggressive value within bounds. A
     /// representative subset — extend by adding more `buggify_knob!` lines.
+    ///
+    /// A knob only raises a family the seed already has: a family the swarm
+    /// (or the configuration) left at zero stays off, and its `buggify_knob!`
+    /// site is not drawn. The spikes stay winnable: partitions remain one at a
+    /// time with a healed gap after each, and clogs stay bounded by
+    /// `clog_duration`.
     pub fn apply_buggify_knobs(&mut self) {
-        self.clog_probability = crate::buggify_knob!(self.clog_probability, 0.5..1.0);
-        self.partition_probability = crate::buggify_knob!(self.partition_probability, 0.3..0.8);
-        self.random_close_probability =
-            crate::buggify_knob!(self.random_close_probability, 0.01..0.1);
-        self.black_hole_probability = crate::buggify_knob!(self.black_hole_probability, 0.01..0.1);
+        if self.clog_rate > 0.0 {
+            self.clog_rate = crate::buggify_knob!(self.clog_rate, 2.0..5.0);
+        }
+        if self.partition_rate > 0.0 {
+            self.partition_rate = crate::buggify_knob!(self.partition_rate, 0.5..2.0);
+        }
+        if self.random_close_probability > 0.0 {
+            self.random_close_probability =
+                crate::buggify_knob!(self.random_close_probability, 0.01..0.1);
+        }
+        if self.black_hole_probability > 0.0 {
+            self.black_hole_probability =
+                crate::buggify_knob!(self.black_hole_probability, 0.01..0.1);
+        }
         // Bit flips are spiked only where the seed enabled them, so a swarm
         // seed without the family never gains it. The sampled rate
         // (0.001%–0.02% per send) is too rare for integrity checks above the
@@ -1059,8 +1094,8 @@ mod swarm_tests {
     /// The on/off state of each swarmed fault family, in mask order.
     fn enabled_families(chaos: &ChaosConfiguration) -> [bool; 8] {
         [
-            chaos.clog_probability > 0.0,
-            chaos.partition_probability > 0.0,
+            chaos.clog_rate > 0.0,
+            chaos.partition_rate > 0.0,
             chaos.bit_flip_probability > 0.0,
             chaos.random_close_probability > 0.0,
             chaos.connect_failure_mode != ConnectFailureMode::Disabled,
@@ -1100,6 +1135,30 @@ mod swarm_tests {
         }
         crate::chaos::buggify_reset();
         assert!(spiked, "no seed spiked the bit-flip rate");
+    }
+
+    /// No buggify knob switches on a family the swarm switched off: a
+    /// knob only spikes the rate of a family the seed already has.
+    #[test]
+    fn buggify_knobs_never_enable_a_swarmed_off_family() {
+        let mut spiked_partitions = false;
+        for seed in 0..400_u64 {
+            reset_sim_rng();
+            set_sim_seed(seed);
+            crate::chaos::buggify_init(0.5);
+            let mut config = NetworkConfiguration::swarm_for_seed();
+            let before = enabled_families(&config.chaos);
+            let partition_rate = config.chaos.partition_rate;
+            config.chaos.apply_buggify_knobs();
+            assert_eq!(
+                before,
+                enabled_families(&config.chaos),
+                "seed {seed}: a knob changed which families are on"
+            );
+            spiked_partitions |= config.chaos.partition_rate > partition_rate;
+        }
+        crate::chaos::buggify_reset();
+        assert!(spiked_partitions, "no seed spiked the partition rate");
     }
 
     #[test]
@@ -1148,8 +1207,8 @@ mod swarm_tests {
             .expect("expected an all-off seed within 0..1000");
 
         let chaos = swarm_for(seed).chaos;
-        assert_zero(chaos.clog_probability);
-        assert_zero(chaos.partition_probability);
+        assert_zero(chaos.clog_rate);
+        assert_zero(chaos.partition_rate);
         assert_zero(chaos.bit_flip_probability);
         assert_zero(chaos.random_close_probability);
         assert_eq!(chaos.connect_failure_mode, ConnectFailureMode::Disabled);

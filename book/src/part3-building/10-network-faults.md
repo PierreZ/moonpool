@@ -27,7 +27,7 @@ SimulationBuilder::new()
 | `Chaos::Network(ChaosMode::Random)` | `NetworkConfiguration::random_for_seed()`: every family on, with per-seed probabilities, durations and a per-seed `PartitionStrategy`. |
 | `Chaos::Network(ChaosMode::Swarm)` | `swarm_for_seed()`: the Random profile, then each of the nine families is switched off with 50% probability. The all-off subset is allowed. |
 
-`Chaos::BuggifyKnobs` composes on top. For a seed where a `buggify_knob!` site fires, one knob jumps to an extreme: clogs at 50% to 100%, partitions at 30% to 80%, random closes and black holes at 1% to 10%. See [Swarm Testing](28-swarm-testing.md) for why "a little of everything" finds fewer bugs than "a lot of a few".
+`Chaos::BuggifyKnobs` composes on top. For a seed where a `buggify_knob!` site fires, one knob jumps to an extreme: 2 to 5 clogs per second, 0.5 to 2 partitions per second, random closes and black holes at 1% to 10%. A knob only spikes a family the seed already has. It never turns on a family the swarm turned off. See [Swarm Testing](28-swarm-testing.md) for why "a little of everything" finds fewer bugs than "a lot of a few".
 
 `NetworkConfiguration::fast_local()` is the no-chaos profile for unit tests, with microsecond latencies and `ChaosConfiguration::disabled()`.
 
@@ -37,11 +37,11 @@ Each family is one `NetworkFault` variant, one bit of the swarm mask, and a few 
 
 | `NetworkFault` | Knobs | What it finds |
 |----------------|-------|---------------|
-| `Clog` | `clog_probability`, `clog_duration` (100 to 300 ms) | Code that assumes a write lands promptly. Delivery stalls on one connection, then resumes in order. |
-| `Partition` | `partition_probability`, `partition_duration`, `partition_strategy` | Split brain, quorum loss, failure detectors. See below. |
+| `Clog` | `clog_rate` (clogs per simulated second), `clog_duration` (100 to 300 ms) | Code that assumes a write lands promptly. One IP's sends, receives or both stall on every connection, then resume in order (FoundationDB's `RandomClogging`). |
+| `Partition` | `partition_rate` (partitions per simulated second), `partition_duration`, `partition_strategy` | Split brain, quorum loss, failure detectors. See below. |
 | `BitFlip` | `bit_flip_probability`, `bit_flip_min_bits`/`max_bits` (1 to 32), `bit_flip_cooldown` | Missing checksums. The flip count follows a power law. |
 | `RandomClose` | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` (30%) | Reconnection and redelivery. 30% of closes return an error, 70% go silent and end in EOF, FoundationDB's ratio. |
-| `ConnectFailure` | `connect_failure_mode` (`Disabled`, `AlwaysFail`, `Probabilistic`), `connect_failure_probability` | Missing connect timeouts. In `Probabilistic` mode a buggified connect returns `ConnectionRefused` or hangs forever. |
+| `ConnectFailure` | `connect_failure_mode` (`Disabled`, `AlwaysFail`, `Probabilistic`), `connect_failure_probability` | Missing connect timeouts. In `Probabilistic` mode a buggified connect returns `ConnectionRefused`, and a small share of the others (one in ten) hangs forever. |
 | `ClockDrift` | `clock_drift_enabled`, `clock_drift_max` (100 ms) | Leases, TTLs, anything that compares clocks across nodes. |
 | `BuggifiedDelay` | `buggified_delay_enabled`, `buggified_delay_max`, `buggified_delay_probability` (25%) | Timeouts. `TimeProvider::sleep` stretches by a power-law delay, only inside the chaos window. |
 | `PairLatency` | `max_pair_latency` (off at `ZERO..ZERO`) | A stably slow peer. Each ordered IP pair draws one extra latency at first contact and keeps it for the run (FoundationDB's `SimClogging`). |
@@ -55,7 +55,9 @@ A fault coin is only rolled when an operation can make progress. A re-poll of a 
 
 ## Partitions
 
-A partition cuts one direction between two IPs. `partition_strategy` decides who is cut when the random coin fires:
+A partition cuts one direction between two IPs. Random partitions arrive as a Poisson process in simulated time, at `partition_rate` per second. The count does not grow with traffic: a busy run and a quiet run see the same number. At most one random partition is in force at a time. The next one is drawn from the moment the current one heals, so every partition is followed by a healed gap (TigerBeetle's partition stability). Clogs arrive the same way, at `clog_rate` per second for the whole network, and may overlap as in FoundationDB.
+
+`partition_strategy` decides who is cut when a partition arrives:
 
 | Strategy | Cut |
 |----------|-----|

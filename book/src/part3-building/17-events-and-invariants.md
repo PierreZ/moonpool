@@ -168,6 +168,7 @@ The `kind` values, with their fields:
 | | `process_restart` | `ip` |
 | Network | `partition_created`, `partition_healed` | `from`, `to` |
 | | `send_partition_created`, `send_partition_healed`, `recv_partition_created`, `recv_partition_healed` | `ip` |
+| | `interface_clogged` | `ip`, `direction` (`send`, `recv`, `both`), `duration_ms` |
 | | `random_close` | `connection_id` |
 | | `black_hole` | `connection_id`, `direction` (`send`, `recv`, `both`) |
 | | `bit_flip` | `connection_id`, `flip_count` |

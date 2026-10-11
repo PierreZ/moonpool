@@ -83,6 +83,11 @@ impl NetworkActions {
         self.faults.push(fault);
     }
 
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.scheduled.extend(other.scheduled);
+        self.faults.extend(other.faults);
+    }
+
     pub(crate) fn into_parts(self) -> (Vec<(Duration, NetworkEvent)>, Vec<SimFaultEvent>) {
         (self.scheduled, self.faults)
     }
@@ -155,7 +160,8 @@ impl NetworkSimulation {
             config.accept_backlog_capacity > 0,
             "accept backlog capacity must be positive"
         );
-        let schedule_maintenance = config.chaos.partition_probability > 0.0;
+        let schedule_maintenance =
+            config.chaos.partition_rate > 0.0 || config.chaos.clog_rate > 0.0;
         let backlog_grew =
             config.accept_backlog_capacity > self.state.config.accept_backlog_capacity;
         self.state.config = config;
@@ -873,14 +879,19 @@ impl NetworkSimulation {
             .map(|c| c.peer_address.clone())
     }
 
-    /// Per-step network work done before the popped event is handled.
+    /// Per-step network work done before the popped event is handled: start
+    /// the random partition and the random interface clog whose arrival time
+    /// has passed.
     ///
-    /// Clog expiry is not swept here: `clog_write` and `clog_read` each
-    /// schedule their own `ClogClear` / `ReadClogClear` at the deadline, and
-    /// that event alone clears the clog and wakes its waiter, for both
-    /// directions alike.
+    /// Both are Poisson processes in simulated time, so the work here draws
+    /// randomness only at an arrival, never per event. Clog expiry is not
+    /// swept here: `clog_write` and `clog_read` each schedule their own
+    /// `ClogClear` / `ReadClogClear` at the deadline, and that event alone
+    /// clears the clog and wakes its waiter, for both directions alike.
     pub(crate) fn before_event(&mut self, now: Duration) -> NetworkActions {
-        self.randomly_trigger_partitions(now)
+        let mut actions = self.randomly_trigger_partitions(now);
+        actions.extend(self.randomly_trigger_clogs(now));
+        actions
     }
 
     pub(crate) fn handle_event(

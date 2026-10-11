@@ -23,13 +23,54 @@ fn draw_fault_direction() -> (bool, bool) {
     (a > 0.33, a < 0.66)
 }
 
+/// Draw the gap to the next arrival of a Poisson process with `rate`
+/// arrivals per simulated second (FDB's `poisson()`): exponential with mean
+/// `1 / rate`. One draw; an infinite rate gives a zero gap.
+fn sample_arrival_gap(rate: f64) -> Duration {
+    if rate.is_infinite() {
+        return Duration::ZERO;
+    }
+    // `1 - u` is in (0, 1], so the logarithm is finite and not positive.
+    let u = sim_random_f64();
+    let seconds = -(1.0 - u).ln() / rate;
+    Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
+}
+
+/// Advance a Poisson process stored in `next_at`: returns whether an
+/// arrival is due at `now`. Draws randomness only when the process is
+/// (re)armed, never on an event that finds the arrival still ahead.
+fn arrival_due(next_at: &mut Option<Duration>, rate: f64, now: Duration) -> bool {
+    if rate.is_nan() || rate <= 0.0 {
+        *next_at = None;
+        return false;
+    }
+    let due = *next_at.get_or_insert_with(|| now.saturating_add(sample_arrival_gap(rate)));
+    now >= due
+}
+
 impl NetworkSimulation {
+    /// Start a random partition when its arrival is due.
+    ///
+    /// `partition_rate` is a rate per simulated second, not a per-event coin
+    /// (a per-event coin makes the partition count grow with traffic: a busy
+    /// run saw hundreds per second). At most one random
+    /// partition is in force at a time: the next arrival is drawn from the
+    /// moment this one heals (`TigerBeetle`'s unpartition stability), so every
+    /// partition is followed by a healed gap of mean `1 / partition_rate`.
     pub(super) fn randomly_trigger_partitions(&mut self, now: Duration) -> NetworkActions {
-        let chaos = &self.state.config.chaos;
-        if chaos.partition_probability == 0.0 || sim_random::<f64>() >= chaos.partition_probability
-        {
+        let rate = self.state.config.chaos.partition_rate;
+        if !arrival_due(&mut self.state.next_partition_at, rate, now) {
             return NetworkActions::default();
         }
+        let (actions, heals_at) = self.start_random_partition(now);
+        self.state.next_partition_at = Some(heals_at.saturating_add(sample_arrival_gap(rate)));
+        actions
+    }
+
+    /// Start one random partition under the configured strategy. Returns its
+    /// actions and when it heals (`now` when no partition could be made).
+    fn start_random_partition(&mut self, now: Duration) -> (NetworkActions, Duration) {
+        let chaos = &self.state.config.chaos;
         let strategy = chaos.partition_strategy;
         let duration_range = chaos.partition_duration.clone();
         let mut ips = self
@@ -43,26 +84,27 @@ impl NetworkSimulation {
             .collect::<Vec<_>>();
         ips.sort_unstable();
         if ips.len() < 2 {
-            return NetworkActions::default();
+            return (NetworkActions::default(), now);
         }
         let duration = crate::network::sample_duration(&duration_range);
+        let deadline = now.saturating_add(duration);
         if matches!(
             strategy,
             PartitionStrategy::AsymmetricSend | PartitionStrategy::AsymmetricRecv
         ) {
             let ip = ips[sim_random_range(0..ips.len())];
-            return if strategy == PartitionStrategy::AsymmetricSend {
+            let actions = if strategy == PartitionStrategy::AsymmetricSend {
                 self.insert_send_partition(ip, duration, now)
             } else {
                 self.insert_recv_partition(ip, duration, now)
             };
+            return (actions, deadline);
         }
         let selected = self.select_partition_group(&ips, strategy);
         let mut actions = NetworkActions::default();
         if selected.is_empty() || selected.len() == ips.len() {
-            return actions;
+            return (actions, now);
         }
-        let deadline = now.saturating_add(duration);
         let other = ips
             .iter()
             .filter(|ip| !selected.contains(ip))
@@ -98,6 +140,70 @@ impl NetworkSimulation {
             },
         );
         self.hold_partitioned_in_flight(now);
+        (actions, deadline)
+    }
+
+    /// Clog one random IP's interface when the clog arrival is due (FDB's
+    /// `RandomClogging` workload: a Poisson process of `clogInterface` calls
+    /// on a random process).
+    ///
+    /// `clog_rate` is clogs per simulated second for the whole network, not a
+    /// per-write coin, so traffic volume does not raise it. Each clog holds
+    /// every open connection of the chosen IP for one `clog_duration` draw:
+    /// its sends, its receives, or both (FDB `ClogDefault`). Clogs only
+    /// delay; nothing is dropped. Clogs may overlap, as in FDB; an
+    /// overlapping clog keeps the later deadline.
+    pub(super) fn randomly_trigger_clogs(&mut self, now: Duration) -> NetworkActions {
+        let rate = self.state.config.chaos.clog_rate;
+        if !arrival_due(&mut self.state.next_clog_at, rate, now) {
+            return NetworkActions::default();
+        }
+        self.state.next_clog_at = Some(now.saturating_add(sample_arrival_gap(rate)));
+        let ips = self
+            .state
+            .connections
+            .values()
+            .filter(|connection| !connection.flags.is_closed())
+            .filter_map(|connection| connection.local_ip)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if ips.is_empty() {
+            return NetworkActions::default();
+        }
+        let ip = ips[sim_random_range(0..ips.len())];
+        let (clog_send, clog_recv) = draw_fault_direction();
+        let duration = crate::network::sample_duration(&self.state.config.chaos.clog_duration);
+        let deadline = now.saturating_add(duration);
+        let ids = self
+            .state
+            .connections
+            .iter()
+            .filter(|(_, connection)| {
+                !connection.flags.is_closed() && connection.local_ip == Some(ip)
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        let mut actions = NetworkActions::default();
+        for id in ids {
+            if clog_send {
+                actions.extend(self.clog_write_until(id, deadline));
+            }
+            if clog_recv {
+                actions.extend(self.clog_read_until(id, deadline));
+            }
+        }
+        let direction = match (clog_send, clog_recv) {
+            (true, true) => "both",
+            (true, false) => "send",
+            _ => "recv",
+        };
+        assert_reachable!("network: interface clogged");
+        actions.record(SimFaultEvent::InterfaceClogged {
+            ip: ip.to_string(),
+            direction: direction.to_string(),
+            duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+        });
         actions
     }
 
@@ -370,5 +476,53 @@ impl NetworkSimulation {
     pub(crate) fn is_send_black_holed(&self, id: ConnectionId) -> bool {
         self.connection(id)
             .is_some_and(|connection| connection.flags.send_black_holed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::arrival_due;
+    use crate::sim::rng::{reset_sim_rng, set_sim_seed};
+    use std::time::Duration;
+
+    /// Count the arrivals a Poisson process with `rate` makes when it is
+    /// polled every `step` for `span` of simulated time.
+    fn arrivals(rate: f64, step: Duration, span: Duration) -> u32 {
+        reset_sim_rng();
+        set_sim_seed(7);
+        let mut next_at = None;
+        let mut count = 0;
+        let mut now = Duration::ZERO;
+        while now < span {
+            if arrival_due(&mut next_at, rate, now) {
+                count += 1;
+                next_at = None;
+            }
+            now += step;
+        }
+        count
+    }
+
+    /// The arrival count follows simulated time, not how often the process
+    /// is polled: a per-event coin made a busy run see hundreds of
+    /// partitions per second.
+    #[test]
+    fn arrivals_follow_simulated_time_not_event_count() {
+        let span = Duration::from_secs(100);
+        let sparse = arrivals(0.5, Duration::from_millis(100), span);
+        let dense = arrivals(0.5, Duration::from_micros(100), span);
+        for count in [sparse, dense] {
+            assert!(
+                (25..=80).contains(&count),
+                "expected about 50 arrivals in 100 s at 0.5/s, got {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_rate_never_arrives_and_disarms() {
+        let mut next_at = Some(Duration::ZERO);
+        assert!(!arrival_due(&mut next_at, 0.0, Duration::from_secs(1)));
+        assert_eq!(next_at, None);
     }
 }

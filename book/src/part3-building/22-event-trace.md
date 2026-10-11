@@ -32,7 +32,7 @@ Every storage operation is `Pending` first and completes through its own event. 
 
 ## Faults in the Timeline
 
-Every fault the engines inject is also an event in the captured timeline, under the name `sim_fault` with a `kind` field. The runner merges `SimWorld::take_faults()` into the timeline after each step, with `source = "sim"`. The kinds mirror the fault surfaces: `partition_created`, `partition_healed`, `random_close`, `black_hole`, `bit_flip`, `storage_read_fault`, `storage_write_fault`, `storage_sync_fault`, `storage_disk_failure`, `storage_crash`, `storage_wipe`, `process_graceful_shutdown`, `process_force_kill`, `process_restart` and the directed partition pairs.
+Every fault the engines inject is also an event in the captured timeline, under the name `sim_fault` with a `kind` field. The runner merges `SimWorld::take_faults()` into the timeline after each step, with `source = "sim"`. The kinds mirror the fault surfaces: `partition_created`, `partition_healed`, `interface_clogged`, `random_close`, `black_hole`, `bit_flip`, `storage_read_fault`, `storage_write_fault`, `storage_sync_fault`, `storage_disk_failure`, `storage_crash`, `storage_wipe`, `process_graceful_shutdown`, `process_force_kill`, `process_restart` and the directed partition pairs.
 
 A workload reads them in `check()` through `ctx.observability()`, and an invariant reads them with a cursor:
 

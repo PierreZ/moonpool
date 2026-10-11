@@ -495,21 +495,6 @@ impl NetworkSimulation {
         );
     }
 
-    /// Whether a clog tracked in `clogs` is in force for `id`, or, when none
-    /// is tracked, whether the clog coin fires now.
-    fn should_clog(
-        &self,
-        clogs: &BTreeMap<ConnectionId, ClogState>,
-        id: ConnectionId,
-        now: Duration,
-    ) -> bool {
-        if let Some(clog) = clogs.get(&id) {
-            return now < clog.expires_at;
-        }
-        let probability = self.state.config.chaos.clog_probability;
-        probability > 0.0 && sim_random::<f64>() < probability
-    }
-
     /// Sample a clog duration and return the deadline at which a clog
     /// starting `now` clears.
     fn sample_clog_deadline(&self, now: Duration) -> Duration {
@@ -525,19 +510,21 @@ impl NetworkSimulation {
         clogs.get(&id).is_some_and(|c| now < c.expires_at)
     }
 
-    pub(crate) fn should_clog_write(&self, id: ConnectionId, now: Duration) -> bool {
-        self.should_clog(&self.state.connection_clogs, id, now)
-    }
-
-    pub(crate) fn clog_write(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
-        let deadline = self.sample_clog_deadline(now);
-        self.state.connection_clogs.insert(
-            id,
-            ClogState {
-                expires_at: deadline,
-            },
-        );
+    /// Hold `id`'s writes until `deadline`, keeping a later deadline already
+    /// in force (FDB `clogSendFor`: `u = max(u, now + t)`).
+    pub(crate) fn clog_write_until(
+        &mut self,
+        id: ConnectionId,
+        deadline: Duration,
+    ) -> NetworkActions {
         let mut actions = NetworkActions::default();
+        let clog = self.state.connection_clogs.entry(id).or_insert(ClogState {
+            expires_at: deadline,
+        });
+        if clog.expires_at > deadline {
+            return actions;
+        }
+        clog.expires_at = deadline;
         actions.schedule_at(
             deadline,
             NetworkEvent::ClogClear {
@@ -546,6 +533,12 @@ impl NetworkSimulation {
             },
         );
         actions
+    }
+
+    /// Clog `id`'s writes for one `clog_duration` draw from `now`.
+    pub(crate) fn clog_write(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
+        let deadline = self.sample_clog_deadline(now);
+        self.clog_write_until(id, deadline)
     }
 
     pub(crate) fn is_write_clogged(&self, id: ConnectionId, now: Duration) -> bool {
@@ -563,19 +556,21 @@ impl NetworkSimulation {
         true
     }
 
-    pub(crate) fn should_clog_read(&self, id: ConnectionId, now: Duration) -> bool {
-        self.should_clog(&self.state.read_clogs, id, now)
-    }
-
-    pub(crate) fn clog_read(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
-        let deadline = self.sample_clog_deadline(now);
-        self.state.read_clogs.insert(
-            id,
-            ClogState {
-                expires_at: deadline,
-            },
-        );
+    /// Hold `id`'s reads until `deadline`, keeping a later deadline already
+    /// in force (FDB `clogRecvFor`).
+    pub(crate) fn clog_read_until(
+        &mut self,
+        id: ConnectionId,
+        deadline: Duration,
+    ) -> NetworkActions {
         let mut actions = NetworkActions::default();
+        let clog = self.state.read_clogs.entry(id).or_insert(ClogState {
+            expires_at: deadline,
+        });
+        if clog.expires_at > deadline {
+            return actions;
+        }
+        clog.expires_at = deadline;
         actions.schedule_at(
             deadline,
             NetworkEvent::ReadClogClear {
@@ -584,6 +579,12 @@ impl NetworkSimulation {
             },
         );
         actions
+    }
+
+    /// Clog `id`'s reads for one `clog_duration` draw from `now`.
+    pub(crate) fn clog_read(&mut self, id: ConnectionId, now: Duration) -> NetworkActions {
+        let deadline = self.sample_clog_deadline(now);
+        self.clog_read_until(id, deadline)
     }
 
     pub(crate) fn is_read_clogged(&self, id: ConnectionId, now: Duration) -> bool {

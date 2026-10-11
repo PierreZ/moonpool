@@ -123,6 +123,16 @@ pub enum SimFaultEvent {
         /// The restored IP.
         ip: String,
     },
+    /// Every connection of one IP clogged by chaos (FDB `clogInterface`):
+    /// its sends, its receives, or both are held until the clog clears.
+    InterfaceClogged {
+        /// The clogged IP.
+        ip: String,
+        /// `"send"`, `"recv"` or `"both"`.
+        direction: String,
+        /// How long the clog holds, in milliseconds.
+        duration_ms: u64,
+    },
     /// Connection randomly closed by chaos.
     RandomClose {
         /// The connection that was closed.
@@ -204,6 +214,7 @@ impl SimFaultEvent {
             Self::RecvPartitionCreated { .. } => "recv_partition_created",
             Self::SendPartitionHealed { .. } => "send_partition_healed",
             Self::RecvPartitionHealed { .. } => "recv_partition_healed",
+            Self::InterfaceClogged { .. } => "interface_clogged",
             Self::RandomClose { .. } => "random_close",
             Self::BlackHole { .. } => "black_hole",
             Self::BitFlip { .. } => "bit_flip",
