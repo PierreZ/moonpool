@@ -34,7 +34,10 @@
 
 #![deny(missing_docs)]
 
+pub mod cpu;
 pub mod hint;
+
+pub use cpu::cpu_charge;
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
