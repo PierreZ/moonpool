@@ -10,9 +10,9 @@ The core philosophy of chaos in moonpool is simple: **amplify failure probabilit
 
 This is not reckless. It is strategic. By making failures frequent, we force the code to handle them **every time**, not just when a developer remembers to write a test for them. And because everything runs inside a deterministic simulation, every failure is reproducible. A bug found at high fault probability is the same bug that would have appeared at low probability in production, just found a thousand times faster.
 
-## Four Dimensions of Chaos
+## Five Dimensions of Chaos
 
-Moonpool provides chaos injection along four distinct dimensions, each targeting a different layer of the system:
+Moonpool provides chaos injection along five distinct dimensions, each targeting a different layer of the system:
 
 ### Code Paths: Buggify
 
@@ -30,6 +30,10 @@ TCP connections fail in subtle ways. Moonpool simulates connection drops, latenc
 
 Disks lie. Following TigerBeetle's fault model, moonpool injects read corruption, write corruption, torn writes, misdirected I/O, phantom writes, and sync failures. These are the faults that data-integrity code must survive, and they are nearly impossible to test without simulation.
 
+### Time and Slowness: CPU and Gray Failures
+
+A busy machine answers late, and a slow machine answers later still. The CPU model gives every process one core and makes each task poll cost time, so busyness counters are real and a burst queues. Gray failures keep a machine alive but slow its CPU, disk or network for a long window, the failure that a crash detector never sees.
+
 ## Determinism Is Non-Negotiable
 
 Every chaos mechanism in moonpool is controlled by the simulation seed. The same seed produces the same faults in the same order at the same times. This means:
@@ -41,7 +45,7 @@ Every chaos mechanism in moonpool is controlled by the simulation seed. The same
 
 This is what separates simulation chaos from production chaos. In production, a network partition happened and something went wrong, but you cannot reproduce the exact sequence of events. In simulation, you hand someone a seed number and they see exactly what you saw.
 
-## The Next Four Chapters
+## The Next Five Chapters
 
 Each dimension of chaos has its own chapter with configuration details, code examples, and the design reasoning behind the choices moonpool makes:
 
@@ -49,3 +53,4 @@ Each dimension of chaos has its own chapter with configuration details, code exa
 - [Attrition: Process Reboots](09-attrition.md) covers automatic process lifecycle chaos
 - [Network Faults](10-network-faults.md) covers TCP-level network fault simulation
 - [Storage Faults](11-storage-faults.md) covers TigerBeetle-inspired storage fault patterns
+- [CPU Time and Gray Failures](26-cpu-and-gray-failure.md) covers the simulated core and machines that are slow but alive

@@ -22,7 +22,8 @@ use crate::{
 };
 
 use super::{
-    events::{Event, ScheduleId, Scheduler},
+    cpu::CpuState,
+    events::{Event, ScheduleError, ScheduleId, Scheduler},
     rng::{reset_sim_rng, set_sim_seed, sim_random},
     sleep::SleepFuture,
     wakers::{WakeBatch, Wakers},
@@ -76,6 +77,9 @@ pub(crate) struct SimInner {
     /// Set once [`SimWorld::enter_recovery_mode`] has run. The simulator
     /// injects no new faults from that point on.
     recovery_mode: bool,
+    /// The CPU model: one slot per process, the parked runnables, the
+    /// active poll's local clock (see `crate::sim::cpu`).
+    pub(crate) cpu: CpuState,
 }
 
 /// Campaign lifetime for the global sleep-delay fault.
@@ -108,11 +112,14 @@ impl SimInner {
             system_samples: BTreeMap::new(),
             buggified_delay_window: BuggifiedDelayWindow::Unbounded,
             recovery_mode: false,
+            cpu: CpuState::default(),
         }
     }
 
+    /// The current time of the caller: the local clock of the process whose
+    /// poll is active under the CPU model, else the scheduler's clock.
     pub(crate) fn now(&self) -> Duration {
-        self.scheduler.now()
+        self.cpu.local().unwrap_or_else(|| self.scheduler.now())
     }
 
     /// Whether [`SimWorld::enter_recovery_mode`] has run.
@@ -126,15 +133,37 @@ impl SimInner {
     }
 
     pub(crate) fn schedule_after(&mut self, event: Event, delay: Duration) {
-        if let Err(error) = self.scheduler.schedule_after(delay, event) {
+        let Some(time) = self.now().checked_add(delay) else {
+            tracing::error!(error = %ScheduleError::TimeOverflow, "failed to schedule simulation event");
+            return;
+        };
+        self.schedule_at(event, time);
+    }
+
+    pub(crate) fn schedule_at(&mut self, event: Event, time: Duration) {
+        if let Err(error) = self.schedule_effect_at(time, event) {
             tracing::error!(%error, "failed to schedule simulation event");
         }
     }
 
-    pub(crate) fn schedule_at(&mut self, event: Event, time: Duration) {
-        if let Err(error) = self.scheduler.schedule_at(time, event) {
-            tracing::error!(%error, "failed to schedule simulation event");
+    /// Schedule `event` at `time`: the one door every event goes through.
+    ///
+    /// While a process's poll is active under the CPU model, an event it
+    /// causes is one of its effects, and an effect never lands before the
+    /// CPU time of the poll that caused it: `time` is at or after the
+    /// poll's local clock (debug-asserted).
+    pub(crate) fn schedule_effect_at(
+        &mut self,
+        time: Duration,
+        event: Event,
+    ) -> Result<ScheduleId, ScheduleError> {
+        if let Some(local) = self.cpu.local() {
+            debug_assert!(
+                time >= local,
+                "cpu: an effect of a poll is stamped {time:?}, before the poll's local clock {local:?}: {event:?}"
+            );
         }
+        self.scheduler.schedule_at(time, event)
     }
 
     pub(crate) fn record_fault(&mut self, event: SimFaultEvent) {
@@ -142,10 +171,14 @@ impl SimInner {
         self.pending_faults.push(SimFaultRecord { time_ms, event });
     }
 
+    /// Apply the network engine's effects. The engine runs on the
+    /// scheduler's clock; an event a process's poll causes is shifted by
+    /// how far the poll's local clock is ahead (see `crate::sim::cpu`).
     pub(crate) fn apply_network(&mut self, actions: NetworkActions) {
+        let offset = self.cpu_offset();
         let (scheduled, faults) = actions.into_parts();
         for (at, event) in scheduled {
-            self.schedule_at(Event::Network(event), at);
+            self.schedule_at(Event::Network(event), at.saturating_add(offset));
         }
         for fault in faults {
             self.record_fault(fault);
@@ -170,6 +203,9 @@ pub struct SimWorld {
 
 impl SimWorld {
     fn create(network_config: NetworkConfiguration, seed: u64) -> Self {
+        // A new world starts without a CPU model: the thread's gate, if an
+        // older world left one, no longer applies.
+        super::cpu::uninstall();
         reset_sim_rng();
         set_sim_seed(seed);
         crate::chaos::assertions::reset_assertion_results();
@@ -206,6 +242,7 @@ impl SimWorld {
     /// Processes one delayed event and returns whether another event is queued.
     #[instrument(skip(self))]
     pub fn step(&mut self) -> bool {
+        let mut requeue = Vec::new();
         let (processed, wakes) = {
             let mut inner = self.inner.write();
             let Some(scheduled) = inner.scheduler.pop() else {
@@ -221,6 +258,12 @@ impl SimWorld {
             inner.last_processed_event = Some(event.clone());
             inner.events_processed += 1;
             match event {
+                Event::CpuFree { ip } => {
+                    requeue = inner.cpu_on_free(ip);
+                }
+                Event::CpuWake { id } => {
+                    wakes.append(inner.cpu_take_deferred(id));
+                }
                 Event::Timer { task_id } => {
                     inner.timer_schedules.remove(&task_id);
                     inner.awakened_tasks.insert(task_id);
@@ -269,7 +312,7 @@ impl SimWorld {
                         inner.network.fail_operation(operation_id);
                     }
                     let now = inner.now();
-                    inner.storage.advance_clock(now);
+                    inner.storage.set_clock(now);
                     let storage_actions = inner.storage.shutdown();
                     wakes.append(super::storage_ops::apply_storage_actions(
                         &mut inner,
@@ -283,6 +326,11 @@ impl SimWorld {
             (true, wakes)
         };
         wakes.wake();
+        // A freed CPU slot: its parked runnables go back on the ready
+        // queue, outside the lock like every wake.
+        for runnable in requeue {
+            runnable.schedule();
+        }
         processed && !self.inner.read().scheduler.is_empty()
     }
 
@@ -316,24 +364,32 @@ impl SimWorld {
 
     /// Returns a deterministically drifted timer reading.
     #[must_use]
+    ///
+    /// The drift is one clock for the whole world, kept on the scheduler's
+    /// clock; a process whose poll is active under the CPU model reads it no
+    /// lower than its own local clock. The local clock is never stored in
+    /// the shared reading, so one process's CPU time never shows in another
+    /// process's timer.
     pub fn timer(&self) -> Duration {
         let mut inner = self.inner.write();
+        let now = inner.scheduler_now();
+        let local = inner.now();
         let chaos = &inner.network.config().chaos;
         if !chaos.clock_drift_enabled {
             // Never hand back a reading below one already given out. Drift that
             // accumulated before it was switched off (recovery mode) is a real
             // skew the node still has to live with; rewinding the clock instead
             // would be a *new* fault, and a nastier one than the drift.
-            inner.timer_time = inner.timer_time.max(inner.now());
-            return inner.timer_time;
+            inner.timer_time = inner.timer_time.max(now);
+            return inner.timer_time.max(local);
         }
-        let max_timer = inner.now().saturating_add(chaos.clock_drift_max);
+        let max_timer = now.saturating_add(chaos.clock_drift_max);
         if inner.timer_time < max_timer {
             let gap = max_timer.saturating_sub(inner.timer_time).as_secs_f64();
             inner.timer_time += Duration::from_secs_f64(sim_random::<f64>() * gap / 2.0);
         }
-        inner.timer_time = inner.timer_time.max(inner.now());
-        inner.timer_time
+        inner.timer_time = inner.timer_time.max(now);
+        inner.timer_time.max(local)
     }
 
     /// Schedules an event after a relative delay.
@@ -451,16 +507,23 @@ impl SimWorld {
     }
 
     /// Take one system sample for the process at `ip`, and remember it.
+    ///
+    /// The CPU counters come from the process's CPU slot (zero while the
+    /// CPU model is off): the CPU time used up to the sample instant and
+    /// never after it, so `process_cpu / at` stays at or below its one core.
+    /// With one core, the machine's busy time and the run loop's are the
+    /// process's.
     pub(crate) fn system_sample(&self, ip: IpAddr) -> SystemSample {
         let mut inner = self.inner.write();
         let at = inner.now();
+        let busy = inner.cpu_busy(ip, at);
         let sample = SystemSample {
             at,
-            process_cpu: Duration::ZERO,
+            process_cpu: busy,
             cores: 1,
-            machine_busy: Duration::ZERO,
+            machine_busy: busy,
             machine_total: at,
-            run_loop_busy: Some(Duration::ZERO),
+            run_loop_busy: Some(busy),
             disk: Some(inner.storage.disk_counters(ip, at)),
         };
         let kept = inner.system_samples.entry(ip).or_default();
@@ -508,10 +571,10 @@ impl SimWorld {
             );
         };
         inner.next_task_id = next;
-        match inner
-            .scheduler
-            .schedule_after(duration, Event::Timer { task_id })
-        {
+        let Some(at) = inner.now().checked_add(duration) else {
+            return SleepFuture::failed(self.downgrade(), ScheduleError::TimeOverflow.to_string());
+        };
+        match inner.schedule_effect_at(at, Event::Timer { task_id }) {
             Ok(schedule_id) => {
                 inner.timer_schedules.insert(task_id, schedule_id);
                 SleepFuture::new(self.downgrade(), task_id, schedule_id)
@@ -592,6 +655,10 @@ impl SimWorld {
     /// environmental: nothing in the system under test can clear it, so
     /// leaving one up would make the quiet tail untestable rather than quiet.
     ///
+    /// Every gray failure ([`set_slowness`](Self::set_slowness)): each
+    /// machine's CPU, disk and network factors go back to 1, so the quiet
+    /// tail runs at full speed.
+    ///
     /// # What survives
     ///
     /// Everything already done. Corrupted sectors stay corrupted, lost writes
@@ -647,6 +714,8 @@ impl SimWorld {
         }
         inner.recovery_mode = true;
         inner.buggified_delay_window = BuggifiedDelayWindow::Inactive;
+        // A gray failure is chaos: the quiet tail runs on healthy machines.
+        inner.clear_slowness();
         inner.network.disable_fault_injection();
         inner.storage.disable_fault_injection();
         let now = inner.now();

@@ -25,7 +25,7 @@ The builder pattern for configuring and running simulation experiments. Created 
 | `chaos_duration(dur)` | `Duration` | Bound the window in which new faults may be injected (see [Chaos duration and recovery mode](#chaos-duration-and-recovery-mode)) |
 | `set_iterations(n)` | `usize` | Run exactly N iterations (default: 1) |
 | `set_debug_seeds(seeds)` | `Vec<u64>` | Use specific seeds for deterministic debugging |
-| `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition/outage chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
+| `enable_chaos(surfaces)` | `impl IntoIterator<Item = Chaos>` | Enable network/storage/attrition/outage/CPU/gray-failure chaos per seed, each in a `ChaosMode` (`Random` or `Swarm`) |
 | `swarm_operations()` | -- | Enable per-seed swarm of each workload's operation alphabet |
 | `check_determinism()` | -- | Run every seed twice and fail it if the replay's draw fingerprints differ (see [The Determinism Canary](../part2-foundations/03-seeds.md#the-determinism-canary)) |
 | `enable_exploration(config)` | `ExplorationConfig` | Enable fork-based multiverse exploration |
@@ -159,6 +159,34 @@ A correlated group outage (`Chaos::Outage { config, mode }`), built from `Outage
 | `straggler` | `Option<Range<Duration>>` | `None` | One victim's time down instead; must start at or after `down`'s end |
 
 In `ChaosMode::Swarm`, each seed keeps the outage with probability 0.5 and its straggler with probability 0.5 (two build-time draws).
+
+## CpuModel
+
+The simulated CPU (`Chaos::Cpu(mode)`, or `SimWorld::set_cpu_model` directly). See [CPU Time and Gray Failures](../part3-building/26-cpu-and-gray-failure.md).
+
+| Field | Type | Per-seed range | Description |
+|-------|------|----------------|-------------|
+| `poll_cost` | `Duration` | 500 ns..=5 µs (`POLL_COST_NS`) | The cost of one poll of one task of a process |
+| `sent_byte_cost_ps` | `u64` | 500..=5000 (`BYTE_COST_PS`) | Picoseconds per byte the process sends |
+| `written_byte_cost_ps` | `u64` | 500..=5000 (`BYTE_COST_PS`) | Picoseconds per byte the process writes |
+
+`CpuModel::random_for_seed()` makes three draws. In `ChaosMode::Swarm`, `CpuModel::swarm_for_seed()` first draws whether the model is on (probability 0.5), then the three costs only when it is. The draws come after every other surface's, so registering `Chaos::Cpu` shifts no other sample.
+
+## GrayFailure
+
+A gray-failure regime (`Chaos::GrayFailure { config, mode }`), built from `GrayFailure::new(max_slow)`. Requires `.chaos_duration()`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `victims` | `AttritionVictims` | `Any` | Eligible machines, as for attrition; a named group must be registered |
+| `max_slow` | `usize` | -- | At most this many machines are slow at once |
+| `window` | `RangeInclusive<f64>` | `0.3..=1.0` | Each slow window's length, as a fraction of the chaos window |
+| `cpu` | `RangeInclusive<u32>` | `10..=1000` | CPU factor (applied only when the CPU model is on) |
+| `disk` | `RangeInclusive<u32>` | `5..=100` | Disk latency factor |
+| `network` | `RangeInclusive<u32>` | `2..=20` | Network latency factor |
+| `kinds` | `GrayKinds` | `ALL` | Which of CPU, disk and network apply |
+
+In `ChaosMode::Swarm`, each seed masks each kind with probability 0.5 (three build-time draws). `Slowness { cpu, disk, network }` is the per-machine factor set, applied with `FaultContext::set_slowness` or `SimWorld::set_slowness` and cleared by recovery mode.
 
 ## NetworkConfiguration
 

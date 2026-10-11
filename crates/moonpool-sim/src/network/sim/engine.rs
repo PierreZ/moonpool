@@ -23,7 +23,8 @@ use super::{
     ConnectionId, ListenerId, NetworkEvent,
     event::NetworkOperationId,
     state::{
-        BoundListener, CloseReason, ConnectionFlags, ConnectionState, NetworkState, SendWindow,
+        BoundListener, CloseReason, ConnectionFlags, ConnectionState, NetworkState, SendChunk,
+        SendWindow,
     },
 };
 
@@ -416,6 +417,7 @@ impl NetworkSimulation {
         connection_id: ConnectionId,
         data: Vec<u8>,
         now: Duration,
+        ready_at: Duration,
     ) -> SimulationResult<NetworkActions> {
         let connection = self
             .state
@@ -425,7 +427,9 @@ impl NetworkSimulation {
         // The window is taken here, the moment the application's bytes are
         // accepted, and given back only by the peer's read.
         connection.window.acquire(data.len());
-        connection.send_buffer.push_back(data);
+        connection
+            .send_buffer
+            .push_back(SendChunk { data, ready_at });
         let mut actions = NetworkActions::default();
         if !connection.flags.send_in_progress() {
             connection.flags.set_send_in_progress(true);
@@ -1114,6 +1118,25 @@ impl NetworkSimulation {
         }
         self.waiters.send_buffers.register(id, waker);
         true
+    }
+
+    /// Set the network slowness of `ip` (1 is healthy).
+    pub(crate) fn set_slow_factor(&mut self, ip: IpAddr, factor: u32) {
+        if factor <= 1 {
+            self.state.slow_factors.remove(&ip);
+        } else {
+            self.state.slow_factors.insert(ip, factor);
+        }
+    }
+
+    /// The network slowness of `ip` (1 is healthy).
+    pub(crate) fn slow_factor(&self, ip: IpAddr) -> u32 {
+        self.state.slow_factor(ip)
+    }
+
+    /// Forget every network slowness.
+    pub(crate) fn clear_slow_factors(&mut self) {
+        self.state.slow_factors.clear();
     }
 
     pub(crate) fn pair_latency(&self, src: IpAddr, dst: IpAddr) -> Option<Duration> {

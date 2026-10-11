@@ -29,10 +29,7 @@ pub(crate) fn apply_storage_actions(inner: &mut SimInner, actions: StorageAction
     } = actions;
     for scheduled in scheduled {
         let operation_id = scheduled.event.operation_id();
-        match inner
-            .scheduler
-            .schedule_at(scheduled.at, Event::Storage(scheduled.event))
-        {
+        match inner.schedule_effect_at(scheduled.at, Event::Storage(scheduled.event)) {
             Ok(schedule_id) => {
                 inner.storage_schedules.insert(operation_id, schedule_id);
             }
@@ -60,7 +57,7 @@ pub(crate) fn handle_storage_event(
     wakes: &mut WakeBatch,
 ) {
     let now = inner.now();
-    inner.storage.advance_clock(now);
+    inner.storage.set_clock(now);
     let actions = inner.storage.handle_event(event);
     wakes.append(apply_storage_actions(inner, actions));
 }
@@ -76,11 +73,11 @@ impl SimWorld {
         let (result, wakes) = {
             let mut inner = self.inner.write();
             let now = inner.now();
-            inner.storage.advance_clock(now);
+            inner.storage.set_clock(now);
             let (result, actions) = transition(&mut inner);
             (result, apply_storage_actions(&mut inner, actions))
         };
-        wakes.wake();
+        self.release_wakes(wakes);
         result
     }
 
@@ -247,6 +244,9 @@ impl SimWorld {
         positioned: bool,
     ) -> Result<OperationId, StorageError> {
         self.try_storage_transition(|inner| {
+            // Writing costs CPU time under the CPU model; the write is
+            // submitted at the writer's local clock after that cost.
+            inner.cpu_charge_written(data.len());
             let now = inner.now();
             inner
                 .storage

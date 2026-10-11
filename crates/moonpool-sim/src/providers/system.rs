@@ -14,9 +14,13 @@ use crate::sim::WeakSimWorld;
 /// their bytes and their times. They are exact and deterministic, and a disk
 /// stall or throttle episode makes them rise.
 ///
-/// A task poll takes no simulated time today, so the CPU counters are zero:
-/// `process_cpu`, `machine_busy` and `run_loop_busy` stay at zero and
-/// `machine_total` follows the clock of one core.
+/// The CPU counters come from the simulated CPU (see
+/// [`SimWorld::set_cpu_model`](crate::SimWorld::set_cpu_model)): with the
+/// model on, `process_cpu`, `machine_busy` and `run_loop_busy` are the time
+/// the process's one core was busy up to the sample's instant (one process
+/// per machine, one run loop per process, so the three are equal). With the
+/// model off a poll costs nothing and they stay at zero. `machine_total`
+/// follows the clock of one core.
 ///
 /// The world remembers the last samples it handed out per process
 /// ([`SimWorld::system_samples`](crate::SimWorld::system_samples)), so a

@@ -235,6 +235,22 @@ The default 25% firing probability works well for most injection points. Use `bu
 
 **Do not use excessive probabilities without reason.** A `buggify_with_prob!(0.9)` that fails 90% of attempts means the system almost never succeeds. That tests error handling but misses the interesting interactions between partial success and partial failure.
 
+## CPU Charges
+
+A simulated poll costs a small base cost when the [CPU model](./26-cpu-and-gray-failure.md) is on. That base cost does not know that one poll decoded a large batch and another only bumped a counter. `cpu_charge` lets the code say so:
+
+```rust
+use std::time::Duration;
+
+fn fold_batch(records: &[Vec<u8>]) {
+    // ... the real work ...
+    // A profile says one record costs about 200 ns to fold.
+    moonpool_buggify::cpu_charge(Duration::from_nanos(200) * records.len() as u32);
+}
+```
+
+Inside a simulation with the CPU model on, the calling process's local clock moves forward by the cost times its CPU slowness, so what it does next (a send, a write, a timer) happens after the work. Everywhere else the call is inert: no sink is installed, and it costs one thread-local read. Put a charge only on a hot path a profile shows, such as an encode, a checksum or a fold.
+
 ## Production Safety
 
 Buggify is gated behind simulation state. When the simulation is not running, `buggify!()` always returns `false`. There is no runtime cost in production: the check is a thread-local boolean read. You can leave buggify calls in your production code without worrying about them firing outside simulation.
@@ -252,6 +268,6 @@ moonpool-buggify = "0.9"
 
 The crate owns only the disabled-by-default state and the macros. When a simulation run starts, `moonpool-sim` installs its deterministic seeded RNG into that shared state, so macros imported through either crate share activation decisions during simulation — and stay inert everywhere else. `moonpool-sim` re-exports the macros, so existing `moonpool_sim::buggify!` call sites are unchanged.
 
-The crate also holds `hint!` (above), `is_simulated()`, and `buggify_pick!` / `buggify_range!`, which draw a choice or a value at an active point without a `rand` dependency. Their production probe companions, `reachable!` and `sometimes!`, live in the zero-dependency `moonpool-assertions`: a probe and a simulation's `assert_reachable!` with the same message share one slot.
+The crate also holds `hint!` (above), `cpu_charge` (above), `is_simulated()`, and `buggify_pick!` / `buggify_range!`, which draw a choice or a value at an active point without a `rand` dependency. Their production probe companions, `reachable!` and `sometimes!`, live in the zero-dependency `moonpool-assertions`: a probe and a simulation's `assert_reachable!` with the same message share one slot.
 
 `buggify_knob!` remains in `moonpool-sim`: knob randomization is simulation-specific configuration spiking, not application-level fault injection.

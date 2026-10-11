@@ -17,7 +17,7 @@ use crate::{
 use super::engine::{NetworkActions, NetworkSimulation};
 use super::{
     ConnectionId, NetworkEvent,
-    state::{ClogState, InFlight, InFlightPayload},
+    state::{ClogState, InFlight, InFlightPayload, SendChunk},
 };
 
 impl NetworkSimulation {
@@ -408,12 +408,18 @@ impl NetworkSimulation {
             .zip(remote_ip)
             .and_then(|pair| self.state.pair_latencies.get(&pair).copied())
             .unwrap_or(Duration::ZERO);
+        let slow_factor = [local_ip, remote_ip]
+            .into_iter()
+            .flatten()
+            .map(|ip| self.state.slow_factor(ip))
+            .max()
+            .unwrap_or(1);
         let partial_max = self.state.config.chaos.partial_write_max_bytes;
         let write_latency = self.state.config.write_latency.clone();
         let Some(connection) = self.state.connections.get_mut(&id) else {
             return;
         };
-        let Some(mut data) = connection.send_buffer.pop_front() else {
+        let Some(SendChunk { mut data, ready_at }) = connection.send_buffer.pop_front() else {
             connection.flags.set_send_in_progress(false);
             if connection.flags.graceful_close_pending() {
                 connection.flags.set_graceful_close_pending(false);
@@ -431,9 +437,10 @@ impl NetworkSimulation {
             // nothing.
             let truncate_to = sim_random_range(1..max_send + 1);
             if truncate_to < data.len() {
-                connection
-                    .send_buffer
-                    .push_front(data.split_off(truncate_to));
+                connection.send_buffer.push_front(SendChunk {
+                    data: data.split_off(truncate_to),
+                    ready_at,
+                });
             }
         }
         let base_delay = if connection.send_buffer.is_empty() {
@@ -441,7 +448,12 @@ impl NetworkSimulation {
         } else {
             Duration::from_nanos(1)
         };
-        let at = now.saturating_add(base_delay).saturating_add(pair_extra);
+        // A gray failure slows every chunk to or from a slow process.
+        let at = now.max(ready_at).saturating_add(
+            base_delay
+                .saturating_add(pair_extra)
+                .saturating_mul(slow_factor),
+        );
         let queue_drained = connection.send_buffer.is_empty();
         let close_pending = connection.flags.graceful_close_pending();
         if paired_id.is_some() {

@@ -189,7 +189,12 @@ pub(crate) struct StorageState {
     /// Directory entries made durable by syncing their parent directory.
     pub(crate) durable_directories: BTreeSet<Name>,
     pub(crate) pending_ops: BTreeMap<OperationId, PendingStorageOp>,
-    /// The latest simulation time a transition saw. Never goes back.
+    /// The clock of the caller of the current transition: the scheduler's
+    /// for a completion, or the local clock of the process whose poll
+    /// submits (see the CPU model, `crate::sim::cpu`). It may go back between
+    /// two transitions, because a polling process's clock runs ahead of the
+    /// scheduler's by the CPU time of its poll; every use is per process, and
+    /// one process's clock never goes back.
     pub(crate) clock: Duration,
     /// Per-process disk activity counters (see [`DiskActivity`]).
     pub(crate) activity: BTreeMap<IpAddr, DiskActivity>,
@@ -213,6 +218,10 @@ pub(crate) struct StorageState {
     /// injection cannot turn a sector a pre-cutoff sync already lied about
     /// into an impossible-state panic in the crash oracle.
     pub(crate) barrier_violation_armed: bool,
+    /// Per-process disk slowness of a gray failure (see
+    /// [`Slowness`](crate::Slowness)): every latency of that disk is
+    /// multiplied by it. A process absent here is healthy (factor 1).
+    pub(crate) slow_factors: BTreeMap<IpAddr, u32>,
 }
 
 impl StorageState {
@@ -234,6 +243,7 @@ impl StorageState {
             pending_ops: BTreeMap::new(),
             clock: Duration::ZERO,
             activity: BTreeMap::new(),
+            slow_factors: BTreeMap::new(),
             eligibility: EligibilitySlot::default(),
             focus: BTreeMap::new(),
             replication: Vec::new(),

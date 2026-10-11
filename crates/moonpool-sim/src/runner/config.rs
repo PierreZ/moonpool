@@ -105,7 +105,10 @@ impl ChaosMode {
     /// 3. then attrition, in registration order, in
     ///    `run_orchestrator_for_iteration` — **after** the reset and the
     ///    breakpoints, so its draws are counted and replayed;
-    /// 4. then outages, in registration order, the same way.
+    /// 4. then outages, in registration order, the same way;
+    /// 5. then (after the replicated storage fault patterns) the CPU model,
+    ///    then the gray-failure regimes in registration order. Both draw
+    ///    only when registered, so opting in shifts no other surface.
     ///
     /// Moving a call across the reset, or reordering two calls, shifts every
     /// seed and invalidates recorded recipes.
@@ -151,4 +154,21 @@ pub enum Chaos {
     },
     /// Occasionally perturb enabled network and storage knobs to extremes.
     BuggifyKnobs,
+    /// The CPU model: every poll of a process's task takes CPU time on the
+    /// process's one core (see [`CpuModel`](crate::CpuModel) and
+    /// [`SimWorld::set_cpu_model`](crate::SimWorld::set_cpu_model)).
+    /// `Random` turns it on for every seed with per-seed costs; `Swarm` for
+    /// half of the seeds. A seed with the model off runs exactly as without
+    /// this entry, apart from the draws that decided it.
+    Cpu(ChaosMode),
+    /// Gray failures: one or more machines stay alive and slow for a long
+    /// window (see [`GrayFailure`](crate::GrayFailure)). At most one regime
+    /// is useful per victim pool; each entry adds one injector.
+    GrayFailure {
+        /// The gray-failure regime.
+        config: crate::GrayFailure,
+        /// Per-seed sampling strategy: `Random` applies every configured
+        /// kind; `Swarm` masks each kind (CPU, disk, network) per seed.
+        mode: ChaosMode,
+    },
 }

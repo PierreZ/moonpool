@@ -98,6 +98,11 @@ pub struct SimulationBuilder {
     /// Correlated group outages, one injector each, with their per-seed
     /// sampling mode.
     pub(super) outages: Vec<(crate::runner::outage::Outage, ChaosMode)>,
+    /// The CPU model's per-seed sampling mode, when enabled.
+    pub(super) cpu_chaos: Option<ChaosMode>,
+    /// Gray-failure regimes, one injector each, with their per-seed sampling
+    /// mode.
+    pub(super) gray_failures: Vec<(crate::runner::gray_failure::GrayFailure, ChaosMode)>,
     pub(super) seeds: Vec<u64>,
     pub(super) network_chaos: Option<ChaosMode>,
     pub(super) storage_chaos: Option<ChaosMode>,
@@ -165,6 +170,8 @@ impl SimulationBuilder {
             process_entries: Vec::new(),
             attritions: Vec::new(),
             outages: Vec::new(),
+            cpu_chaos: None,
+            gray_failures: Vec::new(),
             seeds: Vec::new(),
             network_chaos: None,
             storage_chaos: None,
@@ -867,6 +874,8 @@ impl SimulationBuilder {
                 Chaos::Attrition { config, mode } => self.attritions.push((config, mode)),
                 Chaos::Outage { config, mode } => self.outages.push((config, mode)),
                 Chaos::BuggifyKnobs => self.buggify_knobs = true,
+                Chaos::Cpu(mode) => self.cpu_chaos = Some(mode),
+                Chaos::GrayFailure { config, mode } => self.gray_failures.push((config, mode)),
             }
         }
         self

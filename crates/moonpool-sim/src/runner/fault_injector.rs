@@ -283,6 +283,39 @@ impl FaultContext {
         Ok(self.sim.is_partitioned(a_ip, b_ip))
     }
 
+    /// Make the machine at `ip` slow, or healthy again with
+    /// [`Slowness::HEALTHY`](crate::Slowness::HEALTHY): a gray failure, the
+    /// machine stays alive (see [`SimWorld::set_slowness`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn set_slowness(&self, ip: &str, slowness: crate::Slowness) -> SimulationResult<()> {
+        self.sim.set_slowness(parse_ip(ip)?, slowness);
+        Ok(())
+    }
+
+    /// How slow the machine at `ip` is now (see [`SimWorld::slowness`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn slowness(&self, ip: &str) -> SimulationResult<crate::Slowness> {
+        Ok(self.sim.slowness(parse_ip(ip)?))
+    }
+
+    /// The seed's CPU model, if it is on (see
+    /// [`SimWorld::set_cpu_model`]).
+    #[must_use]
+    pub fn cpu_model(&self) -> Option<crate::CpuModel> {
+        self.sim.cpu_model()
+    }
+
+    /// The process metadata the built-in injectors filter victims with.
+    pub(crate) fn process_info(&self) -> &ProcessInfo {
+        &self.process_info
+    }
+
     /// Get the seeded random provider.
     #[must_use]
     pub fn random(&self) -> &SimRandomProvider {
