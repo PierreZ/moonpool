@@ -50,7 +50,8 @@ and a `Workload`.
 | `prometheus` | no | `moonpool::prometheus`: a `prometheus` registry in the report |
 | `rpc` | no | `moonpool::rpc`: typed dynamic-endpoint RPC |
 | `rpc-derive` | no | the `#[moonpool_rpc::service]` attribute |
-| `rpc-tls` | no | TLS sessions for `rpc` (native only) |
+| `rpc-tls` | no | TLS sessions for `rpc`, server-authenticated or mutual (native only) |
+| `rpc-tls-pki` | no | Certificate making for those sessions (`security::tls::pki`, native only) |
 | `rpc-jwt` | no | JWT/JWKS request verification for `rpc` (native only) |
 
 ## Using in production

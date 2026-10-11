@@ -31,13 +31,15 @@ slow-timeout = { period = "10s", terminate-after = 4 }
 # durability setting, every seed eight crashed incarnations of a writer on
 # the simulated disk and a recovery per crash: about 6s each in the debug
 # profile locally, past a minute for the two fault models' three settings
-# run in one test on a loaded CI runner. A wider budget for that binary rather than a smaller seed
+# run in one test on a loaded CI runner, and slower still once the
+# workspace run also builds the TLS adapter's real-crypto tests. A wider
+# budget for that binary rather than a smaller seed
 # budget, which would cut how many torn records and ambiguous entries they
 # reach. They are CPU-bound campaigns like the RPC ones below, so they share
 # their group.
 [[profile.default.overrides]]
 filter = 'package(moonpool-journal) and binary(journal)'
-slow-timeout = { period = "10s", terminate-after = 6 }
+slow-timeout = { period = "30s", terminate-after = 6 }
 test-group = 'campaigns'
 
 [[profile.default.overrides]]

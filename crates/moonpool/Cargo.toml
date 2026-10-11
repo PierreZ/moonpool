@@ -40,6 +40,8 @@ rpc = ["dep:moonpool-rpc"]
 rpc-derive = ["rpc", "moonpool-rpc/derive"]
 # Server-authenticated TLS sessions (rustls + ring). Native targets only.
 rpc-tls = ["rpc", "moonpool-rpc/tls"]
+# A small certificate authority for those sessions (Ed25519). Native only.
+rpc-tls-pki = ["rpc-tls", "moonpool-rpc/tls-pki"]
 # JWT/JWKS request verification (jsonwebtoken, pure Rust). Native targets only.
 rpc-jwt = ["rpc", "moonpool-rpc/jwt"]
 

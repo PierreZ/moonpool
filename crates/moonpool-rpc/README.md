@@ -80,7 +80,8 @@ Contracts:
 |---|---|---|
 | `prost` | on | Protobuf bodies from `#[derive(prost::Message)]` structs |
 | `derive` | off | `#[moonpool_rpc::service]` (`moonpool-rpc-derive`) |
-| `tls` | off | Server-authenticated TLS 1.3 sessions (`futures-rustls`, rustls with `ring`). Native only. No mutual TLS |
+| `tls` | off | TLS 1.3 sessions, server-authenticated or mutual (`ClientAuth`), via `futures-rustls` (rustls with `ring`). Native only |
+| `tls-pki` | off | A small Ed25519 certificate authority (`security::tls::pki`): roots and leaves with explicit UTC validity, keys from OS entropy or seed bytes. Native only |
 | `jwt` | off | JWT/JWKS request verification (`jsonwebtoken`, pure-Rust backend). Native only |
 
 With `--no-default-features` the transport still builds, also for

@@ -19,13 +19,13 @@ Build a fresh, functionally rich Rust RPC stack inspired by FoundationDB fdbrpc 
 - Support only Moonpool's existing platforms and providers; follow its Tokio and native/wasm feature boundaries. RPC adds no independent platform commitment.
 - Internal ordering, cooperative fairness, hard resource limits and reserved control capacity; no full Flow scheduler.
 - Definitively stale dynamic endpoints fail promptly, preserving execution ambiguity. Learning a new incarnation is explicit application action.
-- User deferred **mTLS**. The accepted remaining security proposal covers server-authenticated TLS, public/private policy, per-request verification, JWT/JWKS verification and rotation. No client-certificate authentication gate or internet-scale multi-tenant promise.
+- User deferred **mTLS**, then requested it on 2026-10-11 (now implemented, simulation included). The accepted remaining security proposal covers server-authenticated TLS, public/private policy, per-request verification, JWT/JWKS verification and rotation. No client-certificate authentication gate or internet-scale multi-tenant promise.
 - Improvements to Moonpool providers/simulation are authorized when RPC exposes a genuine gap. Reusable abstractions may enter core with explicit justification; RPC-specific state stays in RPC. No improvements are implemented during this planning task.
 - Flat crates: moonpool-rpc, optional moonpool-rpc-derive, non-published moonpool-rpc-sim. Production never depends on sim. Hyper stays independent; facade RPC support is optional.
 
 ## Scope and exclusions
 
-The complete agreed RPC/transport scope is distributed through seven executable packages below. mTLS is explicitly deferred. FDB binary compatibility, Flow serialization/layout/history, actors, membership, Paxos/workflows, durable delivery, exactly-once, transparent incarnation refresh and stream resumption are excluded. Application identity, fencing, durable continuity, token issuance and permission meaning remain application concerns. Existing provider/simulation capabilities replace the corresponding FDB runtime components. Every exclusion is classified in parity.md.
+The complete agreed RPC/transport scope is distributed through seven executable packages below. FDB binary compatibility, Flow serialization/layout/history, actors, membership, Paxos/workflows, durable delivery, exactly-once, transparent incarnation refresh and stream resumption are excluded. Application identity, fencing, durable continuity, token issuance and permission meaning remain application concerns. Existing provider/simulation capabilities replace the corresponding FDB runtime components. Every exclusion is classified in parity.md.
 
 ## Work packages and dependencies
 
@@ -68,4 +68,4 @@ P1 calibrates architecture and effort with a real executable slice; adjust later
 
 Read-only GitHub searches found no existing moonpool-rpc issue. Closed #61, #169, #174 and #208 supply lessons about observable decode failure, explicit shutdown, supported fault masks and hidden wall-clock dependence. They are not predecessor implementation requirements, and no historical issue was modified. Existing `enhancement`, `simulation` and `foundationdb-inspired` labels are reused; no labels are created.
 
-Codec/frame details (P1), generic resolver shape (P2), measured budgets (P4), security dependencies/upgrade window (P6) and performance acceptance envelope (P7) remain implementation decisions owned by those issues. No further architecture approval gate is required. mTLS remains deferred until separately requested.
+Codec/frame details (P1), generic resolver shape (P2), measured budgets (P4), security dependencies/upgrade window (P6) and performance acceptance envelope (P7) remain implementation decisions owned by those issues. No further architecture approval gate is required. mTLS was requested on 2026-10-11 and is implemented.

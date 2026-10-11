@@ -113,6 +113,17 @@ impl QualificationFaults {
         Ok(())
     }
 
+    /// One server, restarted in place again and again while the workload
+    /// keeps using it.
+    fn storm_restart(&mut self, ctx: &FaultContext, server: &str) -> SimulationResult<()> {
+        ctx.restart(server)?;
+        self.storm_reboots += 1;
+        if self.storm_reboots >= 10 {
+            assert_reachable!("rpc qual one server rebooted ten times");
+        }
+        Ok(())
+    }
+
     async fn lifecycle(
         &mut self,
         ctx: &FaultContext,
@@ -154,18 +165,25 @@ impl FaultInjector for QualificationFaults {
         let third = ctx.ips_in_group("third").into_iter().next();
         let legacy = ctx.ips_in_group("legacy").into_iter().next();
         pause(ctx, ctx.random().random_range(300..1200)).await?;
+        if self.storm
+            && let Some(server) = servers.first()
+        {
+            // The first ten restarts come in a row: a requested cut lasts
+            // seconds, so cuts served between restarts would leave most
+            // seeds short of ten within the chaos window.
+            while self.storm_reboots < 10 && !ctx.chaos_shutdown().is_cancelled() {
+                pause(ctx, ctx.random().random_range(150..600)).await?;
+                self.storm_restart(ctx, server)?;
+            }
+        }
         while !ctx.chaos_shutdown().is_cancelled() {
             pause(ctx, ctx.random().random_range(150..600)).await?;
             self.serve_cuts(ctx).await?;
             self.serve_shutdowns(ctx)?;
-            if self.storm && !servers.is_empty() {
-                // One server, restarted in place again and again while the
-                // workload keeps using it.
-                ctx.restart(&servers[0])?;
-                self.storm_reboots += 1;
-                if self.storm_reboots >= 10 {
-                    assert_reachable!("rpc qual one server rebooted ten times");
-                }
+            if self.storm
+                && let Some(server) = servers.first()
+            {
+                self.storm_restart(ctx, server)?;
                 continue;
             }
             match ctx.random().random_range(0..19u8) {

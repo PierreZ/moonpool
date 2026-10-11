@@ -119,17 +119,19 @@ jobs:
         run: nix develop --command cargo clippy -p moonpool-rpc --no-default-features --all-targets -- --deny warnings
       - name: moonpool-rpc with its optional derive
         run: nix develop --command cargo clippy -p moonpool-rpc -p moonpool-rpc-derive --features moonpool-rpc/derive --all-targets -- --deny warnings
-      # The native security adapters (rustls + ring, jsonwebtoken) are
-      # non-default features: they do not build for wasm32, and the
-      # workspace test run enables only `jwt` (through moonpool-rpc-sim).
-      # Their real-TLS and real-token tests run here.
+      # The native security adapters (rustls + ring, rcgen, jsonwebtoken)
+      # are non-default features: they do not build for wasm32. The
+      # workspace test run enables them through moonpool-rpc-sim; their
+      # real-TLS and real-token tests run here.
       - name: moonpool-rpc with its native security features
         run: |
           nix develop --command cargo clippy -p moonpool-rpc --features tls,jwt --all-targets -- --deny warnings
+          nix develop --command cargo clippy -p moonpool-rpc --features tls-pki,jwt --all-targets -- --deny warnings
           # Only what the features add (the rest runs in the test job):
-          # the tests/tls.rs binary and every jwt test (security::jwt
-          # unit tests, tests/security.rs's jwt module).
-          nix develop --command cargo nextest run -p moonpool-rpc --features tls,jwt -E 'binary(tls) | test(/jwt/)'
+          # the tests/tls.rs and tests/mtls.rs binaries, the TLS unit tests
+          # and every jwt test (security::jwt unit tests,
+          # tests/security.rs's jwt module).
+          nix develop --command cargo nextest run -p moonpool-rpc --features tls-pki,jwt -E 'binary(tls) | binary(mtls) | test(/tls::/) | test(/jwt/)'
       # nextest skips doctests; the RPC crate's examples and compile-fail
       # doctests (derive included) run here.
       - name: moonpool-rpc doctests
@@ -172,7 +174,7 @@ jobs:
           fi
       - name: moonpool-rpc production tree excludes sim/explorer
         run: |
-          for features in "--no-default-features" "" "--features tls,jwt"; do
+          for features in "--no-default-features" "" "--features tls,jwt" "--features tls-pki,jwt"; do
             tree=$(nix develop --command cargo tree -p moonpool-rpc $features -e no-dev)
             echo "$tree"
             # moonpool-buggify is allowed: zero dependencies, inert outside a
@@ -189,7 +191,7 @@ jobs:
           done
           # Declining the native security features keeps their crates out.
           tree=$(nix develop --command cargo tree -p moonpool-rpc -e no-dev)
-          if echo "$tree" | grep -qE "rustls|ring v|jsonwebtoken"; then
+          if echo "$tree" | grep -qE "rustls|ring v|rcgen|jsonwebtoken"; then
             echo "::error::moonpool-rpc pulled in TLS/JWT crates without their features"
             exit 1
           fi
@@ -281,6 +283,7 @@ jobs:
           - rpc-balance
           - rpc-streams
           - rpc-security
+          - rpc-tls
           - rpc-qualification
     steps:
       - uses: actions/checkout@v7

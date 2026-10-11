@@ -216,7 +216,8 @@ and under the simulator in its own `#[test]`.
 - Raw TCP over `NetworkProvider`: test your own protocol byte for byte.
 - `moonpool-rpc`: typed dynamic endpoints, delivery modes, reply streams,
   balancing, per-endpoint admission queues, buggify points inside the
-  runtime, `#[service]` derive, TLS and JWT features.
+  runtime, `#[service]` derive, TLS (mutual TLS included, simulated by
+  `sim-rpc-tls`) and JWT features.
   `moonpool-rpc-sim` holds its simulation campaigns.
 - `moonpool-hyper`: hyper 1.x, tonic gRPC and axum on the providers, with a
   reconnecting h2 channel and a per-connection server.
@@ -256,7 +257,7 @@ and under the simulator in its own `#[test]`.
 
 | Crate | Purpose | Published |
 |-------|---------|-----------|
-| `moonpool` | Facade: features `sim`, `tokio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-jwt` | yes |
+| `moonpool` | Facade: features `sim`, `tokio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt` | yes |
 | `moonpool-core` | Provider traits, `TokioProviders`, storage and metrics types | yes |
 | `moonpool-sim` | Simulator, runner, chaos, assertion macros | yes |
 | `moonpool-buggify` | `buggify!`, `hint!`, `cpu_charge`; zero dependencies | yes |

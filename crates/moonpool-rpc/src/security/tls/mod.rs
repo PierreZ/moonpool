@@ -1,4 +1,4 @@
-//! Server-authenticated TLS sessions (feature `tls`).
+//! TLS 1.3 sessions, server-authenticated or mutual (feature `tls`).
 //!
 //! [`Tls`] is a session upgrade ([`Connector`] and [`Acceptor`]) that runs
 //! TLS 1.3 over the provider's stream through `futures-rustls` (rustls with
@@ -11,11 +11,22 @@
 //!   a name per address). An untrusted, expired, not-yet-valid or
 //!   wrong-name certificate fails the connect, which fails the calls
 //!   waiting on it as `ConnectFailed`, never admitted.
-//! - **Clients are not authenticated by TLS**: mutual TLS is deliberately
-//!   not provided. A client's identity comes from its per-request
-//!   credential ([`RequestVerifier`](super::RequestVerifier)); TLS gives
-//!   that credential confidentiality and binds it to the authenticated
-//!   server.
+//! - **Clients are authenticated only when the server asks** ([`ClientAuth`]):
+//!   `Off` (the default) requests no certificate, and a client's identity
+//!   comes from its per-request credential
+//!   ([`RequestVerifier`](super::RequestVerifier)), which TLS keeps secret
+//!   and binds to the authenticated server. `Required` makes the session
+//!   mutual: the client presents a certificate
+//!   ([`TlsClient::with_certificate`]) that chains to the server's client
+//!   roots and is valid at the injected time. `Optional` verifies a
+//!   certificate when one is presented and admits a client without one.
+//! - **Identity**: a verified certificate's names
+//!   ([`CertificateNames`]) become the session's
+//!   [`PeerContext::identity`]: its first URI name, else its first DNS name,
+//!   else its first IP address (the dialing side keeps the name it verified
+//!   when the server's certificate has no URI). A server that trusts it
+//!   says so with
+//!   [`SecurityConfig::admit_authenticated_peers`](super::SecurityConfig::admit_authenticated_peers).
 //! - Certificates are validated at the time of an injected
 //!   [`UtcClock`], never the host clock unless it is
 //!   [`SystemUtc`](super::SystemUtc). No session tickets are issued (their
@@ -23,20 +34,31 @@
 //!   from `ring`, never from the runtime's `RandomProvider`, so a
 //!   simulation cannot make TLS ciphertext reproducible and does not try
 //!   to.
-//! - **Rotation**: [`RotatingCertificate::replace`] swaps the server's
-//!   certificate and key for every later handshake;
-//!   [`TlsClient::replace_roots`] swaps the client's trust anchors for every
-//!   later connection. Established sessions keep what they negotiated.
+//! - **Rotation**: [`RotatingCertificate::replace`] swaps a certificate and
+//!   key (the server's, or the client's presented one) for every later
+//!   handshake; [`TlsClient::replace_roots`] and
+//!   [`TlsServer::replace_client_roots`] swap trust anchors for every later
+//!   connection. Established sessions keep what they negotiated.
 //!   Session resumption is off on both sides, so every new session sees
 //!   the current certificate and trust anchors (RPC sessions are
 //!   long-lived; the full handshake is paid once per connection).
 //! - A session closed from this side sends a TLS `close_notify` before the
 //!   stream closes, so the peer can tell an orderly end from truncation.
 //!
+//! **Simulation fault sites.** A dial may be told, inside a simulation, to
+//! fail its handshake or to stop right before it (`hint!`), and an accept to
+//! stop right after verifying the client. Outside a simulation they are
+//! inert. The `pki` module (feature `tls-pki`) makes the certificates, with
+//! fault sites of its own.
+//!
 //! The protected session carries the ordinary frames, checksums included,
 //! and [`PeerContext::is_encrypted`] is `true` on both ends, which is what
 //! lets the server accept bearer credentials (see
 //! [`SecurityConfig::accept_credentials_over_plaintext`](super::SecurityConfig::accept_credentials_over_plaintext)).
+
+mod identity;
+#[cfg(feature = "tls-pki")]
+pub mod pki;
 
 use std::collections::BTreeMap;
 use std::io;
@@ -44,15 +66,19 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 
 use futures::io::{AsyncRead, AsyncWrite};
-use futures_rustls::rustls::client::ClientConfig;
+use futures_rustls::rustls::client::{ClientConfig, ResolvesClientCert};
 use futures_rustls::rustls::crypto::{CryptoProvider, ring};
-use futures_rustls::rustls::server::{ClientHello, ResolvesServerCert, ServerConfig};
+use futures_rustls::rustls::server::{
+    ClientHello, ResolvesServerCert, ServerConfig, WebPkiClientVerifier,
+};
 use futures_rustls::rustls::sign::CertifiedKey;
 use futures_rustls::rustls::{self as rustls_crate, RootCertStore};
 use futures_rustls::{TlsAcceptor, TlsConnector};
 
 pub use futures_rustls::rustls;
 pub use futures_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+
+pub use self::identity::CertificateNames;
 
 use super::UtcClock;
 use crate::transport::upgrade::{Acceptor, Connector, PeerContext};
@@ -131,6 +157,8 @@ pub struct TlsClient {
     config: Arc<RwLock<Arc<ClientConfig>>>,
     clock: Arc<dyn UtcClock>,
     names: ServerNames,
+    roots: Arc<RwLock<Vec<CertificateDer<'static>>>>,
+    certificate: Option<Arc<RotatingCertificate>>,
 }
 
 impl std::fmt::Debug for TlsClient {
@@ -141,22 +169,31 @@ impl std::fmt::Debug for TlsClient {
     }
 }
 
-fn client_config(
-    roots: impl IntoIterator<Item = CertificateDer<'static>>,
-    clock: &Arc<dyn UtcClock>,
-) -> Result<Arc<ClientConfig>, TlsError> {
+fn root_store(roots: &[CertificateDer<'static>]) -> Result<RootCertStore, TlsError> {
     let mut store = RootCertStore::empty();
     for root in roots {
-        store.add(root)?;
+        store.add(root.clone())?;
     }
     if store.is_empty() {
         return Err(TlsError("no trust anchor".into()));
     }
-    let mut config =
+    Ok(store)
+}
+
+fn client_config(
+    roots: &[CertificateDer<'static>],
+    clock: &Arc<dyn UtcClock>,
+    certificate: Option<&Arc<RotatingCertificate>>,
+) -> Result<Arc<ClientConfig>, TlsError> {
+    let builder =
         ClientConfig::builder_with_details(provider(), Arc::new(ValidationTime(Arc::clone(clock))))
             .with_protocol_versions(&[&rustls_crate::version::TLS13])?
-            .with_root_certificates(store)
-            .with_no_client_auth();
+            .with_root_certificates(root_store(roots)?);
+    let mut config = match certificate {
+        Some(certificate) => builder
+            .with_client_cert_resolver(Arc::clone(certificate) as Arc<dyn ResolvesClientCert>),
+        None => builder.with_no_client_auth(),
+    };
     // Every session verifies the server's current certificate: a resumed
     // session would skip that, and outlive a rotation.
     config.resumption = rustls_crate::client::Resumption::disabled();
@@ -175,11 +212,52 @@ impl TlsClient {
         clock: impl UtcClock,
     ) -> Result<Self, TlsError> {
         let clock: Arc<dyn UtcClock> = Arc::new(clock);
+        let roots: Vec<_> = roots.into_iter().collect();
         Ok(Self {
-            config: Arc::new(RwLock::new(client_config(roots, &clock)?)),
+            config: Arc::new(RwLock::new(client_config(&roots, &clock, None)?)),
             clock,
             names: ServerNames::default(),
+            roots: Arc::new(RwLock::new(roots)),
+            certificate: None,
         })
+    }
+
+    /// Present `chain` (end-entity first) with `key` to servers that ask
+    /// for a client certificate (mutual TLS). Rotate it through
+    /// [`certificate`](Self::certificate).
+    ///
+    /// # Errors
+    ///
+    /// [`TlsError`] when the chain is empty or the key does not match it.
+    ///
+    /// # Panics
+    ///
+    /// Only if a thread panicked while replacing the roots.
+    pub fn with_certificate(
+        mut self,
+        chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> Result<Self, TlsError> {
+        let certificate = Arc::new(RotatingCertificate {
+            current: RwLock::new(RotatingCertificate::load(chain, key)?),
+        });
+        let roots = self
+            .roots
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .clone();
+        let config = client_config(&roots, &self.clock, Some(&certificate))?;
+        // A fresh shared state: clones made before this call keep theirs.
+        self.config = Arc::new(RwLock::new(config));
+        self.roots = Arc::new(RwLock::new(roots));
+        self.certificate = Some(certificate);
+        Ok(self)
+    }
+
+    /// The certificate it presents, to rotate (`None` without one).
+    #[must_use]
+    pub fn certificate(&self) -> Option<&Arc<RotatingCertificate>> {
+        self.certificate.as_ref()
     }
 
     /// Expect these server names.
@@ -203,11 +281,16 @@ impl TlsClient {
         &self,
         roots: impl IntoIterator<Item = CertificateDer<'static>>,
     ) -> Result<(), TlsError> {
-        let config = client_config(roots, &self.clock)?;
+        let roots: Vec<_> = roots.into_iter().collect();
+        let config = client_config(&roots, &self.clock, self.certificate.as_ref())?;
         *self
             .config
             .write()
             .expect("RwLock poisoned: prior task panicked") = config;
+        *self
+            .roots
+            .write()
+            .expect("RwLock poisoned: prior task panicked") = roots;
         Ok(())
     }
 
@@ -221,7 +304,8 @@ impl TlsClient {
     }
 }
 
-/// The server's certificate chain and key, replaceable while it serves.
+/// A certificate chain and key, replaceable while in use: a server's, or
+/// the one a client presents for mutual TLS.
 #[derive(Debug)]
 pub struct RotatingCertificate {
     current: RwLock<Arc<CertifiedKey>>,
@@ -264,6 +348,25 @@ impl RotatingCertificate {
     }
 }
 
+impl ResolvesClientCert for RotatingCertificate {
+    fn resolve(
+        &self,
+        _root_hint_subjects: &[&[u8]],
+        _schemes: &[rustls_crate::SignatureScheme],
+    ) -> Option<Arc<CertifiedKey>> {
+        Some(Arc::clone(
+            &self
+                .current
+                .read()
+                .expect("RwLock poisoned: prior task panicked"),
+        ))
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
 impl ResolvesServerCert for RotatingCertificate {
     fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         Some(Arc::clone(
@@ -275,22 +378,105 @@ impl ResolvesServerCert for RotatingCertificate {
     }
 }
 
-/// The server side: a rotating certificate and the validation clock.
+/// Whether, and how, a server authenticates its clients.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum ClientAuth {
+    /// Request no client certificate (server-authenticated TLS).
+    #[default]
+    Off,
+    /// Verify a client certificate when one is presented, against these
+    /// roots; admit a client without one.
+    Optional(Vec<CertificateDer<'static>>),
+    /// Require a client certificate that chains to these roots (mutual
+    /// TLS).
+    Required(Vec<CertificateDer<'static>>),
+}
+
+impl std::fmt::Debug for ClientAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Off => f.write_str("Off"),
+            Self::Optional(roots) => write!(f, "Optional({} roots)", roots.len()),
+            Self::Required(roots) => write!(f, "Required({} roots)", roots.len()),
+        }
+    }
+}
+
+impl ClientAuth {
+    /// The same mode over other roots (`Off` stays `Off`).
+    #[must_use]
+    fn with_roots(&self, roots: Vec<CertificateDer<'static>>) -> Self {
+        match self {
+            Self::Off => Self::Off,
+            Self::Optional(_) => Self::Optional(roots),
+            Self::Required(_) => Self::Required(roots),
+        }
+    }
+
+    /// Whether this mode verifies client certificates.
+    #[must_use]
+    pub fn verifies_clients(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
+fn server_config(
+    certificate: &Arc<RotatingCertificate>,
+    clock: &Arc<dyn UtcClock>,
+    client_auth: &ClientAuth,
+) -> Result<Arc<ServerConfig>, TlsError> {
+    let builder =
+        ServerConfig::builder_with_details(provider(), Arc::new(ValidationTime(Arc::clone(clock))))
+            .with_protocol_versions(&[&rustls_crate::version::TLS13])?;
+    let builder = match client_auth {
+        ClientAuth::Off => builder.with_no_client_auth(),
+        ClientAuth::Optional(roots) | ClientAuth::Required(roots) => {
+            let verifier = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(root_store(roots)?),
+                provider(),
+            );
+            let verifier = if matches!(client_auth, ClientAuth::Optional(_)) {
+                verifier.allow_unauthenticated()
+            } else {
+                verifier
+            };
+            let verifier = verifier
+                .build()
+                .map_err(|error| TlsError(format!("client verifier: {error}")))?;
+            builder.with_client_cert_verifier(verifier)
+        }
+    };
+    let mut config =
+        builder.with_cert_resolver(Arc::clone(certificate) as Arc<dyn ResolvesServerCert>);
+    // No resumption: every session presents the current certificate and
+    // verifies the current client roots.
+    config.session_storage = Arc::new(rustls_crate::server::NoServerSessionStorage {});
+    config.send_tls13_tickets = 0;
+    Ok(Arc::new(config))
+}
+
+/// The server side: a rotating certificate, the client authentication mode
+/// and the validation clock.
 #[derive(Clone)]
 pub struct TlsServer {
-    config: Arc<ServerConfig>,
+    config: Arc<RwLock<Arc<ServerConfig>>>,
     certificate: Arc<RotatingCertificate>,
+    clock: Arc<dyn UtcClock>,
+    client_auth: Arc<RwLock<ClientAuth>>,
 }
 
 impl std::fmt::Debug for TlsServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TlsServer").finish_non_exhaustive()
+        f.debug_struct("TlsServer")
+            .field("client_auth", &self.client_auth())
+            .finish_non_exhaustive()
     }
 }
 
 impl TlsServer {
     /// Serve `chain` (end-entity first) with `key`. No client certificate
-    /// is requested and no session is resumable (no ticket, no cache).
+    /// is requested (see [`with_client_auth`](Self::with_client_auth)) and
+    /// no session is resumable (no ticket, no cache).
     ///
     /// # Errors
     ///
@@ -303,26 +489,88 @@ impl TlsServer {
         let certificate = Arc::new(RotatingCertificate {
             current: RwLock::new(RotatingCertificate::load(chain, key)?),
         });
-        let mut config = ServerConfig::builder_with_details(
-            provider(),
-            Arc::new(ValidationTime(Arc::new(clock))),
-        )
-        .with_protocol_versions(&[&rustls_crate::version::TLS13])?
-        .with_no_client_auth()
-        .with_cert_resolver(Arc::clone(&certificate) as Arc<dyn ResolvesServerCert>);
-        // No resumption: every session presents the current certificate.
-        config.session_storage = Arc::new(rustls_crate::server::NoServerSessionStorage {});
-        config.send_tls13_tickets = 0;
+        let clock: Arc<dyn UtcClock> = Arc::new(clock);
+        let config = server_config(&certificate, &clock, &ClientAuth::Off)?;
         Ok(Self {
-            config: Arc::new(config),
+            config: Arc::new(RwLock::new(config)),
             certificate,
+            clock,
+            client_auth: Arc::new(RwLock::new(ClientAuth::Off)),
         })
+    }
+
+    /// Authenticate clients as `client_auth` says.
+    ///
+    /// # Errors
+    ///
+    /// [`TlsError`] without a usable root.
+    ///
+    /// # Panics
+    ///
+    /// Only if a thread panicked while replacing the configuration.
+    pub fn with_client_auth(mut self, client_auth: ClientAuth) -> Result<Self, TlsError> {
+        let config = server_config(&self.certificate, &self.clock, &client_auth)?;
+        // A fresh shared state: clones made before this call keep theirs.
+        self.config = Arc::new(RwLock::new(config));
+        self.client_auth = Arc::new(RwLock::new(client_auth));
+        Ok(self)
+    }
+
+    /// Verify clients against `roots` instead, for every later handshake
+    /// (clones share the change; established sessions keep what they
+    /// verified). The mode stays; with [`ClientAuth::Off`] nothing changes.
+    ///
+    /// # Errors
+    ///
+    /// [`TlsError`] without a usable root; the current roots stay.
+    ///
+    /// # Panics
+    ///
+    /// Only if a thread panicked while replacing the roots.
+    pub fn replace_client_roots(
+        &self,
+        roots: impl IntoIterator<Item = CertificateDer<'static>>,
+    ) -> Result<(), TlsError> {
+        let client_auth = self.client_auth().with_roots(roots.into_iter().collect());
+        let config = server_config(&self.certificate, &self.clock, &client_auth)?;
+        *self
+            .config
+            .write()
+            .expect("RwLock poisoned: prior task panicked") = config;
+        *self
+            .client_auth
+            .write()
+            .expect("RwLock poisoned: prior task panicked") = client_auth;
+        tracing::info!(target: "moonpool_rpc::audit", "rpc_tls_client_roots_replaced");
+        Ok(())
+    }
+
+    /// The client authentication mode in force.
+    ///
+    /// # Panics
+    ///
+    /// Only if a thread panicked while replacing the roots.
+    #[must_use]
+    pub fn client_auth(&self) -> ClientAuth {
+        self.client_auth
+            .read()
+            .expect("RwLock poisoned: prior task panicked")
+            .clone()
     }
 
     /// The certificate it serves, to rotate.
     #[must_use]
     pub fn certificate(&self) -> &Arc<RotatingCertificate> {
         &self.certificate
+    }
+
+    fn current(&self) -> Arc<ServerConfig> {
+        Arc::clone(
+            &self
+                .config
+                .read()
+                .expect("RwLock poisoned: prior task panicked"),
+        )
     }
 }
 
@@ -400,11 +648,25 @@ where
             )
         })?;
         let name = client.names.resolve(peer)?;
-        let identity = name.to_str().into_owned();
+        let expected = name.to_str().into_owned();
+        moonpool_buggify::hint!("rpc tls handshake about to start").await;
+        if moonpool_buggify::buggify_fault_with_prob!(0.01) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "TLS handshake aborted (buggify)",
+            ));
+        }
         let session = TlsConnector::from(client.current())
             .connect(name, stream)
             .await?;
         let (_, connection) = session.get_ref();
+        // The server's own URI names it best; otherwise the name verified.
+        let identity = connection
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .map(|leaf| CertificateNames::of(leaf))
+            .and_then(|names| names.uris.first().cloned())
+            .unwrap_or(expected);
         let protection = describe(
             connection.protocol_version(),
             connection.negotiated_cipher_suite(),
@@ -431,15 +693,22 @@ where
                 "this runtime has no TLS server configuration",
             )
         })?;
-        let session = TlsAcceptor::from(Arc::clone(&server.config))
-            .accept(stream)
-            .await?;
+        let session = TlsAcceptor::from(server.current()).accept(stream).await?;
         let (_, connection) = session.get_ref();
         let protection = describe(
             connection.protocol_version(),
             connection.negotiated_cipher_suite(),
         );
-        // No client certificate: the peer has an address, not an identity.
-        Ok((session, PeerContext::new(peer).with_protection(protection)))
+        // A client certificate is only here when the verifier accepted it.
+        let identity = connection
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .and_then(|leaf| CertificateNames::of(leaf).primary());
+        let context = PeerContext::new(peer).with_protection(protection);
+        let Some(identity) = identity else {
+            return Ok((session, context));
+        };
+        moonpool_buggify::hint!("rpc tls client verified, not yet admitted").await;
+        Ok((session, context.with_identity(identity)))
     }
 }

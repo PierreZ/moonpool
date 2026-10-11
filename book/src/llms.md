@@ -19,7 +19,7 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 
 | Crate | Depend on it for | Features |
 |-------|------------------|----------|
-| `moonpool` | The facade. `moonpool_core::*`, `moonpool_sim::*` under `sim`, modules `hyper`, `prometheus`, `rpc`. | `default = ["sim", "tokio"]`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-jwt` |
+| `moonpool` | The facade. `moonpool_core::*`, `moonpool_sim::*` under `sim`, modules `hyper`, `prometheus`, `rpc`. | `default = ["sim", "tokio"]`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt` |
 | `moonpool-core` | Provider traits and core types. | `default = ["tokio-providers", "select"]`, granular `tokio-task/-time/-net/-fs/-random/-system`, `deterministic-select` |
 | `moonpool-sim` | The runtime, builder, chaos, assertions, observability. | `default = ["tokio-providers", "exploration"]` |
 | `moonpool-assertions`, `moonpool-buggify` | Probes and fault sites for libraries. Zero dependencies. | none |

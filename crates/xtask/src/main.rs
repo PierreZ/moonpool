@@ -63,6 +63,7 @@ const SIM_BINARIES: &[SimBinary] = &[
     SimBinary::rpc("sim-rpc-balance"),
     SimBinary::rpc("sim-rpc-streams"),
     SimBinary::rpc("sim-rpc-security"),
+    SimBinary::rpc("sim-rpc-tls"),
     SimBinary::rpc("sim-rpc-qualification"),
 ];
 
