@@ -46,7 +46,11 @@ use super::topology::WorkloadTopology;
 /// shipped code, written against the provider traits, runs in simulation.
 ///
 /// A process gets a fresh context on every boot, with fresh providers. A
-/// workload keeps one context for the whole iteration.
+/// workload keeps one context for the whole iteration. A clone shares every
+/// handle, so a workload can hand its context to a task it spawns (a client
+/// program that runs on from `run()` into `check()` under
+/// [`chaos_until_run_ends`](crate::SimulationBuilder::chaos_until_run_ends)).
+#[derive(Clone)]
 pub struct SimContext {
     providers: SimProviders,
     topology: WorkloadTopology,
