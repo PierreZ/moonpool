@@ -112,6 +112,7 @@ pub mod buggify;
 pub mod exploration_glue;
 pub mod fault_events;
 pub mod state_handle;
+pub mod window;
 
 // Re-export main types at module level
 pub use assertions::{
@@ -122,3 +123,4 @@ pub use assertions::{
 pub use buggify::{buggify_init, buggify_internal, buggify_knob_internal, buggify_reset};
 pub use fault_events::{SIM_FAULT_EVENT_NAME, SimFaultEvent};
 pub use state_handle::StateHandle;
+pub use window::{chaos_ended_at, in_chaos};

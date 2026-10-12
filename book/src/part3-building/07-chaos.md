@@ -86,6 +86,27 @@ When the window closes, the runner ends chaos in one step:
 
 The cutoff bounds **fault generation**, nothing else. Corrupted sectors stay corrupted. Lost writes stay lost. A process already killed restarts on its own schedule. The cluster is not healthy at the cutoff. The environment has stopped making it worse, and recovering is now the system's job. The quiet tail between the cutoff and workload completion is where a rebooted process rejoins and a cluster reconverges. Give the workload enough simulated time there, then assert on convergence.
 
+### Chaos for the Whole Run
+
+A fixed window has a weakness: the workload's operations and the faults meet only while both happen to run. If the window is short, most operations run in the quiet tail and never meet a fault. `chaos_until_run_ends()` uses FoundationDB's test shape instead. The fault surfaces run for the whole run phase, beside the client workload, and the checks run on a quiet, live cluster:
+
+```rust
+SimulationBuilder::new()
+    .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+    .chaos_duration(Duration::from_secs(300)) // the cap
+    .chaos_until_run_ends()
+```
+
+In this mode:
+
+- Chaos ends when the last workload's `run()` returns, or at `chaos_duration`, which is now a cap. The run's length is the workload's choice: it can draw one per seed.
+- A `run()` that returns early does not shut its siblings down.
+- `check()` runs on the **live** processes after the cutoff. It is the quiet tail: there the system recovers, and the workload reads its final state back and judges convergence. Killed processes come back on their usual schedule, and no new fault starts.
+- Fault injectors keep running until `check()` ends, with their `chaos_shutdown` cancelled. The processes are aborted only after `check()`.
+- `chaos_duration` is also the reference length of a gray failure's window. Set it near the longest run the workload draws.
+
+`moonpool_sim::chaos_ended_at()` gives the cutoff time (and `in_chaos()` whether it passed), so code that times a step from the cutoff can find it.
+
 ## Determinism Is Not Negotiable
 
 Every chaos decision is a draw on the one simulation stream. The same seed produces the same faults in the same order at the same times. So:

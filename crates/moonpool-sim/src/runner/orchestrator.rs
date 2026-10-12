@@ -174,6 +174,7 @@ impl PhaseStall {
 struct RunPhaseInputs<'a> {
     chaos_shutdown: &'a CancellationToken,
     chaos_duration: Option<Duration>,
+    chaos_until_run_ends: bool,
     workload_handles: &'a mut WorkloadHandleSlots,
     workload_collected: &'a mut [Option<WorkloadResult>],
     workload_ips: &'a [String],
@@ -200,6 +201,10 @@ pub(crate) struct OrchestrateInputs<'a> {
     pub(crate) sim: SimWorld,
     /// Optional chaos duration; `None` disables fault injection.
     pub(crate) chaos_duration: Option<Duration>,
+    /// Whether chaos ends with the run phase, `chaos_duration` its cap, and
+    /// `check()` runs on the live processes
+    /// ([`SimulationBuilder::chaos_until_run_ends`](crate::SimulationBuilder::chaos_until_run_ends)).
+    pub(crate) chaos_until_run_ends: bool,
     /// Builds one application-metrics source per node IP, or `None` when the
     /// simulation registered no metrics factory.
     pub(crate) metrics_factory: Option<&'a SourceFactory>,
@@ -276,12 +281,14 @@ impl WorkloadOrchestrator {
             seed,
             mut sim,
             chaos_duration,
+            chaos_until_run_ends,
             metrics_factory,
             iteration_count,
             run_time_budget,
             max_spawns,
             task_panics,
         } = inputs;
+        crate::chaos::window::set_chaos_ended_at(None);
 
         Self::log_orchestration_start(&workloads, &fault_injectors, process_config.as_ref());
 
@@ -326,16 +333,27 @@ impl WorkloadOrchestrator {
                 }
             };
 
-        let (returned_workloads, results) = Self::do_chaos_and_run_phase(
+        let ((returned_workloads, results), injectors) = Self::do_chaos_and_run_phase(
             &mut sim,
             &mut process_manager,
             env,
             (workloads, contexts),
             fault_injectors,
-            chaos_duration,
+            (chaos_duration, chaos_until_run_ends),
         )
         .await?;
 
+        if chaos_until_run_ends {
+            return Self::finalize_live_check(
+                &mut sim,
+                &mut process_manager,
+                env,
+                (returned_workloads, results),
+                injectors,
+            )
+            .await;
+        }
+        Self::abort_running_injectors(injectors);
         Self::finalize_orchestration(
             &mut sim,
             &mut process_manager,
@@ -344,6 +362,49 @@ impl WorkloadOrchestrator {
             results,
         )
         .await
+    }
+
+    /// The end of a run whose chaos ended with its run phase
+    /// ([`SimulationBuilder::chaos_until_run_ends`](crate::SimulationBuilder::chaos_until_run_ends)):
+    /// `check()` runs on the live processes in the quiet tail, and only then
+    /// are the injectors stopped, the processes aborted and the scheduler
+    /// settled.
+    async fn finalize_live_check(
+        sim: &mut SimWorld,
+        process_manager: &mut ProcessManager<'_>,
+        env: IterationEnv<'_>,
+        (returned_workloads, mut results): CompletedWorkloads,
+        injectors: InjectorHandleSlots,
+    ) -> Result<OrchestrateOutput, Deadlock> {
+        assert_reachable!("phase: check runs on live processes");
+        let (final_workloads, check_results) =
+            Self::do_check_phase(sim, returned_workloads, env, Some(&mut *process_manager))
+                .await
+                .map_err(|()| env.deadlock())?;
+        results.extend(check_results);
+        Self::trigger_shutdown(sim, env.shutdown_signal);
+        Self::abort_running_injectors(injectors);
+        process_manager.abort_all();
+        for panic in process_manager.take_panics() {
+            results.push(Err(crate::SimulationError::InvalidState(format!(
+                "process at {} panicked: {}",
+                panic.ip, panic.message
+            ))));
+        }
+        if let Some(settle_err) = Self::settle_phase(sim) {
+            return Ok(OrchestrateOutput {
+                workloads: final_workloads,
+                results: vec![Err(settle_err)],
+                metrics: Self::extract_metrics(sim, env.metrics, &env.topology.membership),
+            });
+        }
+        Self::pump_observability(sim, env.obs);
+        let metrics = Self::extract_metrics(sim, env.metrics, &env.topology.membership);
+        Ok(OrchestrateOutput {
+            workloads: final_workloads,
+            results,
+            metrics,
+        })
     }
 
     /// Build topology metadata (process IPs, tag registry, combined entity
@@ -417,8 +478,8 @@ impl WorkloadOrchestrator {
         env: IterationEnv<'_>,
         (workloads, contexts): (Vec<Box<dyn Workload>>, Vec<SimContext>),
         fault_injectors: Vec<Box<dyn FaultInjector>>,
-        chaos_duration: Option<Duration>,
-    ) -> Result<CompletedWorkloads, Deadlock> {
+        (chaos_duration, chaos_until_run_ends): (Option<Duration>, bool),
+    ) -> Result<(CompletedWorkloads, InjectorHandleSlots), Deadlock> {
         let chaos_shutdown = CancellationToken::new();
         sim.start_buggified_delay_window(chaos_duration);
         let mut injector_handles = Self::start_fault_injectors(
@@ -446,6 +507,7 @@ impl WorkloadOrchestrator {
             RunPhaseInputs {
                 chaos_shutdown: &chaos_shutdown,
                 chaos_duration,
+                chaos_until_run_ends,
                 workload_handles: &mut workload_handles,
                 workload_collected: &mut workload_collected,
                 workload_ips: &workload_ips,
@@ -454,9 +516,10 @@ impl WorkloadOrchestrator {
         )
         .await?;
 
-        Self::abort_running_injectors(injector_handles);
-        Self::collect_workload_results(workload_collected, total_workloads, &workload_ips)
-            .map_err(|()| env.deadlock())
+        let completed =
+            Self::collect_workload_results(workload_collected, total_workloads, &workload_ips)
+                .map_err(|()| env.deadlock())?;
+        Ok((completed, injector_handles))
     }
 
     /// Abort every process, settle the world, and run the check phase.
@@ -493,9 +556,10 @@ impl WorkloadOrchestrator {
         Self::pump_observability(sim, env.obs);
 
         // === 7. CHECK PHASE (executor spawn + cooperative stepping) ===
-        let (final_workloads, check_results) = Self::do_check_phase(sim, returned_workloads, env)
-            .await
-            .map_err(|()| env.deadlock())?;
+        let (final_workloads, check_results) =
+            Self::do_check_phase(sim, returned_workloads, env, None)
+                .await
+                .map_err(|()| env.deadlock())?;
         // A `check()` verdict is part of the iteration's result: a workload
         // whose `run()` succeeded but whose final validation returned `Err`
         // (or panicked) fails the seed exactly as a failing `run()` does.
@@ -526,6 +590,7 @@ impl WorkloadOrchestrator {
         sim: &mut SimWorld,
         workloads: Vec<Box<dyn Workload>>,
         env: IterationEnv<'_>,
+        process_manager: Option<&mut ProcessManager<'_>>,
     ) -> Result<CompletedWorkloads, ()> {
         let check_contexts = Self::build_workload_contexts(sim, &env)?;
         let (check_handles, check_ips) = Self::spawn_workload_tasks(
@@ -541,7 +606,7 @@ impl WorkloadOrchestrator {
             },
         );
 
-        if !Self::cooperative_loop_until_done(sim, None, env, &check_handles).await {
+        if !Self::cooperative_loop_until_done(sim, process_manager, env, &check_handles).await {
             for handle in &check_handles {
                 handle.abort();
             }
@@ -630,6 +695,7 @@ impl WorkloadOrchestrator {
         let RunPhaseInputs {
             chaos_shutdown,
             chaos_duration,
+            chaos_until_run_ends,
             workload_handles,
             workload_collected,
             workload_ips,
@@ -665,22 +731,8 @@ impl WorkloadOrchestrator {
             let initial_event_count = sim.pending_event_count();
 
             if !chaos_ended && Self::should_end_chaos(sim, chaos_start, chaos_duration) {
-                tracing::debug!("Chaos phase ended");
-                // Stop the two sources of new faults together: the explicit
-                // injector loops (token) and the configuration-driven network,
-                // storage, and block-device families (recovery mode, which
-                // also heals the partitions the simulator is holding). Damage
-                // already done stays done — the quiet tail that follows is
-                // where the system under test has to recover from it, while
-                // its processes are still alive.
-                chaos_shutdown.cancel();
-                sim.enter_recovery_mode();
-                // Disruptive buggify sites (`buggify_fault_with_prob!`) stop
-                // with the rest of the chaos; ordinary sites keep firing.
-                moonpool_buggify::buggify_enter_recovery();
-                moonpool_buggify::hint::clear_sink();
+                Self::end_chaos(sim, chaos_shutdown);
                 chaos_ended = true;
-                assert_reachable!("phase: chaos ended");
             }
 
             Self::step_and_pump(sim, Some(&mut *process_manager), &env);
@@ -693,7 +745,9 @@ impl WorkloadOrchestrator {
             .await
             .map_err(|()| env.deadlock())?;
 
-            if any_finished && !stall.shutdown_triggered {
+            // A workload done early shuts its siblings down, unless chaos
+            // lasts until the last one returns.
+            if any_finished && !stall.shutdown_triggered && !chaos_until_run_ends {
                 Self::trigger_shutdown(sim, env.shutdown_signal);
                 stall.shutdown_triggered = true;
             }
@@ -715,9 +769,31 @@ impl WorkloadOrchestrator {
                 crate::executor::until_stalled().await;
             }
         }
+        if chaos_until_run_ends && !chaos_ended {
+            assert_reachable!("phase: chaos ends with the run");
+            Self::end_chaos(sim, chaos_shutdown);
+        }
         // Final pump: capture events emitted after the last step.
         Self::pump_observability(sim, env.obs);
         Ok(())
+    }
+
+    /// End the chaos phase. Stop the two sources of new faults together: the
+    /// explicit injector loops (token) and the configuration-driven network,
+    /// storage, and block-device families (recovery mode, which also heals
+    /// the partitions the simulator is holding). Damage already done stays
+    /// done — the quiet tail that follows is where the system under test has
+    /// to recover from it, while its processes are still alive.
+    fn end_chaos(sim: &mut SimWorld, chaos_shutdown: &CancellationToken) {
+        tracing::debug!("Chaos phase ended");
+        chaos_shutdown.cancel();
+        sim.enter_recovery_mode();
+        // Disruptive buggify sites (`buggify_fault_with_prob!`) stop with the
+        // rest of the chaos; ordinary sites keep firing.
+        moonpool_buggify::buggify_enter_recovery();
+        moonpool_buggify::hint::clear_sink();
+        crate::chaos::window::set_chaos_ended_at(Some(sim.current_time()));
+        assert_reachable!("phase: chaos ended");
     }
 
     /// Spawn the fault injectors for the chaos phase. When `chaos_duration`

@@ -164,13 +164,13 @@ impl KvWorkload {
 
 ## Why run() Must Finish
 
-A workload returns when it is done. The runner takes the first `Ok` from any workload as the signal to cancel `ctx.shutdown()` for every process and every other workload. A workload that loops forever keeps the seed alive until the stall guards declare a deadlock. Count operations, or sleep for a fixed simulated duration, then return. [Running and Observing](./05-running.md#stall-detection) covers the guards.
+A workload returns when it is done. The runner takes the first `Ok` from any workload as the signal to cancel `ctx.shutdown()` for every process and every other workload (except under `chaos_until_run_ends()`, where the runner waits for the last one). A workload that loops forever keeps the seed alive until the stall guards declare a deadlock. Count operations, or sleep for a fixed simulated duration, then return. [Running and Observing](./05-running.md#stall-detection) covers the guards.
 
 A model that only knows what **this** client wrote is wrong under crashes: a `Crash` reboot loses the server's in-memory map, so a later get returns empty where the model expects a value. That is the first bug this workload finds, and it is a real one. The fix belongs in the server, through `ctx.storage()`, not in the assertion.
 
 ## Check: Final Validation
 
-`check()` runs after the world is quiet. No messages in flight, no faults, processes aborted. It is the place for whole-run properties:
+`check()` runs after the world is quiet. No messages in flight, no faults, processes aborted. (With `chaos_until_run_ends()` it runs on the live processes instead, after the cutoff: the quiet tail where the workload reads the final state back. See [Chaos in Moonpool](./07-chaos.md#chaos-for-the-whole-run).) It is the place for whole-run properties:
 
 ```rust
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {

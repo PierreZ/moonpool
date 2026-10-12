@@ -17,6 +17,7 @@ Every value on this page is read from the current source. The code wins when the
 | `workloads(WorkloadCount, \|i\| Box<dyn Workload>)` | | `Fixed(n)` or `Random(range)` drivers per run. |
 | `enable_chaos([Chaos, ..])` | no chaos | Enable chaos surfaces (table below). |
 | `chaos_duration(Duration)` | none | The fault-generation window. Required by `fault_factory`. After it, `enter_recovery_mode` turns off every configuration-driven family and heals held partitions. |
+| `chaos_until_run_ends()` | off | Chaos ends when the last workload's `run()` returns, `chaos_duration` its cap. An early `run()` stops no sibling, and `check()` runs on the live processes after the cutoff. |
 | `fault_factory(\|\| Box<dyn FaultInjector>)` | | A custom injector per run. `run()` returns `InvalidConfiguration` without `chaos_duration`. |
 | `network_fault_mask(NetworkFaultMask)` | `all()` | Remove network fault families after the per-seed draw. |
 | `storage_fault_mask(StorageFaultMask)` | `all()` | Remove storage fault families after the per-seed draw. |
