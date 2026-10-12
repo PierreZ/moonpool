@@ -26,12 +26,22 @@ use crate::{assert_reachable, assert_sometimes_each};
 /// The run's state key a [`HintVeto`] is published under.
 pub const HINT_VETO_KEY: &str = "moonpool:hint-veto";
 
-/// A harness's budget over the reboots hints ask for.
+/// The label a [`HintVeto`] is asked with for an attrition regime's own
+/// timed reboot of one process, which no hint names.
+pub const TIMED_REBOOT_LABEL: &str = "attrition: timed reboot";
+
+/// A harness's budget over the reboots hints ask for, and over an
+/// attrition regime's timed reboots of one process.
 ///
 /// The sink asks the veto with the process IP and the hint's label after
 /// the attrition regime admits the reboot, and only then: a `true` answer
 /// is a reboot that is scheduled at once, so the harness may record it as
 /// done. A `false` answer leaves the process alive and the hint resolves.
+/// A per-process regime asks it the same way before each timed reboot,
+/// with [`TIMED_REBOOT_LABEL`]: a timed reboot lands at any instant, inside
+/// a commit too, so a budget that only hints asked would leak. A
+/// `false` answer skips that round. A per-domain regime's group reboot
+/// does not ask it.
 ///
 /// Use it for a budget the simulator cannot see, such as the copies a
 /// replicated store can lose before a crash is no longer survivable. The
@@ -57,6 +67,14 @@ impl HintVeto {
     fn permits(&self, ip: &str, label: &'static str) -> bool {
         (self.0)(ip, label)
     }
+}
+
+/// Whether the run's [`HintVeto`], if one is published, permits rebooting
+/// the process at `ip` for `label`: `true` when none is.
+pub(crate) fn veto_permits(ctx: &FaultContext, ip: &str, label: &'static str) -> bool {
+    ctx.state()
+        .get::<HintVeto>(HINT_VETO_KEY)
+        .is_none_or(|veto| veto.permits(ip, label))
 }
 
 impl std::fmt::Debug for HintVeto {
@@ -94,9 +112,8 @@ impl Sink for HintSink {
             assert_reachable!("hint: no attrition regime covers the hinting process");
             return Strike::None;
         };
-        let veto = self.ctx.state().get::<HintVeto>(HINT_VETO_KEY);
         let permit = || {
-            let permitted = veto.as_ref().is_none_or(|veto| veto.permits(&ip, label));
+            let permitted = veto_permits(&self.ctx, &ip, label);
             if !permitted {
                 assert_reachable!("hint: the harness's veto refuses a reboot");
             }

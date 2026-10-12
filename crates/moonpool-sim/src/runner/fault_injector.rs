@@ -881,6 +881,12 @@ impl AttritionInjector {
             "attrition_process_targeted",
             [("process_idx", i64::try_from(idx).unwrap_or(i64::MAX))]
         );
+        // The harness's budget (`HintVeto`) covers a timed reboot as it
+        // covers a hint's: it lands at any instant, inside a commit too.
+        if !super::hint::veto_permits(ctx, &ip, super::hint::TIMED_REBOOT_LABEL) {
+            assert_reachable!("attrition: the harness's veto refuses a timed reboot");
+            return Ok(());
+        }
         self.check_victim(ctx, &ip);
         ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)
     }

@@ -58,6 +58,8 @@ HintVeto::new(move |ip, _label| ledger.permit_cut(ip)).publish(ctx.state());
 
 The veto runs inside the hint's call, so it must not draw randomness. `HINT_VETO_KEY` is the state key, and a later `publish` replaces an earlier veto.
 
+The same veto guards the regime's own timed reboots of one process. A timed reboot lands at any instant, inside a commit too, so a budget that only hints asked would leak. Before each one, a per-process regime asks the veto with the label `TIMED_REBOOT_LABEL`. A `false` answer skips that round. A per-domain regime's group reboot does not ask it.
+
 The chain costs nothing until a site fires. Every draw (activation, firing, kind, delay) goes through the one simulation stream from inside the call, so a hinted reboot replays exactly. `crates/moonpool-sim/tests/hint.rs` runs the chain under `check_determinism` and shows a refused veto leaving the process alive.
 
 ## Where to Put a Hint

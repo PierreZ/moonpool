@@ -410,8 +410,8 @@ pub use runner::{
     GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl, LocalityConfig,
     MachineRegistry, Membership, MetricsHandle, OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage,
     OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SelfCrash, SimContext,
-    SimulationBuilder, SimulationMetrics, SimulationReport, TagRegistry, VETO_RETRY, Workload,
-    WorkloadCount, WorkloadTopology,
+    SimulationBuilder, SimulationMetrics, SimulationReport, TIMED_REBOOT_LABEL, TagRegistry,
+    VETO_RETRY, Workload, WorkloadCount, WorkloadTopology,
 };
 
 // Application-metrics vocabulary, re-exported from moonpool-core so a
