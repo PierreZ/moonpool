@@ -120,7 +120,7 @@ The stripe key comes from `LayoutRegion::stripe` (the journal uses the entry pos
 | Domain reboot | `FaultContext::reboot_machine(..)`, `reboot_domain(..)`; `AttritionScope::{PerMachine, PerZone, PerDatacenter}` | Every process of the domain at once. |
 | Self crash | `SimContext::crash_self(kind, Option<Duration>)`, `SimContext::self_crash() -> SelfCrash` | A process kills itself one scheduler tick from now, at an exact point of its protocol. No randomness is drawn. Only a process may call it. |
 | Outage | `Chaos::Outage` | Every process of the named groups loses power at one instant. A workload can hold it with `OutageVeto`. |
-| Hint | `hint!("label")` in library code | The seed's first admitting attrition regime may reboot the process at that moment. A workload can budget it with `HintVeto::new(\|ip, label\| bool).publish(state)` under `HINT_VETO_KEY`. |
+| Hint | `hint!("label")` in library code | The seed's first admitting attrition regime may reboot the process at that moment. A workload can budget it with `HintVeto::new(\|ip, label\| bool).publish(state)` under `HINT_VETO_KEY`. The veto also guards a per-process regime's timed reboots, asked with `TIMED_REBOOT_LABEL`. |
 
 Reboots are bounded by `max_dead` per injector pool. The restart runs the process factory again: a fresh instance, the same IP, the same disk unless wiped.
 

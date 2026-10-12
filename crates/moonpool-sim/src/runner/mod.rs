@@ -61,7 +61,7 @@ pub use deployment::Deployment;
 pub use fault_injector::{FaultContext, FaultInjector};
 pub use gray_failure::{GrayFailure, GrayKinds};
 pub use groups::GroupRegistry;
-pub use hint::{HINT_VETO_KEY, HintVeto};
+pub use hint::{HINT_VETO_KEY, HintVeto, TIMED_REBOOT_LABEL};
 pub use locality::{LocalityConfig, MachineRegistry};
 pub use membership::{DeploymentChanges, DomainSpec, Membership};
 pub use outage::{OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, VETO_RETRY};

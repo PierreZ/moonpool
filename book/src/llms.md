@@ -168,7 +168,7 @@ Capture rule: INFO and above, constant message, inside a process or workload tas
 | `buggify_named!("label", p)` + `set_activation("label", bool)` | Named sites a harness can mask. |
 | `buggify_pick!(p, n)`, `buggify_range!(p, range)` | `Option<usize>`, `Option<u64>`. |
 | `buggify_knob!(default, lo..hi)` | A knob value in range on some seeds (`moonpool-sim`). |
-| `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it. |
+| `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it, and a per-process regime's timed reboots too (label `TIMED_REBOOT_LABEL`). |
 | `cpu_charge(Duration)` | Explicit CPU work under `Chaos::Cpu`. |
 
 All are no-ops in production. `moonpool-journal` shows the pattern: three `hint!` moments per commit.

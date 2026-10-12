@@ -176,7 +176,8 @@ and under the simulator in its own `#[test]`.
 ### `hint!`, buggify and swarm testing (`moonpool-buggify`)
 
 - `hint!("label").await` names a moment. The simulator may reboot the
-  caller there, under the seed's attrition regime and an optional `HintVeto`.
+  caller there, under the seed's attrition regime and an optional `HintVeto`,
+  which also guards a per-process regime's timed reboots.
 - `buggify!`, `buggify_with_prob!`, `buggify_fault_with_prob!`,
   `buggify_pick!` and `buggify_range!`: two-phase activation, once per run
   and then per call. `buggify_knob!` (in `moonpool-sim`) for tunables.
