@@ -100,6 +100,7 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `workload(w)`, `workload_factory(f)`, `workloads(WorkloadCount, f)` | Exploration and `check_determinism` need a factory. |
 | `enable_chaos([Chaos..])` | `Network(mode)`, `Storage(mode)`, `Attrition { config, mode }`, `Outage { config, mode }`, `BuggifyKnobs`, `Cpu(mode)`, `GrayFailure { config, mode }`. |
 | `chaos_duration(d)` | Required by `fault_factory`. After it: recovery mode. |
+| `chaos_until_run_ends()` | Chaos ends when the last `run()` returns (`chaos_duration` is the cap); `check()` runs on live processes after the cutoff. `chaos_ended_at()` gives the cutoff. |
 | `fault_factory(\|\| Box<dyn FaultInjector>)` | Custom injector per run. |
 | `network_fault_mask(m)`, `storage_fault_mask(m)` | Remove families after the draw. |
 | `replicated_storage_faults(ReplicatedFaults)` | Bound damage to tolerated domains. |

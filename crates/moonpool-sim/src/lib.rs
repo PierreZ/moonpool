@@ -443,8 +443,8 @@ pub use moonpool_buggify::{
 // Chaos module re-exports
 pub use chaos::{
     AssertionStats, SIM_FAULT_EVENT_NAME, SimFaultEvent, StateHandle, assertion_results,
-    buggify_init, buggify_reset, has_always_violations, reset_always_violations,
-    reset_assertion_results, validate_assertion_contracts,
+    buggify_init, buggify_reset, chaos_ended_at, has_always_violations, in_chaos,
+    reset_always_violations, reset_assertion_results, validate_assertion_contracts,
 };
 
 // Observability module re-exports (plain-tracing capture + invariants)

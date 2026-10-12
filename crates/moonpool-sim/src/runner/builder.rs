@@ -156,6 +156,8 @@ pub struct SimulationBuilder {
     /// Metric queries the runner evaluates against every successful seed.
     pub(super) metric_queries: Vec<MetricQueryPlan>,
     pub(super) chaos_duration: Option<Duration>,
+    /// When the chaos phase ends ([`Self::chaos_until_run_ends`]).
+    pub(super) chaos_end: ChaosEnd,
     pub(super) exploration_config: Option<crate::chaos::exploration_glue::ExplorationConfig>,
     /// Replay breakpoints staged for the next orchestration run. Installed
     /// *after* `SimWorld` construction (whose RNG reset would clear them);
@@ -220,6 +222,7 @@ impl SimulationBuilder {
             metrics_factory: None,
             metric_queries: Vec::new(),
             chaos_duration: None,
+            chaos_end: ChaosEnd::AtDuration,
             exploration_config: None,
             pending_replay: None,
             replay_recipe: None,
@@ -898,6 +901,39 @@ impl SimulationBuilder {
         self
     }
 
+    /// End the chaos phase with the run phase, not at a fixed time: faults
+    /// run while any workload's `run()` still runs, and stop the moment the
+    /// last one returns. [`Self::chaos_duration`], required, becomes a cap.
+    ///
+    /// This is `FoundationDB`'s test shape: the fault workloads (clogging,
+    /// attrition) run for the test's whole duration beside the client
+    /// workload, and the checks run afterwards on a quiet, live cluster. The
+    /// run's length is the workloads' own choice, so chaos meets every
+    /// operation they make.
+    ///
+    /// Three things change in this mode:
+    ///
+    /// - A workload whose `run()` returns early does not shut its siblings
+    ///   down: chaos goes on until the last one returns.
+    /// - `check()` runs on the **live** processes, after the cutoff: it is
+    ///   the quiet tail, where the system under test recovers and the
+    ///   workloads judge it. Killed processes come back on their usual
+    ///   schedule there, and no new fault starts.
+    /// - Fault injectors keep running until `check()` ends, their
+    ///   [`chaos_shutdown`](crate::FaultContext::chaos_shutdown) cancelled,
+    ///   so a scripted sequence may finish a step in the tail. The processes
+    ///   are aborted, and the scheduler settled, only after `check()`.
+    ///
+    /// The cap is also the reference length of every gray failure's window
+    /// ([`GrayFailure::window`](crate::GrayFailure)): pick it near the
+    /// longest `run()` the workloads draw. [`chaos_ended_at`](crate::chaos_ended_at)
+    /// gives the cutoff to code that times a scenario from it.
+    #[must_use]
+    pub fn chaos_until_run_ends(mut self) -> Self {
+        self.chaos_end = ChaosEnd::WithRun;
+        self
+    }
+
     /// Run exactly `iterations` seeds ([`IterationControl::FixedCount`]).
     ///
     /// Combine it with [`set_debug_seeds`](Self::set_debug_seeds) to replay
@@ -1170,6 +1206,16 @@ impl SimulationBuilder {
         self.exploration_config = Some(config);
         self
     }
+}
+
+/// When the chaos phase ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ChaosEnd {
+    /// At [`SimulationBuilder::chaos_duration`] after the run phase starts.
+    AtDuration,
+    /// When every workload's `run()` returned, capped by the duration
+    /// ([`SimulationBuilder::chaos_until_run_ends`]).
+    WithRun,
 }
 
 #[cfg(test)]

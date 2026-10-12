@@ -170,7 +170,8 @@ and under the simulator in its own `#[test]`.
   minority, striped and rolling patterns that never hit every replica.
 - Custom faults: `fault_factory` with a `FaultInjector` and its
   `FaultContext`. `chaos_duration` closes the chaos window and opens a
-  quiet recovery tail.
+  quiet recovery tail; `chaos_until_run_ends` keeps chaos on for the whole
+  run phase and runs `check()` on the live processes after it.
 
 ### `hint!`, buggify and swarm testing (`moonpool-buggify`)
 

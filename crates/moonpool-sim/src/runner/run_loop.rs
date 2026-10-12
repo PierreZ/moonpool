@@ -37,6 +37,7 @@ struct RunOrchestratorInputs<'a> {
     sim: crate::sim::SimWorld,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
+    chaos_until_run_ends: bool,
     obs_handle: SimulationLayerHandle,
     run_time_budget: Duration,
     max_spawns: usize,
@@ -276,6 +277,7 @@ impl SimulationBuilder {
             sim,
             fault_injectors,
             chaos_duration,
+            chaos_until_run_ends,
             obs_handle,
             run_time_budget,
             max_spawns,
@@ -298,6 +300,7 @@ impl SimulationBuilder {
                 seed,
                 sim,
                 chaos_duration,
+                chaos_until_run_ends,
                 metrics_factory,
                 iteration_count,
                 run_time_budget,
@@ -501,6 +504,13 @@ impl SimulationBuilder {
             .find_map(|(gray, _)| gray.invalid(&registered))
         {
             return Err(SimulationError::InvalidConfiguration(reason));
+        }
+        if self.chaos_end == super::builder::ChaosEnd::WithRun && self.chaos_duration.is_none() {
+            return Err(SimulationError::InvalidConfiguration(
+                "SimulationBuilder::chaos_until_run_ends needs SimulationBuilder::chaos_duration: \
+                 the cap of the chaos phase and the reference length of a gray failure's window"
+                    .into(),
+            ));
         }
         if self.chaos_duration.is_some() {
             return Ok(());
@@ -1304,6 +1314,7 @@ impl SimulationBuilder {
             sim,
             fault_injectors,
             chaos_duration: self.chaos_duration,
+            chaos_until_run_ends: self.chaos_end == super::builder::ChaosEnd::WithRun,
             obs_handle: obs_handle.clone(),
             run_time_budget: self.run_time_budget,
             max_spawns: self.max_spawns,
