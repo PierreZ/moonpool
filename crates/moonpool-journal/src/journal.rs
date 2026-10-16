@@ -43,7 +43,9 @@ pub struct JournalConfig {
     /// The protocol of each commit. Recorded per batch, so it may change
     /// between opens.
     pub durability: Durability,
-    /// The segment shape: fixed at creation, checked at every open.
+    /// The segment shape of a journal [`Journal::create`] makes. A journal
+    /// keeps the shape it was created with: [`Journal::open`] reads it from
+    /// the metainfo and the segment headers, and ignores this one.
     pub geometry: Geometry,
     /// Direct-I/O policy for the segment files.
     pub direct_io: DirectIo,
@@ -334,11 +336,17 @@ impl<P: StorageProvider> Journal<P> {
                 Err(OpenError::MetaLost)
             };
         };
-        if meta.geometry != config.geometry {
+        // The shape is the journal's own, fixed at creation: a journal made
+        // under an older default opens under the shape it was made with.
+        if !meta.geometry.is_valid() {
             return Err(OpenError::InvalidConfig(
-                "the geometry differs from the one the journal was created with",
+                "the recorded geometry describes no usable segment",
             ));
         }
+        let config = JournalConfig {
+            geometry: meta.geometry,
+            ..config
+        };
         let mut recovery = Recovery {
             meta_repaired,
             ..Recovery::default()
@@ -444,6 +452,14 @@ impl<P: StorageProvider> Journal<P> {
     #[must_use]
     pub fn id(&self) -> JournalId {
         self.id
+    }
+
+    /// The segment shape this journal was created with: the bound a batch
+    /// must fit ([`Batch::fits`]). An opened journal keeps its own, whatever
+    /// [`JournalConfig::geometry`] said.
+    #[must_use]
+    pub fn geometry(&self) -> Geometry {
+        self.config.geometry
     }
 
     /// The caller's metainfo.

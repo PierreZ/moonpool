@@ -195,6 +195,41 @@ fn positions_in_any_order_survive_reopen() {
 }
 
 #[test]
+fn a_journal_keeps_the_geometry_it_was_created_with() {
+    runtime().block_on(async {
+        let mut sim = sim(3);
+        let journal = create(&mut sim, Durability::Ordered).await;
+        assert_eq!(journal.geometry(), Geometry::small());
+        let journal = put(&mut sim, journal, &[(1, 1, 100), (2, 1, 100)]).await;
+        drop(journal);
+        // Opened under another default, it keeps its own shape.
+        let opened = run(&mut sim, |provider| async move {
+            Journal::open(provider, DIR, JOURNAL, JournalConfig::default()).await
+        })
+        .await
+        .expect("open")
+        .map(|(journal, _)| journal);
+        let journal = opened.expect("a journal is there");
+        assert_eq!(journal.geometry(), Geometry::small());
+        assert_ne!(Geometry::small(), Geometry::default());
+        let (journal, read) = read(&mut sim, journal, 2).await;
+        assert_eq!(read.expect("read"), payload(2, 1, 100));
+        // Commits go on under the recorded shape: past one small segment.
+        let mut journal = journal;
+        for position in 3..600 {
+            journal = put(&mut sim, journal, &[(position, 1, 8)]).await;
+        }
+        assert_eq!(
+            journal.state(599),
+            State::Live {
+                id: id(599, 1),
+                len: 8
+            }
+        );
+    });
+}
+
+#[test]
 fn an_empty_directory_holds_no_journal_and_create_refuses_an_existing_one() {
     runtime().block_on(async {
         let mut sim = sim(2);

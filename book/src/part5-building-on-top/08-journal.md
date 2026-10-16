@@ -71,9 +71,13 @@ journal.commit(chunk).await?;   // metainfo and floor go in the last one
 ```
 
 `Batch::fits(geometry)` is the same bound for a staged batch. The default
-`Geometry` is a 64 MiB segment (32,768 records and 60 MiB of entries).
+`Geometry` is a 64 MiB segment with persist and entry logs of the same size
+(507,904 records and 31 MiB of entries). Every batch starts on a fresh block
+in both logs, so a segment holds 7,936 batches of one small entry.
 `Geometry::small()` is 512 records and 64 KiB of entries, so tests roll over
-segments quickly.
+segments quickly. A journal keeps the geometry it was created with:
+`Journal::open` reads it from the metainfo, and `Journal::geometry` returns
+it, so a caller packs its batches against the journal's own shape.
 
 ## Layout
 
