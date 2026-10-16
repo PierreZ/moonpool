@@ -396,6 +396,63 @@ fn a_damaged_entry_before_the_last_batch_is_reported_by_identity_never_truncated
     });
 }
 
+/// A replay reads runs of entries with one read each: over batches of many
+/// entries, positions written out of order, overwrites, several segments
+/// and a damaged entry inside a run, it answers what a read of each
+/// position answers.
+#[test]
+fn a_replay_answers_what_each_read_answers() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(8);
+            let mut journal = create(&mut sim, durability).await;
+            for round in 0..12u64 {
+                let puts: Vec<(u64, u64, usize)> = (0..40u64)
+                    .map(|at| {
+                        (
+                            (at * 7 + round * 3) % 97,
+                            round + 1,
+                            40 + usize::try_from(at % 9).expect("small") * 50,
+                        )
+                    })
+                    .collect();
+                journal = put(&mut sim, journal, &puts).await;
+            }
+            let damaged = journal.positions().nth(30).expect("a live position").0;
+            let (_, entry) = spots(&journal, damaged);
+            drop(journal);
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, _) = reopen(&mut sim, durability).await.expect("opens");
+            let positions: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            let (journal, replay) = run(&mut sim, move |_| async move {
+                let replay = journal.replay(..).await;
+                (journal, replay)
+            })
+            .await;
+            let replay = replay.expect("replay");
+            assert_eq!(
+                replay.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+                positions,
+                "every live position once, in order"
+            );
+            let mut journal = journal;
+            for (position, replayed) in replay {
+                let (back, read) = read(&mut sim, journal, position).await;
+                journal = back;
+                assert_eq!(
+                    replayed
+                        .map(|entry| entry.payload)
+                        .map_err(|error| format!("{error:?}")),
+                    read.map_err(|error| format!("{error:?}")),
+                    "position {position} under {durability:?}"
+                );
+            }
+            let (_, read) = read(&mut sim, journal, damaged).await;
+            assert!(matches!(read, Err(ReadError::Damaged { .. })), "{read:?}");
+        }
+    });
+}
+
 #[test]
 fn a_damaged_last_entry_is_corrupt_when_ordered_and_ambiguous_when_batched() {
     runtime().block_on(async {

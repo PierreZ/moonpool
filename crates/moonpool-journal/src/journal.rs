@@ -575,28 +575,35 @@ impl<P: StorageProvider> Journal<P> {
             .index
             .get(&position)
             .ok_or(ReadError::Empty { position })?;
-        let damaged = ReadError::Damaged {
-            position,
-            id: at.id,
-        };
         if at.damaged {
-            return Err(damaged);
+            return Err(ReadError::Damaged {
+                position,
+                id: at.id,
+            });
         }
         let segment = &self.segments[self.segment_index(at.segment)];
         let bytes = segment
-            .read_at(
-                u64::from(at.offset),
-                RECORD_SIZE + usize_of(u64::from(at.len)),
-            )
+            .read_at(u64::from(at.offset), entry_bytes(at))
             .await?;
+        self.judge(position, at, &bytes)
+    }
+
+    /// The entry at `position` from its bytes `bytes`, read at `at`: checked
+    /// against its persist record (its CRC, and that it is exactly the entry
+    /// the record names).
+    fn judge(&self, position: u64, at: &Located, bytes: &[u8]) -> Result<Entry, ReadError> {
+        assert_eq!(bytes.len(), entry_bytes(at), "judged on its whole entry");
         let record = record_of(position, at);
-        let intact = EntryHeader::parse(&bytes).is_some_and(|(header, stored)| {
+        let intact = EntryHeader::parse(bytes).is_some_and(|(header, stored)| {
             header.tag == self.tag
                 && entry_matches(&record, &header, stored)
                 && entry_crc(&bytes[..RECORD_SIZE], &bytes[RECORD_SIZE..]) == stored
         });
         if !intact {
-            return Err(damaged);
+            return Err(ReadError::Damaged {
+                position,
+                id: at.id,
+            });
         }
         Ok(Entry {
             position,
@@ -606,22 +613,66 @@ impl<P: StorageProvider> Journal<P> {
     }
 
     /// Read every non-empty position in `range`, in order: a damaged entry
-    /// is reported in place and the replay goes on.
+    /// is reported in place and the replay goes on. Entries that follow each
+    /// other in one segment are read together, at most `REPLAY_READ` bytes
+    /// per read, and each is judged as [`read`](Self::read) judges it.
     ///
     /// # Errors
     /// Only a provider failure that is not the medium's.
+    ///
+    /// # Panics
+    /// If a read returns fewer bytes than asked: a provider bug.
     pub async fn replay(
         &self,
         range: impl RangeBounds<u64>,
     ) -> Result<Vec<(u64, Result<Entry, ReadError>)>, std::io::Error> {
-        let positions: Vec<u64> = self.index.range(range).map(|(&p, _)| p).collect();
-        let mut out = Vec::with_capacity(positions.len());
-        for position in positions {
-            match self.read(position).await {
-                Err(ReadError::Io(error)) => return Err(error),
-                read => out.push((position, read)),
+        let located: Vec<(u64, Located)> =
+            self.index.range(range).map(|(&p, &at)| (p, at)).collect();
+        let mut out = Vec::with_capacity(located.len());
+        let mut first = 0;
+        while first < located.len() {
+            let (position, at) = located[first];
+            if at.damaged {
+                out.push((
+                    position,
+                    Err(ReadError::Damaged {
+                        position,
+                        id: at.id,
+                    }),
+                ));
+                first += 1;
+                continue;
             }
+            // A run: the entries that follow each other in one segment,
+            // read with one read of at most `REPLAY_READ` bytes.
+            let start = u64::from(at.offset);
+            let mut end = start + u64_of(entry_bytes(&at));
+            let mut stop = first + 1;
+            while let Some(&(_, next)) = located.get(stop) {
+                let next_start = u64::from(next.offset);
+                let next_end = next_start + u64_of(entry_bytes(&next));
+                if next.segment != at.segment
+                    || next.damaged
+                    || next_start < end
+                    || next_start - end > REPLAY_GAP
+                    || next_end - start > REPLAY_READ
+                {
+                    break;
+                }
+                end = next_end;
+                stop += 1;
+            }
+            let segment = &self.segments[self.segment_index(at.segment)];
+            let bytes = segment.read_at(start, usize_of(end - start)).await?;
+            assert_eq!(u64_of(bytes.len()), end - start, "a run reads whole");
+            for &(position, at) in &located[first..stop] {
+                let from = usize_of(u64::from(at.offset) - start);
+                let entry = &bytes[from..from + entry_bytes(&at)];
+                out.push((position, self.judge(position, &at, entry)));
+            }
+            first = stop;
         }
+        assert_eq!(out.len(), located.len(), "every position replayed once");
         Ok(out)
     }
 
@@ -954,6 +1005,22 @@ impl<P: StorageProvider> Journal<P> {
 }
 
 /// The persist record a located entry was written under.
+/// The most bytes one replay read covers: a run of entries longer than
+/// this is read in several.
+const REPLAY_READ: u64 = 1 << 20;
+
+/// The most bytes between two entries a replay read covers rather than
+/// starting a new read: the alignment after a batch, or entries since
+/// released.
+const REPLAY_GAP: u64 = 64 * BLOCK_U64;
+
+const _: () = assert!(REPLAY_GAP < REPLAY_READ);
+
+/// The bytes of the entry at `at`: its header and its payload.
+fn entry_bytes(at: &Located) -> usize {
+    RECORD_SIZE + usize_of(u64::from(at.len))
+}
+
 fn record_of(position: u64, at: &Located) -> Record {
     Record {
         kind: Kind::Put,
