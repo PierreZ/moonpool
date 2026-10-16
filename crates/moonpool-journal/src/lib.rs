@@ -177,6 +177,9 @@
 //!
 //! - `examples/accept_log.rs`: a Paxos acceptor on the real filesystem finds
 //!   one rotted accept, with its ballot, and repairs it.
+//! - `examples/bench.rs`: commit throughput, latency percentiles and
+//!   fairness on the real filesystem, per writer count, record size, batch
+//!   size and [`Durability`].
 //! - `tests/journal.rs`: one test per row of the recovery table, aimed with
 //!   [`Journal::layout`], plus crash loops under two fault models.
 //! - `moonpool-sim-examples/src/journal.rs`: the journal in a full
