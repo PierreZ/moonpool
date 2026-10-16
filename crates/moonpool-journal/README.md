@@ -111,6 +111,19 @@ rotted accept reported with its ballot, and repairs it as if from a peer:
 cargo run -p moonpool-journal --example accept_log
 ```
 
+`examples/bench.rs` measures commits on the real filesystem. Each writer
+owns one journal and commits back to back for a fixed duration. It reports
+throughput, commit latency percentiles and fairness between writers, and
+`--csv` writes a time series with the page-cache dirty bytes. Run it in
+release mode on the disk under test (the default directory is under
+`target/`; tmpfs is refused), and never compare numbers across `--fsync`
+policies:
+
+```sh
+cargo run --release -p moonpool-journal --example bench -- \
+    --writers 4 --record-size 4096 --batch 1 --fsync ordered --duration 10
+```
+
 `crates/moonpool-sim-examples/src/journal.rs` runs the journal inside a full
 simulation, with one node crashed over and over by attrition:
 
