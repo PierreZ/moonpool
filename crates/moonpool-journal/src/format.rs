@@ -120,13 +120,18 @@ pub struct Geometry {
 }
 
 impl Default for Geometry {
-    /// 32,768 records (2 MiB), a 2 MiB gap, 60 MiB of entries: 64 MiB and
+    /// 507,904 records (31 MiB), a 2 MiB gap, 31 MiB of entries: 64 MiB and
     /// two header blocks per segment.
+    ///
+    /// Every batch starts on a fresh block in both logs, so a batch of one
+    /// small entry takes one persist block and one entry block. The two logs
+    /// are the same size, so a segment holds 7,936 such batches. (With 512
+    /// persist blocks it held only 512, and used 2 MiB of its entries.)
     fn default() -> Self {
         Self {
-            persist_blocks: 512,
+            persist_blocks: 7_936,
             gap_blocks: 512,
-            entry_blocks: 15_360,
+            entry_blocks: 7_936,
         }
     }
 }
