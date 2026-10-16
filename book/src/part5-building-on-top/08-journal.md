@@ -179,7 +179,10 @@ what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`,
 `headers_repaired` and `segments_removed`. Only the last batch's entries are
 read at open. The rest are checked when read: `read(position)` returns
 `ReadError::Damaged { position, id }` with the identity its record kept, and
-`replay(range)` reports a damaged entry in place and goes on.
+`replay(range)` reports a damaged entry in place and goes on. A replay reads
+entries that follow each other in one segment with one read, up to 1 MiB, and
+judges each entry as `read` does: under direct I/O, a replay of a few thousand
+entries costs a few reads, not one read per entry.
 
 Three rules keep recovery's own writes honest, and the crash loops found
 each of them. **What opening keeps, it syncs**, because a process that
