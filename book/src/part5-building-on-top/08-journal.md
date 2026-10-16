@@ -75,9 +75,8 @@ journal.commit(chunk).await?;   // metainfo and floor go in the last one
 (507,904 records and 31 MiB of entries). Every batch starts on a fresh block
 in both logs, so a segment holds 7,936 batches of one small entry.
 `Geometry::small()` is 512 records and 64 KiB of entries, so tests roll over
-segments quickly. A journal keeps the geometry it was created with:
-`Journal::open` reads it from the metainfo, and `Journal::geometry` returns
-it, so a caller packs its batches against the journal's own shape.
+segments quickly. `Journal::open` refuses a geometry other than the one the
+journal was created with.
 
 ## Layout
 
