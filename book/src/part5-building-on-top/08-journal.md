@@ -99,7 +99,7 @@ survivable.
 
 The meta file is separate. It is the one structure rewritten in place, and
 it must outlive every segment. Its two copies are written one after the
-other, each followed by a sync, so at most one is in flight and a single
+other, each a durable write (`write_at_durable`), so at most one is in flight and a single
 rotted copy never rolls the metainfo back. `Journal::peek_meta(&provider,
 dir, id)` reads it without opening the journal: no recovery, no repair, no
 sync, so a probe never changes what the next open finds.
@@ -111,7 +111,7 @@ sync, so a probe never changes what the next open finds.
 | Mode | Protocol | Syncs | Last batch |
 |---|---|---|---|
 | `Batched` | `write(entries)`, `write(records)`, `fsync` | 1 | ambiguous |
-| `Ordered` (default) | `write(entries)`, `fsync`, `write(records)`, `fsync` | 2 | decided |
+| `Ordered` (default) | `write_durable(entries)`, `write_durable(records)` | 2 | decided |
 
 `Batched` is the paper's protocol. With one sync, a crash can leave an intact
 record beside a damaged entry exactly as corruption would. The paper's
@@ -121,21 +121,32 @@ The **ambiguous tail** stays ambiguous until the next batch commits, then
 becomes `Corrupt`. `Ordered` writes the records only once the entries are
 durable, so a record always proves its entry was synced.
 
-Metainfo is written only **after** the batch's last sync: copy A, sync, copy
-B, sync. A crash can leave the batch durable without its metainfo, but never
+`Ordered` issues each log's write as one durable write
+(`StorageFile::write_at_durable`): on Linux one `pwritev2(RWF_DSYNC)`, which
+on a direct-I/O segment whose blocks are written can become a single FUA
+write instead of a write plus a cache flush. Two calls replace four, and the
+durability argument is unchanged. A durable write covers its own range only,
+and that range is the segment's one unsynced write: every earlier commit was
+durable before it returned, an open syncs every segment, a roll writes its
+headers durably, and a failed commit poisons the journal. Data-only
+durability is enough because a segment never changes size. `Batched` keeps
+its plain writes and one sync: a durable write of the records alone would not
+cover the entries.
+
+Metainfo is written only **after** the batch is durable: copy A durably,
+then copy B durably. A crash can leave the batch durable without its metainfo, but never
 the metainfo without its batch. Anything true only once a batch is on disk
 (a chosen index, a watermark) can share that batch's commit.
 
 ### Hints Inside a Commit
 
-The commit protocol names its three dangerous moments with `hint!` from
-`moonpool-buggify`:
+The commit protocol names its dangerous moments with `hint!` from
+`moonpool-buggify`. A batched commit names three:
 
 ```rust,ignore
 segment.write(batch.entry_at, &batch.entries).await?;
 // A power loss here tears entries no record points at yet.
 moonpool_buggify::hint!("journal commit: entries written, not synced", COMMIT_HINT_PROB).await;
-...
 segment.write(batch.persist_at, &batch.records).await?;
 moonpool_buggify::hint!("journal commit: records written, not synced", COMMIT_HINT_PROB).await;
 segment.sync().await?;
@@ -144,6 +155,12 @@ if let Some(meta) = meta {
     meta_file.update(meta).await?;
 }
 ```
+
+An ordered commit writes each log with one durable write, so the window
+between a write and its sync lies inside a single call. The simulator names
+it there: its `write_at_durable` is `write_at`, then
+`hint!("storage: durable write landed, not synced")` at the same 0.25, then
+`sync_data`. The ordered commit keeps the metainfo moment of its own.
 
 In production a hint is a no-op. In a simulation the `HintSink` decides
 whether to crash the owning process at that exact moment, under the seed's

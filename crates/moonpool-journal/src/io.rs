@@ -70,3 +70,20 @@ pub(crate) async fn write_blocks<F: StorageFile>(
     buf.as_mut_slice().copy_from_slice(bytes);
     file.write_blocks(first_block, buf.as_slice()).await
 }
+
+/// Write `bytes` (a whole number of blocks) at block `first_block`, durable
+/// on return: [`BlockFile::write_blocks_durable`]. Only these blocks; a
+/// caller with another unsynced write in the file syncs it first.
+pub(crate) async fn write_blocks_durable<F: StorageFile>(
+    file: &BlockFile<F>,
+    first_block: u64,
+    bytes: &[u8],
+) -> io::Result<()> {
+    assert!(bytes.len().is_multiple_of(BLOCK), "writes are whole blocks");
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let mut buf = file.buffer(bytes.len() / BLOCK)?;
+    buf.as_mut_slice().copy_from_slice(bytes);
+    file.write_blocks_durable(first_block, buf.as_slice()).await
+}

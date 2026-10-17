@@ -274,6 +274,30 @@ impl<F: StorageFile> BlockFile<F> {
     /// than its own alignment allows a caller to resume from, and any error
     /// the file itself reports.
     pub async fn write_blocks(&self, block_index: u64, buf: &[u8]) -> io::Result<()> {
+        self.transfer_blocks(block_index, buf, false).await
+    }
+
+    /// Write whole blocks starting at `block_index`, each piece through
+    /// [`StorageFile::write_at_durable`]: on `Ok` every byte of `buf` is
+    /// durable.
+    ///
+    /// The same transfer as [`write_blocks`](Self::write_blocks), short writes
+    /// looped the same way; every piece is durable when its call returns, so
+    /// the whole range is once the loop ends. Only `buf`'s range: an earlier
+    /// write elsewhere in the file that no sync has covered stays volatile
+    /// (see [`StorageFile::write_at_durable`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`write_blocks`](Self::write_blocks). An error leaves the range's
+    /// durability unknown.
+    pub async fn write_blocks_durable(&self, block_index: u64, buf: &[u8]) -> io::Result<()> {
+        self.transfer_blocks(block_index, buf, true).await
+    }
+
+    /// The write loop behind [`write_blocks`](Self::write_blocks) and
+    /// [`write_blocks_durable`](Self::write_blocks_durable).
+    async fn transfer_blocks(&self, block_index: u64, buf: &[u8], durable: bool) -> io::Result<()> {
         let start = self.range(block_index, buf.len())?;
         self.check_buffer(buf)?;
         let len = buf.len();
@@ -283,10 +307,12 @@ impl<F: StorageFile> BlockFile<F> {
             // bytes between it and the frontier. Rewriting them is safe — they
             // are the same bytes from the same buffer.
             let from = self.align_down(done);
-            let moved = self
-                .file
-                .write_at(start + from as u64, &buf[from..])
-                .await?;
+            let at = start + from as u64;
+            let moved = if durable {
+                self.file.write_at_durable(at, &buf[from..]).await?
+            } else {
+                self.file.write_at(at, &buf[from..]).await?
+            };
             if moved == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,

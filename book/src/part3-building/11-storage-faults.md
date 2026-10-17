@@ -13,8 +13,8 @@ Before the faults, the API they land on. Moonpool has **one provider, one file a
 | Layer | Owns | Methods |
 |-------|------|---------|
 | `StorageProvider` | The filesystem **namespace** | `open`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` |
-| `StorageFile` | Already-open **bytes** | `AsyncRead`/`AsyncWrite`/`AsyncSeek`, `read_at`, `write_at`, `sync_all`, `sync_data`, `size`, `set_len`, `constraints`, `is_direct_io` |
-| `BlockFile<F>` | Block arithmetic over one open file | `read_blocks`, `write_blocks`, `sync`, `sync_data`, `grow_to_blocks`, `size_in_blocks`, `buffer` |
+| `StorageFile` | Already-open **bytes** | `AsyncRead`/`AsyncWrite`/`AsyncSeek`, `read_at`, `write_at`, `write_at_durable`, `sync_all`, `sync_data`, `size`, `set_len`, `constraints`, `is_direct_io` |
+| `BlockFile<F>` | Block arithmetic over one open file | `read_blocks`, `write_blocks`, `write_blocks_durable`, `sync`, `sync_data`, `grow_to_blocks`, `size_in_blocks`, `buffer` |
 
 Database needs are **options on opening an ordinary file**, never a second provider stack. There is no `BlockProvider`, no `DirectIoProvider` and no region-addressed device:
 
@@ -32,12 +32,14 @@ blocks.read_blocks(7, page.as_mut_slice()).await?;
 
 Keep four distinctions, because code hides behind their opposites:
 
-1. **Direct I/O is not durability.** An uncached write is visible, not durable, until `sync_all` or `sync_data` completes.
+1. **Direct I/O is not durability.** An uncached write is visible, not durable, until `sync_all` or `sync_data` completes, or unless it was a `write_at_durable`. A durable write covers its own range only, like `O_DSYNC`: it does not make an earlier unsynced write elsewhere in the file durable.
 2. **The caller's block size is not the file's I/O alignment**, and neither is a crash-atomicity unit. `file.constraints()` reports offset, length and memory alignment separately. A two-block write tears across a crash like any other.
 3. **Growing a file is not preallocation.**
 4. **File durability is not directory-entry durability.** `sync_all` makes the bytes and the length survive. Only `StorageProvider::sync_dir(parent)` makes the **name** survive.
 
 A file with alignment constraints refuses the stream API with `ErrorKind::Unsupported`, on both backends, because a shared cursor cannot stay aligned. `read_at` and `write_at` are what such a file offers. Both return the count moved, which may be short. `BlockFile` exists to loop over short transfers so a pager does not.
+
+`write_at_durable` is a write and a data sync in one call. The Tokio backend issues `pwritev2(RWF_DSYNC)` on Linux and falls back to `pwrite` plus `fdatasync` on a kernel that refuses the flag and on other platforms. The simulator models it as exactly `write_at` then `sync_data`: the write lands dirty, a `hint!` ("storage: durable write landed, not synced") names the window before the sync, and the sync commits it. Sync failures, lying syncs, the barrier-bounded crash model and the lost-synced-write oracle all apply unchanged. The simulated sync is file-wide, which is stronger than the contract: code that relies on a durable write covering an earlier unsynced write passes in simulation and loses data on Linux, so a durable write belongs where its range is the file's only unsynced write.
 
 ## Turning Faults On
 

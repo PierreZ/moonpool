@@ -227,7 +227,8 @@ and under the simulator in its own `#[test]`.
 ### Storage and the journal
 
 - `StorageProvider` and `StorageFile`: positioned I/O, `sync_all` and
-  `sync_data`, `sync_dir`, and `OpenOptions::direct_io` with `IoConstraints`
+  `sync_data`, a durable positioned write (`write_at_durable`, one
+  `pwritev2(RWF_DSYNC)` on Linux), `sync_dir`, and `OpenOptions::direct_io` with `IoConstraints`
   and `AlignedBuf`. `BlockFile` adds block addressing.
 - `moonpool-journal`: a position-keyed CLSTORE journal that tells a crash
   from corruption and names the damaged entry. Positions in any order,

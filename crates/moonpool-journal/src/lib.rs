@@ -95,10 +95,15 @@
 //!   with a header write and a rename instead of writing a whole segment.
 //!   [`Journal::prepare_spare`] does it inline; [`Journal::rolls`] counts
 //!   the rolls of each kind.
-//! - **Crash hints.** Each commit names three moments with
+//! - **Durable writes.** An ordered commit writes each log with one
+//!   [`write_at_durable`](moonpool_core::StorageFile::write_at_durable)
+//!   (`pwritev2(RWF_DSYNC)` on Linux) where a write and a sync were two
+//!   calls; so do the metainfo copies and a roll's headers.
+//! - **Crash hints.** A batched commit names three moments with
 //!   [`hint!`](moonpool_buggify::hint!): entries written but not synced, records
 //!   written but not synced, and the batch synced while the metainfo is
-//!   still stale. In production these are no-ops. In a simulation the
+//!   still stale. An ordered commit names the last one; the windows inside
+//!   its two durable writes are the storage layer's to name. In production these are no-ops. In a simulation the
 //!   simulator may reboot the process there, under the seed's attrition
 //!   regime and an optional harness `HintVeto` budget.
 //!

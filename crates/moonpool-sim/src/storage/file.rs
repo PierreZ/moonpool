@@ -12,6 +12,11 @@ use std::task::{Context, Poll};
 use super::futures::{ReadAtFuture, SetLenFuture, SyncFuture, WriteAtFuture};
 use super::sim_shutdown_error;
 
+/// How often an active durable-write point fires per call: the window a
+/// two-call write-then-sync once named itself, at the rate of the journal
+/// commit points it replaces.
+const DURABLE_WRITE_HINT_PROB: f64 = 0.25;
+
 /// Simulated storage file for deterministic testing.
 ///
 /// This provides a simulation-aware file handle that integrates with
@@ -146,6 +151,35 @@ impl StorageFile for SimStorageFile {
         }
         self.constraints.check(offset, buf)?;
         WriteAtFuture::new(self.sim.clone(), self.handle_id, offset, buf.to_vec()).await
+    }
+
+    /// Modelled as exactly what the default does: [`write_at`](Self::write_at),
+    /// then [`sync_data`](Self::sync_data). The write lands as a dirty range
+    /// and the sync commits it, so the barrier-bounded crash model, the
+    /// lost-synced-write oracle, sync failures and lying syncs all apply to a
+    /// durable write unchanged, as they do in `FoundationDB`'s
+    /// `AsyncFileNonDurable`, where only `sync()` makes a write durable.
+    ///
+    /// The crash window inside the call is real on a device too (a power cut
+    /// mid-FUA leaves the range old, new or torn), so it is a named moment:
+    /// the process may die with the bytes written and not yet synced, and
+    /// the crash model resolves them.
+    ///
+    /// The sync is file-wide, which is stronger than the contract's "this
+    /// write only": a caller that relies on a durable write covering an
+    /// earlier unsynced write passes here and loses data on Linux.
+    async fn write_at_durable(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        let written = self.write_at(offset, buf).await?;
+        if written == 0 {
+            return Ok(0);
+        }
+        moonpool_buggify::hint!(
+            "storage: durable write landed, not synced",
+            DURABLE_WRITE_HINT_PROB
+        )
+        .await;
+        self.sync_data().await?;
+        Ok(written)
     }
 
     async fn size(&self) -> io::Result<u64> {

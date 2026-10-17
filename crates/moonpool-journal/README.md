@@ -65,9 +65,14 @@ journal.commit(batch).await?;
 - **Two protocols.** `Durability::Batched` is the paper's protocol (`write
   entries; write records; fsync`): one sync, and the last batch's damaged
   entries are `Ambiguous`. `Durability::Ordered` syncs in between: two syncs,
-  and damage is always told apart.
-- **Crash hints.** Each commit names three moments with
-  `moonpool_buggify::hint!`. They are no-ops in production. In a simulation,
+  and damage is always told apart. Ordered issues each log's write as one
+  durable write (`StorageFile::write_at_durable`, `pwritev2(RWF_DSYNC)` on
+  Linux), two calls where a write and an `fdatasync` each were four; so do the
+  metainfo copies and a roll's segment headers.
+- **Crash hints.** A batched commit names three moments with
+  `moonpool_buggify::hint!`; an ordered commit names the metainfo one and
+  leaves the windows inside its two durable writes to the storage layer,
+  which the simulator names "storage: durable write landed, not synced". They are no-ops in production. In a simulation,
   the simulator may reboot the process at one of them, under the seed's
   attrition regime and an optional `HintVeto` budget from the harness.
 

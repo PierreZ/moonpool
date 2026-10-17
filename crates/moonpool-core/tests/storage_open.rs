@@ -218,6 +218,51 @@ async fn direct_io_constraints_describe_what_the_device_accepts() {
     assert_eq!(read.as_slice(), block.as_slice());
 }
 
+/// A durable positioned write is the same transfer as `write_at`: on a
+/// buffered and on a direct-I/O file (where the device supports it) the
+/// bytes land where they were aimed and read back, and an empty write is a
+/// no-op. Durability itself is the kernel's promise and the simulator's
+/// model; this pins that the one-syscall path transfers what it reports.
+#[tokio::test]
+async fn a_durable_write_lands_like_a_positioned_write() {
+    let dir = TempDir::new().expect("temp dir");
+    let provider = TokioStorageProvider::new();
+    for (name, direct_io) in [
+        ("buffered.db", DirectIo::Disabled),
+        ("direct.db", DirectIo::Optional),
+    ] {
+        let path = &scratch_file(&dir, name);
+        let file = provider
+            .open(
+                path,
+                OpenOptions::create_write().read(true).direct_io(direct_io),
+            )
+            .await
+            .expect("open failed");
+        let constraints = file.constraints();
+        let length = constraints.length_alignment().max(4096);
+        let offset = constraints.offset_alignment().max(4096);
+        let mut block = AlignedBuf::for_constraints(length, constraints);
+        block.as_mut_slice().fill(0x5A);
+        assert_eq!(
+            file.write_at_durable(offset, block.as_slice())
+                .await
+                .expect("durable write failed"),
+            length
+        );
+        assert_eq!(file.write_at_durable(0, &[]).await.expect("empty write"), 0);
+        let mut read = AlignedBuf::for_constraints(length, constraints);
+        assert_eq!(
+            file.read_at(offset, read.as_mut_slice())
+                .await
+                .expect("read failed"),
+            length
+        );
+        assert_eq!(read.as_slice(), block.as_slice());
+        assert_eq!(file.size().await.expect("size"), offset + length as u64);
+    }
+}
+
 /// The stream API and alignment are mutually exclusive, and a direct-I/O file
 /// says so itself rather than letting the kernel answer with `EINVAL` on some
 /// requests and succeed on others.

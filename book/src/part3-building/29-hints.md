@@ -75,15 +75,12 @@ A hint is **not** for a decision of the code. Skipping a resend, shrinking a bat
 
 ## A Worked Example: moonpool-journal
 
-`moonpool-journal` ships three hints inside its commit protocol (`crates/moonpool-journal/src/journal.rs`). The journal depends on `moonpool-core` and `moonpool-buggify` only, so every user of the journal gets these power cuts with no code of its own.
+`moonpool-journal` ships three hints inside its batched commit protocol (`crates/moonpool-journal/src/journal.rs`). The journal depends on `moonpool-core` and `moonpool-buggify` only, so every user of the journal gets these power cuts with no code of its own.
 
 ```rust
 segment.write(batch.entry_at, &batch.entries).await?;
 // A power loss here tears entries no record points at yet.
 moonpool_buggify::hint!("journal commit: entries written, not synced", COMMIT_HINT_PROB).await;
-if ordered {
-    segment.sync().await?;
-}
 segment.write(batch.persist_at, &batch.records).await?;
 // A power loss here may tear the records, rebuild them from their
 // entries, or leave the last batch ambiguous.
@@ -96,7 +93,7 @@ if let Some(meta) = meta {
 }
 ```
 
-`COMMIT_HINT_PROB` is 0.25, the buggify default, not the 5% of a hot-path point: a commit is short, and a cut inside it is the case its recovery exists for. Each of the three moments maps to a recovery path the journal must take: a torn record, a record rebuilt from its entry, an ambiguous last batch. A harness that counts the replicas it can afford to lose publishes a `HintVeto`, and the journal never knows. [A Crash-Aware Journal](../part5-building-on-top/08-journal.md) follows those recoveries.
+`COMMIT_HINT_PROB` is 0.25, the buggify default, not the 5% of a hot-path point: a commit is short, and a cut inside it is the case its recovery exists for. Each of the three moments maps to a recovery path the journal must take: a torn record, a record rebuilt from its entry, an ambiguous last batch. The ordered protocol writes each log with one durable write (`write_at_durable`), so its two write-then-sync windows sit inside one call each. The simulated storage names them itself, with `hint!("storage: durable write landed, not synced", 0.25)` between the write and the sync it models. A harness that counts the replicas it can afford to lose publishes a `HintVeto`, and the journal never knows. [A Crash-Aware Journal](../part5-building-on-top/08-journal.md) follows those recoveries.
 
 ## What a Hint Is Not
 
