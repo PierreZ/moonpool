@@ -629,9 +629,12 @@ pub struct TokioStorageFile {
 
 /// One positioned read against the OS.
 ///
-/// Runs on the blocking pool through a bounce buffer: the caller's slice
-/// cannot be moved into a `'static` blocking closure, so the transfer lands in
-/// an owned buffer that is copied back on completion. The bounce buffer
+/// Runs on the blocking pool, into an owned [`AlignedBuf`] moved into the
+/// blocking closure and back. The owned methods
+/// ([`read_at_aligned`](StorageFile::read_at_aligned) and its siblings) pass
+/// the caller's buffer itself: no copy. The borrowed ones cannot — a slice
+/// cannot move into a `'static` closure — so they go through a bounce
+/// buffer copied in before a write and out after a read. The bounce buffer
 /// carries the file's memory alignment — a direct-I/O transfer through a
 /// byte-aligned `Vec` earns `EINVAL` however carefully the caller aligned the
 /// slice it handed in.
@@ -748,11 +751,75 @@ where
         .map_err(|error| io::Error::other(format!("blocking file I/O task failed: {error}")))?
 }
 
+/// Which positioned write an owned transfer performs.
+#[derive(Debug, Clone, Copy)]
+enum WriteKind {
+    /// [`StorageFile::write_at`]: visible on return.
+    Visible,
+    /// [`StorageFile::write_at_durable`]: durable on return.
+    Durable,
+}
+
 impl TokioStorageFile {
-    /// A `len`-byte bounce buffer aligned the way this file's transfers must
-    /// be.
-    fn bounce(&self, len: usize) -> AlignedBuf {
-        AlignedBuf::zeroed(len, self.constraints.memory_alignment())
+    /// A bounce buffer holding a copy of `buf`, aligned the way this file's
+    /// transfers must be: what the borrowed write methods pay that the owned
+    /// ones do not.
+    fn bounce_from(&self, buf: &[u8]) -> AlignedBuf {
+        let mut bounce = AlignedBuf::zeroed(buf.len(), self.constraints.memory_alignment());
+        bounce.as_mut_slice().copy_from_slice(buf);
+        bounce
+    }
+
+    /// The owned read: `buf` moves into the blocking task and back.
+    async fn read_owned(&self, offset: u64, buf: AlignedBuf) -> io::Result<(usize, AlignedBuf)> {
+        if buf.is_empty() {
+            return Ok((0, buf));
+        }
+        self.constraints.check(offset, buf.as_slice())?;
+        let file = Arc::clone(&self.positioned);
+        run_blocking(move || {
+            let mut buf = buf;
+            let read = read_at_blocking(&file, offset, buf.as_mut_slice())?;
+            Ok((read, buf))
+        })
+        .await
+    }
+
+    /// The owned write, visible or durable: `buf` moves into the blocking
+    /// task and back.
+    async fn write_owned(
+        &self,
+        offset: u64,
+        buf: AlignedBuf,
+        kind: WriteKind,
+    ) -> io::Result<(usize, AlignedBuf)> {
+        if buf.is_empty() {
+            return Ok((0, buf));
+        }
+        self.constraints.check(offset, buf.as_slice())?;
+        let file = Arc::clone(&self.positioned);
+        run_blocking(move || {
+            let written = match kind {
+                WriteKind::Visible => write_at_blocking(&file, offset, buf.as_slice())?,
+                WriteKind::Durable => write_at_durable_blocking(&file, offset, buf.as_slice())?,
+            };
+            Ok((written, buf))
+        })
+        .await
+    }
+
+    /// The borrowed write: checked against the caller's own slice (the
+    /// contract is the caller's, whatever this backend does next), then
+    /// copied into a bounce buffer for the owned write.
+    async fn write_borrowed(&self, offset: u64, buf: &[u8], kind: WriteKind) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.constraints.check(offset, buf)?;
+        let (written, _) = self
+            .write_owned(offset, self.bounce_from(buf), kind)
+            .await?;
+        Ok(written)
     }
 }
 
@@ -778,37 +845,42 @@ impl StorageFile for TokioStorageFile {
             return Ok(0);
         }
         self.constraints.check(offset, buf)?;
-        let file = Arc::clone(&self.positioned);
-        let mut bounce = self.bounce(buf.len());
-        let (read, bounce) = run_blocking(move || {
-            let read = read_at_blocking(&file, offset, bounce.as_mut_slice())?;
-            Ok((read, bounce))
-        })
-        .await?;
+        let bounce = AlignedBuf::zeroed(buf.len(), self.constraints.memory_alignment());
+        let (read, bounce) = self.read_owned(offset, bounce).await?;
         buf[..read].copy_from_slice(&bounce.as_slice()[..read]);
         Ok(read)
     }
 
     async fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        self.constraints.check(offset, buf)?;
-        let file = Arc::clone(&self.positioned);
-        let mut bounce = self.bounce(buf.len());
-        bounce.as_mut_slice().copy_from_slice(buf);
-        run_blocking(move || write_at_blocking(&file, offset, bounce.as_slice())).await
+        self.write_borrowed(offset, buf, WriteKind::Visible).await
     }
 
     async fn write_at_durable(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        self.constraints.check(offset, buf)?;
-        let file = Arc::clone(&self.positioned);
-        let mut bounce = self.bounce(buf.len());
-        bounce.as_mut_slice().copy_from_slice(buf);
-        run_blocking(move || write_at_durable_blocking(&file, offset, bounce.as_slice())).await
+        self.write_borrowed(offset, buf, WriteKind::Durable).await
+    }
+
+    async fn read_at_aligned(
+        &self,
+        offset: u64,
+        buf: AlignedBuf,
+    ) -> io::Result<(usize, AlignedBuf)> {
+        self.read_owned(offset, buf).await
+    }
+
+    async fn write_at_aligned(
+        &self,
+        offset: u64,
+        buf: AlignedBuf,
+    ) -> io::Result<(usize, AlignedBuf)> {
+        self.write_owned(offset, buf, WriteKind::Visible).await
+    }
+
+    async fn write_at_durable_aligned(
+        &self,
+        offset: u64,
+        buf: AlignedBuf,
+    ) -> io::Result<(usize, AlignedBuf)> {
+        self.write_owned(offset, buf, WriteKind::Durable).await
     }
 
     async fn size(&self) -> io::Result<u64> {

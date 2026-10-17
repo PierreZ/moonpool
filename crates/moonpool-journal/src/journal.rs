@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 
-use moonpool_core::{DirectIo, LayoutRegion, StorageProvider, TaskProvider};
+use moonpool_core::{AlignedBuf, DirectIo, LayoutRegion, StorageProvider, TaskProvider};
 
 use crate::batch::{Batch, Write};
 use crate::format::{
@@ -11,6 +11,7 @@ use crate::format::{
     Meta, RECORD_SIZE, Record, SegmentHeader, align_up, clear_id, entry_crc, first_batch_of,
     generation_of, journal_tag, u64_of, usize_of,
 };
+use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{Located, Op, Stale, entry_matches, scan};
 use crate::segment::{Segment, is_segment_leftover, parse_segment_name};
@@ -413,7 +414,7 @@ impl<P: StorageProvider> Journal<P> {
             generation: meta.open_generation,
             last: meta.open_last,
         };
-        let scanned = scan(&segments, tag, stale).await?;
+        let mut scanned = scan(&segments, tag, stale).await?;
         if scanned.last_batch < meta.last_batch {
             return Err(OpenError::LostBatch {
                 batch: meta.last_batch,
@@ -423,15 +424,15 @@ impl<P: StorageProvider> Journal<P> {
             segment.persist_next = *persist_next;
             segment.entry_next = *entry_next;
         }
-        if let Some((at, offset, bytes)) = &scanned.rewrite {
+        if let Some((at, offset, bytes)) = scanned.rewrite.take() {
             // A rebuilt record says its entry was persisted, and the entry it
             // was rebuilt from may be a predecessor's unsynced write still in
             // the page cache: the entry reaches the disk first, as in a
             // commit. (A crash between a rewrite and the entries' sync left
             // records naming entries that never landed: corruption from a
             // crash alone.)
-            segments[*at].sync().await?;
-            segments[*at].write(*offset, bytes).await?;
+            segments[at].sync().await?;
+            segments[at].write(offset, bytes).await?;
         }
         // Whatever opening keeps must survive the next power loss.
         for segment in &segments {
@@ -791,7 +792,7 @@ impl<P: StorageProvider> Journal<P> {
         let ordered = self.config.durability == Durability::Ordered;
         let meta = meta_changes.then_some(&next_meta);
         if let Err((error, durable)) =
-            write_protocol(segment, &self.meta_file, &prepared, meta, ordered).await
+            write_protocol(segment, &self.meta_file, &mut prepared, meta, ordered).await
         {
             self.poisoned = true;
             return Err(CommitError::Io { error, durable });
@@ -952,8 +953,21 @@ impl<P: StorageProvider> Journal<P> {
             Durability::Batched => 0,
         };
         // Entries are laid out relative to the batch's first entry; the
-        // offsets are fixed once a segment is chosen.
-        let mut entries = Vec::new();
+        // offsets are fixed once a segment is chosen. They are encoded in
+        // place, in the aligned buffer the segment write moves to the
+        // kernel: sized first (`Batch::fits` bounded it), so it is
+        // allocated once, zeroed padding included, and never copied.
+        let mut footprint = 0_u64;
+        for write in &batch.writes {
+            let len = match write {
+                Write::Put { payload, .. } => payload.len(),
+                Write::Clear { .. } => 0,
+            };
+            let len = u32::try_from(len).map_err(|_| CommitError::BatchTooLarge)?;
+            footprint += EntryHeader::footprint(len);
+        }
+        let mut entries = block_buf(usize_of(align_up(footprint, BLOCK_U64)));
+        let mut start = 0;
         let mut decoded = Vec::with_capacity(batch.writes.len());
         for (index, write) in (0u16..).zip(&batch.writes) {
             let (kind, position, id, payload): (Kind, u64, Id, &[u8]) = match write {
@@ -976,8 +990,6 @@ impl<P: StorageProvider> Journal<P> {
                 len,
                 tag: self.tag,
             };
-            let start = entries.len();
-            entries.resize(start + usize_of(EntryHeader::footprint(len)), 0);
             let entry_crc = header.encode(payload, &mut entries[start..]);
             decoded.push(Record {
                 kind,
@@ -991,9 +1003,14 @@ impl<P: StorageProvider> Journal<P> {
                 len,
                 entry_crc,
             });
+            start += usize_of(EntryHeader::footprint(len));
         }
-        entries.resize(usize_of(align_up(u64_of(entries.len()), BLOCK_U64)), 0);
-        let records = vec![0u8; usize_of(Record::blocks_for(decoded.len()) * BLOCK_U64)];
+        assert_eq!(
+            u64_of(start),
+            footprint,
+            "the entries fill the footprint they were sized for"
+        );
+        let records = block_buf(usize_of(Record::blocks_for(decoded.len()) * BLOCK_U64));
         let geometry = self.config.geometry;
         // Pair with `Batch::fits`, checked before anything was laid out.
         assert!(
@@ -1217,8 +1234,10 @@ fn record_of(position: u64, at: &Located) -> Record {
 /// entry until [`Prepared::place`]) and its persist records.
 struct Prepared {
     seq: u64,
-    entries: Vec<u8>,
-    records: Vec<u8>,
+    /// The entry log's bytes, block-padded, in the buffer the write moves.
+    entries: AlignedBuf,
+    /// The persist log's bytes, block-padded, likewise.
+    records: AlignedBuf,
     decoded: Vec<Record>,
     persist_at: u64,
     entry_at: u64,
@@ -1250,14 +1269,19 @@ const COMMIT_HINT_PROB: f64 = 0.25;
 /// once the batch is synced, copy B once copy A is. A durable metainfo
 /// therefore always vouches for a durable batch; the reverse (the batch
 /// durable, its metainfo not) is what a crash between the two leaves.
+///
+/// The batch's two buffers move into their writes and back (no copy); a
+/// failed write drops its buffer, which a poisoned journal never reads.
 async fn write_protocol<F: moonpool_core::StorageFile>(
     segment: &Segment<F>,
     meta_file: &MetaFile<F>,
-    batch: &Prepared,
+    batch: &mut Prepared,
     meta: Option<&Meta>,
     ordered: bool,
 ) -> Result<(), (std::io::Error, Durable)> {
     let unknown = |error| (error, Durable::Unknown);
+    let entries = std::mem::take(&mut batch.entries);
+    let records = std::mem::take(&mut batch.records);
     if ordered {
         // Each log's write is durable on return, entries first: two durable
         // writes where a write and a sync each were four calls. A durable
@@ -1268,19 +1292,19 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
         // journal), and data-only durability suffices because a segment
         // never changes size. The windows inside each write (bytes landed,
         // not yet durable) are the storage layer's to name.
-        segment
-            .write_durable(batch.entry_at, &batch.entries)
+        batch.entries = segment
+            .write_durable(batch.entry_at, entries)
             .await
             .map_err(|error| (error, Durable::No))?;
-        segment
-            .write_durable(batch.persist_at, &batch.records)
+        batch.records = segment
+            .write_durable(batch.persist_at, records)
             .await
             .map_err(unknown)?;
     } else {
         // One barrier for both logs: it must cover the entries too, which a
         // durable write of the records alone would not.
-        segment
-            .write(batch.entry_at, &batch.entries)
+        batch.entries = segment
+            .write(batch.entry_at, entries)
             .await
             .map_err(|error| (error, Durable::No))?;
         // A power loss here tears entries no record points at yet.
@@ -1289,8 +1313,8 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
             COMMIT_HINT_PROB
         )
         .await;
-        segment
-            .write(batch.persist_at, &batch.records)
+        batch.records = segment
+            .write(batch.persist_at, records)
             .await
             .map_err(unknown)?;
         // The commit's window: a power loss here may tear the records,

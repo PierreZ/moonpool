@@ -207,14 +207,17 @@ pub(crate) async fn zero_fill<F: moonpool_core::StorageFile>(
     total: u64,
     abandoned: &impl Fn() -> bool,
 ) -> std::io::Result<bool> {
-    let chunk = vec![0u8; usize_of(FILL_BLOCKS * BLOCK_U64)];
+    // One zeroed buffer for the whole fill, moved into each write and back:
+    // never written to, so it stays zeros, and never copied.
+    let mut chunk = file.buffer(usize_of(FILL_BLOCKS))?;
     let mut block = 0;
     while block < total {
         if abandoned() {
             return Ok(false);
         }
         let count = FILL_BLOCKS.min(total - block);
-        write_blocks(file, block, &chunk[..usize_of(count * BLOCK_U64)]).await?;
+        chunk.truncate(usize_of(count * BLOCK_U64));
+        chunk = write_blocks(file, block, chunk).await?;
         block += count;
     }
     assert_eq!(block, total, "the fill covers the file exactly");

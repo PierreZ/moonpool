@@ -13,8 +13,8 @@ Before the faults, the API they land on. Moonpool has **one provider, one file a
 | Layer | Owns | Methods |
 |-------|------|---------|
 | `StorageProvider` | The filesystem **namespace** | `open`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` |
-| `StorageFile` | Already-open **bytes** | `AsyncRead`/`AsyncWrite`/`AsyncSeek`, `read_at`, `write_at`, `write_at_durable`, `sync_all`, `sync_data`, `size`, `set_len`, `constraints`, `is_direct_io` |
-| `BlockFile<F>` | Block arithmetic over one open file | `read_blocks`, `write_blocks`, `write_blocks_durable`, `sync`, `sync_data`, `grow_to_blocks`, `size_in_blocks`, `buffer` |
+| `StorageFile` | Already-open **bytes** | `AsyncRead`/`AsyncWrite`/`AsyncSeek`, `read_at`, `write_at`, `write_at_durable` and their zero-copy `*_aligned` forms, `sync_all`, `sync_data`, `size`, `set_len`, `constraints`, `is_direct_io` |
+| `BlockFile<F>` | Block arithmetic over one open file | `read_blocks`, `write_blocks`, `write_blocks_durable` and their `*_aligned` forms, `sync`, `sync_data`, `grow_to_blocks`, `size_in_blocks`, `buffer` |
 
 Database needs are **options on opening an ordinary file**, never a second provider stack. There is no `BlockProvider`, no `DirectIoProvider` and no region-addressed device:
 
@@ -38,6 +38,20 @@ Keep four distinctions, because code hides behind their opposites:
 4. **File durability is not directory-entry durability.** `sync_all` makes the bytes and the length survive. Only `StorageProvider::sync_dir(parent)` makes the **name** survive.
 
 A file with alignment constraints refuses the stream API with `ErrorKind::Unsupported`, on both backends, because a shared cursor cannot stay aligned. `read_at` and `write_at` are what such a file offers. Both return the count moved, which may be short. `BlockFile` exists to loop over short transfers so a pager does not.
+
+### Zero copy: owned buffers
+
+Every positioned transfer has a borrowed form (`&[u8]`, `&mut [u8]`) and an owned form over an `AlignedBuf` (`read_at_aligned`, `write_at_aligned`, `write_at_durable_aligned`; on `BlockFile`, `read_blocks_aligned`, `write_blocks_aligned`, `write_blocks_durable_aligned`). They are one transfer with one contract. The owned form moves the buffer in and hands it back with the count, so the caller reuses it; an error drops it.
+
+The difference is a copy. The Tokio backend runs positioned I/O on the blocking pool, and a borrowed slice cannot cross into a `'static` task: the borrowed form copies the bytes into an aligned bounce buffer before a write and out of it after a read. The owned form moves the caller's buffer into the task instead, so the kernel transfers straight from and into it. A storage engine that encodes its pages or log blocks directly into an `AlignedBuf` never copies them on the way, which is what `moonpool-journal` does.
+
+```rust
+let mut page = blocks.buffer(1)?;          // aligned for this file
+encode_page(page.as_mut_slice());          // built in place
+let page = blocks.write_blocks_durable_aligned(7, page).await?; // no copy
+```
+
+`BlockFile`'s owned methods are forgiving where the borrowed ones refuse: a buffer that misses the file's memory alignment is copied once into one that meets it, and that one comes back. Only the first request moves the buffer; the rare short transfer is resumed through the borrowed form. `AlignedBuf::truncate` shortens a buffer in place (the last, partial chunk of a fill), and `is_aligned_to` checks an address. The simulator keeps the trait's defaults, the borrowed transfer on the buffer's bytes, so every fault, hint and oracle applies to the owned form unchanged.
 
 `write_at_durable` is a write and a data sync in one call. The Tokio backend issues `pwritev2(RWF_DSYNC)` on Linux and falls back to `pwrite` plus `fdatasync` on a kernel that refuses the flag and on other platforms. The simulator models it as exactly `write_at` then `sync_data`: the write lands dirty, a `hint!` ("storage: durable write landed, not synced") names the window before the sync, and the sync commits it. Sync failures, lying syncs, the barrier-bounded crash model and the lost-synced-write oracle all apply unchanged. The simulated sync is file-wide, which is stronger than the contract: code that relies on a durable write covering an earlier unsynced write passes in simulation and loses data on Linux, so a durable write belongs where its range is the file's only unsynced write.
 

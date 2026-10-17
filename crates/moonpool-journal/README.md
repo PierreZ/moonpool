@@ -69,6 +69,12 @@ journal.commit(batch).await?;
   durable write (`StorageFile::write_at_durable`, `pwritev2(RWF_DSYNC)` on
   Linux), two calls where a write and an `fdatasync` each were four; so do the
   metainfo copies and a roll's segment headers.
+- **No copy on the way to the disk.** A commit encodes its entries and
+  records in place, in block-aligned `AlignedBuf`s, and moves them through
+  the zero-copy `StorageFile::write_at_aligned` /
+  `write_at_durable_aligned`: a direct-I/O segment never copies them. So do
+  the headers, the metainfo copies, the spare's zero-fill and recovery's
+  reads.
 - **Crash hints.** A batched commit names three moments with
   `moonpool_buggify::hint!`; an ordered commit names the metainfo one and
   leaves the windows inside its two durable writes to the storage layer,

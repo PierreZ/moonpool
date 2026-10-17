@@ -367,3 +367,79 @@ async fn block_arithmetic_is_checked_at_every_boundary() {
         "no arithmetic failure may reach the file as a request"
     );
 }
+
+/// The owned write takes the same path through a short transfer: one owned
+/// request (here through the trait's default, the borrowed write), then a
+/// borrowed resume from the aligned boundary. The buffer comes back.
+#[tokio::test]
+async fn a_short_owned_write_is_completed_and_hands_the_buffer_back() {
+    let (recorder, blocks) = awkward_blocks(0);
+
+    let mut page = blocks.buffer(1).expect("buffer allocation");
+    page.as_mut_slice().copy_from_slice(&pattern(BLOCK));
+    let address = page.as_slice().as_ptr();
+    let page = blocks
+        .write_blocks_durable_aligned(0, page)
+        .await
+        .expect("the short write must be completed, not failed");
+
+    assert_eq!(
+        page.as_slice().as_ptr(),
+        address,
+        "the same buffer comes back"
+    );
+    let state = recorder.state();
+    assert_every_request_aligned(&state);
+    assert_eq!(state.requests.len(), 2, "{:?}", state.requests);
+    assert_eq!(state.requests[1].offset, 0, "resumed on the boundary");
+    assert_eq!(state.bytes, page.as_slice(), "every byte must have landed");
+}
+
+/// The owned read completes a short read the same way, and fills the buffer
+/// it hands back.
+#[tokio::test]
+async fn a_short_owned_read_is_completed() {
+    let expected = pattern(2 * BLOCK);
+    let (recorder, blocks) = awkward_blocks(0);
+    recorder.state().bytes = expected.clone();
+
+    let page = blocks
+        .read_blocks_aligned(0, blocks.buffer(2).expect("buffer allocation"))
+        .await
+        .expect("the short read must be completed, not failed");
+
+    assert_eq!(page.as_slice(), expected, "every byte must have arrived");
+    let state = recorder.state();
+    assert_every_request_aligned(&state);
+    assert_eq!(state.requests.len(), 2, "{:?}", state.requests);
+}
+
+/// An owned buffer that misses the file's memory alignment is not refused:
+/// the bytes are copied into one that meets it, and the device only ever
+/// sees aligned requests.
+#[tokio::test]
+async fn a_misaligned_owned_buffer_is_realigned() {
+    let (recorder, blocks) = awkward_blocks(0);
+
+    // A byte-aligned allocation lands on a 512-byte boundary only by luck;
+    // look for one that does not.
+    let mut misaligned = AlignedBuf::zeroed(BLOCK, 1);
+    let mut tries = 0;
+    while misaligned.is_aligned_to(MEMORY_ALIGNMENT) {
+        tries += 1;
+        assert!(tries < 64, "every byte-aligned allocation was 512-aligned");
+        misaligned = AlignedBuf::zeroed(BLOCK + tries, 1);
+        misaligned.truncate(BLOCK);
+    }
+    misaligned.as_mut_slice().copy_from_slice(&pattern(BLOCK));
+    let returned = blocks
+        .write_blocks_aligned(0, misaligned)
+        .await
+        .expect("a misaligned owned buffer is realigned, not refused");
+
+    assert!(returned.is_aligned_to(MEMORY_ALIGNMENT));
+    assert_eq!(returned.as_slice(), pattern(BLOCK));
+    let state = recorder.state();
+    assert_every_request_aligned(&state);
+    assert_eq!(state.bytes, pattern(BLOCK), "the copy is what landed");
+}

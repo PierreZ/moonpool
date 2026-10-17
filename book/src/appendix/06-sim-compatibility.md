@@ -41,7 +41,7 @@ There is no tokio runtime inside a simulation. Everything runs on the [determini
 | Forbidden | Use instead |
 |-----------|-------------|
 | `tokio::fs::*`, `std::fs::*` | `storage.open(path, OpenOptions)`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` |
-| Direct file handles, `O_DIRECT` by hand | `StorageFile` (`read_at`, `write_at`, `write_at_durable`, `sync_all`, `sync_data`, `size`, `set_len`), `OpenOptions::direct_io(DirectIo::..)`, `BlockFile<F>` |
+| Direct file handles, `O_DIRECT` by hand | `StorageFile` (`read_at`, `write_at`, `write_at_durable`, their zero-copy `*_aligned` forms over `AlignedBuf`, `sync_all`, `sync_data`, `size`, `set_len`), `OpenOptions::direct_io(DirectIo::..)`, `BlockFile<F>` |
 
 Storage operations return `Poll::Pending` and complete through scheduled events. A low-level test must step `SimWorld` while it polls (the `drive` helper in the root `AGENTS.md`). File durability is not directory-entry durability: `sync_dir` after a create or rename.
 

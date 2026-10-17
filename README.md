@@ -229,14 +229,17 @@ and under the simulator in its own `#[test]`.
 - `StorageProvider` and `StorageFile`: positioned I/O, `sync_all` and
   `sync_data`, a durable positioned write (`write_at_durable`, one
   `pwritev2(RWF_DSYNC)` on Linux), `sync_dir`, and `OpenOptions::direct_io` with `IoConstraints`
-  and `AlignedBuf`. `BlockFile` adds block addressing.
+  and `AlignedBuf`. Zero-copy positioned I/O: the `*_aligned` methods move an
+  owned `AlignedBuf` to the kernel and back, where the borrowed form copies
+  through a bounce buffer. `BlockFile` adds block addressing.
 - `moonpool-journal`: a position-keyed CLSTORE journal that tells a crash
   from corruption and names the damaged entry. Positions in any order,
   `Batch::fits` / `fits_another`, `Journal::peek_meta`, metadata repair,
   ambiguous tails, layout regions for aimed faults, `hint!` points inside
   each commit, and spare segments prepared in the background
   (`Journal::prepare_spares_with`) so a segment roll is a header write and a
-  rename instead of a zero-fill on the commit path.
+  rename instead of a zero-fill on the commit path. Batches, headers and
+  metainfo are encoded in place in aligned buffers and written with no copy.
 
 ### Metrics (`moonpool-prometheus`)
 

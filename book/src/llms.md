@@ -37,12 +37,12 @@ Production: `moonpool = { default-features = false, features = ["tokio"] }`. Sim
 | `NetworkProvider` | `bind(addr)`, `connect(addr)`; `TcpStream: AsyncRead + AsyncWrite`; `TcpListenerTrait::{accept, local_addr}` | `SimNetworkProvider` |
 | `RandomProvider` | `random::<T>()`, `random_range(r)`, `random_ratio()`, `random_bool(p)` | `SimRandomProvider` |
 | `StorageProvider` | `open(path, OpenOptions)`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` | `SimStorageProvider` |
-| `StorageFile` | `read_at`, `write_at`, `write_at_durable` (durable on return, its range only), `sync_all`, `sync_data`, `size`, `set_len`, `constraints()`, `is_direct_io()` | simulated file image |
+| `StorageFile` | `read_at`, `write_at`, `write_at_durable` (durable on return, its range only), the zero-copy `read_at_aligned` / `write_at_aligned` / `write_at_durable_aligned` (an owned `AlignedBuf` moved in and handed back; Tokio moves it into the blocking task instead of copying through a bounce buffer; defaults to the borrowed form, which the sim keeps), `sync_all`, `sync_data`, `size`, `set_len`, `constraints()`, `is_direct_io()` | simulated file image |
 | `SystemProvider` | `sample(data_dir) -> SystemSample { at, process_cpu, cores, machine_busy, machine_total, run_loop_busy, disk: Option<DiskCounters> }` | `SimSystemProvider` |
 | `Providers` | `network()`, `time()`, `task()`, `random()`, `storage()`, `system()` | `SimProviders` |
 | `Resolver` | `resolve(host_port)` | `ScriptedResolver` |
 
-`OpenOptions::direct_io(DirectIo::{Disabled, Optional, Required})`, `BlockFile<F>` for block arithmetic over one open file, `LayoutRegion { path, bytes, kind, stripe }` to name byte ranges. `moonpool_sim::select!` replaces `tokio::select!` with the same grammar. `moonpool_sim::executor::spawn(name, fut)` is the sim-only raw spawn.
+`OpenOptions::direct_io(DirectIo::{Disabled, Optional, Required})`, `BlockFile<F>` for block arithmetic over one open file (owned `*_blocks_aligned` forms for zero copy), `AlignedBuf` (`zeroed`, `for_constraints`, `truncate`, `is_aligned_to`), `LayoutRegion { path, bytes, kind, stripe }` to name byte ranges. `moonpool_sim::select!` replaces `tokio::select!` with the same grammar. `moonpool_sim::executor::spawn(name, fut)` is the sim-only raw spawn.
 
 ## Process, Workload, Context
 

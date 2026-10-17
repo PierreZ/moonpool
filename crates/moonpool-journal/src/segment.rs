@@ -9,10 +9,12 @@
 //! a fresh block in each, so no write ever touches a sector holding an
 //! acknowledged record or entry.
 
-use moonpool_core::{BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{AlignedBuf, BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
 
 use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, usize_of};
-use crate::io::{read_blocks, read_bytes, write_blocks, write_blocks_durable};
+use crate::io::{
+    ReadBytes, block_buf, read_blocks, read_bytes, write_blocks, write_blocks_durable,
+};
 use crate::spare::zero_fill;
 use crate::{JournalId, OpenError};
 
@@ -186,8 +188,7 @@ impl<F: StorageFile> Segment<F> {
         if file.size_in_blocks().await? != geometry.total_blocks() {
             return Err(bad("wrong size"));
         }
-        let mut headers = file.buffer(2)?;
-        read_blocks(&file, 0, headers.as_mut_slice()).await?;
+        let headers = read_blocks(&file, 0, file.buffer(2)?).await?;
         let a = SegmentHeader::decode(&headers.as_slice()[..BLOCK]);
         let b = SegmentHeader::decode(&headers.as_slice()[BLOCK..]);
         let (header, damaged) = match (a, b) {
@@ -209,9 +210,9 @@ impl<F: StorageFile> Segment<F> {
             return Err(bad("header names another geometry"));
         }
         if let Some(block) = damaged {
-            let mut copy = vec![0u8; BLOCK];
-            header.encode(&mut copy);
-            write_blocks_durable(&file, block, &copy).await?;
+            let mut copy = block_buf(BLOCK);
+            header.encode(copy.as_mut_slice());
+            write_blocks_durable(&file, block, copy).await?;
         }
         Ok((
             Self::fresh(
@@ -226,15 +227,18 @@ impl<F: StorageFile> Segment<F> {
     }
 
     /// The whole persist log, damaged blocks zero-filled.
-    pub async fn read_persist_log(&self) -> std::io::Result<Vec<u8>> {
+    pub async fn read_persist_log(&self) -> std::io::Result<AlignedBuf> {
         let start = Geometry::PERSIST_START;
         let len = usize_of(self.geometry.persist_end() - start);
-        let mut buf = self.file.buffer(len / BLOCK)?;
-        read_blocks(&self.file, start / BLOCK_U64, buf.as_mut_slice()).await?;
-        Ok(buf.as_slice().to_vec())
+        read_blocks(
+            &self.file,
+            start / BLOCK_U64,
+            self.file.buffer(len / BLOCK)?,
+        )
+        .await
     }
 
-    pub async fn read_at(&self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    pub async fn read_at(&self, offset: u64, len: usize) -> std::io::Result<ReadBytes> {
         read_bytes(&self.file, offset, len).await
     }
 
@@ -254,18 +258,19 @@ impl<F: StorageFile> Segment<F> {
             && self.entry_next + entry_bytes <= self.geometry.entry_end()
     }
 
-    pub async fn write(&self, offset: u64, bytes: &[u8]) -> std::io::Result<()> {
+    /// Write `buf` at `offset`, with no copy; returns the buffer.
+    pub async fn write(&self, offset: u64, buf: AlignedBuf) -> std::io::Result<AlignedBuf> {
         assert!(offset.is_multiple_of(BLOCK_U64), "writes start on a block");
-        write_blocks(&self.file, offset / BLOCK_U64, bytes).await
+        write_blocks(&self.file, offset / BLOCK_U64, buf).await
     }
 
     /// [`write`](Self::write), durable on return: one durable write where
-    /// `write` and `sync` are two calls. Only `bytes`' range is made
+    /// `write` and `sync` are two calls. Only `buf`'s range is made
     /// durable, so the segment must hold no other unsynced write; data-only
     /// durability is enough because a segment never changes size.
-    pub async fn write_durable(&self, offset: u64, bytes: &[u8]) -> std::io::Result<()> {
+    pub async fn write_durable(&self, offset: u64, buf: AlignedBuf) -> std::io::Result<AlignedBuf> {
         assert!(offset.is_multiple_of(BLOCK_U64), "writes start on a block");
-        write_blocks_durable(&self.file, offset / BLOCK_U64, bytes).await
+        write_blocks_durable(&self.file, offset / BLOCK_U64, buf).await
     }
 
     pub async fn sync(&self) -> std::io::Result<()> {
@@ -282,7 +287,8 @@ async fn write_headers<F: StorageFile>(
     file: &BlockFile<F>,
     header: &SegmentHeader,
 ) -> std::io::Result<()> {
-    write_blocks(file, 0, &header_blocks(header)).await
+    write_blocks(file, 0, header_blocks(header)).await?;
+    Ok(())
 }
 
 /// [`write_headers`], durable on return.
@@ -290,12 +296,13 @@ async fn write_headers_durable<F: StorageFile>(
     file: &BlockFile<F>,
     header: &SegmentHeader,
 ) -> std::io::Result<()> {
-    write_blocks_durable(file, 0, &header_blocks(header)).await
+    write_blocks_durable(file, 0, header_blocks(header)).await?;
+    Ok(())
 }
 
-/// Both header copies, encoded: blocks 0 and 1.
-fn header_blocks(header: &SegmentHeader) -> Vec<u8> {
-    let mut blocks = vec![0u8; 2 * BLOCK];
+/// Both header copies, encoded in place: blocks 0 and 1.
+fn header_blocks(header: &SegmentHeader) -> AlignedBuf {
+    let mut blocks = block_buf(2 * BLOCK);
     header.encode(&mut blocks[..BLOCK]);
     header.encode(&mut blocks[BLOCK..]);
     blocks

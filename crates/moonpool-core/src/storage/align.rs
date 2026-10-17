@@ -171,6 +171,16 @@ impl Default for IoConstraints {
 /// it rather than growing a second one. It is built from safe code by
 /// over-allocating and slicing at the boundary.
 ///
+/// It is also the unit of **zero-copy** positioned I/O. The owned methods of
+/// [`StorageFile`](super::StorageFile)
+/// ([`read_at_aligned`](super::StorageFile::read_at_aligned),
+/// [`write_at_aligned`](super::StorageFile::write_at_aligned),
+/// [`write_at_durable_aligned`](super::StorageFile::write_at_durable_aligned))
+/// take the buffer by value and hand it back, so a backend that runs the
+/// transfer on another thread moves the buffer there instead of copying a
+/// borrowed slice into one of its own. Moving it never moves its bytes: the
+/// address stays aligned for the buffer's whole life.
+///
 /// ```
 /// use moonpool_core::{AlignedBuf, IoConstraints};
 ///
@@ -178,7 +188,7 @@ impl Default for IoConstraints {
 /// buf.as_mut_slice()[0] = 1;
 /// assert_eq!(buf.len(), 4096);
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AlignedBuf {
     backing: Vec<u8>,
     offset: usize,
@@ -252,6 +262,33 @@ impl AlignedBuf {
         self.len
     }
 
+    /// Shorten the buffer to its first `len` bytes; a no-op when it is not
+    /// longer. The start, and therefore the alignment, does not move, and
+    /// the allocation is kept: the buffer cannot grow back.
+    ///
+    /// How a caller transfers a shorter tail with the buffer it already
+    /// filled — the last, partial chunk of a fill, say — instead of
+    /// allocating a second one.
+    pub fn truncate(&mut self, len: usize) {
+        self.len = self.len.min(len);
+    }
+
+    /// Whether the buffer's first byte sits on an `alignment`-byte boundary.
+    ///
+    /// An empty buffer qualifies for every alignment: it transfers nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless `alignment` is a power of two.
+    #[must_use]
+    pub fn is_aligned_to(&self, alignment: usize) -> bool {
+        assert!(
+            alignment.is_power_of_two(),
+            "alignment {alignment} is not a power of two"
+        );
+        self.is_empty() || (self.as_slice().as_ptr() as usize).is_multiple_of(alignment)
+    }
+
     /// Whether the buffer has no usable bytes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -306,6 +343,26 @@ mod tests {
         assert_eq!(buf.len(), 8192);
         assert!(constraints.check(0, buf.as_slice()).is_ok());
         assert!(buf.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn moving_and_truncating_keep_the_alignment() {
+        let mut buf = AlignedBuf::zeroed(8192, 4096);
+        buf.as_mut_slice()[4095] = 9;
+        let address = buf.as_slice().as_ptr();
+        let moved = std::thread::spawn(move || buf)
+            .join()
+            .expect("the thread only returns the buffer");
+        assert_eq!(moved.as_slice().as_ptr(), address, "a move keeps the bytes");
+        let mut buf = moved;
+        buf.truncate(4096);
+        assert_eq!(buf.len(), 4096);
+        assert_eq!(buf[4095], 9, "truncation keeps the prefix");
+        assert!(buf.is_aligned_to(4096));
+        buf.truncate(1 << 20);
+        assert_eq!(buf.len(), 4096, "truncation never grows");
+        assert!(AlignedBuf::default().is_empty());
+        assert!(AlignedBuf::default().is_aligned_to(4096));
     }
 
     #[test]

@@ -71,7 +71,9 @@
 //!
 //! - Storage: [`OpenOptions`] with [`DirectIo`], [`StorageFile`] positioned
 //!   I/O and sync barriers, [`IoConstraints`] and [`AlignedBuf`] for direct
-//!   I/O, [`BlockFile`] for block addressing, and [`LayoutRegion`] so a
+//!   I/O (an owned [`AlignedBuf`] is also the unit of zero-copy positioned
+//!   I/O: [`StorageFile::write_at_aligned`] and its siblings), [`BlockFile`]
+//!   for block addressing, and [`LayoutRegion`] so a
 //!   storage format can tell a fault injector where its bytes live.
 //! - System: [`SystemSample`] and [`DiskCounters`], with the
 //!   [`parse_proc_stat`] and [`parse_diskstats`] parsers.
