@@ -285,6 +285,88 @@ fn the_floor_and_tombstones_free_whole_segments_without_resurrection() {
     });
 }
 
+async fn prepare_spare(sim: &mut SimWorld, mut journal: J) -> J {
+    run(sim, move |_| async move {
+        journal.prepare_spare().await.map(|()| journal)
+    })
+    .await
+    .expect("prepare a spare")
+}
+
+async fn names(sim: &mut SimWorld) -> Vec<String> {
+    run(sim, |provider| async move { provider.list_dir(DIR).await })
+        .await
+        .expect("list")
+}
+
+#[test]
+fn a_roll_onto_a_prepared_spare_makes_a_segment_like_any_other() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(16);
+            let mut journal = create(&mut sim, durability).await;
+            journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+            journal = prepare_spare(&mut sim, journal).await;
+            assert_eq!(
+                names(&mut sim)
+                    .await
+                    .iter()
+                    .filter(|n| n.starts_with("spare-"))
+                    .count(),
+                1
+            );
+            // Eight batches fill the first segment's persist log.
+            for position in 1..12 {
+                journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+            }
+            assert_eq!(journal.rolls().onto_spare, 1, "{durability:?}");
+            assert_eq!(journal.rolls().inline, 1, "the first segment: no spare");
+            let names = names(&mut sim).await;
+            assert!(!names.iter().any(|n| n.starts_with("spare-")), "{names:?}");
+            assert_eq!(names.iter().filter(|n| n.starts_with("seg-")).count(), 2);
+            drop(journal);
+            sim.simulate_crash_for_process(ip(), true);
+            let (mut journal, recovery) = reopen(&mut sim, durability).await.expect("reopen");
+            assert_eq!(recovery.spares_removed, 0);
+            assert_eq!(journal.positions().count(), 12, "{durability:?}");
+            for position in 0..12 {
+                let (back, bytes) = read(&mut sim, journal, position).await;
+                journal = back;
+                assert_eq!(bytes.expect("intact"), payload(position, 1, 100));
+            }
+        }
+    });
+}
+
+#[test]
+fn a_spare_left_behind_whole_or_not_is_deleted_and_never_read_as_a_segment() {
+    runtime().block_on(async {
+        let mut sim = sim(17);
+        let mut journal = create(&mut sim, Durability::Ordered).await;
+        journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        journal = prepare_spare(&mut sim, journal).await;
+        drop(journal);
+        // A half-written spare of another open, its bytes anything at all.
+        run(&mut sim, |provider| async move {
+            let path = format!("{DIR}/spare-0000000099-0000000000.wal");
+            let file = provider
+                .open(&path, OpenOptions::create_new_write())
+                .await?;
+            file.write_at(0, &[0xA5; 3 * 4096]).await?;
+            file.sync_all().await
+        })
+        .await
+        .expect("a stray spare");
+        sim.simulate_crash_for_process(ip(), true);
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        assert_eq!(recovery.spares_removed, 2);
+        assert!(matches!(journal.state(0), State::Live { .. }));
+        let names = names(&mut sim).await;
+        assert!(!names.iter().any(|n| n.starts_with("spare-")), "{names:?}");
+        assert_eq!(names.iter().filter(|n| n.starts_with("seg-")).count(), 1);
+    });
+}
+
 #[test]
 fn a_put_below_the_floor_is_refused_before_anything_is_written() {
     runtime().block_on(async {
@@ -731,6 +813,11 @@ fn paper(durability: Option<Durability>) {
         tally.torn + tally.rebuilt > 0,
         "no crash ever landed mid-batch"
     );
+    assert!(tally.onto_spare > 0, "no commit ever rolled onto a spare");
+    assert!(
+        tally.spares_removed > 0,
+        "no crash ever left a spare behind"
+    );
 }
 
 /// The crash loop under moonpool's full crash physics, for one durability
@@ -743,6 +830,11 @@ fn harsh(durability: Option<Durability>) {
     eprintln!("harsh {durability:?}: {tally:?}");
     assert!(tally.torn > 0, "no crash ever tore a record");
     assert!(tally.prefix_dropped > 0, "no segment was ever freed");
+    assert!(tally.onto_spare > 0, "no commit ever rolled onto a spare");
+    assert!(
+        tally.spares_removed > 0,
+        "no crash ever left a spare behind"
+    );
 }
 
 #[test]

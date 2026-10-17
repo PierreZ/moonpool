@@ -2,8 +2,9 @@
 //! the persist log and the entry log (see [`Geometry`]).
 //!
 //! A segment is created whole under a temporary name and published by a
-//! rename, so a segment file either does not exist or has its full size and
-//! both headers. It never changes size again, so `fdatasync` never has file
+//! rename ([`Segment::create`]), or adopted from a prepared spare whose
+//! headers are synced before the rename ([`Segment::adopt`]), so a segment
+//! file either does not exist or has its full size and both headers. It never changes size again, so `fdatasync` never has file
 //! metadata to write. Both logs only ever append, and every batch starts on
 //! a fresh block in each, so no write ever touches a sector holding an
 //! acknowledged record or entry.
@@ -12,10 +13,8 @@ use moonpool_core::{BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvid
 
 use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, usize_of};
 use crate::io::{read_blocks, read_bytes, write_blocks};
+use crate::spare::zero_fill;
 use crate::{JournalId, OpenError};
-
-/// Bytes zeroed per write while preallocating a segment.
-const FILL_BLOCKS: u64 = 256;
 
 const PREFIX: &str = "seg-";
 const SUFFIX: &str = ".wal";
@@ -77,28 +76,71 @@ impl<F: StorageFile> Segment<F> {
             .open(&temporary, OpenOptions::create_new_write().read(true))
             .await?;
         let file = BlockFile::new(file, BLOCK)?;
-        let total = geometry.total_blocks();
-        let mut block = 0;
-        while block < total {
-            let count = FILL_BLOCKS.min(total - block);
-            let mut chunk = vec![0u8; usize_of(count * BLOCK_U64)];
-            if block == 0 {
-                let header = SegmentHeader {
-                    journal,
-                    first_batch,
-                    prev_batch,
-                    geometry,
-                };
-                header.encode(&mut chunk[..BLOCK]);
-                header.encode(&mut chunk[BLOCK..2 * BLOCK]);
-            }
-            write_blocks(&file, block, &chunk).await?;
-            block += count;
-        }
+        zero_fill(&file, geometry.total_blocks(), &|| false).await?;
+        let header = SegmentHeader {
+            journal,
+            first_batch,
+            prev_batch,
+            geometry,
+        };
+        write_headers(&file, &header).await?;
         // Bytes and length alike: the file never changes size again.
         file.sync().await?;
         drop(file);
         provider.rename(&temporary, &path).await?;
+        provider.sync_dir(dir).await?;
+        let file = open_file(provider, &path, direct_io).await?;
+        Ok(Self::fresh(first_batch, prev_batch, name, file, geometry))
+    }
+
+    /// Make the prepared spare `spare` the segment for batches from
+    /// `first_batch` on: write and sync its headers, rename it to its
+    /// segment name, sync the directory. The spare is full size, zero-filled
+    /// and synced, so this is two small syncs where [`create`](Self::create)
+    /// writes and syncs a whole segment.
+    ///
+    /// The headers are durable before the name is: a crash leaves either the
+    /// spare (every open deletes it, and no batch was written to it) or a
+    /// whole, empty segment, exactly what a crash after `create` leaves.
+    pub async fn adopt<P: StorageProvider<File = F>>(
+        provider: &P,
+        dir: &str,
+        spare: &str,
+        header: SegmentHeader,
+        direct_io: DirectIo,
+    ) -> Result<Self, OpenError> {
+        let SegmentHeader {
+            first_batch,
+            prev_batch,
+            geometry,
+            ..
+        } = header;
+        let name = segment_name(first_batch);
+        let path = format!("{dir}/{name}");
+        let spare = format!("{dir}/{spare}");
+        let file = open_file(provider, &spare, direct_io).await?;
+        if file.size_in_blocks().await? != geometry.total_blocks() {
+            return Err(OpenError::BadSegment {
+                name,
+                reason: "the spare is not a whole segment",
+            });
+        }
+        write_headers(&file, &header).await?;
+        file.sync_data().await?;
+        drop(file);
+        // A power loss here leaves a spare with headers: still a spare.
+        moonpool_buggify::hint!(
+            "journal roll: spare headers synced, not renamed",
+            ROLL_HINT_PROB
+        )
+        .await;
+        provider.rename(&spare, &path).await?;
+        // A power loss here leaves the spare's name, the segment's, or both.
+        moonpool_buggify::hint!(
+            "journal roll: spare renamed, directory not synced",
+            ROLL_HINT_PROB
+        )
+        .await;
         provider.sync_dir(dir).await?;
         let file = open_file(provider, &path, direct_io).await?;
         Ok(Self::fresh(first_batch, prev_batch, name, file, geometry))
@@ -196,6 +238,15 @@ impl<F: StorageFile> Segment<F> {
         read_bytes(&self.file, offset, len).await
     }
 
+    /// Whether either log is at least half full: time to prepare the next
+    /// segment.
+    pub fn half_full(&self) -> bool {
+        let persist_used = self.persist_next - Geometry::PERSIST_START;
+        let entry_used = self.entry_next - self.geometry.entry_start();
+        persist_used * 2 >= self.geometry.persist_end() - Geometry::PERSIST_START
+            || entry_used * 2 >= self.geometry.entry_end() - self.geometry.entry_start()
+    }
+
     /// Whether a batch of `persist_blocks` and `entry_bytes` fits after the
     /// last one.
     pub fn fits(&self, persist_blocks: u64, entry_bytes: u64) -> bool {
@@ -211,6 +262,21 @@ impl<F: StorageFile> Segment<F> {
     pub async fn sync(&self) -> std::io::Result<()> {
         self.file.sync_data().await
     }
+}
+
+/// How often an active roll point fires: a roll is rare, so the commit's
+/// rate.
+const ROLL_HINT_PROB: f64 = 0.25;
+
+/// Write both header copies of a segment (blocks 0 and 1).
+async fn write_headers<F: StorageFile>(
+    file: &BlockFile<F>,
+    header: &SegmentHeader,
+) -> std::io::Result<()> {
+    let mut blocks = vec![0u8; 2 * BLOCK];
+    header.encode(&mut blocks[..BLOCK]);
+    header.encode(&mut blocks[BLOCK..]);
+    write_blocks(file, 0, &blocks).await
 }
 
 async fn open_file<P: StorageProvider>(
