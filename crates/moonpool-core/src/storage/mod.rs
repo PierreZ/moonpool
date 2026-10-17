@@ -9,7 +9,9 @@
 //!   ([`AsyncRead`]/[`AsyncWrite`]/[`AsyncSeek`]), positioned I/O
 //!   ([`read_at`](StorageFile::read_at) / [`write_at`](StorageFile::write_at)),
 //!   a durable positioned write
-//!   ([`write_at_durable`](StorageFile::write_at_durable)),
+//!   ([`write_at_durable`](StorageFile::write_at_durable)), the zero-copy
+//!   forms of all three over an owned [`AlignedBuf`]
+//!   ([`read_at_aligned`](StorageFile::read_at_aligned) and its siblings),
 //!   durability ([`sync_all`](StorageFile::sync_all) /
 //!   [`sync_data`](StorageFile::sync_data)), and size
 //!   ([`size`](StorageFile::size) / [`set_len`](StorageFile::set_len)).
@@ -207,6 +209,17 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
 /// [`read_at`](Self::read_at) and [`write_at`](Self::write_at) are what such a
 /// file offers instead, and they are what a storage engine wants anyway.
 /// Seeking stays available: it moves a cursor, it does not transfer anything.
+///
+/// ## Borrowed or owned buffers
+///
+/// Each positioned transfer comes in two forms: borrowed (`&[u8]`,
+/// `&mut [u8]`) and owned ([`AlignedBuf`], the `*_aligned` methods). They
+/// are one transfer with one contract; the owned form only lets a backend
+/// that runs I/O on another thread move the caller's buffer there rather
+/// than copy it. A caller that already holds its bytes in an [`AlignedBuf`]
+/// — a journal building its batch in place — uses the owned form and the
+/// bytes are never copied between it and the kernel; any other caller keeps
+/// the borrowed form. Neither is a different kind of file.
 pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static {
     /// Flush this file's data *and* metadata to the device.
     ///
@@ -311,6 +324,91 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
             let written = self.write_at(offset, buf).await?;
             self.sync_data().await?;
             Ok(written)
+        }
+    }
+
+    /// [`read_at`](Self::read_at) into an owned, aligned buffer: the
+    /// zero-copy read.
+    ///
+    /// The same transfer — into `buf`'s [`len`](AlignedBuf::len) bytes from
+    /// `offset`, possibly short, `0` at end of file, the same constraint
+    /// checks — but the buffer is moved in and handed back with the count,
+    /// so a backend that performs the transfer on another thread reads
+    /// straight into it. The borrowed form cannot do that: a slice cannot
+    /// cross into a `'static` blocking task, so such a backend reads into a
+    /// buffer of its own and copies out. The first `n` bytes of the returned
+    /// buffer (the count) hold what was read; the bytes past them are left as
+    /// they were.
+    ///
+    /// On error the buffer is dropped.
+    ///
+    /// ## Default
+    ///
+    /// [`read_at`](Self::read_at) on the buffer's bytes: exactly the borrowed
+    /// transfer, faults and all. The simulated backend keeps it. The Tokio
+    /// backend (`TokioStorageFile`) overrides it to move the buffer into its
+    /// blocking task, with no copy.
+    fn read_at_aligned(
+        &self,
+        offset: u64,
+        buf: AlignedBuf,
+    ) -> impl std::future::Future<Output = io::Result<(usize, AlignedBuf)>> + Send {
+        async move {
+            let mut buf = buf;
+            let read = self.read_at(offset, buf.as_mut_slice()).await?;
+            Ok((read, buf))
+        }
+    }
+
+    /// [`write_at`](Self::write_at) from an owned, aligned buffer: the
+    /// zero-copy write.
+    ///
+    /// The same transfer as [`write_at`](Self::write_at) — `buf`'s
+    /// [`len`](AlignedBuf::len) bytes at `offset`, possibly short, visible
+    /// and not durable, the same constraint checks — with the buffer moved in
+    /// and handed back beside the count, so the caller reuses it (to resume a
+    /// short write, or for the next one). See
+    /// [`read_at_aligned`](Self::read_at_aligned) for why owning it saves a
+    /// copy. On error the buffer is dropped.
+    ///
+    /// ## Default
+    ///
+    /// [`write_at`](Self::write_at) on the buffer's bytes. The simulated
+    /// backend keeps it; the Tokio backend moves the buffer into its blocking
+    /// task instead of copying it.
+    fn write_at_aligned(
+        &self,
+        offset: u64,
+        buf: AlignedBuf,
+    ) -> impl std::future::Future<Output = io::Result<(usize, AlignedBuf)>> + Send {
+        async move {
+            let written = self.write_at(offset, buf.as_slice()).await?;
+            Ok((written, buf))
+        }
+    }
+
+    /// [`write_at_durable`](Self::write_at_durable) from an owned, aligned
+    /// buffer: the zero-copy durable write.
+    ///
+    /// Every guarantee of [`write_at_durable`](Self::write_at_durable),
+    /// "only this write" included, with the buffer moved in and handed back
+    /// as in [`write_at_aligned`](Self::write_at_aligned). On error the
+    /// buffer is dropped, and the range's durability is unknown.
+    ///
+    /// ## Default
+    ///
+    /// [`write_at_durable`](Self::write_at_durable) on the buffer's bytes,
+    /// so a backend's durable write — the simulated one's named crash
+    /// window, the Tokio one's `RWF_DSYNC` — applies unchanged. The Tokio
+    /// backend overrides it only to move the buffer instead of copying it.
+    fn write_at_durable_aligned(
+        &self,
+        offset: u64,
+        buf: AlignedBuf,
+    ) -> impl std::future::Future<Output = io::Result<(usize, AlignedBuf)>> + Send {
+        async move {
+            let written = self.write_at_durable(offset, buf.as_slice()).await?;
+            Ok((written, buf))
         }
     }
 

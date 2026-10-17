@@ -133,6 +133,32 @@ durability is enough because a segment never changes size. `Batched` keeps
 its plain writes and one sync: a durable write of the records alone would not
 cover the entries.
 
+### No Copy on the Way to the Disk
+
+A commit encodes its batch **in place**. `commit` sizes the entry log's
+bytes first (`Batch::fits` already bounded them), allocates one zeroed,
+block-aligned `AlignedBuf`, and encodes every entry header and payload
+straight into it; the persist records go into a second one. Both move into
+`BlockFile::write_blocks_aligned` / `write_blocks_durable_aligned`, which
+hand them to the file's owned `write_at_aligned` /
+`write_at_durable_aligned`. On `TokioStorageProvider` the buffer moves into
+the blocking task and back, so `pwritev2(RWF_DSYNC)` reads the journal's own
+memory: the bytes a caller staged are copied once, into the batch, and
+never again. The segment headers, the metainfo copies, the spare's
+zero-fill (one 1 MiB buffer moved through every write) and recovery's
+reads (the persist log, entries read in place) take the same owned path.
+Before, a direct-I/O commit copied each log twice: from the journal's
+`Vec` into an aligned buffer, then into the provider's bounce buffer.
+
+```rust,ignore
+let entries = std::mem::take(&mut batch.entries);
+batch.entries = segment.write_durable(batch.entry_at, entries).await?; // moved, not copied
+```
+
+A buffer whose address missed a file's memory alignment would be copied
+once into one that meets it; a block boundary meets every direct-I/O device
+the journal opens in practice.
+
 Metainfo is written only **after** the batch is durable: copy A durably,
 then copy B durably. A crash can leave the batch durable without its metainfo, but never
 the metainfo without its batch. Anything true only once a batch is on disk
@@ -144,10 +170,10 @@ The commit protocol names its dangerous moments with `hint!` from
 `moonpool-buggify`. A batched commit names three:
 
 ```rust,ignore
-segment.write(batch.entry_at, &batch.entries).await?;
+batch.entries = segment.write(batch.entry_at, entries).await?;
 // A power loss here tears entries no record points at yet.
 moonpool_buggify::hint!("journal commit: entries written, not synced", COMMIT_HINT_PROB).await;
-segment.write(batch.persist_at, &batch.records).await?;
+batch.records = segment.write(batch.persist_at, records).await?;
 moonpool_buggify::hint!("journal commit: records written, not synced", COMMIT_HINT_PROB).await;
 segment.sync().await?;
 if let Some(meta) = meta {
@@ -158,7 +184,8 @@ if let Some(meta) = meta {
 
 An ordered commit writes each log with one durable write, so the window
 between a write and its sync lies inside a single call. The simulator names
-it there: its `write_at_durable` is `write_at`, then
+it there: its `write_at_durable` (which the owned `write_at_durable_aligned`
+calls by default) is `write_at`, then
 `hint!("storage: durable write landed, not synced")` at the same 0.25, then
 `sync_data`. The ordered commit keeps the metainfo moment of its own.
 

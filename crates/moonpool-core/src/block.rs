@@ -223,8 +223,51 @@ impl<F: StorageFile> BlockFile<F> {
     pub async fn read_blocks(&self, block_index: u64, buf: &mut [u8]) -> io::Result<()> {
         let start = self.range(block_index, buf.len())?;
         self.check_buffer(buf)?;
+        self.read_from(block_index, start, buf, 0).await
+    }
+
+    /// [`read_blocks`](Self::read_blocks) into an owned buffer, through
+    /// [`StorageFile::read_at_aligned`]: the zero-copy read. Returns the
+    /// filled buffer.
+    ///
+    /// The same transfer and the same errors, with two differences. A buffer
+    /// that misses the file's memory alignment is not refused: it is replaced
+    /// by one that meets it, which is the buffer returned. And only the first
+    /// request moves the buffer; the rare short read is resumed through the
+    /// borrowed [`read_at`](StorageFile::read_at), so its tail may be copied.
+    /// On error the buffer is dropped.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_blocks`](Self::read_blocks), less the misaligned buffer.
+    pub async fn read_blocks_aligned(
+        &self,
+        block_index: u64,
+        buf: AlignedBuf,
+    ) -> io::Result<AlignedBuf> {
+        let start = self.range(block_index, buf.len())?;
+        let buf = self.realign(buf, false);
         let len = buf.len();
-        let mut done = 0;
+        let (moved, mut buf) = self.file.read_at_aligned(start, buf).await?;
+        if moved == 0 {
+            return Err(self.stalled_read_error(block_index, 0, len).await);
+        }
+        if moved < len {
+            self.read_from(block_index, start, buf.as_mut_slice(), moved)
+                .await?;
+        }
+        Ok(buf)
+    }
+
+    /// The read loop: fill `buf` (the range at byte `start`) from `done` on.
+    async fn read_from(
+        &self,
+        block_index: u64,
+        start: u64,
+        buf: &mut [u8],
+        mut done: usize,
+    ) -> io::Result<()> {
+        let len = buf.len();
         while done < len {
             // Resume from the step boundary at or below the frontier, not from
             // the frontier itself. A short transfer may stop anywhere the
@@ -295,13 +338,94 @@ impl<F: StorageFile> BlockFile<F> {
         self.transfer_blocks(block_index, buf, true).await
     }
 
+    /// [`write_blocks`](Self::write_blocks) from an owned buffer, through
+    /// [`StorageFile::write_at_aligned`]: the zero-copy write. Returns the
+    /// buffer, for the caller to reuse.
+    ///
+    /// The same transfer and the same errors, with the differences of
+    /// [`read_blocks_aligned`](Self::read_blocks_aligned): a buffer that
+    /// misses the file's memory alignment is copied once into one that meets
+    /// it (and that one is returned), and a short write is resumed through
+    /// the borrowed [`write_at`](StorageFile::write_at). On error the buffer
+    /// is dropped.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_blocks`](Self::write_blocks), less the misaligned buffer.
+    pub async fn write_blocks_aligned(
+        &self,
+        block_index: u64,
+        buf: AlignedBuf,
+    ) -> io::Result<AlignedBuf> {
+        self.transfer_blocks_owned(block_index, buf, false).await
+    }
+
+    /// [`write_blocks_durable`](Self::write_blocks_durable) from an owned
+    /// buffer, through [`StorageFile::write_at_durable_aligned`]: the
+    /// zero-copy durable write, with the differences of
+    /// [`write_blocks_aligned`](Self::write_blocks_aligned). On `Ok` every
+    /// byte of the buffer is durable.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_blocks_durable`](Self::write_blocks_durable), less the
+    /// misaligned buffer.
+    pub async fn write_blocks_durable_aligned(
+        &self,
+        block_index: u64,
+        buf: AlignedBuf,
+    ) -> io::Result<AlignedBuf> {
+        self.transfer_blocks_owned(block_index, buf, true).await
+    }
+
     /// The write loop behind [`write_blocks`](Self::write_blocks) and
     /// [`write_blocks_durable`](Self::write_blocks_durable).
     async fn transfer_blocks(&self, block_index: u64, buf: &[u8], durable: bool) -> io::Result<()> {
         let start = self.range(block_index, buf.len())?;
         self.check_buffer(buf)?;
+        self.transfer_from(block_index, start, buf, 0, durable)
+            .await
+    }
+
+    /// The owned write behind [`write_blocks_aligned`](Self::write_blocks_aligned)
+    /// and [`write_blocks_durable_aligned`](Self::write_blocks_durable_aligned):
+    /// one owned request, then the borrowed loop for whatever it left.
+    async fn transfer_blocks_owned(
+        &self,
+        block_index: u64,
+        buf: AlignedBuf,
+        durable: bool,
+    ) -> io::Result<AlignedBuf> {
+        let start = self.range(block_index, buf.len())?;
+        let buf = self.realign(buf, true);
         let len = buf.len();
-        let mut done = 0;
+        let (moved, buf) = if durable {
+            self.file.write_at_durable_aligned(start, buf).await?
+        } else {
+            self.file.write_at_aligned(start, buf).await?
+        };
+        if moved == 0 {
+            return Err(write_zero(block_index, 0, len));
+        }
+        let done = self.advance(0, 0, moved, "write")?;
+        if done < len {
+            self.transfer_from(block_index, start, buf.as_slice(), done, durable)
+                .await?;
+        }
+        Ok(buf)
+    }
+
+    /// The write loop: write `buf` (the range at byte `start`) from `done`
+    /// on.
+    async fn transfer_from(
+        &self,
+        block_index: u64,
+        start: u64,
+        buf: &[u8],
+        mut done: usize,
+        durable: bool,
+    ) -> io::Result<()> {
+        let len = buf.len();
         while done < len {
             // As in `read_blocks`: resume on a step boundary, rewriting the
             // bytes between it and the frontier. Rewriting them is safe — they
@@ -314,14 +438,28 @@ impl<F: StorageFile> BlockFile<F> {
                 self.file.write_at(at, &buf[from..]).await?
             };
             if moved == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    format!("file accepted only {done} of {len} bytes at block {block_index}"),
-                ));
+                return Err(write_zero(block_index, done, len));
             }
             done = self.advance(done, from, moved, "write")?;
         }
         Ok(())
+    }
+
+    /// `buf`, or — when it misses the file's memory alignment — a buffer of
+    /// the same length that meets it, holding a copy of `buf`'s bytes when
+    /// `keep` asks for them (a write) and zeros otherwise (a read).
+    fn realign(&self, buf: AlignedBuf, keep: bool) -> AlignedBuf {
+        let constraints = self.constraints();
+        if buf.is_aligned_to(constraints.memory_alignment()) {
+            return buf;
+        }
+        // The length is a whole number of blocks (`range` checked it), and a
+        // block is a multiple of the length alignment, so this cannot panic.
+        let mut aligned = AlignedBuf::for_constraints(buf.len(), constraints);
+        if keep {
+            aligned.as_mut_slice().copy_from_slice(buf.as_slice());
+        }
+        aligned
     }
 
     /// Make every completed write durable, data and length alike.
@@ -480,4 +618,12 @@ impl<F: StorageFile> BlockFile<F> {
         })?;
         Ok(start)
     }
+}
+
+/// The error for a write the file stopped accepting bytes for.
+fn write_zero(block_index: u64, done: usize, len: usize) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WriteZero,
+        format!("file accepted only {done} of {len} bytes at block {block_index}"),
+    )
 }

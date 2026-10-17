@@ -263,6 +263,77 @@ async fn a_durable_write_lands_like_a_positioned_write() {
     }
 }
 
+/// The owned transfers are the same transfers as the borrowed ones, and
+/// they are zero-copy: the buffer handed back is the one handed in (same
+/// address, so the kernel read from and wrote into it directly), on a
+/// buffered and on a direct-I/O file. A misaligned owned transfer is refused
+/// like a borrowed one, and an empty one is a no-op.
+#[tokio::test]
+async fn owned_transfers_move_the_callers_buffer() {
+    let dir = TempDir::new().expect("temp dir");
+    let provider = TokioStorageProvider::new();
+    for (name, direct_io) in [
+        ("buffered.db", DirectIo::Disabled),
+        ("direct.db", DirectIo::Optional),
+    ] {
+        let path = &scratch_file(&dir, name);
+        let file = provider
+            .open(
+                path,
+                OpenOptions::create_write().read(true).direct_io(direct_io),
+            )
+            .await
+            .expect("open failed");
+        let constraints = file.constraints();
+        let length = constraints.length_alignment().max(4096);
+        let offset = constraints.offset_alignment().max(4096);
+
+        let mut block = AlignedBuf::for_constraints(2 * length, constraints);
+        block.as_mut_slice().fill(0x3C);
+        let address = block.as_slice().as_ptr();
+        let (written, block) = file
+            .write_at_aligned(offset, block)
+            .await
+            .expect("owned write failed");
+        assert_eq!(written, 2 * length);
+        assert_eq!(block.as_slice().as_ptr(), address, "no bounce buffer");
+
+        let mut half = block;
+        half.truncate(length);
+        half.as_mut_slice().fill(0x7E);
+        let (written, half) = file
+            .write_at_durable_aligned(offset, half)
+            .await
+            .expect("owned durable write failed");
+        assert_eq!(written, length);
+        assert_eq!(half.as_slice().as_ptr(), address, "no bounce buffer");
+
+        let read = AlignedBuf::for_constraints(2 * length, constraints);
+        let address = read.as_slice().as_ptr();
+        let (got, read) = file
+            .read_at_aligned(offset, read)
+            .await
+            .expect("owned read failed");
+        assert_eq!(got, 2 * length);
+        assert_eq!(read.as_slice().as_ptr(), address, "no bounce buffer");
+        assert!(read[..length].iter().all(|&byte| byte == 0x7E));
+        assert!(read[length..].iter().all(|&byte| byte == 0x3C));
+
+        let (none, _) = file
+            .write_at_aligned(0, AlignedBuf::default())
+            .await
+            .expect("empty write");
+        assert_eq!(none, 0);
+        if file.is_direct_io() && constraints.offset_alignment() > 1 {
+            let error = file
+                .write_at_aligned(1, AlignedBuf::for_constraints(length, constraints))
+                .await
+                .expect_err("a misaligned offset is refused");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+}
+
 /// The stream API and alignment are mutually exclusive, and a direct-I/O file
 /// says so itself rather than letting the kernel answer with `EINVAL` on some
 /// requests and succeed on others.

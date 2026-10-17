@@ -99,6 +99,13 @@
 //!   [`write_at_durable`](moonpool_core::StorageFile::write_at_durable)
 //!   (`pwritev2(RWF_DSYNC)` on Linux) where a write and a sync were two
 //!   calls; so do the metainfo copies and a roll's headers.
+//! - **No copy on the way to the disk.** A commit encodes its entries and
+//!   records in place, in block-aligned
+//!   [`AlignedBuf`](moonpool_core::AlignedBuf)s, and moves them through the
+//!   zero-copy [`BlockFile`](moonpool_core::BlockFile) writes
+//!   ([`StorageFile::write_at_durable_aligned`](moonpool_core::StorageFile::write_at_durable_aligned)
+//!   and its siblings): over `TokioStorageProvider` the kernel reads the
+//!   journal's own buffer, and a direct-I/O segment never copies it.
 //! - **Crash hints.** A batched commit names three moments with
 //!   [`hint!`](moonpool_buggify::hint!): entries written but not synced, records
 //!   written but not synced, and the batch synced while the metainfo is

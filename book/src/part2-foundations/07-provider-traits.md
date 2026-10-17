@@ -113,6 +113,16 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     fn write_at_durable(&self, offset: u64, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
         // default: write_at, then sync_data
     }
+    // The zero-copy forms: the buffer moves in and comes back with the count.
+    fn read_at_aligned(&self, offset: u64, buf: AlignedBuf) -> impl Future<Output = io::Result<(usize, AlignedBuf)>> + Send {
+        // default: read_at on the buffer's bytes
+    }
+    fn write_at_aligned(&self, offset: u64, buf: AlignedBuf) -> impl Future<Output = io::Result<(usize, AlignedBuf)>> + Send {
+        // default: write_at on the buffer's bytes
+    }
+    fn write_at_durable_aligned(&self, offset: u64, buf: AlignedBuf) -> impl Future<Output = io::Result<(usize, AlignedBuf)>> + Send {
+        // default: write_at_durable on the buffer's bytes
+    }
     fn size(&self) -> impl Future<Output = io::Result<u64>> + Send;
     fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> + Send;
 }
@@ -126,11 +136,11 @@ Three distinctions the trait keeps apart, because production keeps them apart:
 - File durability is not **directory-entry** durability. After `open(create)`, `write` and `sync_all`, a crash can still leave no name pointing at the file. `sync_dir` on the parent is the call that makes the name durable, as SQLite and PostgreSQL do after a create, delete or rename.
 - `set_len` grows the readable range. It does not allocate, initialize or make the length durable.
 
-`OpenOptions` mirrors `std::fs::OpenOptions` (`read`, `write`, `create`, `create_new`, `truncate`, `append`) and adds `direct_io(DirectIo::{Disabled, Optional, Required})`. Direct I/O is an option on opening an ordinary file, not a second provider: there is no `BlockProvider`. A direct-I/O file reports its alignment through `constraints()` and refuses the stream API with `stream_io_unsupported()`, because a shared cursor cannot honour an alignment. `read_at` and `write_at` are positioned, take `&self`, and may transfer fewer bytes than asked. `BlockFile<F>` wraps one open file to add block arithmetic and the loops that turn partial transfers into whole ones. It holds no path and opens nothing. `LayoutRegion` lets a format describe where its bytes live, so a fault injector can aim at them. [Storage Faults](../part3-building/11-storage-faults.md) and [Aiming Storage Faults](../part3-building/33-aimed-faults.md) continue there.
+`OpenOptions` mirrors `std::fs::OpenOptions` (`read`, `write`, `create`, `create_new`, `truncate`, `append`) and adds `direct_io(DirectIo::{Disabled, Optional, Required})`. Direct I/O is an option on opening an ordinary file, not a second provider: there is no `BlockProvider`. A direct-I/O file reports its alignment through `constraints()` and refuses the stream API with `stream_io_unsupported()`, because a shared cursor cannot honour an alignment. `read_at` and `write_at` are positioned, take `&self`, and may transfer fewer bytes than asked. Each positioned transfer also has an **owned** form over an `AlignedBuf` (`read_at_aligned`, `write_at_aligned`, `write_at_durable_aligned`): the same transfer and contract, with the buffer moved in and handed back beside the count (dropped on error). It exists for zero copy. A backend that runs I/O on another thread cannot move a borrowed slice there, so the borrowed form pays a copy into its own aligned buffer; the owned form moves the caller's buffer instead. A caller that already holds its bytes in an `AlignedBuf` uses it, any other caller keeps the borrowed form, and neither is a different kind of file. `BlockFile<F>` wraps one open file to add block arithmetic and the loops that turn partial transfers into whole ones. It holds no path and opens nothing. `LayoutRegion` lets a format describe where its bytes live, so a fault injector can aim at them. [Storage Faults](../part3-building/11-storage-faults.md) and [Aiming Storage Faults](../part3-building/33-aimed-faults.md) continue there.
 
-**Production**: `TokioStorageProvider` wraps `tokio::fs`. Positioned I/O runs on the blocking pool, and `O_DIRECT` comes from `libc`.
+**Production**: `TokioStorageProvider` wraps `tokio::fs`. Positioned I/O runs on the blocking pool, and `O_DIRECT` comes from `libc`. The owned transfers move the caller's `AlignedBuf` into the blocking task and back, so `pwrite`, `pwritev2` and `pread` reach the caller's own memory; the borrowed ones copy through a bounce buffer, as a slice cannot cross into a `'static` task.
 
-**Simulation**: `StorageEngine` keeps one in-memory image per file. A positioned write is visible to a stream read, and a block write to both. Open handles have independent cursors and pending operations. Every operation returns `Pending` and completes through a scheduled event, with an exact result, so a crash or shutdown completes pending work with errors instead of silence. Each `SimStorageProvider` is scoped to a process IP, which selects that process's disk configuration and degradation episodes. The fault model follows TigerBeetle and FoundationDB: read and write corruption, EIO, the barrier-bounded crash model, misdirected I/O, short transfers, sync lies, unsynced directory-entry loss, and IOPS and bandwidth timing.
+**Simulation**: the owned transfers keep the trait's defaults, the borrowed transfer on the buffer's bytes, so every fault applies to them unchanged. `StorageEngine` keeps one in-memory image per file. A positioned write is visible to a stream read, and a block write to both. Open handles have independent cursors and pending operations. Every operation returns `Pending` and completes through a scheduled event, with an exact result, so a crash or shutdown completes pending work with errors instead of silence. Each `SimStorageProvider` is scoped to a process IP, which selects that process's disk configuration and degradation episodes. The fault model follows TigerBeetle and FoundationDB: read and write corruption, EIO, the barrier-bounded crash model, misdirected I/O, short transfers, sync lies, unsynced directory-entry loss, and IOPS and bandwidth timing.
 
 ## SystemProvider
 

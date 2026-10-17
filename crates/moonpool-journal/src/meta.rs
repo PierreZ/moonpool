@@ -16,7 +16,7 @@
 use moonpool_core::{BlockFile, OpenOptions, StorageFile, StorageProvider};
 
 use crate::format::{BLOCK, BLOCK_U64, META_COPY_B_AT, META_FILE_BLOCKS, Meta};
-use crate::io::{read_blocks, write_blocks, write_blocks_durable};
+use crate::io::{block_buf, read_blocks, write_blocks, write_blocks_durable};
 use crate::{JournalId, OpenError};
 
 pub(crate) const META_NAME: &str = "meta";
@@ -60,11 +60,11 @@ impl<F: StorageFile> MetaFile<F> {
             .open(&temporary, OpenOptions::create_new_write().read(true))
             .await?;
         let file = BlockFile::new(file, BLOCK)?;
-        let mut image = vec![0u8; crate::format::usize_of(META_FILE_BLOCKS * BLOCK_U64)];
+        let mut image = block_buf(crate::format::usize_of(META_FILE_BLOCKS * BLOCK_U64));
         meta.encode(Copy::A as u8, &mut image[..BLOCK]);
         let b_at = crate::format::usize_of(META_COPY_B_AT);
         meta.encode(Copy::B as u8, &mut image[b_at..b_at + BLOCK]);
-        write_blocks(&file, 0, &image).await?;
+        write_blocks(&file, 0, image).await?;
         file.sync().await?;
         drop(file);
         provider
@@ -147,17 +147,17 @@ impl<F: StorageFile> MetaFile<F> {
     }
 
     async fn read(&self, copy: Copy) -> std::io::Result<Option<Meta>> {
-        let mut buf = self.file.buffer(1)?;
-        read_blocks(&self.file, copy.block(), buf.as_mut_slice()).await?;
+        let buf = read_blocks(&self.file, copy.block(), self.file.buffer(1)?).await?;
         Ok(Meta::decode(buf.as_slice(), copy as u8))
     }
 
     /// Write one copy, durable on return. Only that block: the file must
     /// hold no other unsynced write.
     async fn write_durable(&self, copy: Copy, meta: &Meta) -> std::io::Result<()> {
-        let mut block = vec![0u8; BLOCK];
-        meta.encode(copy as u8, &mut block);
-        write_blocks_durable(&self.file, copy.block(), &block).await
+        let mut block = block_buf(BLOCK);
+        meta.encode(copy as u8, block.as_mut_slice());
+        write_blocks_durable(&self.file, copy.block(), block).await?;
+        Ok(())
     }
 
     /// Replace the value: copy A, durable, then copy B, durable, so at most

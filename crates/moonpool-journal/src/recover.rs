@@ -16,7 +16,7 @@
 //! batch** and damaged records cost entry reads: the rest of the log is
 //! checked when it is read.
 
-use moonpool_core::StorageFile;
+use moonpool_core::{AlignedBuf, StorageFile};
 
 use crate::OpenError;
 use crate::format::{
@@ -84,7 +84,7 @@ pub(crate) struct Scan {
     /// The last batch's persist extent rewritten: `(segment index, offset,
     /// bytes)`. Set when it voids or rebuilds a record, so the next open
     /// finds a durable verdict instead of damage before a later batch.
-    pub rewrite: Option<(usize, u64, Vec<u8>)>,
+    pub rewrite: Option<(usize, u64, AlignedBuf)>,
 }
 
 /// An entry checked against what is expected of it.
@@ -398,7 +398,7 @@ async fn judge_batch<F: StorageFile>(
     }
     if rewrite {
         let blocks = Record::blocks_for(kept.len());
-        let mut bytes = vec![0u8; usize_of(blocks * BLOCK_U64)];
+        let mut bytes = crate::io::block_buf(usize_of(blocks * BLOCK_U64));
         for (at, record) in kept.iter().enumerate() {
             record.encode(&mut bytes[at * RECORD_SIZE..]);
         }
