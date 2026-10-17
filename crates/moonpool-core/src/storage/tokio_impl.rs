@@ -671,6 +671,73 @@ fn write_at_blocking(_file: &std::fs::File, _offset: u64, _buf: &[u8]) -> io::Re
     ))
 }
 
+/// One durable positioned write against the OS: the bytes it reports
+/// written are durable when it returns.
+///
+/// On Linux this is `pwritev2(RWF_DSYNC)`: the write carries its own
+/// data-sync, one syscall where `pwrite` plus `fdatasync` are two, and on a
+/// direct-I/O file whose blocks are already allocated the kernel can turn it
+/// into a single FUA write instead of a write and a cache flush. Like
+/// `O_DSYNC`, it covers this write's range only. A kernel without
+/// `pwritev2` (`ENOSYS`) or without `RWF_DSYNC` (`EOPNOTSUPP`) falls back to
+/// the portable pair, once for the process.
+#[cfg(all(target_os = "linux", any(target_env = "gnu", target_env = "musl")))]
+fn write_at_durable_blocking(file: &std::fs::File, offset: u64, buf: &[u8]) -> io::Result<usize> {
+    use std::os::fd::AsRawFd as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Set once the kernel refused `RWF_DSYNC`: every later call goes
+    /// straight to the fallback instead of failing the same syscall again.
+    static DSYNC_REFUSED: AtomicBool = AtomicBool::new(false);
+
+    if DSYNC_REFUSED.load(Ordering::Relaxed) {
+        return write_then_sync_blocking(file, offset, buf);
+    }
+    let position = libc::off_t::try_from(offset)
+        .map_err(|_| super::invalid_input(format!("offset {offset} overflows off_t")))?;
+    let iov = libc::iovec {
+        iov_base: buf.as_ptr().cast_mut().cast::<libc::c_void>(),
+        iov_len: buf.len(),
+    };
+    // SAFETY: the descriptor is open for the duration of the call, `iov`
+    // describes exactly `buf`, which outlives the call, and the kernel only
+    // reads through it (a write never stores into the source buffer).
+    let written = unsafe {
+        libc::pwritev2(
+            file.as_raw_fd(),
+            &raw const iov,
+            1,
+            position,
+            libc::RWF_DSYNC,
+        )
+    };
+    if let Ok(written) = usize::try_from(written) {
+        return Ok(written);
+    }
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ENOSYS | libc::EOPNOTSUPP) => {
+            DSYNC_REFUSED.store(true, Ordering::Relaxed);
+            write_then_sync_blocking(file, offset, buf)
+        }
+        _ => Err(error),
+    }
+}
+
+#[cfg(not(all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))))]
+fn write_at_durable_blocking(file: &std::fs::File, offset: u64, buf: &[u8]) -> io::Result<usize> {
+    write_then_sync_blocking(file, offset, buf)
+}
+
+/// The portable durable write: a positioned write, then a data sync, both on
+/// the one blocking task. The sync covers more than the write's range, which
+/// the contract allows.
+fn write_then_sync_blocking(file: &std::fs::File, offset: u64, buf: &[u8]) -> io::Result<usize> {
+    let written = write_at_blocking(file, offset, buf)?;
+    file.sync_data()?;
+    Ok(written)
+}
+
 async fn run_blocking<T, F>(work: F) -> io::Result<T>
 where
     T: Send + 'static,
@@ -731,6 +798,17 @@ impl StorageFile for TokioStorageFile {
         let mut bounce = self.bounce(buf.len());
         bounce.as_mut_slice().copy_from_slice(buf);
         run_blocking(move || write_at_blocking(&file, offset, bounce.as_slice())).await
+    }
+
+    async fn write_at_durable(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.constraints.check(offset, buf)?;
+        let file = Arc::clone(&self.positioned);
+        let mut bounce = self.bounce(buf.len());
+        bounce.as_mut_slice().copy_from_slice(buf);
+        run_blocking(move || write_at_durable_blocking(&file, offset, bounce.as_slice())).await
     }
 
     async fn size(&self) -> io::Result<u64> {

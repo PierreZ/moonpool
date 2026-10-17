@@ -84,6 +84,46 @@ fn test_simulate_crash_synced_data_survives() {
     });
 }
 
+/// A durable positioned write needs no sync of its own: it survives a crash
+/// that damages every unsynced sector.
+#[test]
+fn test_simulate_crash_durable_write_survives() {
+    local_runtime().block_on(async {
+        let mut config = StorageConfiguration::fast_local();
+        config.crash_latent_fault_probability = 1.0;
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+        let data = b"written durably, no sync of its own";
+
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let file = provider
+                .open("durable.bin", OpenOptions::create_write().read(true))
+                .await?;
+            let written = file.write_at_durable(0, data).await?;
+            drop(file);
+            Ok::<_, std::io::Error>(written)
+        });
+        let written = step_until_done(&mut sim, handle).await.expect("io error");
+        assert_eq!(written, data.len());
+
+        sim.simulate_crash_for_process(test_ip(), true);
+
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let file = provider
+                .open("durable.bin", OpenOptions::read_only())
+                .await?;
+            let mut buf = vec![0u8; data.len()];
+            let read = file.read_at(0, &mut buf).await?;
+            buf.truncate(read);
+            Ok::<_, std::io::Error>(buf)
+        });
+        let read = step_until_done(&mut sim, handle).await.expect("io error");
+        assert_eq!(&read, data, "a durable write must survive the crash");
+    });
+}
+
 /// Test that unsynced data may be lost after crash
 #[test]
 fn test_simulate_crash_unsynced_data_behavior() {

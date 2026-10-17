@@ -8,6 +8,8 @@
 //! - [`StorageFile`] is one already-open file: stream I/O
 //!   ([`AsyncRead`]/[`AsyncWrite`]/[`AsyncSeek`]), positioned I/O
 //!   ([`read_at`](StorageFile::read_at) / [`write_at`](StorageFile::write_at)),
+//!   a durable positioned write
+//!   ([`write_at_durable`](StorageFile::write_at_durable)),
 //!   durability ([`sync_all`](StorageFile::sync_all) /
 //!   [`sync_data`](StorageFile::sync_data)), and size
 //!   ([`size`](StorageFile::size) / [`set_len`](StorageFile::set_len)).
@@ -184,8 +186,10 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
 ///
 /// A completed write is *visible*, not *durable*: subsequent reads observe it,
 /// but only a completed [`sync_all`](Self::sync_all) or
-/// [`sync_data`](Self::sync_data) makes it survive a crash. Nothing else on
-/// this trait implies durability.
+/// [`sync_data`](Self::sync_data) makes it survive a crash. The one exception
+/// is [`write_at_durable`](Self::write_at_durable), which makes its own bytes
+/// (and only those) durable before it returns. Nothing else on this trait
+/// implies durability.
 ///
 /// ## Stream I/O and alignment do not mix
 ///
@@ -268,6 +272,47 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
         offset: u64,
         buf: &[u8],
     ) -> impl std::future::Future<Output = io::Result<usize>> + Send;
+
+    /// Write `buf` starting at `offset` and make the written bytes durable
+    /// before returning: one durable positioned write.
+    ///
+    /// The same transfer as [`write_at`](Self::write_at), short writes
+    /// included: on success the first `n` bytes of `buf` (the returned count)
+    /// survive a crash, as [`sync_data`](Self::sync_data) would have made
+    /// them. A caller that needs the whole range loops, and each piece is
+    /// durable when its call returns.
+    ///
+    /// ## Only this write
+    ///
+    /// The guarantee covers **the bytes of this write and nothing else**. It
+    /// says nothing about earlier writes to other ranges of the file that no
+    /// sync has covered yet: on Linux an `RWF_DSYNC` write flushes only its
+    /// own range, and with direct I/O it may become a single FUA write that
+    /// leaves the rest of the device's volatile cache alone. A protocol that
+    /// needs an earlier write durable syncs it, or writes it durably too.
+    ///
+    /// An error says nothing either way: the bytes may have landed, may be
+    /// durable, or may be neither, as with a failed write followed by a
+    /// failed sync.
+    ///
+    /// ## Default
+    ///
+    /// [`write_at`](Self::write_at) then [`sync_data`](Self::sync_data): two
+    /// calls, a stronger guarantee than the contract asks for. A backend
+    /// overrides it when the platform can make the write itself durable, as
+    /// the Tokio backend (`TokioStorageFile`) does with `pwritev2(RWF_DSYNC)`
+    /// on Linux.
+    fn write_at_durable(
+        &self,
+        offset: u64,
+        buf: &[u8],
+    ) -> impl std::future::Future<Output = io::Result<usize>> + Send {
+        async move {
+            let written = self.write_at(offset, buf).await?;
+            self.sync_data().await?;
+            Ok(written)
+        }
+    }
 
     /// Get the current size of the file in bytes.
     fn size(&self) -> impl std::future::Future<Output = io::Result<u64>> + Send;

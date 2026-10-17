@@ -31,9 +31,12 @@ pub enum Durability {
     /// the two cannot be told apart for the last batch: its damaged entries
     /// are reported [`State::Ambiguous`].
     Batched,
-    /// `write(entries); fsync; write(persist records); fsync`. Two syncs
-    /// per batch; a persist record proves its entry was synced, so damage is
-    /// always told apart.
+    /// `write(entries); fsync; write(persist records); fsync`, issued as
+    /// two durable writes ([`StorageFile::write_at_durable`]: one
+    /// `pwritev2(RWF_DSYNC)` each on Linux). Two syncs per batch; a persist
+    /// record proves its entry was synced, so damage is always told apart.
+    ///
+    /// [`StorageFile::write_at_durable`]: moonpool_core::StorageFile::write_at_durable
     #[default]
     Ordered,
 }
@@ -1254,32 +1257,52 @@ async fn write_protocol<F: moonpool_core::StorageFile>(
     meta: Option<&Meta>,
     ordered: bool,
 ) -> Result<(), (std::io::Error, Durable)> {
-    segment
-        .write(batch.entry_at, &batch.entries)
-        .await
-        .map_err(|error| (error, Durable::No))?;
-    // A power loss here tears entries no record points at yet.
-    moonpool_buggify::hint!(
-        "journal commit: entries written, not synced",
-        COMMIT_HINT_PROB
-    )
-    .await;
     let unknown = |error| (error, Durable::Unknown);
     if ordered {
+        // Each log's write is durable on return, entries first: two durable
+        // writes where a write and a sync each were four calls. A durable
+        // write covers its own blocks only, which is the whole barrier here:
+        // every earlier write to this segment is durable (each commit's
+        // writes are before it returns, open syncs every segment, a roll's
+        // headers are written durably, and a failed commit poisons the
+        // journal), and data-only durability suffices because a segment
+        // never changes size. The windows inside each write (bytes landed,
+        // not yet durable) are the storage layer's to name.
+        segment
+            .write_durable(batch.entry_at, &batch.entries)
+            .await
+            .map_err(|error| (error, Durable::No))?;
+        segment
+            .write_durable(batch.persist_at, &batch.records)
+            .await
+            .map_err(unknown)?;
+    } else {
+        // One barrier for both logs: it must cover the entries too, which a
+        // durable write of the records alone would not.
+        segment
+            .write(batch.entry_at, &batch.entries)
+            .await
+            .map_err(|error| (error, Durable::No))?;
+        // A power loss here tears entries no record points at yet.
+        moonpool_buggify::hint!(
+            "journal commit: entries written, not synced",
+            COMMIT_HINT_PROB
+        )
+        .await;
+        segment
+            .write(batch.persist_at, &batch.records)
+            .await
+            .map_err(unknown)?;
+        // The commit's window: a power loss here may tear the records,
+        // rebuild them from their entries, or leave the last batch
+        // ambiguous.
+        moonpool_buggify::hint!(
+            "journal commit: records written, not synced",
+            COMMIT_HINT_PROB
+        )
+        .await;
         segment.sync().await.map_err(unknown)?;
     }
-    segment
-        .write(batch.persist_at, &batch.records)
-        .await
-        .map_err(unknown)?;
-    // The commit's window: a power loss here may tear the records, rebuild
-    // them from their entries, or leave the last batch ambiguous.
-    moonpool_buggify::hint!(
-        "journal commit: records written, not synced",
-        COMMIT_HINT_PROB
-    )
-    .await;
-    segment.sync().await.map_err(unknown)?;
     if let Some(meta) = meta {
         // The batch is durable and the metainfo still names the old one.
         moonpool_buggify::hint!(

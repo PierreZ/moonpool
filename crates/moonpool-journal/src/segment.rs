@@ -12,7 +12,7 @@
 use moonpool_core::{BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
 
 use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, usize_of};
-use crate::io::{read_blocks, read_bytes, write_blocks};
+use crate::io::{read_blocks, read_bytes, write_blocks, write_blocks_durable};
 use crate::spare::zero_fill;
 use crate::{JournalId, OpenError};
 
@@ -125,8 +125,9 @@ impl<F: StorageFile> Segment<F> {
                 reason: "the spare is not a whole segment",
             });
         }
-        write_headers(&file, &header).await?;
-        file.sync_data().await?;
+        // The spare is zero-filled and synced whole, so the headers are its
+        // one unsynced write: making them durable alone is the full sync.
+        write_headers_durable(&file, &header).await?;
         drop(file);
         // A power loss here leaves a spare with headers: still a spare.
         moonpool_buggify::hint!(
@@ -210,8 +211,7 @@ impl<F: StorageFile> Segment<F> {
         if let Some(block) = damaged {
             let mut copy = vec![0u8; BLOCK];
             header.encode(&mut copy);
-            write_blocks(&file, block, &copy).await?;
-            file.sync_data().await?;
+            write_blocks_durable(&file, block, &copy).await?;
         }
         Ok((
             Self::fresh(
@@ -259,6 +259,15 @@ impl<F: StorageFile> Segment<F> {
         write_blocks(&self.file, offset / BLOCK_U64, bytes).await
     }
 
+    /// [`write`](Self::write), durable on return: one durable write where
+    /// `write` and `sync` are two calls. Only `bytes`' range is made
+    /// durable, so the segment must hold no other unsynced write; data-only
+    /// durability is enough because a segment never changes size.
+    pub async fn write_durable(&self, offset: u64, bytes: &[u8]) -> std::io::Result<()> {
+        assert!(offset.is_multiple_of(BLOCK_U64), "writes start on a block");
+        write_blocks_durable(&self.file, offset / BLOCK_U64, bytes).await
+    }
+
     pub async fn sync(&self) -> std::io::Result<()> {
         self.file.sync_data().await
     }
@@ -273,10 +282,23 @@ async fn write_headers<F: StorageFile>(
     file: &BlockFile<F>,
     header: &SegmentHeader,
 ) -> std::io::Result<()> {
+    write_blocks(file, 0, &header_blocks(header)).await
+}
+
+/// [`write_headers`], durable on return.
+async fn write_headers_durable<F: StorageFile>(
+    file: &BlockFile<F>,
+    header: &SegmentHeader,
+) -> std::io::Result<()> {
+    write_blocks_durable(file, 0, &header_blocks(header)).await
+}
+
+/// Both header copies, encoded: blocks 0 and 1.
+fn header_blocks(header: &SegmentHeader) -> Vec<u8> {
     let mut blocks = vec![0u8; 2 * BLOCK];
     header.encode(&mut blocks[..BLOCK]);
     header.encode(&mut blocks[BLOCK..]);
-    write_blocks(file, 0, &blocks).await
+    blocks
 }
 
 async fn open_file<P: StorageProvider>(

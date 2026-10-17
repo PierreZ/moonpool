@@ -16,7 +16,7 @@
 use moonpool_core::{BlockFile, OpenOptions, StorageFile, StorageProvider};
 
 use crate::format::{BLOCK, BLOCK_U64, META_COPY_B_AT, META_FILE_BLOCKS, Meta};
-use crate::io::{read_blocks, write_blocks};
+use crate::io::{read_blocks, write_blocks, write_blocks_durable};
 use crate::{JournalId, OpenError};
 
 pub(crate) const META_NAME: &str = "meta";
@@ -99,8 +99,7 @@ impl<F: StorageFile> MetaFile<F> {
         meta_file.sync().await?;
         let (meta, stale) = meta_file.choose(journal).await?;
         if let Some(copy) = stale {
-            meta_file.write(copy, &meta).await?;
-            meta_file.sync().await?;
+            meta_file.write_durable(copy, &meta).await?;
         }
         Ok(Some((meta_file, meta, stale.is_some())))
     }
@@ -153,20 +152,24 @@ impl<F: StorageFile> MetaFile<F> {
         Ok(Meta::decode(buf.as_slice(), copy as u8))
     }
 
-    /// Write one copy. Not durable until [`sync`](Self::sync).
-    pub async fn write(&self, copy: Copy, meta: &Meta) -> std::io::Result<()> {
+    /// Write one copy, durable on return. Only that block: the file must
+    /// hold no other unsynced write.
+    async fn write_durable(&self, copy: Copy, meta: &Meta) -> std::io::Result<()> {
         let mut block = vec![0u8; BLOCK];
         meta.encode(copy as u8, &mut block);
-        write_blocks(&self.file, copy.block(), &block).await
+        write_blocks_durable(&self.file, copy.block(), &block).await
     }
 
-    /// Replace the value: copy A, synced, then copy B, synced, so at most
-    /// one copy is ever in flight.
+    /// Replace the value: copy A, durable, then copy B, durable, so at most
+    /// one copy is ever in flight. Each copy is one durable write where a
+    /// write and a sync were two. The file never changes size, and every
+    /// write to it is durable before the call that made it returns (a failed
+    /// one poisons the journal, and the next open syncs first), so each copy
+    /// is the file's only unsynced write and data-only durability of its
+    /// block is the whole barrier.
     pub async fn update(&self, meta: &Meta) -> std::io::Result<()> {
-        self.write(Copy::A, meta).await?;
-        self.sync().await?;
-        self.write(Copy::B, meta).await?;
-        self.sync().await
+        self.write_durable(Copy::A, meta).await?;
+        self.write_durable(Copy::B, meta).await
     }
 
     pub async fn sync(&self) -> std::io::Result<()> {

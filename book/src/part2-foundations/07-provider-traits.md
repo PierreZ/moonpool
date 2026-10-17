@@ -110,6 +110,9 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     fn is_direct_io(&self) -> bool;
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> impl Future<Output = io::Result<usize>> + Send;
     fn write_at(&self, offset: u64, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send;
+    fn write_at_durable(&self, offset: u64, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
+        // default: write_at, then sync_data
+    }
     fn size(&self) -> impl Future<Output = io::Result<u64>> + Send;
     fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> + Send;
 }
@@ -119,7 +122,7 @@ The split is the rule. The **provider owns the namespace**: open, exists, delete
 
 Three distinctions the trait keeps apart, because production keeps them apart:
 
-- A completed write is **visible**, not durable. Only `sync_all` or `sync_data` makes it survive a crash.
+- A completed write is **visible**, not durable. Only `sync_all` or `sync_data` makes it survive a crash. `write_at_durable` is the one write that is durable on return, and only for its own bytes: on Linux the Tokio backend issues one `pwritev2(RWF_DSYNC)` (a FUA write on a direct-I/O file whose blocks are allocated), which flushes nothing outside its range. The default, and the simulator, run `write_at` then `sync_data`.
 - File durability is not **directory-entry** durability. After `open(create)`, `write` and `sync_all`, a crash can still leave no name pointing at the file. `sync_dir` on the parent is the call that makes the name durable, as SQLite and PostgreSQL do after a create, delete or rename.
 - `set_len` grows the readable range. It does not allocate, initialize or make the length durable.
 
