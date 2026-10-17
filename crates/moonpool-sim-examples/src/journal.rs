@@ -33,12 +33,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_journal::{
-    Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
-    OpenError, Recovery,
+    BLOCK, Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig,
+    JournalId, OpenError, Recovery,
 };
 use moonpool_sim::{
-    Process, RandomProvider, SimContext, SimStorageProvider, SimulationResult, StorageProvider,
-    TimeProvider, Workload, assert_always, assert_reachable, assert_sometimes,
+    OpenOptions, Process, RandomProvider, SimContext, SimStorageProvider, SimulationResult,
+    StorageFile, StorageProvider, TimeProvider, Workload, assert_always, assert_reachable,
+    assert_sometimes,
 };
 
 use crate::support::{invalid_state, unless_shutdown};
@@ -176,6 +177,7 @@ async fn live(ctx: &SimContext, ledger: &Ledger) -> Ended {
     } else {
         Durability::Batched
     };
+    note_spares(ctx).await;
     let provider = ctx.storage().clone();
     let opened = match Journal::open(provider.clone(), DIR, ID, config(durability)).await {
         Ok(Some(found)) => Ok(found),
@@ -195,6 +197,12 @@ async fn live(ctx: &SimContext, ledger: &Ledger) -> Ended {
         }
     };
     note_recovery(ctx, &recovery).await;
+    // Most boots prepare spare segments in the background, so a crash can
+    // land inside a preparation and a commit can roll onto a spare; the
+    // rest roll inline, as a journal without a task provider does.
+    if ctx.random().random_bool(0.75) {
+        journal.prepare_spares_with(ctx.task().clone());
+    }
     if let Err(error) = reconcile(&mut journal, ledger).await {
         return Ended::Commit(error);
     }
@@ -205,6 +213,26 @@ async fn live(ctx: &SimContext, ledger: &Ledger) -> Ended {
         let pause = Duration::from_millis(ctx.random().random_range(1..20));
         // A sleep only fails at shutdown, which the caller watches for.
         let _ = ctx.time().sleep(pause).await;
+    }
+}
+
+/// Before an open: a spare the last boot left behind, and whether a crash
+/// cut its preparation short (the open deletes it either way).
+async fn note_spares(ctx: &SimContext) {
+    let Ok(names) = ctx.storage().list_dir(DIR).await else {
+        return;
+    };
+    let geometry = Geometry::small();
+    let blocks = 2 + geometry.persist_blocks + geometry.gap_blocks + geometry.entry_blocks;
+    let whole = u64::from(blocks) * BLOCK as u64;
+    for name in names.iter().filter(|n| n.starts_with("spare-")) {
+        let path = format!("{DIR}/{name}");
+        let Ok(file) = ctx.storage().open(&path, OpenOptions::read_only()).await else {
+            continue;
+        };
+        if file.size().await.is_ok_and(|size| size < whole) {
+            assert_reachable!("a crash cut a spare segment's preparation short");
+        }
     }
 }
 
@@ -219,6 +247,9 @@ async fn note_recovery(ctx: &SimContext, recovery: &Recovery) {
     }
     if recovery.meta_repaired {
         assert_reachable!("recovery repaired a metainfo copy");
+    }
+    if recovery.spares_removed > 0 {
+        assert_reachable!("recovery deleted a spare segment");
     }
     let segments = ctx.storage().list_dir(DIR).await.map_or(0, |names| {
         names.iter().filter(|n| n.starts_with("seg-")).count()
@@ -373,7 +404,11 @@ async fn step(
         batch.set_meta(meta.clone());
     }
     ledger.with(|state| state.pending = Some(pending.clone()));
+    let rolls = journal.rolls();
     journal.commit(batch).await?;
+    if journal.rolls().onto_spare > rolls.onto_spare {
+        assert_reachable!("a commit rolled onto a prepared spare segment");
+    }
     // Acknowledged: the batch is durable.
     ledger.with(|state| {
         for (position, value) in pending.puts {

@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
-use moonpool_core::{DirectIo, TokioStorageProvider};
+use moonpool_core::{DirectIo, TokioStorageProvider, TokioTaskProvider};
 use moonpool_journal::{Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId};
 use tokio::sync::Barrier;
 
@@ -77,6 +77,15 @@ struct Args {
     /// that commit. 0 never raises it.
     #[arg(long, default_value_t = 0)]
     truncate_every: u64,
+    /// Blocks in each segment's persist log and in its entry log (no gap),
+    /// to roll often; 0 keeps the default 64 MiB segment.
+    #[arg(long, default_value_t = 0)]
+    segment_blocks: u32,
+    /// Prepare each next segment in the background (a spare), so a roll is
+    /// a header write and a rename; off, a roll zero-fills a whole segment
+    /// on the commit path.
+    #[arg(long)]
+    spares: bool,
     /// Write a time series (every 500 ms) to this CSV file.
     #[arg(long)]
     csv: Option<PathBuf>,
@@ -110,7 +119,15 @@ impl Args {
                 Fsync::Ordered => Durability::Ordered,
                 Fsync::Batched => Durability::Batched,
             },
-            geometry: Geometry::default(),
+            geometry: if self.segment_blocks == 0 {
+                Geometry::default()
+            } else {
+                Geometry {
+                    persist_blocks: self.segment_blocks,
+                    gap_blocks: 0,
+                    entry_blocks: self.segment_blocks,
+                }
+            },
             direct_io: match self.direct_io {
                 Direct::Disabled => DirectIo::Disabled,
                 Direct::Optional => DirectIo::Optional,
@@ -134,6 +151,10 @@ struct Counters {
 /// What one writer measured.
 struct WriterReport {
     histogram: Histogram<u64>,
+    /// The commits that rolled onto a prepared spare.
+    spare_rolls: Histogram<u64>,
+    /// The commits that created their new segment inline.
+    inline_rolls: Histogram<u64>,
     commits: u64,
     elapsed: Duration,
 }
@@ -142,6 +163,9 @@ fn main() -> Result<()> {
     let args = Arc::new(Args::parse());
     if args.writers == 0 || args.batch == 0 || args.duration == 0 {
         return Err("--writers, --batch and --duration must be at least 1".into());
+    }
+    if !args.config().geometry.is_valid() {
+        return Err("--segment-blocks describes no usable segment".into());
     }
     let mut probe = Batch::new();
     for position in 0..args.batch {
@@ -240,10 +264,15 @@ async fn writer(
         b"bench",
     )
     .await?;
+    if args.spares {
+        journal.prepare_spares_with(TokioTaskProvider);
+    }
     let payload = vec![0xA5_u8; args.record_size];
     let batch_len = u64::try_from(args.batch)?;
     let batch_bytes = batch_len * u64::try_from(args.record_size)?;
     let mut histogram = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+    let mut spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+    let mut inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut position = 0_u64;
     let mut commits = 0_u64;
 
@@ -259,10 +288,18 @@ async fn writer(
         }
         position += batch_len;
 
+        let rolled = journal.rolls();
         let committing = Instant::now();
         journal.commit(batch).await?;
         let latency = u64::try_from(committing.elapsed().as_micros())?;
         histogram.saturating_record(latency.max(1));
+        let now = journal.rolls();
+        if now.onto_spare != rolled.onto_spare {
+            spare_rolls.saturating_record(latency.max(1));
+        }
+        if now.inline != rolled.inline {
+            inline_rolls.saturating_record(latency.max(1));
+        }
 
         commits += 1;
         counters.commits.fetch_add(1, Ordering::Relaxed);
@@ -270,6 +307,8 @@ async fn writer(
     }
     Ok(WriterReport {
         histogram,
+        spare_rolls,
+        inline_rolls,
         commits,
         elapsed: began.elapsed(),
     })
@@ -310,11 +349,15 @@ async fn sample(
 
 fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) -> Result<()> {
     let mut merged = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+    let mut spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+    let mut inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut rates = Vec::with_capacity(reports.len());
     let mut commits = 0_u64;
     let mut longest = Duration::ZERO;
     for report in reports {
         merged.add(&report.histogram)?;
+        spare_rolls.add(&report.spare_rolls)?;
+        inline_rolls.add(&report.inline_rolls)?;
         rates.push(per_second(report.commits, report.elapsed.as_micros()));
         commits += report.commits;
         longest = longest.max(report.elapsed);
@@ -325,13 +368,15 @@ fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) ->
     let bytes = commits.saturating_mul(batch).saturating_mul(record);
 
     println!(
-        "moonpool-journal bench: writers={} record-size={}B batch={} fsync={:?} direct-io={:?} truncate-every={} duration={}s",
+        "moonpool-journal bench: writers={} record-size={}B batch={} fsync={:?} direct-io={:?} truncate-every={} segment-blocks={} spares={} duration={}s",
         args.writers,
         args.record_size,
         args.batch,
         args.fsync,
         args.direct_io,
         args.truncate_every,
+        args.segment_blocks,
+        args.spares,
         args.duration,
     );
     println!(
@@ -356,6 +401,18 @@ fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) ->
         merged.value_at_quantile(0.999),
         merged.max(),
     );
+    for (kind, rolls) in [("inline", &inline_rolls), ("onto a spare", &spare_rolls)] {
+        if !rolls.is_empty() {
+            println!(
+                "commits rolling {kind} (µs): {} of them, min {} p50 {} p99 {} max {}",
+                rolls.len(),
+                rolls.min(),
+                rolls.value_at_quantile(0.50),
+                rolls.value_at_quantile(0.99),
+                rolls.max(),
+            );
+        }
+    }
     println!(
         "fairness: {}% (per-writer commits/s: {rates:?})",
         fairness(&rates)

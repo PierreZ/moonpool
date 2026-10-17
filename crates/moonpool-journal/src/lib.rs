@@ -89,6 +89,12 @@
 //!   [`LayoutRegion`](moonpool_core::LayoutRegion) values. A simulation uses them to aim
 //!   storage faults at one structure. The position is the stripe key, so a
 //!   replicated fault pattern hits the same position on every replica.
+//! - **Spare segments.** [`Journal::prepare_spares_with`] prepares the next
+//!   segment in the background on a [`TaskProvider`](moonpool_core::TaskProvider)
+//!   once the active one is half full, so the commit that fills it rolls
+//!   with a header write and a rename instead of writing a whole segment.
+//!   [`Journal::prepare_spare`] does it inline; [`Journal::rolls`] counts
+//!   the rolls of each kind.
 //! - **Crash hints.** Each commit names three moments with
 //!   [`hint!`](moonpool_buggify::hint!): entries written but not synced, records
 //!   written but not synced, and the batch synced while the metainfo is
@@ -112,7 +118,12 @@
 //! <dir>/meta                    metainfo copy A (block 0) and copy B (block 16)
 //! <dir>/seg-<first batch>.wal   preallocated, zero-filled segments:
 //!     header A | header B | persist log | guard gap | entry log
+//! <dir>/spare-<gen>-<n>.wal     the next segment, prepared: zeros, no header
 //! ```
+//!
+//! A **spare** is never evidence: it has no header, no batch is written to
+//! it before it is renamed to a segment, and every open deletes the spares
+//! it finds ([`Recovery::spares_removed`]).
 //!
 //! The **meta file** is separate because it is the one structure rewritten in
 //! place, and it must outlive every segment (`LogCabin`, canonical/raft and
@@ -193,8 +204,11 @@ mod journal;
 mod meta;
 mod recover;
 mod segment;
+mod spare;
 
 pub use batch::Batch;
 pub use error::{CommitError, Durable, OpenError, ReadError};
 pub use format::{BLOCK, Geometry, ID_SIZE, Id, MAX_BATCH_RECORDS, META_MAX, RECORD_SIZE};
-pub use journal::{Durability, Entry, Journal, JournalConfig, JournalId, Layout, Recovery, State};
+pub use journal::{
+    Durability, Entry, Journal, JournalConfig, JournalId, Layout, Recovery, Rolls, State,
+};

@@ -171,7 +171,7 @@ Capture rule: INFO and above, constant message, inside a process or workload tas
 | `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it, and a per-process regime's timed reboots too (label `TIMED_REBOOT_LABEL`). |
 | `cpu_charge(Duration)` | Explicit CPU work under `Chaos::Cpu`. |
 
-All are no-ops in production. `moonpool-journal` shows the pattern: three `hint!` moments per commit.
+All are no-ops in production. `moonpool-journal` shows the pattern: three `hint!` moments per commit, two per roll onto a prepared spare segment and two in the spare's background preparation (a hint in a spawned task strikes the process that spawned it).
 
 ## Chaos Configuration
 

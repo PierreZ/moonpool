@@ -232,8 +232,10 @@ and under the simulator in its own `#[test]`.
 - `moonpool-journal`: a position-keyed CLSTORE journal that tells a crash
   from corruption and names the damaged entry. Positions in any order,
   `Batch::fits` / `fits_another`, `Journal::peek_meta`, metadata repair,
-  ambiguous tails, layout regions for aimed faults and `hint!` points inside
-  each commit.
+  ambiguous tails, layout regions for aimed faults, `hint!` points inside
+  each commit, and spare segments prepared in the background
+  (`Journal::prepare_spares_with`) so a segment roll is a header write and a
+  rename instead of a zero-fill on the commit path.
 
 ### Metrics (`moonpool-prometheus`)
 

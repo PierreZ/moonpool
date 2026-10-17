@@ -43,6 +43,7 @@ journal.commit(batch).await?;
 | Type or method | Role |
 |---|---|
 | `Journal<P>` | `create`, `open` (recover), `commit`, `read`, `replay`, over any `StorageProvider` |
+| `Journal::prepare_spares_with` / `prepare_spare` / `Rolls` | Prepare the next segment ahead (in the background on a `TaskProvider`, or inline), so a roll is a header write and a rename |
 | `Journal::peek_meta` | Read a closed journal's metainfo without recovery, repair or sync |
 | `Batch` | What one commit makes durable: `put`, `clear`, `truncate_prefix`, `set_meta` |
 | `Batch::fits` / `Batch::fits_another` | Whether a batch fits one segment, so the caller can split it |
@@ -80,6 +81,13 @@ copies, a persist log of 64-byte records, a guard gap, and an entry log.
 Every batch starts on a fresh 4 KiB block in both logs, so no write touches a
 sector that holds acknowledged data.
 
+`<dir>/spare-<generation>-<n>.wal` is the next segment, prepared ahead:
+full size, zero-filled and synced, with its name synced, but no header. A
+roll writes and syncs its headers, renames it to its segment name and syncs
+the directory. Every open deletes the spares it finds: no batch is ever
+written to a spare, so a spare is never evidence. The zeros are written, not
+`fallocate`d, so a commit's `fdatasync` stays a pure data sync.
+
 ## Feature flags
 
 None. The crate depends on `moonpool-core` with `default-features = false`.
@@ -96,7 +104,8 @@ filesystem.
 - crash loops under two fault models (the paper's sector-atomic model, and
   moonpool's full model with lost, latent and shorn sectors), for each
   durability mode and for a mode drawn again every round, with crashes
-  inside recovery too.
+  inside recovery and inside a spare segment's preparation, and rolls onto
+  prepared spares.
 
 `JOURNAL_CRASH_SEEDS` raises the seed count. `JOURNAL_CRASH_SEED` replays one
 seed.
@@ -114,7 +123,10 @@ cargo run -p moonpool-journal --example accept_log
 `examples/bench.rs` measures commits on the real filesystem. Each writer
 owns one journal and commits back to back for a fixed duration. It reports
 throughput, commit latency percentiles and fairness between writers, and
-`--csv` writes a time series with the page-cache dirty bytes. Run it in
+`--csv` writes a time series with the page-cache dirty bytes.
+`--segment-blocks N` shrinks the segments so they roll often, `--spares`
+prepares each next segment in the background, and the report gives the
+latency of the commits that rolled, inline and onto a spare. Run it in
 release mode on the disk under test (the default directory is under
 `target/`; tmpfs is refused), and never compare numbers across `--fsync`
 policies:
