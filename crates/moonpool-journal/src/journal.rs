@@ -1089,8 +1089,14 @@ impl<P: StorageProvider> Journal<P> {
                 }
                 Err(error) => {
                     self.poisoned = true;
+                    // The provider's own error keeps its kind, so a caller
+                    // tells a full disk (`StorageFull`) from a failing one.
+                    let error = match error {
+                        OpenError::Io(error) => error,
+                        other => std::io::Error::other(other.to_string()),
+                    };
                     return Err(CommitError::Io {
-                        error: std::io::Error::other(error.to_string()),
+                        error,
                         durable: Durable::No,
                     });
                 }

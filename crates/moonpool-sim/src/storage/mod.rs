@@ -58,7 +58,12 @@
 //!   [`LayoutRegion`](crate::LayoutRegion)s a process publishes with
 //!   [`SimStorageProvider::publish_layout`].
 //! - [`FaultContext`](crate::FaultContext) lets a custom injector corrupt
-//!   bytes, fail a file with `EIO` and read a file's durable bytes.
+//!   bytes, fail a file with `EIO`, read a file's durable bytes and give a
+//!   disk a [`DiskCapacity`], so it fills up and refuses growth with
+//!   `ENOSPC`.
+
+/// Disk capacity: a simulated disk that fills up.
+pub mod capacity;
 
 /// Storage configuration and settings
 pub mod config;
@@ -103,6 +108,9 @@ pub(crate) fn sim_shutdown_error() -> io::Error {
 
 // Re-export error
 pub use error::StorageError;
+
+// Re-export the disk capacity
+pub use capacity::DiskCapacity;
 
 // Re-export configuration
 pub use config::{StorageConfiguration, StorageFault, StorageFaultMask};

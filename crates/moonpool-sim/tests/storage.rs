@@ -65,6 +65,8 @@ mod determinism;
 mod directory;
 #[path = "storage/disk_failure.rs"]
 mod disk_failure;
+#[path = "storage/disk_full.rs"]
+mod disk_full;
 #[path = "storage/faults.rs"]
 mod faults;
 #[path = "storage/focus.rs"]

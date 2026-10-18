@@ -3,7 +3,7 @@
 
 use std::{io, time::Duration};
 
-use super::{DiskCounters, SystemProvider, SystemSample};
+use super::{DiskCounters, DiskSpace, SystemProvider, SystemSample};
 
 /// Production system provider.
 ///
@@ -13,6 +13,8 @@ use super::{DiskCounters, SystemProvider, SystemSample};
 ///   found by the major and minor numbers of its `stat()` (Linux), the
 ///   method FDB uses. `None` when no line matches, which happens on
 ///   btrfs, overlayfs and some container setups.
+/// - `space`: `statvfs()` of `data_dir` (Unix): `f_blocks` and `f_bavail`
+///   times `f_frsize`.
 /// - `run_loop_busy`: the busiest Tokio worker's busy time
 ///   (`RuntimeMetrics::worker_total_busy_duration`), on targets with 64-bit
 ///   atomics, when called from inside a Tokio runtime. Tokio adds a worker's
@@ -57,6 +59,7 @@ impl SystemProvider for TokioSystemProvider {
             machine_total,
             run_loop_busy: run_loop_busy(),
             disk: disk_counters(data_dir),
+            space: disk_space(data_dir),
         })
     }
 }
@@ -114,6 +117,35 @@ fn disk_counters(_data_dir: &str) -> Option<DiskCounters> {
     None
 }
 
+#[cfg(unix)]
+fn disk_space(data_dir: &str) -> Option<DiskSpace> {
+    let path = std::ffi::CString::new(data_dir).ok()?;
+    // SAFETY: `statvfs` only writes into the zeroed struct we own.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid NUL-terminated path and a properly sized `statvfs`.
+    let rc = unsafe { libc::statvfs(path.as_ptr(), &raw mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    let block = widen(stat.f_frsize);
+    let (blocks, available) = (widen(stat.f_blocks), widen(stat.f_bavail));
+    Some(DiskSpace {
+        total_bytes: blocks.saturating_mul(block),
+        free_bytes: available.saturating_mul(block),
+    })
+}
+
+/// The `statvfs` field widths differ per target: widen each one to `u64`.
+#[cfg(unix)]
+fn widen(value: impl Into<u64>) -> u64 {
+    value.into()
+}
+
+#[cfg(not(unix))]
+fn disk_space(_data_dir: &str) -> Option<DiskSpace> {
+    None
+}
+
 #[cfg(target_has_atomic = "64")]
 fn run_loop_busy() -> Option<Duration> {
     let handle = tokio::runtime::Handle::try_current().ok()?;
@@ -146,6 +178,8 @@ mod tests {
         assert!(second.process_cpu >= first.process_cpu);
         assert!(second.machine_total >= first.machine_total);
         assert!(second.cores >= 1);
+        let space = second.space.expect("statvfs reads the current directory");
+        assert!(space.free_bytes <= space.total_bytes);
         // Outside a Tokio runtime there is no run loop to read.
         assert_eq!(second.run_loop_busy, None);
     }

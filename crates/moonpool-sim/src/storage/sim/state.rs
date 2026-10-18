@@ -11,7 +11,7 @@ use moonpool_core::{IoConstraints, OpenOptions};
 
 use super::OperationId;
 use crate::storage::{
-    FaultFocus, FileCrashReport, FileImage, StorageConfiguration, StorageFaultRecord,
+    DiskCapacity, FaultFocus, FileCrashReport, FileImage, StorageConfiguration, StorageFaultRecord,
     faults::EligibilitySlot,
     replication::{LayoutIndex, ReplicationPlan},
 };
@@ -222,6 +222,9 @@ pub(crate) struct StorageState {
     /// [`Slowness`](crate::Slowness)): every latency of that disk is
     /// multiplied by it. A process absent here is healthy (factor 1).
     pub(crate) slow_factors: BTreeMap<IpAddr, u32>,
+    /// Per-process disk size limits (see [`DiskCapacity`]). A process absent
+    /// here has a disk with no limit.
+    pub(crate) capacities: BTreeMap<IpAddr, DiskCapacity>,
 }
 
 impl StorageState {
@@ -244,6 +247,7 @@ impl StorageState {
             clock: Duration::ZERO,
             activity: BTreeMap::new(),
             slow_factors: BTreeMap::new(),
+            capacities: BTreeMap::new(),
             eligibility: EligibilitySlot::default(),
             focus: BTreeMap::new(),
             replication: Vec::new(),
@@ -252,6 +256,16 @@ impl StorageState {
             crash_reports: Vec::new(),
             barrier_violation_armed: false,
         }
+    }
+
+    /// The bytes the files `ip` owns hold in all: every file's length, an
+    /// unlinked file still open included.
+    pub(crate) fn file_bytes(&self, ip: IpAddr) -> u64 {
+        self.files
+            .values()
+            .filter(|file| file.owner_ip == ip)
+            .map(|file| file.image.size())
+            .fold(0, u64::saturating_add)
     }
 
     pub(crate) fn config_for(&self, ip: IpAddr) -> &StorageConfiguration {

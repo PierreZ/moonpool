@@ -51,7 +51,7 @@ Storage operations return `Poll::Pending` and complete through scheduled events.
 |-----------|-------------|
 | `getrusage`, `/proc/stat`, `/proc/diskstats`, `sysconf` | `system.sample(data_dir) -> SystemSample` |
 
-`SystemProvider::sample` returns process CPU, core count, machine busy and total time, run-loop busy time and optional `DiskCounters`. In simulation it reports the CPU model's charges and the simulated disk, so an admission controller that watches its own load sees the chaos.
+`SystemProvider::sample` returns process CPU, core count, machine busy and total time, run-loop busy time, optional `DiskCounters` and optional `DiskSpace` (`statvfs`). In simulation it reports the CPU model's charges and the simulated disk, so an admission controller that watches its own load sees the chaos.
 
 ## 6. Randomness
 

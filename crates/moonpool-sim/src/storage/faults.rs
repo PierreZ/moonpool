@@ -51,6 +51,9 @@ pub enum StorageFaultKind {
     LostSyncedWrite,
     /// A crash lost an unsynced directory entry.
     DirEntryLost,
+    /// A write or a `set_len` that grew a file failed with `ENOSPC`: the
+    /// disk's [`DiskCapacity`](crate::DiskCapacity) had no room.
+    DiskFull,
 }
 
 /// One observable fault injected by the simulated disk.

@@ -162,7 +162,9 @@ pub use storage::{
 pub use storage::{TokioStorageFile, TokioStorageProvider};
 #[cfg(feature = "tokio-system")]
 pub use system::TokioSystemProvider;
-pub use system::{DiskCounters, SystemProvider, SystemSample, parse_diskstats, parse_proc_stat};
+pub use system::{
+    DiskCounters, DiskSpace, SystemProvider, SystemSample, parse_diskstats, parse_proc_stat,
+};
 pub use task::{Detach, JoinError, TaskProvider};
 #[cfg(feature = "tokio-task")]
 pub use task::{TokioJoinHandle, TokioTaskProvider};

@@ -168,6 +168,10 @@ and under the simulator in its own `#[test]`.
 - Aimed storage faults: owner-scoped, byte-range targeting through
   `LayoutRegion` and `FaultFocus`, and `replicated_storage_faults` with
   minority, striped and rolling patterns that never hit every replica.
+- Full disks: `set_disk_capacity` gives a disk a size (optionally
+  amplified), so growth past it fails with `ENOSPC` and a delete or a
+  truncate frees space. `SystemSample::space` reports the free bytes
+  (`statvfs` in production).
 - Custom faults: `fault_factory` with a `FaultInjector` and its
   `FaultContext`. `chaos_duration` closes the chaos window and opens a
   quiet recovery tail; `chaos_until_run_ends` keeps chaos on for the whole
