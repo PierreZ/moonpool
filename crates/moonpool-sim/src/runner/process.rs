@@ -205,6 +205,7 @@ impl AttritionVictims {
 ///     grace_period_ms: None,
 ///     scope: AttritionScope::PerProcess,
 ///     victims: AttritionVictims::Any,
+///     wipe_budget: None,
 /// };
 /// ```
 #[derive(Debug, Clone, PartialEq)]
@@ -266,9 +267,41 @@ pub struct Attrition {
     /// eligible processes in it. Register one [`Chaos::Attrition`](super::config::Chaos::Attrition)
     /// entry per pool to give each process group its own regime.
     pub victims: AttritionVictims,
+
+    /// An optional bound on wiped processes of the victim pool that are
+    /// not yet healed, so wipes roll through the pool instead of piling up.
+    ///
+    /// `max_dead` bounds only the processes dead at once. A
+    /// [`RebootKind::CrashAndWipe`] process restarts after its recovery
+    /// delay but comes back empty, so two wipes a few seconds apart can each
+    /// pass `max_dead: 1` and still erase two replicas of the same state.
+    /// With a [`WipeBudget`](super::wipe::WipeBudget), a wiped process stays
+    /// unhealed from the wipe decision until it heals
+    /// ([`WipeHeal`](super::wipe::WipeHeal)); while the pool holds
+    /// `max_unhealed` unhealed processes, a drawn `CrashAndWipe` becomes a
+    /// plain [`RebootKind::Crash`]. The downgrade happens after the kind is
+    /// drawn and draws nothing, on every path this regime reboots through:
+    /// timed reboots, failure-domain reboots (a group wipe counts its
+    /// size), and reboot [hints](mod@moonpool_buggify::hint).
+    ///
+    /// `None` (the default) leaves wipes bounded by `max_dead` alone, with
+    /// the draw schedule unchanged. Swarm mode copies the field through and
+    /// draws nothing for it. Scripted
+    /// [`FaultContext::reboot`](super::fault_injector::FaultContext::reboot)
+    /// wipes are never downgraded, but they count as unhealed in the pool.
+    pub wipe_budget: Option<super::wipe::WipeBudget>,
 }
 
 impl Attrition {
+    /// This regime with a [`WipeBudget`](super::wipe::WipeBudget): at most
+    /// `max_unhealed` wiped processes of the victim pool unhealed at once,
+    /// healed by `heal`. See the `wipe_budget` field.
+    #[must_use]
+    pub fn wipe_budget(mut self, max_unhealed: usize, heal: super::wipe::WipeHeal) -> Self {
+        self.wipe_budget = Some(super::wipe::WipeBudget { max_unhealed, heal });
+        self
+    }
+
     /// Choose a [`RebootKind`] based on the configured probabilities using the
     /// given random value in `[0.0, 1.0)`.
     pub(crate) fn choose_kind(&self, rand_val: f64) -> RebootKind {
@@ -414,6 +447,7 @@ mod swarm_tests {
             grace_period_ms: None,
             scope: AttritionScope::PerProcess,
             victims: AttritionVictims::Any,
+            wipe_budget: None,
         }
     }
 
@@ -492,6 +526,25 @@ mod swarm_tests {
         let _ = base().swarm_for_seed();
 
         assert_eq!(rng_call_count() - before, 6);
+    }
+
+    #[test]
+    fn swarm_copies_the_wipe_budget_and_draws_nothing_for_it() {
+        let budgeted = base().wipe_budget(1, crate::WipeHeal::Signal);
+        set_sim_seed(42);
+        let plain = base().swarm_for_seed();
+        set_sim_seed(42);
+        let before = rng_call_count();
+        let swarmed = budgeted.swarm_for_seed();
+        assert_eq!(rng_call_count() - before, 6);
+        assert_eq!(swarmed.wipe_budget, budgeted.wipe_budget);
+        assert_eq!(
+            Attrition {
+                wipe_budget: None,
+                ..swarmed
+            },
+            plain
+        );
     }
 
     fn topology(processes_per_machine: usize) -> MachineRegistry {

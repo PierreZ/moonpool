@@ -299,6 +299,9 @@ impl WorkloadOrchestrator {
         // Shared state for cross-workload publish/get communication. Event
         // timelines and invariants live on `obs` (SimulationLayer).
         let state = StateHandle::new();
+        // The run's wipe ledger: draws nothing, read only by a regime with
+        // a wipe budget.
+        crate::runner::wipe::WipeLedger::install(&state);
         let metrics = Self::build_metrics(metrics_factory, &topology.all_entities, &obs);
         let shutdown_signal = CancellationToken::new();
         let env = IterationEnv {
@@ -1279,6 +1282,11 @@ impl WorkloadOrchestrator {
                     ProcessKillKind::CrashAndWipe => {
                         sim.simulate_crash_for_process(ip, true);
                         sim.wipe_storage_for_process(ip);
+                        // A process crashing itself decided this wipe
+                        // without a fault context: count it here.
+                        if let Some(ledger) = crate::runner::wipe::WipeLedger::of(env.state) {
+                            ledger.note_wipe_kill(ip);
+                        }
                     }
                 }
                 // A held-down crash (None) schedules no restart: the process
@@ -1341,6 +1349,9 @@ impl WorkloadOrchestrator {
                 // IP is unchanged, so counters survive the reboot exactly as a
                 // real node's do across a process restart on the same host.
                 process_manager.restart(ip, &env.process_env(&weak_sim));
+                if let Some(ledger) = crate::runner::wipe::WipeLedger::of(env.state) {
+                    ledger.note_restart(ip, sim.current_time());
+                }
             }
             _ => {}
         }

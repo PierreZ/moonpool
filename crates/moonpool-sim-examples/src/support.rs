@@ -53,6 +53,7 @@ pub fn reboot_attrition(max_dead: usize, scope: AttritionScope) -> Chaos {
             grace_period_ms: None,
             scope,
             victims: AttritionVictims::Any,
+            wipe_budget: None,
         },
         mode: ChaosMode::Random,
     }

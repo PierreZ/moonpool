@@ -77,6 +77,7 @@ use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::MachineRegistry;
 use crate::runner::membership::Membership;
 use crate::runner::process::{AttritionScope, AttritionVictims, RebootKind};
+use crate::runner::wipe::WipeLedger;
 use crate::sim::{ProcessKillKind, SimWorld};
 use crate::{assert_always, assert_reachable, assert_sometimes_each};
 
@@ -511,6 +512,13 @@ impl FaultContext {
             RebootKind::Crash | RebootKind::CrashAndWipe => {
                 assert_reachable!("reboot: crash path");
                 self.mark_dead(ip_addr);
+                if kind == RebootKind::CrashAndWipe {
+                    // Unhealed from the decision, like dead: a wipe budget
+                    // checked before the kill runs must already count it.
+                    if let Some(ledger) = WipeLedger::of(&self.state) {
+                        ledger.record_wipe(ip_addr);
+                    }
+                }
                 let delay_ms = crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
                 let cause = if kind == RebootKind::CrashAndWipe {
                     ProcessKillKind::CrashAndWipe
@@ -812,6 +820,47 @@ impl AttritionInjector {
         kind
     }
 
+    /// `kind`, or [`RebootKind::Crash`] when it is a wipe of `victims`
+    /// that would pass the regime's [`WipeBudget`](super::wipe::WipeBudget)
+    /// over the victim pool `eligible`: the pool's unhealed processes other
+    /// than the victims (re-wiping an unhealed process loses nothing more),
+    /// plus the victims, must stay within `max_unhealed`. Called after the
+    /// kind is drawn; draws nothing, and without a budget returns `kind`
+    /// unread.
+    fn within_wipe_budget(
+        &self,
+        ctx: &FaultContext,
+        kind: RebootKind,
+        eligible: &[&String],
+        victims: &[&String],
+    ) -> RebootKind {
+        let Some(budget) = self.config.wipe_budget else {
+            return kind;
+        };
+        if kind != RebootKind::CrashAndWipe {
+            return kind;
+        }
+        let others: Vec<&String> = eligible
+            .iter()
+            .copied()
+            .filter(|ip| !victims.contains(ip))
+            .collect();
+        let unhealed = WipeLedger::of(ctx.state()).map_or(0, |ledger| {
+            ledger.unhealed_among(&others, budget.heal, ctx.sim.current_time())
+        });
+        if unhealed + victims.len() > budget.max_unhealed {
+            assert_reachable!("attrition: wipe budget downgrades a wipe to a crash");
+            tracing::info!(
+                unhealed,
+                victims = victims.len(),
+                max_unhealed = budget.max_unhealed,
+                "attrition: wipe budget spent, crashing instead of wiping"
+            );
+            return RebootKind::Crash;
+        }
+        kind
+    }
+
     /// Configured recovery / grace-period delay ranges, with defaults.
     fn delay_ranges(&self) -> (std::ops::Range<usize>, std::ops::Range<usize>) {
         (
@@ -876,7 +925,8 @@ impl AttritionInjector {
         if !permit() {
             return Ok(false);
         }
-        let kind = self.choose_kind();
+        let ip_string = ip.to_string();
+        let kind = self.within_wipe_budget(ctx, self.choose_kind(), &eligible, &[&ip_string]);
         let (recovery_range, grace_range) = self.delay_ranges();
         self.check_victim(ctx, ip);
         ctx.reboot_with_delays(ip, kind, &recovery_range, &grace_range)?;
@@ -894,15 +944,21 @@ impl AttritionInjector {
         }
         // Only a live process can be killed: drawing a dead one would schedule
         // a second restart for it.
-        let live: Vec<&String> = eligible.into_iter().filter(|ip| !ctx.is_dead(ip)).collect();
+        let live: Vec<&String> = eligible
+            .iter()
+            .copied()
+            .filter(|ip| !ctx.is_dead(ip))
+            .collect();
         if live.is_empty() {
             assert_reachable!("attrition: no eligible victim");
             return Ok(());
         }
-        let kind = self.choose_kind();
+        let drawn = self.choose_kind();
         let (recovery_range, grace_range) = self.delay_ranges();
         let idx = crate::sim::sim_random_range(0..live.len());
         let ip = live[idx].clone();
+        // Judged once the victim is drawn, so the draw order is unchanged.
+        let kind = self.within_wipe_budget(ctx, drawn, &eligible, &[&ip]);
         assert_sometimes_each!(
             "attrition_process_targeted",
             [("process_idx", i64::try_from(idx).unwrap_or(i64::MAX))]
@@ -959,7 +1015,8 @@ impl AttritionInjector {
             assert_reachable!("attrition: max_dead limit enforced (group)");
             return Ok(());
         }
-        let kind = self.choose_kind();
+        let victims: Vec<&String> = ips.iter().collect();
+        let kind = self.within_wipe_budget(ctx, self.choose_kind(), &eligible, &victims);
         let (recovery_range, grace_range) = self.delay_ranges();
         assert_sometimes_each!(
             "attrition_domain_targeted",

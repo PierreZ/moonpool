@@ -119,6 +119,7 @@ fn regime(max_dead: usize, victims: AttritionVictims) -> Attrition {
         grace_period_ms: None,
         scope: AttritionScope::PerProcess,
         victims,
+        wipe_budget: None,
     }
 }
 

@@ -18,6 +18,7 @@
 //! | [`outage`] | [`Outage`], [`OutageVeto`], [`OutageLanded`] |
 //! | [`gray_failure`] | [`GrayFailure`], [`GrayKinds`] |
 //! | [`hint`] | The hint sink and [`HintVeto`] |
+//! | [`wipe`] | [`WipeBudget`], [`WipeHeal`], [`WipeLedger`]: rolling wipes |
 //! | [`groups`] | [`GroupRegistry`]: process groups and their IP ranges |
 //! | [`tags`] | [`ProcessTags`], [`TagRegistry`]: round-robin tags |
 //! | [`locality`] | [`LocalityConfig`], [`MachineRegistry`]: failure-domain topology |
@@ -50,6 +51,7 @@ pub(crate) mod stall;
 pub mod tags;
 pub mod topology;
 pub(crate) mod wall_clock;
+pub mod wipe;
 pub mod workload;
 
 // Re-export main types at module level
@@ -69,4 +71,5 @@ pub use process::{Attrition, AttritionScope, AttritionVictims, Process, RebootKi
 pub use report::{SimulationMetrics, SimulationReport};
 pub use tags::{ProcessTags, TagRegistry};
 pub use topology::WorkloadTopology;
+pub use wipe::{WIPE_LEDGER_KEY, WipeBudget, WipeHeal, WipeLedger};
 pub use workload::Workload;

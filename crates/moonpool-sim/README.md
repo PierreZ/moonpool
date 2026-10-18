@@ -67,6 +67,7 @@ let reboots = Attrition {
     grace_period_ms: None,
     scope: AttritionScope::PerProcess,
     victims: AttritionVictims::Any,
+    wipe_budget: None,
 };
 
 let report = SimulationBuilder::new()
@@ -102,7 +103,7 @@ seed, so sharp single-fault configurations happen often.
 |---------|--------|
 | `Chaos::Network` | Partitions, clogs, bit flips, random closes, connect failures, clock drift, buggified delays, slow IP pairs, black holes |
 | `Chaos::Storage` | Corruption, `EIO`, misdirected and phantom writes, sync failures, short transfers, crash damage, disk stalls, disk failure |
-| `Chaos::Attrition` | Graceful reboots, crashes and wipes under a `max_dead` budget, per process group |
+| `Chaos::Attrition` | Graceful reboots, crashes and wipes under a `max_dead` budget, per process group; `.wipe_budget(..)` rolls wipes one healed process at a time |
 | `Chaos::Outage` | A whole group loses power at once; `OutageVeto` lets the harness defer it |
 | `Chaos::Cpu` | The CPU gate: each poll of a process costs time on its one core |
 | `Chaos::GrayFailure` | Machines stay alive but slow for a long window: disk, network, and CPU when `Chaos::Cpu` is on |
