@@ -1077,6 +1077,7 @@ impl SimulationBuilder {
     ///     grace_period_ms: None,
     ///     scope: AttritionScope::PerProcess,
     ///     victims: AttritionVictims::Any,
+    ///     wipe_budget: None,
     /// };
     ///
     /// let _builder = SimulationBuilder::new()
@@ -1276,6 +1277,7 @@ mod tests {
                         grace_period_ms: None,
                         scope: crate::AttritionScope::PerProcess,
                         victims: crate::AttritionVictims::Any,
+                        wipe_budget: None,
                     },
                     mode: ChaosMode::Random,
                 },

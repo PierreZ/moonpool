@@ -157,7 +157,9 @@ and under the simulator in its own `#[test]`.
   degradation and disk failure. The crash model is bounded by sync barriers,
   with an oracle for lost synced writes.
 - `Chaos::Attrition`: graceful, crash and wipe reboots under a `max_dead`
-  budget, scoped per process, machine, zone or datacenter.
+  budget, scoped per process, machine, zone or datacenter. An optional wipe
+  budget makes wipes roll: a wiped process stays unhealed until the harness
+  signals it healed, and a wipe past the budget becomes a crash.
 - `Chaos::Outage`: a correlated outage of whole process groups, with an
   optional straggler. An `OutageVeto` lets the harness defer it.
 - `Chaos::Cpu` and `Chaos::GrayFailure`: a CPU model per process and slow

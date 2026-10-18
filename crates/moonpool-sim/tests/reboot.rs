@@ -228,6 +228,7 @@ fn test_builtin_attrition() {
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
                 victims: AttritionVictims::Any,
+                wipe_budget: None,
             },
             mode: ChaosMode::Random,
         }])
@@ -583,6 +584,7 @@ fn test_attrition_timing_invariant() {
                 grace_period_ms: Some(1000..3000),
                 scope: AttritionScope::PerProcess,
                 victims: AttritionVictims::Any,
+                wipe_budget: None,
             },
             mode: ChaosMode::Random,
         }])
@@ -616,6 +618,7 @@ fn test_max_dead_limits_concurrent_kills_via_attrition() {
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
                 victims: AttritionVictims::Any,
+                wipe_budget: None,
             },
             mode: ChaosMode::Random,
         }])

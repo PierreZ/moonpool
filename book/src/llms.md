@@ -177,7 +177,7 @@ All are no-ops in production. `moonpool-journal` shows the pattern: three `hint!
 
 | Type | Construction |
 |------|--------------|
-| `Attrition` | `{ max_dead, prob_graceful, prob_crash, prob_wipe, recovery_delay_ms: None (1–10 s), grace_period_ms: None (2–5 s), scope: AttritionScope::PerProcess, victims: AttritionVictims::Any }`. `AttritionVictims::group("name")`, `::tagged("key", "value")`. |
+| `Attrition` | `{ max_dead, prob_graceful, prob_crash, prob_wipe, recovery_delay_ms: None (1–10 s), grace_period_ms: None (2–5 s), scope: AttritionScope::PerProcess, victims: AttritionVictims::Any, wipe_budget: None }`. `AttritionVictims::group("name")`, `::tagged("key", "value")`. `.wipe_budget(max_unhealed, WipeHeal::Signal \| WipeHeal::After(d))` makes wipes roll: a wiped process is unhealed until `WipeLedger::heal(ctx.state(), ip)` (or `d` after its restart), and a drawn wipe past `max_unhealed` unhealed in the pool becomes a crash. No extra draws. |
 | `Outage` | `Outage::groups(["acceptors"])`: probability 1.0, start 0–10 s, down 1–10 s, no straggler. `OutageVeto::new(\|victims\| bool).publish(ctx.state())`. |
 | `GrayFailure` | `GrayFailure::new(max_slow)`: window 0.3–1.0 of the chaos window, cpu 10–1000, disk 5–100, network 2–20, `GrayKinds::ALL`. |
 | `CpuModel` | Drawn per seed under `Chaos::Cpu`; `SimWorld::set_cpu_model` by hand. |

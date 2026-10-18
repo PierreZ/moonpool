@@ -223,6 +223,7 @@ fn per_machine_attrition_respects_group_budget() {
                 grace_period_ms: None,
                 scope: AttritionScope::PerMachine,
                 victims: AttritionVictims::Any,
+                wipe_budget: None,
             },
             mode: ChaosMode::Random,
         }])
@@ -263,6 +264,7 @@ fn per_datacenter_attrition_reboots_a_whole_region() {
                 grace_period_ms: None,
                 scope: AttritionScope::PerDatacenter,
                 victims: AttritionVictims::Any,
+                wipe_budget: None,
             },
             mode: ChaosMode::Random,
         }])

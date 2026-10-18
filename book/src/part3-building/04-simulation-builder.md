@@ -110,6 +110,7 @@ SimulationBuilder::new()
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
                 victims: AttritionVictims::Any,
+                wipe_budget: None,
             },
             mode: ChaosMode::Swarm,
         },

@@ -32,6 +32,7 @@ Attrition {
     grace_period_ms: Some(2000..5000),
     scope: AttritionScope::PerProcess,
     victims: AttritionVictims::Any,
+    wipe_budget: None,
 }
 ```
 
@@ -46,6 +47,8 @@ Attrition {
 **`scope`** is the failure domain a reboot targets. `PerProcess` kills one process. `PerMachine`, `PerZone` and `PerDatacenter` kill every collocated process together and need a `.cluster()` topology.
 
 **`victims`** is who may die at all. `AttritionVictims::Any` draws over every server process. `AttritionVictims::group("acceptor")` and `AttritionVictims::tagged("role", "voter")` narrow the pool.
+
+**`wipe_budget`** bounds the wiped processes of the pool that are not yet healed. `None` (the default) leaves wipes bounded by `max_dead` alone. [Rolling Wipes](#rolling-wipes-the-wipe-budget) explains it.
 
 ## Using Attrition
 
@@ -65,6 +68,7 @@ SimulationBuilder::new()
             grace_period_ms: None,
             scope: AttritionScope::PerProcess,
             victims: AttritionVictims::Any,
+            wipe_budget: None,
         },
         mode: ChaosMode::Random,
     }])
@@ -91,6 +95,37 @@ The injector still makes its usual draws per reboot for kind, delay and victim. 
 `max_dead` is the bridge between chaos and correctness. Without it, attrition could kill every node at once, which is chaos but not useful chaos. Set it to what your system claims to survive. Replication factor 3 tolerates one failure, so `max_dead: 1`. A system that needs 3 of 5 nodes uses `max_dead: 2`. Attrition then tests failures the system **should** survive, not failures that no design survives.
 
 The budget is per victim pool. With `AttritionVictims::Any` it is the whole cluster. With a group or tag filter it is that pool alone, so "at most one dead acceptor" means exactly that, whatever happens to the matchmakers. A reboot hint from the code (see [hint!](29-hints.md)) spends the same budget: the first regime whose filter admits the hinting process decides, and a full budget refuses the hint.
+
+## Rolling Wipes: the Wipe Budget
+
+`max_dead` counts processes that are **dead**. A wiped process is dead only during its recovery delay. It then restarts, alive but empty, long before the system has rebuilt what it lost. So two wipes a few seconds apart each pass `max_dead: 1`, and together they can erase two of three replicas. A Paxos deployment with three matchmakers lost two of them that way, 6 s apart.
+
+A wipe budget makes wipes roll through the pool, one healed process at a time:
+
+```rust
+use moonpool_sim::{WipeHeal, WipeLedger};
+
+let regime = Attrition {
+    max_dead: 1,
+    victims: AttritionVictims::group("matchmaker"),
+    ..base
+}
+.wipe_budget(1, WipeHeal::Signal); // at most one unhealed wipe
+
+// In the system under test, once a wiped node has caught up:
+WipeLedger::heal(ctx.state(), ctx.my_ip());
+```
+
+A wiped process is **unhealed** from the instant its wipe is decided until it heals. While the pool holds `max_unhealed` unhealed processes, a drawn `CrashAndWipe` becomes a plain `Crash`. A group wipe (a machine, zone or datacenter scope) counts every process of the group. A victim that is itself unhealed does not count twice, since wiping it again loses nothing more. The downgrade applies on every path the regime reboots through: timed reboots, failure-domain reboots, and [hints](29-hints.md).
+
+Two ways to heal:
+
+- **`WipeHeal::Signal`**: the harness declares a process healed with `WipeLedger::heal(state, ip)`. It returns whether the process was unhealed, so calling it on every catch-up is safe. Only the system knows when a replaced node has caught up. A process never signaled stays unhealed for the rest of the run, so every later wipe in its pool is a crash.
+- **`WipeHeal::After(duration)`**: healed that long in simulated time after the wiped process restarts. A signal heals it earlier.
+
+`WipeLedger::unhealed(state)` lists the processes wiped and not yet signaled healed.
+
+The budget costs no randomness. The kind is drawn as before, then judged against the ledger, so a seed draws the same values with or without a budget. Swarm mode copies `wipe_budget` through and draws nothing for it. Every wipe enters the ledger, including a scripted `FaultContext::reboot(ip, RebootKind::CrashAndWipe)` and a process that crashes itself with a wipe. A scripted wipe is never downgraded, but it counts against a budgeted pool it lands in.
 
 ## Role-Aware Victims: One Regime per Group
 

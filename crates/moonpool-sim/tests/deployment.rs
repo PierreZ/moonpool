@@ -354,6 +354,7 @@ fn a_retired_process_never_restarts_and_keeps_its_disk() {
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
                 victims: AttritionVictims::Any,
+                wipe_budget: None,
             },
             mode: ChaosMode::Random,
         }])
@@ -418,6 +419,7 @@ fn attrition() -> Chaos {
             grace_period_ms: Some(100..500),
             scope: AttritionScope::PerProcess,
             victims: AttritionVictims::Any,
+            wipe_budget: None,
         },
         mode: ChaosMode::Random,
     }

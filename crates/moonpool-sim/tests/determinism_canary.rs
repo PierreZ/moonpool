@@ -187,6 +187,7 @@ fn canary_is_green_under_full_chaos() {
                     grace_period_ms: None,
                     scope: AttritionScope::PerProcess,
                     victims: AttritionVictims::Any,
+                    wipe_budget: None,
                 },
                 mode: ChaosMode::Swarm,
             },

@@ -131,6 +131,7 @@
 //!     grace_period_ms: None,
 //!     scope: AttritionScope::PerProcess,
 //!     victims: AttritionVictims::Any,
+//!     wipe_budget: None,
 //! };
 //! let builder = SimulationBuilder::new()
 //!     .enable_chaos([
@@ -411,7 +412,8 @@ pub use runner::{
     MachineRegistry, Membership, MetricsHandle, OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage,
     OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SelfCrash, SimContext,
     SimulationBuilder, SimulationMetrics, SimulationReport, TIMED_REBOOT_LABEL, TagRegistry,
-    VETO_RETRY, Workload, WorkloadCount, WorkloadTopology,
+    VETO_RETRY, WIPE_LEDGER_KEY, WipeBudget, WipeHeal, WipeLedger, Workload, WorkloadCount,
+    WorkloadTopology,
 };
 
 // Application-metrics vocabulary, re-exported from moonpool-core so a
