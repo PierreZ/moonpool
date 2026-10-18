@@ -57,6 +57,20 @@ pub(crate) struct Segment<F> {
     pub live: u64,
 }
 
+/// Zero-fill a new segment file whole, write both headers and sync it.
+async fn fill_new<F: StorageFile>(
+    file: F,
+    geometry: Geometry,
+    header: &SegmentHeader,
+) -> Result<(), OpenError> {
+    let file = BlockFile::new(file, BLOCK)?;
+    zero_fill(&file, geometry.total_blocks(), &|| false).await?;
+    write_headers(&file, header).await?;
+    // Bytes and length alike: the file never changes size again.
+    file.sync().await?;
+    Ok(())
+}
+
 impl<F: StorageFile> Segment<F> {
     /// Create a fresh, empty segment for batches from `first_batch` on.
     pub async fn create<P: StorageProvider<File = F>>(
@@ -77,18 +91,19 @@ impl<F: StorageFile> Segment<F> {
         let file = provider
             .open(&temporary, OpenOptions::create_new_write().read(true))
             .await?;
-        let file = BlockFile::new(file, BLOCK)?;
-        zero_fill(&file, geometry.total_blocks(), &|| false).await?;
         let header = SegmentHeader {
             journal,
             first_batch,
             prev_batch,
             geometry,
         };
-        write_headers(&file, &header).await?;
-        // Bytes and length alike: the file never changes size again.
-        file.sync().await?;
-        drop(file);
+        if let Err(error) = fill_new(file, geometry, &header).await {
+            // Best effort: a half-filled segment holds no batch, and on a
+            // full disk its bytes are the space the next roll needs.
+            // Whatever is left is deleted by the next open.
+            let _ = provider.delete(&temporary).await;
+            return Err(error);
+        }
         provider.rename(&temporary, &path).await?;
         provider.sync_dir(dir).await?;
         let file = open_file(provider, &path, direct_io).await?;

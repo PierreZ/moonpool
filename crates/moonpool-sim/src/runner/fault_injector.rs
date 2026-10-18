@@ -330,6 +330,32 @@ impl FaultContext {
         Ok(self.sim.slowness(parse_ip(ip)?))
     }
 
+    /// Give the disk of the process at `ip` a size limit, or lift it with
+    /// `None`: it fills up and refuses growth with `ENOSPC` (see
+    /// [`SimWorld::set_disk_capacity`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn set_disk_capacity(
+        &self,
+        ip: &str,
+        capacity: Option<crate::DiskCapacity>,
+    ) -> SimulationResult<()> {
+        self.sim.set_disk_capacity(parse_ip(ip)?, capacity);
+        Ok(())
+    }
+
+    /// The space on the disk of the process at `ip`, when it has a size
+    /// limit (see [`SimWorld::disk_space`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if IP parsing fails.
+    pub fn disk_space(&self, ip: &str) -> SimulationResult<Option<crate::DiskSpace>> {
+        Ok(self.sim.disk_space(parse_ip(ip)?))
+    }
+
     /// The seed's CPU model, if it is on (see
     /// [`SimWorld::set_cpu_model`]).
     #[must_use]

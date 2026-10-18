@@ -91,6 +91,8 @@ Real disks degrade in **episodes**, which FoundationDB models with its `DiskFail
 
 A **failed disk** never answers. Every read, write, sync or `set_len` after the failure stays `Pending` for the rest of the run, like FoundationDB's `failedDisk`. The stall detector then reports a deadlock, which is the verdict: a process that cannot survive a hung disk has a bug. At most one disk is failed at a time, so a quorum never loses two members this way. A crash or wipe of the owner replaces the disk and fails the parked operations with `OperationInterrupted`. `SimWorld::fail_disk_for_process(ip)` is the scripted form.
 
+A **full disk** refuses growth. `SimWorld::set_disk_capacity(ip, Some(DiskCapacity::new(bytes)))` gives one process's disk a size: the sum of its files' lengths, an unlinked file still open included. A write past the end of a file, or a `set_len` that grows one, fails with `io::ErrorKind::StorageFull` (`ENOSPC`) when the growth does not fit, and none of its bytes land. A write inside a file's length needs no space, so a preallocated file stays writable on a full disk. Deleting or shrinking a file frees space at once. `DiskCapacity::amplified(n)` counts each byte `n` times, so an ordinary workload fills a disk during a short run. The capacity is the harness's choice, not a rate: it draws nothing, holds across a crash or a wipe, and recovery mode lifts every capacity. `SystemSample::space` reports the disk's `DiskSpace { total_bytes, free_bytes }` (`statvfs` in production), so the code under test can see the disk fill before it refuses.
+
 ## The Barrier-Bounded Crash Model
 
 A sync is the only barrier a file has. Everything written since the last one is up for grabs.

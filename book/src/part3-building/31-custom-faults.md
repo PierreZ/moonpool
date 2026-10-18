@@ -68,6 +68,7 @@ A fault factory requires `chaos_duration`. `run()` returns `SimulationError::Inv
 | `dead_count()`, `is_dead(ip)` | The budget every injector shares. |
 | `partition(a, b)`, `heal_partition(a, b)`, `is_partitioned(a, b)` | A bidirectional partition that holds until healed. |
 | `set_slowness(ip, s)`, `slowness(ip)`, `cpu_model()` | A gray failure by hand. |
+| `set_disk_capacity(ip, Some(DiskCapacity))`, `disk_space(ip)` | A disk that fills up: growth past the capacity fails with `ENOSPC`. `None` lifts it. |
 | `durable_bytes(ip, path)` | The durable bytes of one process's file, to read a layout before aiming. No draw, no simulated time. |
 | `corrupt_bytes(ip, path, range)` | Mutate exactly those bytes, durably, on that process's disk alone. |
 | `fail_file_with_eio(ip, path, sectors, target)`, `clear_file_eio(ip, path, target)` | EIO on reads, writes or both, for a sector range of one file. |

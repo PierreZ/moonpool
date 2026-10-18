@@ -38,7 +38,7 @@ Production: `moonpool = { default-features = false, features = ["tokio"] }`. Sim
 | `RandomProvider` | `random::<T>()`, `random_range(r)`, `random_ratio()`, `random_bool(p)` | `SimRandomProvider` |
 | `StorageProvider` | `open(path, OpenOptions)`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` | `SimStorageProvider` |
 | `StorageFile` | `read_at`, `write_at`, `write_at_durable` (durable on return, its range only), the zero-copy `read_at_aligned` / `write_at_aligned` / `write_at_durable_aligned` (an owned `AlignedBuf` moved in and handed back; Tokio moves it into the blocking task instead of copying through a bounce buffer; defaults to the borrowed form, which the sim keeps), `sync_all`, `sync_data`, `size`, `set_len`, `constraints()`, `is_direct_io()` | simulated file image |
-| `SystemProvider` | `sample(data_dir) -> SystemSample { at, process_cpu, cores, machine_busy, machine_total, run_loop_busy, disk: Option<DiskCounters> }` | `SimSystemProvider` |
+| `SystemProvider` | `sample(data_dir) -> SystemSample { at, process_cpu, cores, machine_busy, machine_total, run_loop_busy, disk: Option<DiskCounters>, space: Option<DiskSpace> }` | `SimSystemProvider` |
 | `Providers` | `network()`, `time()`, `task()`, `random()`, `storage()`, `system()` | `SimProviders` |
 | `Resolver` | `resolve(host_port)` | `ScriptedResolver` |
 
@@ -208,7 +208,7 @@ impl FaultInjector for Partitioner {
 |-------|---------|
 | Reboots | `reboot(ip, kind)`, `reboot_with_delays(..)`, `crash(ip)`, `crash_for(ip, down)`, `restart(ip)`, `reboot_random(kind)`, `reboot_tagged(..)`, `reboot_machine(..)`, `reboot_domain(..)`, `dead_count()`, `is_dead(ip)` |
 | Network | `partition(a, b)`, `heal_partition(a, b)`, `is_partitioned(a, b)` |
-| Storage | `durable_bytes(ip, path)`, `corrupt_bytes(..)`, `fail_file_with_eio(..)`, `clear_file_eio(..)` |
+| Storage | `durable_bytes(ip, path)`, `corrupt_bytes(..)`, `fail_file_with_eio(..)`, `clear_file_eio(..)`, `set_disk_capacity(ip, Option<DiskCapacity>)`, `disk_space(ip)` |
 | Slowness | `set_slowness(ip, Slowness)`, `slowness(ip)`, `cpu_model()` |
 | Topology | `process_ips()`, `group_registry()`, `ips_in_group(name)`, `machine_registry()` (live, owned copies), `membership()`, `membership_version()` |
 | Misc | `state()`, `random()`, `time()`, `chaos_shutdown()` |

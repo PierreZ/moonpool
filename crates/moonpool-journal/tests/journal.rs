@@ -889,3 +889,44 @@ fn acknowledged_commits_survive_a_crash() {
         }
     });
 }
+
+#[test]
+fn a_roll_on_a_full_disk_fails_as_storage_full_and_leaves_no_segment_behind() {
+    runtime().block_on(async {
+        let mut sim = sim(11);
+        let mut journal = create(&mut sim, Durability::Ordered).await;
+        journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        // Room for what the journal holds now, and not for a second segment.
+        sim.set_disk_capacity(ip(), Some(moonpool_sim::DiskCapacity::new(u64::MAX)));
+        let used = sim
+            .disk_space(ip())
+            .map(|space| u64::MAX - space.free_bytes);
+        let used = used.expect("a disk with a capacity reports its space");
+        sim.set_disk_capacity(ip(), Some(moonpool_sim::DiskCapacity::new(used + 4096)));
+        let before = names(&mut sim).await;
+
+        // Each batch takes a fresh persist block: eight per segment.
+        for position in 1..8 {
+            journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+        }
+        let mut batch = Batch::new();
+        batch.put(8, id(8, 1), payload(8, 1, 100));
+        let Err(CommitError::Io { error, .. }) = commit(&mut sim, journal, batch).await else {
+            panic!("the roll must fail on a full disk");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::StorageFull);
+        assert_eq!(
+            names(&mut sim).await,
+            before,
+            "a failed roll leaves no segment, whole or half-written"
+        );
+
+        // The disk gets room: the reopened journal rolls and keeps every
+        // batch committed before the refusal.
+        sim.set_disk_capacity(ip(), None);
+        let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        let journal = put(&mut sim, journal, &[(8, 1, 100)]).await;
+        let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+        assert_eq!(live, (0..9).collect::<Vec<_>>());
+    });
+}

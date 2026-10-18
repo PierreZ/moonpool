@@ -549,6 +549,7 @@ impl SimWorld {
             machine_total: at,
             run_loop_busy: Some(busy),
             disk: Some(inner.storage.disk_counters(ip, at)),
+            space: inner.storage.disk_space(ip),
         };
         let kept = inner.system_samples.entry(ip).or_default();
         if kept.len() == SYSTEM_SAMPLES_KEPT {
@@ -573,6 +574,42 @@ impl SimWorld {
             .get(&ip)
             .map(|kept| kept.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Give `ip`'s disk a size limit, or lift it with `None` (see
+    /// [`DiskCapacity`](crate::DiskCapacity)).
+    ///
+    /// From then on a write or `set_len` that grows one of its files past the
+    /// limit fails with `ENOSPC` and lands nothing; deleting or shrinking a
+    /// file frees space. The limit holds across a crash or a wipe of the
+    /// process. In recovery mode the call does nothing:
+    /// [`enter_recovery_mode`](Self::enter_recovery_mode) lifts every limit.
+    /// Consumes no randomness.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic, or
+    /// if the capacity's `amplification` is zero.
+    pub fn set_disk_capacity(&self, ip: IpAddr, capacity: Option<crate::DiskCapacity>) {
+        let mut inner = self.inner.write();
+        if inner.recovery_mode {
+            return;
+        }
+        inner.storage.set_disk_capacity(ip, capacity);
+    }
+
+    /// `ip`'s disk size limit, if it has one.
+    #[must_use]
+    pub fn disk_capacity(&self, ip: IpAddr) -> Option<crate::DiskCapacity> {
+        self.inner.read().storage.disk_capacity(ip)
+    }
+
+    /// The space on `ip`'s disk now, when it has a size limit: what its
+    /// [`SimSystemProvider`](crate::SimSystemProvider) samples report as
+    /// [`SystemSample::space`].
+    #[must_use]
+    pub fn disk_space(&self, ip: IpAddr) -> Option<moonpool_core::DiskSpace> {
+        self.inner.read().storage.disk_space(ip)
     }
 
     /// Whether `ip`'s disk has failed and parks every operation forever (see
@@ -739,6 +776,7 @@ impl SimWorld {
         inner.recovery_mode = true;
         inner.buggified_delay_window = BuggifiedDelayWindow::Inactive;
         // A gray failure is chaos: the quiet tail runs on healthy machines.
+        // So is a full disk: the storage cutoff below lifts every capacity.
         inner.clear_slowness();
         inner.network.disable_fault_injection();
         inner.storage.disable_fault_injection();

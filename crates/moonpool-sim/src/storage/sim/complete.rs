@@ -1,6 +1,6 @@
 //! Operation completion: reads, writes, syncs and set-length, with the faults each one can land.
 
-use std::ops::Range;
+use std::{net::IpAddr, ops::Range};
 
 use super::engine::{StorageActions, StorageCompletion, StorageEngine, misdirected_read_offset};
 use super::{
@@ -181,6 +181,14 @@ impl StorageEngine {
         } else {
             pending.offset
         };
+        // A full disk refuses growth before the disk has any other say, so a
+        // disk with room draws exactly what it drew before (see
+        // `storage::capacity`).
+        let growth = (offset + data.len() as u64).saturating_sub(file_size);
+        if !self.has_room(owner_ip, growth) {
+            let sectors = sector_range(offset, data.len());
+            return Err(self.refuse_full((owner_ip, pending.file_id), &path, sectors, actions));
+        }
 
         let landing =
             self.decide_write_landing(pending.file_id, offset, data.len(), file_size, &config);
@@ -411,7 +419,23 @@ impl StorageEngine {
         &mut self,
         pending: &PendingStorageOp,
         new_len: u64,
+        actions: &mut StorageActions,
     ) -> Result<(), StorageError> {
+        let Some((owner_ip, path, file_size)) = self
+            .state
+            .files
+            .get(&pending.file_id)
+            .map(|file| (file.owner_ip, file.path.clone(), file.image.size()))
+        else {
+            return Err(StorageError::InvalidFileHandle {
+                handle_id: pending.handle_id,
+            });
+        };
+        if !self.has_room(owner_ip, new_len.saturating_sub(file_size)) {
+            let growth = usize::try_from(new_len - file_size).unwrap_or(usize::MAX);
+            let sectors = sector_range(file_size, growth);
+            return Err(self.refuse_full((owner_ip, pending.file_id), &path, sectors, actions));
+        }
         let Some(file) = self.state.files.get_mut(&pending.file_id) else {
             return Err(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
@@ -420,6 +444,30 @@ impl StorageEngine {
         file.image.set_len(new_len);
         self.state.note_damage_changed();
         Ok(())
+    }
+
+    /// Refuse a write or `set_len` that would grow a file past its disk's
+    /// capacity: `ENOSPC`, nothing landed. `sectors` are the ones the
+    /// operation would have written or grown into.
+    fn refuse_full(
+        &mut self,
+        (owner_ip, file_id): (IpAddr, FileId),
+        path: &str,
+        sectors: Range<u64>,
+        actions: &mut StorageActions,
+    ) -> StorageError {
+        assert_reachable!("disk: a write found the disk full");
+        self.record(path, StorageFaultKind::DiskFull, Some(sectors));
+        actions.fault(SimFaultEvent::StorageWriteFault {
+            ip: owner_ip.to_string(),
+            file_id: file_id.0,
+            write_kind: "full".to_string(),
+        });
+        StorageError::Io {
+            file_id,
+            kind: std::io::ErrorKind::StorageFull,
+            message: "no space left on device (simulated disk full)".to_string(),
+        }
     }
 
     /// Land a write at `landed_at` (where the disk put it, `offset` being

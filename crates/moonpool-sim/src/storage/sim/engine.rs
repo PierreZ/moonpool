@@ -23,8 +23,9 @@ use crate::{
         wakers::{WakeBatch, WakerRegistry},
     },
     storage::{
-        EioTarget, FileCrashReport, FileImage, StorageConfiguration, StorageEligibilityMask,
-        StorageError, StorageFaultKind, StorageFaultRecord, StorageOperation, faults::FaultFocus,
+        DiskCapacity, EioTarget, FileCrashReport, FileImage, StorageConfiguration,
+        StorageEligibilityMask, StorageError, StorageFaultKind, StorageFaultRecord,
+        StorageOperation, faults::FaultFocus,
     },
 };
 
@@ -112,11 +113,53 @@ impl StorageEngine {
     /// operation past it, so a stall that started under chaos still has to be
     /// waited out. A disk that already failed stays in `failed_disks`: it has
     /// no expiry, and only a crash or wipe of its process replaces it.
+    ///
+    /// Every disk capacity is lifted too (see
+    /// [`DiskCapacity`]): a full disk is chaos,
+    /// and the quiet tail runs on disks with room.
     pub(crate) fn disable_fault_injection(&mut self) {
         self.state.config.disable_fault_injection();
         for config in self.state.per_process_configs.values_mut() {
             config.disable_fault_injection();
         }
+        self.state.capacities.clear();
+    }
+
+    /// Give `ip`'s disk a size limit, or lift it with `None`.
+    pub(crate) fn set_disk_capacity(&mut self, ip: IpAddr, capacity: Option<DiskCapacity>) {
+        match capacity {
+            Some(capacity) => {
+                assert!(
+                    capacity.amplification >= 1,
+                    "a disk counts each byte at least once"
+                );
+                self.state.capacities.insert(ip, capacity);
+            }
+            None => {
+                self.state.capacities.remove(&ip);
+            }
+        }
+    }
+
+    /// `ip`'s disk size limit, if it has one.
+    pub(crate) fn disk_capacity(&self, ip: IpAddr) -> Option<DiskCapacity> {
+        self.state.capacities.get(&ip).copied()
+    }
+
+    /// The space on `ip`'s disk, when it has a size limit.
+    pub(crate) fn disk_space(&self, ip: IpAddr) -> Option<moonpool_core::DiskSpace> {
+        let capacity = self.disk_capacity(ip)?;
+        Some(capacity.space(self.state.file_bytes(ip)))
+    }
+
+    /// Whether growing a file of `owner_ip`'s by `growth` bytes fits its
+    /// disk. Draws nothing: a disk with no limit always has room.
+    pub(super) fn has_room(&self, owner_ip: IpAddr, growth: u64) -> bool {
+        if growth == 0 {
+            return true;
+        }
+        self.disk_capacity(owner_ip)
+            .is_none_or(|capacity| capacity.fits(self.state.file_bytes(owner_ip), growth))
     }
 
     pub(crate) fn disk_episode_for(&self, ip: IpAddr) -> Option<DiskDegradationState> {
@@ -1117,7 +1160,7 @@ impl StorageEngine {
                 .complete_sync(&pending, &mut actions)
                 .map(|()| StorageCompletion::Unit),
             (PendingOpType::SetLen, StorageOperation::SetLenComplete { new_len }) => self
-                .complete_set_len(&pending, new_len)
+                .complete_set_len(&pending, new_len, &mut actions)
                 .map(|()| StorageCompletion::Unit),
             _ => Err(StorageError::InvalidOperation {
                 operation_id: event.operation_id(),

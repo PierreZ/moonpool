@@ -153,7 +153,7 @@ pub trait SystemProvider: Clone + Send + Sync + 'static {
 }
 ```
 
-A `SystemSample` carries the instant `at`, `process_cpu`, the usable `cores`, `machine_busy` and `machine_total`, the run loop's busy time, and the `DiskCounters` of the device that holds `data_dir`: `io_ticks` (time with at least one I/O in flight), `in_flight`, completed `reads` and `writes`, their bytes and their times. The provider does no arithmetic. Every counter only grows, so a counter that goes back tells the caller the window is not valid.
+A `SystemSample` carries the instant `at`, `process_cpu`, the usable `cores`, `machine_busy` and `machine_total`, the run loop's busy time, and the `DiskCounters` of the device that holds `data_dir`: `io_ticks` (time with at least one I/O in flight), `in_flight`, completed `reads` and `writes`, their bytes and their times. `space` is the `DiskSpace` of the filesystem that holds `data_dir` (`statvfs`: `total_bytes` and the `free_bytes` an unprivileged writer may use), or, in simulation, of a disk given a capacity. The provider does no arithmetic. Every counter only grows, so a counter that goes back tells the caller the window is not valid.
 
 **Production**: `TokioSystemProvider` reads `getrusage(RUSAGE_SELF)`, `/proc/stat` and the `/proc/diskstats` line whose major and minor numbers match `stat(data_dir)`. On btrfs, overlayfs and some containers no line matches, so `disk` is `None`. The run loop's busy time is the busiest tokio worker's. Remember that `io_ticks` is iostat's `%util`: on flash and RAID it reaches 100% long before the device runs out of throughput.
 

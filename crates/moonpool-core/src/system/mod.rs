@@ -60,6 +60,24 @@ pub struct SystemSample {
     /// Counters of the disk that holds the data directory. `None` when the
     /// device is not known (an overlay or btrfs mount, another OS).
     pub disk: Option<DiskCounters>,
+    /// Space on the filesystem that holds the data directory. `None` when it
+    /// cannot be read (another OS), or, in simulation, when the disk has no
+    /// capacity limit.
+    pub space: Option<DiskSpace>,
+}
+
+/// Space on the filesystem that holds a directory, as `statvfs` reports it.
+///
+/// `free_bytes` is the space an unprivileged writer may still use
+/// (`f_bavail`), so a disk with only its reserved blocks left reads as full.
+/// A write that needs more than `free_bytes` fails with
+/// [`io::ErrorKind::StorageFull`] (`ENOSPC`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskSpace {
+    /// Size of the filesystem.
+    pub total_bytes: u64,
+    /// Bytes a write may still use.
+    pub free_bytes: u64,
 }
 
 /// Cumulative counters of one disk, as in `/proc/diskstats`.
