@@ -77,7 +77,28 @@ The task API mirrors what the orchestrator, and your process or workload code th
 | dropping the `Runtime` | dropping the `Executor` cancels every live task |
 | `tokio::select!` | `moonpool_sim::select!` (tokio's own expansion, seeded start offset) |
 
-Spawned futures stay `Send + 'static`. Execution is one OS thread, but the bounds let application code use `Arc<RwLock<…>>` and `DashMap` without contortion.
+Spawned futures stay `Send + 'static` through `spawn_task`. Execution is one OS thread, but the bounds let application code use `Arc<RwLock<…>>` and `DashMap` without contortion.
+
+## Local Tasks
+
+Some code holds `Rc<RefCell<…>>` and never leaves its thread. `executor::spawn_local` and `spawn_owned_local` sit beside the `Send` twins for it, and `SimTaskProvider` exposes them as `LocalTaskProvider::spawn_local`. Inside a `Process`, `ctx.task().spawn_local("name", async move { … })` works with `Rc` state.
+
+A local task is not a second scheduler. It is built on `async_task::Builder::spawn_local`, joins the same seeded ready queue and carries the same `TaskMeta`. Reboots cancel it through the same scope, and a panic is captured the same way. Each poll checks that it runs on the spawning thread, which is always true here. The `Send` path is untouched, so recorded seeds and explorer recipes do not shift.
+
+`Process` and `Workload` stay `Send`. To run a `!Send` body, spawn it from the `Send` `run` shell with `spawn_local` and await the handle:
+
+```rust,ignore
+async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+    let handle = ctx.task().spawn_local("node-body", async move {
+        let state = Rc::new(RefCell::new(NodeState::default()));
+        serve(state).await;
+    });
+    let _ = handle.await;
+    Ok(())
+}
+```
+
+A `?Send` `LocalProcess` trait is a planned follow-up.
 
 Panic handling has two layers. A task spawned with `executor::spawn` records its panic in its own `JoinHandle`. A task spawned through `ctx.task().spawn_task()` carries one more contract: the runner records an unobserved child panic with its process or workload identity, as an `unobserved_task_panic` event, and marks the seed as failed. If the caller awaits the handle and handles `Err(JoinError::Panicked)`, the panic is observed and the seed can recover. Dropping or detaching the handle leaves the panic unobserved. A process's tasks are also bound to the **scope** of its boot: when the process is killed, every task it spawned, however deep, is dropped with it. That drop is cancellation, not a panic.
 

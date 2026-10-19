@@ -4,7 +4,7 @@ Deterministic simulation testing for distributed systems in Rust.
 
 We write the system once against provider traits. In tests, the simulator
 runs it on logical time, one seeded random stream and a simulated network
-and disk, and injects faults. In production, the same code runs on Tokio.
+and disk, and injects faults. In production, the same code runs on Tokio, or on compio for thread-per-core.
 One seed gives one exact execution, so every failure replays bit for bit.
 
 Moonpool follows [FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html),
@@ -18,7 +18,7 @@ Shipped code is never wrapped in a simulation variant. There is no `SimDisk`,
 no `SimMachine` and no test-only hook in the product.
 
 - Code depends on provider traits, usually through one `Providers` bundle:
-  `TokioProviders` in production, `SimProviders` in tests.
+  `TokioProviders` (or `CompioProviders`) in production, `SimProviders` in tests.
 - Code names interesting moments with `hint!("label").await`. In production
   it is a no-op. In simulation the simulator decides whether to strike there,
   for example by rebooting the process.
@@ -117,6 +117,12 @@ and under the simulator in its own `#[test]`.
   `Providers`.
 - `TokioProviders` for production, with granular `tokio-*` features.
   `SimProviders` for simulation.
+- `LocalTaskProvider` and `LocalProviders` for `!Send` tasks (`Rc`,
+  `RefCell`), plus `TimeProvider::timeout_local`. The simulator,
+  `TokioLocalProviders` and `CompioProviders` implement them. The
+  work-stealing `TokioProviders` does not.
+- `CompioProviders` (`moonpool-compio`, feature `compio`): thread-per-core
+  production on io_uring with a polling fallback.
 - `Resolver` for `host:port` lookups, outside the bundle: `TokioResolver` in
   production, `ScriptedResolver` in simulation.
 - `SystemProvider` reads cumulative CPU and disk counters (`getrusage`,
@@ -271,8 +277,9 @@ and under the simulator in its own `#[test]`.
 
 | Crate | Purpose | Published |
 |-------|---------|-----------|
-| `moonpool` | Facade: features `sim`, `tokio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt` | yes |
-| `moonpool-core` | Provider traits, `TokioProviders`, storage and metrics types | yes |
+| `moonpool` | Facade: features `sim`, `tokio`, `compio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt` | yes |
+| `moonpool-core` | Provider traits, `TokioProviders`, local spawn traits, storage and metrics types | yes |
+| `moonpool-compio` | Providers on compio for thread-per-core deployment | yes |
 | `moonpool-sim` | Simulator, runner, chaos, assertion macros | yes |
 | `moonpool-buggify` | `buggify!`, `hint!`, `cpu_charge`; zero dependencies | yes |
 | `moonpool-assertions` | Assertion accounting; zero dependencies, wasm-clean | yes |
@@ -300,7 +307,7 @@ moonpool = { version = "0.8", default-features = false, features = ["tokio"] }
 This pulls the provider traits and `TokioProviders` with real TCP and
 filesystem implementations, without `moonpool-sim`, `moonpool-explorer` or
 the fork machinery. Add `hyper`, `prometheus` or `rpc` when the application
-uses them. A crate that only marks fault sites can depend on
+uses them, or `compio` for a thread-per-core deployment on `CompioProviders`. A crate that only marks fault sites can depend on
 `moonpool-buggify` alone.
 
 ## Development

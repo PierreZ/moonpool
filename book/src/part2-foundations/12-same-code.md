@@ -16,7 +16,7 @@ The same rule applies to your code. A process in a simulation is your server, bu
 
 Three things let one implementation serve both worlds.
 
-**Providers carry the I/O.** The code depends on `P: Providers`, never on tokio. In production `main` builds `TokioProviders::new()`. In a simulation the runner hands a `SimProviders` to each process and workload through `ctx.providers()`. [The Provider Pattern](./04-provider-pattern.md) covers this. moonpool-rpc and moonpool-hyper follow the same rule: both are generic over `P: Providers`, ship no providers, and never depend on moonpool-sim.
+**Providers carry the I/O.** The code depends on `P: Providers`, never on tokio. In production `main` builds `TokioProviders::new()`, or `CompioProviders::new()` for a thread-per-core binary. In a simulation the runner hands a `SimProviders` to each process and workload through `ctx.providers()`. [The Provider Pattern](./04-provider-pattern.md) covers this. moonpool-rpc and moonpool-hyper follow the same rule: both are generic over `P: Providers`, ship no providers, and never depend on moonpool-sim.
 
 **The code names moments, the simulator strikes.** Some faults are best placed by the code that knows the moment. A journal knows the instant where its entries are written but not synced. The code names that moment with `hint!` from moonpool-buggify:
 
@@ -69,7 +69,7 @@ moonpool-sim = "0.8.0"
 moonpool = { version = "0.8.0", default-features = false, features = ["tokio"] }
 ```
 
-`tokio` enables core's `tokio-providers` and `select`, so `TokioProviders` and `moonpool::select!` are there. `sim` is off, so moonpool-sim and moonpool-explorer are absent from the dependency tree. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt` are opt-in on top of either configuration.
+`tokio` enables core's `tokio-providers` and `select`, so `TokioProviders`, `TokioLocalProviders` and `moonpool::select!` are there. The opt-in `compio` feature adds `moonpool-compio` and `CompioProviders`. `sim` is off, so moonpool-sim and moonpool-explorer are absent from the dependency tree. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt` are opt-in on top of either configuration.
 
 ## The select! Asymmetry
 

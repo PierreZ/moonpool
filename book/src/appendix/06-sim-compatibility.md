@@ -18,7 +18,9 @@ Use this list when you bring an existing crate into a moonpool simulation. Deter
 | Forbidden | Use instead |
 |-----------|-------------|
 | `std::thread::spawn`, OS threads | `task.spawn_task(name, fut)` |
-| `tokio::task::spawn_local`, `tokio::task::LocalSet` | `task.spawn_task(name, fut)` (Send-bounded) |
+| `tokio::task::spawn_local`, `tokio::task::LocalSet` | `ctx.task().spawn_local(name, fut)` for `!Send` futures, else `task.spawn_task(name, fut)` |
+| `compio::runtime::spawn` | `task.spawn_task(name, fut)`, or `spawn_local` for `!Send` futures |
+| `compio::time::sleep` | `time.sleep(duration)` |
 | `tokio::spawn` | `task.spawn_task(name, fut)`, or `moonpool_sim::executor::spawn(name, fut)` in sim-only code |
 | `tokio::select!` | `moonpool_sim::select!` or `moonpool::select!` (same grammar) |
 
