@@ -1,5 +1,5 @@
 //! A duration-based write benchmark for the journal on the real filesystem,
-//! through `TokioStorageProvider`. It measures; it changes nothing.
+//! on tokio or on compio. It measures; it changes nothing.
 //!
 //! Each writer task owns one journal in its own directory, as one acceptor
 //! or one tenant would: `Journal::commit` takes `&mut self`, so a journal has
@@ -15,18 +15,38 @@
 //!
 //! Every commit syncs: `--fsync ordered` is two syncs per commit,
 //! `--fsync batched` one. Never compare numbers across fsync policies.
-//! `TokioStorageProvider` runs file I/O on Tokio's blocking pool, so the
-//! numbers include that hand-off.
+//!
+//! # Runtimes
+//!
+//! The measurement is generic over the provider bundle, so `--runtime`
+//! switches the storage backend and nothing else; compare runs with
+//! identical flags.
+//!
+//! - `--runtime tokio` (the default) runs on `TokioProviders` and a
+//!   multi-thread tokio runtime with one worker thread per writer, or
+//!   `--threads N`. `TokioStorageProvider` runs file I/O on Tokio's blocking
+//!   pool, so the numbers include that hand-off.
+//! - `--runtime compio` runs on `CompioProviders`: positioned I/O is
+//!   `io_uring` (epoll when the kernel refuses `io_uring`; the report names the
+//!   driver), durable writes are a write plus `sync_data` (compio has no
+//!   per-write `RWF_DSYNC`), and there is no blocking-pool hand-off. With
+//!   `--threads 1` (the default) everything runs on one compio runtime. With
+//!   `--threads N` the writers are spread over N threads, one compio runtime
+//!   each (thread-per-core), and the main thread's own runtime keeps the
+//!   clock and the `--csv` sampler.
 //!
 //! Run it in release mode, on the disk under test (the default directory is
 //! under `target/`, never `/tmp`, which can be tmpfs):
 //!
 //! ```text
-//! cargo run --release -p moonpool-journal --example bench -- \
+//! cargo run --release -p moonpool-journal-bench -- \
+//!     --writers 4 --record-size 4096 --batch 1 --fsync ordered --duration 10
+//! cargo run --release -p moonpool-journal-bench -- --runtime compio --threads 4 \
 //!     --writers 4 --record-size 4096 --batch 1 --fsync ordered --duration 10
 //! ```
 
 use std::fmt::Write as _;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -34,9 +54,10 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
-use moonpool_core::{DirectIo, TokioStorageProvider, TokioTaskProvider};
+use moonpool_compio::CompioProviders;
+use moonpool_core::{Detach, DirectIo, Providers, TaskProvider, TimeProvider, TokioProviders};
 use moonpool_journal::{Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId};
-use tokio::sync::Barrier;
+use tokio::sync::{Barrier, oneshot};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -92,6 +113,14 @@ struct Args {
     /// Keep the journals on disk after the run.
     #[arg(long)]
     keep: bool,
+    /// The async runtime, and so the storage backend, the journals run on.
+    #[arg(long, value_enum, default_value_t = Runtime::Tokio)]
+    runtime: Runtime,
+    /// OS threads for the writers: tokio's worker threads (default: one per
+    /// writer), or compio runtimes, one per thread, sharing the writers
+    /// (default: 1, and never more than the writers).
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -110,6 +139,14 @@ enum Direct {
     Optional,
     /// `O_DIRECT` or fail.
     Required,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Runtime {
+    /// `TokioProviders` on a multi-thread tokio runtime.
+    Tokio,
+    /// `CompioProviders` on one compio runtime per thread.
+    Compio,
 }
 
 impl Args {
@@ -148,6 +185,26 @@ struct Counters {
     bytes: AtomicU64,
 }
 
+/// What the writers and the coordinating task share, across threads.
+#[derive(Clone)]
+struct Shared {
+    start: Arc<Barrier>,
+    stop: Arc<AtomicBool>,
+    counters: Arc<Counters>,
+}
+
+impl Shared {
+    fn new(writers: usize) -> Self {
+        Self {
+            // The writers and the coordinating task: everyone starts once
+            // every journal exists.
+            start: Arc::new(Barrier::new(writers + 1)),
+            stop: Arc::new(AtomicBool::new(false)),
+            counters: Arc::new(Counters::default()),
+        }
+    }
+}
+
 /// What one writer measured.
 struct WriterReport {
     histogram: Histogram<u64>,
@@ -159,10 +216,14 @@ struct WriterReport {
     elapsed: Duration,
 }
 
+/// A writer's report, sent back from its task (a provider's join handle
+/// carries no value).
+type ReportReceiver = oneshot::Receiver<Result<WriterReport>>;
+
 fn main() -> Result<()> {
     let args = Arc::new(Args::parse());
-    if args.writers == 0 || args.batch == 0 || args.duration == 0 {
-        return Err("--writers, --batch and --duration must be at least 1".into());
+    if args.writers == 0 || args.batch == 0 || args.duration == 0 || args.threads == Some(0) {
+        return Err("--writers, --batch, --duration and --threads must be at least 1".into());
     }
     if !args.config().geometry.is_valid() {
         return Err("--segment-blocks describes no usable segment".into());
@@ -194,89 +255,233 @@ fn main() -> Result<()> {
         remove_if_present(&args.writer_dir(index))?;
     }
 
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(args.writers)
-        .enable_all()
-        .build()?;
-    let reports = runtime.block_on(run(Arc::clone(&args)))?;
+    let (reports, runtime) = match args.runtime {
+        Runtime::Tokio => run_tokio(&args)?,
+        Runtime::Compio => run_compio(&args)?,
+    };
 
     if !args.keep {
         for index in 0..args.writers {
             remove_if_present(&args.writer_dir(index))?;
         }
     }
-    print_report(&args, fs_type.as_deref(), &reports)
+    print_report(&args, fs_type.as_deref(), &runtime, &reports)
 }
 
-async fn run(args: Arc<Args>) -> Result<Vec<WriterReport>> {
-    let counters = Arc::new(Counters::default());
-    let stop = Arc::new(AtomicBool::new(false));
-    // The writers and this task: everyone starts once every journal exists.
-    let start = Arc::new(Barrier::new(args.writers + 1));
-    let mut writers = Vec::with_capacity(args.writers);
-    for index in 0..args.writers {
-        writers.push(tokio::spawn(writer(
-            Arc::clone(&args),
-            index,
-            Arc::clone(&start),
-            Arc::clone(&stop),
-            Arc::clone(&counters),
-        )));
-    }
-    start.wait().await;
-    let began = Instant::now();
-    let sampler = args.csv.clone().map(|path| {
-        tokio::spawn(sample(
-            path,
-            began,
-            Arc::clone(&stop),
-            Arc::clone(&counters),
-        ))
-    });
-    tokio::time::sleep(Duration::from_secs(args.duration)).await;
-    stop.store(true, Ordering::Relaxed);
+/// Every writer on one multi-thread tokio runtime. Returns the reports and
+/// the runtime line of the report.
+fn run_tokio(args: &Arc<Args>) -> Result<(Vec<WriterReport>, String)> {
+    let threads = args.threads.unwrap_or(args.writers);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(threads)
+        .enable_all()
+        .build()?;
+    let reports = runtime.block_on(async { run(&TokioProviders::new(), args).await })?;
+    Ok((reports, format!("tokio, {threads} worker threads")))
+}
 
-    let mut reports = Vec::with_capacity(args.writers);
-    for writer in writers {
-        reports.push(writer.await??);
+/// The writers on `--threads` compio runtimes, one per thread. Returns the
+/// reports and the runtime line of the report.
+fn run_compio(args: &Arc<Args>) -> Result<(Vec<WriterReport>, String)> {
+    let threads = args.threads.unwrap_or(1).min(args.writers);
+    let runtime = compio::runtime::Runtime::new()?;
+    let label = format!(
+        "compio ({:?} driver), {threads} thread{}",
+        runtime.driver_type(),
+        if threads == 1 { "" } else { "s" },
+    );
+    let reports = if threads == 1 {
+        runtime.block_on(run(&CompioProviders::new(), args))?
+    } else {
+        run_compio_threads(&runtime, args, threads)?
+    };
+    Ok((reports, label))
+}
+
+/// Thread-per-core: `threads` threads, each with its own compio runtime and
+/// its share of the writers; `runtime` (the main thread's) keeps the clock
+/// and the sampler.
+fn run_compio_threads(
+    runtime: &compio::runtime::Runtime,
+    args: &Arc<Args>,
+    threads: usize,
+) -> Result<Vec<WriterReport>> {
+    let shared = Shared::new(args.writers);
+    let mut handles = Vec::with_capacity(threads);
+    for (thread, indices) in split(args.writers, threads).into_iter().enumerate() {
+        let (args, shared) = (Arc::clone(args), shared.clone());
+        handles.push(
+            std::thread::Builder::new()
+                .name(format!("bench-compio-{thread}"))
+                .spawn(move || -> Result<Vec<WriterReport>> {
+                    compio::runtime::Runtime::new()?.block_on(async {
+                        collect(spawn_writers(
+                            &CompioProviders::new(),
+                            &args,
+                            indices,
+                            &shared,
+                        ))
+                        .await
+                    })
+                })?,
+        );
     }
-    if let Some(sampler) = sampler {
-        sampler.await??;
+    let coordinated = runtime.block_on(coordinate(&CompioProviders::new(), args, &shared));
+    let mut reports = Vec::with_capacity(args.writers);
+    for handle in handles {
+        reports.extend(handle.join().map_err(|_| "a writer thread panicked")??);
+    }
+    coordinated?;
+    Ok(reports)
+}
+
+/// The writer indices of each of `threads` threads: contiguous, and the
+/// first `writers % threads` threads take one more.
+fn split(writers: usize, threads: usize) -> Vec<Range<usize>> {
+    let (each, extra) = (writers / threads, writers % threads);
+    let mut next = 0;
+    (0..threads)
+        .map(|thread| {
+            let len = each + usize::from(thread < extra);
+            let indices = next..next + len;
+            next += len;
+            indices
+        })
+        .collect()
+}
+
+/// Every writer and the clock on the runtime `providers` runs on.
+async fn run<P: Providers>(providers: &P, args: &Arc<Args>) -> Result<Vec<WriterReport>> {
+    let shared = Shared::new(args.writers);
+    let writers = spawn_writers(providers, args, 0..args.writers, &shared);
+    coordinate(providers, args, &shared).await?;
+    collect(writers).await
+}
+
+/// Spawn the writers `indices` as tasks of `providers`.
+fn spawn_writers<P: Providers>(
+    providers: &P,
+    args: &Arc<Args>,
+    indices: Range<usize>,
+    shared: &Shared,
+) -> Vec<ReportReceiver> {
+    indices
+        .map(|index| {
+            let (sender, receiver) = oneshot::channel();
+            let report = writer(providers.clone(), Arc::clone(args), index, shared.clone());
+            providers
+                .task()
+                .spawn_task(&format!("writer-{index}"), async move {
+                    // The receiver is gone only when the run already failed.
+                    let _ = sender.send(report.await);
+                })
+                .detach();
+            receiver
+        })
+        .collect()
+}
+
+/// Wait for every writer's report.
+async fn collect(receivers: Vec<ReportReceiver>) -> Result<Vec<WriterReport>> {
+    let mut reports = Vec::with_capacity(receivers.len());
+    for receiver in receivers {
+        reports.push(
+            receiver
+                .await
+                .map_err(|_| "a writer task ended without a report")??,
+        );
     }
     Ok(reports)
 }
 
-async fn writer(
+/// Start the writers together, run the sampler, and stop the writers after
+/// `--duration`.
+async fn coordinate<P: Providers>(providers: &P, args: &Args, shared: &Shared) -> Result<()> {
+    shared.start.wait().await;
+    let began = Instant::now();
+    let sampler = args.csv.clone().map(|path| {
+        let (sender, receiver) = oneshot::channel();
+        let sample = sample(
+            providers.time().clone(),
+            path,
+            began,
+            Arc::clone(&shared.stop),
+            Arc::clone(&shared.counters),
+        );
+        providers
+            .task()
+            .spawn_task("sampler", async move {
+                // The receiver is gone only when the run already failed.
+                let _ = sender.send(sample.await);
+            })
+            .detach();
+        receiver
+    });
+    let slept = providers
+        .time()
+        .sleep(Duration::from_secs(args.duration))
+        .await;
+    // Stop the writers even when the clock failed, so nothing waits forever.
+    shared.stop.store(true, Ordering::Relaxed);
+    slept?;
+    if let Some(sampler) = sampler {
+        sampler
+            .await
+            .map_err(|_| "the sampler ended without a result")??;
+    }
+    Ok(())
+}
+
+async fn writer<P: Providers>(
+    providers: P,
     args: Arc<Args>,
     index: usize,
-    start: Arc<Barrier>,
-    stop: Arc<AtomicBool>,
-    counters: Arc<Counters>,
+    shared: Shared,
 ) -> Result<WriterReport> {
-    let dir = args.writer_dir(index);
-    let dir = dir.to_str().ok_or("path is not UTF-8")?;
-    let id = JournalId(u128::try_from(index)? + 1);
-    let mut journal = Journal::create(
-        TokioStorageProvider::new(),
-        dir,
-        id,
-        args.config(),
-        b"bench",
-    )
-    .await?;
-    if args.spares {
-        journal.prepare_spares_with(TokioTaskProvider);
+    let Shared {
+        start,
+        stop,
+        counters,
+    } = shared;
+    // Setup errors wait for the barrier too, so one failed writer cannot
+    // leave the others (and the clock) waiting for it forever.
+    let setup = async {
+        let dir = args.writer_dir(index);
+        let dir = dir.to_str().ok_or("path is not UTF-8")?;
+        let id = JournalId(u128::try_from(index)? + 1);
+        let mut journal = Journal::create(
+            providers.storage().clone(),
+            dir,
+            id,
+            args.config(),
+            b"bench",
+        )
+        .await?;
+        if args.spares {
+            journal.prepare_spares_with(providers.task().clone());
+        }
+        let batch_len = u64::try_from(args.batch)?;
+        let batch_bytes = batch_len * u64::try_from(args.record_size)?;
+        let histogram = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+        let spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+        let inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+        Ok::<_, Error>((
+            journal,
+            batch_len,
+            batch_bytes,
+            histogram,
+            spare_rolls,
+            inline_rolls,
+        ))
     }
+    .await;
+    start.wait().await;
+    let (mut journal, batch_len, batch_bytes, mut histogram, mut spare_rolls, mut inline_rolls) =
+        setup?;
     let payload = vec![0xA5_u8; args.record_size];
-    let batch_len = u64::try_from(args.batch)?;
-    let batch_bytes = batch_len * u64::try_from(args.record_size)?;
-    let mut histogram = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
-    let mut spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
-    let mut inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut position = 0_u64;
     let mut commits = 0_u64;
 
-    start.wait().await;
     let began = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let mut batch = Batch::new();
@@ -316,7 +521,8 @@ async fn writer(
 
 /// Every [`SAMPLE_EVERY`] until `stop`: one CSV row with the rates since the
 /// last row and the page-cache dirty bytes, written out at the end.
-async fn sample(
+async fn sample<T: TimeProvider>(
+    time: T,
     path: PathBuf,
     began: Instant,
     stop: Arc<AtomicBool>,
@@ -324,11 +530,9 @@ async fn sample(
 ) -> Result<()> {
     let mut csv =
         String::from("elapsed_ms,commits_per_s,bytes_per_s,total_commits,total_bytes,dirty_kb\n");
-    let mut ticks = tokio::time::interval(SAMPLE_EVERY);
-    ticks.tick().await;
     let (mut last_at, mut last_commits, mut last_bytes) = (began, 0, 0);
     while !stop.load(Ordering::Relaxed) {
-        ticks.tick().await;
+        time.sleep(SAMPLE_EVERY).await?;
         let now = Instant::now();
         let commits = counters.commits.load(Ordering::Relaxed);
         let bytes = counters.bytes.load(Ordering::Relaxed);
@@ -347,7 +551,12 @@ async fn sample(
     Ok(())
 }
 
-fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) -> Result<()> {
+fn print_report(
+    args: &Args,
+    fs_type: Option<&str>,
+    runtime: &str,
+    reports: &[WriterReport],
+) -> Result<()> {
     let mut merged = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
@@ -384,6 +593,7 @@ fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) ->
         args.path.display(),
         fs_type.unwrap_or("unknown filesystem")
     );
+    println!("runtime: {runtime}");
     println!(
         "throughput: {} commits/s, {} records/s, {} MiB/s of payload ({commits} commits)",
         per_second(commits, span),

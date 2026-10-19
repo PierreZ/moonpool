@@ -6,7 +6,7 @@ Every distributed system does five things with the outside world: it reads the c
 
 ## The Core Idea
 
-Define a trait for each category of I/O. Implement the trait twice: once over real tokio calls for production, once over the deterministic world for testing. Your application code is generic over the trait. It never knows which implementation it runs against.
+Define a trait for each category of I/O. Implement the trait twice: once over real runtime calls for production (tokio, or compio for thread-per-core), once over the deterministic world for testing. Your application code is generic over the trait. It never knows which implementation it runs against.
 
 ```text
                   Application Code
@@ -66,7 +66,7 @@ fn run_server<P: Providers>(providers: P) {
 }
 ```
 
-Two implementations exist. `TokioProviders::new()` in moonpool-core is production. `SimProviders::new(sim, ip)` in moonpool-sim is simulation: it takes a weak handle on the `SimWorld` and the IP of the process it serves, so its network, storage and system providers are scoped to that process's machine. Your application code imports neither. It sees `P: Providers` and nothing else.
+Two families of implementation exist. `TokioProviders::new()` in moonpool-core is the default production bundle. `CompioProviders` is the variant for code that spawns non-`Send` tasks, covered in [Choosing a runtime](../part4-integration/05-production.md#choosing-a-runtime). `SimProviders::new(sim, ip)` in moonpool-sim is simulation: it takes a weak handle on the `SimWorld` and the IP of the process it serves, so its network, storage and system providers are scoped to that process's machine. Your application code imports neither. It sees `P: Providers` and nothing else.
 
 Each provider in the bundle is `Clone`. Clone the one you need and move it into a spawned task, the way you would clone an `Arc`.
 

@@ -34,16 +34,23 @@
 //! let _ = node.uptime();
 //! ```
 //!
-//! Two bundles exist: [`TokioProviders`] here, for production, and
-//! `SimProviders` in `moonpool-sim`, which a simulation hands to each process
-//! and workload through `SimContext::providers`.
+//! Two bundles live in the crates that own their runtime: [`TokioProviders`]
+//! here, for production on tokio's work-stealing runtime; and `SimProviders`
+//! in `moonpool-sim`, which a simulation hands to each process and workload
+//! through `SimContext::providers`. For production code that holds `!Send`
+//! state, `CompioProviders` in `moonpool-compio` is the bundle.
+//!
+//! Code that spawns `!Send` futures bounds on [`LocalProviders`] instead of
+//! [`Providers`]: it accepts the bundles whose task provider implements
+//! [`LocalTaskProvider`], and rejects [`TokioProviders`] at compile time.
 
 use crate::{
-    NetworkProvider, RandomProvider, StorageProvider, SystemProvider, TaskProvider, TimeProvider,
+    LocalTaskProvider, NetworkProvider, RandomProvider, StorageProvider, SystemProvider,
+    TaskProvider, TimeProvider,
 };
 #[cfg(feature = "tokio-providers")]
 use crate::{
-    TokioNetworkProvider, TokioRandomProvider, TokioStorageProvider, TokioSystemProvider,
+    ThreadRngRandomProvider, TokioNetworkProvider, TokioStorageProvider, TokioSystemProvider,
     TokioTaskProvider, TokioTimeProvider,
 };
 
@@ -114,6 +121,8 @@ macro_rules! impl_providers_bundle {
 /// ## Implementations
 ///
 /// - [`TokioProviders`]: production providers on a real Tokio runtime.
+/// - `CompioProviders` (in `moonpool-compio`): production providers on a
+///   compio runtime, whose task provider also spawns `!Send` futures.
 /// - `SimProviders` (in `moonpool-sim`): deterministic simulation providers.
 ///
 /// ## Design
@@ -159,6 +168,22 @@ pub trait Providers: Clone + Send + Sync + 'static {
     fn system(&self) -> &Self::System;
 }
 
+/// A [`Providers`] bundle whose task provider can also spawn `!Send` futures.
+///
+/// Bound on `P: LocalProviders` instead of `P: Providers` in thread-per-core
+/// code that holds `Rc<RefCell<…>>` across awaits and spawns it with
+/// `providers.task().spawn_local(..)`. Every bundle whose
+/// [`Task`](Providers::Task) implements [`LocalTaskProvider`] gets this trait
+/// through the blanket impl; there is nothing to implement by hand.
+///
+/// `CompioProviders` in `moonpool-compio` and `SimProviders` in
+/// `moonpool-sim` satisfy it. [`TokioProviders`] does not: its
+/// task provider is the work-stealing `tokio::spawn`, which moves tasks
+/// between threads.
+pub trait LocalProviders: Providers<Task: LocalTaskProvider> {}
+
+impl<P: Providers> LocalProviders for P where P::Task: LocalTaskProvider {}
+
 /// Production providers: the six Tokio-backed providers in one bundle.
 ///
 /// | Slot | Type |
@@ -166,7 +191,7 @@ pub trait Providers: Clone + Send + Sync + 'static {
 /// | network | [`TokioNetworkProvider`] |
 /// | time | [`TokioTimeProvider`] |
 /// | task | [`TokioTaskProvider`] |
-/// | random | [`TokioRandomProvider`] |
+/// | random | [`ThreadRngRandomProvider`] |
 /// | storage | [`TokioStorageProvider`] |
 /// | system | [`TokioSystemProvider`] |
 ///
@@ -186,7 +211,7 @@ pub struct TokioProviders {
     network: TokioNetworkProvider,
     time: TokioTimeProvider,
     task: TokioTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 }
@@ -201,7 +226,7 @@ impl TokioProviders {
             network: TokioNetworkProvider::new(),
             time: TokioTimeProvider::new(),
             task: TokioTaskProvider,
-            random: TokioRandomProvider::new(),
+            random: ThreadRngRandomProvider::new(),
             storage: TokioStorageProvider::new(),
             system: TokioSystemProvider::new(),
         }
@@ -220,7 +245,7 @@ impl_providers_bundle!(TokioProviders {
     network: TokioNetworkProvider,
     time: TokioTimeProvider,
     task: TokioTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 });

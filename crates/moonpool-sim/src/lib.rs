@@ -346,9 +346,10 @@
 
 // Re-export core types for convenience
 pub use moonpool_core::{
-    Detach, DiskCounters, DiskSpace, LayoutRegion, NetworkProvider, OpenOptions, Providers,
-    RandomProvider, Resolver, SimulationError, SimulationResult, StorageFile, StorageProvider,
-    SystemProvider, SystemSample, TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
+    Detach, DiskCounters, DiskSpace, LayoutRegion, LocalProviders, LocalTaskProvider,
+    NetworkProvider, OpenOptions, Providers, RandomProvider, Resolver, SimulationError,
+    SimulationResult, StorageFile, StorageProvider, SystemProvider, SystemSample, TaskProvider,
+    TcpListenerTrait, TimeError, TimeProvider,
 };
 // The deterministic select! (moonpool-sim always enables core's
 // deterministic-select, so this is tokio's expansion with a seeded start

@@ -58,7 +58,7 @@ A list of mistakes we have made ourselves when building simulations with Moonpoo
 
 **Cause**: Moonpool runs on **one OS thread** for determinism. Wrapping it in a tokio runtime hands scheduling to tokio: redundant at best, real parallelism at worst, even though the traits are `Send`-bounded.
 
-**Fix**: a plain `#[test]` or `fn main`. `SimulationBuilder::run()` drives its own executor. Standalone code uses `Executor::new(seed)` plus `executor.block_on(..)`, as [The Deterministic Executor](../part2-foundations/11-executor.md) shows. `LocalSet`, `spawn_local` and `build_local` are gone from the model.
+**Fix**: a plain `#[test]` or `fn main`. `SimulationBuilder::run()` drives its own executor. Standalone code uses `Executor::new(seed)` plus `executor.block_on(..)`, as [The Deterministic Executor](../part2-foundations/11-executor.md) shows. Tokio's `LocalSet`, `spawn_local` and `build_local` are gone from the model. For a `!Send` task, use `ctx.task().spawn_local`.
 
 ## Unordered Collections
 

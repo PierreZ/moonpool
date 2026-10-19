@@ -15,7 +15,8 @@ Moonpool follows [FoundationDB's simulation testing](https://apple.github.io/fou
 
 Code depends on provider traits, never on tokio. Tests run it on the
 simulator's providers: logical time, one seeded random stream, a simulated
-network and disk with faults. Production runs it on `TokioProviders`. Shipped
+network and disk with faults. Production runs it on `TokioProviders`, or on
+`CompioProviders` for thread-per-core. Shipped
 code is never wrapped in a simulation variant. It marks fault sites with
 `hint!` and `buggify!`, which are inert outside a simulation.
 
@@ -46,6 +47,7 @@ and a `Workload`.
 |---------|---------|------|
 | `sim` | yes | `moonpool-sim`: simulator, chaos, assertions, exploration |
 | `tokio` | yes | `TokioProviders` and the `select!` passthrough |
+| `compio` | no | `CompioProviders` and siblings from `moonpool-compio`: thread-per-core on io_uring |
 | `hyper` | no | `moonpool::hyper`: HTTP/2, tonic and axum over the providers |
 | `prometheus` | no | `moonpool::prometheus`: a `prometheus` registry in the report |
 | `rpc` | no | `moonpool::rpc`: typed dynamic-endpoint RPC |

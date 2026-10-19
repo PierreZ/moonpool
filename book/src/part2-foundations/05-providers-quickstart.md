@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`TokioProviders` bundles `TokioTimeProvider`, `TokioTaskProvider`, `TokioNetworkProvider`, `TokioRandomProvider`, `TokioStorageProvider` and `TokioSystemProvider`. Each one delegates to tokio, `rand` or the kernel. Real sleeps, real sockets, OS entropy.
+`TokioProviders` bundles `TokioTimeProvider`, `TokioTaskProvider`, `TokioNetworkProvider`, `ThreadRngRandomProvider`, `TokioStorageProvider` and `TokioSystemProvider`. Each one delegates to tokio, `rand` or the kernel. Real sleeps, real sockets, OS entropy. Thread-per-core code swaps in `CompioProviders` and keeps the rest.
 
 ## Running in Simulation
 

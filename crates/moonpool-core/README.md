@@ -14,7 +14,7 @@ and no `Sim*` variants of shipped types. This is FoundationDB's rule.
 | Trait | Production | Simulation | Purpose |
 |-------|------------|------------|---------|
 | `TimeProvider` | Wall clock | Logical time, clock drift | `sleep`, `timeout`, `now`, `timer` |
-| `TaskProvider` | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now` |
+| `TaskProvider` | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now`; `spawn_local` via `LocalTaskProvider` |
 | `NetworkProvider` | Real TCP | Simulated TCP with faults | `bind`, `connect`, `accept` |
 | `RandomProvider` | Thread-local RNG | The run's one seeded stream | `random`, `random_range`, `random_bool` |
 | `StorageProvider` | Real filesystem, direct I/O | Simulated disk with faults | `open`, `rename`, `sync_dir`, positioned I/O |
@@ -62,7 +62,8 @@ from `moonpool-sim` or `moonpool`, not `tokio::select!`.
 | Feature | Default | Adds |
 |---------|---------|------|
 | `tokio-providers` | yes | `TokioProviders`: all six `tokio-*` features |
-| `tokio-task`, `tokio-time`, `tokio-net`, `tokio-fs`, `tokio-random`, `tokio-system` | via umbrella | One production provider each (`tokio-net` also adds `TokioResolver`) |
+| `tokio-task`, `tokio-time`, `tokio-net`, `tokio-fs`, `thread-rng`, `tokio-system` | via umbrella | One production provider each (`tokio-net` also adds `TokioResolver`) |
+| `host` | via `tokio-fs` / `tokio-system` | `direct_io` and `host`: the direct-I/O probing and `/proc`, `getrusage`, `statvfs` readers shared by the production backends (`moonpool-compio` enables it alone) |
 | `select` | yes | `select!` as tokio's macro, unchanged |
 | `deterministic-select` | no | `select!` with a seeded branch offset (enabled by `moonpool-sim`) |
 

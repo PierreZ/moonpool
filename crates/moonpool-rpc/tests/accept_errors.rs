@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moonpool_core::{
-    NetworkProvider, Providers, TcpListenerTrait, TokioNetworkProvider, TokioRandomProvider,
+    NetworkProvider, Providers, TcpListenerTrait, ThreadRngRandomProvider, TokioNetworkProvider,
     TokioStorageProvider, TokioSystemProvider, TokioTaskProvider, TokioTcpListener,
     TokioTimeProvider,
 };
@@ -89,7 +89,7 @@ struct ScriptedProviders {
     network: ScriptedNetwork,
     time: TokioTimeProvider,
     task: TokioTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 }
@@ -98,7 +98,7 @@ impl Providers for ScriptedProviders {
     type Network = ScriptedNetwork;
     type Time = TokioTimeProvider;
     type Task = TokioTaskProvider;
-    type Random = TokioRandomProvider;
+    type Random = ThreadRngRandomProvider;
     type Storage = TokioStorageProvider;
     type System = TokioSystemProvider;
 
@@ -111,7 +111,7 @@ impl Providers for ScriptedProviders {
     fn task(&self) -> &TokioTaskProvider {
         &self.task
     }
-    fn random(&self) -> &TokioRandomProvider {
+    fn random(&self) -> &ThreadRngRandomProvider {
         &self.random
     }
     fn storage(&self) -> &TokioStorageProvider {
@@ -130,7 +130,7 @@ fn providers(script: &[io::ErrorKind]) -> ScriptedProviders {
         },
         time: TokioTimeProvider::new(),
         task: TokioTaskProvider,
-        random: TokioRandomProvider::new(),
+        random: ThreadRngRandomProvider::new(),
         storage: TokioStorageProvider::new(),
         system: TokioSystemProvider::new(),
     }

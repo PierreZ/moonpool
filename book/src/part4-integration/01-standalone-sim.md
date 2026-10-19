@@ -111,8 +111,9 @@ a seed, and the code stays runnable on `TokioProviders` later.
 
 **Do not use `tokio::spawn`, `tokio::task::spawn_local` or a `LocalSet`.**
 There is no tokio runtime inside a simulation. A bare `tokio::spawn` panics,
-and `spawn_local` has no `LocalSet` to attach to. When you reach for a `!Send`
-workaround, you have left the supported path.
+and tokio's `spawn_local` has no `LocalSet` to attach to. When a task holds
+`Rc` or `RefCell` state, spawn it with `ctx.task().spawn_local(name, future)`
+or `moonpool_sim::executor::spawn_local`.
 
 One case still bites. Some third-party connection futures are `!Send` for
 reasons unrelated to moonpool. hyper's HTTP/1 `Connection` is the canonical

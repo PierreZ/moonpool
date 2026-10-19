@@ -14,7 +14,9 @@
 //!
 //! This crate is the facade. It re-exports [`moonpool_core`] at the root and,
 //! with the `sim` feature, [`moonpool_sim`] too. Optional integrations live in
-//! namespaced modules: `hyper`, `prometheus` and `rpc`.
+//! namespaced modules: `hyper`, `prometheus` and `rpc`. The `compio` feature
+//! adds the compio-backed providers (`CompioProviders`) at the root, beside
+//! `TokioProviders`.
 //!
 //! ## Same code in production and simulation
 //!
@@ -152,6 +154,9 @@
 // Re-export all public items from sub-crates. `moonpool-core` is always present;
 // `sim` is feature-gated so a lean production build pulls neither the simulation
 // runtime nor the explorer (no libc/mio in the prod dependency tree).
+/// The compio-backed providers (`CompioProviders`). Requires the `compio` feature.
+#[cfg(feature = "compio")]
+pub use moonpool_compio::*;
 #[allow(ambiguous_glob_reexports)]
 pub use moonpool_core::*;
 #[cfg(feature = "sim")]

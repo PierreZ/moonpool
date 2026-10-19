@@ -10,7 +10,7 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 2. The same code runs in production over `TokioProviders` and in simulation over `SimProviders`. No `Sim*` wrapper in application code.
 3. `Process` is the server, rebuilt by its factory on every reboot. `Workload` is the test driver and survives reboots. Never merge them.
 4. Facts go out as `tracing` events. Cross-process safety goes in an `Invariant`. Local checks go in `assert_always!`. Rare paths get `assert_sometimes!`. Dangerous moments get `buggify!` or `hint!`.
-5. Every random decision is a counted draw on one seeded stream. `BTreeMap`, not `HashMap`. Futures are `Send + 'static`. No `unwrap()`.
+5. Every random decision is a counted draw on one seeded stream. `BTreeMap`, not `HashMap`. Futures are `Send + 'static`; a `!Send` task uses `LocalTaskProvider::spawn_local`. No `unwrap()`.
 6. Replay before diagnosis: `set_debug_seeds(vec![seed]).set_iterations(1)` or `replay_timeline(seed, recipe)`.
 7. Never delete an assertion that catches a bug. Fix the bug.
 8. Validate with `nix develop --command cargo fmt`, `cargo clippy`, `cargo nextest run`, and `mdbook build book/` when a public API changes.
@@ -19,21 +19,22 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 
 | Crate | Depend on it for | Features |
 |-------|------------------|----------|
-| `moonpool` | The facade. `moonpool_core::*`, `moonpool_sim::*` under `sim`, modules `hyper`, `prometheus`, `rpc`. | `default = ["sim", "tokio"]`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt` |
+| `moonpool` | The facade. `moonpool_core::*`, `moonpool_sim::*` under `sim`, modules `hyper`, `prometheus`, `rpc`. | `default = ["sim", "tokio"]`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt`, `compio` (off by default) |
 | `moonpool-core` | Provider traits and core types. | `default = ["tokio-providers", "select"]`, granular `tokio-task/-time/-net/-fs/-random/-system`, `deterministic-select` |
 | `moonpool-sim` | The runtime, builder, chaos, assertions, observability. | `default = ["tokio-providers", "exploration"]` |
+| `moonpool-compio` | Production providers on compio (io_uring, polling fallback) for thread-per-core: `CompioProviders` and siblings. Pinned `=0.20.0-beta.1`. | none |
 | `moonpool-assertions`, `moonpool-buggify` | Probes and fault sites for libraries. Zero dependencies. | none |
 | `moonpool-explorer` | Multiverse exploration (`fork`, `mmap`). | none |
 | `moonpool-hyper`, `moonpool-rpc`, `moonpool-prometheus`, `moonpool-journal` | HTTP/2, typed RPC, metrics, a CLSTORE journal. | see the [Crate Map](./appendix/02-crate-map.md) |
 
-Production: `moonpool = { default-features = false, features = ["tokio"] }`. Simulation harness: `moonpool-sim` in dev-dependencies or a separate binary crate. wasm: `moonpool-sim` with `default-features = false`.
+Production: `moonpool = { default-features = false, features = ["tokio"] }`. Two production bundles: `TokioProviders` (work-stealing, no `spawn_local`), `CompioProviders` (feature `compio`, thread-per-core). Local-capable code bounds on `P: LocalProviders`. `TimeProvider::timeout_local` bounds a `!Send` future. Compio contracts: provider futures and `CompioTcpStream` panic if polled or dropped on another thread; the TCP stream copies once per direction and sends on flush; `write_at_durable` is one `pwritev2(RWF_DSYNC)` operation (write then `sync_data` once the kernel refuses `RWF_DSYNC`); append-mode stream writes go through an `O_APPEND` descriptor; `run_loop_busy` is `getrusage(RUSAGE_THREAD)`; the random slot is `ThreadRngRandomProvider`. Simulation harness: `moonpool-sim` in dev-dependencies or a separate binary crate. wasm: `moonpool-sim` with `default-features = false`.
 
 ## Providers
 
 | Trait | Methods | Simulation type |
 |-------|---------|-----------------|
-| `TimeProvider` | `sleep(d)`, `now() -> Duration`, `timer()` (drifted), `timeout(d, fut)` | `SimTimeProvider` |
-| `TaskProvider` | `spawn_task(name, fut) -> JoinHandle`, `yield_now()`; `Detach` | `SimTaskProvider` |
+| `TimeProvider` | `sleep(d)`, `now() -> Duration`, `timer()` (drifted), `timeout(d, fut)`, `timeout_local(d, fut)` for `!Send` futures | `SimTimeProvider` |
+| `TaskProvider` | `spawn_task(name, fut) -> JoinHandle`, `yield_now()`; `Detach`. `LocalTaskProvider::spawn_local(name, fut)` for `!Send` futures | `SimTaskProvider` |
 | `NetworkProvider` | `bind(addr)`, `connect(addr)`; `TcpStream: AsyncRead + AsyncWrite`; `TcpListenerTrait::{accept, local_addr}` | `SimNetworkProvider` |
 | `RandomProvider` | `random::<T>()`, `random_range(r)`, `random_ratio()`, `random_bool(p)` | `SimRandomProvider` |
 | `StorageProvider` | `open(path, OpenOptions)`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` | `SimStorageProvider` |

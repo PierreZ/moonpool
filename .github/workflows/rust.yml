@@ -142,8 +142,10 @@ jobs:
         run: nix develop --command cargo run -p moonpool-journal --example accept_log
       # Smoke run of the journal benchmark: it builds and runs. Shared
       # runners give noisy I/O, so the numbers are printed, never checked.
-      - name: moonpool-journal benchmark (smoke)
-        run: nix develop --command cargo run -p moonpool-journal --example bench -- --duration 1 --writers 2
+      - name: moonpool-journal benchmark on tokio (smoke)
+        run: nix develop --command cargo run -p moonpool-journal-bench -- --duration 1 --writers 2
+      - name: moonpool-journal benchmark on compio (smoke)
+        run: nix develop --command cargo run -p moonpool-journal-bench -- --duration 1 --writers 2 --runtime compio
       - name: Build without any rustflags (no tokio_unstable required)
         run: |
           # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml
@@ -151,6 +153,7 @@ jobs:
           RUSTFLAGS="" nix develop --command cargo check \
             -p moonpool-assertions \
             -p moonpool-buggify \
+            -p moonpool-compio \
             -p moonpool-core \
             -p moonpool-explorer \
             -p moonpool-hyper \
@@ -176,6 +179,35 @@ jobs:
             echo "::error::lean production build pulled in prometheus"
             exit 1
           fi
+      - name: Compio production tree excludes sim/explorer/hyper/prometheus/rpc
+        run: |
+          tree=$(nix develop --command cargo tree -p moonpool --no-default-features --features compio -e no-dev)
+          echo "$tree"
+          if echo "$tree" | grep -qE "moonpool-sim|moonpool-explorer|moonpool-assertions"; then
+            echo "::error::compio production build pulled in a sim/explorer crate"
+            exit 1
+          fi
+          if echo "$tree" | grep -qE "moonpool-hyper|hyper v|h2 v"; then
+            echo "::error::compio production build pulled in hyper"
+            exit 1
+          fi
+          if echo "$tree" | grep -qE "moonpool-prometheus|prometheus v"; then
+            echo "::error::compio production build pulled in prometheus"
+            exit 1
+          fi
+          if echo "$tree" | grep -qE "moonpool-rpc"; then
+            echo "::error::compio production build pulled in moonpool-rpc"
+            exit 1
+          fi
+          if ! echo "$tree" | grep -qE "moonpool-compio v"; then
+            echo "::error::the compio facade feature did not pull in moonpool-compio"
+            exit 1
+          fi
+          if ! echo "$tree" | grep -qE "compio v"; then
+            echo "::error::the compio facade feature did not pull in compio"
+            exit 1
+          fi
+          nix develop --command cargo check -p moonpool --no-default-features --features compio
       - name: moonpool-rpc production tree excludes sim/explorer
         run: |
           for features in "--no-default-features" "" "--features tls,jwt" "--features tls-pki,jwt"; do
@@ -239,7 +271,7 @@ jobs:
       # The watchdog samples any test still running after 8s with `sample`,
       # before nextest's slow-timeout kills it without a word.
       - name: Run explorer and sim tests
-        run: scripts/ci/with-hang-traces.sh nix develop --command cargo nextest run -p moonpool-explorer -p moonpool-sim
+        run: scripts/ci/with-hang-traces.sh nix develop --command cargo nextest run -p moonpool-compio -p moonpool-explorer -p moonpool-sim
       # moonpool-rpc's real-network suites (both Tokio flavors) on darwin's
       # socket stack: the platform half of the RPC qualification (#219).
       - name: Run moonpool-rpc real-network tests

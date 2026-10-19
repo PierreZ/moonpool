@@ -55,7 +55,9 @@ The runtime still runs on one thread. No future ever moves between threads at ru
 
 A team that adopts moonpool to test an existing service should not rewrite its type hierarchy. If the production code uses `Arc<RwLock<…>>` (it does), moonpool runs it as is. The simulation drives those types on one thread, but the types look exactly like production.
 
-There is no `LocalSet`, no `spawn_local` and no `build_local` anywhere in moonpool. Spawned futures are `Send + 'static`, as `tokio::spawn` requires.
+There is no tokio `LocalSet`, no tokio `spawn_local` and no `build_local` inside a simulation. Spawned futures are `Send + 'static`, as `tokio::spawn` requires.
+
+One exception is additive. A `!Send` task, one that holds `Rc` or `RefCell`, spawns through `ctx.task().spawn_local(name, fut)`. It runs on the same executor and the same seeded queue, so determinism does not change. Thread-per-core production runtimes (compio) implement the same `LocalTaskProvider`. The `Send` contract on every trait stays: we pay for it to get interoperability, and a local task simply does not spend it.
 
 ## What This Costs
 

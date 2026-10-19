@@ -4,7 +4,7 @@
 
 Moonpool puts every interaction between your code and the outside world behind six provider traits: `TimeProvider`, `TaskProvider`, `NetworkProvider`, `RandomProvider`, `StorageProvider` and `SystemProvider`. Each covers one category of I/O. Together they form a complete boundary around your application. A seventh trait, `Resolver`, sits outside the bundle for code that resolves names. The `select!` macro completes the set.
 
-Every provider trait is `Clone + Send + Sync + 'static`. The simulation runs on one thread, but the types are `Send`-bounded so your code stays ordinary: `Arc<RwLock<…>>`, `DashMap` and `Send` task spawning all work. The async methods use native async-fn-in-trait, declared as `-> impl Future<…> + Send` so the bound propagates. There is no `#[async_trait]` and no `?Send` in the provider layer.
+Every provider trait is `Clone + Send + Sync + 'static`. The simulation runs on one thread, but the types are `Send`-bounded so your code stays ordinary: `Arc<RwLock<…>>`, `DashMap` and `Send` task spawning all work. The async methods use native async-fn-in-trait, declared as `-> impl Future<…> + Send` so the bound propagates. There is no `#[async_trait]` and no `?Send` in the provider layer. Thread-per-core code gets an additive escape hatch, [`LocalTaskProvider`](#localtaskprovider), without changing any of these bounds.
 
 ## TimeProvider
 
@@ -18,10 +18,15 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
     fn timeout<F, T>(&self, duration: Duration, future: F)
         -> impl Future<Output = Result<T, TimeError>> + Send
     where F: Future<Output = T> + Send, T: Send;
+    // Provided: the same race for a future that is not Send.
+    fn timeout_local<F: Future>(&self, duration: Duration, future: F)
+        -> impl Future<Output = Result<F::Output, TimeError>>;
 }
 ```
 
 The `now()` and `timer()` split comes from FoundationDB's `sim2`. `now()` is the exact clock. `timer()` is a default method that returns `now()`, which is what production keeps. The simulation overrides it: `timer()` can run up to `clock_drift_max` (default 100 ms) ahead of `now()`. Use `now()` for scheduling. Use `timer()` for lease expiry and heartbeat deadlines, so clock skew between processes is part of every seed. `sleep` returns `TimeError::Shutdown` when the simulation is gone, and `timeout` returns `TimeError::Elapsed`.
+
+`timeout_local` is a provided method for a future that holds `Rc` or `RefCell` state inside a local task. It is built on `sleep`, polls the future first and the sleep second, so a future that is ready on the poll where the deadline passes still wins. Its result is not `Send` either.
 
 **Production**: `TokioTimeProvider` delegates to `tokio::time::sleep` and `tokio::time::timeout`. `now()` is the elapsed time since the provider was created.
 
@@ -46,6 +51,25 @@ Spawned futures are `Send + 'static`, as `tokio::spawn` requires. The handle res
 
 **Simulation**: `SimTaskProvider` spawns onto the [deterministic executor](./11-executor.md), which stores the name and traces every poll under it. A process's provider carries the **scope** of its boot: when the process is killed, every task spawned through it, and every task those spawned, is dropped. A workload's provider has no scope, because a workload survives everything. A spawned task runs inside the span current at spawn time, so its tracing events keep their process or workload attribution.
 
+### LocalTaskProvider
+
+Some code wants `Rc<RefCell<…>>` state and never crosses a thread. A thread-per-core server is the typical case. `LocalTaskProvider` serves it:
+
+```rust,ignore
+pub trait LocalTaskProvider: TaskProvider {
+    fn spawn_local<F>(&self, name: &str, future: F) -> Self::JoinHandle
+    where F: Future<Output = ()> + 'static;
+}
+```
+
+The future needs `'static` but not `Send`. The task runs on the thread that spawned it, and the handle is the same `Send` handle `spawn_task` returns. Only runtimes that never move a task between threads implement the trait: `SimTaskProvider` and `CompioTaskProvider`. The work-stealing `TokioTaskProvider` does not. Code bounded on `LocalTaskProvider` therefore cannot run on it by mistake, and the compiler says so.
+
+`LocalProviders` lifts the rule to the bundle. It is a marker for `Providers<Task: LocalTaskProvider>` with a blanket impl, so thread-per-core code writes `P: LocalProviders` and nothing else. Every other provider stays usable there: their futures are `Send`, and a `Send` future may be awaited inside a local task.
+
+**Production**: `CompioTaskProvider` spawns on the compio runtime of the current thread. Moonpool adds no `cfg` of its own.
+
+**Simulation**: `SimTaskProvider::spawn_local` spawns onto the same [deterministic executor](./11-executor.md), through the same seeded ready queue, with the same name, owner scope and panic capture as `spawn_task`.
+
 ## NetworkProvider
 
 ```rust,ignore
@@ -67,7 +91,7 @@ pub trait TcpListenerTrait: Send + Sync + 'static {
 
 The stream types are `futures::io::AsyncRead + AsyncWrite`, the runtime-agnostic traits, so one codec or framing layer works on both backends. `bind`, `connect` and `accept` behave like their tokio counterparts.
 
-**Production**: `TokioNetworkProvider` wraps `tokio::net` through `tokio_util::compat`. Every connected and accepted stream has Nagle's algorithm disabled (`TCP_NODELAY`, best-effort), as FoundationDB's `Net2` does, because request-reply protocols write a small frame and wait for the answer.
+**Production**: `CompioNetworkProvider` serves `CompioTcpListener` and `CompioTcpStream` on io_uring. `TokioNetworkProvider` wraps `tokio::net` through `tokio_util::compat`. Every connected and accepted stream has Nagle's algorithm disabled (`TCP_NODELAY`, best-effort), as FoundationDB's `Net2` does, because request-reply protocols write a small frame and wait for the answer.
 
 **Simulation**: `NetworkSimulation` owns listeners, connections, topology, faults, pending results and wakers. `bind`, `connect` and `accept` park until their scheduled latency expires. Established streams use in-memory buffers with deterministic delivery delays, TCP half-close and fault injection: connection drops, partitions, corruption. Binding port zero on a numeric address assigns a distinct dynamic port, and `local_addr()` returns it. A bare process IP is also a valid address. Dropping a stream with unread bytes resets the peer, as TCP does. `AsyncWrite::close` shuts down the write half only. Each listener has a bounded accept backlog, 128 by default, set per run with `SimulationBuilder::accept_backlog_capacity`. [Network Faults](../part3-building/10-network-faults.md) lists the fault families.
 
@@ -84,7 +108,7 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
 
 Only `random` and `random_range` are required. The trait is fully synchronous: random numbers never need to suspend.
 
-**Production**: `TokioRandomProvider` uses `rand::rng()`, thread-local OS entropy.
+**Production**: `ThreadRngRandomProvider` uses `rand::rng()`, thread-local OS entropy. Every production bundle, `CompioProviders` included, uses it.
 
 **Simulation**: `SimRandomProvider` draws from the one seeded `ChaCha8Rng` stream. Every call is counted, so it is part of the replay and of exploration recipes.
 
@@ -138,7 +162,7 @@ Three distinctions the trait keeps apart, because production keeps them apart:
 
 `OpenOptions` mirrors `std::fs::OpenOptions` (`read`, `write`, `create`, `create_new`, `truncate`, `append`) and adds `direct_io(DirectIo::{Disabled, Optional, Required})`. Direct I/O is an option on opening an ordinary file, not a second provider: there is no `BlockProvider`. A direct-I/O file reports its alignment through `constraints()` and refuses the stream API with `stream_io_unsupported()`, because a shared cursor cannot honour an alignment. `read_at` and `write_at` are positioned, take `&self`, and may transfer fewer bytes than asked. Each positioned transfer also has an **owned** form over an `AlignedBuf` (`read_at_aligned`, `write_at_aligned`, `write_at_durable_aligned`): the same transfer and contract, with the buffer moved in and handed back beside the count (dropped on error). It exists for zero copy. A backend that runs I/O on another thread cannot move a borrowed slice there, so the borrowed form pays a copy into its own aligned buffer; the owned form moves the caller's buffer instead. A caller that already holds its bytes in an `AlignedBuf` uses it, any other caller keeps the borrowed form, and neither is a different kind of file. `BlockFile<F>` wraps one open file to add block arithmetic and the loops that turn partial transfers into whole ones. It holds no path and opens nothing. `LayoutRegion` lets a format describe where its bytes live, so a fault injector can aim at them. [Storage Faults](../part3-building/11-storage-faults.md) and [Aiming Storage Faults](../part3-building/33-aimed-faults.md) continue there.
 
-**Production**: `TokioStorageProvider` wraps `tokio::fs`. Positioned I/O runs on the blocking pool, and `O_DIRECT` comes from `libc`. The owned transfers move the caller's `AlignedBuf` into the blocking task and back, so `pwrite`, `pwritev2` and `pread` reach the caller's own memory; the borrowed ones copy through a bounce buffer, as a slice cannot cross into a `'static` task.
+**Production**: `CompioStorageProvider` and `CompioStorageFile` run positioned I/O as compio operations. Its `write_at_durable` is one `pwritev2(RWF_DSYNC)` operation, like the tokio backend, through a custom compio operation. If the kernel refuses `RWF_DSYNC`, the process switches once to a write then `sync_data`. `TokioStorageProvider` wraps `tokio::fs`. Positioned I/O runs on the blocking pool, and `O_DIRECT` comes from `libc`. The owned transfers move the caller's `AlignedBuf` into the blocking task and back, so `pwrite`, `pwritev2` and `pread` reach the caller's own memory; the borrowed ones copy through a bounce buffer, as a slice cannot cross into a `'static` task.
 
 **Simulation**: the owned transfers keep the trait's defaults, the borrowed transfer on the buffer's bytes, so every fault applies to them unchanged. `StorageEngine` keeps one in-memory image per file. A positioned write is visible to a stream read, and a block write to both. Open handles have independent cursors and pending operations. Every operation returns `Pending` and completes through a scheduled event, with an exact result, so a crash or shutdown completes pending work with errors instead of silence. Each `SimStorageProvider` is scoped to a process IP, which selects that process's disk configuration and degradation episodes. The fault model follows TigerBeetle and FoundationDB: read and write corruption, EIO, the barrier-bounded crash model, misdirected I/O, short transfers, sync lies, unsynced directory-entry loss, and IOPS and bandwidth timing.
 
@@ -155,7 +179,7 @@ pub trait SystemProvider: Clone + Send + Sync + 'static {
 
 A `SystemSample` carries the instant `at`, `process_cpu`, the usable `cores`, `machine_busy` and `machine_total`, the run loop's busy time, and the `DiskCounters` of the device that holds `data_dir`: `io_ticks` (time with at least one I/O in flight), `in_flight`, completed `reads` and `writes`, their bytes and their times. `space` is the `DiskSpace` of the filesystem that holds `data_dir` (`statvfs`: `total_bytes` and the `free_bytes` an unprivileged writer may use), or, in simulation, of a disk given a capacity. The provider does no arithmetic. Every counter only grows, so a counter that goes back tells the caller the window is not valid.
 
-**Production**: `TokioSystemProvider` reads `getrusage(RUSAGE_SELF)`, `/proc/stat` and the `/proc/diskstats` line whose major and minor numbers match `stat(data_dir)`. On btrfs, overlayfs and some containers no line matches, so `disk` is `None`. The run loop's busy time is the busiest tokio worker's. Remember that `io_ticks` is iostat's `%util`: on flash and RAID it reaches 100% long before the device runs out of throughput.
+**Production**: `TokioSystemProvider` reads `getrusage(RUSAGE_SELF)`, `/proc/stat` and the `/proc/diskstats` line whose major and minor numbers match `stat(data_dir)`. On btrfs, overlayfs and some containers no line matches, so `disk` is `None`. The run loop's busy time is the busiest tokio worker's. `CompioSystemProvider` reports the runtime thread's own CPU time instead (`getrusage(RUSAGE_THREAD)`). Remember that `io_ticks` is iostat's `%util`: on flash and RAID it reaches 100% long before the device runs out of throughput.
 
 **Simulation**: FoundationDB switches its system monitor off in simulation. Moonpool does the opposite. `StorageEngine` counts, per process, the time its disk has at least one operation in flight, parked operations on a failed disk included, so a stall or throttle episode makes `io_ticks` rise. `SimWorld::disk_counters(ip)` returns the same numbers, so a harness can check a process's report against ground truth. With the [CPU model](../part3-building/26-cpu-and-gray-failure.md) on, every poll of the process's tasks costs simulated time on its one core, and `process_cpu`, `machine_busy` and `run_loop_busy` are that core's busy time. With the model off they stay at zero. The world remembers the last 64 samples per process (`SYSTEM_SAMPLES_KEPT`), readable with `ctx.system_samples(ip)`. A sample draws nothing from the seed.
 
@@ -179,7 +203,7 @@ pub trait Providers: Clone + Send + Sync + 'static {
 }
 ```
 
-`TokioProviders::new()` bundles the six production implementations. `SimProviders::new(sim, ip)` bundles the six simulation implementations, scoped to one process IP. Your application code sees `P: Providers` and nothing else.
+`TokioProviders::new()` bundles the six production implementations. `CompioProviders` (in moonpool-compio) does the same over compio and satisfies `LocalProviders`. `SimProviders::new(sim, ip)` bundles the six simulation implementations, scoped to one process IP. Your application code sees `P: Providers` and nothing else.
 
 ## Resolver
 
@@ -193,7 +217,7 @@ pub trait Resolver: Clone + Send + Sync + 'static {
 
 The target is the same `host:port` string `connect` takes. A numeric target resolves to itself. An `Ok` answer is never empty: a name with no address is a `NotFound` error, so a caller can tell a failed lookup from a failed connection. Caching and time-to-live belong to the caller.
 
-**Production**: `TokioResolver` (feature `tokio-net`) calls `tokio::net::lookup_host`.
+**Production**: `TokioResolver` (feature `tokio-net`) calls `tokio::net::lookup_host`. `CompioResolver` is the compio counterpart.
 
 **Simulation**: `ScriptedResolver` answers from a shared table that a fault injector or workload edits while the run goes. Answers are immediate and draw no randomness.
 

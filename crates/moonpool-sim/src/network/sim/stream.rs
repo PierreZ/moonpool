@@ -110,11 +110,13 @@ fn connection_aborted_error() -> io::Error {
 /// ## Thread Safety
 ///
 /// `SimTcpStream` is `Send + Sync + Unpin + 'static` via its `Arc<RwLock<…>>`
-/// backed `WeakSimWorld` handle. The simulation runtime itself runs on a
-/// single OS thread (`new_current_thread().build()`), but the stream type
-/// satisfies Send-bounded traits so it composes naturally with
-/// `tokio::spawn`, hyper/reqwest connectors, and customer code that uses
-/// `Arc<RwLock<…>>` / `DashMap` / `Arc<AtomicBool>`.
+/// backed `WeakSimWorld` handle. The simulation itself runs on a single OS
+/// thread, on the moonpool deterministic executor
+/// ([`Executor`](crate::executor::Executor)), but the stream type satisfies
+/// Send-bounded traits so it composes naturally with provider-spawned tasks,
+/// hyper/reqwest connectors, and customer code that uses
+/// `Arc<RwLock<…>>` / `DashMap` / `Arc<AtomicBool>`. It is equally usable
+/// from a `!Send` task spawned with `spawn_local`.
 pub struct SimTcpStream {
     /// Weak reference to the simulation world.
     ///

@@ -43,6 +43,13 @@ name = "moonpool-journal"
 changelog_path = "crates/moonpool-journal/CHANGELOG.md"
 version_group = "moonpool"
 
+# compio-backed providers over the provider traits; depends only on
+# moonpool-core, so it publishes in the same tier as moonpool-hyper.
+[[package]]
+name = "moonpool-compio"
+changelog_path = "crates/moonpool-compio/CHANGELOG.md"
+version_group = "moonpool"
+
 # The optional typed-interface attribute of moonpool-rpc; no moonpool
 # dependencies, so it publishes before moonpool-rpc.
 [[package]]
@@ -93,6 +100,11 @@ version_group = "moonpool"
 
 [[package]]
 name = "moonpool-calibrate"
+release = false
+publish = false
+
+[[package]]
+name = "moonpool-journal-bench"
 release = false
 publish = false
 

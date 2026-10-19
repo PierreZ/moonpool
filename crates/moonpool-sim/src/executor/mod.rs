@@ -106,6 +106,7 @@
 
 mod join;
 
+use join::TaskResult;
 pub use join::{JoinHandle, YieldNow, until_stalled, yield_now};
 
 use std::cell::{Cell, RefCell};
@@ -234,6 +235,47 @@ impl Handle {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        let (meta, wrapped) = self.prepare(name, owner, future);
+        let (runnable, task) = async_task::Builder::new()
+            .metadata(meta)
+            .spawn(move |_| wrapped, self.schedule());
+        self.start(runnable, task)
+    }
+
+    /// [`Self::spawn`] without the `Send` bounds: the future lives in an
+    /// async-task *local* task, which checks the thread id on every poll and
+    /// drop. Everything else (metadata, panic capture, ready queue, waker
+    /// registry, CPU parking, kill-on-drop) is shared with the `Send` path.
+    fn spawn_local<T, F>(
+        &self,
+        name: &str,
+        owner: Option<std::net::IpAddr>,
+        future: F,
+    ) -> JoinHandle<T>
+    where
+        F: Future<Output = T> + 'static,
+        T: 'static,
+    {
+        let (meta, wrapped) = self.prepare(name, owner, future);
+        let (runnable, task) = async_task::Builder::new()
+            .metadata(meta)
+            .spawn_local(move |_| wrapped, self.schedule());
+        self.start(runnable, task)
+    }
+
+    /// The task metadata and the wrapped future shared by both spawn paths.
+    ///
+    /// The returned future is `Send` exactly when `F` is (auto traits leak
+    /// through the opaque type), so the `Send` path keeps its bounds.
+    fn prepare<T, F>(
+        &self,
+        name: &str,
+        owner: Option<std::net::IpAddr>,
+        future: F,
+    ) -> (TaskMeta, impl Future<Output = TaskResult<T>> + use<T, F>)
+    where
+        F: Future<Output = T>,
+    {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let meta = TaskMeta {
             id,
@@ -258,17 +300,29 @@ impl Handle {
             let _unregister = unregister;
             caught.await
         };
+        (meta, wrapped)
+    }
 
+    /// The schedule function shared by both spawn paths: push onto the
+    /// seeded ready queue.
+    fn schedule(&self) -> impl Fn(ExecRunnable) + Send + Sync + 'static + use<> {
         let schedule_shared = Arc::clone(&self.shared);
-        let schedule = move |runnable: ExecRunnable| {
+        move |runnable: ExecRunnable| {
             schedule_shared.queue.lock().push(runnable);
-        };
+        }
+    }
 
-        let (runnable, task) = async_task::Builder::new()
-            .metadata(meta)
-            .spawn(move |_| wrapped, schedule);
-
-        self.shared.wakers.lock().insert(id, runnable.waker());
+    /// Register the new task for kill-on-drop, schedule its first poll, and
+    /// hand back its join handle.
+    fn start<T>(
+        &self,
+        runnable: ExecRunnable,
+        task: async_task::Task<TaskResult<T>, TaskMeta>,
+    ) -> JoinHandle<T> {
+        self.shared
+            .wakers
+            .lock()
+            .insert(runnable.metadata().id, runnable.waker());
         runnable.schedule();
 
         JoinHandle::new(task.fallible())
@@ -321,6 +375,42 @@ where
             .as_ref()
             .expect("executor::spawn called outside Executor::block_on")
             .spawn(name, current_owner(), future)
+    })
+}
+
+/// Spawn a named task whose future is not `Send` onto the executor
+/// currently running on this thread.
+///
+/// It is [`spawn`] without the `Send` bounds: same seeded ready queue, same
+/// owner inheritance, same panic capture, same kill-on-drop, and the
+/// returned [`JoinHandle`] has the same semantics. It lets a simulated
+/// process hold `Rc`/`RefCell` state across awaits, as a thread-per-core
+/// runtime would.
+///
+/// # Why this is sound
+///
+/// async-task's local tasks record the spawning thread and check it on every
+/// poll and on drop, panicking on a mismatch. The simulation never crosses
+/// threads: the executor, every waker it hands out and the world all live on
+/// the one OS thread that called [`Executor::block_on`], and dropping the
+/// executor drains its tasks on that same thread. The fork explorer forks
+/// only between complete runs, when no executor is alive, so no local task
+/// ever exists in a forked child.
+///
+/// # Panics
+///
+/// Panics when called outside [`Executor::block_on`], as [`spawn`] does.
+pub fn spawn_local<T, F>(name: &str, future: F) -> JoinHandle<T>
+where
+    F: Future<Output = T> + 'static,
+    T: 'static,
+{
+    CURRENT.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .expect("executor::spawn_local called outside Executor::block_on")
+            .spawn_local(name, current_owner(), future)
     })
 }
 

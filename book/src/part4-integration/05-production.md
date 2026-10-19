@@ -12,7 +12,7 @@ states the rule. This chapter shows how to deploy under it.
 ## The production backend
 
 Simulation hands your code `SimProviders`. Production hands it
-`TokioProviders`, a bundle of the six real implementations: tokio tasks,
+`TokioProviders` by default, a bundle of the six real implementations: tokio tasks,
 wall-clock time, real TCP, OS randomness, real files, and the kernel's CPU and
 disk counters through `SystemProvider`. Code generic over `P: Providers`
 accepts either one.
@@ -65,6 +65,66 @@ or gRPC stack gets the same treatment through `moonpool-hyper`: `H2Server` and
 `ReconnectingChannel` take `&TokioProviders` in production exactly as they take
 `ctx.providers()` in a test.
 
+## Choosing a runtime
+
+`TokioProviders` is not the only production bundle. Two exist, and they differ
+in one question: may a task move between threads?
+
+| Bundle | Runtime | `spawn_local` | Pick it when |
+|--------|---------|:---:|--------------|
+| `TokioProviders` | tokio, multi-thread or current-thread | no | Work-stealing is fine and shared state is `Arc<RwLock<…>>` |
+| `CompioProviders` | compio, io_uring with a polling fallback | yes | Thread-per-core: one runtime per core, no task ever migrates |
+
+The `yes` column is a compile-time fact. `LocalTaskProvider` adds
+`spawn_local` for futures that hold `Rc` or `RefCell`. The simulator and
+`CompioTaskProvider` implement it. The
+work-stealing `TokioTaskProvider` does not, so code bounded on it cannot run
+there by mistake. `LocalProviders` is the bundle-level marker: thread-per-core
+code writes `P: LocalProviders` and keeps its state in `Rc<RefCell<…>>`.
+
+The `Send` bound on the provider traits stays. Local spawn is additive. The
+futures that `sleep`, `connect` or `read_at` return are still `Send`, so a local
+task awaits them as usual. To bound a future that is itself not `Send`, call
+`timeout_local` instead of `timeout`. We pay for `Send` to get interoperability,
+not parallelism, and a thread-per-core deployment simply does not spend it.
+
+Compio starts from its own runtime:
+
+```rust,ignore
+use moonpool::CompioProviders;
+
+fn main() -> std::io::Result<()> {
+    let runtime = compio::runtime::Runtime::new()?;
+    runtime.block_on(async {
+        let providers = CompioProviders::new();
+        run_app(providers).await
+    })
+}
+```
+
+`#[compio::main]` does the same. Four contracts come with the compio bundle:
+
+- **Thread affinity.** Every compio future is `!Send`, because it holds the
+  thread-local driver. The provider traits still demand `Send`, so the
+  providers wrap each future in a thread-checked adapter. Polling or dropping a
+  provider future, or a `CompioTcpStream`, on another thread panics. A
+  thread-per-core application never does that.
+- **Streams copy once, and writes go through without a flush, like the tokio
+  provider.** The TCP stream is a `futures::io` adapter over compio's
+  owned-buffer socket, with one copy per direction. A native owned-buffer
+  stream trait is a planned follow-up.
+- **Durable writes take one operation.** `write_at_durable` is one
+  `pwritev2(RWF_DSYNC)`, like the tokio backend. Under `io_uring` it is a write
+  that carries `RWF_DSYNC`. Under the polling driver it is a call on the
+  blocking pool. If the kernel refuses `RWF_DSYNC`, the process switches once to
+  a write then `sync_data`.
+- **System counters.** `run_loop_busy` in `SystemSample` is the runtime
+  thread's own CPU time, from `getrusage(RUSAGE_THREAD)`.
+
+The random slot is `ThreadRngRandomProvider`, `rand`'s thread-local generator,
+shared by every production bundle. compio is pinned to `=0.20.0-beta.1`, so the facade feature
+stays off by default.
+
 ## A lean dependency tree
 
 The simulation runtime and the fork-based explorer have no place in a
@@ -90,6 +150,7 @@ them creeps back in.
 | Feature | Pulls in | Use it when |
 |---------|----------|-------------|
 | `tokio` | `TokioProviders`, `moonpool::select!` | The application runs on real time, tasks, TCP, randomness and files |
+| `compio` | `moonpool::CompioProviders` and its siblings, from `moonpool-compio` | Thread-per-core deployment on io_uring, with a polling fallback. `moonpool::select!` is included. |
 | `hyper` | `moonpool::hyper`: runtime adapters, `HyperIo`, `H2Server`, `ReconnectingChannel` | The application uses hyper, axum or tonic |
 | `prometheus` | `moonpool::prometheus`: `PrometheusSource` and instrumented handles | A `prometheus::Registry` you want in the simulation report |
 | `rpc` | `moonpool::rpc`, typed dynamic-endpoint RPC | Processes call each other through moonpool-rpc |
@@ -179,11 +240,11 @@ The provider traits and the production backend compile broadly. The sim
 runtime is portable too, with one boundary: the fork-based explorer needs a
 POSIX process model.
 
-| Target | core traits | `TokioProviders` | sim runtime | explorer (fork) |
-|--------|:---:|:---:|:---:|:---:|
-| Linux | yes | yes | yes | yes |
-| macOS | yes | yes | yes | yes |
-| `wasm32-unknown-unknown` | yes | no | yes, `--no-default-features` | no |
+| Target | core traits | `TokioProviders` | `CompioProviders` | sim runtime | explorer (fork) |
+|--------|:---:|:---:|:---:|:---:|:---:|
+| Linux | yes | yes | yes, io_uring or polling | yes | yes |
+| macOS | yes | yes | polling driver | yes | yes |
+| `wasm32-unknown-unknown` | yes | no | no | yes, `--no-default-features` | no |
 
 The simulation engine compiles to `wasm32-unknown-unknown` because it derives
 everything from a seeded RNG, a logical clock and a cooperative scheduler. The

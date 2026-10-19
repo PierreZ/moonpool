@@ -94,6 +94,47 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
     where
         F: std::future::Future<Output = T> + Send,
         T: Send;
+
+    /// [`timeout`](Self::timeout) for futures that are not `Send`.
+    ///
+    /// Use it inside a task spawned with
+    /// [`LocalTaskProvider::spawn_local`](crate::LocalTaskProvider::spawn_local),
+    /// where the awaited future may hold `Rc` or `RefCell` state. The returned
+    /// future is not `Send` either.
+    ///
+    /// Provided in terms of [`sleep`](Self::sleep): the future is polled first,
+    /// then the sleep, the same order as `timeout` and as tokio's `Timeout`, so
+    /// a future that is ready on the poll where the deadline passes still wins.
+    /// Returns `Ok(result)` if the future completes within the timeout,
+    /// `Err(TimeError::Elapsed)` if the sleep finishes first, or the sleep's own
+    /// error.
+    fn timeout_local<F>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl std::future::Future<Output = Result<F::Output, TimeError>>
+    where
+        F: std::future::Future,
+    {
+        let sleep = self.sleep(duration);
+        async move {
+            futures::pin_mut!(future);
+            futures::pin_mut!(sleep);
+            futures::future::poll_fn(|cx| {
+                if let std::task::Poll::Ready(output) = future.as_mut().poll(cx) {
+                    return std::task::Poll::Ready(Ok(output));
+                }
+                match sleep.as_mut().poll(cx) {
+                    std::task::Poll::Ready(Ok(())) => {
+                        std::task::Poll::Ready(Err(TimeError::Elapsed))
+                    }
+                    std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(error)),
+                    std::task::Poll::Pending => std::task::Poll::Pending,
+                }
+            })
+            .await
+        }
+    }
 }
 
 /// Production time provider: `tokio::time` for sleeps and timeouts, and a
@@ -147,5 +188,39 @@ impl TimeProvider for TokioTimeProvider {
         tokio::time::timeout(duration, future)
             .await
             .map_err(|_| TimeError::Elapsed)
+    }
+}
+
+#[cfg(all(test, feature = "tokio-time"))]
+mod tests {
+    use std::{rc::Rc, time::Duration};
+
+    use super::{TimeError, TimeProvider, TokioTimeProvider};
+
+    #[tokio::test]
+    async fn timeout_local_completes_a_non_send_future() {
+        let time = TokioTimeProvider::new();
+        let shared = Rc::new(7_u32);
+        let result = time
+            .timeout_local(Duration::from_secs(5), async move {
+                tokio::task::yield_now().await;
+                *shared
+            })
+            .await;
+        assert_eq!(result, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn timeout_local_elapses_on_a_pending_non_send_future() {
+        let time = TokioTimeProvider::new();
+        let shared = Rc::new(7_u32);
+        let result = time
+            .timeout_local(Duration::from_millis(20), async move {
+                // `shared` is read after the await, so the future holds
+                // the `Rc` across it and is not `Send`.
+                std::future::pending::<u32>().await + *shared
+            })
+            .await;
+        assert_eq!(result, Err(TimeError::Elapsed));
     }
 }
