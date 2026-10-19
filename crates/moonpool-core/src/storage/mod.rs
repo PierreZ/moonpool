@@ -17,6 +17,11 @@
 //!   ([`size`](StorageFile::size) / [`set_len`](StorageFile::set_len)).
 //! - [`OpenOptions`] decides the properties of the open.
 //!
+//! Both traits have a local (non-`Send`) form, [`LocalStorageProvider`] and
+//! [`LocalStorageFile`], for thread-per-core runtimes whose files and futures
+//! cannot leave their thread. Every `Send` backend implements the local form
+//! for free; see [`LocalStorageFile`] for the details.
+//!
 //! ## One file abstraction, not several
 //!
 //! A database's needs — positioned reads and writes, uncached I/O, alignment,
@@ -42,6 +47,7 @@
 
 mod align;
 mod layout;
+mod local;
 mod options;
 #[cfg(feature = "tokio-fs")]
 mod tokio_impl;
@@ -51,6 +57,7 @@ use std::io;
 
 pub use align::{AlignedBuf, IoConstraints};
 pub use layout::LayoutRegion;
+pub use local::{LocalStorageFile, LocalStorageProvider};
 pub use options::{DirectIo, InvalidOpenOptions, OpenOptions};
 
 /// The error a file with I/O constraints returns from the stream API.

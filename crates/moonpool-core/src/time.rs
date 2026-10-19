@@ -96,6 +96,146 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
         T: Send;
 }
 
+/// Local (non-`Send`) form of [`TimeProvider`], for thread-per-core
+/// runtimes whose timers cannot leave their thread.
+///
+/// The same contract as [`TimeProvider`] without any `Send` or `Sync` bound:
+/// [`sleep`](Self::sleep) returns a future that need not be `Send`, and
+/// [`timeout`](Self::timeout) accepts a future that need not be `Send`. Every
+/// [`TimeProvider`] implements it through a blanket impl, so the Tokio and
+/// simulated providers get it for free; a thread-per-core backend implements
+/// only this trait.
+///
+/// Code generic over this trait runs on every backend, and when the backend
+/// is `Send` (Tokio, the simulator) and the timed future is `Send`, the
+/// futures it builds are `Send` too: the auto traits of the concrete future
+/// leak through the generic code.
+///
+/// A concrete [`TimeProvider`] has both traits' methods under the same names.
+/// With both traits in scope, `time.sleep(..)` is ambiguous: import one trait
+/// per module, or call `LocalTimeProvider::sleep(&time, ..)`.
+pub trait LocalTimeProvider: Clone + 'static {
+    /// Sleep for the specified duration. See [`TimeProvider::sleep`].
+    fn sleep(&self, duration: Duration)
+    -> impl std::future::Future<Output = Result<(), TimeError>>;
+
+    /// Get exact current time: the scheduling clock. See
+    /// [`TimeProvider::now`].
+    fn now(&self) -> Duration;
+
+    /// Get drifted timer time: the application clock. See
+    /// [`TimeProvider::timer`].
+    fn timer(&self) -> Duration {
+        LocalTimeProvider::now(self)
+    }
+
+    /// Run a future with a timeout. See [`TimeProvider::timeout`].
+    ///
+    /// Returns `Ok(result)` if the future completes within the timeout,
+    /// or `Err(TimeError::Elapsed)` if it times out.
+    fn timeout<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl std::future::Future<Output = Result<T, TimeError>>
+    where
+        F: std::future::Future<Output = T>;
+}
+
+/// The blanket impl cannot forward [`timeout`](LocalTimeProvider::timeout) to
+/// [`TimeProvider::timeout`], which needs a `Send` future. It races the
+/// future against [`TimeProvider::sleep`] instead, with the same outcome as
+/// `tokio::time::timeout` and the simulator's own `timeout`: the timer starts
+/// before the future is first polled, and a future that is ready wins over a
+/// timer that is ready in the same poll.
+impl<P: TimeProvider> LocalTimeProvider for P {
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> impl std::future::Future<Output = Result<(), TimeError>> {
+        TimeProvider::sleep(self, duration)
+    }
+
+    fn now(&self) -> Duration {
+        TimeProvider::now(self)
+    }
+
+    fn timer(&self) -> Duration {
+        TimeProvider::timer(self)
+    }
+
+    fn timeout<F, T>(
+        &self,
+        duration: Duration,
+        future: F,
+    ) -> impl std::future::Future<Output = Result<T, TimeError>>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        race_timeout(future, TimeProvider::sleep(self, duration))
+    }
+}
+
+/// Race `future` against `sleep`: `Ok` with the future's output, or the
+/// sleep's outcome as an error.
+///
+/// The first poll starts the sleep before it polls the future, so the timer
+/// is armed (and, in simulation, scheduled) before any of the future's work;
+/// a sleep that fails to start fails the race at once. Every later poll
+/// polls the future first. In each poll a ready future wins.
+async fn race_timeout<F, S, T>(future: F, sleep: S) -> Result<T, TimeError>
+where
+    F: std::future::Future<Output = T>,
+    S: std::future::Future<Output = Result<(), TimeError>>,
+{
+    use std::task::Poll;
+
+    let mut future = std::pin::pin!(future);
+    let mut sleep = std::pin::pin!(sleep);
+    let mut started = false;
+    let mut slept = false;
+    std::future::poll_fn(|cx| {
+        let first_poll = !std::mem::replace(&mut started, true);
+        // Arm the timer before any of the future's work.
+        if first_poll && let Err(error) = poll_sleep(sleep.as_mut(), cx, &mut slept) {
+            return Poll::Ready(Err(error));
+        }
+        if let Poll::Ready(output) = future.as_mut().poll(cx) {
+            return Poll::Ready(Ok(output));
+        }
+        if !first_poll
+            && !slept
+            && let Err(error) = poll_sleep(sleep.as_mut(), cx, &mut slept)
+        {
+            return Poll::Ready(Err(error));
+        }
+        if slept {
+            Poll::Ready(Err(TimeError::Elapsed))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
+}
+
+/// Poll the timeout's sleep once: set `slept` when it fired, and return the
+/// error when it failed.
+fn poll_sleep<S>(
+    sleep: std::pin::Pin<&mut S>,
+    cx: &mut std::task::Context<'_>,
+    slept: &mut bool,
+) -> Result<(), TimeError>
+where
+    S: std::future::Future<Output = Result<(), TimeError>>,
+{
+    match sleep.poll(cx) {
+        std::task::Poll::Ready(Ok(())) => *slept = true,
+        std::task::Poll::Ready(Err(error)) => return Err(error),
+        std::task::Poll::Pending => {}
+    }
+    Ok(())
+}
+
 /// Production time provider: `tokio::time` for sleeps and timeouts, and a
 /// monotonic [`Instant`](std::time::Instant) for the clocks.
 ///

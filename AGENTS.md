@@ -61,7 +61,10 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 - Use traits, not concrete types
 - KISS principle
 - **No LocalSet, no `spawn_local`, no `build_local`**: the executor runs on a
-  single OS thread, but futures must be `Send + 'static`
+  single OS thread, but futures must be `Send + 'static`. The one exception is
+  code written against the local traits (`LocalProviders`,
+  `LocalTaskProvider`, for thread-per-core runtimes): it spawns `!Send` tasks
+  with `spawn_local_task`, which `SimTaskProvider` runs on the same executor
 - **No direct tokio calls**: Use Provider traits
   - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`,
     `tokio::select!` (entropy branch offsets — use `moonpool_sim::select!`)

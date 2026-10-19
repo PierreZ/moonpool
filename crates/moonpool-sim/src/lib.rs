@@ -350,6 +350,12 @@ pub use moonpool_core::{
     RandomProvider, Resolver, SimulationError, SimulationResult, StorageFile, StorageProvider,
     SystemProvider, SystemSample, TaskProvider, TcpListenerTrait, TimeError, TimeProvider,
 };
+// Local (non-`Send`) provider traits: the sim backends implement them too, so
+// code written for a thread-per-core runtime runs under simulation.
+pub use moonpool_core::{
+    LocalNetworkProvider, LocalProviders, LocalStorageFile, LocalStorageProvider,
+    LocalTaskProvider, LocalTcpListener, LocalTimeProvider,
+};
 // The deterministic select! (moonpool-sim always enables core's
 // deterministic-select, so this is tokio's expansion with a seeded start
 // offset). Process and

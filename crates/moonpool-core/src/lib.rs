@@ -142,12 +142,12 @@ pub use error::{SimulationError, SimulationResult};
 pub use metrics::{HistogramValue, MetricSample, MetricValue, MetricsSource};
 
 // Provider trait exports
-pub use network::{NetworkProvider, TcpListenerTrait};
+pub use network::{LocalNetworkProvider, LocalTcpListener, NetworkProvider, TcpListenerTrait};
 #[cfg(feature = "tokio-net")]
 pub use network::{TokioNetworkProvider, TokioTcpListener};
-pub use providers::Providers;
 #[cfg(feature = "tokio-providers")]
 pub use providers::TokioProviders;
+pub use providers::{LocalProviders, Providers};
 pub use random::RandomProvider;
 #[cfg(feature = "tokio-random")]
 pub use random::TokioRandomProvider;
@@ -155,8 +155,8 @@ pub use random::TokioRandomProvider;
 pub use resolver::TokioResolver;
 pub use resolver::{Resolver, split_host_port};
 pub use storage::{
-    AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, LayoutRegion, OpenOptions,
-    StorageFile, StorageProvider, stream_io_unsupported,
+    AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, LayoutRegion, LocalStorageFile,
+    LocalStorageProvider, OpenOptions, StorageFile, StorageProvider, stream_io_unsupported,
 };
 #[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};
@@ -165,12 +165,12 @@ pub use system::TokioSystemProvider;
 pub use system::{
     DiskCounters, DiskSpace, SystemProvider, SystemSample, parse_diskstats, parse_proc_stat,
 };
-pub use task::{Detach, JoinError, TaskProvider};
+pub use task::{Detach, JoinError, LocalTaskProvider, TaskProvider};
 #[cfg(feature = "tokio-task")]
-pub use task::{TokioJoinHandle, TokioTaskProvider};
+pub use task::{TokioJoinHandle, TokioLocalTaskProvider, TokioTaskProvider};
 #[cfg(feature = "tokio-time")]
 pub use time::TokioTimeProvider;
-pub use time::{TimeError, TimeProvider};
+pub use time::{LocalTimeProvider, TimeError, TimeProvider};
 
 /// Common imports for writing code against the provider traits.
 ///

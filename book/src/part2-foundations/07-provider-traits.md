@@ -181,6 +181,34 @@ pub trait Providers: Clone + Send + Sync + 'static {
 
 `TokioProviders::new()` bundles the six production implementations. `SimProviders::new(sim, ip)` bundles the six simulation implementations, scoped to one process IP. Your application code sees `P: Providers` and nothing else.
 
+## Local Providers
+
+A thread-per-core runtime (compio, monoio, a Tokio `LocalSet`) pins every task, file and socket to one thread. Its files hold an `Rc` to their descriptor and its futures hold the thread's proactor, so none of them is `Send`, and it cannot implement the traits above. Each `Send` trait has a **local** form: the same methods and the same contract, with no `Send` or `Sync` bound on the trait, its associated types or its futures.
+
+| Local trait | `Send` trait | Blanket impl |
+|-------------|--------------|--------------|
+| `LocalStorageProvider`, `LocalStorageFile` | `StorageProvider`, `StorageFile` | yes |
+| `LocalNetworkProvider`, `LocalTcpListener` | `NetworkProvider`, `TcpListenerTrait` | yes |
+| `LocalTimeProvider` | `TimeProvider` | yes (`timeout` takes a `!Send` future) |
+| `LocalTaskProvider` (`spawn_local_task`) | `TaskProvider` | no |
+| `LocalProviders` (no task slot) | `Providers` | yes |
+
+```rust,ignore
+pub trait LocalStorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'static {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> impl Future<Output = io::Result<usize>>;
+    // ... every StorageFile method, no `+ Send`
+}
+impl<F: StorageFile> LocalStorageFile for F { /* forwards every method */ }
+```
+
+Every `Send` backend implements the local traits through the blanket impls, so the Tokio and simulated providers get them for free. A thread-per-core backend implements only the local traits. Code written once against the local traits runs on every backend, and when the backend is `Send` the futures it builds are `Send` too: the auto traits of the concrete future leak through the generic code, so it can still go to `tokio::spawn`.
+
+**Tasks** have no blanket impl in either direction. A `TaskProvider` cannot spawn a `!Send` future, and a local provider pins its tasks to one thread. A backend that can do both implements both. `TokioLocalTaskProvider` (feature `tokio-task`) spawns with `tokio::task::spawn_local` and must run inside a `LocalSet`. `SimTaskProvider` implements both traits, because the executor runs every task on one thread anyway: a local task inherits the owner and the boot scope, dies with its process, reports its panics, and is scheduled by the same seeded executor. So **local code runs under simulation** unchanged, `Rc<RefCell<..>>` across awaits included. A `Process` or `Workload` future stays `Send`: it spawns the local code with `ctx.task().spawn_local_task(..)` and awaits or detaches the handle, which is `Send` (`crates/moonpool-sim/tests/local_workload.rs`).
+
+`LocalProviders` leaves the task slot out so that it can be a blanket impl over `Providers`: every existing bundle is a `LocalProviders`. Code that spawns local tasks takes a `LocalTaskProvider` beside the bundle. Random and system keep their `Send` traits: their methods are synchronous, so a thread-per-core runtime backs them with the same types Tokio uses.
+
+**Method-name ambiguity.** A concrete Tokio or sim type has both traits' methods under the same names. With both traits in scope, `file.read_at(..)` is ambiguous: import one trait per module, or call through the trait (`LocalStorageFile::read_at(&file, ..)`). Generic code bounded by one trait is not affected. The local traits are not in the prelude.
+
 ## Resolver
 
 Name resolution is not in the bundle. Most code never resolves a name, and code that does picks its resolver next to its providers.

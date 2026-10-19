@@ -1,4 +1,6 @@
-//! Tasks: [`TaskProvider`], with [`TokioTaskProvider`] for production.
+//! Tasks: [`TaskProvider`], with [`TokioTaskProvider`] for production, and
+//! [`LocalTaskProvider`], with [`TokioLocalTaskProvider`], for tasks that stay
+//! on their thread and need not be `Send`.
 //!
 //! Application code spawns through this trait, never through
 //! `tokio::spawn`. In simulation the spawned task runs on moonpool's
@@ -74,6 +76,52 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
     fn yield_now(&self) -> impl Future<Output = ()> + Send;
 }
 
+/// Local (non-`Send`) task provider: spawns futures that stay on the
+/// spawning thread.
+///
+/// A thread-per-core runtime (compio, monoio, a Tokio `LocalSet`) runs every
+/// task on the thread that spawned it, so the future need not be `Send` and
+/// may hold `Rc`, `RefCell` and the runtime's own thread-bound handles.
+///
+/// ## Relationship to [`TaskProvider`]
+///
+/// Unlike the other local traits, there is **no blanket impl** in either
+/// direction:
+///
+/// - a [`TaskProvider`] cannot spawn a `!Send` future (`tokio::spawn` moves
+///   it to any worker thread), so it is not a `LocalTaskProvider`;
+/// - a `LocalTaskProvider` pins tasks to one thread and may return `!Send`
+///   handles, so it is not a [`TaskProvider`].
+///
+/// A backend that can do both implements both:
+/// [`TokioLocalTaskProvider`] is the local one for Tokio, and
+/// `moonpool_sim::SimTaskProvider` implements both traits, because the
+/// simulator runs every task on one thread anyway.
+///
+/// The method is named [`spawn_local_task`](Self::spawn_local_task), not
+/// `spawn_task`, so a type implementing both traits never makes a call site
+/// ambiguous. [`yield_now`](Self::yield_now) shares its name with
+/// [`TaskProvider::yield_now`]: with both traits in scope, call it through
+/// the trait (`LocalTaskProvider::yield_now(&tasks)`).
+pub trait LocalTaskProvider: Clone + 'static {
+    /// Future returned by [`Self::spawn_local_task`].
+    ///
+    /// Resolves with `Ok(())` on normal completion, or a [`JoinError`] if the
+    /// task was cancelled or panicked. Consume it with [`Detach::detach`] for
+    /// explicit fire-and-forget. It need not be `Send`.
+    type JoinHandle: Future<Output = Result<(), JoinError>> + Detach + 'static;
+
+    /// Spawn a named task on the current thread. The future need not be
+    /// `Send`.
+    fn spawn_local_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
+    where
+        F: Future<Output = ()> + 'static;
+
+    /// Yield control to allow other tasks on this thread to run. See
+    /// [`TaskProvider::yield_now`].
+    fn yield_now(&self) -> impl Future<Output = ()>;
+}
+
 /// Tokio-based task provider.
 ///
 /// This provider creates tasks via `tokio::spawn`. The task name is emitted
@@ -133,6 +181,60 @@ impl TaskProvider for TokioTaskProvider {
             tracing::trace!("Task {} completed", task_name);
         };
         TokioJoinHandle(tokio::spawn(fut))
+    }
+
+    async fn yield_now(&self) {
+        tokio::task::yield_now().await;
+    }
+}
+
+/// Tokio-based local task provider: spawns `!Send` futures with
+/// `tokio::task::spawn_local`.
+///
+/// Spawned tasks run on the current thread. Like `spawn_local`, it **panics**
+/// unless called inside a `tokio::task::LocalSet` (or a local runtime): a
+/// plain multi-threaded or current-thread runtime is not enough. The task
+/// name is emitted in `tracing::trace!` events around the future, as
+/// [`TokioTaskProvider`] does.
+///
+/// ```rust
+/// use std::rc::Rc;
+///
+/// use moonpool_core::{LocalTaskProvider, TokioLocalTaskProvider};
+///
+/// # #[tokio::main(flavor = "current_thread")]
+/// # async fn main() {
+/// let local = tokio::task::LocalSet::new();
+/// local
+///     .run_until(async {
+///         let shared = Rc::new(41);
+///         let handle = TokioLocalTaskProvider.spawn_local_task("rc", async move {
+///             assert_eq!(*shared + 1, 42);
+///         });
+///         handle.await.expect("task completed");
+///     })
+///     .await;
+/// # }
+/// ```
+#[cfg(feature = "tokio-task")]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TokioLocalTaskProvider;
+
+#[cfg(feature = "tokio-task")]
+impl LocalTaskProvider for TokioLocalTaskProvider {
+    type JoinHandle = TokioJoinHandle;
+
+    fn spawn_local_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        let task_name = name.to_string();
+        let fut = async move {
+            tracing::trace!("Task {} starting", task_name);
+            future.await;
+            tracing::trace!("Task {} completed", task_name);
+        };
+        TokioJoinHandle(tokio::task::spawn_local(fut))
     }
 
     async fn yield_now(&self) {

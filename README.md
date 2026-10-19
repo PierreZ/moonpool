@@ -117,6 +117,10 @@ and under the simulator in its own `#[test]`.
   `Providers`.
 - `TokioProviders` for production, with granular `tokio-*` features.
   `SimProviders` for simulation.
+- Local (non-`Send`) forms of the traits for thread-per-core runtimes:
+  `LocalStorageProvider`, `LocalNetworkProvider`, `LocalTimeProvider`,
+  `LocalTaskProvider` and the `LocalProviders` bundle. Tokio and the
+  simulator implement them too, so local code runs under simulation.
 - `Resolver` for `host:port` lookups, outside the bundle: `TokioResolver` in
   production, `ScriptedResolver` in simulation.
 - `SystemProvider` reads cumulative CPU and disk counters (`getrusage`,

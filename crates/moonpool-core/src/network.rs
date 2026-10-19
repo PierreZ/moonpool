@@ -1,5 +1,7 @@
 //! Networking: [`NetworkProvider`] and [`TcpListenerTrait`], with
-//! [`TokioNetworkProvider`] for production.
+//! [`TokioNetworkProvider`] for production, and their local (non-`Send`)
+//! forms [`LocalNetworkProvider`] and [`LocalTcpListener`] for
+//! thread-per-core runtimes.
 //!
 //! Streams implement the runtime-neutral `futures::io::AsyncRead` and
 //! `AsyncWrite` traits, so protocol code (and hyper, tonic and moonpool-rpc
@@ -66,6 +68,90 @@ pub trait TcpListenerTrait: Send + Sync + 'static {
     /// Returns an [`io::Error`] if the local address cannot be retrieved
     /// from the underlying listener.
     fn local_addr(&self) -> io::Result<String>;
+}
+
+/// Local (non-`Send`) form of [`NetworkProvider`], for thread-per-core
+/// runtimes whose sockets and futures cannot leave their thread.
+///
+/// The same contract as [`NetworkProvider`] without any `Send` or `Sync`
+/// bound: not on the provider, not on its stream type, not on the futures
+/// [`bind`](Self::bind) and [`connect`](Self::connect) return. Every
+/// [`NetworkProvider`] implements it through a blanket impl, so the Tokio and
+/// simulated providers get it for free; a thread-per-core backend implements
+/// only this trait.
+///
+/// Code generic over this trait runs on every backend, and when the backend
+/// is `Send` (Tokio, the simulator) the futures it builds are `Send` too:
+/// the auto traits of the concrete future leak through the generic code.
+///
+/// A concrete [`NetworkProvider`] has both traits' methods under the same
+/// names. With both traits in scope, `network.bind(..)` is ambiguous: import
+/// one trait per module, or call `LocalNetworkProvider::bind(&network, ..)`.
+pub trait LocalNetworkProvider: Clone + 'static {
+    /// The TCP stream type for this provider.
+    type TcpStream: AsyncRead + AsyncWrite + Unpin + 'static;
+    /// The TCP listener type for this provider.
+    type TcpListener: LocalTcpListener<TcpStream = Self::TcpStream> + 'static;
+
+    /// Create a TCP listener bound to the given address. See
+    /// [`NetworkProvider::bind`].
+    fn bind(&self, addr: &str) -> impl std::future::Future<Output = io::Result<Self::TcpListener>>;
+
+    /// Connect to a remote address. See [`NetworkProvider::connect`].
+    fn connect(&self, addr: &str)
+    -> impl std::future::Future<Output = io::Result<Self::TcpStream>>;
+}
+
+/// Local (non-`Send`) form of [`TcpListenerTrait`].
+///
+/// The same contract without any `Send` or `Sync` bound. Every
+/// [`TcpListenerTrait`] implements it through a blanket impl. As with
+/// [`LocalNetworkProvider`], a concrete listener has both traits' methods
+/// under the same names: import one trait per module, or call
+/// `LocalTcpListener::accept(&listener)`.
+pub trait LocalTcpListener: 'static {
+    /// The TCP stream type that this listener produces.
+    type TcpStream: AsyncRead + AsyncWrite + Unpin + 'static;
+
+    /// Accept a single incoming connection. See [`TcpListenerTrait::accept`].
+    fn accept(&self) -> impl std::future::Future<Output = io::Result<(Self::TcpStream, String)>>;
+
+    /// Get the local address this listener is bound to. See
+    /// [`TcpListenerTrait::local_addr`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`io::Error`] if the local address cannot be retrieved
+    /// from the underlying listener.
+    fn local_addr(&self) -> io::Result<String>;
+}
+
+impl<N: NetworkProvider> LocalNetworkProvider for N {
+    type TcpStream = N::TcpStream;
+    type TcpListener = N::TcpListener;
+
+    fn bind(&self, addr: &str) -> impl std::future::Future<Output = io::Result<Self::TcpListener>> {
+        NetworkProvider::bind(self, addr)
+    }
+
+    fn connect(
+        &self,
+        addr: &str,
+    ) -> impl std::future::Future<Output = io::Result<Self::TcpStream>> {
+        NetworkProvider::connect(self, addr)
+    }
+}
+
+impl<L: TcpListenerTrait> LocalTcpListener for L {
+    type TcpStream = L::TcpStream;
+
+    fn accept(&self) -> impl std::future::Future<Output = io::Result<(Self::TcpStream, String)>> {
+        TcpListenerTrait::accept(self)
+    }
+
+    fn local_addr(&self) -> io::Result<String> {
+        TcpListenerTrait::local_addr(self)
+    }
 }
 
 /// Real Tokio networking implementation.

@@ -39,7 +39,8 @@
 //! and workload through `SimContext::providers`.
 
 use crate::{
-    NetworkProvider, RandomProvider, StorageProvider, SystemProvider, TaskProvider, TimeProvider,
+    LocalNetworkProvider, LocalStorageProvider, LocalTimeProvider, NetworkProvider, RandomProvider,
+    StorageProvider, SystemProvider, TaskProvider, TimeProvider,
 };
 #[cfg(feature = "tokio-providers")]
 use crate::{
@@ -157,6 +158,93 @@ pub trait Providers: Clone + Send + Sync + 'static {
 
     /// Get the system provider instance.
     fn system(&self) -> &Self::System;
+}
+
+/// Local (non-`Send`) bundle: the provider slots a thread-per-core runtime
+/// can back, without the task slot.
+///
+/// The network, time and storage slots take the local traits
+/// ([`LocalNetworkProvider`], [`LocalTimeProvider`],
+/// [`LocalStorageProvider`]). Random and system keep [`RandomProvider`] and
+/// [`SystemProvider`]: their methods are synchronous, so a thread-per-core
+/// runtime can back them with the same `Send` types Tokio uses (a
+/// thread-local RNG, `getrusage`). The bundle itself need not be `Send`.
+///
+/// ## No task slot
+///
+/// Tasks are left out on purpose. A [`TaskProvider`] is not a
+/// [`LocalTaskProvider`](crate::LocalTaskProvider) (it cannot spawn a `!Send`
+/// future), so a task slot would rule out the blanket impl below, and every
+/// existing bundle would need a second, hand-written impl. Without it, every
+/// [`Providers`] bundle ([`TokioProviders`], `SimProviders`) is a
+/// `LocalProviders` for free. Code that spawns local tasks takes a
+/// [`LocalTaskProvider`](crate::LocalTaskProvider) beside the bundle.
+///
+/// ## Method-name ambiguity
+///
+/// A concrete [`Providers`] bundle has both traits' accessors under the same
+/// names. With both traits in scope, `providers.time()` is ambiguous on a
+/// concrete type: import one trait per module, or call
+/// `LocalProviders::time(&providers)`. Generic code bounded by one trait is
+/// not affected.
+pub trait LocalProviders: Clone + 'static {
+    /// Network provider type for TCP connections and listeners.
+    type Network: LocalNetworkProvider;
+
+    /// Time provider type for sleep, timeout, and time queries.
+    type Time: LocalTimeProvider;
+
+    /// Random provider type for deterministic or real randomness.
+    type Random: RandomProvider;
+
+    /// Storage provider type for file I/O operations.
+    type Storage: LocalStorageProvider;
+
+    /// System provider type for CPU and disk counters.
+    type System: SystemProvider;
+
+    /// Get the network provider instance.
+    fn network(&self) -> &Self::Network;
+
+    /// Get the time provider instance.
+    fn time(&self) -> &Self::Time;
+
+    /// Get the random provider instance.
+    fn random(&self) -> &Self::Random;
+
+    /// Get the storage provider instance.
+    fn storage(&self) -> &Self::Storage;
+
+    /// Get the system provider instance.
+    fn system(&self) -> &Self::System;
+}
+
+impl<P: Providers> LocalProviders for P {
+    type Network = P::Network;
+    type Time = P::Time;
+    type Random = P::Random;
+    type Storage = P::Storage;
+    type System = P::System;
+
+    fn network(&self) -> &Self::Network {
+        Providers::network(self)
+    }
+
+    fn time(&self) -> &Self::Time {
+        Providers::time(self)
+    }
+
+    fn random(&self) -> &Self::Random {
+        Providers::random(self)
+    }
+
+    fn storage(&self) -> &Self::Storage {
+        Providers::storage(self)
+    }
+
+    fn system(&self) -> &Self::System {
+        Providers::system(self)
+    }
 }
 
 /// Production providers: the six Tokio-backed providers in one bundle.
