@@ -48,7 +48,7 @@ pub fn is_direct_io_unsupported(error: &io::Error) -> bool {
 }
 
 /// What the kernel will say about a file's direct-I/O alignment.
-#[cfg(unix)]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 enum ReportedAlignment {
     /// The kernel described this file's actual requirement.
     Known(IoConstraints),
@@ -112,11 +112,6 @@ fn reported_alignment<F: AsFd>(file: &F) -> ReportedAlignment {
     ReportedAlignment::Known(IoConstraints::new(offset, length, memory))
 }
 
-#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
-fn reported_alignment<F: AsFd>(_file: &F) -> ReportedAlignment {
-    ReportedAlignment::Unknown
-}
-
 /// An alignment guaranteed to satisfy this system's direct I/O, for kernels
 /// that will not report the real one.
 ///
@@ -152,7 +147,7 @@ pub fn bounded_alignment() -> Option<IoConstraints> {
 /// Advertising constraints that are too weak would hand the caller an aligned
 /// buffer the device then rejects, so "we do not know" is answered by not
 /// offering direct I/O rather than by guessing.
-#[cfg(unix)]
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[must_use]
 pub fn direct_io_constraints<F: AsFd>(file: &F) -> Option<IoConstraints> {
     match reported_alignment(file) {
@@ -160,6 +155,13 @@ pub fn direct_io_constraints<F: AsFd>(file: &F) -> Option<IoConstraints> {
         ReportedAlignment::Refused => None,
         ReportedAlignment::Unknown => bounded_alignment(),
     }
+}
+
+/// The kernel reports nothing here, so the bound is all there is.
+#[cfg(all(unix, not(all(target_os = "linux", target_env = "gnu"))))]
+#[must_use]
+pub fn direct_io_constraints<F: AsFd>(_file: &F) -> Option<IoConstraints> {
+    bounded_alignment()
 }
 
 /// Outside unix the kernel reports nothing and nothing bounds the
