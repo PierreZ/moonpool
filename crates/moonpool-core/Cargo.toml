@@ -52,7 +52,8 @@ compio-providers = [
 compio-task = ["dep:compio", "compio/runtime", "compio/io-uring", "compio/polling"]
 compio-time = ["dep:compio", "compio/time", "compio/io-uring", "compio/polling"]
 compio-net = ["dep:compio", "compio/net", "compio/io-compat", "compio/io-uring", "compio/polling"]
-compio-fs = ["dep:compio", "compio/fs", "compio/io-uring", "compio/polling"]
+# libc supplies O_DIRECT, O_APPEND and the statx alignment query.
+compio-fs = ["dep:compio", "dep:libc", "compio/fs", "compio/io-uring", "compio/polling"]
 # CompioSystemProvider: the same getrusage, /proc and statvfs counters as
 # TokioSystemProvider, without Tokio's runtime metrics.
 compio-system = ["dep:libc"]

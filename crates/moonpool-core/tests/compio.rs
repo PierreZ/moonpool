@@ -154,17 +154,39 @@ fn opens_follow_the_shared_rules() {
                 OpenOptions::create_write().direct_io(DirectIo::Required),
             )
             .await
-            .expect_err("direct I/O is not offered");
+            .expect_err("Required never creates a file");
         assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        assert!(
+            !storage.exists(&path).await.expect("exists"),
+            "a refused Required open leaves nothing behind"
+        );
 
-        let buffered = storage
+        let optional = storage
             .open(
                 &path,
                 OpenOptions::create_write().direct_io(DirectIo::Optional),
             )
             .await
-            .expect("optional falls back to buffered");
-        assert!(!buffered.is_direct_io());
+            .expect("Optional creates the file, direct or not");
+        assert_eq!(
+            optional.is_direct_io(),
+            !optional.constraints().is_unconstrained()
+        );
+        drop(optional);
+        for policy in [DirectIo::Disabled, DirectIo::Optional, DirectIo::Required] {
+            let kind = storage
+                .open(&path, OpenOptions::create_new_write().direct_io(policy))
+                .await
+                .expect_err("create_new refuses an existing file under every policy")
+                .kind();
+            assert!(
+                matches!(
+                    kind,
+                    std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::Unsupported
+                ),
+                "{policy:?}: {kind:?}"
+            );
+        }
 
         let missing = storage
             .open(&scratch(&dir, "missing"), OpenOptions::read_only())
@@ -177,6 +199,219 @@ fn opens_follow_the_shared_rules() {
             .await
             .expect_err("create_new refuses an existing file");
         assert_eq!(exclusive.kind(), std::io::ErrorKind::AlreadyExists);
+    });
+}
+
+/// Open `path` with `DirectIo::Required` after creating it the ordinary
+/// way; `None` where this filesystem or platform has no direct I/O.
+async fn open_direct(
+    storage: &CompioStorageProvider,
+    path: &str,
+) -> Option<moonpool_core::CompioStorageFile> {
+    let created = storage
+        .open(path, OpenOptions::create_write())
+        .await
+        .expect("create");
+    created.sync_all().await.expect("sync");
+    drop(created);
+    match storage
+        .open(
+            path,
+            OpenOptions::read_write().direct_io(DirectIo::Required),
+        )
+        .await
+    {
+        Ok(file) => Some(file),
+        Err(error) => {
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported, "{error}");
+            eprintln!("skipped: direct I/O is unavailable here: {error}");
+            None
+        }
+    }
+}
+
+/// A direct file advertises constraints its device accepts: transfers at
+/// exactly that alignment go through, borrowed and owned; a misaligned one
+/// and the stream API are refused.
+#[test]
+fn direct_io_transfers_at_the_reported_alignment() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scratch(&dir, "direct.db");
+    run(async {
+        let storage = CompioStorageProvider::new();
+        let Some(mut file) = open_direct(&storage, &path).await else {
+            return;
+        };
+        assert!(file.is_direct_io());
+        let constraints = file.constraints();
+        assert!(!constraints.is_unconstrained());
+        let length = constraints.length_alignment();
+        let offset = constraints.offset_alignment();
+
+        let mut block = AlignedBuf::for_constraints(length, constraints);
+        block.as_mut_slice().fill(0xD1);
+        let (written, block) = file
+            .write_at_durable_aligned(offset, block)
+            .await
+            .expect("an aligned owned write is accepted");
+        assert_eq!(written, length);
+        let (read, back) = file
+            .read_at_aligned(offset, AlignedBuf::for_constraints(length, constraints))
+            .await
+            .expect("an aligned owned read is accepted");
+        assert_eq!(read, length);
+        assert_eq!(back.as_slice(), block.as_slice());
+
+        // The borrowed forms take an aligned slice and bounce it through an
+        // aligned buffer of their own.
+        let mut borrowed = AlignedBuf::for_constraints(length, constraints);
+        assert_eq!(
+            file.read_at(offset, borrowed.as_mut_slice())
+                .await
+                .expect("read_at"),
+            length
+        );
+        assert_eq!(borrowed.as_slice(), block.as_slice());
+        assert_eq!(
+            file.write_at(0, borrowed.as_slice())
+                .await
+                .expect("write_at"),
+            length
+        );
+
+        if offset > 1 {
+            let misaligned = file
+                .write_at(1, borrowed.as_slice())
+                .await
+                .expect_err("a misaligned offset is refused");
+            assert_eq!(misaligned.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        let stream = file
+            .write_all(b"x")
+            .await
+            .expect_err("a direct file refuses stream writes");
+        assert_eq!(stream.kind(), std::io::ErrorKind::Unsupported);
+        let mut byte = [0_u8; 1];
+        let stream = file
+            .read(&mut byte)
+            .await
+            .expect_err("a direct file refuses stream reads");
+        assert_eq!(stream.kind(), std::io::ErrorKind::Unsupported);
+    });
+}
+
+/// `Required` with truncate truncates an existing file once direct I/O is
+/// secured, and an `Optional` truncating open truncates exactly once.
+#[test]
+fn truncation_is_applied_once_under_every_policy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scratch(&dir, "truncate.db");
+    run(async {
+        let storage = CompioStorageProvider::new();
+        for policy in [DirectIo::Optional, DirectIo::Required] {
+            let seed = storage
+                .open(&path, OpenOptions::create_write())
+                .await
+                .expect("create");
+            seed.write_at(0, b"old contents").await.expect("seed");
+            drop(seed);
+            match storage
+                .open(
+                    &path,
+                    OpenOptions::read_write().truncate(true).direct_io(policy),
+                )
+                .await
+            {
+                Ok(file) => assert_eq!(file.size().await.expect("size"), 0, "{policy:?}"),
+                Err(error) => {
+                    assert_eq!(policy, DirectIo::Required, "{error}");
+                    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+                    assert_eq!(
+                        std::fs::metadata(&path).expect("metadata").len(),
+                        12,
+                        "a refused Required open leaves the file as it was"
+                    );
+                }
+            }
+        }
+    });
+}
+
+/// Two append handles interleaving stream writes lose nothing: every write
+/// lands whole at the end, which needs the kernel's `O_APPEND`. Positioned
+/// writes on the same handles still go where they are told.
+#[cfg(target_os = "linux")]
+#[test]
+fn appends_from_two_handles_never_overwrite_each_other() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scratch(&dir, "shared.log");
+    run(async {
+        let storage = CompioStorageProvider::new();
+        let append = || OpenOptions::new().read(true).append(true).create(true);
+        let mut first = storage.open(&path, append()).await.expect("open");
+        let mut second = storage.open(&path, append()).await.expect("open");
+        for round in 0..8_u8 {
+            first.write_all(&[b'a' + round; 3]).await.expect("append");
+            second.write_all(&[b'A' + round; 2]).await.expect("append");
+        }
+        first.flush().await.expect("flush");
+        second.flush().await.expect("flush");
+        assert_eq!(first.size().await.expect("size"), 8 * 5);
+
+        // The stream cursor of an append handle is the end of the file.
+        assert_eq!(first.seek(SeekFrom::Current(0)).await.expect("seek"), 40);
+        assert_eq!(second.seek(SeekFrom::Current(-2)).await.expect("seek"), 38);
+        let mut tail = Vec::new();
+        second.read_to_end(&mut tail).await.expect("read_to_end");
+        assert_eq!(tail, b"HH");
+
+        first.write_at(0, b"!").await.expect("positioned");
+        let mut all = vec![0_u8; 64];
+        let read = first.read_at(0, &mut all).await.expect("read");
+        all.truncate(read);
+        let mut expected = Vec::new();
+        for round in 0..8_u8 {
+            expected.extend_from_slice(&[b'a' + round; 3]);
+            expected.extend_from_slice(&[b'A' + round; 2]);
+        }
+        expected[0] = b'!';
+        assert_eq!(all, expected);
+    });
+}
+
+/// The stream and positioned sides of one append handle stay on the file it
+/// opened, even after a replacement is renamed over its path.
+#[test]
+fn an_append_handle_stays_on_one_file_across_a_rename() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scratch(&dir, "append.db");
+    let replacement = scratch(&dir, "replacement.db");
+    run(async {
+        let storage = CompioStorageProvider::new();
+        let seed = storage
+            .open(&path, OpenOptions::create_write())
+            .await
+            .expect("create");
+        seed.write_at(0, b"AAAA").await.expect("seed");
+        drop(seed);
+        let mut file = storage
+            .open(&path, OpenOptions::new().read(true).append(true))
+            .await
+            .expect("open");
+        let other = storage
+            .open(&replacement, OpenOptions::create_write())
+            .await
+            .expect("create");
+        other.write_at(0, b"ZZZZ").await.expect("write");
+        drop(other);
+        storage.rename(&replacement, &path).await.expect("rename");
+
+        file.write_all(b"SS").await.expect("append");
+        file.write_at(0, b"P").await.expect("positioned");
+        let mut buf = [0_u8; 8];
+        let read = file.read_at(0, &mut buf).await.expect("read");
+        assert_eq!(&buf[..read], b"PAAASS");
+        assert_eq!(std::fs::read(&path).expect("read"), b"ZZZZ");
     });
 }
 

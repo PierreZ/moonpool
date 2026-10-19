@@ -102,7 +102,7 @@
 //! | `compio-task` | via umbrella | `CompioTaskProvider` ([`LocalTaskProvider`]) |
 //! | `compio-time` | via umbrella | `CompioTimeProvider` ([`LocalTimeProvider`]) |
 //! | `compio-net` | via umbrella | `CompioNetworkProvider` ([`LocalNetworkProvider`]) |
-//! | `compio-fs` | via umbrella | `CompioStorageProvider` ([`LocalStorageProvider`]), buffered I/O only |
+//! | `compio-fs` | via umbrella | `CompioStorageProvider` ([`LocalStorageProvider`]), direct I/O on Linux |
 //! | `compio-system` | via umbrella | `CompioSystemProvider` |
 //! | `select` | yes | [`select!`] as tokio's macro, unchanged |
 //! | `deterministic-select` | no | [`select!`] with a seeded branch offset (`moonpool-sim` turns it on) |

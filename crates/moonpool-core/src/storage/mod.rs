@@ -50,6 +50,8 @@ mod align;
 mod compio_impl;
 mod layout;
 mod local;
+#[cfg(any(feature = "tokio-fs", feature = "compio-fs"))]
+mod native;
 mod options;
 #[cfg(feature = "tokio-fs")]
 mod tokio_impl;
