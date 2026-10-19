@@ -90,6 +90,15 @@ pub(crate) enum PendingOpType {
     SetLen,
 }
 
+impl PendingOpType {
+    /// Whether the operation changes the file: a write, a sync, or a length
+    /// change. Dropping its future does not undo it (see
+    /// [`PendingStorageOp::detached`]); a dropped read is simply cancelled.
+    pub(crate) fn is_mutation(self) -> bool {
+        !matches!(self, Self::Read)
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PendingStorageOp {
     pub(crate) handle_id: HandleId,
@@ -106,6 +115,30 @@ pub(crate) struct PendingStorageOp {
     pub(crate) owner_ip: IpAddr,
     /// When the operation entered the disk; set at registration.
     pub(crate) issued_at: Duration,
+    /// Who, if anyone, waits for it, and whether it will ever complete.
+    pub(crate) wait: Wait,
+}
+
+/// How an in-flight operation ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Wait {
+    /// Its completion is scheduled and its future waits for the result.
+    Awaited,
+    /// Parked on a failed disk: it has no scheduled completion and never
+    /// completes.
+    Parked,
+    /// Its future was dropped and the mutation still lands: the completion
+    /// stays scheduled and applies its effect, but stores no result and
+    /// wakes nobody. A crash, a wipe, or shutdown still fails it like any
+    /// in-flight operation, and closing its handle does not cancel it.
+    Detached,
+}
+
+impl PendingStorageOp {
+    /// Whether its future was dropped while it still lands.
+    pub(crate) fn is_detached(&self) -> bool {
+        self.wait == Wait::Detached
+    }
 }
 
 /// Cumulative activity of one process's disk, as `/proc/diskstats` counts it.

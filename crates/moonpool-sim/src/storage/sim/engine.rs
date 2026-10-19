@@ -12,7 +12,7 @@ use moonpool_core::{DirectIo, IoConstraints, OpenOptions};
 
 use super::{
     DiskDegradationState, DiskEpisodeKind, FileId, HandleId, OperationId, StorageEvent,
-    state::{FileState, HandleState, PendingOpType, PendingStorageOp, StorageState},
+    state::{FileState, HandleState, PendingOpType, PendingStorageOp, StorageState, Wait},
 };
 use crate::{
     assert_reachable,
@@ -400,11 +400,11 @@ impl StorageEngine {
             .values()
             .chain(self.state.durable_paths.values())
             .any(|id| *id == file_id);
-        let open = self
-            .state
-            .handles
-            .values()
-            .any(|handle| handle.file_id == file_id && !handle.is_closed);
+        // A closed handle whose dropped mutations are still landing keeps
+        // reaching the bytes until the last one lands.
+        let open = self.state.handles.values().any(|handle| {
+            handle.file_id == file_id && (!handle.is_closed || !handle.pending_ops.is_empty())
+        });
         if !named && !open {
             self.state.files.remove(&file_id);
         }
@@ -802,6 +802,7 @@ impl StorageEngine {
             positioned,
             owner_ip,
             issued_at: Duration::ZERO,
+            wait: Wait::Awaited,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -843,6 +844,7 @@ impl StorageEngine {
             positioned,
             owner_ip,
             issued_at: Duration::ZERO,
+            wait: Wait::Awaited,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -876,6 +878,7 @@ impl StorageEngine {
             positioned: false,
             owner_ip,
             issued_at: Duration::ZERO,
+            wait: Wait::Awaited,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -918,6 +921,7 @@ impl StorageEngine {
             positioned: false,
             owner_ip,
             issued_at: Duration::ZERO,
+            wait: Wait::Awaited,
         };
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
@@ -997,14 +1001,16 @@ impl StorageEngine {
     ///
     /// The operation stays `Pending` for good: nothing in the engine will ever
     /// resolve it. It leaves `pending_ops` only when its future is dropped
-    /// (`cancel_operation`), when a crash or wipe of the owning process fails
+    /// (`cancel_operation`: a parked mutation never lands, so it is removed
+    /// like a read), when a crash or wipe of the owning process fails
     /// the handle's operations, or at simulation shutdown. It samples no
     /// latency and enters no episode, so a hung I/O draws nothing.
     fn park_operation(
         &mut self,
-        pending: PendingStorageOp,
+        mut pending: PendingStorageOp,
         actions: StorageActions,
     ) -> Result<(OperationId, StorageActions), StorageError> {
+        pending.wait = Wait::Parked;
         let operation_id = self.register_operation(pending)?;
         Ok((operation_id, actions))
     }
@@ -1141,6 +1147,8 @@ impl StorageEngine {
         if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
             handle.pending_ops.remove(&event.operation_id());
         }
+        let detached = pending.is_detached();
+        let handle_id = pending.handle_id;
 
         if matches!(
             (pending.op_type, event.operation()),
@@ -1166,9 +1174,29 @@ impl StorageEngine {
                 operation_id: event.operation_id(),
             }),
         };
-        self.results.insert(event.operation_id(), result);
+        if detached {
+            // Its future is gone: the effect is on the file, and there is
+            // nobody to hand the result to.
+            assert_reachable!("disk: a dropped mutation landed with no waiter");
+            self.release_closed_handle(handle_id);
+        } else {
+            self.results.insert(event.operation_id(), result);
+        }
         actions.wakes.push(self.wakers.take(&event.operation_id()));
         actions
+    }
+
+    /// Forget a handle closed while dropped mutations were still landing,
+    /// once the last of them has landed.
+    fn release_closed_handle(&mut self, handle_id: HandleId) {
+        let Some(handle) = self.state.handles.get(&handle_id) else {
+            return;
+        };
+        if handle.is_closed && handle.pending_ops.is_empty() {
+            let file_id = handle.file_id;
+            self.state.handles.remove(&handle_id);
+            self.drop_file_if_unlinked(file_id);
+        }
     }
 
     /// Plant a random latent fault on one sector.
@@ -1217,17 +1245,53 @@ impl StorageEngine {
         }
     }
 
+    /// The future waiting on `operation_id` was dropped.
+    ///
+    /// A dropped read is cancelled: its completion is unscheduled and nothing
+    /// is left of it. A dropped mutation (write, sync, `set_len`) still lands,
+    /// as on every real backend: it is detached and its completion applies
+    /// the effect at its scheduled time, unless the
+    /// [`dropped_mutation_discard_probability`] coin says it never reached
+    /// the device. A mutation parked on a failed disk never completes either
+    /// way, so it is removed like a read.
+    ///
+    /// [`dropped_mutation_discard_probability`]: StorageConfiguration::dropped_mutation_discard_probability
     pub(crate) fn cancel_operation(&mut self, operation_id: OperationId) -> StorageActions {
         let mut actions = StorageActions::default();
+        self.results.remove(&operation_id);
+        self.wakers.take(&operation_id);
+        self.drop_operation(operation_id, &mut actions);
+        actions
+    }
+
+    /// Detach or discard one in-flight operation whose waiter is gone.
+    fn drop_operation(&mut self, operation_id: OperationId, actions: &mut StorageActions) {
+        let Some(pending) = self.state.pending_ops.get(&operation_id) else {
+            return;
+        };
+        if pending.is_detached() {
+            return;
+        }
+        if pending.op_type.is_mutation() && pending.wait != Wait::Parked {
+            let probability = self
+                .state
+                .config_for(pending.owner_ip)
+                .dropped_mutation_discard_probability;
+            if probability <= 0.0 || sim_random::<f64>() >= probability {
+                assert_reachable!("disk: a dropped mutation still lands");
+                if let Some(pending) = self.state.pending_ops.get_mut(&operation_id) {
+                    pending.wait = Wait::Detached;
+                }
+                return;
+            }
+            assert_reachable!("disk: a dropped mutation never reached the device");
+        }
         if let Some(pending) = self.take_pending(operation_id) {
             if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
                 handle.pending_ops.remove(&operation_id);
             }
             actions.cancel(operation_id);
         }
-        self.results.remove(&operation_id);
-        self.wakers.take(&operation_id);
-        actions
     }
 
     pub(crate) fn fail_scheduled_operation(&mut self, operation_id: OperationId) -> WakeBatch {
@@ -1237,10 +1301,12 @@ impl StorageEngine {
         if let Some(handle) = self.state.handles.get_mut(&pending.handle_id) {
             handle.pending_ops.remove(&operation_id);
         }
-        self.results.insert(
-            operation_id,
-            Err(StorageError::ScheduleFailed { operation_id }),
-        );
+        if !pending.is_detached() {
+            self.results.insert(
+                operation_id,
+                Err(StorageError::ScheduleFailed { operation_id }),
+            );
+        }
         let mut wakes = WakeBatch::default();
         wakes.push(self.wakers.take(&operation_id));
         wakes
@@ -1268,19 +1334,24 @@ impl StorageEngine {
             .ok_or(StorageError::InvalidFileHandle { handle_id })
     }
 
+    /// Close `handle_id`. Its in-flight operations follow the dropped-future
+    /// rule ([`cancel_operation`](Self::cancel_operation)): reads are
+    /// cancelled, mutations land unless discarded. A handle with mutations
+    /// still landing stays known, closed, until the last one lands.
     pub(crate) fn close_handle(&mut self, handle_id: HandleId) -> StorageActions {
         let mut actions = StorageActions::default();
-        let Some(handle) = self.state.handles.remove(&handle_id) else {
+        let Some(handle) = self.state.handles.get_mut(&handle_id) else {
             return actions;
         };
-        for operation_id in handle.pending_ops {
-            self.take_pending(operation_id);
+        handle.is_closed = true;
+        let operation_ids = handle.pending_ops.iter().copied().collect::<Vec<_>>();
+        for operation_id in operation_ids {
             self.results.remove(&operation_id);
-            actions.cancel(operation_id);
             actions.wakes.push(self.wakers.take(&operation_id));
+            self.drop_operation(operation_id, &mut actions);
         }
         // The last handle on an unlinked file frees its image.
-        self.drop_file_if_unlinked(handle.file_id);
+        self.release_closed_handle(handle_id);
         actions
     }
 
@@ -1403,10 +1474,14 @@ impl StorageEngine {
                 handle.pending_ops.remove(&operation_id);
                 handle.is_closed = true;
             }
-            self.results.insert(
-                operation_id,
-                Err(StorageError::SimulationShutdown { operation_id }),
-            );
+            // A dropped mutation still scheduled at shutdown never lands, and
+            // nobody waits for its result.
+            if !pending.is_detached() {
+                self.results.insert(
+                    operation_id,
+                    Err(StorageError::SimulationShutdown { operation_id }),
+                );
+            }
             actions.cancel(operation_id);
             actions.wakes.push(self.wakers.take(&operation_id));
         }
@@ -1432,14 +1507,20 @@ impl StorageEngine {
         let operation_ids = std::mem::take(&mut handle.pending_ops);
         handle.is_closed |= close_handle;
         for operation_id in operation_ids {
-            self.take_pending(operation_id);
-            self.results.insert(
-                operation_id,
-                Err(StorageError::OperationInterrupted {
+            // A dropped mutation still in flight dies with the process like
+            // any other in-flight operation; nobody waits for its result.
+            let detached = self
+                .take_pending(operation_id)
+                .is_some_and(|pending| pending.is_detached());
+            if !detached {
+                self.results.insert(
                     operation_id,
-                    file_id,
-                }),
-            );
+                    Err(StorageError::OperationInterrupted {
+                        operation_id,
+                        file_id,
+                    }),
+                );
+            }
             actions.cancel(operation_id);
             actions.wakes.push(self.wakers.take(&operation_id));
         }

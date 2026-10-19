@@ -225,8 +225,9 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 | `disk_throttle_iops_multiplier` | 1.0 | 2 to 20 | |
 | `disk_throttle_bandwidth_multiplier` | 1.0 | 2 to 20 | |
 | `disk_failure_probability` | 0.0 | 0 to 0.0001 | 0 |
+| `dropped_mutation_discard_probability` | 0.0 | 0 to 0.49 | 0 |
 
-`swarm_for_seed()` draws `random_for_seed()` then 14 coins over the families. `apply_buggify_knobs()` spikes iops to 100..5000, bandwidth to 1 MB/s..20 MB/s, sync failure to 0.05..0.2, disk stall to 0.1..0.5 with 100 ms to 500 ms episodes, throttle to 0.1..0.5 with 1 s to 5 s episodes, and disk failure to 0.001..0.01. `disable_fault_injection()` zeroes every family, including barrier violation. Sectors are `SECTOR_SIZE` = 512 bytes.
+`swarm_for_seed()` draws `random_for_seed()` then 15 coins over the families. `apply_buggify_knobs()` spikes iops to 100..5000, bandwidth to 1 MB/s..20 MB/s, sync failure to 0.05..0.2, disk stall to 0.1..0.5 with 100 ms to 500 ms episodes, throttle to 0.1..0.5 with 1 s to 5 s episodes, and disk failure to 0.001..0.01. `disable_fault_injection()` zeroes every family, including barrier violation. Sectors are `SECTOR_SIZE` = 512 bytes.
 
 ## Aiming Storage Faults
 
