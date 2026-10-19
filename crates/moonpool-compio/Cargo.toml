@@ -13,7 +13,7 @@ categories.workspace = true
 [dependencies]
 # The provider traits, plus `ThreadRngRandomProvider` for the random slot: it is
 # rand's thread-local generator and pulls in no tokio at all.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["thread-rng"] }
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["thread-rng", "host"] }
 
 # `sync` makes the handle types (TcpStream, TcpListener, File, JoinHandle)
 # Send + Sync; the futures stay !Send and are wrapped in `SendWrapper`.
@@ -27,7 +27,6 @@ compio = { version = "=0.20.0-beta.1", default-features = false, features = [
     "fs",
     "net",
     "io",
-    "io-compat",
     "sync",
 ] }
 # Thread-affinity wrapper: `Send` by an unsafe impl, panics when polled or
@@ -36,6 +35,11 @@ compio-send-wrapper = { version = "0.7.2", features = ["futures"] }
 futures = "0.3"
 libc = "0.2"
 tracing = "0.1"
+
+# The submission entry of the custom `RWF_DSYNC` write operation; the same
+# version line compio-driver pins, so both name one `squeue::Entry`.
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7.13"
 
 [dev-dependencies]
 compio = { version = "=0.20.0-beta.1", default-features = false, features = [
@@ -46,7 +50,6 @@ compio = { version = "=0.20.0-beta.1", default-features = false, features = [
     "fs",
     "net",
     "io",
-    "io-compat",
     "sync",
     "macros",
 ] }

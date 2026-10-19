@@ -1,4 +1,4 @@
-//! Mutual TLS over compio: futures-rustls on `CompioTcpStream` (the compat
+//! Mutual TLS over compio: futures-rustls on `CompioTcpStream` (the write-through
 //! stream), split by moonpool-rpc with a read and a write in flight at once.
 //! Ported from moonpool-rpc's own `tests/mtls.rs`.
 

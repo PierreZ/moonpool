@@ -69,13 +69,17 @@
 //!
 //! # Costs and gaps
 //!
-//! - **TCP streams copy once per direction** through compio's compat layer
-//!   (an 8 KiB buffer that grows on demand), and **written bytes leave on
-//!   flush**: see [`CompioTcpStream`].
-//! - **Durable writes are a write plus `sync_data`**: compio has no per-write
-//!   `RWF_DSYNC`, which the Tokio backend uses. See [`CompioStorageFile`].
-//! - **Stream I/O on files is emulated** over positioned operations, and
-//!   append mode is not atomic against concurrent appenders. See
+//! - **TCP streams copy once per direction**, between the caller's buffer
+//!   and the stream's owned one (a read-ahead buffer of 8 KiB to 64 KiB, and
+//!   a write buffer of at most 64 KiB per call). Writes go through without a
+//!   flush, like the Tokio stream: see [`CompioTcpStream`].
+//! - **Durable writes are one `pwritev2(RWF_DSYNC)` operation** on Linux, as
+//!   in the Tokio backend, through a custom compio operation (an `io_uring`
+//!   write, or a blocking-pool call under the polling driver). A kernel that
+//!   refuses `RWF_DSYNC` switches the process to a write plus `sync_data`.
+//!   See [`CompioStorageFile`].
+//! - **Stream I/O on files is emulated** over positioned operations; append
+//!   mode goes through a second, `O_APPEND` descriptor. See
 //!   [`CompioStorageFile`].
 //!
 //! # `!Send` tasks

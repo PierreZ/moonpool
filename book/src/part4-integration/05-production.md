@@ -122,12 +122,15 @@ fn main() -> std::io::Result<()> {
   providers wrap each future in a thread-checked adapter. Polling or dropping a
   provider future, or a `CompioTcpStream`, on another thread panics. A
   thread-per-core application never does that.
-- **Streams copy once.** The TCP stream is compio's `futures::io` adapter, with
-  one copy per direction. Bytes leave on flush. moonpool-rpc and hyper flush. A
-  native owned-buffer stream trait is a planned follow-up.
-- **Durable writes take two operations.** `write_at_durable` is a write then
-  `sync_data`, because compio has no `RWF_DSYNC` operation yet. The tokio provider
-  needs one.
+- **Streams copy once, and writes go through without a flush, like the tokio
+  provider.** The TCP stream is a `futures::io` adapter over compio's
+  owned-buffer socket, with one copy per direction. A native owned-buffer
+  stream trait is a planned follow-up.
+- **Durable writes take one operation.** `write_at_durable` is one
+  `pwritev2(RWF_DSYNC)`, like the tokio backend. Under `io_uring` it is a write
+  that carries `RWF_DSYNC`. Under the polling driver it is a call on the
+  blocking pool. If the kernel refuses `RWF_DSYNC`, the process switches once to
+  a write then `sync_data`.
 - **System counters.** `run_loop_busy` in `SystemSample` is the runtime
   thread's own CPU time, from `getrusage(RUSAGE_THREAD)`.
 
@@ -160,7 +163,7 @@ them creeps back in.
 | Feature | Pulls in | Use it when |
 |---------|----------|-------------|
 | `tokio` | `TokioProviders`, `TokioLocalProviders`, `moonpool::select!` | The application runs on real time, tasks, TCP, randomness and files |
-| `compio` | `moonpool::CompioProviders` and its siblings, from `moonpool-compio` | Thread-per-core deployment on io_uring, with a polling fallback |
+| `compio` | `moonpool::CompioProviders` and its siblings, from `moonpool-compio` | Thread-per-core deployment on io_uring, with a polling fallback. `moonpool::select!` is included. |
 | `hyper` | `moonpool::hyper`: runtime adapters, `HyperIo`, `H2Server`, `ReconnectingChannel` | The application uses hyper, axum or tonic |
 | `prometheus` | `moonpool::prometheus`: `PrometheusSource` and instrumented handles | A `prometheus::Registry` you want in the simulation report |
 | `rpc` | `moonpool::rpc`, typed dynamic-endpoint RPC | Processes call each other through moonpool-rpc |

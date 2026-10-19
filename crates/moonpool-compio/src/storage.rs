@@ -2,10 +2,10 @@
 //! [`CompioStorageFile`].
 //!
 //! The open protocol (direct-I/O policy, the `Optional` upgrade by
-//! descriptor, the `Required` refusal rules, the alignment probe) is a copy
-//! of `moonpool-core`'s Tokio backend (`crates/moonpool-core/src/storage/tokio_impl.rs`),
-//! whose helpers are private to its `tokio-fs` feature. Keep the two in step:
-//! the long-form reasoning lives in the original.
+//! descriptor, the `Required` refusal rules) follows `moonpool-core`'s Tokio
+//! backend, over the shared helpers in [`moonpool_core::direct_io`] (the
+//! alignment probe, error classification and constructors), where the
+//! long-form reasoning lives.
 
 use std::fmt;
 use std::future::Future;
@@ -14,16 +14,49 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use compio::BufResult;
+use compio::buf::IoBuf;
 use compio::fs::File;
-use compio::io::{AsyncReadAt, AsyncWriteAt};
+use compio::io::{AsyncReadAt, AsyncWriteAt, AsyncWriteAtExt as _};
 use compio_send_wrapper::SendWrapper;
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
+use moonpool_core::direct_io::{
+    DIRECT_IO_SUPPORTED, access_only, creation_needs_a_bootstrap, direct_io_constraints,
+    is_direct_io_unsupported, undescribable_direct_io, unsupported_direct_io,
+};
+#[cfg(target_os = "linux")]
+use moonpool_core::direct_io::{descriptor_path, descriptor_paths_available};
 use moonpool_core::{
     AlignedBuf, DirectIo, IoConstraints, OpenOptions, StorageFile, StorageProvider,
     stream_io_unsupported,
 };
 
 use crate::buf::CompioAlignedBuf;
+
+#[cfg(all(target_os = "linux", any(target_env = "gnu", target_env = "musl")))]
+mod dsync;
+
+#[cfg(all(target_os = "linux", any(target_env = "gnu", target_env = "musl")))]
+use dsync::write_at_durable;
+
+/// One durable positioned write: without `pwritev2(RWF_DSYNC)`, a write then
+/// `sync_data`.
+#[cfg(not(all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))))]
+async fn write_at_durable<T: IoBuf>(file: &File, offset: u64, buffer: T) -> BufResult<usize, T> {
+    write_then_sync(file, offset, buffer).await
+}
+
+/// The portable durable write: a positioned write, then a data sync once the
+/// write succeeded. The sync covers more than the write's range, which the
+/// contract allows. The buffer comes back with the result.
+async fn write_then_sync<T: IoBuf>(file: &File, offset: u64, buffer: T) -> BufResult<usize, T> {
+    let mut handle = file;
+    let BufResult(result, buffer) = handle.write_at(buffer, offset).await;
+    let result = match result {
+        Ok(written) => file.sync_data().await.map(|()| written),
+        Err(error) => Err(error),
+    };
+    BufResult(result, buffer)
+}
 
 /// Storage provider over `compio::fs`: on Linux every read, write and sync
 /// is an `io_uring` operation when the runtime runs the `io_uring` driver.
@@ -55,6 +88,7 @@ impl StorageProvider for CompioStorageProvider {
     }
 
     fn exists(&self, path: &str) -> impl Future<Output = io::Result<bool>> + Send {
+        tracing::trace!(path, "exists");
         SendWrapper::new(exists(path.to_owned()))
     }
 
@@ -82,14 +116,55 @@ impl StorageProvider for CompioStorageProvider {
 #[tracing::instrument(skip_all, fields(path = %path))]
 async fn open(path: String, options: OpenOptions) -> io::Result<CompioStorageFile> {
     let opened = open_file(&path, &options).await?;
+    let append_file = open_appender(&path, &opened, &options).await?;
     Ok(CompioStorageFile {
         file: opened.file,
+        append_file,
         constraints: opened.constraints,
         direct: opened.direct,
         append: options.is_append(),
         cursor: 0,
         in_flight: None,
     })
+}
+
+/// The descriptor stream writes of an append-mode file go through: a second
+/// open of the same file with `O_APPEND`, so the kernel places each write at
+/// the end atomically. It carries the caller's access and no lifecycle flag
+/// (the first open already created or truncated the file), and on Linux it
+/// reopens the primary descriptor's own file through `/proc/self/fd`, immune
+/// to a rename between the two opens. A direct-I/O file refuses stream I/O,
+/// so it gets none.
+#[cfg(unix)]
+async fn open_appender(
+    path: &str,
+    opened: &OpenedFile,
+    options: &OpenOptions,
+) -> io::Result<Option<File>> {
+    if !options.is_append() || opened.direct {
+        return Ok(None);
+    }
+    let mut builder = compio_options(&access_only(options), false);
+    builder.custom_flags(libc::O_APPEND);
+    #[cfg(target_os = "linux")]
+    if descriptor_paths_available() {
+        return builder
+            .open(descriptor_path(&opened.file, path))
+            .await
+            .map(Some);
+    }
+    builder.open(path).await.map(Some)
+}
+
+/// No `O_APPEND` through compio outside unix: stream writes emulate append
+/// (see [`CompioStorageFile`]).
+#[cfg(not(unix))]
+async fn open_appender(
+    _path: &str,
+    _opened: &OpenedFile,
+    _options: &OpenOptions,
+) -> io::Result<Option<File>> {
+    Ok(None)
 }
 
 async fn exists(path: String) -> io::Result<bool> {
@@ -164,14 +239,15 @@ async fn sync_dir(path: String) -> io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// The open protocol: a copy of the Tokio backend's, over compio's open.
+// The open protocol: the Tokio backend's, over compio's open.
 // ---------------------------------------------------------------------------
 
 /// Build compio open options for `options`, optionally adding `O_DIRECT`.
 ///
-/// compio has no append mode. Append implies write access here, and the
-/// stream API emulates it (see [`CompioStorageFile`]); the descriptor never
-/// carries `O_APPEND`, so a positioned write always lands where it is told.
+/// compio has no append mode. Append implies write access here; stream
+/// writes go through a second, `O_APPEND` descriptor (see
+/// [`CompioStorageFile`]). The primary descriptor never carries `O_APPEND`,
+/// so a positioned write always lands where it is told.
 fn compio_options(options: &OpenOptions, direct: bool) -> compio::fs::OpenOptions {
     let mut builder = compio::fs::OpenOptions::new();
     builder
@@ -187,23 +263,6 @@ fn compio_options(options: &OpenOptions, direct: bool) -> compio::fs::OpenOption
     #[cfg(not(target_os = "linux"))]
     let _ = direct;
     builder
-}
-
-/// Whether this build can ask the kernel for uncached I/O at all.
-const DIRECT_IO_SUPPORTED: bool = cfg!(target_os = "linux");
-
-/// Whether an open failure means *direct I/O is unavailable here*:
-/// `EINVAL` or `EOPNOTSUPP`. Every other error is a real failure of the open.
-fn is_direct_io_unsupported(error: &io::Error) -> bool {
-    #[cfg(unix)]
-    {
-        let code = error.raw_os_error();
-        code == Some(libc::EINVAL) || code == Some(libc::EOPNOTSUPP)
-    }
-    #[cfg(not(unix))]
-    {
-        error.kind() == io::ErrorKind::Unsupported
-    }
 }
 
 /// A file the provider has opened, with the I/O constraints it came with.
@@ -231,114 +290,6 @@ impl OpenedFile {
     }
 }
 
-/// What the kernel will say about a file's direct-I/O alignment.
-enum ReportedAlignment {
-    Known(IoConstraints),
-    Refused,
-    Unknown,
-}
-
-/// `STATX_DIOALIGN`, which `libc` does not export.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-const STATX_DIOALIGN: libc::c_uint = 0x0000_2000;
-
-/// Ask the kernel what alignment direct I/O on this file requires
-/// (`statx(STATX_DIOALIGN)`, Linux 5.19+). A metadata query on an open
-/// descriptor, so it runs inline.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn reported_alignment(file: &File) -> ReportedAlignment {
-    use std::os::fd::{AsFd as _, AsRawFd as _};
-
-    // SAFETY: `statx` fills a caller-allocated `struct statx`; the value is
-    // zeroed first so every field is initialized whatever the kernel writes.
-    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
-    // SAFETY: the descriptor is open for the duration of the call, the path is
-    // an empty C string paired with `AT_EMPTY_PATH` (the documented way to
-    // stat a descriptor), and `stx` is a valid, correctly sized output buffer.
-    let result = unsafe {
-        libc::statx(
-            file.as_fd().as_raw_fd(),
-            c"".as_ptr(),
-            libc::AT_EMPTY_PATH,
-            STATX_DIOALIGN,
-            &raw mut stx,
-        )
-    };
-    if result != 0 || stx.stx_mask & STATX_DIOALIGN == 0 {
-        return ReportedAlignment::Unknown;
-    }
-    if stx.stx_dio_mem_align == 0 || stx.stx_dio_offset_align == 0 {
-        return ReportedAlignment::Refused;
-    }
-    let Ok(memory) = usize::try_from(stx.stx_dio_mem_align) else {
-        return ReportedAlignment::Unknown;
-    };
-    let Ok(length) = usize::try_from(stx.stx_dio_offset_align) else {
-        return ReportedAlignment::Unknown;
-    };
-    let offset = u64::from(stx.stx_dio_offset_align);
-    if !memory.is_power_of_two() || !length.is_power_of_two() {
-        return ReportedAlignment::Unknown;
-    }
-    ReportedAlignment::Known(IoConstraints::new(offset, length, memory))
-}
-
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn reported_alignment(_file: &File) -> ReportedAlignment {
-    ReportedAlignment::Unknown
-}
-
-/// The page size: an alignment guaranteed to satisfy direct I/O on kernels
-/// that will not report the real one.
-#[cfg(unix)]
-fn bounded_alignment() -> Option<IoConstraints> {
-    // SAFETY: `sysconf` reads a system parameter and has no preconditions.
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    let page_size = usize::try_from(page_size).ok()?;
-    if page_size == 0 || !page_size.is_power_of_two() {
-        return None;
-    }
-    Some(IoConstraints::uniform(page_size))
-}
-
-#[cfg(not(unix))]
-fn bounded_alignment() -> Option<IoConstraints> {
-    None
-}
-
-/// The constraints a direct-I/O open must advertise, or `None` when this
-/// file cannot do direct I/O or nothing can bound what it would require.
-fn direct_io_constraints(file: &File) -> Option<IoConstraints> {
-    match reported_alignment(file) {
-        ReportedAlignment::Known(constraints) => Some(constraints),
-        ReportedAlignment::Refused => None,
-        ReportedAlignment::Unknown => bounded_alignment(),
-    }
-}
-
-/// `/proc/self/fd/N`: the path that reopens *this exact file*.
-#[cfg(target_os = "linux")]
-fn descriptor_path(file: &File) -> std::path::PathBuf {
-    use std::os::fd::{AsFd as _, AsRawFd as _};
-    std::path::PathBuf::from(format!("/proc/self/fd/{}", file.as_fd().as_raw_fd()))
-}
-
-/// Whether `/proc/self/fd` is there for the `Optional` upgrade.
-#[cfg(target_os = "linux")]
-fn descriptor_paths_available() -> bool {
-    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| std::fs::metadata("/proc/self/fd").is_ok())
-}
-
-/// The caller's access with no lifecycle (`create`, `create_new`,
-/// `truncate`) at all.
-fn access_only(options: &OpenOptions) -> OpenOptions {
-    OpenOptions::new()
-        .read(options.is_read())
-        .write(options.is_write())
-        .append(options.is_append())
-}
-
 /// Open `path`, honoring the requested direct-I/O policy. `Optional` applies
 /// the lifecycle once through a buffered open, then upgrades by descriptor.
 async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> {
@@ -353,7 +304,7 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
         DirectIo::Required => open_required(path, options).await,
         DirectIo::Optional => {
             let buffered = compio_options(options, false).open(path).await?;
-            upgrade_to_direct(buffered, options).await
+            upgrade_to_direct(buffered, path, options).await
         }
     }
 }
@@ -362,11 +313,15 @@ async fn open_file(path: &str, options: &OpenOptions) -> io::Result<OpenedFile> 
 /// descriptor, with `O_DIRECT` and no lifecycle flags. Only "no direct I/O
 /// here" failures fall back to the buffered handle.
 #[cfg(target_os = "linux")]
-async fn upgrade_to_direct(buffered: File, options: &OpenOptions) -> io::Result<OpenedFile> {
+async fn upgrade_to_direct(
+    buffered: File,
+    path: &str,
+    options: &OpenOptions,
+) -> io::Result<OpenedFile> {
     if !descriptor_paths_available() {
         return Ok(OpenedFile::buffered(buffered));
     }
-    let upgrade = descriptor_path(&buffered);
+    let upgrade = descriptor_path(&buffered, path);
     match compio_options(&access_only(options), true)
         .open(&upgrade)
         .await
@@ -381,7 +336,11 @@ async fn upgrade_to_direct(buffered: File, options: &OpenOptions) -> io::Result<
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn upgrade_to_direct(buffered: File, _options: &OpenOptions) -> io::Result<OpenedFile> {
+async fn upgrade_to_direct(
+    buffered: File,
+    _path: &str,
+    _options: &OpenOptions,
+) -> io::Result<OpenedFile> {
     Ok(OpenedFile::buffered(buffered))
 }
 
@@ -417,31 +376,6 @@ async fn finish_existing(file: File, options: &OpenOptions) -> io::Result<Opened
     Ok(OpenedFile::direct(file, constraints))
 }
 
-fn unsupported_direct_io(path: &str, error: &io::Error) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("direct I/O is not supported for '{path}': {error}"),
-    )
-}
-
-fn creation_needs_a_bootstrap(path: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!(
-            "'{path}' does not exist: direct I/O cannot be required of a file this open would \
-             have to create. Create it with an ordinary open, sync it (and its directory, if \
-             the name must be durable), then reopen it with DirectIo::Required."
-        ),
-    )
-}
-
-fn undescribable_direct_io(path: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        format!("cannot determine the alignment direct I/O requires for '{path}'"),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // The file.
 // ---------------------------------------------------------------------------
@@ -456,31 +390,49 @@ fn undescribable_direct_io(path: &str) -> io::Error {
 /// own its buffer.
 ///
 /// **Durable writes** ([`write_at_durable`](StorageFile::write_at_durable)
-/// and its owned form) are a write followed by `sync_data`: two operations,
-/// a stronger guarantee than the contract asks for. compio has no per-write
-/// `RWF_DSYNC`, which the Tokio backend uses for a single durable `pwritev2`;
-/// closing that gap needs a custom compio operation.
+/// and its owned form) are one `pwritev2(RWF_DSYNC)` operation on Linux, as
+/// in the Tokio backend: an `io_uring` write carrying `RWF_DSYNC` under the
+/// `io_uring` driver, a `pwritev2` on the blocking pool under the polling
+/// driver. A kernel that refuses it (`ENOSYS` or `EOPNOTSUPP`) switches the
+/// whole process, once, to a write followed by `sync_data`, which is also
+/// the only form outside Linux. The borrowed form copies through the aligned
+/// bounce buffer into the same operation.
 ///
 /// **Stream I/O** (on a buffered file only; a direct-I/O file refuses it
 /// with [`stream_io_unsupported`]) is emulated over positioned operations
 /// and a cursor kept here, since compio files have no cursor. Each
 /// `poll_read` / `poll_write` runs one operation through an owned buffer
-/// (one copy), and returns once it completed. A file opened with
-/// `append(true)` writes each stream write at the file's current size, read
-/// just before the write: unlike `O_APPEND`, this is **not atomic** against
-/// another writer appending to the same file at the same time.
+/// (one copy). A read returns once its operation completed. A write follows
+/// Tokio's `File`: `poll_write` returning `Ready(n)` means the `n` bytes were
+/// **accepted**, copied into an operation now in flight, not that they
+/// reached the file. The next `poll_write` (or any other stream operation)
+/// first waits for that operation, returning `Pending` without taking the
+/// new buffer, and `poll_flush` / `poll_close` settle it. A failed write
+/// surfaces on that next call. So a caller cancelled while waiting has
+/// handed over nothing, and every accepted byte is written once settled. A
+/// file opened with `append(true)` sends its stream writes through a second
+/// descriptor opened with `O_APPEND`, so the kernel appends each one
+/// atomically, even against another writer appending to the same file, and
+/// the cursor moves to the file's size once the write completes. Positioned writes keep using the
+/// primary descriptor, which has no `O_APPEND`. (Outside unix, where compio
+/// cannot set `O_APPEND`, a stream write goes at the size read just before
+/// it, which is not atomic against concurrent appenders.)
 ///
 /// Every future this file returns, and the file itself while a stream
 /// operation is in flight, is bound to the runtime thread that created it
 /// (see the crate documentation).
 pub struct CompioStorageFile {
     file: File,
+    /// The `O_APPEND` descriptor stream writes use, on an append-mode
+    /// buffered file under unix.
+    append_file: Option<File>,
     constraints: IoConstraints,
     direct: bool,
     append: bool,
     /// The stream cursor: where the next stream read or write goes.
     cursor: u64,
-    /// The stream operation started by a `poll_*` that returned `Pending`.
+    /// The stream operation still running: a read or seek whose `poll_*`
+    /// returned `Pending`, or an accepted write.
     in_flight: Option<InFlight>,
 }
 
@@ -509,8 +461,8 @@ enum StreamOp {
 enum Done {
     /// The bytes read (possibly fewer than asked, none at end of file).
     Read(Vec<u8>),
-    /// The written count and the offset just past it.
-    Write { written: usize, end: u64 },
+    /// The whole accepted buffer was written; the cursor after it.
+    Write { end: u64 },
     /// The new cursor.
     Seek(u64),
 }
@@ -554,8 +506,8 @@ enum WriteKind {
 impl CompioStorageFile {
     /// Drive the stream operation `kind` to completion, starting it with
     /// `start(file, cursor)` unless it is already in flight. An in-flight
-    /// operation of another kind (one whose `poll_*` caller went away) is
-    /// finished first and its effect on the cursor kept.
+    /// operation of another kind (an accepted write, or one whose `poll_*`
+    /// caller went away) is finished first and its effect on the cursor kept.
     fn poll_stream(
         &mut self,
         cx: &mut Context<'_>,
@@ -606,7 +558,7 @@ impl CompioStorageFile {
     fn apply(&mut self, done: &Done) {
         match *done {
             Done::Read(_) => {}
-            Done::Write { end, .. } => self.cursor = end,
+            Done::Write { end } => self.cursor = end,
             Done::Seek(position) => self.cursor = position,
         }
     }
@@ -634,35 +586,61 @@ impl CompioStorageFile {
             return Ok((0, buf));
         }
         self.constraints.check(offset, buf.as_slice())?;
-        let mut file = &self.file;
         let BufResult(result, CompioAlignedBuf(buf)) =
-            file.write_at(CompioAlignedBuf(buf), offset).await;
-        let written = result?;
-        if let WriteKind::Durable = kind {
-            self.file.sync_data().await?;
-        }
-        Ok((written, buf))
+            self.write_buf(offset, CompioAlignedBuf(buf), kind).await;
+        Ok((result?, buf))
     }
 
-    /// The borrowed write: checked against the caller's slice, then copied
-    /// into an aligned bounce buffer for the owned write.
-    async fn write_borrowed(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
+    /// One positioned write of an owned buffer, visible or durable.
+    async fn write_buf<T: IoBuf>(
+        &self,
+        offset: u64,
+        buf: T,
+        kind: WriteKind,
+    ) -> BufResult<usize, T> {
+        match kind {
+            WriteKind::Visible => {
+                let mut file = &self.file;
+                file.write_at(buf, offset).await
+            }
+            WriteKind::Durable => write_at_durable(&self.file, offset, buf).await,
+        }
+    }
+
+    /// The borrowed write, visible or durable, checked against the caller's
+    /// slice. An unconstrained file writes a plain copy; a direct-I/O file
+    /// copies into an aligned bounce buffer for the owned write.
+    async fn write_borrowed(&self, offset: u64, buf: &[u8], kind: WriteKind) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
         self.constraints.check(offset, buf)?;
+        if self.constraints.is_unconstrained() {
+            let BufResult(result, _) = self.write_buf(offset, buf.to_vec(), kind).await;
+            return result;
+        }
         let mut bounce = AlignedBuf::zeroed(buf.len(), self.constraints.memory_alignment());
         bounce.as_mut_slice().copy_from_slice(buf);
-        let (written, _) = self.write_owned(offset, bounce, WriteKind::Visible).await?;
+        let (written, _) = self.write_owned(offset, bounce, kind).await?;
         Ok(written)
     }
 
-    /// The borrowed read: through an aligned bounce buffer, copied out.
+    /// The borrowed read, copied out of a plain buffer on an unconstrained
+    /// file, out of an aligned bounce buffer on a direct-I/O file.
     async fn read_borrowed(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
         self.constraints.check(offset, buf)?;
+        if self.constraints.is_unconstrained() {
+            let BufResult(result, data) = self
+                .file
+                .read_at(Vec::with_capacity(buf.len()), offset)
+                .await;
+            result?;
+            buf[..data.len()].copy_from_slice(&data);
+            return Ok(data.len());
+        }
         let bounce = AlignedBuf::zeroed(buf.len(), self.constraints.memory_alignment());
         let (read, bounce) = self.read_owned(offset, bounce).await?;
         buf[..read].copy_from_slice(&bounce.as_slice()[..read]);
@@ -672,10 +650,12 @@ impl CompioStorageFile {
 
 impl StorageFile for CompioStorageFile {
     fn sync_all(&self) -> impl Future<Output = io::Result<()>> + Send {
+        tracing::trace!("sync_all");
         SendWrapper::new(self.file.sync_all())
     }
 
     fn sync_data(&self) -> impl Future<Output = io::Result<()>> + Send {
+        tracing::trace!("sync_data");
         SendWrapper::new(self.file.sync_data())
     }
 
@@ -698,7 +678,18 @@ impl StorageFile for CompioStorageFile {
 
     fn write_at(&self, offset: u64, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
         tracing::trace!(offset, len = buf.len(), "write_at");
-        SendWrapper::new(self.write_borrowed(offset, buf))
+        SendWrapper::new(self.write_borrowed(offset, buf, WriteKind::Visible))
+    }
+
+    /// One `RWF_DSYNC` write through the aligned bounce buffer, instead of
+    /// the default's write then `sync_data`.
+    fn write_at_durable(
+        &self,
+        offset: u64,
+        buf: &[u8],
+    ) -> impl Future<Output = io::Result<usize>> + Send {
+        tracing::trace!(offset, len = buf.len(), "write_at_durable");
+        SendWrapper::new(self.write_borrowed(offset, buf, WriteKind::Durable))
     }
 
     fn read_at_aligned(
@@ -719,8 +710,8 @@ impl StorageFile for CompioStorageFile {
         SendWrapper::new(self.write_owned(offset, buf, WriteKind::Visible))
     }
 
-    /// The default's write-then-`sync_data`, kept zero-copy: the default
-    /// would route the owned buffer through the borrowed write's bounce.
+    /// One `RWF_DSYNC` write, kept zero-copy: the default would route the
+    /// owned buffer through the borrowed write's bounce.
     fn write_at_durable_aligned(
         &self,
         offset: u64,
@@ -731,10 +722,12 @@ impl StorageFile for CompioStorageFile {
     }
 
     fn size(&self) -> impl Future<Output = io::Result<u64>> + Send {
+        tracing::trace!("size");
         SendWrapper::new(async move { Ok(self.file.metadata().await?.len()) })
     }
 
     fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> + Send {
+        tracing::trace!(size, "set_len");
         SendWrapper::new(self.file.set_len(size))
     }
 }
@@ -773,6 +766,9 @@ impl AsyncRead for CompioStorageFile {
 }
 
 impl AsyncWrite for CompioStorageFile {
+    /// Settle the write in flight, then accept `buf`: copy it into a new
+    /// write operation, start it, and return `Ready(buf.len())` without
+    /// waiting for it (see the type documentation).
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -785,41 +781,77 @@ impl AsyncWrite for CompioStorageFile {
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let append = this.append;
-        let done = std::task::ready!(this.poll_stream(cx, StreamOp::Write, |file, cursor| {
-            let data = buf.to_vec();
-            Box::pin(async move {
-                let at = if append {
-                    file.metadata().await?.len()
-                } else {
-                    cursor
-                };
-                let mut handle = &file;
-                let BufResult(result, _) = handle.write_at(data, at).await;
-                let written = result?;
-                Ok(Done::Write {
-                    written,
-                    end: at + written as u64,
-                })
-            })
-        }))?;
-        let Done::Write { written, end } = done else {
-            return Poll::Ready(Err(unexpected_completion()));
-        };
-        this.cursor = end;
-        tracing::trace!(written, "stream write");
-        Poll::Ready(Ok(written))
+        std::task::ready!(this.poll_settle(cx))?;
+        let len = buf.len();
+        let op = stream_write(
+            this.file.clone(),
+            this.append_file.clone(),
+            this.append,
+            this.cursor,
+            buf.to_vec(),
+        );
+        if !this.append {
+            this.cursor += len as u64;
+        }
+        let mut in_flight = InFlight::new(StreamOp::Write, op);
+        match in_flight.poll(cx) {
+            Poll::Pending => this.in_flight = Some(in_flight),
+            Poll::Ready(Ok(done)) => this.apply(&done),
+            // Accepted, then failed at once: the error waits for the next
+            // call, as it would had the write been slower.
+            Poll::Ready(Err(error)) => {
+                this.in_flight = Some(InFlight::new(
+                    StreamOp::Write,
+                    Box::pin(std::future::ready(Err(error))),
+                ));
+            }
+        }
+        tracing::trace!(len, "stream write accepted");
+        Poll::Ready(Ok(len))
     }
 
-    /// Stream writes complete before `poll_write` returns, so a flush only
-    /// finishes a write whose caller stopped polling it.
+    /// Wait for the accepted write, surfacing its error.
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.get_mut().poll_settle(cx)
     }
 
+    /// Wait for the accepted write, surfacing its error.
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.get_mut().poll_settle(cx)
     }
+}
+
+/// The operation behind an accepted stream write: all of `data`, at the
+/// cursor, or at the end of an append-mode file.
+fn stream_write(
+    file: File,
+    appender: Option<File>,
+    append: bool,
+    cursor: u64,
+    data: Vec<u8>,
+) -> BoxedOp {
+    Box::pin(async move {
+        let len = data.len() as u64;
+        if let Some(appender) = appender {
+            // `O_APPEND`: the kernel puts the bytes at the end of the file,
+            // atomically, whatever the offset says.
+            let mut handle = &appender;
+            let BufResult(result, _) = handle.write_all_at(data, 0).await;
+            result?;
+            return Ok(Done::Write {
+                end: appender.metadata().await?.len(),
+            });
+        }
+        let at = if append {
+            file.metadata().await?.len()
+        } else {
+            cursor
+        };
+        let mut handle = &file;
+        let BufResult(result, _) = handle.write_all_at(data, at).await;
+        result?;
+        Ok(Done::Write { end: at + len })
+    })
 }
 
 impl AsyncSeek for CompioStorageFile {
@@ -856,46 +888,35 @@ impl AsyncSeek for CompioStorageFile {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenOptions, access_only, is_direct_io_unsupported};
+    use super::OpenOptions;
     use std::io;
 
-    /// Only the two codes that mean "this filesystem cannot do direct I/O"
-    /// may be absorbed into a buffered fallback (as in the Tokio backend).
+    /// Append mode is the kernel's: stream writes go through a descriptor
+    /// with `O_APPEND`, positioned writes through one without it.
     #[cfg(unix)]
-    #[test]
-    fn only_unsupported_errors_are_absorbed() {
-        assert!(is_direct_io_unsupported(&io::Error::from_raw_os_error(
-            libc::EINVAL
-        )));
-        assert!(is_direct_io_unsupported(&io::Error::from_raw_os_error(
-            libc::EOPNOTSUPP
-        )));
-        for code in [
-            libc::EACCES,
-            libc::EPERM,
-            libc::EEXIST,
-            libc::ENOENT,
-            libc::EROFS,
-            libc::EIO,
-        ] {
-            assert!(!is_direct_io_unsupported(&io::Error::from_raw_os_error(
-                code
-            )));
-        }
-        assert!(!is_direct_io_unsupported(&io::Error::other("synthetic")));
-    }
+    #[compio::test]
+    async fn only_the_append_descriptor_carries_o_append() -> io::Result<()> {
+        use std::os::fd::{AsFd as _, AsRawFd as _};
 
-    #[test]
-    fn the_access_only_open_drops_every_lifecycle_flag() {
-        let requested = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .append(true)
-            .create(true)
-            .create_new(true)
-            .truncate(true);
-        let access = access_only(&requested);
-        assert!(access.is_read() && access.is_write() && access.is_append());
-        assert!(!access.is_create() && !access.is_create_new() && !access.is_truncate());
+        fn status_flags(file: &compio::fs::File) -> libc::c_int {
+            // SAFETY: `F_GETFL` reads the open file's status flags; the
+            // descriptor is open for the duration of the call.
+            unsafe { libc::fcntl(file.as_fd().as_raw_fd(), libc::F_GETFL) }
+        }
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("log");
+        let path = path.to_str().expect("UTF-8 path").to_owned();
+        let file = super::open(path.clone(), OpenOptions::create_write().append(true)).await?;
+        let appender = file.append_file.as_ref().expect("an append descriptor");
+        assert_ne!(status_flags(appender) & libc::O_APPEND, 0);
+        assert_eq!(status_flags(&file.file) & libc::O_APPEND, 0);
+
+        let plain = super::open(path, OpenOptions::read_write()).await?;
+        assert!(
+            plain.append_file.is_none(),
+            "no append, no second descriptor"
+        );
+        Ok(())
     }
 }

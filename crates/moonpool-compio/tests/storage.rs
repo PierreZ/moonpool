@@ -4,10 +4,11 @@
 //! can be tmpfs (no direct I/O there).
 
 use std::io::{self, SeekFrom};
+use std::task::Poll;
 
 use futures::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use moonpool_compio::CompioStorageProvider;
-use moonpool_core::{BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{AlignedBuf, BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
 use tempfile::TempDir;
 
 fn temp_dir() -> TempDir {
@@ -56,6 +57,19 @@ async fn namespace_and_positioned_io() -> io::Result<()> {
     file.set_len(100).await?;
     assert_eq!(file.size().await?, 100);
     assert_eq!(file.read_at(100, &mut buf).await?, 0, "end of file");
+
+    // Durable writes, borrowed and owned: one `RWF_DSYNC` operation on Linux
+    // (whichever driver runs), readable once they return.
+    assert_eq!(file.write_at_durable(100, b"durable").await?, 7);
+    let mut owned = AlignedBuf::zeroed(5, 1);
+    owned.as_mut_slice().copy_from_slice(b"owned");
+    let (written, owned) = file.write_at_durable_aligned(107, owned).await?;
+    assert_eq!(written, 5);
+    assert_eq!(owned.as_slice(), b"owned", "the buffer comes back");
+    let mut durable = [0_u8; 12];
+    assert_eq!(file.read_at(100, &mut durable).await?, 12);
+    assert_eq!(&durable, b"durableowned");
+    assert_eq!(file.size().await?, 112);
     drop(file);
 
     let renamed = format!("{nested}/renamed");
@@ -127,6 +141,31 @@ async fn stream_io_on_a_buffered_file() -> io::Result<()> {
     file.close().await?;
     drop(file);
 
+    // A stream write is accepted, not awaited: `Ready` means the bytes sit in
+    // an operation in flight, and flush settles it. A write cancelled while
+    // the previous one still runs has handed over nothing.
+    let mut accepted = storage
+        .open(
+            &path(&dir, "accepted"),
+            OpenOptions::create_write().read(true),
+        )
+        .await?;
+    assert!(matches!(
+        futures::poll!(accepted.write(b"abc")),
+        Poll::Ready(Ok(3))
+    ));
+    assert!(
+        futures::poll!(accepted.write(b"def")).is_pending(),
+        "the accepted write is still in flight"
+    );
+    accepted.write_all(b"xyz").await?;
+    accepted.flush().await?;
+    let mut written = [0_u8; 6];
+    assert_eq!(accepted.read_at(0, &mut written).await?, 6);
+    assert_eq!(&written, b"abcxyz", "the cancelled write never landed");
+    assert_eq!(accepted.size().await?, 6);
+    drop(accepted);
+
     // Append: stream writes go to the end, positioned writes where told.
     let mut appending = storage
         .open(&name, OpenOptions::new().read(true).append(true))
@@ -138,6 +177,26 @@ async fn stream_io_on_a_buffered_file() -> io::Result<()> {
     appending.seek(SeekFrom::Start(0)).await?;
     appending.read_to_end(&mut all).await?;
     assert_eq!(all, b"hELLO world!?");
+    drop(appending);
+
+    // Two appenders on one file, writing at the same time: `O_APPEND` puts
+    // each write at the end, so neither overwrites the other.
+    let mut first = storage.open(&name, OpenOptions::new().append(true)).await?;
+    let mut second = storage.open(&name, OpenOptions::new().append(true)).await?;
+    let (a, b) = futures::future::join(first.write_all(b"AAAA"), second.write_all(b"BBBB")).await;
+    a?;
+    b?;
+    first.flush().await?;
+    second.flush().await?;
+    let mut reader = storage.open(&name, OpenOptions::new().read(true)).await?;
+    let mut all = Vec::new();
+    reader.read_to_end(&mut all).await?;
+    let tail = &all[b"hELLO world!?".len()..];
+    assert!(
+        tail == b"AAAABBBB" || tail == b"BBBBAAAA",
+        "concurrent appends interleave whole, got {:?}",
+        String::from_utf8_lossy(&all)
+    );
     Ok(())
 }
 

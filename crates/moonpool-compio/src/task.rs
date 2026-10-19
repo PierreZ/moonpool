@@ -74,20 +74,6 @@ impl Drop for CompioJoinHandle {
     }
 }
 
-/// Wrap `future` with the start and end trace events every moonpool task
-/// provider emits.
-fn traced<F>(name: &str, future: F) -> impl Future<Output = ()> + use<F>
-where
-    F: Future<Output = ()>,
-{
-    let task_name = name.to_string();
-    async move {
-        tracing::trace!("Task {} starting", task_name);
-        future.await;
-        tracing::trace!("Task {} completed", task_name);
-    }
-}
-
 impl TaskProvider for CompioTaskProvider {
     type JoinHandle = CompioJoinHandle;
 
@@ -97,7 +83,9 @@ impl TaskProvider for CompioTaskProvider {
         F: Future<Output = ()> + Send + 'static,
     {
         CompioJoinHandle {
-            inner: Some(compio::runtime::spawn(traced(name, future))),
+            inner: Some(compio::runtime::spawn(moonpool_core::traced_task(
+                name, future,
+            ))),
         }
     }
 
@@ -113,7 +101,9 @@ impl LocalTaskProvider for CompioTaskProvider {
         F: Future<Output = ()> + 'static,
     {
         CompioJoinHandle {
-            inner: Some(compio::runtime::spawn(traced(name, future))),
+            inner: Some(compio::runtime::spawn(moonpool_core::traced_task(
+                name, future,
+            ))),
         }
     }
 }
