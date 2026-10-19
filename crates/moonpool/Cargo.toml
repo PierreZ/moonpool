@@ -20,6 +20,10 @@ sim = ["dep:moonpool-sim"]
 # tokio passthrough), so the documented lean
 # config `default-features = false, features = ["tokio"]` has the macro too.
 tokio = ["moonpool-core/tokio-providers", "moonpool-core/select"]
+# Thread-per-core providers on compio (CompioProviders), io_uring on Linux with
+# a polling fallback elsewhere. Off by default, including in the
+# batteries-included default above, so the lean tokio tree stays free of it.
+compio = ["dep:moonpool-compio"]
 # hyper 1.x integration (moonpool::hyper). Off by default, including in the
 # batteries-included default above: a stack that speaks no HTTP should not
 # compile h2 and tower, and the lean production tree stays free of hyper.
@@ -46,6 +50,7 @@ rpc-tls-pki = ["rpc-tls", "moonpool-rpc/tls-pki"]
 rpc-jwt = ["rpc", "moonpool-rpc/jwt"]
 
 [dependencies]
+moonpool-compio = { path = "../moonpool-compio", version = "0.8.0", optional = true }
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
 moonpool-hyper = { path = "../moonpool-hyper", version = "0.8.0", optional = true }
 moonpool-prometheus = { path = "../moonpool-prometheus", version = "0.8.0", optional = true }
