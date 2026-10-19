@@ -289,3 +289,56 @@ impl TimeProvider for TokioTimeProvider {
             .map_err(|_| TimeError::Elapsed)
     }
 }
+
+/// Compio time provider: compio's timer for sleeps and timeouts, and a
+/// monotonic [`Instant`](std::time::Instant) for the clocks.
+///
+/// It implements [`LocalTimeProvider`] only: compio's timers live on the
+/// thread's runtime and are not `Send`. [`now`](LocalTimeProvider::now)
+/// counts from the creation of the provider, and
+/// [`timer`](LocalTimeProvider::timer) equals it. Sleeps and timeouts need a
+/// running compio runtime.
+#[cfg(feature = "compio-time")]
+#[derive(Debug, Clone)]
+pub struct CompioTimeProvider {
+    start_time: std::time::Instant,
+}
+
+#[cfg(feature = "compio-time")]
+impl CompioTimeProvider {
+    /// Create a compio time provider whose clock starts at zero now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            start_time: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(feature = "compio-time")]
+impl Default for CompioTimeProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "compio-time")]
+impl LocalTimeProvider for CompioTimeProvider {
+    async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
+        compio::time::sleep(duration).await;
+        Ok(())
+    }
+
+    fn now(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+
+    async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        compio::time::timeout(duration, future)
+            .await
+            .map_err(|_| TimeError::Elapsed)
+    }
+}

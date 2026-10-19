@@ -77,7 +77,9 @@ crates/
 │                            (rpc-derive/rpc-tls/rpc-jwt).
 ├── moonpool-core/         - Provider traits (Time, Task, Network, Random, Storage) + core types.
 │                            Granular tokio features: tokio-task/-time/-net/-fs/-random
-│                            (umbrella `tokio-providers`). wasm-clean with all off.
+│                            (umbrella `tokio-providers`). Local (non-Send) traits, and a
+│                            compio backend for them: compio-task/-time/-net/-fs/-system
+│                            (umbrella `compio-providers`, off by default). wasm-clean with all off.
 ├── moonpool-assertions/   - Antithesis-style assertion accounting (pure std, ZERO deps, wasm-able).
 │                            Heap table by default; explorer overlays MAP_SHARED + a discovery hook.
 ├── moonpool-buggify/      - Standalone buggify!/buggify_with_prob! macros + state (pure std, ZERO

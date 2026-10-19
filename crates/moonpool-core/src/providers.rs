@@ -312,3 +312,82 @@ impl_providers_bundle!(TokioProviders {
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 });
+
+/// Compio providers: the local (non-`Send`) production bundle for a
+/// thread-per-core application.
+///
+/// | Slot | Type |
+/// |------|------|
+/// | network | [`CompioNetworkProvider`](crate::CompioNetworkProvider) |
+/// | time | [`CompioTimeProvider`](crate::CompioTimeProvider) |
+/// | random | [`TokioRandomProvider`](crate::TokioRandomProvider) (a thread-local RNG; no Tokio involved) |
+/// | storage | [`CompioStorageProvider`](crate::CompioStorageProvider) |
+/// | system | [`CompioSystemProvider`](crate::CompioSystemProvider) |
+///
+/// It implements [`LocalProviders`], which has no task slot: spawn with
+/// [`CompioTaskProvider`](crate::CompioTaskProvider) beside it. Build it
+/// anywhere, and call the async methods from inside a compio runtime, one
+/// per thread.
+///
+/// ```rust
+/// use std::time::Duration;
+///
+/// use moonpool_core::{CompioProviders, LocalProviders, LocalTimeProvider};
+///
+/// compio::runtime::Runtime::new().expect("runtime").block_on(async {
+///     let providers = CompioProviders::new();
+///     providers
+///         .time()
+///         .sleep(Duration::from_millis(1))
+///         .await
+///         .expect("sleep");
+/// });
+/// ```
+#[cfg(feature = "compio-providers")]
+#[derive(Clone, Default)]
+pub struct CompioProviders {
+    network: crate::CompioNetworkProvider,
+    time: crate::CompioTimeProvider,
+    random: crate::TokioRandomProvider,
+    storage: crate::CompioStorageProvider,
+    system: crate::CompioSystemProvider,
+}
+
+#[cfg(feature = "compio-providers")]
+impl CompioProviders {
+    /// Create the compio bundle. Each provider starts with its default
+    /// configuration, and the time and system clocks count from now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(feature = "compio-providers")]
+impl LocalProviders for CompioProviders {
+    type Network = crate::CompioNetworkProvider;
+    type Time = crate::CompioTimeProvider;
+    type Random = crate::TokioRandomProvider;
+    type Storage = crate::CompioStorageProvider;
+    type System = crate::CompioSystemProvider;
+
+    fn network(&self) -> &Self::Network {
+        &self.network
+    }
+
+    fn time(&self) -> &Self::Time {
+        &self.time
+    }
+
+    fn random(&self) -> &Self::Random {
+        &self.random
+    }
+
+    fn storage(&self) -> &Self::Storage {
+        &self.storage
+    }
+
+    fn system(&self) -> &Self::System {
+        &self.system
+    }
+}

@@ -107,6 +107,13 @@ jobs:
       # Building core alone is the only way they run.
       - name: Tests (moonpool-core select passthrough)
         run: nix develop --command cargo nextest run -p moonpool-core --features select
+      # The compio backend is off by default and nothing in the workspace
+      # enables it, so it is linted and tested on its own.
+      - name: moonpool-core compio backend
+        run: |
+          nix develop --command cargo clippy -p moonpool-core --features compio-providers --all-targets -- --deny warnings
+          nix develop --command cargo nextest run -p moonpool-core --features compio-providers
+          nix develop --command cargo test -p moonpool-core --features compio-providers --doc
       - name: Build for wasm32-unknown-unknown
         run: |
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions

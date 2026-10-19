@@ -1,11 +1,12 @@
-//! Production [`SystemProvider`]: `getrusage`, `/proc/stat`, `/proc/diskstats`
-//! and Tokio's runtime metrics.
+//! Production [`SystemProvider`]s: `getrusage`, `/proc/stat`, `/proc/diskstats`
+//! and `statvfs`, shared by [`TokioSystemProvider`] (which adds Tokio's
+//! runtime metrics) and [`CompioSystemProvider`].
 
 use std::{io, time::Duration};
 
 use super::{DiskCounters, DiskSpace, SystemProvider, SystemSample};
 
-/// Production system provider.
+/// Production system provider for Tokio.
 ///
 /// - `process_cpu`: `getrusage(RUSAGE_SELF)`, user plus system (Unix).
 /// - `machine_busy` / `machine_total`: the `cpu` line of `/proc/stat` (Linux).
@@ -21,11 +22,13 @@ use super::{DiskCounters, DiskSpace, SystemProvider, SystemSample};
 ///   busy time when the worker parks, so a reader must clamp the ratio.
 /// - `cores`: [`std::thread::available_parallelism`], which honours the
 ///   cgroup CPU quota and the affinity mask.
+#[cfg(feature = "tokio-system")]
 #[derive(Debug, Clone)]
 pub struct TokioSystemProvider {
     start: std::time::Instant,
 }
 
+#[cfg(feature = "tokio-system")]
 impl TokioSystemProvider {
     /// Create a system provider. Its [`SystemSample::at`] counts from now.
     #[must_use]
@@ -36,32 +39,81 @@ impl TokioSystemProvider {
     }
 }
 
+#[cfg(feature = "tokio-system")]
 impl Default for TokioSystemProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "tokio-system")]
 impl SystemProvider for TokioSystemProvider {
     fn sample(&self, data_dir: &str) -> io::Result<SystemSample> {
-        let at = self.start.elapsed();
-        let process_cpu = process_cpu()?;
-        let (machine_busy, machine_total) = machine_cpu().unwrap_or((Duration::ZERO, at));
-        let cores = std::thread::available_parallelism()
-            .ok()
-            .and_then(|cores| u32::try_from(cores.get()).ok())
-            .unwrap_or(1);
-        Ok(SystemSample {
-            at,
-            process_cpu,
-            cores,
-            machine_busy,
-            machine_total,
-            run_loop_busy: run_loop_busy(),
-            disk: disk_counters(data_dir),
-            space: disk_space(data_dir),
-        })
+        sample(self.start, data_dir, run_loop_busy())
     }
+}
+
+/// Production system provider for compio: the same counters as
+/// [`TokioSystemProvider`], with `run_loop_busy` always `None`, because
+/// compio exposes no busy time for its run loop.
+///
+/// It reads only process and kernel counters, so it is `Send` and needs no
+/// runtime: it serves a thread-per-core application as it is.
+#[cfg(feature = "compio-system")]
+#[derive(Debug, Clone)]
+pub struct CompioSystemProvider {
+    start: std::time::Instant,
+}
+
+#[cfg(feature = "compio-system")]
+impl CompioSystemProvider {
+    /// Create a system provider. Its [`SystemSample::at`] counts from now.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+#[cfg(feature = "compio-system")]
+impl Default for CompioSystemProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "compio-system")]
+impl SystemProvider for CompioSystemProvider {
+    fn sample(&self, data_dir: &str) -> io::Result<SystemSample> {
+        sample(self.start, data_dir, None)
+    }
+}
+
+/// One reading of the OS counters, with the run loop's busy time as the
+/// runtime reports it.
+fn sample(
+    start: std::time::Instant,
+    data_dir: &str,
+    run_loop_busy: Option<Duration>,
+) -> io::Result<SystemSample> {
+    let at = start.elapsed();
+    let process_cpu = process_cpu()?;
+    let (machine_busy, machine_total) = machine_cpu().unwrap_or((Duration::ZERO, at));
+    let cores = std::thread::available_parallelism()
+        .ok()
+        .and_then(|cores| u32::try_from(cores.get()).ok())
+        .unwrap_or(1);
+    Ok(SystemSample {
+        at,
+        process_cpu,
+        cores,
+        machine_busy,
+        machine_total,
+        run_loop_busy,
+        disk: disk_counters(data_dir),
+        space: disk_space(data_dir),
+    })
 }
 
 #[cfg(unix)]
@@ -146,7 +198,7 @@ fn disk_space(_data_dir: &str) -> Option<DiskSpace> {
     None
 }
 
-#[cfg(target_has_atomic = "64")]
+#[cfg(all(feature = "tokio-system", target_has_atomic = "64"))]
 fn run_loop_busy() -> Option<Duration> {
     let handle = tokio::runtime::Handle::try_current().ok()?;
     let metrics = handle.metrics();
@@ -155,12 +207,12 @@ fn run_loop_busy() -> Option<Duration> {
         .max()
 }
 
-#[cfg(not(target_has_atomic = "64"))]
+#[cfg(all(feature = "tokio-system", not(target_has_atomic = "64")))]
 fn run_loop_busy() -> Option<Duration> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-system"))]
 mod tests {
     use super::*;
 

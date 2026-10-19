@@ -1,6 +1,6 @@
 //! Tasks: [`TaskProvider`], with [`TokioTaskProvider`] for production, and
-//! [`LocalTaskProvider`], with [`TokioLocalTaskProvider`], for tasks that stay
-//! on their thread and need not be `Send`.
+//! [`LocalTaskProvider`] for tasks that stay on their thread and need not be
+//! `Send`.
 //!
 //! Application code spawns through this trait, never through
 //! `tokio::spawn`. In simulation the spawned task runs on moonpool's
@@ -79,7 +79,7 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 /// Local (non-`Send`) task provider: spawns futures that stay on the
 /// spawning thread.
 ///
-/// A thread-per-core runtime (compio, monoio, a Tokio `LocalSet`) runs every
+/// A thread-per-core runtime (compio, monoio) runs every
 /// task on the thread that spawned it, so the future need not be `Send` and
 /// may hold `Rc`, `RefCell` and the runtime's own thread-bound handles.
 ///
@@ -94,9 +94,9 @@ pub trait TaskProvider: Clone + Send + Sync + 'static {
 ///   handles, so it is not a [`TaskProvider`].
 ///
 /// A backend that can do both implements both:
-/// [`TokioLocalTaskProvider`] is the local one for Tokio, and
 /// `moonpool_sim::SimTaskProvider` implements both traits, because the
-/// simulator runs every task on one thread anyway.
+/// simulator runs every task on one thread anyway. `CompioTaskProvider`
+/// (feature `compio-task`) is the production one.
 ///
 /// The method is named [`spawn_local_task`](Self::spawn_local_task), not
 /// `spawn_task`, so a type implementing both traits never makes a call site
@@ -188,41 +188,85 @@ impl TaskProvider for TokioTaskProvider {
     }
 }
 
-/// Tokio-based local task provider: spawns `!Send` futures with
-/// `tokio::task::spawn_local`.
+/// Compio task provider: spawns `!Send` futures on the current thread's
+/// compio runtime.
 ///
-/// Spawned tasks run on the current thread. Like `spawn_local`, it **panics**
-/// unless called inside a `tokio::task::LocalSet` (or a local runtime): a
-/// plain multi-threaded or current-thread runtime is not enough. The task
-/// name is emitted in `tracing::trace!` events around the future, as
-/// [`TokioTaskProvider`] does.
+/// Compio runs one runtime per thread and never moves a task off it, so a
+/// spawned future may hold `Rc`, `RefCell` and compio's own thread-bound
+/// files and sockets. It implements [`LocalTaskProvider`] only. Spawning
+/// **panics** outside a compio runtime, as `compio::runtime::spawn` does.
 ///
 /// ```rust
 /// use std::rc::Rc;
 ///
-/// use moonpool_core::{LocalTaskProvider, TokioLocalTaskProvider};
+/// use moonpool_core::{CompioTaskProvider, LocalTaskProvider};
 ///
-/// # #[tokio::main(flavor = "current_thread")]
-/// # async fn main() {
-/// let local = tokio::task::LocalSet::new();
-/// local
-///     .run_until(async {
-///         let shared = Rc::new(41);
-///         let handle = TokioLocalTaskProvider.spawn_local_task("rc", async move {
-///             assert_eq!(*shared + 1, 42);
-///         });
-///         handle.await.expect("task completed");
-///     })
-///     .await;
-/// # }
+/// compio::runtime::Runtime::new().expect("runtime").block_on(async {
+///     let shared = Rc::new(41);
+///     let handle = CompioTaskProvider.spawn_local_task("rc", async move {
+///         assert_eq!(*shared + 1, 42);
+///     });
+///     handle.await.expect("task completed");
+/// });
 /// ```
-#[cfg(feature = "tokio-task")]
+#[cfg(feature = "compio-task")]
 #[derive(Clone, Copy, Debug, Default)]
-pub struct TokioLocalTaskProvider;
+pub struct CompioTaskProvider;
 
-#[cfg(feature = "tokio-task")]
-impl LocalTaskProvider for TokioLocalTaskProvider {
-    type JoinHandle = TokioJoinHandle;
+/// `JoinHandle` produced by [`CompioTaskProvider`].
+///
+/// Wraps compio's `JoinHandle<()>` with the runtime-agnostic contract:
+/// [`JoinError`] on cancellation or panic, and **detach on drop**. Compio's
+/// own handle cancels its task when dropped; this one detaches it instead,
+/// as Tokio's and the simulator's handles do, so dropping a handle never
+/// cancels work.
+#[cfg(feature = "compio-task")]
+#[derive(Debug)]
+pub struct CompioJoinHandle(Option<compio::runtime::JoinHandle<()>>);
+
+#[cfg(feature = "compio-task")]
+impl Future for CompioJoinHandle {
+    type Output = Result<(), JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let Some(handle) = self.0.as_mut() else {
+            return std::task::Poll::Ready(Err(JoinError::Cancelled));
+        };
+        let output = std::task::ready!(std::pin::Pin::new(handle).poll(cx));
+        // Compio's handle must not be polled again after it completes.
+        self.0 = None;
+        std::task::Poll::Ready(output.map_err(|error| match error {
+            compio::runtime::JoinError::Cancelled => JoinError::Cancelled,
+            compio::runtime::JoinError::Panicked(_) => JoinError::Panicked,
+        }))
+    }
+}
+
+#[cfg(feature = "compio-task")]
+impl Detach for CompioJoinHandle {
+    fn detach(mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.detach();
+        }
+    }
+}
+
+#[cfg(feature = "compio-task")]
+impl Drop for CompioJoinHandle {
+    fn drop(&mut self) {
+        // Detach on drop (Tokio parity); compio's handle would cancel.
+        if let Some(handle) = self.0.take() {
+            handle.detach();
+        }
+    }
+}
+
+#[cfg(feature = "compio-task")]
+impl LocalTaskProvider for CompioTaskProvider {
+    type JoinHandle = CompioJoinHandle;
 
     fn spawn_local_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
     where
@@ -234,10 +278,32 @@ impl LocalTaskProvider for TokioLocalTaskProvider {
             future.await;
             tracing::trace!("Task {} completed", task_name);
         };
-        TokioJoinHandle(tokio::task::spawn_local(fut))
+        CompioJoinHandle(Some(compio::runtime::spawn(fut)))
     }
 
     async fn yield_now(&self) {
-        tokio::task::yield_now().await;
+        YieldOnce(false).await;
+    }
+}
+
+/// Pends once, waking itself, then completes: one trip through the run
+/// queue. Compio has no `yield_now` of its own.
+#[cfg(feature = "compio-task")]
+struct YieldOnce(bool);
+
+#[cfg(feature = "compio-task")]
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
     }
 }

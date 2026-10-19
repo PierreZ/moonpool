@@ -35,6 +35,12 @@
 //!
 //! [`Providers`] bundles the six provider types into one type parameter.
 //!
+//! Each trait also has a **local** form (`LocalStorageProvider`,
+//! `LocalNetworkProvider`, `LocalTimeProvider`, `LocalTaskProvider`,
+//! `LocalProviders`) with no `Send` bounds, for thread-per-core runtimes.
+//! Every `Send` backend implements the local form for free; the compio
+//! backend (`compio-*` features) implements only the local form.
+//!
 //! ## Writing code against the providers
 //!
 //! The function below never names a runtime. Production calls it with
@@ -92,6 +98,12 @@
 //! | `tokio-fs` | via umbrella | [`TokioStorageProvider`], with `O_DIRECT` support |
 //! | `tokio-random` | via umbrella | [`TokioRandomProvider`] |
 //! | `tokio-system` | via umbrella | [`TokioSystemProvider`] |
+//! | `compio-providers` | no | `CompioProviders`: all five `compio-*` features below, plus `tokio-random` for the RNG (no Tokio involved) |
+//! | `compio-task` | via umbrella | `CompioTaskProvider` ([`LocalTaskProvider`]) |
+//! | `compio-time` | via umbrella | `CompioTimeProvider` ([`LocalTimeProvider`]) |
+//! | `compio-net` | via umbrella | `CompioNetworkProvider` ([`LocalNetworkProvider`]) |
+//! | `compio-fs` | via umbrella | `CompioStorageProvider` ([`LocalStorageProvider`]), buffered I/O only |
+//! | `compio-system` | via umbrella | `CompioSystemProvider` |
 //! | `select` | yes | [`select!`] as tokio's macro, unchanged |
 //! | `deterministic-select` | no | [`select!`] with a seeded branch offset (`moonpool-sim` turns it on) |
 //!
@@ -142,9 +154,13 @@ pub use error::{SimulationError, SimulationResult};
 pub use metrics::{HistogramValue, MetricSample, MetricValue, MetricsSource};
 
 // Provider trait exports
+#[cfg(feature = "compio-net")]
+pub use network::{CompioNetworkProvider, CompioTcpListener, CompioTcpStream};
 pub use network::{LocalNetworkProvider, LocalTcpListener, NetworkProvider, TcpListenerTrait};
 #[cfg(feature = "tokio-net")]
 pub use network::{TokioNetworkProvider, TokioTcpListener};
+#[cfg(feature = "compio-providers")]
+pub use providers::CompioProviders;
 #[cfg(feature = "tokio-providers")]
 pub use providers::TokioProviders;
 pub use providers::{LocalProviders, Providers};
@@ -158,16 +174,24 @@ pub use storage::{
     AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, LayoutRegion, LocalStorageFile,
     LocalStorageProvider, OpenOptions, StorageFile, StorageProvider, stream_io_unsupported,
 };
+#[cfg(feature = "compio-fs")]
+pub use storage::{CompioStorageFile, CompioStorageProvider};
 #[cfg(feature = "tokio-fs")]
 pub use storage::{TokioStorageFile, TokioStorageProvider};
+#[cfg(feature = "compio-system")]
+pub use system::CompioSystemProvider;
 #[cfg(feature = "tokio-system")]
 pub use system::TokioSystemProvider;
 pub use system::{
     DiskCounters, DiskSpace, SystemProvider, SystemSample, parse_diskstats, parse_proc_stat,
 };
+#[cfg(feature = "compio-task")]
+pub use task::{CompioJoinHandle, CompioTaskProvider};
 pub use task::{Detach, JoinError, LocalTaskProvider, TaskProvider};
 #[cfg(feature = "tokio-task")]
-pub use task::{TokioJoinHandle, TokioLocalTaskProvider, TokioTaskProvider};
+pub use task::{TokioJoinHandle, TokioTaskProvider};
+#[cfg(feature = "compio-time")]
+pub use time::CompioTimeProvider;
 #[cfg(feature = "tokio-time")]
 pub use time::TokioTimeProvider;
 pub use time::{LocalTimeProvider, TimeError, TimeProvider};

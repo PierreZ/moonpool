@@ -46,6 +46,8 @@
 //! [`AsyncSeek`]: futures::io::AsyncSeek
 
 mod align;
+#[cfg(feature = "compio-fs")]
+mod compio_impl;
 mod layout;
 mod local;
 mod options;
@@ -75,6 +77,8 @@ pub fn stream_io_unsupported() -> io::Error {
          use read_at and write_at",
     )
 }
+#[cfg(feature = "compio-fs")]
+pub use compio_impl::{CompioStorageFile, CompioStorageProvider};
 #[cfg(feature = "tokio-fs")]
 pub use tokio_impl::{TokioStorageFile, TokioStorageProvider};
 

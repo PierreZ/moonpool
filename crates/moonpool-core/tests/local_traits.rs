@@ -64,8 +64,8 @@ async fn bundle_round_trip<P: LocalProviders>(providers: &P, path: &str) -> io::
 mod tokio_backends {
     use super::*;
     use moonpool_core::{
-        TokioLocalTaskProvider, TokioNetworkProvider, TokioProviders, TokioStorageFile,
-        TokioStorageProvider, TokioTcpListener, TokioTimeProvider,
+        TokioNetworkProvider, TokioProviders, TokioStorageFile, TokioStorageProvider,
+        TokioTcpListener, TokioTimeProvider,
     };
 
     fn assert_send<T: Send>(_: &T) {}
@@ -151,35 +151,6 @@ mod tokio_backends {
         .await;
         assert_eq!(elapsed, Err(TimeError::Elapsed));
         assert_eq!(shared.get(), 2);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn tokio_local_task_provider_spawns_a_non_send_future() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let tasks = TokioLocalTaskProvider;
-                let shared = Rc::new(RefCell::new(Vec::new()));
-                let inner = Rc::clone(&shared);
-                let handle = tasks.spawn_local_task("rc-holder", async move {
-                    inner.borrow_mut().push(1);
-                    tokio::task::yield_now().await;
-                    inner.borrow_mut().push(2);
-                });
-                LocalTaskProvider::yield_now(&tasks).await;
-                handle.await.expect("task completed");
-                assert_eq!(*shared.borrow(), vec![1, 2]);
-
-                let detached = Rc::clone(&shared);
-                tasks
-                    .spawn_local_task("detached", async move {
-                        detached.borrow_mut().push(3);
-                    })
-                    .detach();
-                tokio::task::yield_now().await;
-                assert_eq!(*shared.borrow(), vec![1, 2, 3]);
-            })
-            .await;
     }
 }
 

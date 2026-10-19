@@ -121,6 +121,8 @@ and under the simulator in its own `#[test]`.
   `LocalStorageProvider`, `LocalNetworkProvider`, `LocalTimeProvider`,
   `LocalTaskProvider` and the `LocalProviders` bundle. Tokio and the
   simulator implement them too, so local code runs under simulation.
+- A compio backend (features `compio-*`, off by default): io_uring storage
+  and networking for thread-per-core code, bundled by `CompioProviders`.
 - `Resolver` for `host:port` lookups, outside the bundle: `TokioResolver` in
   production, `ScriptedResolver` in simulation.
 - `SystemProvider` reads cumulative CPU and disk counters (`getrusage`,

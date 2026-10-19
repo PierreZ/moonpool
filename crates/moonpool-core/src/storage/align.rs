@@ -310,6 +310,40 @@ impl DerefMut for AlignedBuf {
     }
 }
 
+/// Compio's owned-buffer traits, so an [`AlignedBuf`] goes to the kernel
+/// itself in the compio backend's zero-copy transfers. The buffer has a fixed
+/// length and every byte is initialized, like `[u8; N]`: a read fills it from
+/// its start and never changes its length.
+#[cfg(feature = "compio-fs")]
+impl compio::buf::IoBuf for AlignedBuf {
+    fn as_init(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+#[cfg(feature = "compio-fs")]
+impl compio::buf::SetLen for AlignedBuf {
+    unsafe fn set_len(&mut self, len: usize) {
+        debug_assert!(len <= self.len());
+    }
+}
+
+#[cfg(feature = "compio-fs")]
+impl compio::buf::IoBufMut for AlignedBuf {
+    fn as_uninit(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
+        let bytes = self.as_mut_slice();
+        // SAFETY: every byte of the buffer is initialized, so viewing it as
+        // `MaybeUninit<u8>` is sound; compio only writes initialized bytes
+        // back through it.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                bytes.as_mut_ptr().cast::<std::mem::MaybeUninit<u8>>(),
+                bytes.len(),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{AlignedBuf, IoConstraints};
