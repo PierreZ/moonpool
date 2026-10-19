@@ -131,10 +131,12 @@ rotted accept reported with its ballot, and repairs it as if from a peer:
 cargo run -p moonpool-journal --example accept_log
 ```
 
-`examples/bench.rs` measures commits on the real filesystem. Each writer
-owns one journal and commits back to back for a fixed duration. It reports
-throughput, commit latency percentiles and fairness between writers, and
-`--csv` writes a time series with the page-cache dirty bytes.
+The `moonpool-journal-bench` crate measures commits on the real filesystem,
+on tokio or on compio (`--runtime tokio|compio`, `--threads N`), with
+identical flags for both backends. Each writer owns one journal and commits
+back to back for a fixed duration. It reports throughput, commit latency
+percentiles and fairness between writers, and `--csv` writes a time series
+with the page-cache dirty bytes.
 `--segment-blocks N` shrinks the segments so they roll often, `--spares`
 prepares each next segment in the background, and the report gives the
 latency of the commits that rolled, inline and onto a spare. Run it in
@@ -143,7 +145,9 @@ release mode on the disk under test (the default directory is under
 policies:
 
 ```sh
-cargo run --release -p moonpool-journal --example bench -- \
+cargo run --release -p moonpool-journal-bench -- \
+    --writers 4 --record-size 4096 --batch 1 --fsync ordered --duration 10
+cargo run --release -p moonpool-journal-bench -- --runtime compio --threads 4 \
     --writers 4 --record-size 4096 --batch 1 --fsync ordered --duration 10
 ```
 

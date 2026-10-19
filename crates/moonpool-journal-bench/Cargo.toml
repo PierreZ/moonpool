@@ -1,0 +1,43 @@
+[package]
+name = "moonpool-journal-bench"
+version.workspace = true
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Measure moonpool-journal commits on the real filesystem, on tokio or on compio"
+
+# A separate crate so moonpool-journal never depends on moonpool-compio
+# (moonpool-compio already dev-depends on moonpool-journal).
+[dependencies]
+# `tokio-providers` for `TokioProviders`, the tokio side of the comparison.
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-providers"] }
+moonpool-journal = { path = "../moonpool-journal", version = "0.8.0" }
+moonpool-compio = { path = "../moonpool-compio", version = "0.8.0" }
+# Only `Runtime::new`: the fusion driver (io_uring when the kernel allows it,
+# epoll otherwise), as moonpool-compio builds it.
+compio = { version = "=0.20.0-beta.1", default-features = false, features = [
+    "runtime",
+    "io-uring",
+    "polling",
+] }
+# The tokio runtime for `--runtime tokio`; `sync` (Barrier, oneshot) needs no
+# runtime and also serves the compio runs.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync"] }
+# CLI flags and bounded percentile accounting, as in moonpool-calibrate.
+clap = { version = "4.6", default-features = false, features = [
+    "std",
+    "help",
+    "usage",
+    "error-context",
+    "derive",
+] }
+hdrhistogram = { version = "7.6", default-features = false }
+
+[[bin]]
+name = "moonpool-journal-bench"
+path = "src/main.rs"
+
+[lints]
+workspace = true

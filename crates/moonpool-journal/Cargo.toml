@@ -27,16 +27,6 @@ thiserror = "2.0"
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-fs"] }
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
-# The `bench` example: CLI flags and bounded percentile accounting, as in
-# moonpool-calibrate.
-clap = { version = "4.6", default-features = false, features = [
-    "std",
-    "help",
-    "usage",
-    "error-context",
-    "derive",
-] }
-hdrhistogram = { version = "7.6", default-features = false }
 
 [lints]
 workspace = true

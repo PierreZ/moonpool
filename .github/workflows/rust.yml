@@ -142,8 +142,10 @@ jobs:
         run: nix develop --command cargo run -p moonpool-journal --example accept_log
       # Smoke run of the journal benchmark: it builds and runs. Shared
       # runners give noisy I/O, so the numbers are printed, never checked.
-      - name: moonpool-journal benchmark (smoke)
-        run: nix develop --command cargo run -p moonpool-journal --example bench -- --duration 1 --writers 2
+      - name: moonpool-journal benchmark on tokio (smoke)
+        run: nix develop --command cargo run -p moonpool-journal-bench -- --duration 1 --writers 2
+      - name: moonpool-journal benchmark on compio (smoke)
+        run: nix develop --command cargo run -p moonpool-journal-bench -- --duration 1 --writers 2 --runtime compio
       - name: Build without any rustflags (no tokio_unstable required)
         run: |
           # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml
