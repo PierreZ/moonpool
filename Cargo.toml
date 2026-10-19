@@ -5,6 +5,7 @@ members = [
     "crates/moonpool-assertions",
     "crates/moonpool-buggify",
     "crates/moonpool-calibrate",
+    "crates/moonpool-compio",
     "crates/moonpool-core",
     "crates/moonpool-explorer",
     "crates/moonpool-hyper",

@@ -1,0 +1,65 @@
+[package]
+name = "moonpool-compio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "compio-backed providers for moonpool (thread-per-core, io_uring)"
+documentation = "https://docs.rs/moonpool-compio"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# The provider traits, plus `TokioRandomProvider` for the random slot: it is
+# rand's thread-local generator and pulls in no tokio at all.
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-random"] }
+
+# `sync` makes the handle types (TcpStream, TcpListener, File, JoinHandle)
+# Send + Sync; the futures stay !Send and are wrapped in `SendWrapper`.
+# `io-uring` + `polling` build the fusion driver: io_uring when the kernel
+# allows it, epoll otherwise.
+compio = { version = "=0.20.0-beta.1", default-features = false, features = [
+    "runtime",
+    "io-uring",
+    "polling",
+    "time",
+    "fs",
+    "net",
+    "io",
+    "io-compat",
+    "sync",
+] }
+# Thread-affinity wrapper: `Send` by an unsafe impl, panics when polled or
+# dropped off the thread that created it (`futures` adds the Future impl).
+compio-send-wrapper = { version = "0.7.2", features = ["futures"] }
+futures = "0.3"
+libc = "0.2"
+tracing = "0.1"
+
+[dev-dependencies]
+compio = { version = "=0.20.0-beta.1", default-features = false, features = [
+    "runtime",
+    "io-uring",
+    "polling",
+    "time",
+    "fs",
+    "net",
+    "io",
+    "io-compat",
+    "sync",
+    "macros",
+] }
+moonpool-journal = { path = "../moonpool-journal", version = "0.8.0" }
+# `tls-pki` (implies `tls`) for the mutual-TLS smoke test's certificates.
+moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0", features = ["derive", "tls-pki"] }
+# `#[derive(prost::Message)]` in the rpc smoke tests expands to `::prost` paths.
+prost = "0.14"
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
