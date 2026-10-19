@@ -21,9 +21,12 @@ Check, in this order, and cite file:line for every finding:
    `rand::thread_rng`, `HashMap`/`HashSet` whose iteration order reaches a
    decision, statics or thread-locals that survive across runs, detached
    tasks that can outlive a run.
-2. **Executor contract**: `LocalSet`, `spawn_local`, `build_local`, futures
-   that are not `Send + 'static`, `#[async_trait(?Send)]` on `Process`,
-   `Workload` or `FaultInjector`.
+2. **Executor contract**: tokio's `LocalSet`, `tokio::task::spawn_local`,
+   `build_local`, `spawn_task` futures that are not `Send + 'static`,
+   `#[async_trait(?Send)]` on `Process`, `Workload` or `FaultInjector`.
+   The provider's `ctx.task().spawn_local(..)` (`LocalTaskProvider`) and
+   `time.timeout_local(..)` are the sanctioned path for `!Send` futures,
+   not a violation.
 3. **Error handling**: `unwrap()`/`expect()` outside the sanctioned
    lock-poison message; swallowed `Result`s.
 4. **Assertions**: an `assert_*` deleted, weakened, or reworded (the message

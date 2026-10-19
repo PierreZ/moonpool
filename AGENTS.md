@@ -60,8 +60,11 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
   use `#[async_trait]` (no `?Send`) with `Send + Sync + 'static` supertraits
 - Use traits, not concrete types
 - KISS principle
-- **No LocalSet, no `spawn_local`, no `build_local`**: the executor runs on a
-  single OS thread, but futures must be `Send + 'static`
+- **No tokio `LocalSet`, `spawn_local` or `build_local`**: the executor runs on
+  a single OS thread, and `spawn_task` futures must be `Send + 'static`.
+  A `!Send` future (`Rc`/`RefCell` state) goes through
+  `ctx.task().spawn_local()` (`LocalTaskProvider`), which runs it on the same
+  seeded queue; `time.timeout_local()` bounds one
 - **No direct tokio calls**: Use Provider traits
   - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`,
     `tokio::select!` (entropy branch offsets — use `moonpool_sim::select!`)

@@ -36,7 +36,11 @@ and `SimContext`.
   to the coordinator. Never move component state or wakers back into
   `SimInner`, and never invoke a waker while holding the world lock.
 - `executor/` — the single-threaded seeded executor. Futures are
-  `Send + 'static`; no `LocalSet`, no `spawn_local`.
+  `Send + 'static` by default. No tokio `LocalSet`, `spawn_local` or
+  `build_local`: `!Send` application futures go through
+  `ctx.task().spawn_local(..)` (the `LocalTaskProvider` impl on
+  `SimTaskProvider`), which runs on the same seeded queue with the same
+  scope cancellation and panic reporting as `spawn_task`.
 - `runner/` — `SimulationBuilder`, `Process`/`Workload`/`FaultInjector`,
   topology and groups, attrition, iteration control, the report.
 - `chaos/` — assertion macros (accounting in `moonpool-assertions`), the
