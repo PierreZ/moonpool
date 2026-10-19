@@ -133,7 +133,7 @@
 //! | `tokio-time` | via umbrella | [`TokioTimeProvider`] |
 //! | `tokio-net` | via umbrella | [`TokioNetworkProvider`] and [`TokioResolver`] |
 //! | `tokio-fs` | via umbrella | [`TokioStorageProvider`], with `O_DIRECT` support |
-//! | `tokio-random` | via umbrella | [`TokioRandomProvider`] |
+//! | `thread-rng` | via umbrella | [`ThreadRngRandomProvider`] |
 //! | `tokio-system` | via umbrella | [`TokioSystemProvider`] |
 //! | `select` | yes | [`select!`] as tokio's macro, unchanged |
 //! | `deterministic-select` | no | [`select!`] with a seeded branch offset (`moonpool-sim` turns it on) |
@@ -192,8 +192,8 @@ pub use providers::{LocalProviders, Providers};
 #[cfg(feature = "tokio-providers")]
 pub use providers::{TokioLocalProviders, TokioProviders};
 pub use random::RandomProvider;
-#[cfg(feature = "tokio-random")]
-pub use random::TokioRandomProvider;
+#[cfg(feature = "thread-rng")]
+pub use random::ThreadRngRandomProvider;
 #[cfg(feature = "tokio-net")]
 pub use resolver::TokioResolver;
 pub use resolver::{Resolver, split_host_port};

@@ -131,8 +131,8 @@ fn main() -> std::io::Result<()> {
 - **System counters.** `run_loop_busy` in `SystemSample` is the runtime
   thread's own CPU time, from `getrusage(RUSAGE_THREAD)`.
 
-The random slot reuses `TokioRandomProvider`, which is `rand`'s thread RNG and
-runs no tokio. compio is pinned to `=0.20.0-beta.1`, so the facade feature
+The random slot is `ThreadRngRandomProvider`, `rand`'s thread-local generator,
+shared by every production bundle. compio is pinned to `=0.20.0-beta.1`, so the facade feature
 stays off by default.
 
 ## A lean dependency tree

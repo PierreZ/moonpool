@@ -19,7 +19,7 @@ tokio-providers = [
     "tokio-time",
     "tokio-net",
     "tokio-fs",
-    "tokio-random",
+    "thread-rng",
     "tokio-system",
 ]
 # Granular per-provider features. A consumer that only needs one provider (e.g.
@@ -34,8 +34,8 @@ tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "tokio/rt", "dep:tokio-uti
 # TokioSystemProvider: getrusage and sysconf from libc, the runtime metrics
 # (worker busy time, stable since tokio 1.45) from tokio/rt.
 tokio-system = ["dep:tokio", "tokio/rt", "dep:libc"]
-# TokioRandomProvider uses rand's ThreadRng; no tokio involved.
-tokio-random = ["rand/thread_rng"]
+# ThreadRngRandomProvider uses rand's ThreadRng; no tokio involved.
+thread-rng = ["rand/thread_rng"]
 # `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
 select = ["dep:tokio", "tokio/macros"]
 # Deterministic `select!`: replaces the passthrough with tokio's expansion

@@ -13,7 +13,7 @@
 //! | network | [`CompioNetworkProvider`] |
 //! | time | [`CompioTimeProvider`] |
 //! | task | [`CompioTaskProvider`] (also a [`LocalTaskProvider`](moonpool_core::LocalTaskProvider)) |
-//! | random | `moonpool_core::TokioRandomProvider` (rand's thread-local generator, no Tokio) |
+//! | random | `moonpool_core::ThreadRngRandomProvider` (rand's thread-local generator, shared by every production bundle) |
 //! | storage | [`CompioStorageProvider`] |
 //! | system | [`CompioSystemProvider`] |
 //! | resolver | [`CompioResolver`] |

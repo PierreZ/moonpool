@@ -1,4 +1,4 @@
-//! Randomness: [`RandomProvider`], with [`TokioRandomProvider`] for
+//! Randomness: [`RandomProvider`], with [`ThreadRngRandomProvider`] for
 //! production.
 //!
 //! Every random choice in application code (jitter, a peer to try, a
@@ -7,14 +7,14 @@
 //! injectors use, so one seed replays every choice. A draw from
 //! `rand::rng()` or the OS breaks that replay.
 
-#[cfg(feature = "tokio-random")]
+#[cfg(feature = "thread-rng")]
 use rand::RngExt as _;
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
 use std::ops::Range;
 
 /// Provider trait for random number generation.
 ///
-/// Production uses [`TokioRandomProvider`] (a thread-local generator).
+/// Production uses [`ThreadRngRandomProvider`] (a thread-local generator).
 /// Simulation uses `moonpool_sim::SimRandomProvider`, which draws from the
 /// seeded simulation stream.
 pub trait RandomProvider: Clone + Send + Sync + 'static {
@@ -55,18 +55,18 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
 /// # Example
 ///
 /// ```rust
-/// use moonpool_core::{RandomProvider, TokioRandomProvider};
+/// use moonpool_core::{RandomProvider, ThreadRngRandomProvider};
 ///
-/// let random = TokioRandomProvider::new();
+/// let random = ThreadRngRandomProvider::new();
 /// let value: u64 = random.random();
 /// let in_range = random.random_range(1..100);
 /// ```
-#[cfg(feature = "tokio-random")]
+#[cfg(feature = "thread-rng")]
 #[derive(Clone, Default)]
-pub struct TokioRandomProvider;
+pub struct ThreadRngRandomProvider;
 
-#[cfg(feature = "tokio-random")]
-impl TokioRandomProvider {
+#[cfg(feature = "thread-rng")]
+impl ThreadRngRandomProvider {
     /// Create a new production random provider.
     #[must_use]
     pub fn new() -> Self {
@@ -74,8 +74,8 @@ impl TokioRandomProvider {
     }
 }
 
-#[cfg(feature = "tokio-random")]
-impl RandomProvider for TokioRandomProvider {
+#[cfg(feature = "thread-rng")]
+impl RandomProvider for ThreadRngRandomProvider {
     fn random<T>(&self) -> T
     where
         StandardUniform: Distribution<T>,

@@ -108,7 +108,7 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
 
 Only `random` and `random_range` are required. The trait is fully synchronous: random numbers never need to suspend.
 
-**Production**: `TokioRandomProvider` uses `rand::rng()`, thread-local OS entropy. `CompioProviders` reuses it, because `rand` runs no tokio.
+**Production**: `ThreadRngRandomProvider` uses `rand::rng()`, thread-local OS entropy. Every production bundle, `CompioProviders` included, uses it.
 
 **Simulation**: `SimRandomProvider` draws from the one seeded `ChaCha8Rng` stream. Every call is counted, so it is part of the replay and of exploration recipes.
 

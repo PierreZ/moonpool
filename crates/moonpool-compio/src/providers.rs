@@ -1,6 +1,6 @@
 //! [`CompioProviders`]: the six compio-backed providers in one bundle.
 
-use moonpool_core::TokioRandomProvider;
+use moonpool_core::ThreadRngRandomProvider;
 
 use crate::{
     CompioNetworkProvider, CompioStorageProvider, CompioSystemProvider, CompioTaskProvider,
@@ -14,12 +14,12 @@ use crate::{
 /// | network | [`CompioNetworkProvider`] |
 /// | time | [`CompioTimeProvider`] |
 /// | task | [`CompioTaskProvider`] |
-/// | random | `TokioRandomProvider` |
+/// | random | `ThreadRngRandomProvider` |
 /// | storage | [`CompioStorageProvider`] |
 /// | system | [`CompioSystemProvider`] |
 ///
-/// The random slot reuses `moonpool_core::TokioRandomProvider`: despite its
-/// name it is rand's thread-local generator and involves no Tokio at all.
+/// The random slot is `moonpool_core::ThreadRngRandomProvider`, rand's
+/// thread-local generator, shared by every production bundle.
 ///
 /// The task provider implements
 /// [`LocalTaskProvider`](moonpool_core::LocalTaskProvider), so this bundle is
@@ -30,7 +30,7 @@ pub struct CompioProviders {
     network: CompioNetworkProvider,
     time: CompioTimeProvider,
     task: CompioTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: CompioStorageProvider,
     system: CompioSystemProvider,
 }
@@ -43,7 +43,7 @@ impl CompioProviders {
             network: CompioNetworkProvider::new(),
             time: CompioTimeProvider::new(),
             task: CompioTaskProvider::new(),
-            random: TokioRandomProvider::new(),
+            random: ThreadRngRandomProvider::new(),
             storage: CompioStorageProvider::new(),
             system: CompioSystemProvider::new(),
         }
@@ -60,7 +60,7 @@ moonpool_core::impl_providers_bundle!(CompioProviders {
     network: CompioNetworkProvider,
     time: CompioTimeProvider,
     task: CompioTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: CompioStorageProvider,
     system: CompioSystemProvider,
 });

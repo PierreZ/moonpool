@@ -11,9 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-# The provider traits, plus `TokioRandomProvider` for the random slot: it is
+# The provider traits, plus `ThreadRngRandomProvider` for the random slot: it is
 # rand's thread-local generator and pulls in no tokio at all.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-random"] }
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["thread-rng"] }
 
 # `sync` makes the handle types (TcpStream, TcpListener, File, JoinHandle)
 # Send + Sync; the futures stay !Send and are wrapped in `SendWrapper`.

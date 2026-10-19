@@ -50,7 +50,7 @@ use crate::{
 };
 #[cfg(feature = "tokio-providers")]
 use crate::{
-    TokioLocalTaskProvider, TokioNetworkProvider, TokioRandomProvider, TokioStorageProvider,
+    ThreadRngRandomProvider, TokioLocalTaskProvider, TokioNetworkProvider, TokioStorageProvider,
     TokioSystemProvider, TokioTaskProvider, TokioTimeProvider,
 };
 
@@ -190,7 +190,7 @@ impl<P: Providers> LocalProviders for P where P::Task: LocalTaskProvider {}
 /// | network | [`TokioNetworkProvider`] |
 /// | time | [`TokioTimeProvider`] |
 /// | task | [`TokioTaskProvider`] |
-/// | random | [`TokioRandomProvider`] |
+/// | random | [`ThreadRngRandomProvider`] |
 /// | storage | [`TokioStorageProvider`] |
 /// | system | [`TokioSystemProvider`] |
 ///
@@ -210,7 +210,7 @@ pub struct TokioProviders {
     network: TokioNetworkProvider,
     time: TokioTimeProvider,
     task: TokioTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 }
@@ -225,7 +225,7 @@ impl TokioProviders {
             network: TokioNetworkProvider::new(),
             time: TokioTimeProvider::new(),
             task: TokioTaskProvider,
-            random: TokioRandomProvider::new(),
+            random: ThreadRngRandomProvider::new(),
             storage: TokioStorageProvider::new(),
             system: TokioSystemProvider::new(),
         }
@@ -244,7 +244,7 @@ impl_providers_bundle!(TokioProviders {
     network: TokioNetworkProvider,
     time: TokioTimeProvider,
     task: TokioTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 });
@@ -257,7 +257,7 @@ impl_providers_bundle!(TokioProviders {
 /// | network | [`TokioNetworkProvider`] |
 /// | time | [`TokioTimeProvider`] |
 /// | task | [`TokioLocalTaskProvider`] |
-/// | random | [`TokioRandomProvider`] |
+/// | random | [`ThreadRngRandomProvider`] |
 /// | storage | [`TokioStorageProvider`] |
 /// | system | [`TokioSystemProvider`] |
 ///
@@ -280,7 +280,7 @@ pub struct TokioLocalProviders {
     network: TokioNetworkProvider,
     time: TokioTimeProvider,
     task: TokioLocalTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 }
@@ -295,7 +295,7 @@ impl TokioLocalProviders {
             network: TokioNetworkProvider::new(),
             time: TokioTimeProvider::new(),
             task: TokioLocalTaskProvider,
-            random: TokioRandomProvider::new(),
+            random: ThreadRngRandomProvider::new(),
             storage: TokioStorageProvider::new(),
             system: TokioSystemProvider::new(),
         }
@@ -314,7 +314,7 @@ impl_providers_bundle!(TokioLocalProviders {
     network: TokioNetworkProvider,
     time: TokioTimeProvider,
     task: TokioLocalTaskProvider,
-    random: TokioRandomProvider,
+    random: ThreadRngRandomProvider,
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 });
