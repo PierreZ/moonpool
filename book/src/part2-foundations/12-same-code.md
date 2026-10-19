@@ -10,7 +10,7 @@ The tempting shortcut is a test-only twin of each component: a `SimMachine` next
 
 Moonpool has none of these in shipped code. There is no `SimMachine`, no `SimDisk`, no test-only hook inside a journal or an RPC runtime. The only `Sim*` types in the workspace are the **providers** themselves: `SimTimeProvider`, `SimNetworkProvider`, `SimStorageProvider` and their siblings in moonpool-sim. They implement the same traits `TokioTimeProvider` and `TokioStorageProvider` implement. Everything above the trait line is one implementation.
 
-The same rule applies to your code. A process in a simulation is your server, built by a factory, not a simplified model of it. moonpool-journal is a worked example: one `Journal<P: StorageProvider>` runs as `Journal<TokioStorageProvider>` in its `accept_log` example and as `Journal<SimStorageProvider>` in its tests, and the crash tests exercise the exact commit path production uses.
+The same rule applies to your code. A process in a simulation is your server, built by a factory, not a simplified model of it. moonpool-journal is a worked example: one `Journal<P: LocalStorageProvider>` runs as `Journal<TokioStorageProvider>` in its `accept_log` example, as `Journal<CompioStorageProvider>` on a thread-per-core runtime, and as `Journal<SimStorageProvider>` in its tests, and the crash tests exercise the exact commit path production uses.
 
 ## Three Mechanisms
 

@@ -35,7 +35,9 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
 use moonpool_core::{DirectIo, TokioStorageProvider, TokioTaskProvider};
-use moonpool_journal::{Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId};
+use moonpool_journal::{
+    Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId, SpareSpawner,
+};
 use tokio::sync::Barrier;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -256,7 +258,7 @@ async fn writer(
     let dir = args.writer_dir(index);
     let dir = dir.to_str().ok_or("path is not UTF-8")?;
     let id = JournalId(u128::try_from(index)? + 1);
-    let mut journal = Journal::create(
+    let journal = Journal::create(
         TokioStorageProvider::new(),
         dir,
         id,
@@ -265,8 +267,21 @@ async fn writer(
     )
     .await?;
     if args.spares {
-        journal.prepare_spares_with(TokioTaskProvider);
+        let journal = journal.prepare_spares_with(TokioTaskProvider);
+        measure(&args, journal, &start, &stop, &counters).await
+    } else {
+        measure(&args, journal, &start, &stop, &counters).await
     }
+}
+
+/// Commit back to back from the start barrier until `stop`.
+async fn measure<S: SpareSpawner<TokioStorageProvider>>(
+    args: &Args,
+    mut journal: Journal<TokioStorageProvider, S>,
+    start: &Barrier,
+    stop: &AtomicBool,
+    counters: &Counters,
+) -> Result<WriterReport> {
     let payload = vec![0xA5_u8; args.record_size];
     let batch_len = u64::try_from(args.batch)?;
     let batch_bytes = batch_len * u64::try_from(args.record_size)?;

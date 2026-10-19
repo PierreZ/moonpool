@@ -6,9 +6,11 @@ FAST '18). It detects damage, tells a crash apart from corruption, and names
 what was damaged. A replication layer can then repair the entry from its
 peers instead of truncating the log.
 
-The journal uses only moonpool's provider traits. The same code runs over
-`TokioStorageProvider` in production and over `SimStorageProvider` in
-simulation.
+The journal uses only moonpool's local provider traits, which every `Send`
+provider also implements. The same code runs over `TokioStorageProvider` in
+production, over `CompioStorageProvider` on a thread-per-core runtime, and
+over `SimStorageProvider` in simulation. Over a `Send` provider the journal
+and its futures are `Send`.
 
 ## Why
 
@@ -42,8 +44,9 @@ journal.commit(batch).await?;
 
 | Type or method | Role |
 |---|---|
-| `Journal<P>` | `create`, `open` (recover), `commit`, `read`, `replay`, over any `StorageProvider` |
-| `Journal::prepare_spares_with` / `prepare_spare` / `Rolls` | Prepare the next segment ahead (in the background on a `TaskProvider`, or inline), so a roll is a header write and a rename |
+| `Journal<P, S = NoSpares>` | `create`, `open` (recover), `commit`, `read`, `replay`, over any `LocalStorageProvider` (every `StorageProvider` is one); `Send` when `P` is |
+| `Journal::prepare_spares_with` / `prepare_spares_local` / `prepare_spare` / `Rolls` | Prepare the next segment ahead (in the background on a `TaskProvider` or a `LocalTaskProvider`, or inline), so a roll is a header write and a rename |
+| `SpareSpawner` / `NoSpares` / `Spares` / `LocalSpares` / `SpareJob` | Where a journal runs its background preparation: the `S` of `Journal<P, S>` |
 | `Journal::peek_meta` | Read a closed journal's metainfo without recovery, repair or sync |
 | `Batch` | What one commit makes durable: `put`, `clear`, `truncate_prefix`, `set_meta` |
 | `Batch::fits` / `Batch::fits_another` | Whether a batch fits one segment, so the caller can split it |

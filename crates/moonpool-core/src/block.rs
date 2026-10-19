@@ -72,14 +72,18 @@
 
 use std::io;
 
+#[cfg(doc)]
+use crate::StorageFile;
 use crate::storage::invalid_input;
-use crate::{AlignedBuf, IoConstraints, StorageFile};
+use crate::{AlignedBuf, IoConstraints, LocalStorageFile};
 
 /// A block-addressed view of one open file.
 ///
-/// `F` is the [`StorageFile`] this borrows its bytes, durability, and
-/// alignment from; `BlockFile` adds block arithmetic and whole-transfer loops
-/// on top and holds no state of its own beyond the block size.
+/// `F` is the file this borrows its bytes, durability, and alignment from:
+/// any [`LocalStorageFile`], so every [`StorageFile`] and a thread-per-core
+/// backend's file alike. Its futures are `Send` exactly when the file's are.
+/// `BlockFile` adds block arithmetic and whole-transfer loops on top and
+/// holds no state of its own beyond the block size.
 ///
 /// It never touches the filesystem namespace: it takes no path and cannot
 /// open, create, rename or delete a file. The block size is the caller's
@@ -97,7 +101,7 @@ pub struct BlockFile<F> {
     transfer_step: usize,
 }
 
-impl<F: StorageFile> BlockFile<F> {
+impl<F: LocalStorageFile> BlockFile<F> {
     /// Wrap an already-open file, addressing it in `block_size`-byte blocks.
     ///
     /// # Errors

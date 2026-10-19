@@ -13,9 +13,12 @@
 //! far from the entry. When the entry fails its checksum, the record proves
 //! that it was written and says which entry it was.
 //!
-//! The journal uses only moonpool's provider traits. The same code runs over
-//! `TokioStorageProvider` in production and over the simulator's
-//! `SimStorageProvider` in tests. It knows no protocol: an entry is a `u64`
+//! The journal uses only moonpool's local provider traits
+//! ([`LocalStorageProvider`](moonpool_core::LocalStorageProvider)), which
+//! every `Send` provider also implements. The same code runs over
+//! `TokioStorageProvider` in production, over `CompioStorageProvider` on a
+//! thread-per-core runtime, and over the simulator's `SimStorageProvider` in
+//! tests. Over a `Send` provider the journal and its futures are `Send`. It knows no protocol: an entry is a `u64`
 //! **position** and an opaque [`Id`] that the caller chooses. A Paxos
 //! acceptor stores its ballot in the [`Id`], a Raft log stores its term.
 //!
@@ -91,6 +94,8 @@
 //!   replicated fault pattern hits the same position on every replica.
 //! - **Spare segments.** [`Journal::prepare_spares_with`] prepares the next
 //!   segment in the background on a [`TaskProvider`](moonpool_core::TaskProvider)
+//!   ([`Journal::prepare_spares_local`] on a
+//!   [`LocalTaskProvider`](moonpool_core::LocalTaskProvider))
 //!   once the active one is half full, so the commit that fills it rolls
 //!   with a header write and a rename instead of writing a whole segment.
 //!   [`Journal::prepare_spare`] does it inline; [`Journal::rolls`] counts
@@ -224,3 +229,4 @@ pub use format::{BLOCK, Geometry, ID_SIZE, Id, MAX_BATCH_RECORDS, META_MAX, RECO
 pub use journal::{
     Durability, Entry, Journal, JournalConfig, JournalId, Layout, Recovery, Rolls, State,
 };
+pub use spare::{LocalSpares, NoSpares, SpareJob, SpareSpawner, Spares};

@@ -13,7 +13,7 @@
 //! the other from it; two valid copies of one sequence that disagree are
 //! damage, and so are two damaged copies: [`OpenError::MetaLost`].
 
-use moonpool_core::{BlockFile, OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{BlockFile, LocalStorageFile, LocalStorageProvider, OpenOptions};
 
 use crate::format::{BLOCK, BLOCK_U64, META_COPY_B_AT, META_FILE_BLOCKS, Meta};
 use crate::io::{block_buf, read_blocks, write_blocks, write_blocks_durable};
@@ -42,12 +42,12 @@ pub(crate) struct MetaFile<F> {
     file: BlockFile<F>,
 }
 
-impl<F: StorageFile> MetaFile<F> {
+impl<F: LocalStorageFile> MetaFile<F> {
     /// Create the meta file with both copies of `meta`: written to a
     /// temporary name, synced, then published by a rename and a directory
     /// sync. The rename is the journal's birth: until it is durable, there
     /// is no journal here.
-    pub async fn create<P: StorageProvider<File = F>>(
+    pub async fn create<P: LocalStorageProvider<File = F>>(
         provider: &P,
         dir: &str,
         meta: &Meta,
@@ -79,7 +79,7 @@ impl<F: StorageFile> MetaFile<F> {
     /// Open the meta file and choose its current value. `Ok(None)`: there
     /// is no meta file (and the caller decides what that means). Returns the
     /// value and whether a copy was rewritten from its twin.
-    pub async fn open<P: StorageProvider<File = F>>(
+    pub async fn open<P: LocalStorageProvider<File = F>>(
         provider: &P,
         dir: &str,
         journal: JournalId,
@@ -128,7 +128,7 @@ impl<F: StorageFile> MetaFile<F> {
 
     /// The metainfo of a closed journal, read only: no sync, no repair,
     /// nothing created. `Ok(None)` where there is no meta file.
-    pub async fn peek<P: StorageProvider<File = F>>(
+    pub async fn peek<P: LocalStorageProvider<File = F>>(
         provider: &P,
         dir: &str,
         journal: JournalId,
@@ -177,7 +177,7 @@ impl<F: StorageFile> MetaFile<F> {
     }
 }
 
-async fn open_file<P: StorageProvider>(
+async fn open_file<P: LocalStorageProvider>(
     provider: &P,
     dir: &str,
 ) -> std::io::Result<BlockFile<P::File>> {
@@ -188,7 +188,7 @@ async fn open_file<P: StorageProvider>(
 }
 
 /// Remove a meta file a crashed `create` left under its temporary name.
-pub(crate) async fn remove_leftover<P: StorageProvider>(
+pub(crate) async fn remove_leftover<P: LocalStorageProvider>(
     provider: &P,
     dir: &str,
 ) -> std::io::Result<()> {
