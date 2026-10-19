@@ -32,6 +32,8 @@ use moonpool_core::{
 
 use crate::buf::CompioAlignedBuf;
 
+#[cfg(unix)]
+mod append;
 #[cfg(all(target_os = "linux", any(target_env = "gnu", target_env = "musl")))]
 mod dsync;
 
@@ -411,8 +413,8 @@ async fn finish_existing(file: File, options: &OpenOptions) -> io::Result<Opened
 /// surfaces on that next call. So a caller cancelled while waiting has
 /// handed over nothing, and every accepted byte is written once settled. A
 /// file opened with `append(true)` sends its stream writes through a second
-/// descriptor opened with `O_APPEND`, so the kernel appends each one
-/// atomically, even against another writer appending to the same file, and
+/// descriptor opened with `O_APPEND`, as plain `write(2)` calls, so the kernel
+/// appends each one atomically, even against another writer appending to the same file, and
 /// the cursor moves to the file's size once the write completes. Positioned writes keep using the
 /// primary descriptor, which has no `O_APPEND`. (Outside unix, where compio
 /// cannot set `O_APPEND`, a stream write goes at the size read just before
@@ -832,16 +834,18 @@ fn stream_write(
 ) -> BoxedOp {
     Box::pin(async move {
         let len = data.len() as u64;
+        #[cfg(unix)]
         if let Some(appender) = appender {
-            // `O_APPEND`: the kernel puts the bytes at the end of the file,
-            // atomically, whatever the offset says.
-            let mut handle = &appender;
-            let BufResult(result, _) = handle.write_all_at(data, 0).await;
-            result?;
+            // A plain `write(2)` on the `O_APPEND` descriptor goes to the end
+            // of the file, atomically, on every unix (`pwrite` would not on
+            // macOS, which honours its offset).
+            append::append_all(&appender, data).await?;
             return Ok(Done::Write {
                 end: appender.metadata().await?.len(),
             });
         }
+        #[cfg(not(unix))]
+        let _ = appender;
         let at = if append {
             file.metadata().await?.len()
         } else {
