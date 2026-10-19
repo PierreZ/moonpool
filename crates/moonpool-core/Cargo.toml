@@ -29,11 +29,16 @@ tokio-task = ["dep:tokio", "tokio/rt"]
 tokio-time = ["dep:tokio", "tokio/time"]
 tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
 # tokio/rt is needed for spawn_blocking (positioned file I/O runs on the
-# blocking pool); libc supplies O_DIRECT for direct-I/O opens.
-tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "tokio/rt", "dep:tokio-util", "dep:libc"]
-# TokioSystemProvider: getrusage and sysconf from libc, the runtime metrics
-# (worker busy time, stable since tokio 1.45) from tokio/rt.
-tokio-system = ["dep:tokio", "tokio/rt", "dep:libc"]
+# blocking pool); libc supplies O_DIRECT for direct-I/O opens, and `host` the
+# shared direct-I/O probing.
+tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "tokio/rt", "dep:tokio-util", "dep:libc", "host"]
+# TokioSystemProvider: the shared `host` readers (getrusage, /proc, statvfs),
+# the runtime metrics (worker busy time, stable since tokio 1.45) from tokio/rt.
+tokio-system = ["dep:tokio", "tokio/rt", "dep:libc", "host"]
+# Host-side helpers shared by the production backends (Tokio's here, compio's
+# in moonpool-compio): direct-I/O probing (`direct_io`) and the /proc,
+# getrusage, statvfs readers (`host`). libc only; no runtime.
+host = ["dep:libc"]
 # ThreadRngRandomProvider uses rand's ThreadRng; no tokio involved.
 thread-rng = ["rand/thread_rng"]
 # `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).

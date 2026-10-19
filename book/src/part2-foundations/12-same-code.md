@@ -61,7 +61,7 @@ moonpool-sim = "0.8.0"
 
 `default-features = false` on moonpool-core drops the tokio providers and the `select!` passthrough, so the library compiles with no tokio at all. The simulator enters only as a dev-dependency. The tests get `SimStorageProvider`; the release gets nothing.
 
-**A binary enables the production providers it needs.** moonpool-core's features are granular: `tokio-task`, `tokio-time`, `tokio-net`, `tokio-fs`, `thread-rng`, `tokio-system`, with `tokio-providers` as the umbrella that gives `TokioProviders`. A consumer that only needs files enables `tokio-fs`. With every tokio feature off, moonpool-core is wasm-clean.
+**A binary enables the production providers it needs.** moonpool-core's features are granular: `tokio-task`, `tokio-time`, `tokio-net`, `tokio-fs`, `thread-rng`, `tokio-system`, with `tokio-providers` as the umbrella that gives `TokioProviders`. A consumer that only needs files enables `tokio-fs`. `host` carries the direct-I/O probing and the `/proc`, `getrusage` and `statvfs` readers that every production backend shares; `tokio-fs` and `tokio-system` turn it on, and `moonpool-compio` enables it without tokio. With every tokio feature off, moonpool-core is wasm-clean.
 
 **The facade has a lean configuration.** The `moonpool` crate's default features are `["sim", "tokio"]`, the full framework. A production build opts out:
 

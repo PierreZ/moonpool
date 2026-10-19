@@ -135,6 +135,7 @@
 //! | `tokio-fs` | via umbrella | [`TokioStorageProvider`], with `O_DIRECT` support |
 //! | `thread-rng` | via umbrella | [`ThreadRngRandomProvider`] |
 //! | `tokio-system` | via umbrella | [`TokioSystemProvider`] |
+//! | `host` | via `tokio-fs` / `tokio-system` | [`direct_io`] and [`host`]: the direct-I/O probing and `/proc`, `getrusage`, `statvfs` readers shared by the production backends |
 //! | `select` | yes | [`select!`] as tokio's macro, unchanged |
 //! | `deterministic-select` | no | [`select!`] with a seeded branch offset (`moonpool-sim` turns it on) |
 //!
@@ -197,6 +198,8 @@ pub use random::ThreadRngRandomProvider;
 #[cfg(feature = "tokio-net")]
 pub use resolver::TokioResolver;
 pub use resolver::{Resolver, split_host_port};
+#[cfg(feature = "host")]
+pub use storage::direct_io;
 pub use storage::{
     AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, LayoutRegion, OpenOptions,
     StorageFile, StorageProvider, stream_io_unsupported,
@@ -205,9 +208,13 @@ pub use storage::{
 pub use storage::{TokioStorageFile, TokioStorageProvider};
 #[cfg(feature = "tokio-system")]
 pub use system::TokioSystemProvider;
+#[cfg(feature = "host")]
+pub use system::host;
 pub use system::{
     DiskCounters, DiskSpace, SystemProvider, SystemSample, parse_diskstats, parse_proc_stat,
 };
+#[doc(hidden)]
+pub use task::traced_task;
 pub use task::{Detach, JoinError, LocalTaskProvider, TaskProvider};
 #[cfg(feature = "tokio-task")]
 pub use task::{TokioJoinHandle, TokioLocalTaskProvider, TokioTaskProvider};

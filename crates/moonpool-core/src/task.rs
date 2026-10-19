@@ -166,7 +166,7 @@ impl TaskProvider for TokioTaskProvider {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        TokioJoinHandle(tokio::spawn(traced(name, future)))
+        TokioJoinHandle(tokio::spawn(traced_task(name, future)))
     }
 
     async fn yield_now(&self) {
@@ -174,15 +174,15 @@ impl TaskProvider for TokioTaskProvider {
     }
 }
 
-/// Wrap a spawned future in the start and completion trace events shared by
-/// the tokio task providers.
+/// Wrap a spawned future in the start and completion trace events every
+/// moonpool task provider emits (Tokio's here, compio's in `moonpool-compio`).
 ///
 /// The returned future is `Send` exactly when `future` is, so the same
-/// wrapper feeds both `tokio::spawn` and `tokio::task::spawn_local`.
-#[cfg(feature = "tokio-task")]
-fn traced<F>(name: &str, future: F) -> impl Future<Output = ()> + 'static
+/// wrapper feeds both the `Send` spawn paths and the local ones. Not public
+/// API: exported for the backends only.
+pub fn traced_task<F>(name: &str, future: F) -> impl Future<Output = ()> + use<F>
 where
-    F: Future<Output = ()> + 'static,
+    F: Future<Output = ()>,
 {
     let task_name = name.to_string();
     async move {
@@ -237,7 +237,7 @@ impl TaskProvider for TokioLocalTaskProvider {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        TokioJoinHandle(tokio::spawn(traced(name, future)))
+        TokioJoinHandle(tokio::spawn(traced_task(name, future)))
     }
 
     async fn yield_now(&self) {
@@ -251,7 +251,7 @@ impl LocalTaskProvider for TokioLocalTaskProvider {
     where
         F: Future<Output = ()> + 'static,
     {
-        TokioJoinHandle(tokio::task::spawn_local(traced(name, future)))
+        TokioJoinHandle(tokio::task::spawn_local(traced_task(name, future)))
     }
 }
 

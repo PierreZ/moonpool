@@ -41,6 +41,8 @@
 //! [`AsyncSeek`]: futures::io::AsyncSeek
 
 mod align;
+#[cfg(feature = "host")]
+pub mod direct_io;
 mod layout;
 mod options;
 #[cfg(feature = "tokio-fs")]

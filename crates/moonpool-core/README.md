@@ -63,6 +63,7 @@ from `moonpool-sim` or `moonpool`, not `tokio::select!`.
 |---------|---------|------|
 | `tokio-providers` | yes | `TokioProviders`: all six `tokio-*` features |
 | `tokio-task`, `tokio-time`, `tokio-net`, `tokio-fs`, `thread-rng`, `tokio-system` | via umbrella | One production provider each (`tokio-net` also adds `TokioResolver`) |
+| `host` | via `tokio-fs` / `tokio-system` | `direct_io` and `host`: the direct-I/O probing and `/proc`, `getrusage`, `statvfs` readers shared by the production backends (`moonpool-compio` enables it alone) |
 | `select` | yes | `select!` as tokio's macro, unchanged |
 | `deterministic-select` | no | `select!` with a seeded branch offset (enabled by `moonpool-sim`) |
 

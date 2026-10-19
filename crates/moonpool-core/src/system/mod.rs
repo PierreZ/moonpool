@@ -14,6 +14,8 @@
 
 use std::{io, time::Duration};
 
+#[cfg(feature = "host")]
+pub mod host;
 #[cfg(feature = "tokio-system")]
 mod tokio_impl;
 
