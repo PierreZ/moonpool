@@ -14,7 +14,7 @@ and no `Sim*` variants of shipped types. This is FoundationDB's rule.
 | Trait | Production | Simulation | Purpose |
 |-------|------------|------------|---------|
 | `TimeProvider` | Wall clock | Logical time, clock drift | `sleep`, `timeout`, `now`, `timer` |
-| `TaskProvider` | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now` |
+| `TaskProvider` | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now`; `spawn_local` via `LocalTaskProvider` |
 | `NetworkProvider` | Real TCP | Simulated TCP with faults | `bind`, `connect`, `accept` |
 | `RandomProvider` | Thread-local RNG | The run's one seeded stream | `random`, `random_range`, `random_bool` |
 | `StorageProvider` | Real filesystem, direct I/O | Simulated disk with faults | `open`, `rename`, `sync_dir`, positioned I/O |

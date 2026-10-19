@@ -26,7 +26,7 @@
 //! | Trait | Production (`Tokio*`) | Simulation (`moonpool-sim`) | Purpose |
 //! |-------|-----------------------|-----------------------------|---------|
 //! | [`TimeProvider`] | Wall clock | Logical time, clock drift | `sleep`, `timeout`, `now`, `timer` |
-//! | [`TaskProvider`] | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now` |
+//! | [`TaskProvider`] | `tokio::spawn` | Seeded deterministic executor | `spawn_task`, `yield_now`; `spawn_local` via [`LocalTaskProvider`] |
 //! | [`NetworkProvider`] | Real TCP (`TCP_NODELAY`) | Simulated TCP with faults | `bind`, `connect`, `accept` |
 //! | [`RandomProvider`] | Thread-local RNG | The run's one seeded stream | `random`, `random_range`, `random_bool` |
 //! | [`StorageProvider`] | Real filesystem, direct I/O | Simulated disk with faults | `open`, `rename`, `sync_dir`, positioned I/O |
@@ -66,6 +66,49 @@
 //! `providers.time().sleep()`, not `tokio::time::sleep()`, and use
 //! [`select!`] (re-exported by `moonpool-sim` and `moonpool`), not
 //! `tokio::select!`.
+//!
+//! ## Local (non-Send) code
+//!
+//! Thread-per-core code that keeps `Rc<RefCell<…>>` across awaits bounds on
+//! [`LocalProviders`] instead of [`Providers`]. Its task provider implements
+//! [`LocalTaskProvider`], so `providers.task().spawn_local(..)` accepts
+//! futures that are not `Send`, and [`TimeProvider::timeout_local`] bounds
+//! them. In production use [`TokioLocalProviders`] inside a
+//! `tokio::task::LocalSet` (or a `tokio::runtime::LocalRuntime`).
+//! [`TokioProviders`] does not satisfy the bound, so this code cannot land on
+//! the work-stealing runtime by mistake.
+//!
+//! ```rust
+//! use std::{cell::RefCell, rc::Rc, time::Duration};
+//!
+//! use moonpool_core::prelude::*;
+//! use moonpool_core::{JoinError, TimeError};
+//!
+//! async fn count_once<P: LocalProviders>(providers: &P, hits: Rc<RefCell<u64>>) -> Result<(), JoinError> {
+//!     providers
+//!         .task()
+//!         .spawn_local("count", async move { *hits.borrow_mut() += 1 })
+//!         .await
+//! }
+//!
+//! # #[tokio::main(flavor = "current_thread")]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let local = tokio::task::LocalSet::new();
+//! local
+//!     .run_until(async {
+//!         let providers = TokioLocalProviders::new();
+//!         let hits = Rc::new(RefCell::new(0));
+//!         count_once(&providers, Rc::clone(&hits)).await?;
+//!         let seen = providers
+//!             .time()
+//!             .timeout_local(Duration::from_secs(1), async { *hits.borrow() })
+//!             .await?;
+//!         assert_eq!(seen, 1);
+//!         Ok::<_, Box<dyn std::error::Error>>(())
+//!     })
+//!     .await
+//! # }
+//! ```
 //!
 //! ## Other core types
 //!
@@ -145,9 +188,9 @@ pub use metrics::{HistogramValue, MetricSample, MetricValue, MetricsSource};
 pub use network::{NetworkProvider, TcpListenerTrait};
 #[cfg(feature = "tokio-net")]
 pub use network::{TokioNetworkProvider, TokioTcpListener};
-pub use providers::Providers;
+pub use providers::{LocalProviders, Providers};
 #[cfg(feature = "tokio-providers")]
-pub use providers::TokioProviders;
+pub use providers::{TokioLocalProviders, TokioProviders};
 pub use random::RandomProvider;
 #[cfg(feature = "tokio-random")]
 pub use random::TokioRandomProvider;
@@ -165,9 +208,9 @@ pub use system::TokioSystemProvider;
 pub use system::{
     DiskCounters, DiskSpace, SystemProvider, SystemSample, parse_diskstats, parse_proc_stat,
 };
-pub use task::{Detach, JoinError, TaskProvider};
+pub use task::{Detach, JoinError, LocalTaskProvider, TaskProvider};
 #[cfg(feature = "tokio-task")]
-pub use task::{TokioJoinHandle, TokioTaskProvider};
+pub use task::{TokioJoinHandle, TokioLocalTaskProvider, TokioTaskProvider};
 #[cfg(feature = "tokio-time")]
 pub use time::TokioTimeProvider;
 pub use time::{TimeError, TimeProvider};
@@ -183,10 +226,10 @@ pub use time::{TimeError, TimeProvider};
 /// ```
 pub mod prelude {
     pub use crate::{
-        NetworkProvider, Providers, RandomProvider, StorageProvider, SystemProvider, TaskProvider,
-        TcpListenerTrait, TimeProvider,
+        LocalProviders, LocalTaskProvider, NetworkProvider, Providers, RandomProvider,
+        StorageProvider, SystemProvider, TaskProvider, TcpListenerTrait, TimeProvider,
     };
 
     #[cfg(feature = "tokio-providers")]
-    pub use crate::TokioProviders;
+    pub use crate::{TokioLocalProviders, TokioProviders};
 }
