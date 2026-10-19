@@ -386,3 +386,17 @@ behind the journal's back. Reading it reports the slot damaged with the
 ballot its record kept, the acceptor writes a peer's copy at the same slot,
 and a final reopen comes back clean. Nothing in the crate names the
 simulator: the provider is the only thing that changes.
+
+Does the provider change the speed? `backends.rs` answers it. It runs the
+same journal on Tokio and on compio, with the same payloads, buffered and
+with direct I/O (`cargo run --release -p moonpool-journal --features
+compio-providers --example backends`). On a 4-vCPU cloud VM, compio commits
+one writer's small records about **15 to 20% faster**. Each Tokio file
+operation goes through the blocking pool, which costs about 17 syscalls per
+append against 3.5 on `io_uring`. With 16 journals in flight, Tokio commits
+**25 to 72% more**, because compio runs all 16 on one thread. Recovery
+takes the same time on both. The tables, the environment and the caveats
+are in
+[`docs/benchmarks/journal-backends.md`](https://github.com/PierreZ/moonpool/blob/main/docs/benchmarks/journal-backends.md).
+The VM very likely hides most of the cost of a sync, so measure on your own
+disk.
