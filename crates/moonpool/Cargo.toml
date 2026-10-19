@@ -23,7 +23,9 @@ tokio = ["moonpool-core/tokio-providers", "moonpool-core/select"]
 # Thread-per-core providers on compio (CompioProviders), io_uring on Linux with
 # a polling fallback elsewhere. Off by default, including in the
 # batteries-included default above, so the lean tokio tree stays free of it.
-compio = ["dep:moonpool-compio"]
+# Also enables moonpool::select!: the macro is tokio's select! expansion and
+# pulls only tokio/macros, no runtime.
+compio = ["dep:moonpool-compio", "moonpool-core/select"]
 # hyper 1.x integration (moonpool::hyper). Off by default, including in the
 # batteries-included default above: a stack that speaks no HTTP should not
 # compile h2 and tower, and the lean production tree stays free of hyper.

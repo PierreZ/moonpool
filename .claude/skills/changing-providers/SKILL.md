@@ -15,7 +15,7 @@ chapter and a compatibility checklist attached.
 | Layer | Where | Rules |
 |---|---|---|
 | trait | `crates/moonpool-core/src/{time,task,network,random,storage,block}.rs` | native AFIT: `fn f(&self, ..) -> impl Future<Output = ..> + Send`; supertraits `Clone + Send + Sync + 'static`; associated types for streams and files (`futures::io`, never `tokio::io`) |
-| tokio impl | the same file, `#[cfg(feature = "tokio-<slot>")]` (`TokioTimeProvider`, `TokioTaskProvider`, `TokioNetworkProvider`, `TokioRandomProvider`, `TokioStorageProvider`, `TokioBlockDeviceProvider` in `block_tokio.rs`); `TokioProviders` in `providers.rs` | plain `async fn`; each slot has its own feature so a consumer can take one without net/fs/time |
+| tokio impl | the same file, `#[cfg(feature = "tokio-<slot>")]` (`TokioTimeProvider`, `TokioTaskProvider` (plus `LocalTaskProvider`, spawn_local), `TokioNetworkProvider`, `ThreadRngRandomProvider`, `TokioStorageProvider`, `TokioBlockDeviceProvider` in `block_tokio.rs`); `TokioProviders` in `providers.rs` | plain `async fn`; each slot has its own feature so a consumer can take one without net/fs/time |
 | sim impl | `crates/moonpool-sim/src/providers/{time,task,random}.rs`, `network/sim/provider.rs`, `storage/provider.rs`, `storage/block/`; `SimProviders` in `providers/sim_providers.rs` | every random choice from `SIM_RNG`; every wait through the `Scheduler`; storage and network completions as scheduled events, never inline |
 | bundle | `impl_providers_bundle!` in `providers.rs` | `Providers` has one associated type and accessor per slot; extend the macro, not the two structs by hand |
 

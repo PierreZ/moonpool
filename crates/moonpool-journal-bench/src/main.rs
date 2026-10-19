@@ -443,30 +443,45 @@ async fn writer<P: Providers>(
         stop,
         counters,
     } = shared;
-    let dir = args.writer_dir(index);
-    let dir = dir.to_str().ok_or("path is not UTF-8")?;
-    let id = JournalId(u128::try_from(index)? + 1);
-    let mut journal = Journal::create(
-        providers.storage().clone(),
-        dir,
-        id,
-        args.config(),
-        b"bench",
-    )
-    .await?;
-    if args.spares {
-        journal.prepare_spares_with(providers.task().clone());
+    // Setup errors wait for the barrier too, so one failed writer cannot
+    // leave the others (and the clock) waiting for it forever.
+    let setup = async {
+        let dir = args.writer_dir(index);
+        let dir = dir.to_str().ok_or("path is not UTF-8")?;
+        let id = JournalId(u128::try_from(index)? + 1);
+        let mut journal = Journal::create(
+            providers.storage().clone(),
+            dir,
+            id,
+            args.config(),
+            b"bench",
+        )
+        .await?;
+        if args.spares {
+            journal.prepare_spares_with(providers.task().clone());
+        }
+        let batch_len = u64::try_from(args.batch)?;
+        let batch_bytes = batch_len * u64::try_from(args.record_size)?;
+        let histogram = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+        let spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+        let inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+        Ok::<_, Error>((
+            journal,
+            batch_len,
+            batch_bytes,
+            histogram,
+            spare_rolls,
+            inline_rolls,
+        ))
     }
+    .await;
+    start.wait().await;
+    let (mut journal, batch_len, batch_bytes, mut histogram, mut spare_rolls, mut inline_rolls) =
+        setup?;
     let payload = vec![0xA5_u8; args.record_size];
-    let batch_len = u64::try_from(args.batch)?;
-    let batch_bytes = batch_len * u64::try_from(args.record_size)?;
-    let mut histogram = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
-    let mut spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
-    let mut inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut position = 0_u64;
     let mut commits = 0_u64;
 
-    start.wait().await;
     let began = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let mut batch = Batch::new();
