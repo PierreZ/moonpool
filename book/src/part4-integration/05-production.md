@@ -67,18 +67,17 @@ or gRPC stack gets the same treatment through `moonpool-hyper`: `H2Server` and
 
 ## Choosing a runtime
 
-`TokioProviders` is not the only production bundle. Three exist, and they differ
+`TokioProviders` is not the only production bundle. Two exist, and they differ
 in one question: may a task move between threads?
 
 | Bundle | Runtime | `spawn_local` | Pick it when |
 |--------|---------|:---:|--------------|
 | `TokioProviders` | tokio, multi-thread or current-thread | no | Work-stealing is fine and shared state is `Arc<RwLock<…>>` |
-| `TokioLocalProviders` | tokio `LocalSet`, or `LocalRuntime` under `--cfg tokio_unstable` | yes | You stay on tokio but want `Rc<RefCell<…>>` state on one thread |
 | `CompioProviders` | compio, io_uring with a polling fallback | yes | Thread-per-core: one runtime per core, no task ever migrates |
 
 The `yes` column is a compile-time fact. `LocalTaskProvider` adds
-`spawn_local` for futures that hold `Rc` or `RefCell`. The simulator,
-`TokioLocalTaskProvider` and `CompioTaskProvider` implement it. The
+`spawn_local` for futures that hold `Rc` or `RefCell`. The simulator and
+`CompioTaskProvider` implement it. The
 work-stealing `TokioTaskProvider` does not, so code bounded on it cannot run
 there by mistake. `LocalProviders` is the bundle-level marker: thread-per-core
 code writes `P: LocalProviders` and keeps its state in `Rc<RefCell<…>>`.
@@ -88,18 +87,6 @@ futures that `sleep`, `connect` or `read_at` return are still `Send`, so a local
 task awaits them as usual. To bound a future that is itself not `Send`, call
 `timeout_local` instead of `timeout`. We pay for `Send` to get interoperability,
 not parallelism, and a thread-per-core deployment simply does not spend it.
-
-Tokio on one thread needs a `LocalSet`, because tokio only accepts
-`spawn_local` inside one:
-
-```rust,ignore
-let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-let local = tokio::task::LocalSet::new();
-runtime.block_on(local.run_until(run_app(TokioLocalProviders::new())));
-```
-
-Moonpool adds no `cfg` flag of its own. With `--cfg tokio_unstable`,
-`#[tokio::main(flavor = "local")]` gives the same effect without the `LocalSet`.
 
 Compio starts from its own runtime:
 
@@ -162,7 +149,7 @@ them creeps back in.
 
 | Feature | Pulls in | Use it when |
 |---------|----------|-------------|
-| `tokio` | `TokioProviders`, `TokioLocalProviders`, `moonpool::select!` | The application runs on real time, tasks, TCP, randomness and files |
+| `tokio` | `TokioProviders`, `moonpool::select!` | The application runs on real time, tasks, TCP, randomness and files |
 | `compio` | `moonpool::CompioProviders` and its siblings, from `moonpool-compio` | Thread-per-core deployment on io_uring, with a polling fallback. `moonpool::select!` is included. |
 | `hyper` | `moonpool::hyper`: runtime adapters, `HyperIo`, `H2Server`, `ReconnectingChannel` | The application uses hyper, axum or tonic |
 | `prometheus` | `moonpool::prometheus`: `PrometheusSource` and instrumented handles | A `prometheus::Registry` you want in the simulation report |

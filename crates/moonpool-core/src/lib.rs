@@ -73,10 +73,12 @@
 //! [`LocalProviders`] instead of [`Providers`]. Its task provider implements
 //! [`LocalTaskProvider`], so `providers.task().spawn_local(..)` accepts
 //! futures that are not `Send`, and [`TimeProvider::timeout_local`] bounds
-//! them. In production use [`TokioLocalProviders`] inside a
-//! `tokio::task::LocalSet` (or a `tokio::runtime::LocalRuntime`).
-//! [`TokioProviders`] does not satisfy the bound, so this code cannot land on
-//! the work-stealing runtime by mistake.
+//! them. In production this is `CompioProviders` from `moonpool-compio`; in
+//! simulation it is `SimProviders`. [`TokioProviders`] does not satisfy the
+//! bound, so this code cannot land on the work-stealing runtime by mistake.
+//!
+//! The example below only compiles generic code. See `moonpool-compio` for a
+//! runnable version.
 //!
 //! ```rust
 //! use std::{cell::RefCell, rc::Rc, time::Duration};
@@ -91,23 +93,13 @@
 //!         .await
 //! }
 //!
-//! # #[tokio::main(flavor = "current_thread")]
-//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let local = tokio::task::LocalSet::new();
-//! local
-//!     .run_until(async {
-//!         let providers = TokioLocalProviders::new();
-//!         let hits = Rc::new(RefCell::new(0));
-//!         count_once(&providers, Rc::clone(&hits)).await?;
-//!         let seen = providers
-//!             .time()
-//!             .timeout_local(Duration::from_secs(1), async { *hits.borrow() })
-//!             .await?;
-//!         assert_eq!(seen, 1);
-//!         Ok::<_, Box<dyn std::error::Error>>(())
-//!     })
-//!     .await
-//! # }
+//! async fn read_within<P: LocalProviders>(providers: &P, hits: Rc<RefCell<u64>>) -> Result<u64, TimeError> {
+//!     providers
+//!         .time()
+//!         .timeout_local(Duration::from_secs(1), async move { *hits.borrow() })
+//!         .await
+//! }
+//! # fn main() {}
 //! ```
 //!
 //! ## Other core types
@@ -189,9 +181,9 @@ pub use metrics::{HistogramValue, MetricSample, MetricValue, MetricsSource};
 pub use network::{NetworkProvider, TcpListenerTrait};
 #[cfg(feature = "tokio-net")]
 pub use network::{TokioNetworkProvider, TokioTcpListener};
-pub use providers::{LocalProviders, Providers};
 #[cfg(feature = "tokio-providers")]
-pub use providers::{TokioLocalProviders, TokioProviders};
+pub use providers::TokioProviders;
+pub use providers::{LocalProviders, Providers};
 pub use random::RandomProvider;
 #[cfg(feature = "thread-rng")]
 pub use random::ThreadRngRandomProvider;
@@ -217,7 +209,7 @@ pub use system::{
 pub use task::traced_task;
 pub use task::{Detach, JoinError, LocalTaskProvider, TaskProvider};
 #[cfg(feature = "tokio-task")]
-pub use task::{TokioJoinHandle, TokioLocalTaskProvider, TokioTaskProvider};
+pub use task::{TokioJoinHandle, TokioTaskProvider};
 #[cfg(feature = "tokio-time")]
 pub use time::TokioTimeProvider;
 pub use time::{TimeError, TimeProvider};
@@ -238,5 +230,5 @@ pub mod prelude {
     };
 
     #[cfg(feature = "tokio-providers")]
-    pub use crate::{TokioLocalProviders, TokioProviders};
+    pub use crate::TokioProviders;
 }

@@ -57,7 +57,7 @@ A team that adopts moonpool to test an existing service should not rewrite its t
 
 There is no tokio `LocalSet`, no tokio `spawn_local` and no `build_local` inside a simulation. Spawned futures are `Send + 'static`, as `tokio::spawn` requires.
 
-One exception is additive. A `!Send` task, one that holds `Rc` or `RefCell`, spawns through `ctx.task().spawn_local(name, fut)`. It runs on the same executor and the same seeded queue, so determinism does not change. Thread-per-core production runtimes (compio, tokio `LocalSet`) implement the same `LocalTaskProvider`. The `Send` contract on every trait stays: we pay for it to get interoperability, and a local task simply does not spend it.
+One exception is additive. A `!Send` task, one that holds `Rc` or `RefCell`, spawns through `ctx.task().spawn_local(name, fut)`. It runs on the same executor and the same seeded queue, so determinism does not change. Thread-per-core production runtimes (compio) implement the same `LocalTaskProvider`. The `Send` contract on every trait stays: we pay for it to get interoperability, and a local task simply does not spend it.
 
 ## What This Costs
 

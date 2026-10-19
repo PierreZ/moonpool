@@ -199,38 +199,28 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_local_completes_a_non_send_future() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let time = TokioTimeProvider::new();
-                let shared = Rc::new(7_u32);
-                let result = time
-                    .timeout_local(Duration::from_secs(5), async move {
-                        tokio::task::yield_now().await;
-                        *shared
-                    })
-                    .await;
-                assert_eq!(result, Ok(7));
+        let time = TokioTimeProvider::new();
+        let shared = Rc::new(7_u32);
+        let result = time
+            .timeout_local(Duration::from_secs(5), async move {
+                tokio::task::yield_now().await;
+                *shared
             })
             .await;
+        assert_eq!(result, Ok(7));
     }
 
     #[tokio::test]
     async fn timeout_local_elapses_on_a_pending_non_send_future() {
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async {
-                let time = TokioTimeProvider::new();
-                let shared = Rc::new(7_u32);
-                let result = time
-                    .timeout_local(Duration::from_millis(20), async move {
-                        // `shared` is read after the await, so the future holds
-                        // the `Rc` across it and is not `Send`.
-                        std::future::pending::<u32>().await + *shared
-                    })
-                    .await;
-                assert_eq!(result, Err(TimeError::Elapsed));
+        let time = TokioTimeProvider::new();
+        let shared = Rc::new(7_u32);
+        let result = time
+            .timeout_local(Duration::from_millis(20), async move {
+                // `shared` is read after the await, so the future holds
+                // the `Rc` across it and is not `Send`.
+                std::future::pending::<u32>().await + *shared
             })
             .await;
+        assert_eq!(result, Err(TimeError::Elapsed));
     }
 }

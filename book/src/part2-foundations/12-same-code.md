@@ -69,7 +69,7 @@ moonpool-sim = "0.8.0"
 moonpool = { version = "0.8.0", default-features = false, features = ["tokio"] }
 ```
 
-`tokio` enables core's `tokio-providers` and `select`, so `TokioProviders`, `TokioLocalProviders` and `moonpool::select!` are there. The opt-in `compio` feature adds `moonpool-compio` and `CompioProviders`. `sim` is off, so moonpool-sim and moonpool-explorer are absent from the dependency tree. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt` are opt-in on top of either configuration.
+`tokio` enables core's `tokio-providers` and `select`, so `TokioProviders` and `moonpool::select!` are there. The opt-in `compio` feature adds `moonpool-compio` and `CompioProviders`. `sim` is off, so moonpool-sim and moonpool-explorer are absent from the dependency tree. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt` are opt-in on top of either configuration.
 
 ## The select! Asymmetry
 

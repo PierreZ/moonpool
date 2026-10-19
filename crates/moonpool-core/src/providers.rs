@@ -34,11 +34,11 @@
 //! let _ = node.uptime();
 //! ```
 //!
-//! Three bundles exist: [`TokioProviders`] here, for production on tokio's
-//! work-stealing runtime; [`TokioLocalProviders`] here, for production on
-//! tokio's local flavors, where tasks may hold `!Send` state; and
-//! `SimProviders` in `moonpool-sim`, which a simulation hands to each process
-//! and workload through `SimContext::providers`.
+//! Two bundles live in the crates that own their runtime: [`TokioProviders`]
+//! here, for production on tokio's work-stealing runtime; and `SimProviders`
+//! in `moonpool-sim`, which a simulation hands to each process and workload
+//! through `SimContext::providers`. For production code that holds `!Send`
+//! state, `CompioProviders` in `moonpool-compio` is the bundle.
 //!
 //! Code that spawns `!Send` futures bounds on [`LocalProviders`] instead of
 //! [`Providers`]: it accepts the bundles whose task provider implements
@@ -50,8 +50,8 @@ use crate::{
 };
 #[cfg(feature = "tokio-providers")]
 use crate::{
-    ThreadRngRandomProvider, TokioLocalTaskProvider, TokioNetworkProvider, TokioStorageProvider,
-    TokioSystemProvider, TokioTaskProvider, TokioTimeProvider,
+    ThreadRngRandomProvider, TokioNetworkProvider, TokioStorageProvider, TokioSystemProvider,
+    TokioTaskProvider, TokioTimeProvider,
 };
 
 /// Implement [`Providers`] for a struct whose fields are named
@@ -121,8 +121,8 @@ macro_rules! impl_providers_bundle {
 /// ## Implementations
 ///
 /// - [`TokioProviders`]: production providers on a real Tokio runtime.
-/// - [`TokioLocalProviders`]: production providers on a Tokio local runtime,
-///   whose task provider also spawns `!Send` futures.
+/// - `CompioProviders` (in `moonpool-compio`): production providers on a
+///   compio runtime, whose task provider also spawns `!Send` futures.
 /// - `SimProviders` (in `moonpool-sim`): deterministic simulation providers.
 ///
 /// ## Design
@@ -176,7 +176,8 @@ pub trait Providers: Clone + Send + Sync + 'static {
 /// [`Task`](Providers::Task) implements [`LocalTaskProvider`] gets this trait
 /// through the blanket impl; there is nothing to implement by hand.
 ///
-/// [`TokioLocalProviders`] satisfies it. [`TokioProviders`] does not: its
+/// `CompioProviders` in `moonpool-compio` and `SimProviders` in
+/// `moonpool-sim` satisfy it. [`TokioProviders`] does not: its
 /// task provider is the work-stealing `tokio::spawn`, which moves tasks
 /// between threads.
 pub trait LocalProviders: Providers<Task: LocalTaskProvider> {}
@@ -248,87 +249,3 @@ impl_providers_bundle!(TokioProviders {
     storage: TokioStorageProvider,
     system: TokioSystemProvider,
 });
-
-/// Production providers for tokio's local flavors: [`TokioProviders`] with a
-/// task provider that also spawns `!Send` futures.
-///
-/// | Slot | Type |
-/// |------|------|
-/// | network | [`TokioNetworkProvider`] |
-/// | time | [`TokioTimeProvider`] |
-/// | task | [`TokioLocalTaskProvider`] |
-/// | random | [`ThreadRngRandomProvider`] |
-/// | storage | [`TokioStorageProvider`] |
-/// | system | [`TokioSystemProvider`] |
-///
-/// It implements [`LocalProviders`], so thread-per-core code bounded on
-/// `P: LocalProviders` runs on it. `spawn_local` must be called inside a
-/// `tokio::task::LocalSet` (stable) or on a `tokio::runtime::LocalRuntime`
-/// (`--cfg tokio_unstable`, `#[tokio::main(flavor = "local")]`); tokio panics
-/// with its own message otherwise. The other slots behave exactly as in
-/// [`TokioProviders`].
-///
-/// ```rust
-/// use moonpool_core::prelude::*;
-///
-/// let providers = TokioLocalProviders::new();
-/// let _elapsed = providers.time().now();
-/// ```
-#[cfg(feature = "tokio-providers")]
-#[derive(Clone)]
-pub struct TokioLocalProviders {
-    network: TokioNetworkProvider,
-    time: TokioTimeProvider,
-    task: TokioLocalTaskProvider,
-    random: ThreadRngRandomProvider,
-    storage: TokioStorageProvider,
-    system: TokioSystemProvider,
-}
-
-#[cfg(feature = "tokio-providers")]
-impl TokioLocalProviders {
-    /// Create the local production bundle. Each provider starts with its
-    /// default configuration, and the time and system clocks count from now.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            network: TokioNetworkProvider::new(),
-            time: TokioTimeProvider::new(),
-            task: TokioLocalTaskProvider,
-            random: ThreadRngRandomProvider::new(),
-            storage: TokioStorageProvider::new(),
-            system: TokioSystemProvider::new(),
-        }
-    }
-}
-
-#[cfg(feature = "tokio-providers")]
-impl Default for TokioLocalProviders {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(feature = "tokio-providers")]
-impl_providers_bundle!(TokioLocalProviders {
-    network: TokioNetworkProvider,
-    time: TokioTimeProvider,
-    task: TokioLocalTaskProvider,
-    random: ThreadRngRandomProvider,
-    storage: TokioStorageProvider,
-    system: TokioSystemProvider,
-});
-
-#[cfg(all(test, feature = "tokio-providers"))]
-mod tests {
-    use super::{LocalProviders, TokioLocalProviders};
-
-    fn needs_local<P: LocalProviders>(_: &P) {}
-
-    // `TokioProviders` intentionally does not satisfy `LocalProviders`: its
-    // task provider is the work-stealing `tokio::spawn`.
-    #[test]
-    fn tokio_local_providers_is_local() {
-        needs_local(&TokioLocalProviders::new());
-    }
-}

@@ -118,8 +118,8 @@ and under the simulator in its own `#[test]`.
 - `TokioProviders` for production, with granular `tokio-*` features.
   `SimProviders` for simulation.
 - `LocalTaskProvider` and `LocalProviders` for `!Send` tasks (`Rc`,
-  `RefCell`), plus `TimeProvider::timeout_local`. The simulator,
-  `TokioLocalProviders` and `CompioProviders` implement them. The
+  `RefCell`), plus `TimeProvider::timeout_local`. The simulator
+  and `CompioProviders` implement them. The
   work-stealing `TokioProviders` does not.
 - `CompioProviders` (`moonpool-compio`, feature `compio`): thread-per-core
   production on io_uring with a polling fallback.

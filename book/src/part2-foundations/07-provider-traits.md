@@ -62,11 +62,11 @@ pub trait LocalTaskProvider: TaskProvider {
 }
 ```
 
-The future needs `'static` but not `Send`. The task runs on the thread that spawned it, and the handle is the same `Send` handle `spawn_task` returns. Only runtimes that never move a task between threads implement the trait: `SimTaskProvider`, `CompioTaskProvider` and `TokioLocalTaskProvider`. The work-stealing `TokioTaskProvider` does not. Code bounded on `LocalTaskProvider` therefore cannot run on it by mistake, and the compiler says so.
+The future needs `'static` but not `Send`. The task runs on the thread that spawned it, and the handle is the same `Send` handle `spawn_task` returns. Only runtimes that never move a task between threads implement the trait: `SimTaskProvider` and `CompioTaskProvider`. The work-stealing `TokioTaskProvider` does not. Code bounded on `LocalTaskProvider` therefore cannot run on it by mistake, and the compiler says so.
 
 `LocalProviders` lifts the rule to the bundle. It is a marker for `Providers<Task: LocalTaskProvider>` with a blanket impl, so thread-per-core code writes `P: LocalProviders` and nothing else. Every other provider stays usable there: their futures are `Send`, and a `Send` future may be awaited inside a local task.
 
-**Production**: `TokioLocalTaskProvider` calls `tokio::task::spawn_local`, which tokio accepts inside a `LocalSet`, or on a `LocalRuntime` under `--cfg tokio_unstable`. Moonpool adds no `cfg` of its own. `CompioTaskProvider` spawns on the compio runtime of the current thread.
+**Production**: `CompioTaskProvider` spawns on the compio runtime of the current thread. Moonpool adds no `cfg` of its own.
 
 **Simulation**: `SimTaskProvider::spawn_local` spawns onto the same [deterministic executor](./11-executor.md), through the same seeded ready queue, with the same name, owner scope and panic capture as `spawn_task`.
 
@@ -203,7 +203,7 @@ pub trait Providers: Clone + Send + Sync + 'static {
 }
 ```
 
-`TokioProviders::new()` bundles the six production implementations. `TokioLocalProviders` does the same over `TokioLocalTaskProvider`, and `CompioProviders` over compio. The last two satisfy `LocalProviders`. `SimProviders::new(sim, ip)` bundles the six simulation implementations, scoped to one process IP. Your application code sees `P: Providers` and nothing else.
+`TokioProviders::new()` bundles the six production implementations. `CompioProviders` (in moonpool-compio) does the same over compio and satisfies `LocalProviders`. `SimProviders::new(sim, ip)` bundles the six simulation implementations, scoped to one process IP. Your application code sees `P: Providers` and nothing else.
 
 ## Resolver
 
