@@ -61,7 +61,10 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 - Use traits, not concrete types
 - KISS principle
 - **No LocalSet, no `spawn_local`, no `build_local`**: the executor runs on a
-  single OS thread, but futures must be `Send + 'static`
+  single OS thread, but futures must be `Send + 'static`. The one exception is
+  code written against the local traits (`LocalProviders`,
+  `LocalTaskProvider`, for thread-per-core runtimes): it spawns `!Send` tasks
+  with `spawn_local_task`, which `SimTaskProvider` runs on the same executor
 - **No direct tokio calls**: Use Provider traits
   - Forbidden: `tokio::time::sleep()`, `tokio::time::timeout()`, `tokio::spawn()`,
     `tokio::select!` (entropy branch offsets — use `moonpool_sim::select!`)
@@ -74,7 +77,9 @@ crates/
 │                            (rpc-derive/rpc-tls/rpc-jwt).
 ├── moonpool-core/         - Provider traits (Time, Task, Network, Random, Storage) + core types.
 │                            Granular tokio features: tokio-task/-time/-net/-fs/-random
-│                            (umbrella `tokio-providers`). wasm-clean with all off.
+│                            (umbrella `tokio-providers`). Local (non-Send) traits, and a
+│                            compio backend for them: compio-task/-time/-net/-fs/-system
+│                            (umbrella `compio-providers`, off by default). wasm-clean with all off.
 ├── moonpool-assertions/   - Antithesis-style assertion accounting (pure std, ZERO deps, wasm-able).
 │                            Heap table by default; explorer overlays MAP_SHARED + a discovery hook.
 ├── moonpool-buggify/      - Standalone buggify!/buggify_with_prob! macros + state (pure std, ZERO

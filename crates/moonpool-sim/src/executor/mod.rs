@@ -234,6 +234,51 @@ impl Handle {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
+        let (meta, wrapped, schedule) = self.prepare(name, owner, future);
+        let (runnable, task) = async_task::Builder::new()
+            .metadata(meta)
+            .spawn(move |_| wrapped, schedule);
+        self.register(runnable, task)
+    }
+
+    /// [`spawn`](Self::spawn) for a future that is not `Send`.
+    ///
+    /// The task goes through the same id allocation, waker registry and ready
+    /// queue as a `Send` one, and draws nothing from the simulation stream,
+    /// so scheduling is unchanged. `async_task` checks that the task is only
+    /// polled and dropped on this thread, which holds: the executor runs on
+    /// the one thread that installed it.
+    fn spawn_local<T, F>(
+        &self,
+        name: &str,
+        owner: Option<std::net::IpAddr>,
+        future: F,
+    ) -> JoinHandle<T>
+    where
+        F: Future<Output = T> + 'static,
+        T: 'static,
+    {
+        let (meta, wrapped, schedule) = self.prepare(name, owner, future);
+        let (runnable, task) = async_task::Builder::new()
+            .metadata(meta)
+            .spawn_local(move |_| wrapped, schedule);
+        self.register(runnable, task)
+    }
+
+    /// Allocate the task id and wrap `future` for either spawn.
+    fn prepare<T, F>(
+        &self,
+        name: &str,
+        owner: Option<std::net::IpAddr>,
+        future: F,
+    ) -> (
+        TaskMeta,
+        impl Future<Output = join::TaskResult<T>> + use<T, F>,
+        impl Fn(ExecRunnable) + Send + Sync + 'static,
+    )
+    where
+        F: Future<Output = T> + 'static,
+    {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let meta = TaskMeta {
             id,
@@ -264,10 +309,16 @@ impl Handle {
             schedule_shared.queue.lock().push(runnable);
         };
 
-        let (runnable, task) = async_task::Builder::new()
-            .metadata(meta)
-            .spawn(move |_| wrapped, schedule);
+        (meta, wrapped, schedule)
+    }
 
+    /// Register a freshly built task's waker and queue its first poll.
+    fn register<T>(
+        &self,
+        runnable: ExecRunnable,
+        task: async_task::Task<join::TaskResult<T>, TaskMeta>,
+    ) -> JoinHandle<T> {
+        let id = runnable.metadata().id;
         self.shared.wakers.lock().insert(id, runnable.waker());
         runnable.schedule();
 
@@ -321,6 +372,31 @@ where
             .as_ref()
             .expect("executor::spawn called outside Executor::block_on")
             .spawn(name, current_owner(), future)
+    })
+}
+
+/// Spawn a named task whose future is not `Send` onto the executor currently
+/// running on this thread.
+///
+/// The same task as [`spawn`] in every other respect: the same handle
+/// semantics, the same owner inheritance, the same seeded scheduling. The
+/// executor runs on one thread, so a future holding `Rc` or `RefCell` is
+/// safe here.
+///
+/// # Panics
+///
+/// As [`spawn`].
+pub fn spawn_local<T, F>(name: &str, future: F) -> JoinHandle<T>
+where
+    F: Future<Output = T> + 'static,
+    T: 'static,
+{
+    CURRENT.with(|current| {
+        current
+            .borrow()
+            .as_ref()
+            .expect("executor::spawn_local called outside Executor::block_on")
+            .spawn_local(name, current_owner(), future)
     })
 }
 

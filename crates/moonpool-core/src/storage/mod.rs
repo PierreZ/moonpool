@@ -17,6 +17,11 @@
 //!   ([`size`](StorageFile::size) / [`set_len`](StorageFile::set_len)).
 //! - [`OpenOptions`] decides the properties of the open.
 //!
+//! Both traits have a local (non-`Send`) form, [`LocalStorageProvider`] and
+//! [`LocalStorageFile`], for thread-per-core runtimes whose files and futures
+//! cannot leave their thread. Every `Send` backend implements the local form
+//! for free; see [`LocalStorageFile`] for the details.
+//!
 //! ## One file abstraction, not several
 //!
 //! A database's needs — positioned reads and writes, uncached I/O, alignment,
@@ -41,7 +46,12 @@
 //! [`AsyncSeek`]: futures::io::AsyncSeek
 
 mod align;
+#[cfg(feature = "compio-fs")]
+mod compio_impl;
 mod layout;
+mod local;
+#[cfg(any(feature = "tokio-fs", feature = "compio-fs"))]
+mod native;
 mod options;
 #[cfg(feature = "tokio-fs")]
 mod tokio_impl;
@@ -51,6 +61,7 @@ use std::io;
 
 pub use align::{AlignedBuf, IoConstraints};
 pub use layout::LayoutRegion;
+pub use local::{LocalStorageFile, LocalStorageProvider};
 pub use options::{DirectIo, InvalidOpenOptions, OpenOptions};
 
 /// The error a file with I/O constraints returns from the stream API.
@@ -68,6 +79,8 @@ pub fn stream_io_unsupported() -> io::Error {
          use read_at and write_at",
     )
 }
+#[cfg(feature = "compio-fs")]
+pub use compio_impl::{CompioStorageFile, CompioStorageProvider};
 #[cfg(feature = "tokio-fs")]
 pub use tokio_impl::{TokioStorageFile, TokioStorageProvider};
 

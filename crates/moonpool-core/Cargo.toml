@@ -36,6 +36,27 @@ tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "tokio/rt", "dep:tokio-uti
 tokio-system = ["dep:tokio", "tokio/rt", "dep:libc"]
 # TokioRandomProvider uses rand's ThreadRng; no tokio involved.
 tokio-random = ["rand/thread_rng"]
+# Compio backend: a thread-per-core, completion-based runtime (io_uring on
+# Linux, IOCP on Windows, polling elsewhere). Its types are not `Send`, so it
+# implements the local provider traits only. The driver features pick io_uring
+# where the kernel allows it and fall back to polling where it does not
+# (a seccomp profile, an old kernel).
+compio-providers = [
+    "compio-task",
+    "compio-time",
+    "compio-net",
+    "compio-fs",
+    "compio-system",
+    "tokio-random",
+]
+compio-task = ["dep:compio", "compio/runtime", "compio/io-uring", "compio/polling"]
+compio-time = ["dep:compio", "compio/time", "compio/io-uring", "compio/polling"]
+compio-net = ["dep:compio", "compio/net", "compio/io-compat", "compio/io-uring", "compio/polling"]
+# libc supplies O_DIRECT, O_APPEND and the statx alignment query.
+compio-fs = ["dep:compio", "dep:libc", "compio/fs", "compio/io-uring", "compio/polling"]
+# CompioSystemProvider: the same getrusage, /proc and statvfs counters as
+# TokioSystemProvider, without Tokio's runtime metrics.
+compio-system = ["dep:libc"]
 # `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
 select = ["dep:tokio", "tokio/macros"]
 # Deterministic `select!`: replaces the passthrough with tokio's expansion
@@ -44,6 +65,7 @@ select = ["dep:tokio", "tokio/macros"]
 deterministic-select = ["select"]
 
 [dependencies]
+compio = { version = "0.19", default-features = false, optional = true }
 futures = "0.3"
 libc = { version = "0.2", optional = true }
 rand = { version = "0.10", default-features = false }

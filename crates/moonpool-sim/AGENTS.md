@@ -36,7 +36,9 @@ and `SimContext`.
   to the coordinator. Never move component state or wakers back into
   `SimInner`, and never invoke a waker while holding the world lock.
 - `executor/` — the single-threaded seeded executor. Futures are
-  `Send + 'static`; no `LocalSet`, no `spawn_local`.
+  `Send + 'static`; no `LocalSet`. `executor::spawn_local` exists only to
+  back `LocalTaskProvider for SimTaskProvider`: same ids, queue and
+  scheduling, no extra draw.
 - `runner/` — `SimulationBuilder`, `Process`/`Workload`/`FaultInjector`,
   topology and groups, attrition, iteration control, the report.
 - `chaos/` — assertion macros (accounting in `moonpool-assertions`), the

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use futures::FutureExt as _;
-use moonpool_core::TaskProvider;
+use moonpool_core::{LocalTaskProvider, TaskProvider};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use tracing::Instrument as _;
 
@@ -108,6 +108,46 @@ impl TaskProvider for SimTaskProvider {
     }
 }
 
+/// The simulator runs every task on one thread, so it spawns `!Send` futures
+/// too. A local task is the same task as one from
+/// [`spawn_task`](TaskProvider::spawn_task): it inherits the spawner's span
+/// and owner, belongs to the provider's boot scope, reports its panics to
+/// the run, and is scheduled by the same seeded executor. Spawning draws
+/// nothing from the simulation stream, so a run that never spawns a local
+/// task replays exactly as before.
+impl LocalTaskProvider for SimTaskProvider {
+    type JoinHandle = crate::executor::JoinHandle<()>;
+
+    fn spawn_local_task<F>(&self, name: &str, future: F) -> Self::JoinHandle
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        let future = future.instrument(tracing::Span::current());
+        let (future, observed) = match &self.panic_reporter {
+            Some(reporter) => {
+                let observed = Arc::new(AtomicBool::new(false));
+                (
+                    reporter.catch_local_task_panic(name, future, Arc::clone(&observed)),
+                    Some(observed),
+                )
+            }
+            None => (Box::pin(future) as Pin<Box<dyn Future<Output = ()>>>, None),
+        };
+        let handle = match &self.scope {
+            Some(scope) => crate::executor::spawn_local(name, Scoped::new(scope.clone(), future)),
+            None => crate::executor::spawn_local(name, future),
+        };
+        match observed {
+            Some(observed) => handle.with_panic_acknowledgment(observed),
+            None => handle,
+        }
+    }
+
+    async fn yield_now(&self) {
+        crate::executor::yield_now().await;
+    }
+}
+
 /// Per-iteration collection of panics from detached provider-spawned tasks.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TaskPanicTracker {
@@ -162,14 +202,42 @@ impl TaskPanicReporter {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        Box::pin(self.catching(task, future, observed))
+    }
+
+    /// [`catch_task_panic`](Self::catch_task_panic) for a future that is
+    /// not `Send`.
+    fn catch_local_task_panic<F>(
+        &self,
+        task: &str,
+        future: F,
+        observed: Arc<AtomicBool>,
+    ) -> Pin<Box<dyn Future<Output = ()>>>
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        Box::pin(self.catching(task, future, observed))
+    }
+
+    /// The panic-recording wrapper both spawns share. It is `Send` exactly
+    /// when `future` is.
+    fn catching<F>(
+        &self,
+        task: &str,
+        future: F,
+        observed: Arc<AtomicBool>,
+    ) -> impl Future<Output = ()> + 'static
+    where
+        F: Future<Output = ()> + 'static,
+    {
         let reporter = self.clone();
         let task = task.to_string();
-        Box::pin(async move {
+        async move {
             if let Err(payload) = AssertUnwindSafe(future).catch_unwind().await {
                 reporter.record_with_observer(task, payload.as_ref(), observed);
                 std::panic::resume_unwind(payload);
             }
-        })
+        }
     }
 
     /// Record a panic that occurred in this actor's named task.
@@ -226,13 +294,16 @@ pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
 /// finds the scope cancelled and drops the application future without
 /// giving it another poll, which is the "no application work after the
 /// kill" rule the process manager keeps for the root future by aborting it.
-struct Scoped {
+///
+/// `F` is `dyn Future + Send` for [`TaskProvider`] spawns and `dyn Future`
+/// for [`LocalTaskProvider`] ones.
+struct Scoped<F: ?Sized> {
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
-    inner: Pin<Box<dyn Future<Output = ()> + Send>>,
+    inner: Pin<Box<F>>,
 }
 
-impl Scoped {
-    fn new(scope: CancellationToken, inner: Pin<Box<dyn Future<Output = ()> + Send>>) -> Self {
+impl<F: Future<Output = ()> + ?Sized> Scoped<F> {
+    fn new(scope: CancellationToken, inner: Pin<Box<F>>) -> Self {
         Self {
             cancelled: Box::pin(scope.cancelled_owned()),
             inner,
@@ -240,7 +311,7 @@ impl Scoped {
     }
 }
 
-impl Future for Scoped {
+impl<F: Future<Output = ()> + ?Sized> Future for Scoped<F> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {

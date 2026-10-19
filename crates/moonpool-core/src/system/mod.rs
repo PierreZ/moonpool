@@ -14,11 +14,13 @@
 
 use std::{io, time::Duration};
 
-#[cfg(feature = "tokio-system")]
-mod tokio_impl;
+#[cfg(any(feature = "tokio-system", feature = "compio-system"))]
+mod os_impl;
 
+#[cfg(feature = "compio-system")]
+pub use os_impl::CompioSystemProvider;
 #[cfg(feature = "tokio-system")]
-pub use tokio_impl::TokioSystemProvider;
+pub use os_impl::TokioSystemProvider;
 
 /// Provider of cumulative CPU and disk counters.
 ///

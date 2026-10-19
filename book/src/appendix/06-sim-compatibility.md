@@ -18,7 +18,7 @@ Use this list when you bring an existing crate into a moonpool simulation. Deter
 | Forbidden | Use instead |
 |-----------|-------------|
 | `std::thread::spawn`, OS threads | `task.spawn_task(name, fut)` |
-| `tokio::task::spawn_local`, `tokio::task::LocalSet` | `task.spawn_task(name, fut)` (Send-bounded) |
+| `tokio::task::spawn_local`, `tokio::task::LocalSet` | `task.spawn_task(name, fut)` (Send-bounded), or `LocalTaskProvider::spawn_local_task(name, fut)` for `!Send` code (`CompioTaskProvider` in production, `SimTaskProvider` in simulation) |
 | `tokio::spawn` | `task.spawn_task(name, fut)`, or `moonpool_sim::executor::spawn(name, fut)` in sim-only code |
 | `tokio::select!` | `moonpool_sim::select!` or `moonpool::select!` (same grammar) |
 
@@ -85,7 +85,7 @@ All of these come from `moonpool-buggify` and `moonpool-assertions`, which have 
 ## 9. Type Bounds
 
 - Futures that cross a trait are `Send + 'static`. The executor is single-threaded, but spawned futures are Send-bounded.
-- Shared state: `Arc<RwLock<..>>`, `Arc<AtomicBool>`, `DashMap`. Not `Rc<RefCell<..>>`.
+- Shared state: `Arc<RwLock<..>>`, `Arc<AtomicBool>`, `DashMap`. `Rc<RefCell<..>>` only in code written against the local traits (`LocalProviders`, `LocalTaskProvider`) and spawned with `spawn_local_task`.
 - `Process`, `Workload` and `FaultInjector` are dyn-stored: `#[async_trait]` with `Send + Sync + 'static`.
 - Provider traits use native `async fn` with `-> impl Future<..> + Send`. No `#[async_trait]`.
 - Never hold a `MutexGuard` or `RwLockGuard` across `.await`.
