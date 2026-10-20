@@ -11,7 +11,7 @@
 use std::io;
 use std::ops::Deref;
 
-use moonpool_core::{AlignedBuf, BlockFile, StorageFile};
+use moonpool_core::{AlignedBuf, BlockFile, LocalStorageFile};
 
 use crate::format::{BLOCK, BLOCK_U64, align_up, u64_of, usize_of};
 
@@ -38,7 +38,7 @@ fn is_media_error(error: &io::Error) -> bool {
 
 /// Read whole blocks from `first_block` into `buf`, zero-filling every block
 /// the medium fails to read. Returns the filled buffer.
-pub(crate) async fn read_blocks<F: StorageFile>(
+pub(crate) async fn read_blocks<F: LocalStorageFile>(
     file: &BlockFile<F>,
     first_block: u64,
     buf: AlignedBuf,
@@ -79,7 +79,7 @@ impl Deref for ReadBytes {
 }
 
 /// Read `len` bytes at `offset` through whole blocks.
-pub(crate) async fn read_bytes<F: StorageFile>(
+pub(crate) async fn read_bytes<F: LocalStorageFile>(
     file: &BlockFile<F>,
     offset: u64,
     len: usize,
@@ -104,7 +104,7 @@ pub(crate) async fn read_bytes<F: StorageFile>(
 
 /// Write `buf` (a whole number of blocks) at block `first_block`, with no
 /// copy. Returns the buffer.
-pub(crate) async fn write_blocks<F: StorageFile>(
+pub(crate) async fn write_blocks<F: LocalStorageFile>(
     file: &BlockFile<F>,
     first_block: u64,
     buf: AlignedBuf,
@@ -119,7 +119,7 @@ pub(crate) async fn write_blocks<F: StorageFile>(
 /// Write `buf` (a whole number of blocks) at block `first_block`, durable
 /// on return: [`BlockFile::write_blocks_durable_aligned`]. Only these
 /// blocks; a caller with another unsynced write in the file syncs it first.
-pub(crate) async fn write_blocks_durable<F: StorageFile>(
+pub(crate) async fn write_blocks_durable<F: LocalStorageFile>(
     file: &BlockFile<F>,
     first_block: u64,
     buf: AlignedBuf,

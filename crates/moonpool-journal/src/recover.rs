@@ -16,7 +16,7 @@
 //! batch** and damaged records cost entry reads: the rest of the log is
 //! checked when it is read.
 
-use moonpool_core::{AlignedBuf, StorageFile};
+use moonpool_core::{AlignedBuf, LocalStorageFile};
 
 use crate::OpenError;
 use crate::format::{
@@ -88,7 +88,7 @@ pub(crate) struct Scan {
 }
 
 /// An entry checked against what is expected of it.
-async fn read_entry<F: StorageFile>(
+async fn read_entry<F: LocalStorageFile>(
     segment: &Segment<F>,
     offset: u64,
     tag: u32,
@@ -158,7 +158,7 @@ impl Stale {
 }
 
 /// Pass 1 over one segment. `prev` is the last batch before it.
-async fn scan_segment<F: StorageFile>(
+async fn scan_segment<F: LocalStorageFile>(
     segment: &Segment<F>,
     prev: u64,
     tag: u32,
@@ -270,7 +270,7 @@ async fn scan_segment<F: StorageFile>(
 }
 
 /// Scan every segment (sorted by first batch) and judge every record.
-pub(crate) async fn scan<F: StorageFile>(
+pub(crate) async fn scan<F: LocalStorageFile>(
     segments: &[Segment<F>],
     tag: u32,
     stale: Stale,
@@ -309,7 +309,7 @@ pub(crate) async fn scan<F: StorageFile>(
 }
 
 /// Pass 2 for one batch.
-async fn judge_batch<F: StorageFile>(
+async fn judge_batch<F: LocalStorageFile>(
     segment: &Segment<F>,
     segment_index: usize,
     batch: BatchScan,

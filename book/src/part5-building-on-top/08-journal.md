@@ -211,11 +211,18 @@ answer is a reboot.
 A segment is created whole: zero-filled, synced, renamed into place, its
 directory synced. Done on the commit that fills the active segment, that is
 a 64 MiB write and two syncs the commit waits for. A caller with a
-`TaskProvider` takes it off the commit path:
+task provider takes it off the commit path:
 
 ```rust,ignore
-journal.prepare_spares_with(ctx.task().clone()); // or TokioTaskProvider
+let mut journal = journal.prepare_spares_with(ctx.task().clone()); // or TokioTaskProvider
+let mut journal = journal.prepare_spares_local(CompioTaskProvider); // a local runtime
 ```
+
+The method consumes the journal and returns a `Journal<P, S>`. The type
+parameter `S` is the spawner: `NoSpares` (the default), `Spares<T>` for a
+`TaskProvider`, or `LocalSpares<T>` for a `LocalTaskProvider`. The spawner
+gets a `SpareJob`, plain data, and builds the preparation future on its own
+runtime. Thus the future keeps its concrete type, and nothing is boxed.
 
 Once the active segment is half full, a task creates
 `spare-<generation>-<n>.wal`, zero-fills it, syncs it and syncs its
@@ -223,8 +230,8 @@ directory. The commit that fills the segment then **adopts** the spare: it
 writes the two header blocks, syncs them, renames the spare to
 `seg-<first batch>.wal` and syncs the directory. Two small syncs instead of
 a whole segment. A spare that is not ready yet is left to finish for the
-next roll; the commit creates its segment inline, as it does without a task
-provider. `Journal::prepare_spare()` does the same preparation inline, for a
+next roll; the commit creates its segment inline, as it does without a
+spawner. `Journal::prepare_spare()` does the same preparation inline, for a
 caller with idle time, and `Journal::rolls()` counts the rolls of each kind.
 
 The crash argument is that **a spare is never evidence**:

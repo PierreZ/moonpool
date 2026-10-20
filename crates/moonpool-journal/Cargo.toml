@@ -12,8 +12,9 @@ keywords.workspace = true
 categories.workspace = true
 
 # Built only on the provider traits and `BlockFile`, so the same journal runs
-# over `TokioStorageProvider` in production and `SimStorageProvider` under
-# simulation. No production providers are pulled in here.
+# over `TokioStorageProvider` in production, `CompioStorageProvider` on a
+# thread-per-core runtime and `SimStorageProvider` under simulation. No
+# production providers are pulled in here.
 [dependencies]
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
 # `hint!` names the moments inside a commit where a power loss is worth
@@ -22,9 +23,18 @@ moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
 crc32c = "0.6"
 thiserror = "2.0"
 
+[features]
+# Runs `tests/compio_filesystem.rs`: the same journal over
+# `CompioStorageProvider` and `CompioTaskProvider`. Tests only; the journal
+# itself needs no backend.
+compio-providers = ["moonpool-core/compio-providers"]
+
 [dev-dependencies]
-# The example runs the journal on the real filesystem.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-fs"] }
+# The example and the real-filesystem tests run the journal on Tokio;
+# `tests/send.rs` pins that its futures stay `Send` there.
+moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-fs", "tokio-task"] }
+# The runtime `tests/compio_filesystem.rs` drives the journal on.
+compio = { version = "0.19", default-features = false, features = ["runtime", "io-uring", "polling"] }
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 # The `bench` example: CLI flags and bounded percentile accounting, as in
@@ -37,6 +47,10 @@ clap = { version = "4.6", default-features = false, features = [
     "derive",
 ] }
 hdrhistogram = { version = "7.6", default-features = false }
+
+[[test]]
+name = "compio_filesystem"
+required-features = ["compio-providers"]
 
 [lints]
 workspace = true

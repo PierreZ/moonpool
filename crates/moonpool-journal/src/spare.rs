@@ -18,11 +18,11 @@
 //! Writing the zeros once, off the commit path, keeps a segment's syncs pure
 //! data syncs.
 
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use moonpool_core::{BlockFile, Detach, OpenOptions, StorageProvider, TaskProvider};
+use moonpool_core::{
+    BlockFile, Detach, LocalStorageProvider, LocalTaskProvider, OpenOptions, TaskProvider,
+};
 
 use crate::format::{BLOCK, BLOCK_U64, Geometry, usize_of};
 use crate::io::write_blocks;
@@ -87,9 +87,13 @@ impl Spare {
             .lock()
             .expect("spare lock poisoned: prior task panicked")
     }
+}
 
-    /// The journal let go of this spare: a preparation still running stops.
-    pub fn abandon(&self) {
+/// The journal let go of this spare (it is gone, or it rolled past it): a
+/// preparation still running stops at its next step. A ready or failed
+/// spare is left as it is, for the next open to delete.
+impl Drop for Spare {
+    fn drop(&mut self) {
         let mut progress = self
             .progress
             .lock()
@@ -100,15 +104,106 @@ impl Spare {
     }
 }
 
-/// Spawns a spare's preparation: [`TaskProvider`] with its type erased, so
-/// the journal stays generic over its storage alone.
-pub(crate) trait Spawner: Send + Sync {
-    fn spawn(&self, preparation: Pin<Box<dyn Future<Output = ()> + Send>>);
+/// One spare segment to prepare: plain data, so a spawner builds the
+/// preparation future itself, on its own runtime, and nothing is boxed.
+///
+/// A [`SpareSpawner`] receives it and runs [`SpareJob::run`] in the
+/// background.
+pub struct SpareJob<P> {
+    provider: P,
+    dir: String,
+    name: String,
+    geometry: Geometry,
+    progress: Arc<Mutex<Progress>>,
 }
 
-impl<T: TaskProvider> Spawner for T {
-    fn spawn(&self, preparation: Pin<Box<dyn Future<Output = ()> + Send>>) {
-        self.spawn_task("journal spare", preparation).detach();
+impl<P: LocalStorageProvider> SpareJob<P> {
+    /// Create, zero-fill and sync the spare, then mark it ready for the
+    /// journal's next roll. A failure is recorded for the journal (the next
+    /// roll then creates its segment inline) and the half-written file is
+    /// removed; nothing is returned.
+    ///
+    /// The future is `Send` exactly when `P`'s futures are, so a spawner on a
+    /// work-stealing runtime can spawn it for a `Send` provider.
+    pub async fn run(self) {
+        // A failure is recorded in the spare's progress.
+        let _ = prepare(
+            self.provider,
+            self.dir,
+            self.name,
+            self.geometry,
+            self.progress,
+        )
+        .await;
+    }
+}
+
+/// Where a journal prepares its spare segments in the background: a type
+/// parameter of [`Journal`](crate::Journal), so the preparation future keeps
+/// its concrete type (and its `Send`-ness) and is never boxed.
+///
+/// - [`NoSpares`], the default: no background preparation. A roll creates
+///   its segment inline, or [`Journal::prepare_spare`](crate::Journal::prepare_spare)
+///   prepares one when the caller has idle time.
+/// - [`Spares`]: a [`TaskProvider`] (Tokio, the simulator), for a `Send`
+///   provider. Set with [`Journal::prepare_spares_with`](crate::Journal::prepare_spares_with).
+/// - [`LocalSpares`]: a [`LocalTaskProvider`] (compio, the simulator), for
+///   any provider. Set with [`Journal::prepare_spares_local`](crate::Journal::prepare_spares_local).
+pub trait SpareSpawner<P> {
+    /// Whether this spawner prepares spares at all. A journal with a spawner
+    /// that does not never starts one, and never names one.
+    const BACKGROUND: bool;
+
+    /// Run `job` in the background: [`SpareJob::run`], detached.
+    fn spawn(&self, job: SpareJob<P>);
+}
+
+/// No background spare preparation: the default [`SpareSpawner`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NoSpares;
+
+impl<P> SpareSpawner<P> for NoSpares {
+    const BACKGROUND: bool = false;
+
+    fn spawn(&self, _job: SpareJob<P>) {}
+}
+
+/// Prepare spares on a [`TaskProvider`]: the preparation future is `Send`
+/// because the provider is.
+#[derive(Clone, Debug)]
+pub struct Spares<T>(pub T);
+
+impl<P: moonpool_core::StorageProvider, T: TaskProvider> SpareSpawner<P> for Spares<T> {
+    const BACKGROUND: bool = true;
+
+    fn spawn(&self, job: SpareJob<P>) {
+        self.0.spawn_task("journal spare", job.run()).detach();
+    }
+}
+
+/// Prepare spares on a [`LocalTaskProvider`]: the preparation runs on the
+/// spawning thread, so neither the provider nor its futures need be `Send`.
+#[derive(Clone, Debug)]
+pub struct LocalSpares<T>(pub T);
+
+impl<P: LocalStorageProvider, T: LocalTaskProvider> SpareSpawner<P> for LocalSpares<T> {
+    const BACKGROUND: bool = true;
+
+    fn spawn(&self, job: SpareJob<P>) {
+        self.0.spawn_local_task("journal spare", job.run()).detach();
+    }
+}
+
+impl<P> SpareJob<P> {
+    /// The preparation of `spare` in `dir`.
+    pub(crate) fn new(provider: P, dir: String, spare: &Spare, geometry: Geometry) -> Self {
+        Self {
+            provider,
+            dir,
+            name: spare.name.clone(),
+            geometry,
+            progress: Arc::clone(&spare.progress),
+        }
     }
 }
 
@@ -119,7 +214,7 @@ impl<T: TaskProvider> Spawner for T {
 /// # Errors
 /// The provider's error, or [`std::io::ErrorKind::Interrupted`] when the
 /// journal abandoned the spare first.
-pub(crate) async fn prepare<P: StorageProvider>(
+pub(crate) async fn prepare<P: LocalStorageProvider>(
     provider: P,
     dir: String,
     name: String,
@@ -164,7 +259,7 @@ pub(crate) async fn prepare<P: StorageProvider>(
 
 /// Create, zero-fill and sync the file at `path`, then sync its name.
 /// `Ok(false)` when `abandoned` stopped it first.
-async fn write_spare<P: StorageProvider>(
+async fn write_spare<P: LocalStorageProvider>(
     provider: &P,
     dir: &str,
     path: &str,
@@ -202,7 +297,7 @@ async fn write_spare<P: StorageProvider>(
 
 /// Write `total` blocks of zeros from block 0, `FILL_BLOCKS` per write.
 /// `Ok(false)` when `abandoned` stopped it first.
-pub(crate) async fn zero_fill<F: moonpool_core::StorageFile>(
+pub(crate) async fn zero_fill<F: moonpool_core::LocalStorageFile>(
     file: &BlockFile<F>,
     total: u64,
     abandoned: &impl Fn() -> bool,

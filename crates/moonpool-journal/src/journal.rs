@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::ops::RangeBounds;
 
-use moonpool_core::{AlignedBuf, DirectIo, LayoutRegion, StorageProvider, TaskProvider};
+use moonpool_core::{
+    AlignedBuf, DirectIo, LayoutRegion, LocalStorageProvider, LocalTaskProvider, TaskProvider,
+};
 
 use crate::batch::{Batch, Write};
 use crate::format::{
@@ -15,7 +17,10 @@ use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{Located, Op, Stale, entry_matches, scan};
 use crate::segment::{Segment, is_segment_leftover, parse_segment_name};
-use crate::spare::{Progress, Spare, Spawner, is_spare, prepare, spare_name};
+use crate::spare::{
+    LocalSpares, NoSpares, Progress, Spare, SpareJob, SpareSpawner, Spares, is_spare, prepare,
+    spare_name,
+};
 use crate::{CommitError, Durable, OpenError, ReadError};
 
 /// A journal's identity, stamped in its meta file, its segment headers and
@@ -33,11 +38,11 @@ pub enum Durability {
     /// are reported [`State::Ambiguous`].
     Batched,
     /// `write(entries); fsync; write(persist records); fsync`, issued as
-    /// two durable writes ([`StorageFile::write_at_durable`]: one
+    /// two durable writes ([`LocalStorageFile::write_at_durable`]: one
     /// `pwritev2(RWF_DSYNC)` each on Linux). Two syncs per batch; a persist
     /// record proves its entry was synced, so damage is always told apart.
     ///
-    /// [`StorageFile::write_at_durable`]: moonpool_core::StorageFile::write_at_durable
+    /// [`LocalStorageFile::write_at_durable`]: moonpool_core::LocalStorageFile::write_at_durable
     #[default]
     Ordered,
 }
@@ -150,8 +155,18 @@ impl Layout {
     pub const HEADER: &'static str = "segment header";
 }
 
-/// A CLSTORE journal over any [`StorageProvider`]: see the crate docs.
-pub struct Journal<P: StorageProvider> {
+/// A CLSTORE journal over any [`LocalStorageProvider`]: see the crate docs.
+///
+/// One codebase for every backend. Over a `Send` provider (Tokio, the
+/// simulator) the journal and the futures of its methods are `Send`, so it
+/// runs inside `tokio::spawn`; over a thread-per-core provider (compio) they
+/// are not, and it runs on that runtime's thread.
+///
+/// `S` is where spare segments are prepared in the background (see
+/// [`SpareSpawner`]): [`NoSpares`] until
+/// [`prepare_spares_with`](Self::prepare_spares_with) or
+/// [`prepare_spares_local`](Self::prepare_spares_local) sets one.
+pub struct Journal<P: LocalStorageProvider, S = NoSpares> {
     provider: P,
     dir: String,
     id: JournalId,
@@ -172,23 +187,16 @@ pub struct Journal<P: StorageProvider> {
     /// The next segment, prepared ahead (see [`Journal::prepare_spare`]).
     spare: Option<Spare>,
     /// Where spares are prepared in the background, if anywhere.
-    spawner: Option<Box<dyn Spawner>>,
+    spawner: S,
     /// Spares this open has started: the number in the next one's name.
     spares_started: u32,
     rolls: Rolls,
 }
 
-impl<P: StorageProvider> Drop for Journal<P> {
-    fn drop(&mut self) {
-        // A preparation still running stops; a ready spare is left for the
-        // next open to delete.
-        if let Some(spare) = &self.spare {
-            spare.abandon();
-        }
-    }
-}
+// Dropping the journal drops its spare: a preparation still running stops,
+// and a ready spare is left for the next open to delete (see `Spare`'s drop).
 
-impl<P: StorageProvider> std::fmt::Debug for Journal<P> {
+impl<P: LocalStorageProvider, S> std::fmt::Debug for Journal<P, S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Journal")
             .field("dir", &self.dir)
@@ -235,7 +243,7 @@ fn ancestors_of(dir: &str) -> Vec<String> {
 /// Make every name on the way to `dir`, and the names inside it, durable.
 /// Opening runs it too: an earlier attempt may have created a name, or
 /// renamed a file into place, and failed before its directory sync.
-async fn sync_names<P: StorageProvider>(provider: &P, dir: &str) -> std::io::Result<()> {
+async fn sync_names<P: LocalStorageProvider>(provider: &P, dir: &str) -> std::io::Result<()> {
     for parent in ancestors_of(dir) {
         provider.sync_dir(&parent).await?;
     }
@@ -248,7 +256,7 @@ async fn sync_names<P: StorageProvider>(provider: &P, dir: &str) -> std::io::Res
 ///
 /// A spare is never evidence: no batch is written to it before it is renamed
 /// to a segment, so deleting it, whole or half-written, loses nothing.
-async fn list_segments<P: StorageProvider>(
+async fn list_segments<P: LocalStorageProvider>(
     provider: &P,
     dir: &str,
 ) -> Result<Option<(Vec<(u64, String)>, u32)>, OpenError> {
@@ -264,9 +272,9 @@ async fn list_segments<P: StorageProvider>(
     for name in names {
         if is_spare(&name) {
             spares += 1;
-            provider.delete(&format!("{dir}/{name}")).await?;
+            delete_if_present(provider, &format!("{dir}/{name}")).await?;
         } else if is_segment_leftover(&name) {
-            provider.delete(&format!("{dir}/{name}")).await?;
+            delete_if_present(provider, &format!("{dir}/{name}")).await?;
         } else if let Some(first) = parse_segment_name(&name) {
             firsts.push((first, name));
         }
@@ -275,10 +283,23 @@ async fn list_segments<P: StorageProvider>(
     Ok(Some((firsts, spares)))
 }
 
+/// Delete `path`, which the listing found: gone already is deleted. A
+/// preparation an earlier journal in this process abandoned may remove its
+/// own spare between the listing and this delete.
+async fn delete_if_present<P: LocalStorageProvider>(
+    provider: &P,
+    path: &str,
+) -> std::io::Result<()> {
+    match provider.delete(path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        deleted => deleted,
+    }
+}
+
 /// Make what this open found the log from now on: a new generation, durable
 /// in both metainfo copies before any write, so whatever lies beyond the end
 /// and was invisible here can never come back as evidence.
-async fn begin_generation<F: moonpool_core::StorageFile>(
+async fn begin_generation<F: moonpool_core::LocalStorageFile>(
     meta_file: &MetaFile<F>,
     meta: Meta,
     last_batch: u64,
@@ -298,7 +319,7 @@ async fn begin_generation<F: moonpool_core::StorageFile>(
     Ok(meta)
 }
 
-impl<P: StorageProvider> Journal<P> {
+impl<P: LocalStorageProvider> Journal<P> {
     /// Create a journal in `dir` with the caller's first metainfo.
     ///
     /// # Errors
@@ -347,7 +368,7 @@ impl<P: StorageProvider> Journal<P> {
             generation: 1,
             poisoned: false,
             spare: None,
-            spawner: None,
+            spawner: NoSpares,
             spares_started: 0,
             rolls: Rolls::default(),
         })
@@ -462,7 +483,7 @@ impl<P: StorageProvider> Journal<P> {
             generation,
             poisoned: false,
             spare: None,
-            spawner: None,
+            spawner: NoSpares,
             spares_started: 0,
             rolls: Rolls::default(),
         };
@@ -492,6 +513,85 @@ impl<P: StorageProvider> Journal<P> {
             .map(|meta| meta.bytes))
     }
 
+    /// Prepare the next segment in the background, on `tasks`, from now on:
+    /// once the active segment is half full (or there is none), a task
+    /// creates, zero-fills and syncs a spare, so the commit that fills the
+    /// segment rolls onto it with a header write and a rename instead of
+    /// writing a whole segment. Without it, a roll creates the segment on
+    /// the commit path.
+    ///
+    /// A roll never waits for a spare: one not ready yet is left to finish
+    /// for the next roll. A failed preparation only costs that roll its
+    /// spare. The spare is deleted by the next open, and a preparation still
+    /// running when the journal is dropped stops at its next step.
+    ///
+    /// For a `Send` provider on a [`TaskProvider`] (Tokio, the simulator).
+    /// A thread-per-core runtime uses
+    /// [`prepare_spares_local`](Self::prepare_spares_local).
+    pub fn prepare_spares_with<T: TaskProvider>(self, tasks: T) -> Journal<P, Spares<T>>
+    where
+        P: moonpool_core::StorageProvider,
+    {
+        self.with_spawner(Spares(tasks))
+    }
+
+    /// [`prepare_spares_with`](Self::prepare_spares_with) on a
+    /// [`LocalTaskProvider`]: the preparation runs on the spawning thread,
+    /// so neither the provider nor its futures need be `Send` (compio, or
+    /// the simulator's local spawner).
+    pub fn prepare_spares_local<T: LocalTaskProvider>(
+        self,
+        tasks: T,
+    ) -> Journal<P, LocalSpares<T>> {
+        self.with_spawner(LocalSpares(tasks))
+    }
+
+    /// The same journal, preparing its spares on `spawner`.
+    fn with_spawner<S: SpareSpawner<P>>(self, spawner: S) -> Journal<P, S> {
+        let Self {
+            provider,
+            dir,
+            id,
+            tag,
+            config,
+            meta_file,
+            meta,
+            segments,
+            index,
+            last_batch,
+            ambiguous_batch,
+            generation,
+            poisoned,
+            spare,
+            spawner: NoSpares,
+            spares_started,
+            rolls,
+        } = self;
+        let mut journal = Journal {
+            provider,
+            dir,
+            id,
+            tag,
+            config,
+            meta_file,
+            meta,
+            segments,
+            index,
+            last_batch,
+            ambiguous_batch,
+            generation,
+            poisoned,
+            spare,
+            spawner,
+            spares_started,
+            rolls,
+        };
+        journal.spawn_spare();
+        journal
+    }
+}
+
+impl<P: LocalStorageProvider, S: SpareSpawner<P>> Journal<P, S> {
     // ---- what the journal knows, from memory ----
 
     /// The journal's identity.
@@ -854,24 +954,8 @@ impl<P: StorageProvider> Journal<P> {
 
     // ---- spare segments ----
 
-    /// Prepare the next segment in the background, on `tasks`, from now on:
-    /// once the active segment is half full (or there is none), a task
-    /// creates, zero-fills and syncs a spare, so the commit that fills the
-    /// segment rolls onto it with a header write and a rename instead of
-    /// writing a whole segment. Without it, a roll creates the segment on
-    /// the commit path.
-    ///
-    /// A roll never waits for a spare: one not ready yet is left to finish
-    /// for the next roll. A failed preparation only costs that roll its
-    /// spare. The spare is deleted by the next open, and a preparation still
-    /// running when the journal is dropped stops at its next step.
-    pub fn prepare_spares_with<T: TaskProvider>(&mut self, tasks: T) {
-        self.spawner = Some(Box::new(tasks));
-        self.spawn_spare();
-    }
-
     /// Prepare the next segment now, if there is no spare yet, for a caller
-    /// with idle time and no [`TaskProvider`]: the next roll is then a
+    /// with idle time and no spawner: the next roll is then a
     /// header write and a rename. Writes nothing the journal's state
     /// depends on: a crash or an error here loses no batch.
     ///
@@ -921,22 +1005,16 @@ impl<P: StorageProvider> Journal<P> {
         let due = !self.poisoned
             && self.spare.is_none()
             && self.segments.last().is_none_or(Segment::half_full);
-        if !due || self.spawner.is_none() {
+        if !due || !S::BACKGROUND {
             return;
         }
         let spare = Spare::new(self.next_spare_name());
-        let preparation = prepare(
+        self.spawner.spawn(SpareJob::new(
             self.provider.clone(),
             self.dir.clone(),
-            spare.name.clone(),
+            &spare,
             self.config.geometry,
-            std::sync::Arc::clone(&spare.progress),
-        );
-        let spawner = self.spawner.as_ref().expect("checked above");
-        spawner.spawn(Box::pin(async move {
-            // A failure is recorded in the spare's progress.
-            let _ = preparation.await;
-        }));
+        ));
         self.spare = Some(spare);
     }
 
@@ -1278,7 +1356,7 @@ const COMMIT_HINT_PROB: f64 = 0.25;
 ///
 /// The batch's two buffers move into their writes and back (no copy); a
 /// failed write drops its buffer, which a poisoned journal never reads.
-async fn write_protocol<F: moonpool_core::StorageFile>(
+async fn write_protocol<F: moonpool_core::LocalStorageFile>(
     segment: &Segment<F>,
     meta_file: &MetaFile<F>,
     batch: &mut Prepared,

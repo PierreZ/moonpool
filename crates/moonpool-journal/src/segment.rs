@@ -9,7 +9,9 @@
 //! a fresh block in each, so no write ever touches a sector holding an
 //! acknowledged record or entry.
 
-use moonpool_core::{AlignedBuf, BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
+use moonpool_core::{
+    AlignedBuf, BlockFile, DirectIo, LocalStorageFile, LocalStorageProvider, OpenOptions,
+};
 
 use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, usize_of};
 use crate::io::{
@@ -58,7 +60,7 @@ pub(crate) struct Segment<F> {
 }
 
 /// Zero-fill a new segment file whole, write both headers and sync it.
-async fn fill_new<F: StorageFile>(
+async fn fill_new<F: LocalStorageFile>(
     file: F,
     geometry: Geometry,
     header: &SegmentHeader,
@@ -71,9 +73,9 @@ async fn fill_new<F: StorageFile>(
     Ok(())
 }
 
-impl<F: StorageFile> Segment<F> {
+impl<F: LocalStorageFile> Segment<F> {
     /// Create a fresh, empty segment for batches from `first_batch` on.
-    pub async fn create<P: StorageProvider<File = F>>(
+    pub async fn create<P: LocalStorageProvider<File = F>>(
         provider: &P,
         dir: &str,
         journal: JournalId,
@@ -119,7 +121,7 @@ impl<F: StorageFile> Segment<F> {
     /// The headers are durable before the name is: a crash leaves either the
     /// spare (every open deletes it, and no batch was written to it) or a
     /// whole, empty segment, exactly what a crash after `create` leaves.
-    pub async fn adopt<P: StorageProvider<File = F>>(
+    pub async fn adopt<P: LocalStorageProvider<File = F>>(
         provider: &P,
         dir: &str,
         spare: &str,
@@ -186,7 +188,7 @@ impl<F: StorageFile> Segment<F> {
     /// Open an existing segment and check it is whole and ours. A damaged
     /// header copy is rewritten from its twin; a header block holds nothing
     /// else, so the rewrite reaches nothing acknowledged.
-    pub async fn open<P: StorageProvider<File = F>>(
+    pub async fn open<P: LocalStorageProvider<File = F>>(
         provider: &P,
         dir: &str,
         name: &str,
@@ -298,7 +300,7 @@ impl<F: StorageFile> Segment<F> {
 const ROLL_HINT_PROB: f64 = 0.25;
 
 /// Write both header copies of a segment (blocks 0 and 1).
-async fn write_headers<F: StorageFile>(
+async fn write_headers<F: LocalStorageFile>(
     file: &BlockFile<F>,
     header: &SegmentHeader,
 ) -> std::io::Result<()> {
@@ -307,7 +309,7 @@ async fn write_headers<F: StorageFile>(
 }
 
 /// [`write_headers`], durable on return.
-async fn write_headers_durable<F: StorageFile>(
+async fn write_headers_durable<F: LocalStorageFile>(
     file: &BlockFile<F>,
     header: &SegmentHeader,
 ) -> std::io::Result<()> {
@@ -323,7 +325,7 @@ fn header_blocks(header: &SegmentHeader) -> AlignedBuf {
     blocks
 }
 
-async fn open_file<P: StorageProvider>(
+async fn open_file<P: LocalStorageProvider>(
     provider: &P,
     path: &str,
     direct_io: DirectIo,
