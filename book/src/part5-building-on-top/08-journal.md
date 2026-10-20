@@ -216,11 +216,13 @@ task provider takes it off the commit path:
 ```rust,ignore
 let mut journal = journal.prepare_spares_with(ctx.task().clone()); // or TokioTaskProvider
 let mut journal = journal.prepare_spares_local(CompioTaskProvider); // a local runtime
+let mut journal = journal.with_spawner(MySpawner);                // any SpareSpawner
 ```
 
 The method consumes the journal and returns a `Journal<P, S>`. The type
 parameter `S` is the spawner: `NoSpares` (the default), `Spares<T>` for a
-`TaskProvider`, or `LocalSpares<T>` for a `LocalTaskProvider`. The spawner
+`TaskProvider`, `LocalSpares<T>` for a `LocalTaskProvider`, or your own
+`SpareSpawner` through `with_spawner`. The spawner
 gets a `SpareJob`, plain data, and builds the preparation future on its own
 runtime. Thus the future keeps its concrete type, and nothing is boxed.
 

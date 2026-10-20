@@ -546,8 +546,12 @@ impl<P: LocalStorageProvider> Journal<P> {
         self.with_spawner(LocalSpares(tasks))
     }
 
-    /// The same journal, preparing its spares on `spawner`.
-    fn with_spawner<S: SpareSpawner<P>>(self, spawner: S) -> Journal<P, S> {
+    /// The same journal, preparing its spares on `spawner`: any
+    /// [`SpareSpawner`], for a caller that runs the preparation its own way
+    /// (a type-erased task provider, or one that defers the first spare).
+    /// It may start a spare at once, as the two above do.
+    #[must_use]
+    pub fn with_spawner<S: SpareSpawner<P>>(self, spawner: S) -> Journal<P, S> {
         let Self {
             provider,
             dir,
