@@ -20,7 +20,12 @@ use super::sim_shutdown_error;
 /// 2. Subsequent polls: check completion, return Pending until done
 /// 3. Final poll: clear state, map the completion to the future's output
 ///
-/// Dropping it while an operation is pending cancels that operation.
+/// Dropping it while an operation is pending abandons the wait, not the
+/// operation: a dropped read is cancelled, but a dropped write, sync, or
+/// `set_len` still lands at its scheduled time, as it would on a real
+/// backend, unless the disk's
+/// [`dropped_mutation_discard_probability`](crate::StorageConfiguration::dropped_mutation_discard_probability)
+/// coin says it never reached the device.
 struct PendingOperation {
     sim: WeakSimWorld,
     pending_op: Cell<Option<OperationId>>,

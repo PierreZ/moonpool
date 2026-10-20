@@ -52,6 +52,18 @@
 //! |-------|--------------|---------|---------------------|
 //! | Disk failure | `disk_failure_probability` | 0% | Every later read/write/sync/`set_len` on that process's disk stays pending forever |
 //!
+//! ## Dropped Mutations
+//!
+//! A write, positioned write, sync, or `set_len` whose future is dropped
+//! before it completes still lands, as it does on every real backend: the
+//! effect reaches the file at its scheduled time, through the same fault
+//! rolls as an awaited operation, and nobody is woken. One knob models the
+//! operation that never reached the device:
+//!
+//! | Fault | Config Field | Default | Effect |
+//! |-------|--------------|---------|--------|
+//! | Dropped mutation discarded | `dropped_mutation_discard_probability` | 0% | A dropped mutation is discarded whole instead of landing |
+//!
 //! ## Configuration Examples
 //!
 //! ### Fast Local Testing (No Chaos)
@@ -110,6 +122,10 @@ pub enum StorageFault {
     /// A disk that fails for good: every later operation stays pending
     /// forever.
     DiskFailure,
+    /// A dropped write, sync, or `set_len` that never reached the device
+    /// (`dropped_mutation_discard_probability`). Removing it makes every
+    /// dropped mutation land.
+    DroppedMutationDiscard,
 }
 
 impl StorageFault {
@@ -125,6 +141,7 @@ impl StorageFault {
             Self::CrashDamage => 1 << 7,
             Self::Degradation => 1 << 8,
             Self::DiskFailure => 1 << 9,
+            Self::DroppedMutationDiscard => 1 << 10,
         }
     }
 }
@@ -158,7 +175,7 @@ impl Default for StorageFaultMask {
 }
 
 impl StorageFaultMask {
-    const ALL: u16 = (1 << 10) - 1;
+    const ALL: u16 = (1 << 11) - 1;
 
     /// Retain every selected storage fault family.
     #[must_use]
@@ -227,6 +244,9 @@ impl StorageFaultMask {
         }
         if !self.contains(StorageFault::DiskFailure) {
             config.disk_failure_probability = 0.0;
+        }
+        if !self.contains(StorageFault::DroppedMutationDiscard) {
+            config.dropped_mutation_discard_probability = 0.0;
         }
     }
 }
@@ -520,6 +540,35 @@ pub struct StorageConfiguration {
     ///
     /// While `0.0` (the default) no operation draws from the RNG stream.
     pub disk_failure_probability: f64,
+
+    // =========================================================================
+    // Dropped Mutations
+    // =========================================================================
+    /// Probability that a write, positioned write, sync, or `set_len` whose
+    /// future is dropped before it completes is discarded instead of landing
+    /// (0.0 - 1.0).
+    ///
+    /// # Real-World Scenario
+    /// Dropping an I/O future does not undo the I/O. On Tokio the
+    /// `spawn_blocking` task keeps running; on `io_uring` the kernel owns the
+    /// operation and the runtime holds its buffer until it completes. Code
+    /// that wraps a write in a timeout or a `select!` and assumes "dropped
+    /// means not written" corrupts data in production. So a dropped mutation
+    /// keeps its scheduled completion: it lands at that time, through the
+    /// same fault rolls as an awaited operation (torn, misdirected, phantom,
+    /// failed sync, crash rules), and nobody is woken.
+    ///
+    /// This knob is the other outcome: the operation never reached the
+    /// device (dropped before the runtime submitted it). The coin is drawn
+    /// once, when the future is dropped, and a discarded mutation leaves no
+    /// trace. A dropped mutation is only ever discarded whole or landed
+    /// whole-or-faulted, never half-applied. A dropped read has no
+    /// observable effect and is always cancelled; a mutation parked on a
+    /// failed disk never completes either way.
+    ///
+    /// While `0.0` (the default) every dropped mutation lands and no drop
+    /// draws from the RNG stream.
+    pub dropped_mutation_discard_probability: f64,
 }
 
 impl Default for StorageConfiguration {
@@ -574,6 +623,9 @@ impl Default for StorageConfiguration {
 
             // Disk failure - disabled by default
             disk_failure_probability: 0.0,
+
+            // Every dropped mutation lands
+            dropped_mutation_discard_probability: 0.0,
         }
     }
 }
@@ -647,6 +699,11 @@ impl StorageConfiguration {
             // Disk failure: 0 to 0.01% per operation, drawn last so every field
             // above keeps its per-seed value.
             disk_failure_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
+
+            // A dropped mutation never reaches the device 0% to 50% of the
+            // time: a rate per drop, not per operation, so it is high enough
+            // for both outcomes to show up in a run. Drawn last.
+            dropped_mutation_discard_probability: f64::from(sim_random_range(0..50)) / 100.0,
         }
     }
 
@@ -668,10 +725,8 @@ impl StorageConfiguration {
     /// Disable each fault family with ~50% probability using the simulation
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly ten `sim_random_bool` values (one per family: the seven
-    /// per-op faults, the stall and throttle episode families, and the disk
-    /// failure) so the call sequence is fixed and reproducible per
-    /// seed. Performance
+    /// Draws exactly fifteen `sim_random_bool` values, one per family, so the
+    /// call sequence is fixed and reproducible per seed. Performance
     /// parameters (IOPS, bandwidth, latencies) stay as sampled — only the fault
     /// families are masked.
     fn apply_swarm_mask(&mut self) {
@@ -718,6 +773,9 @@ impl StorageConfiguration {
         }
         if !sim_random_bool(0.5) {
             self.write_eio_probability = 0.0;
+        }
+        if !sim_random_bool(0.5) {
+            self.dropped_mutation_discard_probability = 0.0;
         }
     }
 
@@ -771,6 +829,9 @@ impl StorageConfiguration {
     /// untouched — they are the disk's normal characteristics. So are the
     /// throttle multipliers, which an episode still ticking down needs in order
     /// to keep behaving the way it did before the cutoff.
+    ///
+    /// A dropped mutation always lands after this call: discarding one is a
+    /// fault, landing it is what the device does.
     pub fn disable_fault_injection(&mut self) {
         self.read_corruption_probability = 0.0;
         self.write_corruption_probability = 0.0;
@@ -786,6 +847,7 @@ impl StorageConfiguration {
         self.disk_stall_probability = 0.0;
         self.disk_throttle_probability = 0.0;
         self.disk_failure_probability = 0.0;
+        self.dropped_mutation_discard_probability = 0.0;
     }
 
     /// Create a configuration optimized for fast local testing.
@@ -842,6 +904,9 @@ impl StorageConfiguration {
 
             // Disk failure disabled
             disk_failure_probability: 0.0,
+
+            // Every dropped mutation lands
+            dropped_mutation_discard_probability: 0.0,
         }
     }
 }
@@ -868,6 +933,7 @@ mod swarm_tests {
             config.unsynced_dir_entry_loss_probability > 0.0,
             config.read_eio_probability > 0.0,
             config.write_eio_probability > 0.0,
+            config.dropped_mutation_discard_probability > 0.0,
         ]
     }
 
@@ -880,7 +946,7 @@ mod swarm_tests {
     const REACHABILITY_SEEDS: u64 = 1 << (FAMILY_COUNT + 3);
 
     /// Number of fault families the swarm mask covers.
-    const FAMILY_COUNT: u32 = 14;
+    const FAMILY_COUNT: u32 = 15;
 
     /// Build a swarm config the way the runner does: the stream seeded per iteration.
     fn swarm_for(seed: u64) -> StorageConfiguration {
@@ -953,6 +1019,7 @@ mod swarm_tests {
         assert_zero(config.unsynced_dir_entry_loss_probability);
         assert_zero(config.read_eio_probability);
         assert_zero(config.write_eio_probability);
+        assert_zero(config.dropped_mutation_discard_probability);
     }
 
     #[test]
@@ -975,6 +1042,11 @@ mod swarm_tests {
             config.sync_failure_probability.to_bits(),
             0.25_f64.to_bits()
         );
+        config.dropped_mutation_discard_probability = 0.5;
+        StorageFaultMask::all()
+            .without(StorageFault::DroppedMutationDiscard)
+            .apply_to(&mut config);
+        assert_zero(config.dropped_mutation_discard_probability);
         StorageFaultMask::none().apply_to(&mut config);
         assert_zero(config.write_corruption_probability);
         assert_zero(config.sync_failure_probability);

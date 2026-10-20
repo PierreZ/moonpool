@@ -79,8 +79,9 @@ impl SimStorageFile {
         }
     }
 
-    /// Mark the handle closed exactly once: cancel whatever stream operation
-    /// is still pending and release the handle in the engine.
+    /// Mark the handle closed exactly once: abandon whatever stream operation
+    /// is still pending (a read is cancelled, a write still lands, as for a
+    /// dropped future) and release the handle in the engine.
     fn close(&mut self) {
         if !self.closed.swap(true, Ordering::Relaxed)
             && let Ok(sim) = self.sim.upgrade()
