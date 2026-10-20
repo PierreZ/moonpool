@@ -92,14 +92,13 @@
 //!   [`LayoutRegion`](moonpool_core::LayoutRegion) values. A simulation uses them to aim
 //!   storage faults at one structure. The position is the stripe key, so a
 //!   replicated fault pattern hits the same position on every replica.
-//! - **Spare segments.** [`Journal::prepare_spares_with`] prepares the next
-//!   segment in the background on a [`TaskProvider`](moonpool_core::TaskProvider)
-//!   ([`Journal::prepare_spares_local`] on a
-//!   [`LocalTaskProvider`](moonpool_core::LocalTaskProvider))
-//!   once the active one is half full, so the commit that fills it rolls
-//!   with a header write and a rename instead of writing a whole segment.
-//!   [`Journal::prepare_spare`] does it inline; [`Journal::rolls`] counts
-//!   the rolls of each kind.
+//! - **Recycled segments, no zero-fill.** A dead segment's file becomes the
+//!   spare, and the next roll adopts it with a header write and a rename.
+//!   Its old batches are older than the segment it becomes, so they read
+//!   as stale bytes, never as evidence. With no spare, a roll allocates a
+//!   new file ([`allocate`](moonpool_core::StorageFile::allocate)) and
+//!   writes only its headers. No segment is ever zero-filled.
+//!   [`Journal::rolls`] counts the rolls of each kind.
 //! - **Durable writes.** An ordered commit writes each log with one
 //!   [`write_at_durable`](moonpool_core::StorageFile::write_at_durable)
 //!   (`pwritev2(RWF_DSYNC)` on Linux) where a write and a sync were two
@@ -133,14 +132,15 @@
 //!
 //! ```text
 //! <dir>/meta                    metainfo copy A (block 0) and copy B (block 16)
-//! <dir>/seg-<first batch>.wal   preallocated, zero-filled segments:
+//! <dir>/seg-<first batch>.wal   allocated segments:
 //!     header A | header B | persist log | guard gap | entry log
-//! <dir>/spare-<gen>-<n>.wal     the next segment, prepared: zeros, no header
+//! <dir>/spare-<gen>-<n>.wal     a dead segment's file, kept for the next roll
 //! ```
 //!
-//! A **spare** is never evidence: it has no header, no batch is written to
-//! it before it is renamed to a segment, and every open deletes the spares
-//! it finds ([`Recovery::spares_removed`]).
+//! A **spare** is never evidence: no batch is written to it before it is
+//! renamed to a segment, and the batches it still holds are older than any
+//! it will hold. An open keeps one whole spare and deletes the others
+//! ([`Recovery::spares_removed`]).
 //!
 //! The **meta file** is separate because it is the one structure rewritten in
 //! place, and it must outlive every segment (`LogCabin`, canonical/raft and
@@ -229,4 +229,3 @@ pub use format::{BLOCK, Geometry, ID_SIZE, Id, MAX_BATCH_RECORDS, META_MAX, RECO
 pub use journal::{
     Durability, Entry, Journal, JournalConfig, JournalId, Layout, Recovery, Rolls, State,
 };
-pub use spare::{LocalSpares, NoSpares, SpareJob, SpareSpawner, Spares};

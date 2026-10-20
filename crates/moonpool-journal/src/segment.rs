@@ -1,13 +1,15 @@
-//! One segment file: preallocated and zero-filled, two header copies, then
-//! the persist log and the entry log (see [`Geometry`]).
+//! One segment file: allocated whole, two header copies, then the persist
+//! log and the entry log (see [`Geometry`]).
 //!
 //! A segment is created whole under a temporary name and published by a
-//! rename ([`Segment::create`]), or adopted from a prepared spare whose
-//! headers are synced before the rename ([`Segment::adopt`]), so a segment
-//! file either does not exist or has its full size and both headers. It never changes size again, so `fdatasync` never has file
-//! metadata to write. Both logs only ever append, and every batch starts on
-//! a fresh block in each, so no write ever touches a sector holding an
-//! acknowledged record or entry.
+//! rename ([`Segment::create`]), or adopted from a spare, a dead segment's
+//! file, whose headers are synced before the rename ([`Segment::adopt`]),
+//! so a segment file either does not exist or has its full size and both
+//! headers. It never changes size again. Both logs only ever append, and
+//! every batch starts on a fresh block in each, so no write ever touches a
+//! sector holding an acknowledged record or entry. A recycled file's old
+//! batches are older than its first batch: the scan reads them as stale
+//! (see [`crate::spare`]).
 
 use moonpool_core::{
     AlignedBuf, BlockFile, DirectIo, LocalStorageFile, LocalStorageProvider, OpenOptions,
@@ -17,7 +19,6 @@ use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, usize_of};
 use crate::io::{
     ReadBytes, block_buf, read_blocks, read_bytes, write_blocks, write_blocks_durable,
 };
-use crate::spare::zero_fill;
 use crate::{JournalId, OpenError};
 
 const PREFIX: &str = "seg-";
@@ -59,14 +60,18 @@ pub(crate) struct Segment<F> {
     pub live: u64,
 }
 
-/// Zero-fill a new segment file whole, write both headers and sync it.
+/// Allocate a new segment file whole, write both headers and sync it. The
+/// range is reserved, not written: it reads as zeros, and a full disk fails
+/// here, never in a commit.
 async fn fill_new<F: LocalStorageFile>(
     file: F,
     geometry: Geometry,
     header: &SegmentHeader,
 ) -> Result<(), OpenError> {
     let file = BlockFile::new(file, BLOCK)?;
-    zero_fill(&file, geometry.total_blocks(), &|| false).await?;
+    file.get_ref()
+        .allocate(geometry.total_blocks() * BLOCK_U64)
+        .await?;
     write_headers(&file, header).await?;
     // Bytes and length alike: the file never changes size again.
     file.sync().await?;
@@ -100,7 +105,7 @@ impl<F: LocalStorageFile> Segment<F> {
             geometry,
         };
         if let Err(error) = fill_new(file, geometry, &header).await {
-            // Best effort: a half-filled segment holds no batch, and on a
+            // Best effort: a half-made segment holds no batch, and on a
             // full disk its bytes are the space the next roll needs.
             // Whatever is left is deleted by the next open.
             let _ = provider.delete(&temporary).await;
@@ -112,11 +117,11 @@ impl<F: LocalStorageFile> Segment<F> {
         Ok(Self::fresh(first_batch, prev_batch, name, file, geometry))
     }
 
-    /// Make the prepared spare `spare` the segment for batches from
-    /// `first_batch` on: write and sync its headers, rename it to its
-    /// segment name, sync the directory. The spare is full size, zero-filled
-    /// and synced, so this is two small syncs where [`create`](Self::create)
-    /// writes and syncs a whole segment.
+    /// Make the spare `spare` the segment for batches from `first_batch`
+    /// on: write and sync its headers, rename it to its segment name, sync
+    /// the directory. The spare is a dead segment's file, full size and
+    /// synced, so this is one small durable write and a rename, with no
+    /// allocation.
     ///
     /// The headers are durable before the name is: a crash leaves either the
     /// spare (every open deletes it, and no batch was written to it) or a
@@ -144,8 +149,8 @@ impl<F: LocalStorageFile> Segment<F> {
                 reason: "the spare is not a whole segment",
             });
         }
-        // The spare is zero-filled and synced whole, so the headers are its
-        // one unsynced write: making them durable alone is the full sync.
+        // Everything the spare holds is durable, so the headers are its one
+        // unsynced write: making them durable alone is the full sync.
         write_headers_durable(&file, &header).await?;
         drop(file);
         // A power loss here leaves a spare with headers: still a spare.
@@ -257,15 +262,6 @@ impl<F: LocalStorageFile> Segment<F> {
 
     pub async fn read_at(&self, offset: u64, len: usize) -> std::io::Result<ReadBytes> {
         read_bytes(&self.file, offset, len).await
-    }
-
-    /// Whether either log is at least half full: time to prepare the next
-    /// segment.
-    pub fn half_full(&self) -> bool {
-        let persist_used = self.persist_next - Geometry::PERSIST_START;
-        let entry_used = self.entry_next - self.geometry.entry_start();
-        persist_used * 2 >= self.geometry.persist_end() - Geometry::PERSIST_START
-            || entry_used * 2 >= self.geometry.entry_end() - self.geometry.entry_start()
     }
 
     /// Whether a batch of `persist_blocks` and `entry_bytes` fits after the

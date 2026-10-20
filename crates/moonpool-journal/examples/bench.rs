@@ -34,10 +34,8 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
-use moonpool_core::{DirectIo, TokioStorageProvider, TokioTaskProvider};
-use moonpool_journal::{
-    Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId, SpareSpawner,
-};
+use moonpool_core::{DirectIo, TokioStorageProvider};
+use moonpool_journal::{Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId};
 use tokio::sync::Barrier;
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -74,7 +72,7 @@ struct Args {
     /// Direct-I/O policy for the segment files.
     #[arg(long, value_enum, default_value_t = Direct::Disabled)]
     direct_io: Direct,
-    /// Raise the floor every N commits, so whole segments are deleted while
+    /// Raise the floor every N commits, so whole segments are recycled while
     /// the run goes on. The floor lands with the metainfo: two more syncs on
     /// that commit. 0 never raises it.
     #[arg(long, default_value_t = 0)]
@@ -83,11 +81,6 @@ struct Args {
     /// to roll often; 0 keeps the default 64 MiB segment.
     #[arg(long, default_value_t = 0)]
     segment_blocks: u32,
-    /// Prepare each next segment in the background (a spare), so a roll is
-    /// a header write and a rename; off, a roll zero-fills a whole segment
-    /// on the commit path.
-    #[arg(long)]
-    spares: bool,
     /// Write a time series (every 500 ms) to this CSV file.
     #[arg(long)]
     csv: Option<PathBuf>,
@@ -153,10 +146,10 @@ struct Counters {
 /// What one writer measured.
 struct WriterReport {
     histogram: Histogram<u64>,
-    /// The commits that rolled onto a prepared spare.
+    /// The commits that rolled onto a recycled segment.
     spare_rolls: Histogram<u64>,
-    /// The commits that created their new segment inline.
-    inline_rolls: Histogram<u64>,
+    /// The commits that rolled onto a newly allocated segment.
+    created_rolls: Histogram<u64>,
     commits: u64,
     elapsed: Duration,
 }
@@ -266,18 +259,13 @@ async fn writer(
         b"bench",
     )
     .await?;
-    if args.spares {
-        let journal = journal.prepare_spares_with(TokioTaskProvider);
-        measure(&args, journal, &start, &stop, &counters).await
-    } else {
-        measure(&args, journal, &start, &stop, &counters).await
-    }
+    measure(&args, journal, &start, &stop, &counters).await
 }
 
 /// Commit back to back from the start barrier until `stop`.
-async fn measure<S: SpareSpawner<TokioStorageProvider>>(
+async fn measure(
     args: &Args,
-    mut journal: Journal<TokioStorageProvider, S>,
+    mut journal: Journal<TokioStorageProvider>,
     start: &Barrier,
     stop: &AtomicBool,
     counters: &Counters,
@@ -287,7 +275,7 @@ async fn measure<S: SpareSpawner<TokioStorageProvider>>(
     let batch_bytes = batch_len * u64::try_from(args.record_size)?;
     let mut histogram = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
-    let mut inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+    let mut created_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut position = 0_u64;
     let mut commits = 0_u64;
 
@@ -312,8 +300,8 @@ async fn measure<S: SpareSpawner<TokioStorageProvider>>(
         if now.onto_spare != rolled.onto_spare {
             spare_rolls.saturating_record(latency.max(1));
         }
-        if now.inline != rolled.inline {
-            inline_rolls.saturating_record(latency.max(1));
+        if now.created != rolled.created {
+            created_rolls.saturating_record(latency.max(1));
         }
 
         commits += 1;
@@ -323,7 +311,7 @@ async fn measure<S: SpareSpawner<TokioStorageProvider>>(
     Ok(WriterReport {
         histogram,
         spare_rolls,
-        inline_rolls,
+        created_rolls,
         commits,
         elapsed: began.elapsed(),
     })
@@ -365,14 +353,14 @@ async fn sample(
 fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) -> Result<()> {
     let mut merged = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut spare_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
-    let mut inline_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
+    let mut created_rolls = Histogram::<u64>::new_with_bounds(1, MAX_LATENCY_US, 3)?;
     let mut rates = Vec::with_capacity(reports.len());
     let mut commits = 0_u64;
     let mut longest = Duration::ZERO;
     for report in reports {
         merged.add(&report.histogram)?;
         spare_rolls.add(&report.spare_rolls)?;
-        inline_rolls.add(&report.inline_rolls)?;
+        created_rolls.add(&report.created_rolls)?;
         rates.push(per_second(report.commits, report.elapsed.as_micros()));
         commits += report.commits;
         longest = longest.max(report.elapsed);
@@ -383,7 +371,7 @@ fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) ->
     let bytes = commits.saturating_mul(batch).saturating_mul(record);
 
     println!(
-        "moonpool-journal bench: writers={} record-size={}B batch={} fsync={:?} direct-io={:?} truncate-every={} segment-blocks={} spares={} duration={}s",
+        "moonpool-journal bench: writers={} record-size={}B batch={} fsync={:?} direct-io={:?} truncate-every={} segment-blocks={} duration={}s",
         args.writers,
         args.record_size,
         args.batch,
@@ -391,7 +379,6 @@ fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) ->
         args.direct_io,
         args.truncate_every,
         args.segment_blocks,
-        args.spares,
         args.duration,
     );
     println!(
@@ -416,7 +403,10 @@ fn print_report(args: &Args, fs_type: Option<&str>, reports: &[WriterReport]) ->
         merged.value_at_quantile(0.999),
         merged.max(),
     );
-    for (kind, rolls) in [("inline", &inline_rolls), ("onto a spare", &spare_rolls)] {
+    for (kind, rolls) in [
+        ("onto a new segment", &created_rolls),
+        ("onto a recycled segment", &spare_rolls),
+    ] {
         if !rolls.is_empty() {
             println!(
                 "commits rolling {kind} (µs): {} of them, min {} p50 {} p99 {} max {}",

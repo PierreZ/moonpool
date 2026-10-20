@@ -35,10 +35,9 @@ pub(crate) struct Tally {
     pub ambiguous: usize,
     pub meta_repaired: usize,
     pub segments_removed: u32,
-    /// Spares an open deleted: a crash cut a preparation short, or left a
-    /// spare no roll used.
-    pub spares_removed: u32,
-    /// Rolls onto a prepared spare.
+    /// Opens that kept a recycled spare an earlier open left.
+    pub spares_kept: u32,
+    /// Rolls onto a recycled spare.
     pub onto_spare: u64,
     /// Seeds whose first segment no longer starts at batch 1.
     pub prefix_dropped: usize,
@@ -90,7 +89,7 @@ struct Ledger {
     /// The batch in flight when the writer stopped.
     pending: Option<Pending>,
     commits: usize,
-    /// Rolls onto a prepared spare, over every open.
+    /// Rolls onto a recycled spare, over every open.
     onto_spare: u64,
 }
 
@@ -98,8 +97,6 @@ struct Ledger {
 struct Pending {
     /// Whether the batch was committed with `Durability::Batched`.
     batched: bool,
-    /// Prepare a spare segment before this batch (a crash may cut it short).
-    spare_first: bool,
     puts: Vec<(u64, Value)>,
     clears: Vec<Range<u64>>,
     floor: Option<u64>,
@@ -233,10 +230,7 @@ pub(crate) fn crash_loop(
 
 fn random_batch(rng: &mut Rng, ledger: &Shared, version: u64) -> Pending {
     let floor = ledger.lock().expect("ledger").floor;
-    let mut pending = Pending {
-        spare_first: rng.below(4) == 0,
-        ..Pending::default()
-    };
+    let mut pending = Pending::default();
     for _ in 0..=rng.below(5) {
         // Positions in a window above the floor, in any order.
         let position = floor + rng.below(48);
@@ -268,10 +262,6 @@ fn random_batch(rng: &mut Rng, ledger: &Shared, version: u64) -> Pending {
 
 async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
     for pending in plan {
-        // A spare is never state: a failed preparation is only a lost spare.
-        if pending.spare_first && journal.prepare_spare().await.is_err() {
-            continue;
-        }
         let mut batch = Batch::new();
         for (position, (id, bytes)) in &pending.puts {
             batch.put(*position, *id, bytes.clone());
@@ -344,7 +334,7 @@ async fn recover(
         tally.ambiguous += recovery.ambiguous.len();
         tally.meta_repaired += usize::from(recovery.meta_repaired);
         tally.segments_removed += recovery.segments_removed;
-        tally.spares_removed += recovery.spares_removed;
+        tally.spares_kept += u32::from(recovery.spare_kept);
         match judge(sim, journal, ledger, at).await {
             Some(journal) => return journal,
             None => {

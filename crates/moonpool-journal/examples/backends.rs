@@ -26,8 +26,7 @@
 //!   first when the process may do so.
 //!
 //! Each runs buffered and with `DirectIo::Required`; a filesystem without
-//! direct I/O reports it unavailable. Every commit syncs. Spares are
-//! prepared in the background on each backend's own task provider.
+//! direct I/O reports it unavailable. Every commit syncs.
 //! The report is Markdown, printed to stdout. Run it in release mode, on
 //! the disk under test:
 //!
@@ -42,13 +41,8 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
-use moonpool_core::{
-    CompioStorageProvider, CompioTaskProvider, DirectIo, LocalStorageProvider,
-    TokioStorageProvider, TokioTaskProvider,
-};
-use moonpool_journal::{
-    Batch, Durability, ID_SIZE, Journal, JournalConfig, JournalId, OpenError, SpareSpawner,
-};
+use moonpool_core::{CompioStorageProvider, DirectIo, LocalStorageProvider, TokioStorageProvider};
+use moonpool_journal::{Batch, Durability, ID_SIZE, Journal, JournalConfig, JournalId, OpenError};
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Result<T> = std::result::Result<T, Error>;
@@ -321,7 +315,7 @@ async fn tokio_appends(case: Case, dirs: Vec<String>) -> Result<Outcome> {
         {
             Ok(mut journal) => {
                 warm_up(&mut journal).await?;
-                journals.push(journal.prepare_spares_with(TokioTaskProvider));
+                journals.push(journal);
             }
             Err(error) => return unavailable(case, &error),
         }
@@ -354,7 +348,7 @@ async fn compio_appends(case: Case, dirs: Vec<String>) -> Result<Outcome> {
         {
             Ok(mut journal) => {
                 warm_up(&mut journal).await?;
-                journals.push(journal.prepare_spares_local(CompioTaskProvider));
+                journals.push(journal);
             }
             Err(error) => return unavailable(case, &error),
         }
@@ -385,12 +379,9 @@ fn unavailable(case: Case, error: &OpenError) -> Result<Outcome> {
     }
 }
 
-/// Before the clock starts: prepare the first segment and commit onto it,
-/// so no run times the zero-fill of a whole segment, or a preparation still
-/// writing one in the background. Later rolls, if a run reaches one, use
-/// the background spares as in production.
+/// Before the clock starts: create the first segment and commit onto it,
+/// so no run times the first roll.
 async fn warm_up<P: LocalStorageProvider>(journal: &mut Journal<P>) -> Result<()> {
-    journal.prepare_spare().await?;
     let mut batch = Batch::new();
     // The run's first commit overwrites it.
     batch.put(0, [0; ID_SIZE], vec![0; 1]);
@@ -399,8 +390,8 @@ async fn warm_up<P: LocalStorageProvider>(journal: &mut Journal<P>) -> Result<()
 }
 
 /// Commit one record at a time until `deadline`, timing each commit.
-async fn writer<P: LocalStorageProvider, S: SpareSpawner<P>>(
-    mut journal: Journal<P, S>,
+async fn writer<P: LocalStorageProvider>(
+    mut journal: Journal<P>,
     record: usize,
     deadline: Instant,
 ) -> Result<Writer> {
@@ -580,8 +571,7 @@ async fn build(dir: String, config: JournalConfig, mib: usize) -> Result<()> {
         config,
         b"recovery",
     )
-    .await?
-    .prepare_spares_with(TokioTaskProvider);
+    .await?;
     let records = u64::try_from(mib * 1024 * 1024 / RECOVERY_RECORD)?;
     let payload = vec![0x5A_u8; RECOVERY_RECORD];
     let batch_len = u64::try_from(RECOVERY_BATCH)?;

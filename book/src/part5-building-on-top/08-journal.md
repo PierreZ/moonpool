@@ -82,9 +82,9 @@ journal was created with.
 
 ```text
 <dir>/meta                   metainfo copy A (block 0), copy B (block 16)
-<dir>/seg-<first batch>.wal  preallocated, zero-filled:
+<dir>/seg-<first batch>.wal  allocated whole:
     header A | header B | persist log | guard gap | entry log
-<dir>/spare-<gen>-<n>.wal    the next segment, prepared ahead: zeros, no header
+<dir>/spare-<gen>-<n>.wal    a dead segment's file, kept for the next roll
 ```
 
 Each segment holds two append-only logs. The **persist log** is a run of
@@ -144,8 +144,7 @@ hand them to the file's owned `write_at_aligned` /
 `write_at_durable_aligned`. On `TokioStorageProvider` the buffer moves into
 the blocking task and back, so `pwritev2(RWF_DSYNC)` reads the journal's own
 memory: the bytes a caller staged are copied once, into the batch, and
-never again. The segment headers, the metainfo copies, the spare's
-zero-fill (one 1 MiB buffer moved through every write) and recovery's
+never again. The segment headers, the metainfo copies and recovery's
 reads (the persist log, entries read in place) take the same owned path.
 Before, a direct-I/O commit copied each log twice: from the journal's
 `Vec` into an aligned buffer, then into the provider's bounce buffer.
@@ -206,61 +205,54 @@ HintVeto::new(move |ip, label| copies_alive.load(Ordering::Relaxed) > quorum)
 The sink asks the veto last, after the regime admits the reboot, so a `true`
 answer is a reboot.
 
-### Rolling Onto a Prepared Spare
+### Rolling Onto a Recycled Segment
 
-A segment is created whole: zero-filled, synced, renamed into place, its
-directory synced. Done on the commit that fills the active segment, that is
-a 64 MiB write and two syncs the commit waits for. A caller with a
-task provider takes it off the commit path:
+When the active segment is full, the commit rolls onto a new one. How
+expensive should that be? A segment is 64 MiB. Write it with zeros and the
+commit waits for 64 MiB and two syncs; write it in a background task and the
+zeros still compete with every commit for the same disk. We measured a
+zero-fill running beside the commits: they ran five times slower, with
+45 ms spikes.
 
-```rust,ignore
-let mut journal = journal.prepare_spares_with(ctx.task().clone()); // or TokioTaskProvider
-let mut journal = journal.prepare_spares_local(CompioTaskProvider); // a local runtime
-```
+So the journal writes no zeros at all. It does what PostgreSQL does with its
+WAL: it **recycles**. When the floor, or later writes, leave the front
+segment with nothing live, the journal renames that file to
+`spare-<generation>-<n>.wal` and syncs the directory, instead of deleting
+it. The next roll **adopts** the spare: it writes the two header blocks,
+syncs them, renames the file to `seg-<first batch>.wal` and syncs the
+directory. One small durable write and a rename. The file is already full
+size, and every block in it was written before, so a commit into it costs
+exactly what a commit into any written block costs.
 
-The method consumes the journal and returns a `Journal<P, S>`. The type
-parameter `S` is the spawner: `NoSpares` (the default), `Spares<T>` for a
-`TaskProvider`, or `LocalSpares<T>` for a `LocalTaskProvider`. The spawner
-gets a `SpareJob`, plain data, and builds the preparation future on its own
-runtime. Thus the future keeps its concrete type, and nothing is boxed.
+With no spare (a journal that only grows), the roll creates the segment with
+`StorageFile::allocate`, which is `fallocate(2)` on Linux: the space is
+reserved, the range reads as zeros, and only the headers are written. A full
+disk fails there, at the roll, and never inside a commit. A new segment's
+first pass does pay a little: the first durable write into each block also
+records that the block is now written, a small metadata change. A recycled
+segment pays none.
 
-Once the active segment is half full, a task creates
-`spare-<generation>-<n>.wal`, zero-fills it, syncs it and syncs its
-directory. The commit that fills the segment then **adopts** the spare: it
-writes the two header blocks, syncs them, renames the spare to
-`seg-<first batch>.wal` and syncs the directory. Two small syncs instead of
-a whole segment. A spare that is not ready yet is left to finish for the
-next roll; the commit creates its segment inline, as it does without a
-spawner. `Journal::prepare_spare()` does the same preparation inline, for a
-caller with idle time, and `Journal::rolls()` counts the rolls of each kind.
+But a recycled file is full of old batches. Why are they not evidence?
 
-The crash argument is that **a spare is never evidence**:
+- **A batch older than its segment is stale.** A segment named after its
+  first batch only ever receives batches at or above that number, and batch
+  numbers never repeat: the open generation lives in their high bits. Every
+  record and entry a recycled file still holds is older than the segment it
+  becomes, so the scan reads it like a never-written slot. The recovery
+  table below is unchanged.
+- **No batch is written to a spare.** Its headers are synced before its
+  rename, so a crash during the adoption leaves the spare, or a whole empty
+  segment, or the same file under either name. A recycled segment is renamed
+  and its directory synced before anything is written into it, so it can
+  never come back under its old name with new bytes in it.
+- **The commit acknowledges its batch only after the directory sync**, so
+  the segment's name is durable before any batch in it is.
 
-- It has no header, so no open reads it as a segment, and its name is not a
-  segment name. Every open deletes every spare it finds, whole or
-  half-written (`Recovery::spares_removed`), before it writes anything.
-- No batch is written to a spare. The headers are synced before the rename,
-  so a crash during the adoption leaves the spare (deleted at the next open),
-  a whole empty segment (what a crash after an inline creation leaves too),
-  or both names for the same file (the spare's name is deleted).
-- The commit acknowledges its batch only after the directory sync, so the
-  segment's name is durable before any batch in it is.
-- Each spare has its own name, by open generation and number, so a
-  preparation an earlier open left running (or a failed one still cleaning
-  up) never touches the file a roll uses. Dropping the journal stops its
-  preparation at the next step.
-
-The spare is zero-filled, not preallocated with `fallocate`: an unwritten
-extent turns the first write to each block into a metadata change, and every
-commit's `fdatasync` would have file metadata to write again. Growing a file
-is not preallocation, and preallocation is not a pure data sync; writing the
-zeros once, in the background, keeps every commit sync a data sync.
-
-The commit side names two moments with `hint!` ("journal roll: spare
-headers synced, not renamed", "journal roll: spare renamed, directory not
-synced"), and the preparation two more ("journal spare: zero-filled, not
-synced", "journal spare: synced, its name not synced"). A hint in the
-spawned preparation strikes the process that spawned it.
+An open keeps one whole spare it finds (`Recovery::spare_kept`) and deletes
+the others (`Recovery::spares_removed`). `Journal::rolls()` counts the rolls
+of each kind. The commit side names two moments with `hint!` ("journal roll:
+spare headers synced, not renamed", "journal roll: spare renamed, directory
+not synced").
 
 ## Recovering
 
@@ -280,7 +272,7 @@ metainfo proves durable, is `LostBatch`. A missing meta file beside segments,
 or two damaged copies, is `MetaLost`. Opening returns a `Recovery` that says
 what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`,
 `meta_repaired` (a metainfo copy rewritten from its twin),
-`headers_repaired`, `segments_removed` and `spares_removed`. Only the last batch's entries are
+`headers_repaired`, `segments_removed`, `spares_removed` and `spare_kept`. Only the last batch's entries are
 read at open. The rest are checked when read: `read(position)` returns
 `ReadError::Damaged { position, id }` with the identity its record kept, and
 `replay(range)` reports a damaged entry in place and goes on. A replay reads
@@ -329,9 +321,9 @@ acknowledged and what was in flight. They run under two fault models:
 The promise is the same under both: nothing acknowledged is lost, changed or
 reported damaged, and only a `Batched` batch in flight may come back
 ambiguous. Each model runs for `Ordered`, `Batched` and a mode drawn afresh
-every round. A quarter of the batches prepare a spare inline first, so a
-crash lands inside a preparation and commits roll onto spares; each model
-asserts both happened. `JOURNAL_CRASH_SEEDS` raises the seed count and
+every round. Floor raises free segments, so crashes land around recycling
+and commits roll onto recycled segments; each model asserts that commits
+rolled onto a recycled segment and that an open kept a spare. `JOURNAL_CRASH_SEEDS` raises the seed count and
 `JOURNAL_CRASH_SEED` replays one.
 
 The full simulation is `journal.rs` in `moonpool-sim-examples`
@@ -353,10 +345,9 @@ no second copy to repair from:
 )
 ```
 
-Three boots in four prepare spares in the background on `ctx.task()`, so the
-run reaches "a crash cut a spare segment's preparation short", "recovery
-deleted a spare segment" and "a commit rolled onto a prepared spare
-segment"; the rest roll inline.
+Floor raises recycle segments under the crashes, so the run reaches "an
+open found a recycled spare segment" and "a commit rolled onto a recycled
+segment".
 
 The node's memory dies with it, so what it acknowledged lives in a `Ledger`
 published in the iteration's `StateHandle`. Every boot draws a durability

@@ -33,13 +33,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_journal::{
-    BLOCK, Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig,
-    JournalId, OpenError, Recovery, SpareSpawner,
+    Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
+    OpenError, Recovery,
 };
 use moonpool_sim::{
-    OpenOptions, Process, RandomProvider, SimContext, SimStorageProvider, SimulationResult,
-    StorageFile, StorageProvider, TimeProvider, Workload, assert_always, assert_reachable,
-    assert_sometimes,
+    Process, RandomProvider, SimContext, SimStorageProvider, SimulationResult, StorageProvider,
+    TimeProvider, Workload, assert_always, assert_reachable, assert_sometimes,
 };
 
 use crate::support::{invalid_state, unless_shutdown};
@@ -103,9 +102,6 @@ struct LedgerState {
     pending: Option<Pending>,
     /// Commits so far: each one's version makes its values unique.
     version: u64,
-    /// Boots that prepared spares in the background so far: they alternate
-    /// between the two spawners without a random draw.
-    spared_boots: u64,
 }
 
 impl Ledger {
@@ -200,44 +196,13 @@ async fn live(ctx: &SimContext, ledger: &Ledger) -> Ended {
         }
     };
     note_recovery(ctx, &recovery).await;
-    // Most boots prepare spare segments in the background, so a crash can
-    // land inside a preparation and a commit can roll onto a spare; the
-    // rest roll inline, as a journal without a task provider does. The
-    // preparation runs on the `Send` spawner (Tokio's shape) or the local
-    // one (compio's) on alternate boots: one journal codebase, both spawn
-    // paths under chaos, and no draw added to the seed's schedule.
-    if !ctx.random().random_bool(0.75) {
-        return run(ctx, journal, ledger, durability).await;
-    }
-    let spared = ledger.with(|state| {
-        state.spared_boots += 1;
-        state.spared_boots
-    });
-    if spared.is_multiple_of(2) {
-        assert_reachable!("a boot prepares spares on the Send spawner");
-        run(
-            ctx,
-            journal.prepare_spares_with(ctx.task().clone()),
-            ledger,
-            durability,
-        )
-        .await
-    } else {
-        assert_reachable!("a boot prepares spares on the local spawner");
-        run(
-            ctx,
-            journal.prepare_spares_local(ctx.task().clone()),
-            ledger,
-            durability,
-        )
-        .await
-    }
+    run(ctx, journal, ledger, durability).await
 }
 
 /// Check the recovered journal, then commit until an error ends it.
-async fn run<S: SpareSpawner<SimStorageProvider>>(
+async fn run(
     ctx: &SimContext,
-    mut journal: Journal<SimStorageProvider, S>,
+    mut journal: Journal<SimStorageProvider>,
     ledger: &Ledger,
     durability: Durability,
 ) -> Ended {
@@ -254,23 +219,14 @@ async fn run<S: SpareSpawner<SimStorageProvider>>(
     }
 }
 
-/// Before an open: a spare the last boot left behind, and whether a crash
-/// cut its preparation short (the open deletes it either way).
+/// Before an open: a recycled spare the last boot left behind, which the
+/// open keeps for its next roll.
 async fn note_spares(ctx: &SimContext) {
     let Ok(names) = ctx.storage().list_dir(DIR).await else {
         return;
     };
-    let geometry = Geometry::small();
-    let blocks = 2 + geometry.persist_blocks + geometry.gap_blocks + geometry.entry_blocks;
-    let whole = u64::from(blocks) * BLOCK as u64;
-    for name in names.iter().filter(|n| n.starts_with("spare-")) {
-        let path = format!("{DIR}/{name}");
-        let Ok(file) = ctx.storage().open(&path, OpenOptions::read_only()).await else {
-            continue;
-        };
-        if file.size().await.is_ok_and(|size| size < whole) {
-            assert_reachable!("a crash cut a spare segment's preparation short");
-        }
+    if names.iter().any(|n| n.starts_with("spare-")) {
+        assert_reachable!("an open found a recycled spare segment");
     }
 }
 
@@ -286,9 +242,6 @@ async fn note_recovery(ctx: &SimContext, recovery: &Recovery) {
     if recovery.meta_repaired {
         assert_reachable!("recovery repaired a metainfo copy");
     }
-    if recovery.spares_removed > 0 {
-        assert_reachable!("recovery deleted a spare segment");
-    }
     let segments = ctx.storage().list_dir(DIR).await.map_or(0, |names| {
         names.iter().filter(|n| n.starts_with("seg-")).count()
     });
@@ -297,8 +250,8 @@ async fn note_recovery(ctx: &SimContext, recovery: &Recovery) {
 
 /// Check the recovered journal against the ledger, discard what only the
 /// batch in flight could have damaged, then adopt what the disk holds.
-async fn reconcile<S: SpareSpawner<SimStorageProvider>>(
-    journal: &mut Journal<SimStorageProvider, S>,
+async fn reconcile(
+    journal: &mut Journal<SimStorageProvider>,
     ledger: &Ledger,
 ) -> Result<(), CommitError> {
     let (acked, floor, meta, pending) = ledger.with(|state| {
@@ -390,9 +343,9 @@ fn id_of(position: u64, version: u64) -> Id {
 
 /// One commit: entries at random positions, sometimes a tombstone, a floor
 /// raise or new metainfo.
-async fn step<S: SpareSpawner<SimStorageProvider>>(
+async fn step(
     ctx: &SimContext,
-    journal: &mut Journal<SimStorageProvider, S>,
+    journal: &mut Journal<SimStorageProvider>,
     ledger: &Ledger,
     durability: Durability,
 ) -> Result<(), CommitError> {
@@ -445,7 +398,7 @@ async fn step<S: SpareSpawner<SimStorageProvider>>(
     let rolls = journal.rolls();
     journal.commit(batch).await?;
     if journal.rolls().onto_spare > rolls.onto_spare {
-        assert_reachable!("a commit rolled onto a prepared spare segment");
+        assert_reachable!("a commit rolled onto a recycled segment");
     }
     // Acknowledged: the batch is durable.
     ledger.with(|state| {

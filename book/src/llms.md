@@ -37,7 +37,7 @@ Production: `moonpool = { default-features = false, features = ["tokio"] }`. Sim
 | `NetworkProvider` | `bind(addr)`, `connect(addr)`; `TcpStream: AsyncRead + AsyncWrite`; `TcpListenerTrait::{accept, local_addr}` | `SimNetworkProvider` |
 | `RandomProvider` | `random::<T>()`, `random_range(r)`, `random_ratio()`, `random_bool(p)` | `SimRandomProvider` |
 | `StorageProvider` | `open(path, OpenOptions)`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` | `SimStorageProvider` |
-| `StorageFile` | `read_at`, `write_at`, `write_at_durable` (durable on return, its range only), the zero-copy `read_at_aligned` / `write_at_aligned` / `write_at_durable_aligned` (an owned `AlignedBuf` moved in and handed back; Tokio moves it into the blocking task instead of copying through a bounce buffer; defaults to the borrowed form, which the sim keeps), `sync_all`, `sync_data`, `size`, `set_len`, `constraints()`, `is_direct_io()` | simulated file image |
+| `StorageFile` | `read_at`, `write_at`, `write_at_durable` (durable on return, its range only), the zero-copy `read_at_aligned` / `write_at_aligned` / `write_at_durable_aligned` (an owned `AlignedBuf` moved in and handed back; Tokio moves it into the blocking task instead of copying through a bounce buffer; defaults to the borrowed form, which the sim keeps), `sync_all`, `sync_data`, `size`, `set_len`, `allocate` (reserve the space: `fallocate(2)` on Linux; the sim counts it against disk capacity), `constraints()`, `is_direct_io()` | simulated file image |
 | `SystemProvider` | `sample(data_dir) -> SystemSample { at, process_cpu, cores, machine_busy, machine_total, run_loop_busy, disk: Option<DiskCounters>, space: Option<DiskSpace> }` | `SimSystemProvider` |
 | `Providers` | `network()`, `time()`, `task()`, `random()`, `storage()`, `system()` | `SimProviders` |
 | `Resolver` | `resolve(host_port)` | `ScriptedResolver` |
@@ -172,7 +172,7 @@ Capture rule: INFO and above, constant message, inside a process or workload tas
 | `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it, and a per-process regime's timed reboots too (label `TIMED_REBOOT_LABEL`). |
 | `cpu_charge(Duration)` | Explicit CPU work under `Chaos::Cpu`. |
 
-All are no-ops in production. `moonpool-journal` shows the pattern: three `hint!` moments per batched commit (an ordered commit's two durable writes are named inside the simulated `write_at_durable`, "storage: durable write landed, not synced"), two per roll onto a prepared spare segment and two in the spare's background preparation (a hint in a spawned task strikes the process that spawned it).
+All are no-ops in production. `moonpool-journal` shows the pattern: three `hint!` moments per batched commit (an ordered commit's two durable writes are named inside the simulated `write_at_durable`, "storage: durable write landed, not synced"), and two per roll onto a recycled spare segment.
 
 ## Chaos Configuration
 

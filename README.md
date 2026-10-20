@@ -249,10 +249,9 @@ and under the simulator in its own `#[test]`.
   from corruption and names the damaged entry. Positions in any order,
   `Batch::fits` / `fits_another`, `Journal::peek_meta`, metadata repair,
   ambiguous tails, layout regions for aimed faults, `hint!` points inside
-  each commit, and spare segments prepared in the background
-  (`Journal::prepare_spares_with`, or `prepare_spares_local` on a local
-  runtime) so a segment roll is a header write and a rename instead of a
-  zero-fill on the commit path. It is written against the local provider
+  each commit, and recycled segments: a dead segment's file becomes the
+  next one with a header write and a rename, and a new segment is
+  allocated (`StorageFile::allocate`), never zero-filled. It is written against the local provider
   traits, so it runs on compio as well as Tokio and the simulator, and stays
   `Send` over a `Send` provider. Batches, headers and
   metainfo are encoded in place in aligned buffers and written with no copy.
