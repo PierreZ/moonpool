@@ -48,6 +48,10 @@ clap = { version = "4.6", default-features = false, features = [
 ] }
 hdrhistogram = { version = "7.6", default-features = false }
 
+[[example]]
+name = "backends"
+required-features = ["compio-providers"]
+
 [[test]]
 name = "compio_filesystem"
 required-features = ["compio-providers"]

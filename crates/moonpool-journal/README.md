@@ -150,6 +150,18 @@ cargo run --release -p moonpool-journal --example bench -- \
     --writers 4 --record-size 4096 --batch 1 --fsync ordered --duration 10
 ```
 
+`examples/backends.rs` runs the same journal on Tokio and on compio, on the
+real filesystem: sequential durable appends at 128 B, 4 KiB and 64 KiB,
+concurrent writers, and the recovery of a 256 MiB journal, buffered and with
+direct I/O. It prints the environment and the results as Markdown. The
+results of one run, with their caveats, are in
+[`docs/benchmarks/journal-backends.md`](../../docs/benchmarks/journal-backends.md):
+
+```sh
+cargo run --release -p moonpool-journal --features compio-providers \
+    --example backends -- --duration 5
+```
+
 `crates/moonpool-sim-examples/src/journal.rs` runs the journal inside a full
 simulation, with one node crashed over and over by attrition:
 
