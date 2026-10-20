@@ -16,19 +16,26 @@
 //! (`fallocate`) turns each first write to a block into a metadata change,
 //! so every commit's `fdatasync` would have file metadata to write again.
 //! Writing the zeros once, off the commit path, keeps a segment's syncs pure
-//! data syncs.
+//! data syncs. The zeros go out with the segments' own direct I/O, in short
+//! writes: the fill never fills the page cache, and a commit beside it waits
+//! behind one short write at most.
 
 use std::sync::{Arc, Mutex};
 
 use moonpool_core::{
-    BlockFile, Detach, LocalStorageProvider, LocalTaskProvider, OpenOptions, TaskProvider,
+    BlockFile, Detach, DirectIo, LocalStorageProvider, LocalTaskProvider, OpenOptions, TaskProvider,
 };
 
 use crate::format::{BLOCK, BLOCK_U64, Geometry, usize_of};
 use crate::io::write_blocks;
 
-/// Blocks zeroed per write while preparing a segment file.
-const FILL_BLOCKS: u64 = 256;
+/// Blocks zeroed per write while preparing a segment file: 64 KiB. A spare
+/// is written beside live commits, with the segments' own direct I/O, so
+/// each fill write is short and a commit's durable write waits behind one
+/// of them at most (measured with `parosctl bench`: 1 MiB fill writes
+/// delayed the commits more, and a buffered fill copied every zero through
+/// the page cache, then flushed the whole segment at once).
+const FILL_BLOCKS: u64 = 16;
 
 const PREFIX: &str = "spare-";
 const SUFFIX: &str = ".wal";
@@ -114,6 +121,7 @@ pub struct SpareJob<P> {
     dir: String,
     name: String,
     geometry: Geometry,
+    direct_io: DirectIo,
     progress: Arc<Mutex<Progress>>,
 }
 
@@ -131,7 +139,7 @@ impl<P: LocalStorageProvider> SpareJob<P> {
             self.provider,
             self.dir,
             self.name,
-            self.geometry,
+            (self.geometry, self.direct_io),
             self.progress,
         )
         .await;
@@ -195,13 +203,20 @@ impl<P: LocalStorageProvider, T: LocalTaskProvider> SpareSpawner<P> for LocalSpa
 }
 
 impl<P> SpareJob<P> {
-    /// The preparation of `spare` in `dir`.
-    pub(crate) fn new(provider: P, dir: String, spare: &Spare, geometry: Geometry) -> Self {
+    /// The preparation of `spare` in `dir`, written with the segments' own
+    /// direct I/O.
+    pub(crate) fn new(
+        provider: P,
+        dir: String,
+        spare: &Spare,
+        (geometry, direct_io): (Geometry, DirectIo),
+    ) -> Self {
         Self {
             provider,
             dir,
             name: spare.name.clone(),
             geometry,
+            direct_io,
             progress: Arc::clone(&spare.progress),
         }
     }
@@ -218,7 +233,7 @@ pub(crate) async fn prepare<P: LocalStorageProvider>(
     provider: P,
     dir: String,
     name: String,
-    geometry: Geometry,
+    (geometry, direct_io): (Geometry, DirectIo),
     progress: Arc<Mutex<Progress>>,
 ) -> std::io::Result<()> {
     let path = format!("{dir}/{name}");
@@ -228,7 +243,7 @@ pub(crate) async fn prepare<P: LocalStorageProvider>(
             .expect("spare lock poisoned: prior task panicked")
             == Progress::Abandoned
     };
-    let prepared = write_spare(&provider, &dir, &path, geometry, &abandoned).await;
+    let prepared = write_spare(&provider, &dir, &path, (geometry, direct_io), &abandoned).await;
     let outcome = {
         let mut state = progress
             .lock()
@@ -263,14 +278,19 @@ async fn write_spare<P: LocalStorageProvider>(
     provider: &P,
     dir: &str,
     path: &str,
-    geometry: Geometry,
+    (geometry, direct_io): (Geometry, DirectIo),
     abandoned: &impl Fn() -> bool,
 ) -> std::io::Result<bool> {
     if provider.exists(path).await? {
         provider.delete(path).await?;
     }
     let file = provider
-        .open(path, OpenOptions::create_new_write().read(true))
+        .open(
+            path,
+            OpenOptions::create_new_write()
+                .read(true)
+                .direct_io(direct_io),
+        )
         .await?;
     let file = BlockFile::new(file, BLOCK)?;
     if !zero_fill(&file, geometry.total_blocks(), abandoned).await? {

@@ -256,6 +256,13 @@ commit's `fdatasync` would have file metadata to write again. Growing a file
 is not preallocation, and preallocation is not a pure data sync; writing the
 zeros once, in the background, keeps every commit sync a data sync.
 
+The background fill still shares the disk with live commits. So the spare
+opens with the journal's own `DirectIo` setting and writes its zeros 64 KiB
+at a time. With buffered 1 MiB writes, every zero went through the page
+cache, and the final sync flushed 64 MiB at once while commits waited. On
+`parosctl bench` (three replicas on one disk, four journals) the direct,
+short writes gave 15 to 25% more commits per minute.
+
 The commit side names two moments with `hint!` ("journal roll: spare
 headers synced, not renamed", "journal roll: spare renamed, directory not
 synced"), and the preparation two more ("journal spare: zero-filled, not

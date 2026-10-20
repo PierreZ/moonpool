@@ -978,7 +978,7 @@ impl<P: LocalStorageProvider, S: SpareSpawner<P>> Journal<P, S> {
             self.provider.clone(),
             self.dir.clone(),
             spare.name.clone(),
-            self.config.geometry,
+            (self.config.geometry, self.config.direct_io),
             std::sync::Arc::clone(&spare.progress),
         )
         .await?;
@@ -1013,7 +1013,7 @@ impl<P: LocalStorageProvider, S: SpareSpawner<P>> Journal<P, S> {
             self.provider.clone(),
             self.dir.clone(),
             &spare,
-            self.config.geometry,
+            (self.config.geometry, self.config.direct_io),
         ));
         self.spare = Some(spare);
     }
