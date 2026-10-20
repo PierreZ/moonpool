@@ -13,7 +13,7 @@ Before the faults, the API they land on. Moonpool has **one provider, one file a
 | Layer | Owns | Methods |
 |-------|------|---------|
 | `StorageProvider` | The filesystem **namespace** | `open`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` |
-| `StorageFile` | Already-open **bytes** | `AsyncRead`/`AsyncWrite`/`AsyncSeek`, `read_at`, `write_at`, `write_at_durable` and their zero-copy `*_aligned` forms, `sync_all`, `sync_data`, `size`, `set_len`, `constraints`, `is_direct_io` |
+| `StorageFile` | Already-open **bytes** | `AsyncRead`/`AsyncWrite`/`AsyncSeek`, `read_at`, `write_at`, `write_at_durable` and their zero-copy `*_aligned` forms, `sync_all`, `sync_data`, `size`, `set_len`, `allocate`, `constraints`, `is_direct_io` |
 | `BlockFile<F>` | Block arithmetic over one open file | `read_blocks`, `write_blocks`, `write_blocks_durable` and their `*_aligned` forms, `sync`, `sync_data`, `grow_to_blocks`, `size_in_blocks`, `buffer` |
 
 Database needs are **options on opening an ordinary file**, never a second provider stack. There is no `BlockProvider`, no `DirectIoProvider` and no region-addressed device:

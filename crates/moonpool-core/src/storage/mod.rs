@@ -434,4 +434,16 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     /// physical storage, initialize the range, or make the new length durable.
     /// Those are three separate concerns, and this method is only the first.
     fn set_len(&self, size: u64) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
+    /// Reserve physical storage for the file's first `len` bytes, growing
+    /// the file to `len` when it is shorter. It never shrinks a file.
+    ///
+    /// The new range reads as zeros, and a later write into it needs no
+    /// space the disk may lack: a full disk fails here
+    /// ([`StorageFull`](io::ErrorKind::StorageFull)), not on a write. Like
+    /// [`set_len`](Self::set_len), it does not make the new length durable:
+    /// [`sync_all`](Self::sync_all) does. On Linux this is `fallocate(2)`
+    /// mode 0; where the filesystem or the OS cannot allocate, the file
+    /// only grows, as with `set_len`.
+    fn allocate(&self, len: u64) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }

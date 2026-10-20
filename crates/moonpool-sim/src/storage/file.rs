@@ -193,6 +193,16 @@ impl StorageFile for SimStorageFile {
         self.ensure_open()?;
         SetLenFuture::new(self.sim.clone(), self.handle_id, size).await
     }
+
+    /// Growth through `set_len`: the simulated disk already counts a grown
+    /// range against its capacity, so growing is reserving here, and the
+    /// new range reads as zeros.
+    async fn allocate(&self, len: u64) -> io::Result<()> {
+        if self.size().await? < len {
+            self.set_len(len).await?;
+        }
+        Ok(())
+    }
 }
 
 impl AsyncRead for SimStorageFile {

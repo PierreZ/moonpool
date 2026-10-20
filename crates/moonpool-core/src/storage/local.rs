@@ -203,6 +203,10 @@ pub trait LocalStorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'static
     /// Set the length of the file, growing or shrinking it. See
     /// [`StorageFile::set_len`].
     fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>>;
+
+    /// Reserve physical storage for the file's first `len` bytes. See
+    /// [`StorageFile::allocate`].
+    fn allocate(&self, len: u64) -> impl Future<Output = io::Result<()>>;
 }
 
 impl<P: StorageProvider> LocalStorageProvider for P {
@@ -303,5 +307,9 @@ impl<F: StorageFile> LocalStorageFile for F {
 
     fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> {
         StorageFile::set_len(self, size)
+    }
+
+    fn allocate(&self, len: u64) -> impl Future<Output = io::Result<()>> {
+        StorageFile::allocate(self, len)
     }
 }
