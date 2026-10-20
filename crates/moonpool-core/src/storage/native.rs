@@ -495,6 +495,40 @@ fn undescribable_direct_io(path: &str) -> io::Error {
     )
 }
 
+/// Reserve storage for `file`'s first `len` bytes with `fallocate(2)` mode
+/// 0 (the size grows, never shrinks). `Ok(false)` when the filesystem
+/// cannot allocate (`EOPNOTSUPP`): the caller then only grows the file.
+///
+/// A metadata call on an already-open descriptor; `ENOSPC` comes back as
+/// [`io::ErrorKind::StorageFull`].
+#[cfg(target_os = "linux")]
+pub(super) fn fallocate<F: Descriptor>(file: &F, len: u64) -> io::Result<bool> {
+    use std::os::fd::AsRawFd as _;
+
+    let length = libc::off_t::try_from(len)
+        .map_err(|_| super::invalid_input(format!("length {len} overflows off_t")))?;
+    loop {
+        // SAFETY: `fallocate` only reads its integer arguments, and the
+        // descriptor stays open for the duration of the call.
+        let done = unsafe { libc::fallocate(file.as_fd().as_raw_fd(), 0, 0, length) };
+        if done == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::EOPNOTSUPP) => return Ok(false),
+            _ => return Err(error),
+        }
+    }
+}
+
+/// No allocation call off Linux: the caller only grows the file.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn fallocate<F: Descriptor>(_file: &F, _len: u64) -> io::Result<bool> {
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]

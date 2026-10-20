@@ -146,6 +146,13 @@ impl StorageFile for AwkwardFile {
         self.state().bytes.resize(size, 0);
         Ok(())
     }
+
+    async fn allocate(&self, len: u64) -> io::Result<()> {
+        if self.size().await? < len {
+            self.set_len(len).await?;
+        }
+        Ok(())
+    }
 }
 
 /// Stream I/O is not available on a file with direct-I/O constraints; the

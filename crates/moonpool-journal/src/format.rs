@@ -44,7 +44,8 @@ pub(crate) const META_FILE_BLOCKS: u64 = 17;
 const SEGMENT_MAGIC: u32 = u32::from_le_bytes(*b"MPJS");
 const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 const META_MAGIC: u32 = u32::from_le_bytes(*b"MPJM");
-const VERSION: u16 = 2;
+/// 3: segments are recycled, so a batch older than its segment is stale.
+const VERSION: u16 = 3;
 
 const _: () = assert!(BLOCK.is_multiple_of(RECORD_SIZE));
 const _: () = assert!(RECORDS_PER_BLOCK == 64);
@@ -285,7 +286,7 @@ pub(crate) struct Record {
 /// How a 64-byte slot of the persist log reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Slot {
-    /// All zeros: never written (segments are zero-filled at creation).
+    /// All zeros: never written (a new segment's range reads as zeros).
     Zero,
     /// Anything else that fails its checks.
     Damaged,

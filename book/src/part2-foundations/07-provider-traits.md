@@ -125,6 +125,7 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     }
     fn size(&self) -> impl Future<Output = io::Result<u64>> + Send;
     fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> + Send;
+    fn allocate(&self, len: u64) -> impl Future<Output = io::Result<()>> + Send;
 }
 ```
 
@@ -134,7 +135,7 @@ Three distinctions the trait keeps apart, because production keeps them apart:
 
 - A completed write is **visible**, not durable. Only `sync_all` or `sync_data` makes it survive a crash. `write_at_durable` is the one write that is durable on return, and only for its own bytes: on Linux the Tokio backend issues one `pwritev2(RWF_DSYNC)` (a FUA write on a direct-I/O file whose blocks are allocated), which flushes nothing outside its range. The default, and the simulator, run `write_at` then `sync_data`.
 - File durability is not **directory-entry** durability. After `open(create)`, `write` and `sync_all`, a crash can still leave no name pointing at the file. `sync_dir` on the parent is the call that makes the name durable, as SQLite and PostgreSQL do after a create, delete or rename.
-- `set_len` grows the readable range. It does not allocate, initialize or make the length durable.
+- `set_len` grows the readable range. It does not allocate, initialize or make the length durable. `allocate` is the call that reserves space: `fallocate(2)` mode 0 on Linux, growing the file to at least `len`. The range reads as zeros, a full disk fails there and not on a later write, and the length is still durable only after `sync_all`. The simulator already counts a grown range against the disk's capacity, so there it is the same as growing.
 
 `OpenOptions` mirrors `std::fs::OpenOptions` (`read`, `write`, `create`, `create_new`, `truncate`, `append`) and adds `direct_io(DirectIo::{Disabled, Optional, Required})`. Direct I/O is an option on opening an ordinary file, not a second provider: there is no `BlockProvider`. A direct-I/O file reports its alignment through `constraints()` and refuses the stream API with `stream_io_unsupported()`, because a shared cursor cannot honour an alignment. `read_at` and `write_at` are positioned, take `&self`, and may transfer fewer bytes than asked. Each positioned transfer also has an **owned** form over an `AlignedBuf` (`read_at_aligned`, `write_at_aligned`, `write_at_durable_aligned`): the same transfer and contract, with the buffer moved in and handed back beside the count (dropped on error). It exists for zero copy. A backend that runs I/O on another thread cannot move a borrowed slice there, so the borrowed form pays a copy into its own aligned buffer; the owned form moves the caller's buffer instead. A caller that already holds its bytes in an `AlignedBuf` uses it, any other caller keeps the borrowed form, and neither is a different kind of file. `BlockFile<F>` wraps one open file to add block arithmetic and the loops that turn partial transfers into whole ones. It holds no path and opens nothing. `LayoutRegion` lets a format describe where its bytes live, so a fault injector can aim at them. [Storage Faults](../part3-building/11-storage-faults.md) and [Aiming Storage Faults](../part3-building/33-aimed-faults.md) continue there.
 

@@ -44,9 +44,8 @@ journal.commit(batch).await?;
 
 | Type or method | Role |
 |---|---|
-| `Journal<P, S = NoSpares>` | `create`, `open` (recover), `commit`, `read`, `replay`, over any `LocalStorageProvider` (every `StorageProvider` is one); `Send` when `P` is |
-| `Journal::prepare_spares_with` / `prepare_spares_local` / `prepare_spare` / `Rolls` | Prepare the next segment ahead (in the background on a `TaskProvider` or a `LocalTaskProvider`, or inline), so a roll is a header write and a rename |
-| `SpareSpawner` / `NoSpares` / `Spares` / `LocalSpares` / `SpareJob` | Where a journal runs its background preparation: the `S` of `Journal<P, S>` |
+| `Journal<P>` | `create`, `open` (recover), `commit`, `read`, `replay`, over any `LocalStorageProvider` (every `StorageProvider` is one); `Send` when `P` is |
+| `Journal::rolls` / `Rolls` | How this open's rolls went: onto a recycled segment, or onto a newly allocated one |
 | `Journal::peek_meta` | Read a closed journal's metainfo without recovery, repair or sync |
 | `Batch` | What one commit makes durable: `put`, `clear`, `truncate_prefix`, `set_meta` |
 | `Batch::fits` / `Batch::fits_another` | Whether a batch fits one segment, so the caller can split it |
@@ -76,8 +75,13 @@ journal.commit(batch).await?;
   records in place, in block-aligned `AlignedBuf`s, and moves them through
   the zero-copy `StorageFile::write_at_aligned` /
   `write_at_durable_aligned`: a direct-I/O segment never copies them. So do
-  the headers, the metainfo copies, the spare's zero-fill and recovery's
-  reads.
+  the headers, the metainfo copies and recovery's reads.
+- **Recycled segments, no zero-fill.** A segment with nothing live left
+  becomes the spare, and the next roll adopts it with a header write and a
+  rename: no byte written, no space allocated. With no spare, a roll
+  allocates a new segment (`StorageFile::allocate`, `fallocate(2)` on
+  Linux) and writes only its headers. No segment is ever zero-filled, and
+  no task runs beside the commits.
 - **Crash hints.** A batched commit names three moments with
   `moonpool_buggify::hint!`; an ordered commit names the metainfo one and
   leaves the windows inside its two durable writes to the storage layer,
@@ -90,17 +94,22 @@ No snapshots and no compaction.
 ## On disk
 
 `<dir>/meta` holds the metainfo: copy A at block 0, copy B at block 16. Each
-`<dir>/seg-<first batch>.wal` is preallocated and zero-filled: two header
-copies, a persist log of 64-byte records, a guard gap, and an entry log.
-Every batch starts on a fresh 4 KiB block in both logs, so no write touches a
-sector that holds acknowledged data.
+`<dir>/seg-<first batch>.wal` is allocated whole: two header copies, a
+persist log of 64-byte records, a guard gap, and an entry log. Every batch
+starts on a fresh 4 KiB block in both logs, so no write touches a sector that
+holds acknowledged data.
 
-`<dir>/spare-<generation>-<n>.wal` is the next segment, prepared ahead:
-full size, zero-filled and synced, with its name synced, but no header. A
-roll writes and syncs its headers, renames it to its segment name and syncs
-the directory. Every open deletes the spares it finds: no batch is ever
-written to a spare, so a spare is never evidence. The zeros are written, not
-`fallocate`d, so a commit's `fdatasync` stays a pure data sync.
+`<dir>/spare-<generation>-<n>.wal` is a dead segment's file, renamed and kept
+for the next roll. A roll writes and syncs its headers, renames it to its
+segment name and syncs the directory. Its old batches stay in it, and they
+are never evidence: a segment named after its first batch only receives
+batches at or above that number, batch numbers never repeat, so every record
+or entry older than the segment reads as stale, like a never-written one. An
+open keeps one whole spare and deletes the others.
+
+A new segment reads as zeros without a byte written. Its first pass pays one
+small metadata change per block on each durable write (the extent goes from
+unwritten to written); a recycled segment pays none.
 
 ## Feature flags
 
@@ -118,8 +127,8 @@ filesystem.
 - crash loops under two fault models (the paper's sector-atomic model, and
   moonpool's full model with lost, latent and shorn sectors), for each
   durability mode and for a mode drawn again every round, with crashes
-  inside recovery and inside a spare segment's preparation, and rolls onto
-  prepared spares.
+  inside recovery, floor raises that recycle segments, and rolls onto
+  recycled segments.
 
 `JOURNAL_CRASH_SEEDS` raises the seed count. `JOURNAL_CRASH_SEED` replays one
 seed.
@@ -138,9 +147,10 @@ cargo run -p moonpool-journal --example accept_log
 owns one journal and commits back to back for a fixed duration. It reports
 throughput, commit latency percentiles and fairness between writers, and
 `--csv` writes a time series with the page-cache dirty bytes.
-`--segment-blocks N` shrinks the segments so they roll often, `--spares`
-prepares each next segment in the background, and the report gives the
-latency of the commits that rolled, inline and onto a spare. Run it in
+`--segment-blocks N` shrinks the segments so they roll often,
+`--truncate-every N` raises the floor so segments are recycled, and the
+report gives the latency of the commits that rolled, onto a new segment and
+onto a recycled one. Run it in
 release mode on the disk under test (the default directory is under
 `target/`; tmpfs is refused), and never compare numbers across `--fsync`
 policies:

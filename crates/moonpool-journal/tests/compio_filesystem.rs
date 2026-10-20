@@ -1,28 +1,23 @@
-//! The journal over `CompioStorageProvider` on the real filesystem, with its
-//! spares prepared on `CompioTaskProvider`: the same journal code as the
-//! Tokio run in `tests/real_filesystem.rs`, on the local traits alone.
+//! The journal over `CompioStorageProvider` on the real filesystem: the same
+//! journal code as the Tokio run in `tests/real_filesystem.rs`, on the local
+//! traits alone.
 //!
 //! Run with `cargo test -p moonpool-journal --features compio-providers`.
 //! It pins that committed bytes read back after a reopen, buffered and with
 //! direct I/O (where the filesystem under the target directory offers it),
-//! that rolls land on prepared spares, inline and in the background, and
-//! that the next open deletes a spare left behind.
+//! across rolls onto allocated segments and onto recycled ones, whose old
+//! batches read as stale.
 
-use std::time::{Duration, Instant};
-
-use moonpool_core::{CompioStorageProvider, CompioTaskProvider, DirectIo, LocalTaskProvider};
+use moonpool_core::{CompioStorageProvider, DirectIo};
 use moonpool_journal::{
-    Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId, SpareSpawner, State,
+    Batch, Durability, Geometry, ID_SIZE, Journal, JournalConfig, JournalId, State,
 };
 
-/// Commits per run: enough that the small geometry rolls several times.
+/// Commits per phase: enough that the small geometry rolls several times.
 const ROUNDS: u8 = 12;
 
 /// Entry lengths around and across block boundaries.
 const LENS: [usize; 6] = [1, 4095, 4096, 4097, 12_000, 30_000];
-
-/// How long a background run lets its spare task work between commits.
-const SPARE_TIME: Duration = Duration::from_millis(50);
 
 /// A payload whose period (251, a prime) lines up with no block, so a
 /// misplaced or stale sector cannot read back equal by accident.
@@ -38,106 +33,80 @@ fn lens(round: u8) -> &'static [usize] {
     &LENS[..=usize::from(round) % LENS.len()]
 }
 
-/// How the run prepares spares.
-#[derive(Clone, Copy, Debug)]
-enum Spares {
-    /// `prepare_spare` awaited before every commit.
-    Inline,
-    /// `prepare_spares_local` on `CompioTaskProvider`.
-    Background,
-}
-
-/// Commit `ROUNDS` batches; the next position.
-async fn write<S: SpareSpawner<CompioStorageProvider>>(
-    journal: &mut Journal<CompioStorageProvider, S>,
-    spares: Spares,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut position = 0_u64;
+/// Commit `ROUNDS` batches from `position` on, the first one raising the
+/// floor to `floor`; every `(position, len)` written.
+async fn write(
+    journal: &mut Journal<CompioStorageProvider>,
+    mut position: u64,
+    floor: u64,
+) -> Result<Vec<(u64, usize)>, Box<dyn std::error::Error>> {
+    let mut written = Vec::new();
     for round in 0..ROUNDS {
-        match spares {
-            Spares::Inline => journal.prepare_spare().await?,
-            Spares::Background => {
-                // A roll never waits for a spare: give the task its time.
-                let until = Instant::now() + SPARE_TIME;
-                while Instant::now() < until {
-                    CompioTaskProvider.yield_now().await;
-                }
-            }
-        }
         let mut batch = Batch::new();
+        if round == 0 && floor > 0 {
+            batch.truncate_prefix(floor);
+        }
         for &len in lens(round) {
             batch.put(position, [round; ID_SIZE], payload(position, len));
+            written.push((position, len));
             position += 1;
         }
         batch.set_meta(vec![round; 7]);
         journal.commit(batch).await?;
     }
-    if matches!(spares, Spares::Inline) {
-        // Left behind for the next open to delete.
-        journal.prepare_spare().await?;
-    }
-    Ok(position)
+    Ok(written)
 }
 
-/// Every committed entry reads back, one by one and in a replay.
-async fn check<S: SpareSpawner<CompioStorageProvider>>(
-    journal: &Journal<CompioStorageProvider, S>,
-    position: u64,
+/// Every entry of `written` reads back, one by one and in a replay.
+async fn check(
+    journal: &Journal<CompioStorageProvider>,
+    written: &[(u64, usize)],
     name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(journal.meta(), [ROUNDS - 1; 7], "{name}: the last metainfo");
-    let mut expected = 0_u64;
-    for round in 0..ROUNDS {
-        for &len in lens(round) {
-            assert!(matches!(journal.state(expected), State::Live { .. }));
-            let entry = journal.read(expected).await?;
-            assert_eq!(entry.payload, payload(expected, len), "{name}: {expected}");
-            expected += 1;
-        }
+    for &(position, len) in written {
+        assert!(matches!(journal.state(position), State::Live { .. }));
+        let entry = journal.read(position).await?;
+        assert_eq!(entry.payload, payload(position, len), "{name}: {position}");
     }
-    assert_eq!(expected, position);
     let replayed = journal.replay(..).await?;
-    assert_eq!(replayed.len(), usize::try_from(position)?);
-    for (at, entry) in replayed {
+    assert_eq!(replayed.len(), written.len(), "{name}");
+    for ((at, entry), &(position, _)) in replayed.into_iter().zip(written) {
+        assert_eq!(at, position, "{name}");
         assert_eq!(entry?.position, at, "{name}");
     }
     Ok(())
 }
 
-async fn run(
-    dir: &str,
-    config: JournalConfig,
-    spares: Spares,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(dir: &str, config: JournalConfig) -> Result<(), Box<dyn std::error::Error>> {
     let provider = CompioStorageProvider::new();
     let id = JournalId(11);
-    let journal = Journal::create(provider, dir, id, config, b"m0").await?;
-    let (position, rolls) = match spares {
-        Spares::Inline => {
-            let mut journal = journal;
-            (write(&mut journal, spares).await?, journal.rolls())
-        }
-        Spares::Background => {
-            let mut journal = journal.prepare_spares_local(CompioTaskProvider);
-            (write(&mut journal, spares).await?, journal.rolls())
-        }
-    };
-    assert!(
-        rolls.onto_spare > 0,
-        "{dir}: no roll landed on a spare: {rolls:?}"
-    );
-
-    // Reopen, on spares again: recovery deletes the spare left behind and
-    // keeps every committed byte.
+    let mut journal = Journal::create(provider, dir, id, config, b"m0").await?;
+    let first = write(&mut journal, 0, 0).await?;
+    assert!(journal.rolls().created > 1, "{dir}: {:?}", journal.rolls());
     let (journal, recovery) = Journal::open(provider, dir, id, config)
         .await?
         .ok_or("the journal is gone")?;
     assert!(recovery.corrupt.is_empty(), "{dir}: {recovery:?}");
-    if matches!(spares, Spares::Inline) {
-        assert!(recovery.spares_removed > 0, "{dir}: {recovery:?}");
-    }
-    let journal = journal.prepare_spares_local(CompioTaskProvider);
-    check(&journal, position, dir).await
+    check(&journal, &first, dir).await?;
+
+    // Raise the floor past everything: the dead segments are recycled, and
+    // the rolls of the next phase land on them.
+    let mut journal = journal;
+    let next = first.last().map_or(0, |&(position, _)| position + 1);
+    let second = write(&mut journal, next, next).await?;
+    assert!(
+        journal.rolls().onto_spare > 0,
+        "{dir}: no roll landed on a recycled segment: {:?}",
+        journal.rolls()
+    );
+    drop(journal);
+    let (journal, recovery) = Journal::open(provider, dir, id, config)
+        .await?
+        .ok_or("the journal is gone")?;
+    assert!(recovery.corrupt.is_empty(), "{dir}: {recovery:?}");
+    assert_eq!(recovery.torn, 0, "{dir}: {recovery:?}");
+    check(&journal, &second, dir).await
 }
 
 #[test]
@@ -148,25 +117,10 @@ fn committed_bytes_read_back_after_a_reopen_on_compio() -> Result<(), Box<dyn st
         .join(format!("journal-compio-fs-{}", std::process::id()));
     let runtime = compio::runtime::Runtime::new()?;
     eprintln!("compio driver: {:?}", runtime.driver_type());
-    for (name, durability, direct_io, spares) in [
-        (
-            "ordered-direct-inline",
-            Durability::Ordered,
-            DirectIo::Optional,
-            Spares::Inline,
-        ),
-        (
-            "batched-direct-background",
-            Durability::Batched,
-            DirectIo::Optional,
-            Spares::Background,
-        ),
-        (
-            "ordered-buffered-background",
-            Durability::Ordered,
-            DirectIo::Disabled,
-            Spares::Background,
-        ),
+    for (name, durability, direct_io) in [
+        ("ordered-direct", Durability::Ordered, DirectIo::Optional),
+        ("batched-direct", Durability::Batched, DirectIo::Optional),
+        ("ordered-buffered", Durability::Ordered, DirectIo::Disabled),
     ] {
         let dir = root.join(name);
         let dir = dir.to_str().ok_or("path is not UTF-8")?;
@@ -175,7 +129,7 @@ fn committed_bytes_read_back_after_a_reopen_on_compio() -> Result<(), Box<dyn st
             geometry: Geometry::small(),
             direct_io,
         };
-        runtime.block_on(run(dir, config, spares))?;
+        runtime.block_on(run(dir, config))?;
     }
     std::fs::remove_dir_all(&root)?;
     Ok(())

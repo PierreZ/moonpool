@@ -700,3 +700,31 @@ async fn a_required_open_never_creates_a_file() {
         );
     }
 }
+
+/// `allocate` grows a file to `len`, never shrinks it, and the new range
+/// reads as zeros, with direct I/O as without.
+#[tokio::test]
+async fn allocate_grows_never_shrinks_and_reads_zeros() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for direct_io in [DirectIo::Disabled, DirectIo::Optional] {
+        let path = scratch_file(&dir, &format!("allocated-{direct_io:?}"));
+        let provider = TokioStorageProvider::new();
+        let file = provider
+            .open(
+                &path,
+                OpenOptions::create_new_write()
+                    .read(true)
+                    .direct_io(direct_io),
+            )
+            .await
+            .expect("create");
+        file.allocate(64 * 1024).await.expect("allocate");
+        assert_eq!(file.size().await.expect("size"), 64 * 1024);
+        file.allocate(4096).await.expect("allocate less");
+        assert_eq!(file.size().await.expect("size"), 64 * 1024, "never shrinks");
+        let buf = AlignedBuf::for_constraints(4096, file.constraints());
+        let (read, back) = file.read_at_aligned(32 * 1024, buf).await.expect("read");
+        assert_eq!(read, 4096);
+        assert!(back.as_slice().iter().all(|&b| b == 0), "{direct_io:?}");
+    }
+}

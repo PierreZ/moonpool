@@ -259,6 +259,13 @@ impl LocalStorageFile for RcFile {
         self.bytes.borrow_mut().resize(size, 0);
         Ok(())
     }
+
+    async fn allocate(&self, len: u64) -> io::Result<()> {
+        if self.size().await? < len {
+            self.set_len(len).await?;
+        }
+        Ok(())
+    }
 }
 
 /// A one-file storage provider that is `!Send`.

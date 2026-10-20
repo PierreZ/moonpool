@@ -327,6 +327,14 @@ fn write_then_sync_blocking(file: &std::fs::File, offset: u64, buf: &[u8]) -> io
     Ok(written)
 }
 
+/// [`StorageFile::allocate`] on the blocking pool: `fallocate`, else grow.
+fn allocate_blocking(file: &std::fs::File, len: u64) -> io::Result<()> {
+    if !native::fallocate(file, len)? && file.metadata()?.len() < len {
+        file.set_len(len)?;
+    }
+    Ok(())
+}
+
 async fn run_blocking<T, F>(work: F) -> io::Result<T>
 where
     T: Send + 'static,
@@ -476,6 +484,11 @@ impl StorageFile for TokioStorageFile {
 
     async fn set_len(&self, size: u64) -> io::Result<()> {
         self.inner.get_ref().set_len(size).await
+    }
+
+    async fn allocate(&self, len: u64) -> io::Result<()> {
+        let file = Arc::clone(&self.positioned);
+        run_blocking(move || allocate_blocking(&file, len)).await
     }
 }
 

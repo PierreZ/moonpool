@@ -10,7 +10,9 @@
 //! batch, and each batch's entries start on the block after the last one's.
 //! A batch missing while later records exist is [`OpenError::LostBatch`],
 //! never an end; the persist log ends at the first block boundary after
-//! which nothing valid follows.
+//! which nothing valid follows. A record or entry of a batch older than its
+//! segment is stale, not valid: a recycled file's old bytes (see
+//! [`crate::spare`]) read like never-written ones.
 //!
 //! **Pass 2, verdicts** (the table in the crate docs). Only the **last
 //! batch** and damaged records cost entry reads: the rest of the log is
@@ -155,6 +157,12 @@ impl Stale {
     fn is_stale(self, batch: u64) -> bool {
         generation_of(batch) < u64::from(self.generation) && batch > self.last
     }
+
+    /// [`is_stale`](Self::is_stale), or older than the segment that holds
+    /// it (`first`): a recycled file's old batch.
+    fn is_stale_in(self, first: u64, batch: u64) -> bool {
+        batch < first || self.is_stale(batch)
+    }
 }
 
 /// Pass 1 over one segment. `prev` is the last batch before it.
@@ -167,9 +175,12 @@ async fn scan_segment<F: LocalStorageFile>(
     let geometry = segment.geometry;
     let log = segment.read_persist_log().await?;
     let slots = log.len() / RECORD_SIZE;
-    // A stale record reads as damage: it is not evidence of anything.
+    // A stale record reads as damage: it is not evidence of anything. That
+    // covers a batch older than the segment, left in a recycled file.
     let slot = |at: usize| match Record::decode(&log[at * RECORD_SIZE..]) {
-        Slot::Valid(record) if stale.is_stale(record.batch) => Slot::Damaged,
+        Slot::Valid(record) if stale.is_stale_in(segment.first_batch, record.batch) => {
+            Slot::Damaged
+        }
         slot => slot,
     };
     let persist_at = |at: usize| Geometry::PERSIST_START + u64_of(at * RECORD_SIZE);

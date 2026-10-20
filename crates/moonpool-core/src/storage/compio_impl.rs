@@ -557,6 +557,14 @@ impl LocalStorageFile for CompioStorageFile {
     async fn set_len(&self, size: u64) -> io::Result<()> {
         self.file.set_len(size).await
     }
+
+    async fn allocate(&self, len: u64) -> io::Result<()> {
+        // A short metadata call on the descriptor: run on this thread.
+        if !native::fallocate(&self.file, len)? && self.size().await? < len {
+            self.file.set_len(len).await?;
+        }
+        Ok(())
+    }
 }
 
 impl AsyncRead for CompioStorageFile {
