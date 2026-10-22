@@ -38,6 +38,10 @@ tls-pki = ["tls", "dep:rcgen", "dep:time", "dep:x509-parser"]
 # JWT/JWKS request verification (`security::jwt`): jsonwebtoken with its
 # pure-Rust backend. Native only for the same reason, off by default.
 jwt = ["dep:jsonwebtoken", "dep:serde", "dep:serde_json"]
+# Runs `tests/compio.rs`: the same runtime over `CompioProviders` on a
+# thread-per-core compio runtime (io_uring on Linux). Tests only; the
+# runtime itself needs no backend (see `RpcProviders`).
+compio-providers = ["moonpool-core/compio-providers"]
 
 [dependencies]
 # Only the provider traits (plus the inert buggify macros). Never moonpool-sim or moonpool-explorer: the
@@ -76,6 +80,8 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 moonpool-rpc-derive = { path = "../moonpool-rpc-derive", version = "0.8.0" }
 # Real TCP: the production providers on both Tokio runtime flavors.
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
+# The runtime `tests/compio.rs` drives the RPC runtime on.
+compio = { version = "0.19", default-features = false, features = ["runtime", "io-uring", "polling"] }
 # `#[derive(prost::Message)]` in tests expands to `::prost` paths.
 prost = "0.14"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "io-util", "sync"] }
@@ -84,6 +90,14 @@ rcgen = "0.14"
 time = "0.3"
 # Captures traces in the redaction tests.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+
+[[example]]
+name = "backends"
+required-features = ["compio-providers", "prost"]
+
+[[test]]
+name = "compio"
+required-features = ["compio-providers", "prost"]
 
 [[example]]
 name = "recruitment"

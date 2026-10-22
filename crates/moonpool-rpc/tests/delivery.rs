@@ -89,13 +89,18 @@ async fn listen(config: RpcConfig) -> (RpcHandle<TokioProviders>, Driver) {
     listen_at("127.0.0.1:0", config).await
 }
 
-fn client_with<U>(config: RpcConfig, upgrade: U) -> (RpcHandle<TokioProviders>, Driver)
-where
-    U: moonpool_rpc::SessionUpgrade<TokioProviders>,
-{
-    let (driver, rpc) =
-        RpcDriver::client_only_with(TokioProviders::new(), config, upgrade).expect("valid config");
-    (rpc, tokio::spawn(driver.run()))
+/// A client-only runtime upgrading with `upgrade`, spawned on Tokio.
+///
+/// A macro, not a generic function: the session upgrade traits do not
+/// promise `Send` futures (so that they serve non-`Send` backends), and
+/// `driver.run()` is provably `Send` only for a concrete upgrade type.
+macro_rules! client_with {
+    ($config:expr, $upgrade:expr) => {{
+        let (driver, rpc) = RpcDriver::client_only_with(TokioProviders::new(), $config, $upgrade)
+            .expect("valid config");
+        let driver: Driver = tokio::spawn(driver.run());
+        (rpc, driver)
+    }};
 }
 
 fn serve_echo<M>(mut stream: RequestStream<M>) -> tokio::task::JoinHandle<()>
@@ -295,7 +300,7 @@ async fn reliable_delivery_survives_a_lost_reply_current_thread() {
 async fn reliable_lost_reply() {
     let mut server = held_server(1).await;
     let wire = Cuttable::default();
-    let (client, client_driver) = client_with(fast(), wire.clone());
+    let (client, client_driver) = client_with!(fast(), wire.clone());
     let held = server.service.bind(&client);
     let call = tokio::spawn(async move { held.get_reply(&Ping { id: 7 }).await });
     assert_eq!(server.executed.recv().await, Some(1));
@@ -321,7 +326,7 @@ async fn reliable_lost_reply() {
 async fn single_attempt_reports_ambiguity_and_never_retransmits() {
     let mut server = held_server(1).await;
     let wire = Cuttable::default();
-    let (client, client_driver) = client_with(fast(), wire.clone());
+    let (client, client_driver) = client_with!(fast(), wire.clone());
     let held = server.service.bind(&client);
     let call = tokio::spawn(async move { held.try_get_reply(&Ping { id: 8 }).await });
     assert_eq!(server.executed.recv().await, Some(1));
@@ -351,7 +356,7 @@ async fn ping_timeout_detects_a_black_hole_and_reliable_calls_recover() {
         .expect("register");
     let _handler = serve_echo(stream);
     let wire = Cuttable::default();
-    let (client, client_driver) = client_with(fast(), wire.clone());
+    let (client, client_driver) = client_with!(fast(), wire.clone());
     let echo = service.bind(&client);
     echo.try_get_reply(&Ping { id: 1 }).await.expect("healthy");
     wire.cut(FROZEN);
@@ -381,7 +386,7 @@ async fn failure_monitor_separates_disconnects_addresses_and_endpoints() {
         .expect("register well-known");
     let _wk_handler = serve_echo(wk_stream);
     let address = dynamic.endpoint().address();
-    let (client, client_driver) = client_with(fast(), moonpool_rpc::Plaintext);
+    let (client, client_driver) = client_with!(fast(), moonpool_rpc::Plaintext);
     let echo = dynamic.bind(&client);
     echo.get_reply(&Ping { id: 1 }).await.expect("first");
     let monitor = client.failure_monitor().expect("running");
@@ -535,7 +540,7 @@ async fn one_way_explicit_no_reply_and_broken_promise_are_distinct() {
     let (service, mut stream) = server
         .register::<Held>(AccessClass::Public)
         .expect("register");
-    let (client, client_driver) = client_with(fast(), moonpool_rpc::Plaintext);
+    let (client, client_driver) = client_with!(fast(), moonpool_rpc::Plaintext);
     let held = service.bind(&client);
 
     held.send(&Ping { id: 1 }).expect("queued");
@@ -580,7 +585,7 @@ async fn one_way_explicit_no_reply_and_broken_promise_are_distinct() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn attempts_expose_late_outcomes() {
     let mut server = held_server(2).await;
-    let (client, client_driver) = client_with(fast(), moonpool_rpc::Plaintext);
+    let (client, client_driver) = client_with!(fast(), moonpool_rpc::Plaintext);
     let held = server.service.bind(&client);
 
     let attempt = held.attempt(&Ping { id: 1 }).expect("started");
@@ -618,7 +623,7 @@ async fn cancellation_during_backoff_is_not_admitted_and_releases_retention() {
     // A wide backoff window, so the cancellation lands inside it.
     config.peer.initial_reconnect_delay = Duration::from_secs(3);
     config.peer.max_reconnect_delay = Duration::from_secs(10);
-    let (client, client_driver) = client_with(config, moonpool_rpc::Plaintext);
+    let (client, client_driver) = client_with!(config, moonpool_rpc::Plaintext);
     let target = moonpool_rpc::ServiceRef::<Echo>::new(
         moonpool_rpc::Endpoint::new(
             vacant,
@@ -669,7 +674,7 @@ async fn idle_connections_close_and_calls_reconnect() {
     let _handler = serve_echo(stream);
     let mut config = fast();
     config.peer.idle_timeout = Duration::from_millis(150);
-    let (client, client_driver) = client_with(config, moonpool_rpc::Plaintext);
+    let (client, client_driver) = client_with!(config, moonpool_rpc::Plaintext);
     let echo = service.bind(&client);
     echo.try_get_reply(&Ping { id: 1 }).await.expect("first");
     assert!(
@@ -733,7 +738,7 @@ async fn bootstrap_resolves_invalidates_and_retries() {
         .expect("register");
     let _handler = serve_echo(stream);
     let live = server.address().expect("listening");
-    let (client, client_driver) = client_with(fast(), moonpool_rpc::Plaintext);
+    let (client, client_driver) = client_with!(fast(), moonpool_rpc::Plaintext);
     let resolver = TableResolver::default();
     let bootstrap = BootstrapClient::new(&client, resolver.clone(), Duration::from_mins(1));
     let coordinator = WellKnownRef::<Echo>::new(
@@ -1014,7 +1019,7 @@ async fn retransmission_is_not_bounded_by_the_request_queue() {
     let wire = Cuttable::default();
     let mut config = fast();
     config.max_queued_requests = 4;
-    let (client, client_driver) = client_with(config, wire.clone());
+    let (client, client_driver) = client_with!(config, wire.clone());
     let held = service.bind(&client);
     let calls = 20u64;
     let mut pending = Vec::new();

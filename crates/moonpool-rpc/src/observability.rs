@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use moonpool_core::Providers;
+use crate::RpcProviders;
 use moonpool_core::metrics::{MetricSample, MetricValue, MetricsSource, u64_to_f64_exact};
 
 use crate::security::CredentialError;
@@ -54,7 +54,7 @@ impl RpcMetrics {
     /// The metrics of the runtime behind `rpc`, or `None` if it is already
     /// gone.
     #[must_use]
-    pub fn new<P: Providers>(rpc: &RpcHandle<P>) -> Option<Self> {
+    pub fn new<P: RpcProviders>(rpc: &RpcHandle<P>) -> Option<Self> {
         let counters = Arc::clone(rpc.upgrade()?.counters());
         let rpc = rpc.clone();
         Some(Self {

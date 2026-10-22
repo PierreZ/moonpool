@@ -334,6 +334,40 @@ pub use transport::{
     RpcDriver, RpcHandle, SessionUpgrade, ShutdownReport, is_transient_accept_error,
 };
 
+/// The providers an RPC runtime runs on: a
+/// [`LocalProviders`](moonpool_core::LocalProviders) bundle whose values can
+/// be shared between handles.
+///
+/// The runtime uses the network, time and random slots only, and it spawns
+/// no task. It does not need `Send` futures or `Send` streams. Thus the same
+/// runtime code runs on three backends:
+///
+/// - `TokioProviders` in production, on a multi-threaded runtime. Every
+///   [`Providers`](moonpool_core::Providers) bundle is an `RpcProviders`, and
+///   the runtime's futures stay `Send` over it.
+/// - `CompioProviders` on a thread-per-core runtime (`io_uring` on Linux). The
+///   streams and futures are not `Send`: drive the runtime and its callers
+///   on one thread.
+/// - `SimProviders` under simulation.
+///
+/// The bundle value and its network and time providers must be
+/// `Send + Sync` (the values, not their futures), because handles,
+/// clients and reply routes hold the runtime's shared state behind weak
+/// references. Every bundle in moonpool is.
+///
+/// [`BalancedClient`](crate::balance::BalancedClient) still needs a `Send`
+/// [`Providers`](moonpool_core::Providers) bundle: it keeps its attempts as
+/// boxed `Send` futures.
+pub trait RpcProviders:
+    moonpool_core::LocalProviders<Network: Send + Sync, Time: Send + Sync> + Send + Sync
+{
+}
+
+impl<P> RpcProviders for P where
+    P: moonpool_core::LocalProviders<Network: Send + Sync, Time: Send + Sync> + Send + Sync
+{
+}
+
 /// Generate a typed interface from a trait (feature `derive`).
 ///
 /// ```
@@ -378,4 +412,6 @@ pub use moonpool_rpc_derive::service;
 #[doc(hidden)]
 pub mod __private {
     pub use moonpool_core::Providers;
+
+    pub use crate::RpcProviders;
 }

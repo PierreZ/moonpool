@@ -632,7 +632,7 @@ fn describe(
 
 impl<S> Connector<S> for Tls
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + 'static,
 {
     type Stream = futures_rustls::client::TlsStream<S>;
 
@@ -682,7 +682,7 @@ where
 
 impl<S> Acceptor<S> for Tls
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + 'static,
 {
     type Stream = futures_rustls::server::TlsStream<S>;
 

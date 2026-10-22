@@ -5,7 +5,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 
-use moonpool_core::Providers;
+use crate::RpcProviders;
 
 use super::calls::{RequestKind, overloaded, request_frame};
 use super::connection::{Connection, QueueRefusal};
@@ -30,7 +30,7 @@ use crate::stream::producer::{
 /// A started stream: its consumer and the guard that abandons it.
 pub(crate) type StartedStream = (Arc<ConsumerCore>, CallGuard);
 
-impl<P: Providers> Shared<P> {
+impl<P: RpcProviders> Shared<P> {
     /// Open a reply stream to `endpoint` announcing `window` bytes.
     pub(crate) fn start_stream(
         &self,
@@ -364,7 +364,7 @@ impl<P: Providers> Shared<P> {
     }
 }
 
-impl<P: Providers> LocalStreamSink for Shared<P> {
+impl<P: RpcProviders> LocalStreamSink for Shared<P> {
     fn local_item(
         &self,
         call_id: u64,

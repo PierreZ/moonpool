@@ -6,7 +6,9 @@ use std::sync::Weak;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use moonpool_core::LocalTimeProvider;
+
+use crate::RpcProviders;
 
 use super::connection::CloseReason;
 use super::{Command, DRAINING, PendingCall, RUNNING, Shared, TERMINATED};
@@ -44,7 +46,7 @@ pub struct ShutdownReport {
     pub closed_cleanly: bool,
 }
 
-impl<P: Providers> Shared<P> {
+impl<P: RpcProviders> Shared<P> {
     /// Stop admitting and starting work. Returns `false` if a shutdown
     /// already began.
     pub(super) fn begin_shutdown(&self) -> bool {
@@ -132,7 +134,7 @@ impl<P: Providers> Shared<P> {
 }
 
 /// The graceful shutdown of the runtime behind `weak`.
-pub(super) async fn shutdown<P: Providers>(
+pub(super) async fn shutdown<P: RpcProviders>(
     weak: Weak<Shared<P>>,
     grace: Duration,
 ) -> ShutdownReport {

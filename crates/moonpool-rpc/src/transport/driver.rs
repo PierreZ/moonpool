@@ -4,16 +4,18 @@
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
 use std::time::Duration;
 
 use futures::channel::mpsc;
+use futures::future::Either;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::stream::FuturesUnordered;
 use futures::{AsyncReadExt, StreamExt};
-use moonpool_core::{NetworkProvider, Providers, RandomProvider, TcpListenerTrait, TimeProvider};
+use moonpool_core::{LocalNetworkProvider, LocalTcpListener, LocalTimeProvider, RandomProvider};
+
+use crate::RpcProviders;
 
 use super::connection::{CloseReason, Connection, read_loop, write_loop};
 use super::handle::RpcHandle;
@@ -24,21 +26,19 @@ use crate::config::RpcConfig;
 use crate::protocol::{PROTOCOL_VERSION, decode_message_at};
 use crate::stats::{Counters, TaskGuard};
 
-type ChildFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-
 /// The owned RPC runtime: poll [`run`](Self::run) to make progress.
 ///
 /// Dropping it (or the `run` future) is the shutdown: listener, connections,
 /// registrations and pending calls go with it. `U` upgrades every session
 /// ([`Plaintext`] by default).
-pub struct RpcDriver<P: Providers, U = Plaintext> {
+pub struct RpcDriver<P: RpcProviders, U = Plaintext> {
     shared: Arc<Shared<P>>,
-    commands: mpsc::UnboundedReceiver<Command<P>>,
+    commands: mpsc::UnboundedReceiver<Command>,
     listener: Option<Listener<P>>,
     upgrade: Arc<U>,
 }
 
-impl<P: Providers, U> std::fmt::Debug for RpcDriver<P, U> {
+impl<P: RpcProviders, U> std::fmt::Debug for RpcDriver<P, U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RpcDriver")
             .field("incarnation", &self.shared.incarnation)
@@ -47,7 +47,7 @@ impl<P: Providers, U> std::fmt::Debug for RpcDriver<P, U> {
     }
 }
 
-impl<P: Providers> RpcDriver<P> {
+impl<P: RpcProviders> RpcDriver<P> {
     /// Bind `bind_address` and build a plaintext runtime that serves
     /// endpoints there and can call others.
     ///
@@ -76,7 +76,7 @@ impl<P: Providers> RpcDriver<P> {
     }
 }
 
-impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
+impl<P: RpcProviders, U: SessionUpgrade<P>> RpcDriver<P, U> {
     fn build(
         providers: P,
         config: RpcConfig,
@@ -166,12 +166,14 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
             listener,
             upgrade,
         } = self;
-        let mut children: FuturesUnordered<ChildFuture> = FuturesUnordered::new();
-        let mut acceptor: Option<Pin<Box<dyn Future<Output = io::Error> + Send>>> =
-            listener.map(|listener| {
-                Box::pin(accept_loop(Arc::clone(&shared), listener))
-                    as Pin<Box<dyn Future<Output = io::Error> + Send>>
-            });
+        // No future is boxed as `dyn Future + Send`: the children keep their
+        // concrete types, so `run` is `Send` exactly when the providers'
+        // streams and futures are (Tokio, simulation) and still runs where
+        // they are not (compio).
+        let mut children = FuturesUnordered::new();
+        let (accepted_sender, mut accepted) = mpsc::unbounded();
+        let mut acceptor = listener
+            .map(|listener| Box::pin(accept_loop(Arc::clone(&shared), listener, accepted_sender)));
         futures::future::poll_fn(|cx| {
             if let Some(accepting) = acceptor.as_mut()
                 && let Poll::Ready(error) = accepting.as_mut().poll(cx)
@@ -182,22 +184,28 @@ impl<P: Providers, U: SessionUpgrade<P>> RpcDriver<P, U> {
             // New work first, so a connection queued by a caller is polled in
             // this same pass.
             while let Poll::Ready(Some(command)) = commands.poll_next_unpin(cx) {
-                let shared = Arc::clone(&shared);
-                let upgrade = Arc::clone(&upgrade);
-                let child: ChildFuture = match command {
+                match command {
                     Command::Connect(connection, address) => {
-                        Box::pin(drive_outbound(shared, upgrade, connection, address))
-                    }
-                    Command::Accepted(connection, stream) => {
-                        Box::pin(drive_inbound(shared, upgrade, connection, stream))
+                        children.push(Box::pin(Either::Left(drive_outbound(
+                            Arc::clone(&shared),
+                            Arc::clone(&upgrade),
+                            connection,
+                            address,
+                        ))));
                     }
                     Command::StopAccepting => {
                         // A graceful shutdown began: close the listener.
                         acceptor = None;
-                        continue;
                     }
-                };
-                children.push(child);
+                }
+            }
+            while let Poll::Ready(Some((connection, stream))) = accepted.poll_next_unpin(cx) {
+                children.push(Box::pin(Either::Right(drive_inbound(
+                    Arc::clone(&shared),
+                    Arc::clone(&upgrade),
+                    connection,
+                    stream,
+                ))));
             }
             // Returns Pending once every child is parked (or after its
             // cooperative budget, having scheduled a re-poll).
@@ -242,14 +250,23 @@ fn validated(config: &RpcConfig) -> io::Result<()> {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
 }
 
-async fn accept_loop<P: Providers>(shared: Arc<Shared<P>>, listener: Listener<P>) -> io::Error {
+/// Accept until the listener fails fatally; every admitted stream goes to
+/// the driver through `accepted`.
+async fn accept_loop<P: RpcProviders>(
+    shared: Arc<Shared<P>>,
+    listener: Listener<P>,
+    accepted: mpsc::UnboundedSender<(Arc<Connection>, Stream<P>)>,
+) -> io::Error {
     let _task = TaskGuard::new(&shared.counters);
     let mut backoff = ACCEPT_BACKOFF_MIN;
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
                 backoff = ACCEPT_BACKOFF_MIN;
-                shared.accept(stream, peer);
+                if let Some(connection) = shared.accept(peer) {
+                    // The receiver lives in the driver that runs this loop.
+                    let _ = accepted.unbounded_send((connection, stream));
+                }
             }
             Err(error) if is_transient_accept_error(&error) => {
                 Counters::bump(&shared.counters.accept_errors);
@@ -267,7 +284,7 @@ async fn accept_loop<P: Providers>(shared: Arc<Shared<P>>, listener: Listener<P>
     }
 }
 
-async fn drive_outbound<P: Providers, U: SessionUpgrade<P>>(
+async fn drive_outbound<P: RpcProviders, U: SessionUpgrade<P>>(
     shared: Arc<Shared<P>>,
     upgrade: Arc<U>,
     connection: Arc<Connection>,
@@ -307,7 +324,7 @@ async fn drive_outbound<P: Providers, U: SessionUpgrade<P>>(
     shared.close_connection(&connection, reason);
 }
 
-async fn drive_inbound<P: Providers, U: SessionUpgrade<P>>(
+async fn drive_inbound<P: RpcProviders, U: SessionUpgrade<P>>(
     shared: Arc<Shared<P>>,
     upgrade: Arc<U>,
     connection: Arc<Connection>,
@@ -330,7 +347,7 @@ async fn drive_inbound<P: Providers, U: SessionUpgrade<P>>(
     shared.close_connection(&connection, reason);
 }
 
-impl<P: Providers> Shared<P> {
+impl<P: RpcProviders> Shared<P> {
     /// The jittered pause before dialing `address` now, recorded as that
     /// peer's latest dial.
     fn dial_delay(&self, address: SocketAddr) -> Duration {
@@ -362,8 +379,8 @@ async fn run_session<P, S>(
     stream: S,
 ) -> CloseReason
 where
-    P: Providers,
-    S: AsyncRead + AsyncWrite + Unpin + Send,
+    P: RpcProviders,
+    S: AsyncRead + AsyncWrite + Unpin,
 {
     Counters::bump(&shared.counters.connections_opened);
     let (reader, writer) = stream.split();
@@ -418,7 +435,7 @@ where
 }
 
 /// Resolves only if the peer's `Hello` has not arrived within `timeout`.
-async fn handshake_deadline<P: Providers>(
+async fn handshake_deadline<P: RpcProviders>(
     shared: &Arc<Shared<P>>,
     connection: &Arc<Connection>,
     timeout: Duration,
@@ -434,7 +451,7 @@ async fn handshake_deadline<P: Providers>(
 /// `connectionMonitor`): every jittered ping interval, close the session
 /// if it sat idle long enough; on a selected connection, send a ping and
 /// fail the session if nothing at all arrives within the ping timeout.
-async fn monitor<P: Providers>(
+async fn monitor<P: RpcProviders>(
     shared: &Arc<Shared<P>>,
     connection: &Arc<Connection>,
 ) -> CloseReason {

@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use moonpool_core::Providers;
+use crate::RpcProviders;
 
 use super::connection::{CloseReason, Connection, Direction, PeerHello};
 use super::peer::Peer;
@@ -30,7 +30,7 @@ struct Hello {
     listen: Option<SocketAddr>,
 }
 
-impl<P: Providers> Shared<P> {
+impl<P: RpcProviders> Shared<P> {
     /// Handle one decoded frame from `connection`.
     pub(super) fn on_message(
         &self,

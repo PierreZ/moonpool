@@ -15,7 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moonpool_core::{Providers, RandomProvider, Resolver, TimeProvider};
+use moonpool_core::{LocalTimeProvider, RandomProvider, Resolver};
+
+use crate::RpcProviders;
 
 use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 use crate::error::{ErrorReason, Execution, RpcError};
@@ -230,7 +232,7 @@ struct Cached {
 /// ([`ErrorReason::LookupFailed`]), a connection failure
 /// ([`ErrorReason::ConnectFailed`], [`ErrorReason::Disconnected`]) and an
 /// endpoint failure ([`ErrorReason::EndpointNotFound`]) stay distinct.
-pub struct BootstrapClient<P: Providers, R: Resolver> {
+pub struct BootstrapClient<P: RpcProviders, R: Resolver> {
     rpc: RpcHandle<P>,
     resolver: R,
     ttl: Duration,
@@ -238,7 +240,7 @@ pub struct BootstrapClient<P: Providers, R: Resolver> {
     counters: Arc<Counters>,
 }
 
-impl<P: Providers, R: Resolver> Clone for BootstrapClient<P, R> {
+impl<P: RpcProviders, R: Resolver> Clone for BootstrapClient<P, R> {
     fn clone(&self) -> Self {
         Self {
             rpc: self.rpc.clone(),
@@ -250,7 +252,7 @@ impl<P: Providers, R: Resolver> Clone for BootstrapClient<P, R> {
     }
 }
 
-impl<P: Providers, R: Resolver> std::fmt::Debug for BootstrapClient<P, R> {
+impl<P: RpcProviders, R: Resolver> std::fmt::Debug for BootstrapClient<P, R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BootstrapClient")
             .field("ttl", &self.ttl)
@@ -263,7 +265,7 @@ fn shutdown() -> RpcError {
     RpcError::not_admitted(ErrorReason::Shutdown)
 }
 
-impl<P: Providers, R: Resolver> BootstrapClient<P, R> {
+impl<P: RpcProviders, R: Resolver> BootstrapClient<P, R> {
     /// A client calling through `rpc`, resolving with `resolver` and
     /// trusting an answer for `ttl`.
     #[must_use]

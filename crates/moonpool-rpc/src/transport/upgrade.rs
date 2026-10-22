@@ -91,7 +91,7 @@ impl PeerContext {
 /// Upgrades an outbound provider stream `S` into a session stream.
 pub trait Connector<S>: Send + Sync + 'static {
     /// The upgraded stream the session runs over.
-    type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+    type Stream: AsyncRead + AsyncWrite + Unpin + 'static;
 
     /// Upgrade `stream`, freshly connected to `peer`.
     ///
@@ -101,7 +101,7 @@ pub trait Connector<S>: Send + Sync + 'static {
         &self,
         stream: S,
         peer: &str,
-    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>> + Send;
+    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>>;
 
     /// Whether [`connect`](Self::connect) authenticates the server it
     /// reaches (as a TLS client verifying a certificate does). Default:
@@ -121,7 +121,7 @@ pub trait Connector<S>: Send + Sync + 'static {
 /// Upgrades an accepted provider stream `S` into a session stream.
 pub trait Acceptor<S>: Send + Sync + 'static {
     /// The upgraded stream the session runs over.
-    type Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+    type Stream: AsyncRead + AsyncWrite + Unpin + 'static;
 
     /// Upgrade `stream`, just accepted from `peer`.
     ///
@@ -131,7 +131,7 @@ pub trait Acceptor<S>: Send + Sync + 'static {
         &self,
         stream: S,
         peer: &str,
-    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>> + Send;
+    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>>;
 }
 
 /// No upgrade: the session runs over the provider stream as is.
@@ -143,7 +143,7 @@ pub struct Plaintext;
 
 impl<S> Connector<S> for Plaintext
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + 'static,
 {
     type Stream = S;
 
@@ -154,7 +154,7 @@ where
 
 impl<S> Acceptor<S> for Plaintext
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + 'static,
 {
     type Stream = S;
 

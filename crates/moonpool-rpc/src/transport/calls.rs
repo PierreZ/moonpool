@@ -2,8 +2,8 @@
 
 use std::sync::{Arc, Weak};
 
+use crate::RpcProviders;
 use futures::channel::oneshot;
-use moonpool_core::Providers;
 
 use super::connection::{CloseReason, Connection, QueueRefusal, Transmit};
 use super::{
@@ -102,7 +102,7 @@ pub(super) fn overloaded() -> RpcError {
     RpcError::not_admitted(ErrorReason::Overloaded)
 }
 
-impl<P: Providers> Shared<P> {
+impl<P: RpcProviders> Shared<P> {
     /// Why a request carrying a credential must not be written on
     /// `connection`, if it must not: the credential then never leaves this
     /// process. Checked when the frame is about to be written, the first
@@ -793,7 +793,7 @@ fn disconnect_error(reason: &CloseReason, established: bool, call: &PendingCall)
     }
 }
 
-impl<P: Providers> CallOwner for Shared<P> {
+impl<P: RpcProviders> CallOwner for Shared<P> {
     fn abandon(&self, call_id: u64) -> Option<bool> {
         let mut state = self.lock();
         let call = state.pending.remove(&call_id)?;
@@ -850,7 +850,7 @@ impl<P: Providers> CallOwner for Shared<P> {
     }
 }
 
-impl<P: Providers> LocalSink for Shared<P> {
+impl<P: RpcProviders> LocalSink for Shared<P> {
     fn complete_local(&self, call_id: u64, outcome: WireOutcome) {
         self.complete(Origin::Local, call_id, outcome);
     }

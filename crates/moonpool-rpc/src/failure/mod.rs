@@ -35,7 +35,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use moonpool_core::{Providers, TimeProvider};
+use moonpool_core::LocalTimeProvider;
+
+use crate::RpcProviders;
 
 pub(crate) use self::state::{MonitorState, PermanentFailure};
 use self::watch::Watch;
@@ -82,13 +84,13 @@ impl EndpointState {
 /// Queries answer from the monitor's current belief; `on_*` methods return
 /// futures that resolve when that belief changes. Each future captures
 /// what it compares against when it is *created*, not when first polled.
-pub struct FailureMonitor<P: Providers> {
+pub struct FailureMonitor<P: RpcProviders> {
     shared: Weak<Shared<P>>,
     watch: Arc<Watch>,
     time: P::Time,
 }
 
-impl<P: Providers> Clone for FailureMonitor<P> {
+impl<P: RpcProviders> Clone for FailureMonitor<P> {
     fn clone(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -98,7 +100,7 @@ impl<P: Providers> Clone for FailureMonitor<P> {
     }
 }
 
-impl<P: Providers> std::fmt::Debug for FailureMonitor<P> {
+impl<P: RpcProviders> std::fmt::Debug for FailureMonitor<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FailureMonitor")
             .field("revision", &self.revision())
@@ -113,7 +115,7 @@ fn shutdown() -> RpcError {
     RpcError::not_admitted(ErrorReason::Shutdown)
 }
 
-impl<P: Providers> FailureMonitor<P> {
+impl<P: RpcProviders> FailureMonitor<P> {
     pub(crate) fn new(shared: &Arc<Shared<P>>) -> Self {
         Self {
             shared: Arc::downgrade(shared),
@@ -169,7 +171,7 @@ impl<P: Providers> FailureMonitor<P> {
     fn wait_until(
         &self,
         mut ready: impl FnMut(&MonitorState) -> bool + Send + 'static,
-    ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), RpcError>> + 'static {
         let shared = self.shared.clone();
         let watch = Arc::clone(&self.watch);
         async move {
@@ -200,7 +202,7 @@ impl<P: Providers> FailureMonitor<P> {
     /// # Errors
     ///
     /// [`ErrorReason::Shutdown`] once the runtime is gone.
-    pub fn on_change(&self) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
+    pub fn on_change(&self) -> impl Future<Output = Result<(), RpcError>> + 'static {
         let watch = Arc::clone(&self.watch);
         let since = watch.version();
         async move {
@@ -220,7 +222,7 @@ impl<P: Providers> FailureMonitor<P> {
     pub fn on_disconnect(
         &self,
         address: SocketAddr,
-    ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), RpcError>> + 'static {
         let since = self.read(MonitorState::sequence);
         self.wait_until(move |monitor| monitor.disconnected_since(address, since))
     }
@@ -234,7 +236,7 @@ impl<P: Providers> FailureMonitor<P> {
     pub fn on_failed(
         &self,
         endpoint: Endpoint,
-    ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), RpcError>> + 'static {
         self.wait_until(move |monitor| {
             monitor.endpoint_state(&endpoint) != EndpointState::Available
         })
@@ -248,7 +250,7 @@ impl<P: Providers> FailureMonitor<P> {
     pub fn on_available(
         &self,
         address: SocketAddr,
-    ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), RpcError>> + 'static {
         self.wait_until(move |monitor| monitor.address_state(address) == AddressState::Available)
     }
 
@@ -262,7 +264,7 @@ impl<P: Providers> FailureMonitor<P> {
     pub fn on_disconnect_or_failure(
         &self,
         endpoint: Endpoint,
-    ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), RpcError>> + 'static {
         let since = self.read(MonitorState::sequence);
         self.wait_until(move |monitor| {
             monitor.endpoint_state(&endpoint) != EndpointState::Available
@@ -288,7 +290,7 @@ impl<P: Providers> FailureMonitor<P> {
         endpoint: Endpoint,
         sustained: Duration,
         slope: f64,
-    ) -> impl Future<Output = Result<(), RpcError>> + Send + 'static {
+    ) -> impl Future<Output = Result<(), RpcError>> + 'static {
         let slope = if slope.is_finite() {
             slope.clamp(0.0, 0.99)
         } else {
@@ -323,12 +325,12 @@ impl<P: Providers> FailureMonitor<P> {
 }
 
 /// Keeps an address probed while it is failing, for as long as it lives.
-pub(crate) struct PeerReference<P: Providers> {
+pub(crate) struct PeerReference<P: RpcProviders> {
     shared: Weak<Shared<P>>,
     address: SocketAddr,
 }
 
-impl<P: Providers> PeerReference<P> {
+impl<P: RpcProviders> PeerReference<P> {
     pub(crate) fn new(shared: &Weak<Shared<P>>, address: SocketAddr) -> Self {
         if let Some(shared) = shared.upgrade() {
             shared.reference(address, true);
@@ -340,7 +342,7 @@ impl<P: Providers> PeerReference<P> {
     }
 }
 
-impl<P: Providers> Drop for PeerReference<P> {
+impl<P: RpcProviders> Drop for PeerReference<P> {
     fn drop(&mut self) {
         if let Some(shared) = self.shared.upgrade() {
             shared.reference(self.address, false);
