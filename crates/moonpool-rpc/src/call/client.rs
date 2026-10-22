@@ -8,7 +8,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::channel::oneshot;
-use moonpool_core::{Providers, TimeProvider};
+use moonpool_core::LocalTimeProvider;
+
+use crate::RpcProviders;
 
 use crate::codec::{Wire, encode_to_vec};
 use crate::error::{CallIdentity, ErrorReason, Execution, RpcError};
@@ -23,13 +25,13 @@ use crate::transport::{Delivery, ReplyBytes, RpcHandle};
 /// Cloning is cheap. A client holds the runtime weakly: it never keeps a
 /// dropped runtime serving, and calls on it then fail with
 /// [`ErrorReason::Shutdown`].
-pub struct ServiceClient<P: Providers, M: RpcMethod> {
+pub struct ServiceClient<P: RpcProviders, M: RpcMethod> {
     rpc: RpcHandle<P>,
     target: ServiceRef<M>,
     credentials: Option<Arc<dyn CredentialSource>>,
 }
 
-impl<P: Providers, M: RpcMethod> Clone for ServiceClient<P, M> {
+impl<P: RpcProviders, M: RpcMethod> Clone for ServiceClient<P, M> {
     fn clone(&self) -> Self {
         Self {
             rpc: self.rpc.clone(),
@@ -39,7 +41,7 @@ impl<P: Providers, M: RpcMethod> Clone for ServiceClient<P, M> {
     }
 }
 
-impl<P: Providers, M: RpcMethod> std::fmt::Debug for ServiceClient<P, M> {
+impl<P: RpcProviders, M: RpcMethod> std::fmt::Debug for ServiceClient<P, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceClient")
             .field("target", &self.target)
@@ -47,7 +49,7 @@ impl<P: Providers, M: RpcMethod> std::fmt::Debug for ServiceClient<P, M> {
     }
 }
 
-impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
+impl<P: RpcProviders, M: RpcMethod> ServiceClient<P, M> {
     pub(crate) fn new(rpc: RpcHandle<P>, target: ServiceRef<M>) -> Self {
         Self {
             rpc,
@@ -359,14 +361,14 @@ impl<P: Providers, M: RpcMethod> ServiceClient<P, M> {
 /// afterwards is counted and discarded, and a request still queued behind
 /// the handshake is withdrawn.
 #[must_use = "dropping an attempt abandons it"]
-pub struct ReplyAttempt<P: Providers, M: RpcMethod> {
+pub struct ReplyAttempt<P: RpcProviders, M: RpcMethod> {
     receiver: oneshot::Receiver<Result<ReplyBytes, RpcError>>,
     guard: Option<CallGuard>,
     time: P::Time,
     _method: PhantomData<fn() -> M>,
 }
 
-impl<P: Providers, M: RpcMethod> std::fmt::Debug for ReplyAttempt<P, M> {
+impl<P: RpcProviders, M: RpcMethod> std::fmt::Debug for ReplyAttempt<P, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReplyAttempt")
             .field("method", &M::NAME)
@@ -375,7 +377,7 @@ impl<P: Providers, M: RpcMethod> std::fmt::Debug for ReplyAttempt<P, M> {
     }
 }
 
-impl<P: Providers, M: RpcMethod> ReplyAttempt<P, M> {
+impl<P: RpcProviders, M: RpcMethod> ReplyAttempt<P, M> {
     fn finish(
         outcome: Result<Result<ReplyBytes, RpcError>, oneshot::Canceled>,
     ) -> Result<M::Reply, RpcError> {
@@ -464,9 +466,9 @@ impl<P: Providers, M: RpcMethod> ReplyAttempt<P, M> {
 
 // No field is ever pinned: the receiver is `Unpin` and the clock is only
 // used to create a separate sleep future.
-impl<P: Providers, M: RpcMethod> Unpin for ReplyAttempt<P, M> {}
+impl<P: RpcProviders, M: RpcMethod> Unpin for ReplyAttempt<P, M> {}
 
-impl<P: Providers, M: RpcMethod> Future for ReplyAttempt<P, M> {
+impl<P: RpcProviders, M: RpcMethod> Future for ReplyAttempt<P, M> {
     type Output = Result<M::Reply, RpcError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {

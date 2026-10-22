@@ -460,11 +460,11 @@ fn client(service: &Service, names: &Names, methods: &[Method]) -> TokenStream {
     });
     quote! {
         #[doc = #client_doc]
-        #vis struct #client<P: #rpc::__private::Providers> {
+        #vis struct #client<P: #rpc::__private::RpcProviders> {
             inner: #rpc::InterfaceClient<P, #interface>,
         }
 
-        impl<P: #rpc::__private::Providers> #client<P> {
+        impl<P: #rpc::__private::RpcProviders> #client<P> {
             /// Bind a reference to a runtime after checking it.
             ///
             /// # Errors
@@ -489,7 +489,7 @@ fn client(service: &Service, names: &Names, methods: &[Method]) -> TokenStream {
             #(#client_methods)*
         }
 
-        impl<P: #rpc::__private::Providers> ::core::clone::Clone for #client<P> {
+        impl<P: #rpc::__private::RpcProviders> ::core::clone::Clone for #client<P> {
             fn clone(&self) -> Self {
                 Self {
                     inner: self.inner.clone(),
@@ -497,7 +497,7 @@ fn client(service: &Service, names: &Names, methods: &[Method]) -> TokenStream {
             }
         }
 
-        impl<P: #rpc::__private::Providers> ::core::fmt::Debug for #client<P> {
+        impl<P: #rpc::__private::RpcProviders> ::core::fmt::Debug for #client<P> {
             fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 ::core::fmt::Debug::fmt(&self.inner, f)
             }
@@ -566,7 +566,7 @@ fn server(service: &Service, names: &Names, methods: &[Method]) -> TokenStream {
             /// # Errors
             ///
             /// As for `RpcHandle::register_group`.
-            pub fn register<P: #rpc::__private::Providers>(
+            pub fn register<P: #rpc::__private::RpcProviders>(
                 rpc: &#rpc::RpcHandle<P>,
                 access: #rpc::AccessClass,
             ) -> ::core::result::Result<Self, #rpc::RpcError> {

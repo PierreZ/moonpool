@@ -1,8 +1,11 @@
 # moonpool-rpc
 
 Typed request/reply RPC between dynamically allocated endpoints, over the
-moonpool provider traits. The same code runs on real TCP (`TokioProviders`)
-and under deterministic simulation (`SimProviders`). The design follows
+moonpool provider traits. The same code runs on real TCP (`TokioProviders`,
+or `CompioProviders` on a thread-per-core compio runtime) and under
+deterministic simulation (`SimProviders`). The runtime takes any
+`RpcProviders` bundle: it needs no `Send` futures or streams, and it spawns
+no task. The design follows
 FoundationDB's `fdbrpc`. It is not wire-compatible with it.
 
 ## Quick start

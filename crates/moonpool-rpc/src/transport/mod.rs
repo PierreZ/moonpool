@@ -64,7 +64,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, Weak};
 
 use futures::channel::{mpsc, oneshot};
-use moonpool_core::{NetworkProvider, Providers, RandomProvider};
+use moonpool_core::{LocalNetworkProvider, LocalProviders, RandomProvider};
+
+use crate::RpcProviders;
 
 use self::connection::{Connection, Direction, QueueLimits};
 use self::peer::Peer;
@@ -91,24 +93,26 @@ pub use self::driver::{RpcDriver, is_transient_accept_error};
 pub use self::handle::RpcHandle;
 pub use self::shutdown::ShutdownReport;
 
-type Stream<P> = <<P as Providers>::Network as NetworkProvider>::TcpStream;
-type Listener<P> = <<P as Providers>::Network as NetworkProvider>::TcpListener;
+type Stream<P> = <<P as LocalProviders>::Network as LocalNetworkProvider>::TcpStream;
+type Listener<P> = <<P as LocalProviders>::Network as LocalNetworkProvider>::TcpListener;
 
 /// A session upgrade usable for both directions of provider `P`'s streams.
 ///
 /// Blanket-implemented for every type that is both a [`Connector`] and an
 /// [`Acceptor`] of `P`'s TCP stream.
-pub trait SessionUpgrade<P: Providers>: Connector<Stream<P>> + Acceptor<Stream<P>> {}
+pub trait SessionUpgrade<P: RpcProviders>: Connector<Stream<P>> + Acceptor<Stream<P>> {}
 
-impl<P: Providers, U> SessionUpgrade<P> for U where U: Connector<Stream<P>> + Acceptor<Stream<P>> {}
+impl<P: RpcProviders, U> SessionUpgrade<P> for U where U: Connector<Stream<P>> + Acceptor<Stream<P>> {}
 
-/// Work handed to the driver by handles and the accept loop.
-enum Command<P: Providers> {
+/// Work handed to the driver by handles.
+///
+/// Accepted streams do not pass here: the accept loop hands them to the
+/// driver directly, so the shared state never holds a stream and stays
+/// `Send + Sync` over a backend whose streams are not `Send`.
+enum Command {
     /// Wait out the peer's backoff, then connect, upgrade and drive an
     /// outbound connection.
     Connect(Arc<Connection>, SocketAddr),
-    /// Upgrade and drive an accepted connection.
-    Accepted(Arc<Connection>, Stream<P>),
     /// A graceful shutdown began: stop accepting.
     StopAccepting,
 }
@@ -272,13 +276,13 @@ struct State {
 }
 
 /// The runtime's shared state; the driver holds the only strong reference.
-pub(crate) struct Shared<P: Providers> {
+pub(crate) struct Shared<P: RpcProviders> {
     providers: P,
     config: RpcConfig,
     incarnation: Incarnation,
     address: Option<SocketAddr>,
     state: Mutex<State>,
-    commands: mpsc::UnboundedSender<Command<P>>,
+    commands: mpsc::UnboundedSender<Command>,
     counters: Arc<Counters>,
     /// Published after every failure-monitor change; closed on drop.
     watch: Arc<Watch>,
@@ -303,19 +307,19 @@ const DRAINING: u8 = 1;
 /// closed.
 const TERMINATED: u8 = 2;
 
-impl<P: Providers> Drop for Shared<P> {
+impl<P: RpcProviders> Drop for Shared<P> {
     fn drop(&mut self) {
         // Release every failure-monitor waiter: the runtime is gone.
         self.watch.close();
     }
 }
 
-impl<P: Providers> Shared<P> {
+impl<P: RpcProviders> Shared<P> {
     fn new(
         providers: P,
         config: RpcConfig,
         address: Option<SocketAddr>,
-        commands: mpsc::UnboundedSender<Command<P>>,
+        commands: mpsc::UnboundedSender<Command>,
         authenticates_server: bool,
     ) -> Arc<Self> {
         let inbound_sharing = if authenticates_server {
@@ -387,7 +391,7 @@ impl<P: Providers> Shared<P> {
     }
 
     fn now(&self) -> std::time::Duration {
-        moonpool_core::TimeProvider::now(self.time())
+        moonpool_core::LocalTimeProvider::now(self.time())
     }
 
     pub(crate) fn watch(&self) -> &Arc<Watch> {
@@ -749,9 +753,11 @@ impl<P: Providers> Shared<P> {
         connection
     }
 
-    fn accept(&self, stream: Stream<P>, peer: String) {
+    /// Admit an accepted stream from `peer`: the new connection to drive,
+    /// or `None` when it is refused (and its stream is to be dropped).
+    fn accept(&self, peer: String) -> Option<Arc<Connection>> {
         if self.is_closing() {
-            return;
+            return None;
         }
         if !self.config.security.allow_list().allows_peer(&peer) {
             Counters::bump(&self.counters.connections_refused_by_policy);
@@ -760,21 +766,16 @@ impl<P: Providers> Shared<P> {
                 from = %peer,
                 "rpc_connection_refused"
             );
-            return;
+            return None;
         }
         let mut state = self.lock();
         if state.connections.len() >= self.config.max_connections {
             drop(state);
             Counters::bump(&self.counters.connections_rejected);
             tracing::warn!(%peer, "rpc connection budget exhausted, refusing inbound connection");
-            return;
+            return None;
         }
-        let connection = self.new_connection(&mut state, peer, Direction::Inbound);
-        drop(state);
-        // The receiver lives in the driver that runs this accept loop.
-        let _ = self
-            .commands
-            .unbounded_send(Command::Accepted(connection, stream));
+        Some(self.new_connection(&mut state, peer, Direction::Inbound))
     }
 
     fn stats(&self) -> RpcStats {
@@ -799,7 +800,7 @@ impl<P: Providers> Shared<P> {
     }
 }
 
-impl<P: Providers> EndpointOwner for Shared<P> {
+impl<P: RpcProviders> EndpointOwner for Shared<P> {
     fn unregister(&self, token: EndpointToken, method: Option<MethodId>) {
         let mut state = self.lock();
         let removed = match method {

@@ -249,6 +249,13 @@ impl QualificationWorkload {
                     Kind::WrongAudience,
                 ][ctx.random().random_range(0..9)];
                 let _ = self.auth(ctx, runtimes, None, kind).await;
+                // The rotation scenario needs a retired key refused and then
+                // a current one accepted. Left to the draw, that pair is
+                // rare in a short campaign: sometimes follow a refusal of
+                // the retired key at once with a call on the current key.
+                if self.retired_refused && moonpool_sim::buggify_with_prob!(0.5) {
+                    let _ = self.auth(ctx, runtimes, None, Kind::Valid).await;
+                }
             }
             QualOp::Stale => self.stale(ctx, runtimes).await,
             QualOp::Lookup => {

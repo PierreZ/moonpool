@@ -119,6 +119,11 @@ jobs:
         run: |
           nix develop --command cargo clippy -p moonpool-journal --features compio-providers --all-targets -- --deny warnings
           nix develop --command cargo nextest run -p moonpool-journal --features compio-providers -E 'binary(compio_filesystem)'
+      # The RPC runtime over compio, behind the same off-by-default feature.
+      - name: moonpool-rpc on compio
+        run: |
+          nix develop --command cargo clippy -p moonpool-rpc --features compio-providers --all-targets -- --deny warnings
+          nix develop --command cargo nextest run -p moonpool-rpc --features compio-providers -E 'binary(compio)'
       - name: Build for wasm32-unknown-unknown
         run: |
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions

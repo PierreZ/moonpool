@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 
-use moonpool_core::Providers;
+use crate::RpcProviders;
 
 use super::Shared;
 use crate::call::client::ServiceClient;
@@ -21,11 +21,11 @@ use crate::stats::{ResourceProbe, RpcStats};
 /// Registers endpoints and binds clients. It never keeps the runtime alive:
 /// once the [`RpcDriver`](crate::RpcDriver) is dropped every operation
 /// fails with [`ErrorReason::Shutdown`] (or returns `None`).
-pub struct RpcHandle<P: Providers> {
+pub struct RpcHandle<P: RpcProviders> {
     shared: Weak<Shared<P>>,
 }
 
-impl<P: Providers> Clone for RpcHandle<P> {
+impl<P: RpcProviders> Clone for RpcHandle<P> {
     fn clone(&self) -> Self {
         Self {
             shared: self.shared.clone(),
@@ -33,7 +33,7 @@ impl<P: Providers> Clone for RpcHandle<P> {
     }
 }
 
-impl<P: Providers> std::fmt::Debug for RpcHandle<P> {
+impl<P: RpcProviders> std::fmt::Debug for RpcHandle<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RpcHandle")
             .field("running", &self.is_running())
@@ -41,7 +41,7 @@ impl<P: Providers> std::fmt::Debug for RpcHandle<P> {
     }
 }
 
-impl<P: Providers> RpcHandle<P> {
+impl<P: RpcProviders> RpcHandle<P> {
     pub(crate) fn new(shared: &Arc<Shared<P>>) -> Self {
         Self {
             shared: Arc::downgrade(shared),

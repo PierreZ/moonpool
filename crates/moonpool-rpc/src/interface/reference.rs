@@ -4,7 +4,7 @@
 use std::marker::PhantomData;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use moonpool_core::Providers;
+use crate::RpcProviders;
 
 use super::proto::{Counter, ProtoError, ProtoReader, ProtoWriter, Sink, Value};
 use super::{InterfaceId, InterfaceMethod, RpcInterface};
@@ -449,7 +449,7 @@ impl<M: RpcMethod> ServiceRef<M> {
     /// Binding registers nothing and checks nothing remote: it only
     /// chooses the runtime whose connections carry the calls.
     #[must_use]
-    pub fn bind<P: Providers>(&self, rpc: &RpcHandle<P>) -> ServiceClient<P, M> {
+    pub fn bind<P: RpcProviders>(&self, rpc: &RpcHandle<P>) -> ServiceClient<P, M> {
         ServiceClient::new(rpc.clone(), self.clone())
     }
 
@@ -700,7 +700,7 @@ impl<I: RpcInterface> InterfaceRef<I> {
     ///
     /// [`ErrorReason::InvalidReference`] (never admitted) when the
     /// reference fails its check.
-    pub fn bind<P: Providers>(
+    pub fn bind<P: RpcProviders>(
         &self,
         rpc: &RpcHandle<P>,
     ) -> Result<InterfaceClient<P, I>, RpcError> {
@@ -835,12 +835,12 @@ impl<I: RpcInterface> std::fmt::Debug for InterfaceRef<I> {
 
 /// An [`InterfaceRef`] bound to a runtime: hands out one
 /// [`ServiceClient`] per method, each with every delivery mode.
-pub struct InterfaceClient<P: Providers, I: RpcInterface> {
+pub struct InterfaceClient<P: RpcProviders, I: RpcInterface> {
     rpc: RpcHandle<P>,
     target: InterfaceRef<I>,
 }
 
-impl<P: Providers, I: RpcInterface> InterfaceClient<P, I> {
+impl<P: RpcProviders, I: RpcInterface> InterfaceClient<P, I> {
     /// The reference this client calls.
     #[must_use]
     pub fn target(&self) -> &InterfaceRef<I> {
@@ -855,7 +855,7 @@ impl<P: Providers, I: RpcInterface> InterfaceClient<P, I> {
     }
 }
 
-impl<P: Providers, I: RpcInterface> Clone for InterfaceClient<P, I> {
+impl<P: RpcProviders, I: RpcInterface> Clone for InterfaceClient<P, I> {
     fn clone(&self) -> Self {
         Self {
             rpc: self.rpc.clone(),
@@ -864,7 +864,7 @@ impl<P: Providers, I: RpcInterface> Clone for InterfaceClient<P, I> {
     }
 }
 
-impl<P: Providers, I: RpcInterface> std::fmt::Debug for InterfaceClient<P, I> {
+impl<P: RpcProviders, I: RpcInterface> std::fmt::Debug for InterfaceClient<P, I> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InterfaceClient")
             .field("target", &self.target)
