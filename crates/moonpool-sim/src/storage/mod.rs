@@ -113,7 +113,7 @@ pub use error::StorageError;
 pub use capacity::DiskCapacity;
 
 // Re-export configuration
-pub use config::{StorageConfiguration, StorageFault, StorageFaultMask};
+pub use config::{StorageConfiguration, StorageFault, StorageFaultMask, WritebackErrorReporting};
 
 // Re-export events
 pub use events::StorageOperation;

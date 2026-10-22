@@ -46,6 +46,9 @@ pub enum StorageFaultKind {
     PhantomWrite,
     /// A file or directory sync failed.
     SyncFailure,
+    /// A file's background writeback failed and marked its dirty sectors
+    /// clean without making them durable (fsyncgate).
+    WritebackError,
     /// A crash lost a write that a sync had reported durable
     /// (barrier-violation family).
     LostSyncedWrite,

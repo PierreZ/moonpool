@@ -26,7 +26,19 @@
 //! | Misdirected write | `misdirect_write_probability` | 0% | Write lands at wrong location |
 //! | Misdirected read | `misdirect_read_probability` | 0% | Read returns wrong data |
 //! | Phantom write | `phantom_write_probability` | 0% | Write appears to succeed but doesn't persist |
-//! | Sync failure | `sync_failure_probability` | 0% | fsync fails |
+//! | Sync failure | `sync_failure_probability` | 0% | fsync fails, the dirty pages stay dirty |
+//! | Writeback error | `writeback_error_probability` | 0% | fsyncgate: writeback fails, the pages are marked clean, a retried fsync succeeds |
+//!
+//! ## Writeback Errors (fsyncgate)
+//!
+//! A writeback error is the failure the PostgreSQL "fsyncgate" thread found:
+//! the kernel fails to write a dirty page back, marks it clean anyway, and
+//! reports the error once. A retried sync then returns success for bytes that
+//! never reached the device, and a crash can still lose them.
+//! `writeback_error_revert_probability` also drops the new bytes from the
+//! cache, so reads return the durable ones (the per-filesystem variant
+//! Rebello et al., ATC '20, measured). `writeback_error_reporting` picks which
+//! open handles see the error ([`WritebackErrorReporting`]).
 //!
 //! ## Dynamic Disk Degradation Episodes
 //!
@@ -126,6 +138,37 @@ pub enum StorageFault {
     /// (`dropped_mutation_discard_probability`). Removing it makes every
     /// dropped mutation land.
     DroppedMutationDiscard,
+    /// A failed writeback that marks the dirty pages clean
+    /// (`writeback_error_probability`, the fsyncgate family).
+    WritebackError,
+}
+
+/// Which open handles of a file see a writeback error on their next sync.
+///
+/// Each variant is the behaviour of a real kernel. Whatever the variant, the
+/// pages the failed writeback marked clean are not durable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WritebackErrorReporting {
+    /// Linux 4.16 and later (`errseq_t`): every handle sees each error once.
+    /// A handle opened after the error sees it only when no handle saw it
+    /// before.
+    #[default]
+    Errseq,
+    /// Linux 4.13 to 4.15: only the handles open before the error see it, once
+    /// each. A handle opened after the error never sees it.
+    OpenedBefore,
+    /// Linux before 4.13 (`AS_EIO`): the first sync on any handle sees the
+    /// error and clears it, so the other handles never see it.
+    FirstCaller,
+    /// No handle ever sees the error (some BSD releases): the sync lies. Never
+    /// drawn by [`StorageConfiguration::random_for_seed`]; opt in.
+    Silent,
+}
+
+impl WritebackErrorReporting {
+    /// The variants [`StorageConfiguration::random_for_seed`] draws from: the
+    /// ones that report the error to at least one handle.
+    const REPORTING: [Self; 3] = [Self::Errseq, Self::OpenedBefore, Self::FirstCaller];
 }
 
 impl StorageFault {
@@ -142,6 +185,7 @@ impl StorageFault {
             Self::Degradation => 1 << 8,
             Self::DiskFailure => 1 << 9,
             Self::DroppedMutationDiscard => 1 << 10,
+            Self::WritebackError => 1 << 11,
         }
     }
 }
@@ -175,7 +219,7 @@ impl Default for StorageFaultMask {
 }
 
 impl StorageFaultMask {
-    const ALL: u16 = (1 << 11) - 1;
+    const ALL: u16 = (1 << 12) - 1;
 
     /// Retain every selected storage fault family.
     #[must_use]
@@ -247,6 +291,9 @@ impl StorageFaultMask {
         }
         if !self.contains(StorageFault::DroppedMutationDiscard) {
             config.dropped_mutation_discard_probability = 0.0;
+        }
+        if !self.contains(StorageFault::WritebackError) {
+            config.writeback_error_probability = 0.0;
         }
     }
 }
@@ -427,6 +474,27 @@ pub struct StorageConfiguration {
     /// Tests error handling in durability-critical code paths.
     pub sync_failure_probability: f64,
 
+    /// Probability that the background writeback after a write fails
+    /// (0.0 - 1.0): the fsyncgate family. Rolled once per write, over every
+    /// dirty sector of the file.
+    ///
+    /// # Real-World Scenario
+    /// The kernel marks the pages clean although they never reached the
+    /// device. The error reaches the handles that
+    /// [`writeback_error_reporting`](Self::writeback_error_reporting) names,
+    /// and a retried sync returns success while a crash can still lose the
+    /// bytes. Tests that the caller treats a sync error as data loss, not as
+    /// something a retry fixes.
+    pub writeback_error_probability: f64,
+
+    /// Probability that a failed writeback also drops the new bytes from the
+    /// cache, so reads return the durable ones (0.0 - 1.0). Otherwise reads
+    /// still return the new bytes until a crash.
+    pub writeback_error_revert_probability: f64,
+
+    /// Which open handles see a writeback error.
+    pub writeback_error_reporting: WritebackErrorReporting,
+
     // =========================================================================
     // Device Geometry
     // =========================================================================
@@ -597,6 +665,9 @@ impl Default for StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            writeback_error_probability: 0.0,
+            writeback_error_revert_probability: 0.0,
+            writeback_error_reporting: WritebackErrorReporting::Errseq,
             unsynced_dir_entry_loss_probability: 0.0,
             direct_io_alignment: 4096,
             direct_io_supported: true,
@@ -704,6 +775,13 @@ impl StorageConfiguration {
             // time: a rate per drop, not per operation, so it is high enough
             // for both outcomes to show up in a run. Drawn last.
             dropped_mutation_discard_probability: f64::from(sim_random_range(0..50)) / 100.0,
+
+            // fsyncgate: 0% to 0.05% per write, drawn last so every field above
+            // keeps its per-seed value. The silent variant stays opt-in.
+            writeback_error_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
+            writeback_error_revert_probability: f64::from(sim_random_range(0..101)) / 100.0,
+            writeback_error_reporting: WritebackErrorReporting::REPORTING
+                [sim_random_range(0..WritebackErrorReporting::REPORTING.len())],
         }
     }
 
@@ -725,7 +803,7 @@ impl StorageConfiguration {
     /// Disable each fault family with ~50% probability using the simulation
     /// stream (see [`swarm_for_seed`](Self::swarm_for_seed)).
     ///
-    /// Draws exactly fifteen `sim_random_bool` values, one per family, so the
+    /// Draws exactly sixteen `sim_random_bool` values, one per family, so the
     /// call sequence is fixed and reproducible per seed. Performance
     /// parameters (IOPS, bandwidth, latencies) stay as sampled — only the fault
     /// families are masked.
@@ -776,6 +854,9 @@ impl StorageConfiguration {
         }
         if !sim_random_bool(0.5) {
             self.dropped_mutation_discard_probability = 0.0;
+        }
+        if !sim_random_bool(0.5) {
+            self.writeback_error_probability = 0.0;
         }
     }
 
@@ -842,6 +923,7 @@ impl StorageConfiguration {
         self.misdirect_read_probability = 0.0;
         self.phantom_write_probability = 0.0;
         self.sync_failure_probability = 0.0;
+        self.writeback_error_probability = 0.0;
         self.short_transfer_probability = 0.0;
         self.unsynced_dir_entry_loss_probability = 0.0;
         self.disk_stall_probability = 0.0;
@@ -875,6 +957,9 @@ impl StorageConfiguration {
             misdirect_read_probability: 0.0,
             phantom_write_probability: 0.0,
             sync_failure_probability: 0.0,
+            writeback_error_probability: 0.0,
+            writeback_error_revert_probability: 0.0,
+            writeback_error_reporting: WritebackErrorReporting::Errseq,
             unsynced_dir_entry_loss_probability: 0.0,
             direct_io_alignment: 4096,
             direct_io_supported: true,
@@ -934,6 +1019,7 @@ mod swarm_tests {
             config.read_eio_probability > 0.0,
             config.write_eio_probability > 0.0,
             config.dropped_mutation_discard_probability > 0.0,
+            config.writeback_error_probability > 0.0,
         ]
     }
 
@@ -946,7 +1032,7 @@ mod swarm_tests {
     const REACHABILITY_SEEDS: u64 = 1 << (FAMILY_COUNT + 3);
 
     /// Number of fault families the swarm mask covers.
-    const FAMILY_COUNT: u32 = 15;
+    const FAMILY_COUNT: u32 = 16;
 
     /// Build a swarm config the way the runner does: the stream seeded per iteration.
     fn swarm_for(seed: u64) -> StorageConfiguration {

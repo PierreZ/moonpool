@@ -249,6 +249,7 @@ impl StorageEngine {
             }
         }
 
+        self.fail_writeback((owner_ip, pending.file_id), &path, &config, actions);
         if let Some(write_kind) = fault_kind {
             actions.fault(SimFaultEvent::StorageWriteFault {
                 ip: owner_ip.to_string(),
@@ -411,7 +412,26 @@ impl StorageEngine {
                 handle_id: pending.handle_id,
             });
         };
+        // A sync flushes what it can even when it reports a writeback error.
         file.image.sync(&config, &weigh);
+        let reporting = config.writeback_error_reporting;
+        let reported = self
+            .state
+            .handles
+            .get_mut(&pending.handle_id)
+            .is_some_and(|handle| {
+                file.writeback
+                    .report(&mut handle.seen_writeback_errors, reporting)
+            });
+        if reported {
+            assert_reachable!("disk fault: sync reported a writeback error");
+            self.record(&path, StorageFaultKind::SyncFailure, None);
+            return Err(StorageError::Io {
+                file_id: pending.file_id,
+                kind: std::io::ErrorKind::Other,
+                message: "sync failed: writeback error (simulated)".to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -473,6 +493,45 @@ impl StorageEngine {
     /// Land a write at `landed_at` (where the disk put it, `offset` being
     /// where it was aimed), keeping the damage marks a rolling replicated
     /// fault pattern reads.
+    /// Roll a failed background writeback after a write (fsyncgate): the
+    /// file's dirty sectors become clean but not durable, and the error waits
+    /// for the handles [`WritebackErrorReporting`] names.
+    ///
+    /// [`WritebackErrorReporting`]: crate::storage::WritebackErrorReporting
+    fn fail_writeback(
+        &mut self,
+        (owner_ip, file_id): (IpAddr, FileId),
+        path: &str,
+        config: &StorageConfiguration,
+        actions: &mut StorageActions,
+    ) {
+        if config.writeback_error_probability <= 0.0 {
+            return;
+        }
+        let Some(file) = self.state.files.get_mut(&file_id) else {
+            return;
+        };
+        if !file.image.has_flushable() || sim_random::<f64>() >= config.writeback_error_probability
+        {
+            return;
+        }
+        let revert = sim_random::<f64>() < config.writeback_error_revert_probability;
+        let sectors = file.image.fail_writeback(revert);
+        file.writeback.count += 1;
+        if revert {
+            assert_reachable!("disk fault: failed writeback reverted the cache");
+        } else {
+            assert_reachable!("disk fault: failed writeback kept the new bytes in cache");
+        }
+        let range = sectors.first().zip(sectors.last()).map(|(s, e)| *s..*e + 1);
+        self.record(path, StorageFaultKind::WritebackError, range);
+        actions.fault(SimFaultEvent::StorageWriteFault {
+            ip: owner_ip.to_string(),
+            file_id: file_id.0,
+            write_kind: "writeback".to_string(),
+        });
+    }
+
     fn land_write(
         &mut self,
         file_id: FileId,

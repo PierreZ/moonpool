@@ -473,7 +473,7 @@ pub use storage::{
     CrashOutcome, DiskCapacity, EioTarget, FaultFocus, FaultPattern, FileCrashReport, FileImage,
     ReplicatedFaults, SECTOR_SIZE, SectorBitSet, SectorResolution, SimStorageProvider,
     StorageConfiguration, StorageEligibilityMask, StorageError, StorageFault, StorageFaultKind,
-    StorageFaultMask, StorageFaultRecord,
+    StorageFaultMask, StorageFaultRecord, WritebackErrorReporting,
 };
 
 // Provider exports
