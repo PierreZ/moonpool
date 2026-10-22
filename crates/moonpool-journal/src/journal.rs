@@ -14,7 +14,7 @@ use crate::format::{
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{Located, Op, Stale, entry_matches, scan};
-use crate::segment::{Segment, is_segment_leftover, parse_segment_name};
+use crate::segment::{Segment, is_segment_leftover, named_batches, parse_segment_name};
 use crate::spare::{is_spare, spare_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
 
@@ -113,8 +113,8 @@ pub struct Recovery {
     pub headers_repaired: u32,
     /// Segments that held nothing live: kept as the spare or deleted.
     pub segments_removed: u32,
-    /// Spare files deleted: one more than the spare kept, or not a whole
-    /// segment.
+    /// Spare files deleted: one more than the spare kept, not a whole
+    /// segment, or a second name a crash left on a live segment.
     pub spares_removed: u32,
     /// A dead segment's file an earlier open recycled, kept for the next
     /// roll.
@@ -278,11 +278,15 @@ async fn list_segments<P: LocalStorageProvider>(
 /// count). A spare is never evidence: no batch is written to it before it
 /// is renamed to a segment, so deleting one loses nothing. Kept, its old
 /// batches are older than any batch it will hold (see [`crate::spare`]).
+///
+/// A spare whose header names a segment of `firsts` is never kept: a crash
+/// in a roll left it as a second name of that live segment.
 async fn keep_one_spare<P: LocalStorageProvider>(
     provider: &P,
     dir: &str,
     spares: Vec<String>,
-    geometry: Geometry,
+    firsts: &[(u64, String)],
+    (journal, config): (JournalId, &JournalConfig),
 ) -> Result<(Option<String>, u32), OpenError> {
     let mut kept = None;
     let mut removed = 0;
@@ -292,9 +296,14 @@ async fn keep_one_spare<P: LocalStorageProvider>(
             let file = provider
                 .open(&path, moonpool_core::OpenOptions::read_only())
                 .await?;
-            file.size().await? == geometry.total_blocks() * BLOCK_U64
+            file.size().await? == config.geometry.total_blocks() * BLOCK_U64
         };
-        if whole {
+        let aliased = whole
+            && named_batches(provider, &path, journal, config.direct_io)
+                .await?
+                .iter()
+                .any(|batch| firsts.iter().any(|(first, _)| first == batch));
+        if whole && !aliased {
             kept = Some(name);
         } else {
             delete_if_present(provider, &path).await?;
@@ -431,7 +440,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             ));
         }
         let (spare, spares_removed) =
-            keep_one_spare(&provider, dir, spares, config.geometry).await?;
+            keep_one_spare(&provider, dir, spares, &firsts, (id, &config)).await?;
         let mut recovery = Recovery {
             meta_repaired,
             spares_removed,
