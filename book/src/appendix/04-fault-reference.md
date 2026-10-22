@@ -54,6 +54,7 @@ Enabled by `Chaos::Storage(mode)`, limited by `storage_fault_mask`. Fault coordi
 | `Degradation` | Disk stall (operations wait) or throttle (iops and bandwidth divided) episodes. | `disk_stall_*`, `disk_throttle_*` | |
 | `DiskFailure` | The disk fails for good. Every later operation stays pending forever. | `disk_failure_probability` | `storage_disk_failure` event |
 | `DroppedMutationDiscard` | A write, sync or `set_len` whose future was dropped is discarded instead of landing. Without it, every dropped mutation lands at its scheduled time. | `dropped_mutation_discard_probability` | |
+| `WritebackError` | After a write, the background writeback fails (fsyncgate). The dirty sectors become clean but not durable, so a retried sync succeeds and a crash can still lose them. `writeback_error_reporting` picks which handles see the error. | `writeback_error_probability`, `writeback_error_revert_probability`, `writeback_error_reporting` | `WritebackError`, `storage_write_fault` with `write_kind = "writeback"` |
 
 The barrier-violation family (`barrier_violation_probability`) is separate from the mask. When it is 0, a sector a sync reported durable that changes across a crash fails the run with `StorageFaultKind::LostSyncedWrite`. This is the **lost-synced-write oracle**. When it is above 0, the lie is permitted and recorded.
 
