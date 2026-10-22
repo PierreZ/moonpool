@@ -20,6 +20,14 @@
 //!
 //! A spare holds no batch of its own: no batch is written to it before its
 //! rename. An open keeps one whole spare it finds and deletes the others.
+//!
+//! **A crash can leave one file two names.** A rename whose directory sync
+//! did not happen may keep the old name, the new one, or both. Both is one
+//! file behind a spare's name and a segment's: a roll onto that spare
+//! would write into a live segment. So an open reads each spare's header
+//! and deletes a spare that names a segment the directory lists. A real
+//! spare never does: a dead segment's name is gone once it is a spare, and
+//! no later segment takes its first batch.
 //! With no spare, a roll creates its segment with
 //! [`allocate`](moonpool_core::StorageFile::allocate): the space is
 //! reserved, reads as zeros, and nothing is written but the headers.

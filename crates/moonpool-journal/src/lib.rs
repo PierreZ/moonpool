@@ -140,7 +140,9 @@
 //! A **spare** is never evidence: no batch is written to it before it is
 //! renamed to a segment, and the batches it still holds are older than any
 //! it will hold. An open keeps one whole spare and deletes the others
-//! ([`Recovery::spares_removed`]).
+//! ([`Recovery::spares_removed`]), and never keeps a spare whose header names
+//! a listed segment: a crash in a roll left it as a second name of that
+//! segment.
 //!
 //! The **meta file** is separate because it is the one structure rewritten in
 //! place, and it must outlive every segment (`LogCabin`, canonical/raft and

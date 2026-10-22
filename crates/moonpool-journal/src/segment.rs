@@ -160,7 +160,9 @@ impl<F: LocalStorageFile> Segment<F> {
         )
         .await;
         provider.rename(&spare, &path).await?;
-        // A power loss here leaves the spare's name, the segment's, or both.
+        // A power loss here leaves the spare's name, the segment's, or both:
+        // two names of one file, which the next open tells apart by the
+        // header ([`named_batches`]).
         moonpool_buggify::hint!(
             "journal roll: spare renamed, directory not synced",
             ROLL_HINT_PROB
@@ -294,6 +296,32 @@ impl<F: LocalStorageFile> Segment<F> {
 /// How often an active roll point fires: a roll is rare, so the commit's
 /// rate.
 const ROLL_HINT_PROB: f64 = 0.25;
+
+/// The first batches the header copies of the file at `path` name for
+/// `journal`: none when neither copy decodes or both name another journal.
+///
+/// A crash between a rename and its directory sync can keep both names, one
+/// file behind them. A spare whose header names a segment the directory
+/// lists is such a second name: writing into it writes into that segment.
+pub(crate) async fn named_batches<P: LocalStorageProvider>(
+    provider: &P,
+    path: &str,
+    journal: JournalId,
+    direct_io: DirectIo,
+) -> Result<Vec<u64>, OpenError> {
+    let file = open_file(provider, path, direct_io).await?;
+    let headers = read_blocks(&file, 0, file.buffer(2)?).await?;
+    let copies = [
+        SegmentHeader::decode(&headers.as_slice()[..BLOCK]),
+        SegmentHeader::decode(&headers.as_slice()[BLOCK..]),
+    ];
+    Ok(copies
+        .into_iter()
+        .flatten()
+        .filter(|header| header.journal == journal)
+        .map(|header| header.first_batch)
+        .collect())
+}
 
 /// Write both header copies of a segment (blocks 0 and 1).
 async fn write_headers<F: LocalStorageFile>(

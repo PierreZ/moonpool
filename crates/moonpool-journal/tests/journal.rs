@@ -389,6 +389,103 @@ fn a_spare_that_is_not_a_whole_segment_is_deleted_and_never_read() {
     });
 }
 
+/// A crash in a roll onto the spare, after the rename and before the
+/// directory sync, can keep both names: the spare's old one and the
+/// segment's new one, one file behind both. The next open must not keep that
+/// name as a spare, or the next roll writes another segment's header and
+/// batches into a live segment.
+#[test]
+fn a_crash_mid_adopt_never_leaves_a_spare_that_is_a_live_segment() {
+    runtime().block_on(async {
+        for seed in 0..24 {
+            a_crash_mid_adopt(seed).await;
+        }
+    });
+}
+
+/// Kills the caller at the roll's rename, and nowhere else.
+struct KillAtRename;
+
+impl moonpool_buggify::hint::Sink for KillAtRename {
+    fn strike(&self, label: &'static str) -> moonpool_buggify::hint::Strike {
+        if label == "journal roll: spare renamed, directory not synced" {
+            moonpool_buggify::hint::Strike::Killed
+        } else {
+            moonpool_buggify::hint::Strike::None
+        }
+    }
+}
+
+async fn a_crash_mid_adopt(seed: u64) {
+    let at = format!("seed {seed}");
+    let mut sim = sim(seed);
+    let mut journal = create(&mut sim, Durability::Ordered).await;
+    for position in 0..16 {
+        journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+    }
+    journal = raise_floor(&mut sim, journal, 8, 16).await;
+    drop(journal);
+    sim.simulate_crash_for_process(ip(), true);
+    let (mut journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+    assert!(recovery.spare_kept, "{at}: {recovery:?}");
+    for position in 17..24 {
+        journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+    }
+
+    // The batch that rolls onto the spare dies between the rename and the
+    // directory sync; each name since the last sync comes back or goes
+    // away on its own coin.
+    let mut config = StorageConfiguration::fast_local();
+    config.unsynced_dir_entry_loss_probability = 0.5;
+    sim.set_storage_config(config);
+    moonpool_buggify::set_random_source(|| 0.0);
+    moonpool_buggify::buggify_init(1.0);
+    moonpool_buggify::hint::set_sink(Box::new(KillAtRename));
+    let handle = tokio::spawn(async move {
+        let mut batch = Batch::new();
+        batch.put(24, id(24, 1), payload(24, 1, 100));
+        let _ = journal.commit(batch).await;
+    });
+    for _ in 0..1000 {
+        if handle.is_finished() {
+            break;
+        }
+        while sim.pending_event_count() > 0 {
+            sim.step();
+        }
+        tokio::task::yield_now().await;
+    }
+    moonpool_buggify::hint::clear_sink();
+    moonpool_buggify::buggify_reset();
+    assert!(!handle.is_finished(), "{at}: the roll reached its rename");
+    handle.abort();
+    let _ = handle.await;
+    sim.simulate_crash_for_process(ip(), true);
+    sim.set_storage_config(StorageConfiguration::fast_local());
+
+    // A second roll adopts whatever spare the open kept.
+    let (mut journal, _) = reopen(&mut sim, Durability::Ordered)
+        .await
+        .unwrap_or_else(|error| panic!("{at}: reopen after the cut: {error}"));
+    for position in 25..42 {
+        journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+    }
+    drop(journal);
+    sim.simulate_crash_for_process(ip(), true);
+    let (mut journal, _) = reopen(&mut sim, Durability::Ordered)
+        .await
+        .unwrap_or_else(|error| panic!("{at}: reopen after the second roll: {error}"));
+    for position in (8..24).chain(25..42) {
+        let (back, bytes) = read(&mut sim, journal, position).await;
+        journal = back;
+        assert_eq!(
+            bytes.unwrap_or_else(|error| panic!("{at}: position {position}: {error}")),
+            payload(position, 1, 100),
+            "{at}: position {position}"
+        );
+    }
+}
+
 #[test]
 fn a_put_below_the_floor_is_refused_before_anything_is_written() {
     runtime().block_on(async {
