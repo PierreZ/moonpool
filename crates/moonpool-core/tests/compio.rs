@@ -610,7 +610,10 @@ fn the_resolver_answers_literals_and_localhost() {
     run(async {
         let resolver = moonpool_core::CompioResolver::new();
         let literal = resolver.resolve("127.0.0.1:4500").await.expect("a literal");
-        assert_eq!(literal, vec!["127.0.0.1:4500".parse().expect("literal address")]);
+        assert_eq!(
+            literal,
+            vec!["127.0.0.1:4500".parse().expect("literal address")]
+        );
         let localhost = resolver.resolve("localhost:4500").await;
         assert!(localhost.is_ok_and(|found| found.iter().all(|a| a.port() == 4500)));
         assert!(resolver.resolve("no-port").await.is_err());

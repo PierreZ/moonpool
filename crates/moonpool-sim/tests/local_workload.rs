@@ -156,8 +156,7 @@ impl Workload for PatientWorkload {
                     let _ = LocalTimeProvider::sleep(ctx.time(), Duration::from_millis(50)).await;
                     inner.borrow_mut().push(LocalTimeProvider::now(ctx.time()));
                 }
-                let rounds = inner.borrow().len();
-                rounds
+                inner.borrow().len()
             })
             .await;
         assert_always!(rounds == 10, "the local observer ran every round");
