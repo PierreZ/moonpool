@@ -167,11 +167,15 @@ impl SimContext {
 
         let (answer, answered) = futures::channel::oneshot::channel();
         let future = body(self.clone());
-        LocalTaskProvider::spawn_local_task(self.task(), name, async move {
+        let task = LocalTaskProvider::spawn_local_task(self.task(), name, async move {
             // The caller is gone only when its process is: nothing to tell.
             let _ = answer.send(future.await);
-        })
-        .detach();
+        });
+        // The body dies with its caller: a kill aborts the root and drops
+        // this future, and the guard drops the body at that moment, as if
+        // it ran in the root itself (its scope alone would drop it only at
+        // its next poll).
+        let _guard = AbortOnDrop(task);
         match answered.await {
             Ok(answer) => answer,
             Err(_) => std::future::pending().await,
@@ -453,5 +457,14 @@ impl SelfCrash {
         );
         tracing::info!(ip = %self.ip, ?kind, "process crashed itself");
         Ok(())
+    }
+}
+
+/// Aborts a task when dropped (see [`SimContext::run_local`]).
+struct AbortOnDrop(crate::executor::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
