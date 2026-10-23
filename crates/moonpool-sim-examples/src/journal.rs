@@ -21,7 +21,11 @@
 //!   discards as a replication layer would, since nothing acknowledged them.
 //!
 //! A failed sync is an operating error, not a verdict: the batch it covered
-//! was never acknowledged, and the node reopens the journal.
+//! was never acknowledged. The node does not reopen the journal in place,
+//! though. After a failed writeback (fsyncgate) the page cache still holds
+//! bytes the disk never got, a retried sync reports success for them, and a
+//! reopen would build on them. So the node crashes itself, as PostgreSQL
+//! panics, and the reboot recovers from what the disk really holds.
 //!
 //! The ledger lives in the iteration's [`StateHandle`](moonpool_sim::StateHandle),
 //! so it survives the reboots that the node's memory does not.
@@ -37,8 +41,8 @@ use moonpool_journal::{
     OpenError, Recovery,
 };
 use moonpool_sim::{
-    Process, RandomProvider, SimContext, SimStorageProvider, SimulationResult, StorageProvider,
-    TimeProvider, Workload, assert_always, assert_reachable, assert_sometimes,
+    Process, RandomProvider, RebootKind, SimContext, SimStorageProvider, SimulationResult,
+    StorageProvider, TimeProvider, Workload, assert_always, assert_reachable, assert_sometimes,
 };
 
 use crate::support::{invalid_state, unless_shutdown};
@@ -152,10 +156,15 @@ impl Process for JournalNode {
                 return Ok(());
             };
             match life {
-                // A failed sync (or another I/O error) poisons the journal:
-                // reopen it, as its caller should.
+                // A failed sync (or another I/O error) poisons the journal.
+                // A reopen would trust the page cache, which may hold bytes a
+                // failed writeback never wrote: crash, and recover from disk.
                 Ended::Open(OpenError::Io(_)) | Ended::Commit(CommitError::Io { .. }) => {
-                    assert_reachable!("an I/O error made the node reopen its journal");
+                    assert_reachable!("an I/O error made the node crash itself");
+                    let delay = Duration::from_millis(ctx.random().random_range(10..200));
+                    ctx.crash_self(RebootKind::Crash, Some(delay))?;
+                    // The kill lands before the next storage completion.
+                    std::future::pending::<()>().await;
                 }
                 Ended::Open(error) => {
                     return Err(invalid_state(format!("journal open failed: {error}")));

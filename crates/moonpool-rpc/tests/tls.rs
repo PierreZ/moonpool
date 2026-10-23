@@ -283,6 +283,17 @@ async fn certificates_and_trust_rotate_multi_thread() {
     certificates_and_trust_rotate().await;
 }
 
+/// Poll `condition` on real time for up to five seconds.
+async fn eventually(mut condition: impl FnMut() -> bool) -> bool {
+    for _ in 0..500 {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    condition()
+}
+
 struct OneToken;
 impl RequestVerifier for OneToken {
     fn verify(
@@ -336,7 +347,12 @@ async fn credentials_over_tls_and_downgrade_rejection() {
     old_driver.abort();
 
     assert_eq!(executed.load(Ordering::SeqCst), 1);
-    assert!(server.stats().expect("running").version_rejections >= 1);
+    // The client can see its connect fail before the server's task counts the
+    // rejection: on a multi-thread runtime they run on different workers.
+    assert!(
+        eventually(|| server.stats().expect("running").version_rejections >= 1).await,
+        "the server counts the version 1 client's rejection"
+    );
     server_driver.abort();
     handler.abort();
 }

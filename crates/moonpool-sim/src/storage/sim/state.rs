@@ -12,6 +12,7 @@ use moonpool_core::{IoConstraints, OpenOptions};
 use super::OperationId;
 use crate::storage::{
     DiskCapacity, FaultFocus, FileCrashReport, FileImage, StorageConfiguration, StorageFaultRecord,
+    WritebackErrorReporting,
     faults::EligibilitySlot,
     replication::{LayoutIndex, ReplicationPlan},
 };
@@ -47,6 +48,44 @@ pub(crate) struct FileState {
     pub(crate) path: String,
     pub(crate) image: FileImage,
     pub(crate) owner_ip: IpAddr,
+    pub(crate) writeback: WritebackErrors,
+}
+
+/// Writeback errors of one file, counted like the kernel's `errseq_t`.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct WritebackErrors {
+    /// Writeback errors since the file was created.
+    pub(crate) count: u64,
+    /// `count` as of the last error any handle saw.
+    pub(crate) reported: u64,
+}
+
+impl WritebackErrors {
+    /// The `seen` mark of a handle opened now.
+    pub(crate) fn seen_at_open(self, reporting: WritebackErrorReporting) -> u64 {
+        match reporting {
+            // An error nobody saw yet is visible to a new handle.
+            WritebackErrorReporting::Errseq => self.reported,
+            _ => self.count,
+        }
+    }
+
+    /// Whether a sync on a handle with mark `seen` reports an error, and
+    /// mark it seen.
+    pub(crate) fn report(&mut self, seen: &mut u64, reporting: WritebackErrorReporting) -> bool {
+        let unseen = match reporting {
+            WritebackErrorReporting::Errseq | WritebackErrorReporting::OpenedBefore => {
+                self.count > *seen
+            }
+            WritebackErrorReporting::FirstCaller => self.count > self.reported,
+            WritebackErrorReporting::Silent => false,
+        };
+        if unseen {
+            *seen = self.count;
+            self.reported = self.count;
+        }
+        unseen
+    }
 }
 
 #[derive(Debug)]
@@ -60,6 +99,8 @@ pub(crate) struct HandleState {
     pub(crate) direct_io: bool,
     pub(crate) pending_ops: BTreeSet<OperationId>,
     pub(crate) is_closed: bool,
+    /// The file's writeback error count this handle already saw.
+    pub(crate) seen_writeback_errors: u64,
 }
 
 impl HandleState {
@@ -69,6 +110,7 @@ impl HandleState {
         options: OpenOptions,
         constraints: IoConstraints,
         direct_io: bool,
+        seen_writeback_errors: u64,
     ) -> Self {
         Self {
             file_id,
@@ -78,6 +120,7 @@ impl HandleState {
             direct_io,
             pending_ops: BTreeSet::new(),
             is_closed: false,
+            seen_writeback_errors,
         }
     }
 }

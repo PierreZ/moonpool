@@ -168,8 +168,9 @@ pub enum SimFaultEvent {
         ip: String,
         /// File identifier.
         file_id: u64,
-        /// Kind of write fault: "phantom", "misdirected", "corruption", or
-        /// "full" (a growth refused with `ENOSPC`).
+        /// Kind of write fault: "phantom", "misdirected", "corruption",
+        /// "full" (a growth refused with `ENOSPC`), or "writeback" (the
+        /// background writeback after the write failed, fsyncgate).
         /// (Named `write_kind` to avoid colliding with the timeline's
         /// variant-discriminator `kind` field.)
         write_kind: String,

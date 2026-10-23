@@ -83,6 +83,7 @@ SimulationBuilder::new()
 | `Degradation` | `disk_stall_*`, `disk_throttle_*` | Timeout cascades and backpressure collapse. |
 | `DiskFailure` | `disk_failure_probability` | A missing timeout around I/O. |
 | `DroppedMutationDiscard` | `dropped_mutation_discard_probability` | Nothing by itself. It is the other half of "a dropped write still lands" (below). |
+| `WritebackError` | `writeback_error_probability`, `writeback_error_revert_probability`, `writeback_error_reporting` | Code that retries `fsync` after an error. See failed writeback below. |
 
 ## Timing, Episodes and Dead Disks
 
@@ -127,6 +128,23 @@ sync_all(file)         // the bytes are durable
 ```
 
 After that sequence a crash may still leave no `db/wal`. The bytes were durable, the name was not. SQLite, PostgreSQL and LMDB follow every create, delete and rename with a directory sync, and `sync_dir` is that call. The simulator keeps a visible namespace and a durable one. Each divergence resolves independently at crash time under `unsynced_dir_entry_loss_probability`: a created name may be missing, a deleted one may be back. `list_dir` shows the visible namespace, which is what `readdir` sees.
+
+## Failed Writeback (fsyncgate)
+
+`sync_failure_probability` is the kind failure: the sync fails and the sectors stay dirty, so a retry really makes them durable. Linux is not that kind. When the background writeback of a page fails, the kernel marks the page clean and reports the error once. A retried `fsync` then returns success for bytes that never reached the disk. PostgreSQL found this in 2018 ("fsyncgate"), and Rebello et al. (ATC '20) found it on ext4, XFS and Btrfs.
+
+With `writeback_error_probability > 0`, a write can make the background writeback of the file's dirty sectors fail. These sectors become **stranded**: no later sync flushes them, but they stay volatile, so a crash can still lose them. A write to a stranded sector dirties it again. `writeback_error_revert_probability` also drops the new bytes from the cache, so reads return the durable bytes at once. Otherwise reads return the new bytes until a crash. The oracle never stamps a stranded sector, so this loss is not a simulator bug.
+
+`writeback_error_reporting` picks which handles see the error on their next sync:
+
+| `WritebackErrorReporting` | Kernel | Who sees the error |
+|---------------------------|--------|--------------------|
+| `Errseq` (default) | Linux 4.16 and later | Every handle, once. A handle opened later sees it only if no handle saw it before. |
+| `OpenedBefore` | Linux 4.13 to 4.15 | Only the handles open before the error, once each. |
+| `FirstCaller` | Linux before 4.13 (`AS_EIO`) | The first sync on any handle. The other handles never see it. |
+| `Silent` | some BSD releases | No handle. The sync lies. `random_for_seed` never draws it. |
+
+The safe answer is the one PostgreSQL chose: treat a sync error as data loss and crash, then recover from the log. Never retry the sync.
 
 ## The Lost-Synced-Write Oracle
 

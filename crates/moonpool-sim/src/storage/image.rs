@@ -14,6 +14,13 @@
 //! disk reserves: writes between two syncs may land in any order, torn at
 //! sector granularity, and each sector may be old, new, lost, or damaged.
 //!
+//! ## Failed writeback (fsyncgate)
+//!
+//! A failed writeback marks dirty sectors *stranded*: clean for every later
+//! sync, which no longer flushes them, but still volatile, so a crash
+//! resolves them. A write to a stranded sector dirties it again. A sync never
+//! stamps a stranded sector, so the oracle below never claims it durable.
+//!
 //! ## Lost-synced-write oracle
 //!
 //! At every successful sync each dirty sector is stamped with a CRC of the
@@ -160,6 +167,9 @@ pub struct FileImage {
     dirty: SectorBitSet,
     /// Sectors a sync lied about: reported durable, left volatile.
     lied: SectorBitSet,
+    /// Dirty sectors a failed writeback marked clean without making them
+    /// durable: no sync flushes them, a crash still resolves them.
+    stranded: SectorBitSet,
     /// Sectors with a latent read fault (deterministic corruption on read).
     faults: SectorBitSet,
     /// Targeted EIO injections.
@@ -197,6 +207,7 @@ impl FileImage {
             visible: Vec::new(),
             dirty: SectorBitSet::new(0),
             lied: SectorBitSet::new(0),
+            stranded: SectorBitSet::new(0),
             faults: SectorBitSet::new(0),
             eio_read: SectorBitSet::new(0),
             eio_write: SectorBitSet::new(0),
@@ -312,6 +323,7 @@ impl FileImage {
             self.dirty.set(index);
             self.faults.clear(index);
             self.lied.clear(index);
+            self.stranded.clear(index);
             self.oracle.remove(&sector);
         }
         healed
@@ -344,7 +356,7 @@ impl FileImage {
         self.committed.resize(self.visible.len(), 0);
         let lie_probability = config.barrier_violation_probability;
         let mut lied = Vec::new();
-        for sector in self.dirty_sectors() {
+        for sector in self.flushable_sectors() {
             let index = as_index(sector);
             let lie = lie_probability > 0.0
                 && sim_random::<f64>() < weighted(lie_probability, weight(sector));
@@ -367,8 +379,43 @@ impl FileImage {
         lied
     }
 
+    /// Whether a sync has sectors to flush.
+    #[must_use]
+    pub fn has_flushable(&self) -> bool {
+        (0..self.sectors()).any(|s| self.is_flushable(s))
+    }
+
+    /// Fail the background writeback of every sector a sync would flush
+    /// (fsyncgate).
+    ///
+    /// The sectors become clean for every later sync but stay volatile, so a
+    /// retried sync reports success for bytes a crash can still lose. With
+    /// `revert` the cache also drops the new bytes and reads return the
+    /// durable ones; a sector without a whole durable copy (past the durable
+    /// end) or one a sync lied about stays volatile instead. Returns the
+    /// sectors the failure touched.
+    #[instrument(level = "trace", skip(self))]
+    pub fn fail_writeback(&mut self, revert: bool) -> Vec<u64> {
+        let sectors = self.flushable_sectors();
+        for &sector in &sectors {
+            let index = as_index(sector);
+            let shared = self.shared_bounds(sector);
+            let whole = !shared.is_empty() && shared == self.visible_bounds(sector);
+            if revert && whole && !self.lied.is_set(index) {
+                let bytes = self.committed[shared.clone()].to_vec();
+                self.visible[shared].copy_from_slice(&bytes);
+                self.dirty.clear(index);
+            } else {
+                self.stranded.set(index);
+            }
+        }
+        sectors
+    }
+
     /// Resolve a crash: every sector dirty at this instant lands old, new,
-    /// lost, damaged, or shorn, independently.
+    /// lost, damaged, or shorn, independently. A clean crash lands every
+    /// dirty sector new, except a stranded one, whose writeback already
+    /// failed: it keeps its durable bytes.
     ///
     /// # Panics
     ///
@@ -419,7 +466,9 @@ impl FileImage {
             assert_reachable!("disk crash: clean crash preserved every unsynced write");
             report.clean = true;
             for sector in dirty {
-                self.commit_sector(sector);
+                if !self.stranded.is_set(as_index(sector)) {
+                    self.commit_sector(sector);
+                }
             }
         } else {
             let window = correlated_window(&dirty, config);
@@ -457,6 +506,7 @@ impl FileImage {
         self.resize_bitsets(sectors);
         self.dirty.clear_all();
         self.lied.clear_all();
+        self.stranded.clear_all();
 
         report.lost_synced = self.oracle_sweep(path, &lied, barrier_violation_armed);
         for sector in &report.lost_synced {
@@ -593,6 +643,18 @@ impl FileImage {
             .collect()
     }
 
+    /// Whether a sync flushes `sector`: dirty and not stranded.
+    fn is_flushable(&self, sector: u64) -> bool {
+        let index = as_index(sector);
+        self.dirty.is_set(index) && !self.stranded.is_set(index)
+    }
+
+    fn flushable_sectors(&self) -> Vec<u64> {
+        (0..self.sectors())
+            .filter(|s| self.is_flushable(*s))
+            .collect()
+    }
+
     /// Bytes at the start of `sector` that the last sync reported durable and
     /// no write has touched since: the prefix a crash must leave alone.
     ///
@@ -658,9 +720,10 @@ impl FileImage {
         // resolve through the crash model like any other write. That dirties
         // the whole sector holding the old end of file, while the durability
         // stamp on its synced prefix stays: a grow endangers only the bytes it
-        // added.
+        // added. Like a write, it dirties a stranded sector again.
         for sector in super::faults::sector_range(old_len as u64, new_len - old_len) {
             self.dirty.set(as_index(sector));
+            self.stranded.clear(as_index(sector));
         }
     }
 
@@ -668,6 +731,7 @@ impl FileImage {
         let len = as_index(sectors);
         self.dirty = self.dirty.resized(len);
         self.lied = self.lied.resized(len);
+        self.stranded = self.stranded.resized(len);
         self.faults = self.faults.resized(len);
         self.eio_read = self.eio_read.resized(len);
         self.eio_write = self.eio_write.resized(len);

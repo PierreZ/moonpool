@@ -12,7 +12,10 @@ use moonpool_core::{DirectIo, IoConstraints, OpenOptions};
 
 use super::{
     DiskDegradationState, DiskEpisodeKind, FileId, HandleId, OperationId, StorageEvent,
-    state::{FileState, HandleState, PendingOpType, PendingStorageOp, StorageState, Wait},
+    state::{
+        FileState, HandleState, PendingOpType, PendingStorageOp, StorageState, Wait,
+        WritebackErrors,
+    },
 };
 use crate::{
     assert_reachable,
@@ -246,6 +249,7 @@ impl StorageEngine {
                     path: path.clone(),
                     image: FileImage::new(initial_size, sim_random::<u64>(), garbage_fill),
                     owner_ip,
+                    writeback: WritebackErrors::default(),
                 },
             );
             self.state.path_to_file.insert(name, file_id);
@@ -260,11 +264,17 @@ impl StorageEngine {
         } else {
             0
         };
+        let reporting = self.state.config_for(owner_ip).writeback_error_reporting;
+        let seen = self
+            .state
+            .files
+            .get(&file_id)
+            .map_or(0, |file| file.writeback.seen_at_open(reporting));
         let handle_id = HandleId(self.state.next_handle_id);
         self.state.next_handle_id += 1;
         self.state.handles.insert(
             handle_id,
-            HandleState::new(file_id, position, options, constraints, direct_io),
+            HandleState::new(file_id, position, options, constraints, direct_io, seen),
         );
         Ok(handle_id)
     }
@@ -1388,6 +1398,8 @@ impl StorageEngine {
                 continue;
             };
             let report = file.image.crash(&path, &config, armed, &weigh);
+            // The reboot starts with an empty page cache: no error is pending.
+            file.writeback.reported = file.writeback.count;
             for sector in &report.lost_synced {
                 self.state.record_fault(StorageFaultRecord {
                     path: path.clone(),
