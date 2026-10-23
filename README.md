@@ -119,13 +119,14 @@ and under the simulator in its own `#[test]`.
   `SimProviders` for simulation.
 - Local (non-`Send`) forms of the traits for thread-per-core runtimes:
   `LocalStorageProvider`, `LocalNetworkProvider`, `LocalTimeProvider`,
-  `LocalTaskProvider` and the `LocalProviders` bundle. Tokio and the
-  simulator implement them too, so local code runs under simulation.
+  `LocalTaskProvider`, the `LocalProviders` bundle, and `ThreadProviders`
+  (a local bundle with a local task slot). Tokio and the simulator
+  implement them too, so local code runs under simulation.
 - A compio backend (features `compio-*`, off by default): io_uring storage
   (direct I/O and atomic appends on Linux) and networking for thread-per-core
   code, bundled by `CompioProviders`.
-- `Resolver` for `host:port` lookups, outside the bundle: `TokioResolver` in
-  production, `ScriptedResolver` in simulation.
+- `Resolver` for `host:port` lookups, outside the bundle: `TokioResolver` or
+  `CompioResolver` in production, `ScriptedResolver` in simulation.
 - `SystemProvider` reads cumulative CPU and disk counters (`getrusage`,
   `/proc/stat`, `/proc/diskstats`). The simulator keeps deterministic disk
   counters per process.

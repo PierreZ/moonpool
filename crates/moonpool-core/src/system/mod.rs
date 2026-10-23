@@ -56,8 +56,8 @@ pub struct SystemSample {
     /// Total CPU time of the whole machine, summed over its cores.
     pub machine_total: Duration,
     /// Busy time of the run loop: the busiest worker thread under Tokio, the
-    /// process's CPU under simulation. `None` when the runtime does not
-    /// expose it.
+    /// sampling thread's CPU time under compio, the process's CPU under
+    /// simulation. `None` when the runtime does not expose it.
     pub run_loop_busy: Option<Duration>,
     /// Counters of the disk that holds the data directory. `None` when the
     /// device is not known (an overlay or btrfs mount, another OS).

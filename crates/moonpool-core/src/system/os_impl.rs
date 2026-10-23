@@ -54,8 +54,14 @@ impl SystemProvider for TokioSystemProvider {
 }
 
 /// Production system provider for compio: the same counters as
-/// [`TokioSystemProvider`], with `run_loop_busy` always `None`, because
-/// compio exposes no busy time for its run loop.
+/// [`TokioSystemProvider`], except `run_loop_busy`.
+///
+/// Compio exposes no busy time for its run loop. But it runs one runtime
+/// per thread, and a thread-per-core application samples from that
+/// thread. Thus `run_loop_busy` is the CPU time of the calling thread
+/// (`CLOCK_THREAD_CPUTIME_ID`, user plus system, Unix): the time its run
+/// loop did not sleep. Sample from the runtime's thread; another thread
+/// reads its own time. `None` on other targets.
 ///
 /// It reads only process and kernel counters, so it is `Send` and needs no
 /// runtime: it serves a thread-per-core application as it is.
@@ -86,8 +92,29 @@ impl Default for CompioSystemProvider {
 #[cfg(feature = "compio-system")]
 impl SystemProvider for CompioSystemProvider {
     fn sample(&self, data_dir: &str) -> io::Result<SystemSample> {
-        sample(self.start, data_dir, None)
+        sample(self.start, data_dir, thread_cpu())
     }
+}
+
+/// The CPU time of the calling thread, user plus system.
+#[cfg(all(feature = "compio-system", unix))]
+fn thread_cpu() -> Option<Duration> {
+    // SAFETY: `clock_gettime` only writes into the zeroed struct we own.
+    let mut now: libc::timespec = unsafe { std::mem::zeroed() };
+    // SAFETY: valid pointer to a properly sized `timespec`.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &raw mut now) };
+    if rc != 0 {
+        return None;
+    }
+    Some(Duration::new(
+        u64::try_from(now.tv_sec).ok()?,
+        u32::try_from(now.tv_nsec).ok()?,
+    ))
+}
+
+#[cfg(all(feature = "compio-system", not(unix)))]
+fn thread_cpu() -> Option<Duration> {
+    None
 }
 
 /// One reading of the OS counters, with the run loop's busy time as the

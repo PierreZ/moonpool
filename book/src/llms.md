@@ -41,7 +41,7 @@ Production: `moonpool = { default-features = false, features = ["tokio"] }`. Sim
 | `SystemProvider` | `sample(data_dir) -> SystemSample { at, process_cpu, cores, machine_busy, machine_total, run_loop_busy, disk: Option<DiskCounters>, space: Option<DiskSpace> }` | `SimSystemProvider` |
 | `Providers` | `network()`, `time()`, `task()`, `random()`, `storage()`, `system()` | `SimProviders` |
 | `Resolver` | `resolve(host_port)` | `ScriptedResolver` |
-| `Local*` (non-`Send`) | `LocalStorageProvider`, `LocalStorageFile`, `LocalNetworkProvider`, `LocalTcpListener`, `LocalTimeProvider`, `LocalProviders` (no task slot): blanket impls from every `Send` trait. `LocalTaskProvider::spawn_local_task(name, fut)`: no blanket impl; `CompioTaskProvider`, `SimTaskProvider`. Compio backend (features `compio-*`, umbrella `compio-providers`): `CompioTaskProvider`, `CompioTimeProvider`, `CompioNetworkProvider`, `CompioStorageProvider` (direct I/O and `O_APPEND` on Linux, same open policy as Tokio), `CompioSystemProvider`, bundle `CompioProviders: LocalProviders` | the same sim types |
+| `Local*` (non-`Send`) | `LocalStorageProvider`, `LocalStorageFile`, `LocalNetworkProvider`, `LocalTcpListener`, `LocalTimeProvider`, `LocalProviders` (no task slot): blanket impls from every `Send` trait. `LocalTaskProvider::spawn_local_task(name, fut)`: no blanket impl; `CompioTaskProvider`, `SimTaskProvider`. Compio backend (features `compio-*`, umbrella `compio-providers`): `CompioTaskProvider`, `CompioTimeProvider`, `CompioNetworkProvider`, `CompioStorageProvider` (direct I/O and `O_APPEND` on Linux, same open policy as Tokio), `CompioSystemProvider`, bundle `CompioProviders: LocalProviders`, `CompioResolver`. `ThreadProviders: LocalProviders` adds a local task slot (`local_task()`): `CompioProviders`, `SimProviders` | the same sim types |
 
 `OpenOptions::direct_io(DirectIo::{Disabled, Optional, Required})`, `BlockFile<F>` for block arithmetic over one open file (owned `*_blocks_aligned` forms for zero copy), `AlignedBuf` (`zeroed`, `for_constraints`, `truncate`, `is_aligned_to`), `LayoutRegion { path, bytes, kind, stripe }` to name byte ranges. `moonpool_sim::select!` replaces `tokio::select!` with the same grammar. `moonpool_sim::executor::spawn(name, fut)` is the sim-only raw spawn.
 
@@ -68,6 +68,7 @@ impl Workload for Driver {
 | Group | Methods |
 |-------|---------|
 | Providers | `providers()`, `network()`, `time()`, `task()`, `random()`, `storage()` |
+| Local code | `run_local(name, \|ctx\| fut)`: run a `!Send` future as a local task of the process, return its answer |
 | Identity | `my_ip()`, `client_id()`, `client_count()`, `peer(name)`, `peers()` |
 | Topology | `topology()` → `WorkloadTopology { groups, ips_in_group, group_for, my_group, peer_by_name, all_process_ips, ips_tagged, tags_for, my_tags, my_locality, locality_for, peers_on_my_machine, ips_in_domain }` |
 | Lifecycle | `shutdown()` (a `CancellationToken`), `crash_self(kind, Option<Duration>)`, `self_crash() -> SelfCrash` |

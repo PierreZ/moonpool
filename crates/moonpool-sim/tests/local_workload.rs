@@ -146,24 +146,20 @@ impl Workload for PatientWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
-        let tasks = ctx.task().clone();
-        // A workload can drive local code too: the handle is `Send`, so the
-        // workload's own future stays `Send` while the task holds an `Rc`.
-        let time = ctx.time().clone();
-        let observer = LocalTaskProvider::spawn_local_task(&tasks, "local-observer", async move {
-            let inner = Rc::new(RefCell::new(Vec::new()));
-            for _ in 0..10 {
-                let _ = LocalTimeProvider::sleep(&time, Duration::from_millis(50)).await;
-                inner.borrow_mut().push(LocalTimeProvider::now(&time));
-            }
-            assert_always!(
-                inner.borrow().len() == 10,
-                "the local observer ran every round"
-            );
-        });
-        observer
-            .await
-            .map_err(|e| SimulationError::InvalidState(format!("observer failed: {e}")))?;
+        // A workload can drive local code too: `run_local` runs it as a
+        // local task and hands its answer back, so the workload's own
+        // future stays `Send` while the task holds an `Rc`.
+        let rounds = ctx
+            .run_local("local-observer", |ctx| async move {
+                let inner = Rc::new(RefCell::new(Vec::new()));
+                for _ in 0..10 {
+                    let _ = LocalTimeProvider::sleep(ctx.time(), Duration::from_millis(50)).await;
+                    inner.borrow_mut().push(LocalTimeProvider::now(ctx.time()));
+                }
+                inner.borrow().len()
+            })
+            .await;
+        assert_always!(rounds == 10, "the local observer ran every round");
         for _ in 0..100 {
             moonpool_sim::TimeProvider::sleep(ctx.time(), Duration::from_millis(5))
                 .await
