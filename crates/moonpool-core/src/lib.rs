@@ -101,7 +101,7 @@
 //! | `compio-providers` | no | `CompioProviders`: all five `compio-*` features below, plus `tokio-random` for the RNG (no Tokio involved) |
 //! | `compio-task` | via umbrella | `CompioTaskProvider` ([`LocalTaskProvider`]) |
 //! | `compio-time` | via umbrella | `CompioTimeProvider` ([`LocalTimeProvider`]) |
-//! | `compio-net` | via umbrella | `CompioNetworkProvider` ([`LocalNetworkProvider`]) |
+//! | `compio-net` | via umbrella | `CompioNetworkProvider` ([`LocalNetworkProvider`]) and `CompioResolver` |
 //! | `compio-fs` | via umbrella | `CompioStorageProvider` ([`LocalStorageProvider`]), direct I/O on Linux |
 //! | `compio-system` | via umbrella | `CompioSystemProvider` |
 //! | `select` | yes | [`select!`] as tokio's macro, unchanged |
@@ -163,10 +163,12 @@ pub use network::{TokioNetworkProvider, TokioTcpListener};
 pub use providers::CompioProviders;
 #[cfg(feature = "tokio-providers")]
 pub use providers::TokioProviders;
-pub use providers::{LocalProviders, Providers};
+pub use providers::{LocalProviders, Providers, ThreadProviders};
 pub use random::RandomProvider;
 #[cfg(feature = "tokio-random")]
 pub use random::TokioRandomProvider;
+#[cfg(feature = "compio-net")]
+pub use resolver::CompioResolver;
 #[cfg(feature = "tokio-net")]
 pub use resolver::TokioResolver;
 pub use resolver::{Resolver, split_host_port};

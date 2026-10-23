@@ -91,6 +91,55 @@ impl Resolver for TokioResolver {
     }
 }
 
+/// Production resolver for a thread-per-core runtime (feature `compio-net`):
+/// the operating system's lookup (`getaddrinfo`) on a short-lived helper
+/// thread.
+///
+/// The lookup blocks, so it must not run on the runtime's own thread. The
+/// answer comes back over a channel, thus the future is `Send` and does not
+/// need a runtime of its own. It runs under compio, Tokio or any executor.
+#[cfg(feature = "compio-net")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompioResolver;
+
+#[cfg(feature = "compio-net")]
+impl CompioResolver {
+    /// Create an operating-system resolver.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(feature = "compio-net")]
+impl Resolver for CompioResolver {
+    async fn resolve(&self, target: &str) -> io::Result<Vec<SocketAddr>> {
+        use std::net::ToSocketAddrs as _;
+
+        let (answer, answered) = futures::channel::oneshot::channel();
+        let owned = target.to_string();
+        std::thread::Builder::new()
+            .name("moonpool-resolve".into())
+            .spawn(move || {
+                let found = owned
+                    .to_socket_addrs()
+                    .map(Iterator::collect::<Vec<SocketAddr>>);
+                // The caller may have stopped waiting; nothing to do then.
+                let _ = answer.send(found);
+            })?;
+        let addresses = answered
+            .await
+            .map_err(|_| io::Error::other("the resolver thread ended without an answer"))??;
+        if addresses.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{target} resolved to no address"),
+            ));
+        }
+        Ok(addresses)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::split_host_port;

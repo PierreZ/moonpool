@@ -137,6 +137,47 @@ impl SimContext {
         self.providers.task()
     }
 
+    /// Run `body`, a future that need not be `Send`, as a local task of
+    /// this process or workload, and return its answer.
+    ///
+    /// [`Process::run`](crate::Process::run) and
+    /// [`Workload::run`](crate::Workload::run) return `Send` futures. Code
+    /// written for a thread-per-core runtime (the local provider traits)
+    /// holds `!Send` values across its awaits, so it cannot run inside them
+    /// directly. This runs it on the same deterministic executor and waits
+    /// for its answer over a channel. `body` gets its own clone of the
+    /// context, because a task outlives any borrow.
+    ///
+    /// The task belongs to the caller's boot scope: a crash or a reboot
+    /// ends it with the process. When the task ends without an answer (it
+    /// was aborted), the returned future never completes: the runner is
+    /// about to drop it.
+    ///
+    /// ```ignore
+    /// async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+    ///     ctx.run_local("node", |ctx| async move { local_node(&ctx).await }).await
+    /// }
+    /// ```
+    pub async fn run_local<T, F>(&self, name: &str, body: impl FnOnce(SimContext) -> F) -> T
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = T> + 'static,
+    {
+        use moonpool_core::LocalTaskProvider;
+
+        let (answer, answered) = futures::channel::oneshot::channel();
+        let future = body(self.clone());
+        LocalTaskProvider::spawn_local_task(self.task(), name, async move {
+            // The caller is gone only when its process is: nothing to tell.
+            let _ = answer.send(future.await);
+        })
+        .detach();
+        match answered.await {
+            Ok(answer) => answer,
+            Err(_) => std::future::pending().await,
+        }
+    }
+
     /// Get the seeded random provider.
     ///
     /// Every draw comes from the simulation's one random stream, so it is

@@ -204,9 +204,9 @@ impl<F: StorageFile> LocalStorageFile for F { /* forwards every method */ }
 
 Every `Send` backend implements the local traits through the blanket impls, so the Tokio and simulated providers get them for free. A thread-per-core backend implements only the local traits. Code written once against the local traits runs on every backend, and when the backend is `Send` the futures it builds are `Send` too: the auto traits of the concrete future leak through the generic code, so it can still go to `tokio::spawn`.
 
-**Tasks** have no blanket impl in either direction. A `TaskProvider` cannot spawn a `!Send` future, and a local provider pins its tasks to one thread. A backend that can do both implements both. `CompioTaskProvider` is the production local one. `SimTaskProvider` implements both traits, because the executor runs every task on one thread anyway: a local task inherits the owner and the boot scope, dies with its process, reports its panics, and is scheduled by the same seeded executor. So **local code runs under simulation** unchanged, `Rc<RefCell<..>>` across awaits included. A `Process` or `Workload` future stays `Send`: it spawns the local code with `ctx.task().spawn_local_task(..)` and awaits or detaches the handle, which is `Send` (`crates/moonpool-sim/tests/local_workload.rs`).
+**Tasks** have no blanket impl in either direction. A `TaskProvider` cannot spawn a `!Send` future, and a local provider pins its tasks to one thread. A backend that can do both implements both. `CompioTaskProvider` is the production local one. `SimTaskProvider` implements both traits, because the executor runs every task on one thread anyway: a local task inherits the owner and the boot scope, dies with its process, reports its panics, and is scheduled by the same seeded executor. So **local code runs under simulation** unchanged, `Rc<RefCell<..>>` across awaits included. A `Process` or `Workload` future stays `Send`: it spawns the local code with `ctx.task().spawn_local_task(..)` and awaits or detaches the handle, which is `Send` (`crates/moonpool-sim/tests/local_workload.rs`). `ctx.run_local(name, |ctx| async move { .. })` does this for a body that returns an answer: it runs the body as a local task of the process, with its own clone of the context, and returns the answer over a channel.
 
-`LocalProviders` leaves the task slot out so that it can be a blanket impl over `Providers`: every existing bundle is a `LocalProviders`. Code that spawns local tasks takes a `LocalTaskProvider` beside the bundle. Random and system keep their `Send` traits: their methods are synchronous, so a thread-per-core runtime backs them with the same types Tokio uses.
+`LocalProviders` leaves the task slot out so that it can be a blanket impl over `Providers`: every existing bundle is a `LocalProviders`. Code that spawns local tasks takes a `LocalTaskProvider` beside the bundle, or a `ThreadProviders` bundle: a `LocalProviders` with a local task slot (`local_task()`). `SimProviders` is one (through a blanket impl over every `Providers` whose task provider is also local) and `CompioProviders` is one. `TokioProviders` is not. Random and system keep their `Send` traits: their methods are synchronous, so a thread-per-core runtime backs them with the same types Tokio uses.
 
 **The compio backend.** The `compio-*` features (umbrella `compio-providers`, off by default) add a production backend on [compio](https://github.com/compio-rs/compio), a completion-based, thread-per-core runtime: io_uring on Linux (polling where the kernel refuses io_uring), IOCP on Windows. It implements only the local traits:
 
@@ -216,8 +216,8 @@ Every `Send` backend implements the local traits through the blanket impls, so t
 | `compio-time` | `CompioTimeProvider` | compio's timer; `timer()` equals `now()` |
 | `compio-net` | `CompioNetworkProvider` | compio TCP behind compio's `AsyncStream` adapter (`futures::io`), `TCP_NODELAY` set |
 | `compio-fs` | `CompioStorageProvider` | each positioned transfer, sync and size query is one driver operation; the `*_aligned` forms hand the caller's `AlignedBuf` to the kernel |
-| `compio-system` | `CompioSystemProvider` | the Tokio provider's OS counters, `run_loop_busy` is `None` |
-| `compio-providers` | `CompioProviders` | a `LocalProviders` bundle (random: the thread-local RNG) |
+| `compio-system` | `CompioSystemProvider` | the Tokio provider's OS counters; `run_loop_busy` is the CPU time of the calling thread (sample from the runtime's thread) |
+| `compio-providers` | `CompioProviders` | a `LocalProviders` and `ThreadProviders` bundle (random: the thread-local RNG) |
 
 Every call needs a compio runtime on the current thread. Storage opens follow the Tokio backend's direct-I/O policy, from the same code: `DirectIo::Optional` upgrades to `O_DIRECT` where the filesystem allows it, `DirectIo::Required` fails rather than fall back and never creates a file, and a direct file advertises the alignment the kernel reports. The owned `*_aligned` transfers hand the caller's `AlignedBuf` straight to `io_uring`. On Linux an append file's stream writes go through an `O_APPEND` descriptor, so they are atomic against other writers, and positioned I/O uses a second descriptor of the same file without the flag. Elsewhere `pwrite` honours its offset under `O_APPEND`, so the stream appends at the size it reads first, which is not atomic against other writers.
 
@@ -239,7 +239,7 @@ pub trait Resolver: Clone + Send + Sync + 'static {
 
 The target is the same `host:port` string `connect` takes. A numeric target resolves to itself. An `Ok` answer is never empty: a name with no address is a `NotFound` error, so a caller can tell a failed lookup from a failed connection. Caching and time-to-live belong to the caller.
 
-**Production**: `TokioResolver` (feature `tokio-net`) calls `tokio::net::lookup_host`.
+**Production**: `TokioResolver` (feature `tokio-net`) calls `tokio::net::lookup_host`. `CompioResolver` (feature `compio-net`) runs the operating system's lookup on a helper thread and answers over a channel, so its future is `Send` and runs on any executor.
 
 **Simulation**: `ScriptedResolver` answers from a shared table that a fault injector or workload edits while the run goes. Answers are immediate and draw no randomness.
 

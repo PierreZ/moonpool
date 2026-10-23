@@ -13,7 +13,8 @@ use moonpool_core::{
     AlignedBuf, CompioNetworkProvider, CompioProviders, CompioStorageProvider,
     CompioSystemProvider, CompioTaskProvider, CompioTimeProvider, Detach, DirectIo,
     LocalNetworkProvider, LocalProviders, LocalStorageFile, LocalStorageProvider,
-    LocalTaskProvider, LocalTcpListener, LocalTimeProvider, OpenOptions, SystemProvider, TimeError,
+    LocalTaskProvider, LocalTcpListener, LocalTimeProvider, OpenOptions, Resolver, SystemProvider,
+    ThreadProviders, TimeError,
 };
 use tempfile::TempDir;
 
@@ -569,7 +570,49 @@ fn the_bundle_runs_generic_local_code() {
 #[test]
 fn system_samples_this_process() {
     let provider = CompioSystemProvider::new();
-    let sample = provider.sample(".").expect("sample");
-    assert!(sample.cores >= 1);
-    assert_eq!(sample.run_loop_busy, None);
+    let first = provider.sample(".").expect("sample");
+    assert!(first.cores >= 1);
+    let mut spin = 0_u64;
+    for i in 0..2_000_000_u64 {
+        spin = spin.wrapping_add(i * i);
+    }
+    assert_ne!(spin, 1);
+    let second = provider.sample(".").expect("sample");
+    // The run loop is the calling thread: its CPU time only grows.
+    let (Some(before), Some(after)) = (first.run_loop_busy, second.run_loop_busy) else {
+        panic!("the thread's CPU time is readable on this target");
+    };
+    assert!(after >= before);
+}
+
+/// `CompioProviders` is a `ThreadProviders` bundle: generic code spawns
+/// `!Send` tasks through its local task slot.
+#[test]
+fn the_bundle_spawns_local_tasks() {
+    async fn bump<P: ThreadProviders>(providers: &P, counter: Rc<Cell<u32>>) {
+        providers
+            .local_task()
+            .spawn_local_task("bump", async move { counter.set(counter.get() + 1) })
+            .await
+            .expect("the local task completes");
+    }
+    run(async {
+        let counter = Rc::new(Cell::new(0));
+        bump(&CompioProviders::new(), Rc::clone(&counter)).await;
+        assert_eq!(counter.get(), 1);
+    });
+}
+
+/// `CompioResolver` answers literals and `localhost` from the compio
+/// thread, without blocking it.
+#[test]
+fn the_resolver_answers_literals_and_localhost() {
+    run(async {
+        let resolver = moonpool_core::CompioResolver::new();
+        let literal = resolver.resolve("127.0.0.1:4500").await.expect("a literal");
+        assert_eq!(literal, vec!["127.0.0.1:4500".parse().expect("literal address")]);
+        let localhost = resolver.resolve("localhost:4500").await;
+        assert!(localhost.is_ok_and(|found| found.iter().all(|a| a.port() == 4500)));
+        assert!(resolver.resolve("no-port").await.is_err());
+    });
 }

@@ -39,8 +39,8 @@
 //! and workload through `SimContext::providers`.
 
 use crate::{
-    LocalNetworkProvider, LocalStorageProvider, LocalTimeProvider, NetworkProvider, RandomProvider,
-    StorageProvider, SystemProvider, TaskProvider, TimeProvider,
+    LocalNetworkProvider, LocalStorageProvider, LocalTaskProvider, LocalTimeProvider,
+    NetworkProvider, RandomProvider, StorageProvider, SystemProvider, TaskProvider, TimeProvider,
 };
 #[cfg(feature = "tokio-providers")]
 use crate::{
@@ -247,6 +247,53 @@ impl<P: Providers> LocalProviders for P {
     }
 }
 
+/// A [`LocalProviders`] bundle with a local task slot: what an application
+/// on one thread runs on.
+///
+/// [`LocalProviders`] leaves the task slot out, so that every [`Providers`]
+/// bundle is a local bundle for free. An application that spawns `!Send`
+/// tasks still needs a spawner beside the bundle. This trait adds it:
+///
+/// - every [`Providers`] bundle whose task provider is also a
+///   [`LocalTaskProvider`] (`SimProviders`, because the simulator runs every
+///   task on one thread) implements it with that same task provider;
+/// - [`CompioProviders`] (feature `compio-providers`) implements it with
+///   [`CompioTaskProvider`](crate::CompioTaskProvider).
+///
+/// [`TokioProviders`] does not: `tokio::spawn` needs `Send` futures.
+///
+/// The accessor is named [`local_task`](Self::local_task), not `task`, so a
+/// bundle that also implements [`Providers`] never makes a call ambiguous.
+///
+/// ```rust
+/// use moonpool_core::{LocalTaskProvider, ThreadProviders};
+///
+/// fn start<P: ThreadProviders>(providers: &P) {
+///     let shared = std::rc::Rc::new(());
+///     drop(providers.local_task().spawn_local_task("rc", async move {
+///         let _held = shared;
+///     }));
+/// }
+/// ```
+pub trait ThreadProviders: LocalProviders {
+    /// Task provider type for spawning `!Send` tasks on the current thread.
+    type LocalTask: LocalTaskProvider;
+
+    /// Get the local task provider instance.
+    fn local_task(&self) -> &Self::LocalTask;
+}
+
+impl<P> ThreadProviders for P
+where
+    P: Providers<Task: LocalTaskProvider>,
+{
+    type LocalTask = P::Task;
+
+    fn local_task(&self) -> &Self::LocalTask {
+        Providers::task(self)
+    }
+}
+
 /// Production providers: the six Tokio-backed providers in one bundle.
 ///
 /// | Slot | Type |
@@ -389,5 +436,14 @@ impl LocalProviders for CompioProviders {
 
     fn system(&self) -> &Self::System {
         &self.system
+    }
+}
+
+#[cfg(feature = "compio-providers")]
+impl ThreadProviders for CompioProviders {
+    type LocalTask = crate::CompioTaskProvider;
+
+    fn local_task(&self) -> &Self::LocalTask {
+        &crate::CompioTaskProvider
     }
 }
