@@ -914,7 +914,9 @@ impl SimulationBuilder {
         // Install the observability layer once for the entire run. The guard
         // is dropped when run() returns, restoring the previous subscriber.
         // All registered invariants live on the layer handle.
-        let layer = SimulationLayer::new().with_level(self.trace_level);
+        let layer = SimulationLayer::new()
+            .with_level(self.trace_level)
+            .with_capture(self.timeline == super::builder::TimelineCapture::On);
         let (obs_handle, _obs_guard) = layer.install();
         for inv in self.invariants.drain(..) {
             obs_handle.register(inv);

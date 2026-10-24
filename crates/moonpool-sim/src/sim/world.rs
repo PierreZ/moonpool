@@ -261,7 +261,7 @@ impl SimWorld {
     }
 
     /// Processes one delayed event and returns whether another event is queued.
-    #[instrument(skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn step(&mut self) -> bool {
         let mut requeue = Vec::new();
         let (processed, wakes) = {
