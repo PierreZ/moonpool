@@ -205,11 +205,19 @@ impl<E> Ord for Scheduled<E> {
     }
 }
 
+/// Tombstones a heap may hold beyond twice its live entries before a cancel
+/// compacts it.
+const COMPACT_SLACK: usize = 64;
+
 /// A deterministic delayed-item scheduler.
 ///
 /// The scheduler exclusively owns logical time, global sequence allocation,
-/// queue ordering, and cancellation. Cancelled entries are removed eagerly
-/// without advancing logical time or leaving tombstones in the queue.
+/// queue ordering, and cancellation. A cancelled entry leaves the `live` set
+/// at once and stays in the heap as a tombstone: `pop` discards tombstones
+/// without advancing logical time, and the heap is compacted when tombstones
+/// outnumber live entries. Removing each entry eagerly cost a scan and a
+/// rebuild of the whole heap per cancel, and every timeout that loses its
+/// race cancels one. The order of live entries is the same either way.
 #[derive(Debug)]
 pub struct Scheduler<E> {
     now: Duration,
@@ -284,12 +292,14 @@ impl<E> Scheduler<E> {
     /// Returns `true` only when the identifier still referred to a queued item.
     #[instrument(level = "trace", skip(self))]
     pub fn cancel(&mut self, id: ScheduleId) -> bool {
-        if self.live.remove(&id) {
-            self.heap.retain(|scheduled| scheduled.id != id);
-            true
-        } else {
-            false
+        if !self.live.remove(&id) {
+            return false;
         }
+        if self.heap.len() > 2 * self.live.len() + COMPACT_SLACK {
+            let live = &self.live;
+            self.heap.retain(|scheduled| live.contains(&scheduled.id));
+        }
+        true
     }
 
     /// Pops the next live item and advances logical time to its timestamp.
@@ -298,8 +308,12 @@ impl<E> Scheduler<E> {
     /// clock, the time half of a determinism-canary fingerprint.
     #[instrument(level = "trace", skip(self))]
     pub fn pop(&mut self) -> Option<Scheduled<E>> {
-        let scheduled = self.heap.pop()?;
-        self.live.remove(&scheduled.id);
+        let scheduled = loop {
+            let scheduled = self.heap.pop()?;
+            if self.live.remove(&scheduled.id) {
+                break scheduled;
+            }
+        };
         self.now = scheduled.time;
         crate::sim::rng::note_logical_time(self.now);
         Some(scheduled)
@@ -319,7 +333,9 @@ impl<E> Scheduler<E> {
 
     /// Iterates over live queued items in unspecified heap order.
     pub fn iter(&self) -> impl Iterator<Item = &Scheduled<E>> {
-        self.heap.iter()
+        self.heap
+            .iter()
+            .filter(|scheduled| self.live.contains(&scheduled.id))
     }
 }
 
@@ -376,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_cancellation_does_not_retain_heap_entries() {
+    fn repeated_cancellation_keeps_the_heap_bounded() {
         let mut scheduler = Scheduler::new();
         for value in 0..10_000 {
             let id = scheduler
@@ -386,9 +402,31 @@ mod tests {
         }
 
         assert!(scheduler.is_empty());
-        assert!(scheduler.heap.is_empty());
+        assert!(scheduler.heap.len() <= super::COMPACT_SLACK);
         assert!(scheduler.pop().is_none());
         assert_eq!(scheduler.now(), Duration::ZERO);
+    }
+
+    #[test]
+    fn tombstones_are_invisible_to_pop_and_iter() {
+        let mut scheduler = Scheduler::new();
+        let early = scheduler
+            .schedule_after(Duration::from_secs(1), "early")
+            .expect("item should schedule");
+        scheduler
+            .schedule_after(Duration::from_secs(5), "late")
+            .expect("item should schedule");
+        assert!(scheduler.cancel(early));
+
+        assert_eq!(scheduler.len(), 1);
+        let values: Vec<_> = scheduler
+            .iter()
+            .map(|scheduled| *scheduled.value())
+            .collect();
+        assert_eq!(values, ["late"]);
+        assert_eq!(scheduler.pop().map(Scheduled::into_value), Some("late"));
+        assert_eq!(scheduler.now(), Duration::from_secs(5));
+        assert!(scheduler.pop().is_none());
     }
 
     #[test]

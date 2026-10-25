@@ -221,7 +221,7 @@ impl Drop for SimTcpStream {
 }
 
 impl AsyncRead for SimTcpStream {
-    #[instrument(skip(self, cx, buf))]
+    #[instrument(level = "trace", skip(self, cx, buf))]
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -303,11 +303,10 @@ impl AsyncRead for SimTcpStream {
         );
 
         debug_assert!(bytes_read > 0, "readable connection returned no bytes");
-        let data_preview = String::from_utf8_lossy(&buf[..bytes_read.min(20)]);
         tracing::trace!(
             "SimTcpStream::poll_read connection_id={} returning data: '{}'",
             self.connection_id.0,
-            data_preview
+            String::from_utf8_lossy(&buf[..bytes_read.min(20)])
         );
         Poll::Ready(Ok(bytes_read))
     }
@@ -382,7 +381,7 @@ impl SimTcpStream {
 }
 
 impl AsyncWrite for SimTcpStream {
-    #[instrument(skip(self, cx, buf))]
+    #[instrument(level = "trace", skip(self, cx, buf))]
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -435,11 +434,10 @@ impl AsyncWrite for SimTcpStream {
         // Use buffered send to maintain TCP ordering.
         let accepted = buf.len().min(available);
         let accepted_data = &buf[..accepted];
-        let data_preview = String::from_utf8_lossy(&accepted_data[..accepted.min(20)]);
         tracing::trace!(
             "SimTcpStream::poll_write buffering {} bytes: '{}' for ordered delivery",
             accepted,
-            data_preview
+            String::from_utf8_lossy(&accepted_data[..accepted.min(20)])
         );
 
         // Buffer the data for ordered processing instead of direct event scheduling
@@ -449,7 +447,7 @@ impl AsyncWrite for SimTcpStream {
         Poll::Ready(Ok(accepted))
     }
 
-    #[instrument(skip(self, cx, bufs))]
+    #[instrument(level = "trace", skip(self, cx, bufs))]
     fn poll_write_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

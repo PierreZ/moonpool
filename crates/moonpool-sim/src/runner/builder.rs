@@ -85,6 +85,16 @@ pub(super) enum WorkloadEntry {
     },
 }
 
+/// Whether a run stores trace events in its timeline (see
+/// [`SimulationBuilder::capture_timeline`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TimelineCapture {
+    /// Events are stored (the default).
+    On,
+    /// Events are dropped at the layer.
+    Off,
+}
+
 /// Configures and runs a campaign of simulation seeds.
 ///
 /// A builder collects four kinds of settings, then [`run`](Self::run)
@@ -97,7 +107,7 @@ pub(super) enum WorkloadEntry {
 /// | The test driver | [`workload_factory`](Self::workload_factory), [`workloads`](Self::workloads), [`workload`](Self::workload) |
 /// | Chaos | [`enable_chaos`](Self::enable_chaos), [`chaos_duration`](Self::chaos_duration), [`fault_factory`](Self::fault_factory), [`network_fault_mask`](Self::network_fault_mask), [`storage_fault_mask`](Self::storage_fault_mask), [`replicated_storage_faults`](Self::replicated_storage_faults), [`swarm_operations`](Self::swarm_operations) |
 /// | Deployment shape | [`link_latency`](Self::link_latency), [`tcp_send_window_bytes`](Self::tcp_send_window_bytes), [`accept_backlog_capacity`](Self::accept_backlog_capacity), [`max_spawns`](Self::max_spawns) |
-/// | Checks and observation | [`invariant`](Self::invariant), [`invariant_fn`](Self::invariant_fn), [`trace_level`](Self::trace_level), [`metrics_factory`](Self::metrics_factory), [`metric`](Self::metric), [`check_determinism`](Self::check_determinism) |
+/// | Checks and observation | [`invariant`](Self::invariant), [`invariant_fn`](Self::invariant_fn), [`trace_level`](Self::trace_level), [`capture_timeline`](Self::capture_timeline), [`metrics_factory`](Self::metrics_factory), [`metric`](Self::metric), [`check_determinism`](Self::check_determinism) |
 /// | Seeds and stopping | [`until_coverage_stable`](Self::until_coverage_stable), [`set_iterations`](Self::set_iterations), [`set_debug_seeds`](Self::set_debug_seeds), [`replay_timeline`](Self::replay_timeline), [`run_time_budget`](Self::run_time_budget), `enable_exploration` (feature `exploration`) |
 ///
 /// The crate-level documentation has a complete example.
@@ -146,6 +156,9 @@ pub struct SimulationBuilder {
     /// The trace floor for the run's subscriber and timeline (see
     /// [`SimulationBuilder::trace_level`]). `INFO` by default.
     pub(super) trace_level: tracing::level_filters::LevelFilter,
+    /// Whether trace events are stored in the timeline (see
+    /// [`SimulationBuilder::capture_timeline`]). On by default.
+    pub(super) timeline: TimelineCapture,
     pub(super) invariants: Vec<Box<dyn Invariant + Send>>,
     /// Factories that build a fresh fault injector for every root and explored
     /// timeline, mirroring `workload_factory`.
@@ -217,6 +230,7 @@ impl SimulationBuilder {
             swarm_operations: false,
             check_determinism: false,
             trace_level: tracing::level_filters::LevelFilter::INFO,
+            timeline: TimelineCapture::On,
             invariants: Vec::new(),
             fault_factories: Vec::new(),
             metrics_factory: None,
@@ -703,10 +717,31 @@ impl SimulationBuilder {
     /// one seed: those spans come alive and their events join the timeline,
     /// at the price of a slower run and a much larger capture. The floor
     /// never changes scheduling or randomness, so a seed replays identically
-    /// at any level.
+    /// at any level. `LevelFilter::OFF` disables every span and event: the
+    /// fastest setting for a run that reads neither logs nor the timeline.
     #[must_use]
     pub fn trace_level(mut self, level: tracing::level_filters::LevelFilter) -> Self {
         self.trace_level = level;
+        self
+    }
+
+    /// Store trace events in the timeline (`true`, the default) or not.
+    ///
+    /// Invariants and workloads (`SimContext::observability`) read the
+    /// timeline. A run that reads neither can turn capture off: storing every
+    /// event of a long run (its name, source, target and fields) costs
+    /// allocation, memory and the final free, and the spans stay as enabled
+    /// as [`trace_level`](Self::trace_level) says. Runner-recorded entries
+    /// (simulator faults, unobserved task panics) are kept either way.
+    /// Capture never changes scheduling or randomness, so a seed replays
+    /// identically with it on or off.
+    #[must_use]
+    pub fn capture_timeline(mut self, capture: bool) -> Self {
+        self.timeline = if capture {
+            TimelineCapture::On
+        } else {
+            TimelineCapture::Off
+        };
         self
     }
 

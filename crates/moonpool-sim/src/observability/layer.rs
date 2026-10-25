@@ -3,6 +3,8 @@
 //! [`SimulationLayer`] subscribes to ordinary `tracing` events — the same
 //! emissions production observability consumes. An event is captured iff:
 //!
+//! 0. capture is on ([`SimulationLayer::with_capture`], set for a run by
+//!    [`SimulationBuilder::capture_timeline`]; on by default), and
 //! 1. its level is `INFO` or more severe, and
 //! 2. it is emitted inside a span carrying an `ip` field (the orchestrator
 //!    wraps every process and workload task in such a span), and
@@ -26,6 +28,7 @@
 //! captures the events into the timeline.
 //!
 //! [`SimulationBuilder::trace_level`]: crate::SimulationBuilder::trace_level
+//! [`SimulationBuilder::capture_timeline`]: crate::SimulationBuilder::capture_timeline
 //!
 //! Simulation time is stamped from the layer's internal clock, advanced by
 //! the orchestrator via [`SimulationLayerHandle::set_sim_time_ms`] after each
@@ -109,17 +112,35 @@ pub struct SimulationLayer {
     ///
     /// [`install`]: SimulationLayer::install
     level: LevelFilter,
+    /// Whether trace events are stored in the timeline. `true` by default.
+    capture: bool,
 }
 
 impl SimulationLayer {
-    /// Create a fresh layer with no events, no invariants, and an `INFO` floor.
+    /// Create a fresh layer with no events, no invariants, an `INFO` floor,
+    /// and capture on.
     #[must_use]
     pub fn new() -> Self {
         Self {
             events: Arc::new(Mutex::new(EventStore::new())),
             invariants: Arc::new(Mutex::new(Vec::new())),
             level: LevelFilter::INFO,
+            capture: true,
         }
+    }
+
+    /// Turn the timeline capture of trace events on (the default) or off.
+    ///
+    /// Off, an event still reaches the layer and is dropped at once: for a
+    /// run that reads no timeline, storing every `INFO` event (its name,
+    /// source, target and fields) costs allocation, memory and the final
+    /// free, for nothing. Runner-recorded entries (simulator faults, unobserved
+    /// task panics) are kept either way. Capture never changes scheduling or
+    /// randomness, so a seed replays identically with it on or off.
+    #[must_use]
+    pub fn with_capture(mut self, capture: bool) -> Self {
+        self.capture = capture;
+        self
     }
 
     /// Set the trace floor: the most verbose level this layer captures, and
@@ -476,6 +497,10 @@ where
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+        // 0. Nothing is stored while capture is off (see `with_capture`).
+        if !self.capture {
+            return;
+        }
         // 1. At the floor or more severe only (Level::TRACE > Level::INFO in
         //    tracing's ordering; a `LevelFilter` compares the same way).
         if *event.metadata().level() > self.level {
