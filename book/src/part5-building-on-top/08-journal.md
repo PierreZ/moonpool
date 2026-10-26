@@ -133,6 +133,14 @@ durability is enough because a segment never changes size. `Batched` keeps
 its plain writes and one sync: a durable write of the records alone would not
 cover the entries.
 
+A failed sync can leave pages clean in the page cache but not on the device
+(fsyncgate): a later sync reports success, and reads serve the cached bytes.
+Under one sync the device can then keep a record and lose its entry, a damaged
+batch that no crash made. So a `Batched` commit whose sync fails writes its
+batch again and syncs again, at most three syncs in all. The batch is not
+acknowledged yet, so the rewrite is safe: a power loss during it can tear the
+batch, which a power loss before the first sync could already do.
+
 ### No Copy on the Way to the Disk
 
 A commit encodes its batch **in place**. `commit` sizes the entry log's

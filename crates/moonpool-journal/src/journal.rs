@@ -1316,7 +1316,7 @@ async fn write_protocol<F: moonpool_core::LocalStorageFile>(
             COMMIT_HINT_PROB
         )
         .await;
-        segment.sync().await.map_err(unknown)?;
+        sync_batch(segment, batch).await.map_err(unknown)?;
     }
     if let Some(meta) = meta {
         // The batch is durable and the metainfo still names the old one.
@@ -1328,6 +1328,46 @@ async fn write_protocol<F: moonpool_core::LocalStorageFile>(
         meta_file.update(meta).await.map_err(unknown)?;
     }
     Ok(())
+}
+
+/// How many syncs a [`Durability::Batched`] commit tries before it fails.
+const SYNC_ATTEMPTS: u32 = 3;
+
+/// Sync a [`Durability::Batched`] batch, writing it again before each retry.
+///
+/// A failed sync can leave pages clean in the page cache but not on the
+/// device (fsyncgate): a later sync reports success, and reads keep serving
+/// the bytes until the cache drops them. One sync covers the entries and the
+/// records, so the device can keep a record whose entry it lost: a damaged
+/// batch that no crash made. The batch is not acknowledged yet, so writing
+/// its own bytes again is safe: it dirties every page it holds, and the
+/// next sync flushes them. A power loss during the retry can tear the batch,
+/// which a power loss before the first sync could already do. Ordered
+/// commits need no retry: each durable write covers its own blocks.
+async fn sync_batch<F: moonpool_core::LocalStorageFile>(
+    segment: &Segment<F>,
+    batch: &mut Prepared,
+) -> std::io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        let Err(error) = segment.sync().await else {
+            return Ok(());
+        };
+        if attempt == SYNC_ATTEMPTS {
+            return Err(error);
+        }
+        attempt += 1;
+        let entries = std::mem::take(&mut batch.entries);
+        batch.entries = segment.write(batch.entry_at, entries).await?;
+        let records = std::mem::take(&mut batch.records);
+        batch.records = segment.write(batch.persist_at, records).await?;
+        // A power loss here tears a batch whose first sync failed.
+        moonpool_buggify::hint!(
+            "journal commit: batch written again, not synced",
+            COMMIT_HINT_PROB
+        )
+        .await;
+    }
 }
 
 #[cfg(test)]
