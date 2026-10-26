@@ -70,7 +70,9 @@ journal.commit(batch).await?;
   and damage is always told apart. Ordered issues each log's write as one
   durable write (`StorageFile::write_at_durable`, `pwritev2(RWF_DSYNC)` on
   Linux), two calls where a write and an `fdatasync` each were four; so do the
-  metainfo copies and a roll's segment headers.
+  metainfo copies and a roll's segment headers. A Batched commit whose sync
+  fails writes its batch again before it retries (fsyncgate), at most three
+  syncs in all.
 - **No copy on the way to the disk.** A commit encodes its entries and
   records in place, in block-aligned `AlignedBuf`s, and moves them through
   the zero-copy `StorageFile::write_at_aligned` /
