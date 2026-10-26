@@ -302,6 +302,10 @@ impl SimWorld {
             .set_file_position(handle_id, position)
     }
 
+    pub(crate) fn drop_file_cache(&self, handle_id: HandleId) -> Result<(), StorageError> {
+        self.inner.write().storage.drop_cache(handle_id)
+    }
+
     pub(crate) fn file_size(&self, handle_id: HandleId) -> Result<u64, StorageError> {
         self.inner.read().storage.file_size(handle_id)
     }

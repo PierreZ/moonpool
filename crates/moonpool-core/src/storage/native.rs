@@ -529,6 +529,30 @@ pub(super) fn fallocate<F: Descriptor>(_file: &F, _len: u64) -> io::Result<bool>
     Ok(false)
 }
 
+/// Drop the clean cached pages of `file` (`posix_fadvise(DONTNEED)` over
+/// the whole file): the next read comes from the device.
+#[cfg(target_os = "linux")]
+pub(super) fn drop_cache<F: Descriptor>(file: &F) -> io::Result<()> {
+    use std::os::fd::AsRawFd as _;
+
+    // SAFETY: `posix_fadvise` only reads its integer arguments, and the
+    // descriptor stays open for the duration of the call.
+    let done =
+        unsafe { libc::posix_fadvise(file.as_fd().as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    // It returns the error number, it does not set `errno`.
+    if done == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(done))
+    }
+}
+
+/// No page-cache advice off Linux: nothing is dropped.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn drop_cache<F: Descriptor>(_file: &F) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]

@@ -412,6 +412,38 @@ impl FileImage {
         sectors
     }
 
+    /// Drop the cache's clean copies (`posix_fadvise(DONTNEED)`): every
+    /// stranded sector (a write since clears the mark) reads its durable
+    /// bytes from here on, and the part of it past the durable end reads
+    /// the fill pattern, as a never-written extent does. A sector a sync
+    /// will flush stays. Returns the sectors it dropped.
+    #[instrument(level = "trace", skip(self))]
+    pub fn drop_cache(&mut self) -> Vec<u64> {
+        let dropped: Vec<u64> = (0..self.sectors())
+            .filter(|&s| self.stranded.is_set(as_index(s)))
+            .collect();
+        for &sector in &dropped {
+            let shared = self.shared_bounds(sector);
+            let visible = self.visible_bounds(sector);
+            let fill = self.fill.sector(sector);
+            let base = visible.start;
+            for at in visible {
+                self.visible[at] = if shared.contains(&at) {
+                    self.committed[at]
+                } else {
+                    fill[at - base]
+                };
+            }
+            self.stranded.clear(as_index(sector));
+            // Whole on the device: nothing left to resolve. A tail past the
+            // durable end stays dirty, its length still volatile.
+            if shared == self.visible_bounds(sector) {
+                self.dirty.clear(as_index(sector));
+            }
+        }
+        dropped
+    }
+
     /// Resolve a crash: every sector dirty at this instant lands old, new,
     /// lost, damaged, or shorn, independently. A clean crash lands every
     /// dirty sector new, except a stranded one, whose writeback already
@@ -1046,6 +1078,32 @@ mod tests {
             image.read(0, &mut buf).expect("read failed");
             assert_eq!(&buf, b"a", "seed {seed}: the sector rolled back");
         }
+    }
+
+    /// fsyncgate: a failed writeback leaves the new bytes in the cache and
+    /// a retried sync flushes nothing. Dropping the cache makes reads return
+    /// what the device holds; a sector written again stays.
+    #[test]
+    fn a_dropped_cache_reads_stranded_sectors_from_the_device() {
+        seeded(3);
+        let config = StorageConfiguration::fast_local();
+        let size = SECTOR_SIZE as u64;
+        let mut image = image(3 * size);
+        image.write(0, &[1; SECTOR_SIZE]);
+        image.sync(&config, &always_eligible);
+        image.write(0, &[2; SECTOR_SIZE]);
+        image.write(size, &[3; SECTOR_SIZE]);
+        assert_eq!(image.fail_writeback(false), vec![0, 1]);
+        image.sync(&config, &always_eligible);
+        image.write(size, &[4; SECTOR_SIZE]);
+
+        assert_eq!(image.drop_cache(), vec![0], "a sector written again stays");
+        let mut buf = [0u8; SECTOR_SIZE];
+        image.read(0, &mut buf).expect("read");
+        assert_eq!(buf, [1; SECTOR_SIZE], "the durable bytes come back");
+        image.read(size, &mut buf).expect("read");
+        assert_eq!(buf, [4; SECTOR_SIZE], "a dirty sector keeps its write");
+        assert!(image.drop_cache().is_empty(), "nothing is stranded now");
     }
 
     #[test]

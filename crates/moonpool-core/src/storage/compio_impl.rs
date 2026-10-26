@@ -565,6 +565,14 @@ impl LocalStorageFile for CompioStorageFile {
         }
         Ok(())
     }
+
+    async fn drop_cache(&self) -> io::Result<()> {
+        // A short advice call on the descriptor: run on this thread.
+        if self.direct {
+            return Ok(());
+        }
+        native::drop_cache(&self.file)
+    }
 }
 
 impl AsyncRead for CompioStorageFile {

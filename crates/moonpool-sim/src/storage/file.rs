@@ -203,6 +203,12 @@ impl StorageFile for SimStorageFile {
         }
         Ok(())
     }
+
+    async fn drop_cache(&self) -> io::Result<()> {
+        self.ensure_open()?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+        sim.drop_file_cache(self.handle_id).map_err(Into::into)
+    }
 }
 
 impl AsyncRead for SimStorageFile {

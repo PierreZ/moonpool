@@ -1335,6 +1335,20 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Drop the clean cached pages of the file `handle_id` names
+    /// ([`FileImage::drop_cache`]). A direct-I/O handle drops them too: the
+    /// image strands a failed writeback whatever the handle.
+    pub(crate) fn drop_cache(&mut self, handle_id: HandleId) -> Result<(), StorageError> {
+        let file_id = self.open_file_id(handle_id)?;
+        let file = self
+            .state
+            .files
+            .get_mut(&file_id)
+            .ok_or(StorageError::InvalidFileHandle { handle_id })?;
+        file.image.drop_cache();
+        Ok(())
+    }
+
     pub(crate) fn file_size(&self, handle_id: HandleId) -> Result<u64, StorageError> {
         let file_id = self.open_file_id(handle_id)?;
         self.state

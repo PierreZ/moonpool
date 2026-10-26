@@ -266,6 +266,10 @@ impl LocalStorageFile for RcFile {
         }
         Ok(())
     }
+
+    async fn drop_cache(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// A one-file storage provider that is `!Send`.
