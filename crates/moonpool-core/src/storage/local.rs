@@ -207,6 +207,10 @@ pub trait LocalStorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'static
     /// Reserve physical storage for the file's first `len` bytes. See
     /// [`StorageFile::allocate`].
     fn allocate(&self, len: u64) -> impl Future<Output = io::Result<()>>;
+
+    /// Drop this file's clean cached pages, so the next read comes from the
+    /// device. See [`StorageFile::drop_cache`].
+    fn drop_cache(&self) -> impl Future<Output = io::Result<()>>;
 }
 
 impl<P: StorageProvider> LocalStorageProvider for P {
@@ -311,5 +315,9 @@ impl<F: StorageFile> LocalStorageFile for F {
 
     fn allocate(&self, len: u64) -> impl Future<Output = io::Result<()>> {
         StorageFile::allocate(self, len)
+    }
+
+    fn drop_cache(&self) -> impl Future<Output = io::Result<()>> {
+        StorageFile::drop_cache(self)
     }
 }

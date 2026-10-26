@@ -490,6 +490,14 @@ impl StorageFile for TokioStorageFile {
         let file = Arc::clone(&self.positioned);
         run_blocking(move || allocate_blocking(&file, len)).await
     }
+
+    async fn drop_cache(&self) -> io::Result<()> {
+        if self.direct {
+            return Ok(());
+        }
+        let file = Arc::clone(&self.positioned);
+        run_blocking(move || native::drop_cache(&*file)).await
+    }
 }
 
 impl AsyncRead for TokioStorageFile {

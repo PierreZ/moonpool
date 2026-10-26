@@ -446,4 +446,21 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     /// mode 0; where the filesystem or the OS cannot allocate, the file
     /// only grows, as with `set_len`.
     fn allocate(&self, len: u64) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
+    /// Drop this file's clean cached pages, so the next read comes from the
+    /// device and not from the page cache.
+    ///
+    /// This is the answer to a failed writeback (fsyncgate): the kernel
+    /// marks the pages it could not write clean, so no later sync flushes
+    /// them, and reads go on returning bytes the device does not hold — in
+    /// this process and in the next one, since a process restart keeps the
+    /// page cache. A store that re-opens after a failed sync calls
+    /// [`sync_all`](Self::sync_all), then this method, then reads: what it
+    /// reads is then what a crash keeps.
+    ///
+    /// Dirty pages are not dropped: sync first. On Linux this is
+    /// `posix_fadvise(POSIX_FADV_DONTNEED)` over the whole file, which the
+    /// kernel may decline for a page that is mapped or locked; a direct-I/O
+    /// file has no cache to drop, and off Linux the call does nothing.
+    fn drop_cache(&self) -> impl std::future::Future<Output = io::Result<()>> + Send;
 }

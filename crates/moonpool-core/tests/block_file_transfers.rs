@@ -153,6 +153,10 @@ impl StorageFile for AwkwardFile {
         }
         Ok(())
     }
+
+    async fn drop_cache(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Stream I/O is not available on a file with direct-I/O constraints; the
