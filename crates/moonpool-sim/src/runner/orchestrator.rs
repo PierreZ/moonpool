@@ -216,6 +216,8 @@ pub(crate) struct OrchestrateInputs<'a> {
     pub(crate) run_time_budget: Duration,
     /// How many processes workloads may spawn in this run.
     pub(crate) max_spawns: usize,
+    /// The run's shard fault shapes (the gate is always on).
+    pub(crate) shard_faults: crate::runner::shard::ShardFaults,
     /// Per-iteration accounting for detached task panics.
     pub(crate) task_panics: TaskPanicTracker,
 }
@@ -286,6 +288,7 @@ impl WorkloadOrchestrator {
             iteration_count,
             run_time_budget,
             max_spawns,
+            shard_faults,
             task_panics,
         } = inputs;
         crate::chaos::window::set_chaos_ended_at(None);
@@ -302,6 +305,15 @@ impl WorkloadOrchestrator {
         // The run's wipe ledger: draws nothing, read only by a regime with
         // a wipe budget.
         crate::runner::wipe::WipeLedger::install(&state);
+        // The run's shard book: every `shard!` declaration lands in it, and
+        // the gate, the disks and the network read it.
+        let shard_book = crate::runner::shard::ShardBook::new(shard_faults);
+        state.publish(crate::runner::shard::SHARD_BOOK_KEY, shard_book.clone());
+        sim.set_shard_book(Some(shard_book.clone()));
+        moonpool_buggify::shard::set_sink(Box::new(crate::runner::shard::ShardSink::new(
+            shard_book,
+            sim.downgrade(),
+        )));
         let metrics = Self::build_metrics(metrics_factory, &topology.all_entities, &obs);
         let shutdown_signal = CancellationToken::new();
         let env = IterationEnv {
@@ -734,7 +746,7 @@ impl WorkloadOrchestrator {
             let initial_event_count = sim.pending_event_count();
 
             if !chaos_ended && Self::should_end_chaos(sim, chaos_start, chaos_duration) {
-                Self::end_chaos(sim, chaos_shutdown);
+                Self::end_chaos(sim, chaos_shutdown, process_manager, env.state);
                 chaos_ended = true;
             }
 
@@ -774,7 +786,7 @@ impl WorkloadOrchestrator {
         }
         if chaos_until_run_ends && !chaos_ended {
             assert_reachable!("phase: chaos ends with the run");
-            Self::end_chaos(sim, chaos_shutdown);
+            Self::end_chaos(sim, chaos_shutdown, process_manager, env.state);
         }
         // Final pump: capture events emitted after the last step.
         Self::pump_observability(sim, env.obs);
@@ -787,16 +799,58 @@ impl WorkloadOrchestrator {
     /// the partitions the simulator is holding). Damage already done stays
     /// done — the quiet tail that follows is where the system under test has
     /// to recover from it, while its processes are still alive.
-    fn end_chaos(sim: &mut SimWorld, chaos_shutdown: &CancellationToken) {
+    fn end_chaos(
+        sim: &mut SimWorld,
+        chaos_shutdown: &CancellationToken,
+        process_manager: &ProcessManager<'_>,
+        state: &StateHandle,
+    ) {
         tracing::debug!("Chaos phase ended");
         chaos_shutdown.cancel();
         sim.enter_recovery_mode();
+        Self::enter_shard_core(sim, process_manager, state);
         // Disruptive buggify sites (`buggify_fault_with_prob!`) stop with the
         // rest of the chaos; ordinary sites keep firing.
         moonpool_buggify::buggify_enter_recovery();
         moonpool_buggify::hint::clear_sink();
         crate::chaos::window::set_chaos_ended_at(Some(sim.current_time()));
         assert_reachable!("phase: chaos ended");
+    }
+
+    /// The liveness core, when the run asks for one (see
+    /// [`ShardFaults::core`](crate::ShardFaults::core)): restart the core
+    /// replicas that are down, make every core replica healthy and heal the
+    /// partitions between them. Replicas outside every core that are down
+    /// stay down (the restart handler drops their restarts).
+    fn enter_shard_core(sim: &SimWorld, process_manager: &ProcessManager<'_>, state: &StateHandle) {
+        let Some(book) = crate::runner::shard::ShardBook::of(state) else {
+            return;
+        };
+        let dead = process_manager
+            .process_info()
+            .dead
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .clone();
+        let Some((restart, healthy)) = crate::runner::shard::transition_to_core(&book, &dead)
+        else {
+            return;
+        };
+        for ip in &restart {
+            sim.schedule_event(
+                crate::sim::Event::ProcessRestart { ip: *ip },
+                Duration::from_nanos(1),
+            );
+        }
+        for a in &healthy {
+            sim.set_slowness(*a, crate::Slowness::HEALTHY);
+            for b in &healthy {
+                if a != b {
+                    sim.restore_partition(*a, *b);
+                }
+            }
+        }
+        tracing::info!(?restart, ?healthy, "shard core: the liveness core is set");
     }
 
     /// Spawn the fault injectors for the chaos phase. When `chaos_duration`
@@ -836,6 +890,13 @@ impl WorkloadOrchestrator {
             new_fault_ctx(),
             regimes,
         )));
+        // Random partitions ask the shard gate.
+        if let Some(book) = crate::runner::shard::ShardBook::of(env.state) {
+            sim.set_partition_guard(Some(crate::runner::shard::partition_guard(
+                book,
+                process_manager.process_info().dead,
+            )));
+        }
         for mut injector in fault_injectors {
             let fault_ctx = new_fault_ctx();
             let reporter = env.task_panics.reporter("fault-injector");
@@ -1276,19 +1337,7 @@ impl WorkloadOrchestrator {
                 // over: a free core and zero counters for the next boot.
                 sim.reset_cpu_owner(ip);
                 sim.abort_all_connections_for_ip(ip);
-                match cause {
-                    ProcessKillKind::GracePeriodExpired | ProcessKillKind::RestartInPlace => {}
-                    ProcessKillKind::Crash => sim.simulate_crash_for_process(ip, true),
-                    ProcessKillKind::CrashAndWipe => {
-                        sim.simulate_crash_for_process(ip, true);
-                        sim.wipe_storage_for_process(ip);
-                        // A process crashing itself decided this wipe
-                        // without a fault context: count it here.
-                        if let Some(ledger) = crate::runner::wipe::WipeLedger::of(env.state) {
-                            ledger.note_wipe_kill(ip);
-                        }
-                    }
-                }
+                Self::apply_kill_to_storage(sim, env.state, ip, cause);
                 // A held-down crash (None) schedules no restart: the process
                 // stays dead until a fault injector explicitly restarts it.
                 if let Some(recovery_delay_ms) = recovery_delay_ms {
@@ -1314,6 +1363,11 @@ impl WorkloadOrchestrator {
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
                 assert_reachable!("event: ProcessRestart");
+                if crate::runner::shard::ShardBook::of(env.state)
+                    .is_some_and(|book| book.drops_restart(ip, process_manager.is_running(ip)))
+                {
+                    return;
+                }
                 if process_manager.is_running(ip) {
                     // Restarting a running process is a kill, then a boot.
                     // Killing cancels the root task, but the executor drops
@@ -1354,6 +1408,32 @@ impl WorkloadOrchestrator {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// What a force kill of `cause` does to `ip`'s disk.
+    fn apply_kill_to_storage(
+        sim: &SimWorld,
+        state: &StateHandle,
+        ip: std::net::IpAddr,
+        cause: ProcessKillKind,
+    ) {
+        match cause {
+            ProcessKillKind::GracePeriodExpired | ProcessKillKind::RestartInPlace => {}
+            ProcessKillKind::Crash => sim.simulate_crash_for_process(ip, true),
+            ProcessKillKind::KillKeepCache => sim.simulate_kill_keep_cache_for_process(ip),
+            ProcessKillKind::CrashAndWipe => {
+                sim.simulate_crash_for_process(ip, true);
+                sim.wipe_storage_for_process(ip);
+                if let Some(book) = crate::runner::shard::ShardBook::of(state) {
+                    book.note_wipe(ip);
+                }
+                // A process crashing itself decided this wipe
+                // without a fault context: count it here.
+                if let Some(ledger) = crate::runner::wipe::WipeLedger::of(state) {
+                    ledger.note_wipe_kill(ip);
+                }
+            }
         }
     }
 

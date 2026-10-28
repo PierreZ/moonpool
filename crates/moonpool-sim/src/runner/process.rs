@@ -87,6 +87,15 @@ pub enum RebootKind {
     /// restarted.
     Crash,
 
+    /// Instant kill that keeps the page cache: the process dies, its
+    /// machine does not, so every write not yet synced (and every unsynced
+    /// directory entry) lands as written.
+    ///
+    /// Peers see connection resets as for [`Crash`](RebootKind::Crash), but
+    /// the disk loses nothing. The shard gate downgrades a crash to this
+    /// kind when a power cut could cost a shard its data.
+    KillKeepCache,
+
     /// Instant kill + wipe all storage for this process.
     ///
     /// Same as [`Crash`](RebootKind::Crash) but also deletes all persistent

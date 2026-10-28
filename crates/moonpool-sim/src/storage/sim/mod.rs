@@ -4,6 +4,7 @@ mod complete;
 mod engine;
 mod event;
 mod namespace;
+mod shards;
 mod state;
 
 pub use engine::StorageEngine;

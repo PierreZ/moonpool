@@ -87,6 +87,8 @@ crates/
 │                            RNG per run and re-exports the macros. buggify_knob! stays in sim.
 │                            hint!("moment"): the code names a moment, the sim's HintSink decides
 │                            (reboot under the seed's attrition regime, process = task owner).
+│                            shard!(name, current = r1[, next = r2]): the code declares its
+│                            replication; the sim's shard book and gate keep faults survivable.
 ├── moonpool-sim/          - Simulation runtime, chaos testing, buggify, assertions wiring.
 │                            feature `exploration` (default ON) gates moonpool-explorer; without it
 │                            the sim compiles to wasm32-unknown-unknown.

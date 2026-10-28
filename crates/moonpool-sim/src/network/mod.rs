@@ -50,5 +50,19 @@ pub use config::{
     sample_latency,
 };
 
+/// A guard the simulated network asks before it makes a random partition:
+/// `guard(a, b, cut)` answers whether splitting the IPs `a` from `b` is
+/// allowed (an empty `b` cuts `a` off from everyone), with `cut(x, y)`
+/// saying whether `x` cannot reach `y` now. It must draw no randomness.
+pub(crate) type PartitionGuard = std::sync::Arc<
+    dyn Fn(
+            &[std::net::IpAddr],
+            &[std::net::IpAddr],
+            &dyn Fn(std::net::IpAddr, std::net::IpAddr) -> bool,
+        ) -> bool
+        + Send
+        + Sync,
+>;
+
 // Re-export simulation network provider
 pub use sim::SimNetworkProvider;

@@ -14,6 +14,11 @@
 //! `ProcessRestart` event, not a step of the injector: it runs even once the
 //! chaos window has closed and the injector is gone.
 //!
+//! When the code declares shards (`moonpool_buggify::shard!`), the shard
+//! gate spares each victim whose loss would stop a shard's progress: only
+//! the victims that fit go down. The [`OutageVeto`] below predates the gate
+//! and goes away in a later release.
+//!
 //! The harness may hold an outage back with an [`OutageVeto`] published in
 //! the run's state: the budget a [`HintVeto`](crate::HintVeto) keeps for one
 //! process, kept for the whole victim set at once. A refused outage waits
@@ -52,6 +57,9 @@ pub const VETO_RETRY: Duration = Duration::from_millis(1);
 /// Use it for a budget the simulator cannot see, such as a replicated
 /// store's commit in flight that a crash would leave ambiguous. The veto
 /// must not draw randomness: the answer must not change the draw schedule.
+///
+/// Superseded by shards (`moonpool_buggify::shard!`): this veto stays for
+/// one release, then goes.
 #[derive(Clone)]
 pub struct OutageVeto(Arc<OutagePermits>);
 
@@ -181,7 +189,8 @@ pub struct OutageLanded {
     /// The simulated time the kills were decided; each ran one tick later.
     pub at: Duration,
     /// The victims, in ascending IP order. A process already dead at the
-    /// outage instant is not one: it comes back on its own schedule.
+    /// outage instant is not one: it comes back on its own schedule. Nor is
+    /// one the shard gate spared.
     pub victims: Vec<String>,
     /// Each victim's time down, parallel to `victims`.
     pub down: Vec<Duration>,
@@ -298,8 +307,15 @@ impl FaultInjector for OutageInjector {
         });
 
         let at = ctx.time().now();
+        // The shard gate spares the victims whose loss would stop a shard:
+        // only the victims that fit go down, in IP order.
+        let mut landed = Vec::with_capacity(victims.len());
         for (ip, down) in victims.iter().zip(&down) {
-            ctx.crash_for(&ip.to_string(), Duration::from_millis(*down))?;
+            landed.push(ctx.crash_for_gated(&ip.to_string(), Duration::from_millis(*down))?);
+        }
+        if landed.iter().all(|landed| !landed) {
+            assert_reachable!("outage: the shard gate spares every victim");
+            return Ok(());
         }
         assert_reachable!("outage: a whole group loses power at one instant");
 
@@ -309,14 +325,23 @@ impl FaultInjector for OutageInjector {
             .sleep(Duration::from_nanos(1))
             .await
             .map_err(|error| sleep_failed(&error))?;
-        let victims: Vec<String> = victims.iter().map(ToString::to_string).collect();
+        let straggler = straggler
+            .filter(|at| landed[*at])
+            .map(|at| victims[at].to_string());
+        let (victims, down): (Vec<String>, Vec<Duration>) = victims
+            .iter()
+            .zip(down)
+            .zip(&landed)
+            .filter(|(_, landed)| **landed)
+            .map(|((ip, down), _)| (ip.to_string(), Duration::from_millis(down)))
+            .unzip();
         ctx.state().publish(
             OUTAGE_STATE_KEY,
             OutageLanded {
                 at,
-                straggler: straggler.map(|at| victims[at].clone()),
                 victims,
-                down: down.into_iter().map(Duration::from_millis).collect(),
+                down,
+                straggler,
             },
         );
         Ok(())

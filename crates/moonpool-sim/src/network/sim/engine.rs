@@ -116,6 +116,23 @@ pub(crate) struct NetworkSimulation {
     /// remainder (#210).
     accept_ready_at: BTreeMap<ConnectionId, Duration>,
     operation_waiters: WakerRegistry<NetworkOperationId>,
+    /// Asked before a random partition is made (the shard gate).
+    pub(super) partition_guard: GuardSlot,
+}
+
+/// Holds the optional [`PartitionGuard`](crate::network::PartitionGuard) in a
+/// `Debug` struct.
+#[derive(Clone, Default)]
+pub(crate) struct GuardSlot(pub(super) Option<crate::network::PartitionGuard>);
+
+impl std::fmt::Debug for GuardSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "GuardSlot(set)"
+        } else {
+            "GuardSlot(none)"
+        })
+    }
 }
 
 impl NetworkSimulation {
@@ -133,6 +150,7 @@ impl NetworkSimulation {
             next_accept_waiter_id: 0,
             next_connect_waiter_id: 0,
             completed_operations: BTreeSet::new(),
+            partition_guard: GuardSlot::default(),
             failed_operations: BTreeSet::new(),
             failed_accepts: BTreeMap::new(),
             failed_connects: BTreeSet::new(),
@@ -181,6 +199,11 @@ impl NetworkSimulation {
 
     pub(crate) fn set_localities(&mut self, localities: BTreeMap<IpAddr, LocalityInfo>) {
         self.localities = localities;
+    }
+
+    /// Install (or with `None` remove) the guard random partitions ask.
+    pub(crate) fn set_partition_guard(&mut self, guard: Option<crate::network::PartitionGuard>) {
+        self.partition_guard = GuardSlot(guard);
     }
 
     /// Bind `addr` for `owner`, resolving a numeric socket address's port zero

@@ -46,6 +46,10 @@ pub const TIMED_REBOOT_LABEL: &str = "attrition: timed reboot";
 /// Use it for a budget the simulator cannot see, such as the copies a
 /// replicated store can lose before a crash is no longer survivable. The
 /// veto must not draw randomness: it runs inside the hint's call.
+///
+/// Superseded by shards: declare the replication with
+/// `moonpool_buggify::shard!` and the shard gate keeps every reboot
+/// survivable. This veto stays for one release, then goes.
 #[derive(Clone)]
 pub struct HintVeto(Arc<Permits>);
 

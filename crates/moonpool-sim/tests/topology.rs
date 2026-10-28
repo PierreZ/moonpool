@@ -354,6 +354,7 @@ impl Process for ReplicaProcess {
             bytes: 0..512,
             kind: "record",
             stripe: Some(7),
+            shard: None,
         }])?;
         let pattern = storage.fault_pattern()?;
         let ok = match (&pattern, self.expect_pattern) {

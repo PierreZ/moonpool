@@ -87,6 +87,8 @@ mod positioned;
 mod recovery;
 #[path = "storage/replicated.rs"]
 mod replicated;
+#[path = "storage/sharded.rs"]
+mod sharded;
 #[path = "storage/writeback.rs"]
 mod writeback;
 // Both exercise TokioStorageProvider — only available with the tokio-providers

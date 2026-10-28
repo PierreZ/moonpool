@@ -118,11 +118,15 @@ impl StorageEngine {
     /// positive, so a configuration with the family off consumes no
     /// randomness — and then the visible namespace survives whole, which is
     /// what every test that does not care about entry durability expects.
-    pub(super) fn resolve_namespace_crash(&mut self, ip: IpAddr) {
-        let probability = self
-            .state
-            .config_for(ip)
-            .unsynced_dir_entry_loss_probability;
+    pub(super) fn resolve_namespace_crash(&mut self, ip: IpAddr, keep_cache: bool) {
+        // A kill that keeps the page cache keeps every unsynced entry too.
+        let probability = if keep_cache {
+            0.0
+        } else {
+            self.state
+                .config_for(ip)
+                .unsynced_dir_entry_loss_probability
+        };
         if probability > 0.0 {
             self.resolve_unsynced_entries(ip, probability);
         }
