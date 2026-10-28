@@ -547,6 +547,47 @@ impl FileImage {
         report
     }
 
+    /// Resolve a kill that keeps the page cache: the machine stays up, so
+    /// every dirty sector lands new and an unsynced length change survives.
+    /// A stranded sector, whose writeback already failed, keeps its durable
+    /// bytes, as in a clean crash. Draws nothing.
+    #[instrument(level = "trace", skip(self))]
+    pub fn keep_cache(&mut self, path: &str, barrier_violation_armed: bool) -> FileCrashReport {
+        let mut report = FileCrashReport {
+            path: path.to_string(),
+            clean: true,
+            ..FileCrashReport::default()
+        };
+        if self.visible.len() != self.committed.len() {
+            let old_len = self.committed.len();
+            self.committed.resize(self.visible.len(), 0);
+            fill_extension(&mut self.committed, old_len, self.fill);
+        }
+        let dirty = self.dirty_sectors();
+        let lied: Vec<u64> = dirty
+            .iter()
+            .copied()
+            .filter(|s| self.lied.is_set(as_index(*s)))
+            .collect();
+        for sector in dirty {
+            if !self.stranded.is_set(as_index(sector)) {
+                self.commit_sector(sector);
+            }
+        }
+        self.visible.clear();
+        self.visible.extend_from_slice(&self.committed);
+        let sectors = self.sectors();
+        self.resize_bitsets(sectors);
+        self.dirty.clear_all();
+        self.lied.clear_all();
+        self.stranded.clear_all();
+        report.lost_synced = self.oracle_sweep(path, &lied, barrier_violation_armed);
+        for sector in &report.lost_synced {
+            self.damaged.set(as_index(*sector));
+        }
+        report
+    }
+
     /// Plant a latent read fault on `sectors`: reads return deterministically
     /// corrupted bytes until the sectors are rewritten.
     #[instrument(level = "trace", skip(self))]
@@ -669,7 +710,8 @@ impl FileImage {
         true
     }
 
-    fn dirty_sectors(&self) -> Vec<u64> {
+    /// The sectors written since the last sync that reached them.
+    pub(crate) fn dirty_sectors(&self) -> Vec<u64> {
         (0..self.sectors())
             .filter(|s| self.dirty.is_set(as_index(*s)))
             .collect()

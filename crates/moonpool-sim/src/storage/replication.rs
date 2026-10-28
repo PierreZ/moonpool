@@ -34,6 +34,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::ops::Range;
+use std::sync::Arc;
 
 use moonpool_core::LayoutRegion;
 
@@ -333,14 +334,22 @@ impl ReplicationPlan {
     }
 }
 
-/// One file's published regions: `(byte range, stripe)`, sorted by start.
-type Regions = Vec<(Range<u64>, Option<u64>)>;
+/// One published region, as the index keeps it.
+#[derive(Debug, Clone)]
+struct Region {
+    bytes: Range<u64>,
+    stripe: Option<u64>,
+    shard: Option<Arc<str>>,
+}
+
+/// One region a sector falls in: its stripe and shard.
+pub(crate) type Entry = (Option<u64>, Option<Arc<str>>);
 
 /// One process's published layout, by path, for sector lookups.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LayoutIndex {
-    /// Per path: `(byte range, stripe)`, sorted by range start.
-    by_path: BTreeMap<String, Regions>,
+    /// Per path: the regions, sorted by range start.
+    by_path: BTreeMap<String, Vec<Region>>,
     /// The longest range, bounding the backwards scan of a lookup.
     longest: u64,
 }
@@ -357,36 +366,80 @@ impl LayoutIndex {
                 .by_path
                 .entry(super::faults::normalize_path(&region.path))
                 .or_default()
-                .push((region.bytes.clone(), region.stripe));
+                .push(Region {
+                    bytes: region.bytes.clone(),
+                    stripe: region.stripe,
+                    shard: region.shard.as_deref().map(Arc::from),
+                });
         }
         for ranges in index.by_path.values_mut() {
-            ranges.sort_by_key(|(range, _)| range.start);
+            ranges.sort_by_key(|region| region.bytes.start);
         }
         index
     }
 
     /// Whether any published region shares a byte with `sector`.
     pub(crate) fn covers(&self, path: &str, sector: u64) -> bool {
-        !self.stripes(path, sector).is_empty()
+        !self.entries(path, sector).is_empty()
     }
 
-    /// The stripes of every region sharing a byte with `sector`, in range
-    /// order (`None` for node-local ones); empty if none was published.
+    /// The stripes of every region outside a shard sharing a byte with
+    /// `sector`, in range order (`None` for node-local ones).
     fn stripes(&self, path: &str, sector: u64) -> Vec<Option<u64>> {
+        self.entries(path, sector)
+            .into_iter()
+            .filter(|(_, shard)| shard.is_none())
+            .map(|(stripe, _)| stripe)
+            .collect()
+    }
+
+    /// The stripe and shard of every region sharing a byte with `sector`,
+    /// in range order; empty if none was published.
+    pub(crate) fn entries(&self, path: &str, sector: u64) -> Vec<Entry> {
         let size = SECTOR_SIZE as u64;
-        let bytes = sector * size..(sector + 1) * size;
+        self.entries_in(path, &(sector * size..(sector + 1) * size))
+    }
+
+    /// The stripe and shard of every region sharing a byte with `bytes`.
+    pub(crate) fn entries_in(&self, path: &str, bytes: &Range<u64>) -> Vec<Entry> {
         let Some(ranges) = self.by_path.get(&super::faults::normalize_path(path)) else {
             return Vec::new();
         };
-        let end = ranges.partition_point(|(range, _)| range.start < bytes.end);
+        let end = ranges.partition_point(|region| region.bytes.start < bytes.end);
         let floor = bytes.start.saturating_sub(self.longest);
         ranges[..end]
             .iter()
             .rev()
-            .take_while(|(range, _)| range.start >= floor)
-            .filter(|(range, _)| range.end > bytes.start)
-            .map(|(_, stripe)| *stripe)
+            .take_while(|region| region.bytes.start >= floor)
+            .filter(|region| region.bytes.end > bytes.start)
+            .map(|region| (region.stripe, region.shard.clone()))
             .collect()
+    }
+
+    /// Every region inside a shard: `(path, bytes, shard, stripe)`.
+    pub(crate) fn sharded(&self) -> impl Iterator<Item = (&str, &Range<u64>, &str, Option<u64>)> {
+        self.by_path.iter().flat_map(|(path, regions)| {
+            regions.iter().filter_map(move |region| {
+                region
+                    .shard
+                    .as_deref()
+                    .map(|shard| (path.as_str(), &region.bytes, shard, region.stripe))
+            })
+        })
+    }
+
+    /// The distinct `(shard, stripe)` keys of `path`'s regions inside a shard.
+    pub(crate) fn shard_keys(&self, path: &str) -> Vec<(Arc<str>, Option<u64>)> {
+        let mut keys: Vec<(Arc<str>, Option<u64>)> = self
+            .by_path
+            .get(&super::faults::normalize_path(path))
+            .into_iter()
+            .flatten()
+            .filter_map(|region| region.shard.clone().map(|shard| (shard, region.stripe)))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        keys
     }
 }
 
@@ -415,6 +468,7 @@ mod tests {
             bytes,
             kind: "entry",
             stripe,
+            shard: None,
         }
     }
 

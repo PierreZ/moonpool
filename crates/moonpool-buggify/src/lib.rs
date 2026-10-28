@@ -9,13 +9,14 @@
 //! can depend on it without pulling in a simulation runtime. It compiles on
 //! `wasm32-unknown-unknown`, macOS and Linux.
 //!
-//! ## Three kinds of marks
+//! ## Four kinds of marks
 //!
 //! | Mark | The code says | The simulator may |
 //! |------|---------------|-------------------|
 //! | [`buggify!`] and friends | "a rare but legal branch is here" | force the branch |
 //! | [`hint!`] | "a crash right here would be interesting" | reboot the calling process |
 //! | [`cpu_charge`] | "I just did this much CPU work" | move the process clock forward |
+//! | [`shard!`] | "this data is replicated like this" | keep every fault it draws survivable |
 //!
 //! ## Buggify: two-phase activation
 //!
@@ -124,6 +125,7 @@
 
 pub mod cpu;
 pub mod hint;
+pub mod shard;
 
 pub use cpu::cpu_charge;
 
@@ -389,6 +391,47 @@ macro_rules! hint {
     };
     ($label:literal, $prob:expr) => {
         $crate::hint::at($label, $prob as f64, concat!(file!(), ":", line!()))
+    };
+}
+
+/// Declare a shard's replication: which replicas hold it, and what it needs
+/// from them to make progress and to keep its data. See the
+/// [`shard`](mod@shard) module.
+///
+/// ```rust
+/// use moonpool_buggify::shard;
+/// use moonpool_buggify::shard::{Replica, Replication};
+///
+/// let r1 = Replication::tolerates(vec![Replica::new("10.0.1.1")], 0, 0);
+/// let r2 = Replication::tolerates(vec![Replica::new("10.0.1.2")], 0, 0);
+/// shard!("journal/orders", current = r1.clone());              // stable
+/// shard!("journal/orders", current = r1, next = r2.clone());   // moving
+/// shard!("journal/orders", current = r2);                      // move done
+/// shard!("journal/orders");                                    // gone
+/// ```
+///
+/// Outside a simulation the arguments are not evaluated.
+#[macro_export]
+macro_rules! shard {
+    ($name:expr $(,)?) => {
+        if $crate::shard::is_active() {
+            $crate::shard::declare_at($name, None, None, concat!(file!(), ":", line!()));
+        }
+    };
+    ($name:expr, current = $current:expr $(,)?) => {
+        if $crate::shard::is_active() {
+            $crate::shard::declare_at($name, Some($current), None, concat!(file!(), ":", line!()));
+        }
+    };
+    ($name:expr, current = $current:expr, next = $next:expr $(,)?) => {
+        if $crate::shard::is_active() {
+            $crate::shard::declare_at(
+                $name,
+                Some($current),
+                Some($next),
+                concat!(file!(), ":", line!()),
+            );
+        }
     };
 }
 

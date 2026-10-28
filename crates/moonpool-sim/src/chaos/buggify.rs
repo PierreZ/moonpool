@@ -36,6 +36,7 @@ pub fn buggify_init(activation_prob: f64) {
 /// simulation.
 pub fn buggify_reset() {
     moonpool_buggify::hint::clear_sink();
+    moonpool_buggify::shard::clear_sink();
     moonpool_buggify::buggify_reset();
     moonpool_buggify::clear_random_source();
 }

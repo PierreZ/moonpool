@@ -284,6 +284,9 @@ pub(crate) struct StorageState {
     pub(crate) replication: Vec<ReplicationSlot>,
     /// Per-process published layouts, which the pattern reads.
     pub(crate) layouts: BTreeMap<IpAddr, Arc<LayoutIndex>>,
+    /// The run's shard book: damage to a region inside a shard lands only
+    /// while the shard stays durable (see `shards.rs`).
+    pub(crate) shards: Option<crate::runner::shard::ShardBook>,
     /// Every fault the disk has injected, oldest first, drained by the caller.
     pub(crate) fault_records: Vec<StorageFaultRecord>,
     /// What each simulated crash did, per file, drained by the caller.
@@ -328,6 +331,7 @@ impl StorageState {
             focus: BTreeMap::new(),
             replication: Vec::new(),
             layouts: BTreeMap::new(),
+            shards: None,
             fault_records: Vec::new(),
             crash_reports: Vec::new(),
             barrier_violation_armed: false,
@@ -384,14 +388,27 @@ impl StorageState {
             .map(|slot| (Arc::clone(&slot.plan), slot.turn))
             .collect();
         let layout = self.layouts.get(&owner).cloned();
+        let shard_rule = self.shard_rule(owner, path);
         let path = path.to_string();
         move |sector| {
             if !mask.as_ref().is_none_or(|mask| mask(&path, sector)) {
                 return 0.0;
             }
-            if !replication
-                .iter()
-                .all(|(plan, turn)| plan.allows(owner, layout.as_deref(), &path, sector, *turn))
+            // A region inside a shard takes damage only while the shard
+            // stays durable; one wholly inside shards answers to no
+            // replicated fault pattern.
+            let sharded = shard_rule.as_ref().and_then(|rule| {
+                layout
+                    .as_ref()
+                    .and_then(|layout| rule.verdict(&layout.entries(&path, sector)))
+            });
+            if sharded.is_some_and(|(safe, _)| !safe) {
+                return 0.0;
+            }
+            if !sharded.is_some_and(|(_, only)| only)
+                && !replication
+                    .iter()
+                    .all(|(plan, turn)| plan.allows(owner, layout.as_deref(), &path, sector, *turn))
             {
                 return 0.0;
             }

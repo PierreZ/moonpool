@@ -27,6 +27,11 @@ pub struct LayoutRegion {
     /// replica's copy of it; `None` for bytes only this node has (headers,
     /// local metadata), whose loss costs the node rather than one record.
     pub stripe: Option<u64>,
+    /// The shard these bytes belong to, as its replicas declare it with
+    /// `moonpool_buggify::shard!`; `None` for bytes outside every shard. A
+    /// stripe is then `(shard, stripe)`: two shards on one machine take
+    /// damage independently.
+    pub shard: Option<String>,
 }
 
 impl LayoutRegion {
@@ -34,6 +39,13 @@ impl LayoutRegion {
     #[must_use]
     pub fn striped(mut self, stripe: Option<u64>) -> Self {
         self.stripe = stripe;
+        self
+    }
+
+    /// This region, in the shard `name` (or in none).
+    #[must_use]
+    pub fn sharded(mut self, name: Option<String>) -> Self {
+        self.shard = name;
         self
     }
 

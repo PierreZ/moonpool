@@ -618,6 +618,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             bytes,
             kind,
             stripe: Some(position),
+            shard: None,
         };
         Some(Layout {
             record: region(
@@ -643,12 +644,14 @@ impl<P: LocalStorageProvider> Journal<P> {
                 bytes: 0..BLOCK_U64,
                 kind: Layout::META,
                 stripe: None,
+                shard: None,
             },
             LayoutRegion {
                 path: meta,
                 bytes: META_COPY_B_AT..META_COPY_B_AT + BLOCK_U64,
                 kind: Layout::META,
                 stripe: None,
+                shard: None,
             },
         ];
         for segment in &self.segments {
@@ -659,6 +662,7 @@ impl<P: LocalStorageProvider> Journal<P> {
                     bytes: copy * BLOCK_U64..(copy + 1) * BLOCK_U64,
                     kind: Layout::HEADER,
                     stripe: None,
+                    shard: None,
                 });
             }
         }

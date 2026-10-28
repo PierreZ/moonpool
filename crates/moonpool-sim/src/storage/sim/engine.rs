@@ -495,6 +495,31 @@ impl StorageEngine {
             .unwrap_or_default()
     }
 
+    /// Install the run's shard book (or remove it with `None`).
+    pub(crate) fn set_shard_book(&mut self, book: Option<crate::runner::shard::ShardBook>) {
+        self.state.shards = book;
+    }
+
+    /// Whether `ip`'s copy of `(shard, stripe)` is clean on its disk.
+    pub(crate) fn shard_copy_intact(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {
+        self.state.copy_intact(ip, shard, stripe)
+    }
+
+    /// Whether damage to `bytes` of `owner`'s `path` keeps every shard durable.
+    pub(crate) fn shard_damage_allowed(
+        &self,
+        owner: IpAddr,
+        path: &str,
+        bytes: &Range<u64>,
+    ) -> bool {
+        self.state.damage_allowed(owner, path, bytes)
+    }
+
+    /// Whether a crash of `ip` now could break a shard's `durable` need.
+    pub(crate) fn crash_endangers_shards(&self, ip: IpAddr) -> bool {
+        self.state.crash_endangers_shards(ip)
+    }
+
     /// Replace `ip`'s published layout.
     pub(crate) fn publish_layout(&mut self, ip: IpAddr, regions: &[moonpool_core::LayoutRegion]) {
         self.state.layouts.insert(
@@ -576,6 +601,12 @@ impl StorageEngine {
         let file = self.file_of(owner, path)?;
         let len = file.image.durable_size();
         if file.image.corrupt_bytes(bytes.clone()) {
+            if !bytes.is_empty() {
+                let size = crate::storage::faults::SECTOR_SIZE as u64;
+                file.image
+                    .mark_damaged(bytes.start / size..(bytes.end - 1) / size + 1);
+                self.state.note_damage_changed();
+            }
             Ok(())
         } else {
             Err(StorageError::OutOfRange {
@@ -1003,6 +1034,15 @@ impl StorageEngine {
         if probability <= 0.0 || sim_random::<f64>() >= probability {
             return None;
         }
+        // The shard gate: a disk failure that would cost a shard its data
+        // is not made.
+        if !self.state.disk_failure_allowed(owner_ip) {
+            assert_reachable!("shard gate: a disk failure is refused");
+            if let Some(book) = &self.state.shards {
+                book.count(crate::runner::shard::Downgrade::DiskFailureRefused);
+            }
+            return None;
+        }
         assert_reachable!("disk: failed, every later I/O parks forever");
         Some(self.fail_disk(owner_ip))
     }
@@ -1390,6 +1430,18 @@ impl StorageEngine {
     /// permanent partition rather than a fault. A wipe
     /// ([`wipe_process`](Self::wipe_process)) replaces the disk and clears both.
     pub(crate) fn simulate_crash(&mut self, ip: IpAddr, close_files: bool) -> StorageActions {
+        self.crash_process(ip, close_files, false)
+    }
+
+    /// A kill that keeps the page cache: the process dies, the machine does
+    /// not, so every unsynced write and directory entry lands as written
+    /// (see [`FileImage::keep_cache`]). Otherwise as
+    /// [`simulate_crash`](Self::simulate_crash). Draws nothing.
+    pub(crate) fn simulate_kill_keep_cache(&mut self, ip: IpAddr) -> StorageActions {
+        self.crash_process(ip, true, true)
+    }
+
+    fn crash_process(&mut self, ip: IpAddr, close_files: bool, keep_cache: bool) -> StorageActions {
         // The reboot replaces a failed disk; the operations it parked are
         // failed below with the rest of the process's in-flight I/O.
         self.state.failed_disks.remove(&ip);
@@ -1400,7 +1452,7 @@ impl StorageEngine {
         // First decide which names survive so the same crash's fault mask and
         // reports use the name that actually remains on this process's disk.
         // Keep every original image until the byte-crash oracle has checked it.
-        self.resolve_namespace_crash(ip);
+        self.resolve_namespace_crash(ip, keep_cache);
         // Resolve each file's unsynced writes through the crash model, in
         // stable file order.
         for file_id in &file_ids {
@@ -1411,7 +1463,11 @@ impl StorageEngine {
             let Some(file) = self.state.files.get_mut(file_id) else {
                 continue;
             };
-            let report = file.image.crash(&path, &config, armed, &weigh);
+            let report = if keep_cache {
+                file.image.keep_cache(&path, armed)
+            } else {
+                file.image.crash(&path, &config, armed, &weigh)
+            };
             // The reboot starts with an empty page cache: no error is pending.
             file.writeback.reported = file.writeback.count;
             for sector in &report.lost_synced {

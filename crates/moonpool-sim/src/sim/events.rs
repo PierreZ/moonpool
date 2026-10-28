@@ -94,6 +94,9 @@ pub enum ProcessKillKind {
     /// A [`RebootKind::CrashAndWipe`](crate::RebootKind::CrashAndWipe) reboot:
     /// every persistent file owned by the process is deleted as well.
     CrashAndWipe,
+    /// A [`RebootKind::KillKeepCache`](crate::RebootKind::KillKeepCache)
+    /// reboot: unsynced storage state lands as written.
+    KillKeepCache,
     /// [`FaultContext::restart`](crate::FaultContext::restart) of a
     /// process that was still running: the old boot is killed (task, task
     /// scope, connections; storage untouched, as when the process exits

@@ -235,7 +235,7 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 |------|-----|
 | `StorageEligibilityMask` | `Arc<dyn Fn(&str, u64) -> bool>` over `(path, sector)`. `SimWorld::set_storage_eligibility_mask`, `clear_storage_eligibility_mask`. |
 | `FaultFocus` | `FaultFocus::new().background(w).spot(path, bytes, w).layout(regions, \|r\| w)`. `weight(path, sector)` is the heaviest spot or the background. `SimWorld::set_fault_focus`, `clear_fault_focus`, `SimStorageProvider::focus_faults`. |
-| `LayoutRegion` | `{ path, bytes: Range<u64>, kind: &'static str, stripe: Option<u64> }` from `moonpool_core`. Published with `SimWorld::publish_layout`. |
+| `LayoutRegion` | `{ path, bytes: Range<u64>, kind: &'static str, stripe: Option<u64>, shard: Option<String> }` from `moonpool_core`. Published with `SimWorld::publish_layout`. |
 | `ReplicatedFaults` | `ReplicatedFaults::new(DomainLevel).tolerance(n).group("name")`. The pattern per seed is a `FaultPattern`: `Minority { domains }`, `Striped { domains, local }`, `Rolling { .. }`, `Spared`. |
 
 ## ExplorationConfig

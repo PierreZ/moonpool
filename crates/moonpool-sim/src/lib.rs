@@ -412,11 +412,12 @@ pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 
 // Runner module re-exports
 pub use runner::{
-    Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, DEFAULT_MAX_SPAWNS, Deployment,
-    DeploymentChanges, DomainSpec, FaultContext, FaultInjector, GrayFailure, GrayKinds,
-    GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl, LocalityConfig,
-    MachineRegistry, Membership, MetricsHandle, OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage,
-    OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SelfCrash, SimContext,
+    Aim, Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, Core, DEFAULT_MAX_SPAWNS,
+    Deployment, DeploymentChanges, DomainSpec, Downgrade, FaultContext, FaultInjector, GrayFailure,
+    GrayKinds, GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl,
+    LocalityConfig, MachineRegistry, Membership, MetricsHandle, OUTAGE_STATE_KEY, OUTAGE_VETO_KEY,
+    Outage, OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SHARD_BOOK_KEY, SelfCrash,
+    ShardBook, ShardCounts, ShardEvent, ShardFaults, ShardState, ShardView, Shards, SimContext,
     SimulationBuilder, SimulationMetrics, SimulationReport, TIMED_REBOOT_LABEL, TagRegistry,
     VETO_RETRY, WIPE_LEDGER_KEY, WipeBudget, WipeHeal, WipeLedger, Workload, WorkloadCount,
     WorkloadTopology,
@@ -445,7 +446,7 @@ pub use moonpool_core::metrics::query::{
 // working and share the same state as direct moonpool-buggify users.
 pub use moonpool_buggify::{
     buggify, buggify_fault_with_prob, buggify_named, buggify_pick, buggify_range,
-    buggify_with_prob, cpu_charge, hint, set_activation,
+    buggify_with_prob, cpu_charge, hint, set_activation, shard,
 };
 
 // Chaos module re-exports

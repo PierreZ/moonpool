@@ -331,6 +331,49 @@ impl SimWorld {
         self.storage_transition(|inner| ((), inner.storage.simulate_crash(ip, close_files)));
     }
 
+    /// A kill of `ip` that keeps the page cache: every unsynced write lands
+    /// as written (see [`RebootKind::KillKeepCache`](crate::RebootKind::KillKeepCache)).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(skip(self))]
+    pub fn simulate_kill_keep_cache_for_process(&self, ip: IpAddr) {
+        self.storage_transition(|inner| ((), inner.storage.simulate_kill_keep_cache(ip)));
+    }
+
+    /// Install the run's shard book in the storage engine.
+    pub(crate) fn set_shard_book(&self, book: Option<crate::runner::shard::ShardBook>) {
+        self.inner.write().storage.set_shard_book(book);
+    }
+
+    /// Whether `ip`'s copy of `(shard, stripe)` is clean on its disk (failed
+    /// disks and damaged sectors; wipes are the book's).
+    pub(crate) fn shard_copy_intact(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {
+        self.inner
+            .read()
+            .storage
+            .shard_copy_intact(ip, shard, stripe)
+    }
+
+    /// Whether damage to `bytes` of `owner`'s `path` keeps every shard durable.
+    pub(crate) fn shard_damage_allowed(
+        &self,
+        owner: IpAddr,
+        path: &str,
+        bytes: &std::ops::Range<u64>,
+    ) -> bool {
+        self.inner
+            .read()
+            .storage
+            .shard_damage_allowed(owner, path, bytes)
+    }
+
+    /// Whether a crash of `ip` now could break a shard's `durable` need.
+    pub(crate) fn crash_endangers_shards(&self, ip: IpAddr) -> bool {
+        self.inner.read().storage.crash_endangers_shards(ip)
+    }
+
     /// Fail `ip`'s disk outright: every read, write, sync, or `set_len` issued
     /// to a file it owns from now on is accepted and never completes, until
     /// [`simulate_crash_for_process`](Self::simulate_crash_for_process) or

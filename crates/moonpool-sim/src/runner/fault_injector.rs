@@ -77,6 +77,7 @@ use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::MachineRegistry;
 use crate::runner::membership::Membership;
 use crate::runner::process::{AttritionScope, AttritionVictims, RebootKind};
+use crate::runner::shard::{Downgrade, Requirements, ShardBook, Shards};
 use crate::runner::wipe::WipeLedger;
 use crate::sim::{ProcessKillKind, SimWorld};
 use crate::{assert_always, assert_reachable, assert_sometimes_each};
@@ -206,6 +207,19 @@ impl FaultContext {
     pub fn partition(&self, a: &str, b: &str) -> SimulationResult<()> {
         let a_ip = parse_ip(a)?;
         let b_ip = parse_ip(b)?;
+        if let Some((book, requirements)) = self.gate_requirements() {
+            let dead = self.dead_set();
+            let cut = self.cut();
+            if !super::shard::pure(|| {
+                super::shard::split_ok(&requirements, &dead, &[a_ip], &[b_ip], &cut)
+            }) {
+                assert_reachable!("shard gate: a scripted partition is refused");
+                book.count(Downgrade::PartitionRefused);
+                return Ok(());
+            }
+            book.note_fault(a_ip);
+            book.note_fault(b_ip);
+        }
         // Use a long duration — heal_partition is the expected way to undo
         self.sim.partition_pair(a_ip, b_ip, Duration::from_hours(1));
         self.sim.partition_pair(b_ip, a_ip, Duration::from_hours(1));
@@ -243,6 +257,13 @@ impl FaultContext {
         bytes: std::ops::Range<u64>,
     ) -> SimulationResult<()> {
         let ip = parse_ip(ip)?;
+        if let Some(book) = ShardBook::of(&self.state)
+            && !super::shard::pure(|| self.sim.shard_damage_allowed(ip, path, &bytes))
+        {
+            assert_reachable!("shard gate: scripted damage is refused");
+            book.count(Downgrade::DamageRefused);
+            return Ok(());
+        }
         self.sim
             .corrupt_process_file_bytes(ip, path, bytes)
             .map_err(|error| std::io::Error::from(error).into())
@@ -483,6 +504,9 @@ impl FaultContext {
             tracing::debug!("Skipped reboot of already-dead process at IP {}", ip);
             return Ok(());
         }
+        let Some(kind) = self.gate_reboot(ip_addr, kind) else {
+            return self.restart(ip);
+        };
 
         match kind {
             RebootKind::Graceful => {
@@ -509,7 +533,7 @@ impl FaultContext {
                     recovery_ms
                 );
             }
-            RebootKind::Crash | RebootKind::CrashAndWipe => {
+            RebootKind::Crash | RebootKind::CrashAndWipe | RebootKind::KillKeepCache => {
                 assert_reachable!("reboot: crash path");
                 self.mark_dead(ip_addr);
                 if kind == RebootKind::CrashAndWipe {
@@ -518,12 +542,15 @@ impl FaultContext {
                     if let Some(ledger) = WipeLedger::of(&self.state) {
                         ledger.record_wipe(ip_addr);
                     }
+                    if let Some(book) = ShardBook::of(&self.state) {
+                        book.note_wipe(ip_addr);
+                    }
                 }
                 let delay_ms = crate::sim::sim_random_range(recovery_delay_range_ms.clone()) as u64;
-                let cause = if kind == RebootKind::CrashAndWipe {
-                    ProcessKillKind::CrashAndWipe
-                } else {
-                    ProcessKillKind::Crash
+                let cause = match kind {
+                    RebootKind::CrashAndWipe => ProcessKillKind::CrashAndWipe,
+                    RebootKind::KillKeepCache => ProcessKillKind::KillKeepCache,
+                    _ => ProcessKillKind::Crash,
                 };
                 // A crash is a force-kill, not just a restart: the orchestrator
                 // owns the process handles, so route through ProcessForceKill so
@@ -564,13 +591,16 @@ impl FaultContext {
         if self.retired(ip_addr) {
             return Ok(());
         }
+        let Some(kind) = self.gate_reboot(ip_addr, RebootKind::Crash) else {
+            return self.restart(ip);
+        };
         assert_reachable!("crash: hold-down path");
         self.mark_dead(ip_addr);
         self.sim.schedule_event(
             crate::sim::Event::ProcessForceKill {
                 ip: ip_addr,
                 recovery_delay_ms: None,
-                cause: ProcessKillKind::Crash,
+                cause: kill_cause(kind),
             },
             Duration::from_nanos(1),
         );
@@ -587,25 +617,146 @@ impl FaultContext {
     ///
     /// Returns an error if IP parsing fails.
     pub fn crash_for(&self, ip: &str, down: Duration) -> SimulationResult<()> {
+        self.crash_for_gated(ip, down).map(|_| ())
+    }
+
+    /// [`crash_for`](Self::crash_for), answering whether the crash was
+    /// scheduled: the shard gate spares a victim whose loss would stop a
+    /// shard's progress.
+    pub(crate) fn crash_for_gated(&self, ip: &str, down: Duration) -> SimulationResult<bool> {
         let ip_addr = parse_ip(ip)?;
         if self.retired(ip_addr) {
-            return Ok(());
+            return Ok(false);
         }
         if self.is_dead(ip) {
             assert_reachable!("crash_for: target already dead, skipped");
-            return Ok(());
+            return Ok(false);
         }
+        let Some(kind) = self.gate_crash(ip_addr, RebootKind::Crash) else {
+            assert_reachable!("shard gate: a timed crash spares its victim");
+            if let Some(book) = ShardBook::of(&self.state) {
+                book.count(Downgrade::CrashSpared);
+            }
+            return Ok(false);
+        };
         self.mark_dead(ip_addr);
         self.sim.schedule_event(
             crate::sim::Event::ProcessForceKill {
                 ip: ip_addr,
                 recovery_delay_ms: Some(u64::try_from(down.as_millis()).unwrap_or(u64::MAX)),
-                cause: ProcessKillKind::Crash,
+                cause: kill_cause(kind),
             },
             Duration::from_nanos(1),
         );
         tracing::info!("Crashed process at IP {} (restart in {:?})", ip, down);
-        Ok(())
+        Ok(true)
+    }
+
+    /// The run's shard book and the shards its gate covers, if any.
+    fn gate_requirements(&self) -> Option<(ShardBook, Requirements)> {
+        let book = ShardBook::of(&self.state)?;
+        let requirements = book.requirements();
+        (!requirements.is_empty()).then_some((book, requirements))
+    }
+
+    /// The processes dead now.
+    fn dead_set(&self) -> std::collections::BTreeSet<std::net::IpAddr> {
+        self.process_info
+            .dead
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .clone()
+    }
+
+    /// Whether `a` cannot reach `b` now, in either direction.
+    fn cut(&self) -> impl Fn(std::net::IpAddr, std::net::IpAddr) -> bool + '_ {
+        |a, b| self.sim.is_partitioned(a, b) || self.sim.is_partitioned(b, a)
+    }
+
+    /// The replicas whose copies count as lost now: wiped and not healed,
+    /// or on a failed disk.
+    fn not_intact(
+        &self,
+        book: &ShardBook,
+        requirements: &Requirements,
+    ) -> std::collections::BTreeSet<std::net::IpAddr> {
+        let mut out = book.wiped();
+        for (_, replications) in requirements {
+            for replication in replications {
+                for replica in replication
+                    .replicas
+                    .iter()
+                    .chain(&replication.durable.replicas())
+                {
+                    if let Some(ip) = super::shard::replica_ip(replica)
+                        && self.sim.is_disk_failed(ip)
+                    {
+                        out.insert(ip);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The shard gate for a reboot of `ip` of `kind`: the kind to run, or
+    /// `None` for a clean restart in place instead (see the
+    /// [`shard`](super::shard) module).
+    fn gate_reboot(&self, ip: std::net::IpAddr, kind: RebootKind) -> Option<RebootKind> {
+        let kind = self.gate_crash(ip, kind);
+        if kind.is_none() {
+            assert_reachable!("shard gate: a kill becomes a clean restart");
+            if let Some(book) = ShardBook::of(&self.state) {
+                book.count(Downgrade::KillToRestart);
+            }
+        }
+        kind
+    }
+
+    /// The gate's judgement of `kind` on `ip`: a wipe that would cost a
+    /// shard its data becomes a crash, a crash whose dirty sectors could
+    /// cost a stripe keeps the page cache, and `None` when taking `ip` down
+    /// would stop a shard's progress. Draws nothing.
+    fn gate_crash(&self, ip: std::net::IpAddr, kind: RebootKind) -> Option<RebootKind> {
+        let Some((book, requirements)) = self.gate_requirements() else {
+            return Some(kind);
+        };
+        let verdict = super::shard::pure(|| {
+            let mut kind = kind;
+            if kind == RebootKind::CrashAndWipe {
+                let not_intact = self.not_intact(&book, &requirements);
+                if !super::shard::lose_ok(&requirements, &not_intact, &[ip]) {
+                    assert_reachable!("shard gate: a wipe becomes a crash");
+                    book.count(Downgrade::WipeToCrash);
+                    kind = RebootKind::Crash;
+                }
+            }
+            let dead = self.dead_set();
+            let cut = self.cut();
+            if !super::shard::down_ok(&requirements, &dead, &[ip], &cut) {
+                return None;
+            }
+            if kind == RebootKind::Crash && self.sim.crash_endangers_shards(ip) {
+                assert_reachable!("shard gate: a crash keeps the page cache");
+                book.count(Downgrade::CrashToKeepCache);
+                kind = RebootKind::KillKeepCache;
+            }
+            Some(kind)
+        });
+        if verdict.is_some() {
+            book.note_fault(ip);
+        }
+        verdict
+    }
+
+    /// The run's shards, read-only: the book of every declaration, its
+    /// counts, and the disks' ground truth (see [`Shards`]).
+    #[must_use]
+    pub fn shards(&self) -> Shards {
+        Shards::new(
+            ShardBook::of(&self.state).unwrap_or_default(),
+            self.sim.downgrade(),
+        )
     }
 
     /// Explicitly restart a process, typically one held down by
@@ -751,6 +902,15 @@ impl FaultContext {
         }
 
         Ok(ips)
+    }
+}
+
+/// The force-kill cause for a crash of `kind`.
+fn kill_cause(kind: RebootKind) -> ProcessKillKind {
+    match kind {
+        RebootKind::KillKeepCache => ProcessKillKind::KillKeepCache,
+        RebootKind::CrashAndWipe => ProcessKillKind::CrashAndWipe,
+        RebootKind::Graceful | RebootKind::Crash => ProcessKillKind::Crash,
     }
 }
 
@@ -953,9 +1113,12 @@ impl AttritionInjector {
             assert_reachable!("attrition: no eligible victim");
             return Ok(());
         }
+        if self.edge_round(ctx, &live)? {
+            return Ok(());
+        }
         let drawn = self.choose_kind();
         let (recovery_range, grace_range) = self.delay_ranges();
-        let idx = crate::sim::sim_random_range(0..live.len());
+        let idx = Self::draw_victim(ctx, &live);
         let ip = live[idx].clone();
         // Judged once the victim is drawn, so the draw order is unchanged.
         let kind = self.within_wipe_budget(ctx, drawn, &eligible, &[&ip]);
@@ -971,6 +1134,125 @@ impl AttritionInjector {
         }
         self.check_victim(ctx, &ip);
         ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)
+    }
+
+    /// The index of the victim among `live`: uniform, or, under an active
+    /// [aim](super::shard::ShardFaults::aim), weighted toward the replicas
+    /// of moving shards. One draw either way.
+    fn draw_victim(ctx: &FaultContext, live: &[&String]) -> usize {
+        let aimed = Self::aim(ctx).filter(|(_, aimed)| {
+            live.iter()
+                .any(|ip| ip.parse().is_ok_and(|ip| aimed.contains(&ip)))
+        });
+        let Some((factor, aimed)) = aimed else {
+            return crate::sim::sim_random_range(0..live.len());
+        };
+        let weights: Vec<f64> = live
+            .iter()
+            .map(|ip| {
+                if ip.parse().is_ok_and(|ip| aimed.contains(&ip)) {
+                    factor
+                } else {
+                    1.0
+                }
+            })
+            .collect();
+        let total: f64 = weights.iter().sum();
+        let mut point = crate::sim::sim_random_f64() * total;
+        let mut idx = live.len() - 1;
+        for (at, weight) in weights.iter().enumerate() {
+            if point < *weight {
+                idx = at;
+                break;
+            }
+            point -= weight;
+        }
+        if weights[idx] > 1.0
+            && let Some(book) = ShardBook::of(ctx.state())
+        {
+            assert_reachable!("shard aim: attrition strikes a moving shard");
+            book.count_aimed();
+        }
+        idx
+    }
+
+    /// The active aim: its factor and the processes it points at, when an
+    /// aim is configured and an active site's move is in flight.
+    fn aim(ctx: &FaultContext) -> Option<(f64, std::collections::BTreeSet<std::net::IpAddr>)> {
+        let book = ShardBook::of(ctx.state())?;
+        let aim = book.config().aim_config()?;
+        let aimed = book.aimed();
+        (!aimed.is_empty()).then_some((aim.factor(), aimed))
+    }
+
+    /// An [edge](super::shard::ShardFaults::edge) round, when the edge
+    /// draw says so: pick a shard with a live eligible replica outside one
+    /// of its minimal sets, and take down every live eligible replica
+    /// outside that set. Returns whether the round was an edge round.
+    fn edge_round(&self, ctx: &FaultContext, live: &[&String]) -> SimulationResult<bool> {
+        let Some(book) = ShardBook::of(ctx.state()) else {
+            return Ok(false);
+        };
+        let edge = book.config().edge_fraction();
+        if edge <= 0.0 || !crate::sim::sim_random_bool(edge) {
+            return Ok(false);
+        }
+        let live_ips: Vec<std::net::IpAddr> =
+            live.iter().filter_map(|ip| ip.parse().ok()).collect();
+        let dead = ctx.dead_set();
+        let mut candidates: Vec<(Vec<std::net::IpAddr>, Vec<Vec<std::net::IpAddr>>)> = Vec::new();
+        for (_, replications) in book.requirements() {
+            let need = moonpool_buggify::shard::Need::All(
+                replications
+                    .iter()
+                    .map(|replication| replication.progress.clone())
+                    .collect(),
+            );
+            let up = |replica: &moonpool_buggify::shard::Replica| {
+                super::shard::replica_ip(replica).is_none_or(|ip| !dead.contains(&ip))
+            };
+            let sets: Vec<Vec<std::net::IpAddr>> = need
+                .minimal_sets(&up)
+                .iter()
+                .map(|set| set.iter().filter_map(super::shard::replica_ip).collect())
+                .collect();
+            let replicas: Vec<std::net::IpAddr> = replications
+                .iter()
+                .flat_map(|replication| {
+                    replication
+                        .replicas
+                        .iter()
+                        .chain(&replication.progress.replicas())
+                        .filter_map(super::shard::replica_ip)
+                        .collect::<Vec<_>>()
+                })
+                .filter(|ip| live_ips.contains(ip))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if sets
+                .iter()
+                .any(|set| replicas.iter().any(|ip| !set.contains(ip)))
+            {
+                candidates.push((replicas, sets));
+            }
+        }
+        if candidates.is_empty() {
+            assert_reachable!("shard edge: no shard is above its minimum");
+            return Ok(false);
+        }
+        let (replicas, sets) = &candidates[crate::sim::sim_random_range(0..candidates.len())];
+        let set = &sets[crate::sim::sim_random_range(0..sets.len())];
+        let kind = self.choose_kind();
+        let (recovery_range, grace_range) = self.delay_ranges();
+        for ip in replicas.iter().filter(|ip| !set.contains(ip)) {
+            let ip = ip.to_string();
+            self.check_victim(ctx, &ip);
+            ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)?;
+        }
+        assert_reachable!("shard edge: a shard is pushed to its minimum");
+        book.count_edge();
+        Ok(true)
     }
 
     /// Reboot every live eligible process in a random failure domain
@@ -1042,12 +1324,20 @@ impl FaultInjector for AttritionInjector {
 
     async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         while !ctx.chaos_shutdown().is_cancelled() {
-            // Random delay between reboot attempts (1-5 seconds)
-            let delay_ms = crate::sim::sim_random_range(1000..5000);
+            // Random delay between reboot attempts (1-5 seconds), shorter
+            // by the aim's factor while it points at a move.
+            let delay = Duration::from_millis(
+                u64::try_from(crate::sim::sim_random_range(1000..5000))
+                    .expect("delay_ms is non-negative"),
+            );
+            let delay = match Self::aim(ctx) {
+                Some((factor, _)) if self.config.scope == AttritionScope::PerProcess => {
+                    delay.div_f64(factor).max(Duration::from_millis(1))
+                }
+                _ => delay,
+            };
             ctx.time()
-                .sleep(Duration::from_millis(
-                    u64::try_from(delay_ms).expect("delay_ms is non-negative"),
-                ))
+                .sleep(delay)
                 .await
                 .map_err(|e| crate::SimulationError::InvalidState(format!("sleep failed: {e}")))?;
 

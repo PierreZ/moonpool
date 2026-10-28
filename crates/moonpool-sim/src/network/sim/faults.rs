@@ -93,6 +93,9 @@ impl NetworkSimulation {
             PartitionStrategy::AsymmetricSend | PartitionStrategy::AsymmetricRecv
         ) {
             let ip = ips[sim_random_range(0..ips.len())];
+            if !self.partition_allowed(&[ip], &[], now) {
+                return (NetworkActions::default(), now);
+            }
             let actions = if strategy == PartitionStrategy::AsymmetricSend {
                 self.insert_send_partition(ip, duration, now)
             } else {
@@ -110,6 +113,9 @@ impl NetworkSimulation {
             .filter(|ip| !selected.contains(ip))
             .copied()
             .collect::<Vec<_>>();
+        if !self.partition_allowed(&selected, &other, now) {
+            return (actions, now);
+        }
         for from in selected {
             for &to in &other {
                 if self.state.is_partitioned(from, to, now) {
@@ -205,6 +211,18 @@ impl NetworkSimulation {
             duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
         });
         actions
+    }
+
+    /// Whether the partition guard, if one is installed, allows splitting
+    /// `a` from `b` (an empty `b`: cutting `a` off). Draws nothing.
+    fn partition_allowed(&self, a: &[IpAddr], b: &[IpAddr], now: Duration) -> bool {
+        let Some(guard) = self.partition_guard.0.clone() else {
+            return true;
+        };
+        let cut = |x: IpAddr, y: IpAddr| {
+            self.state.is_partitioned(x, y, now) || self.state.is_partitioned(y, x, now)
+        };
+        guard(a, b, &cut)
     }
 
     fn select_partition_group(&self, ips: &[IpAddr], strategy: PartitionStrategy) -> Vec<IpAddr> {

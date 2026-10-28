@@ -350,6 +350,18 @@ impl SimContext {
         &self.state
     }
 
+    /// The run's shards, read-only: every `shard!` declaration, what the
+    /// gate did, and the disks' ground truth (see
+    /// [`Shards`](crate::Shards)). A harness checks the
+    /// [events](crate::Shards::events) against its own model.
+    #[must_use]
+    pub fn shards(&self) -> crate::Shards {
+        crate::Shards::new(
+            crate::runner::shard::ShardBook::of(&self.state).unwrap_or_default(),
+            self.providers.weak_world(),
+        )
+    }
+
     /// Get a clonable handle to the observability layer.
     ///
     /// The handle implements [`crate::TraceQuery`], so workloads can read
@@ -437,6 +449,7 @@ impl SelfCrash {
     ) -> crate::SimulationResult<()> {
         let cause = match kind {
             crate::RebootKind::Crash => crate::sim::ProcessKillKind::Crash,
+            crate::RebootKind::KillKeepCache => crate::sim::ProcessKillKind::KillKeepCache,
             crate::RebootKind::CrashAndWipe => crate::sim::ProcessKillKind::CrashAndWipe,
             crate::RebootKind::Graceful => {
                 return Err(crate::SimulationError::InvalidState(

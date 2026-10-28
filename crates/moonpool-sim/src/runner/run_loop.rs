@@ -41,6 +41,7 @@ struct RunOrchestratorInputs<'a> {
     obs_handle: SimulationLayerHandle,
     run_time_budget: Duration,
     max_spawns: usize,
+    shard_faults: crate::runner::shard::ShardFaults,
 }
 
 /// Outcome of an orchestration attempt.
@@ -281,6 +282,7 @@ impl SimulationBuilder {
             obs_handle,
             run_time_budget,
             max_spawns,
+            shard_faults,
         } = inputs;
         // Fresh executor per iteration: dropping it cancels every task that
         // leaked past the settle phase, so no state crosses into the next seed
@@ -305,6 +307,7 @@ impl SimulationBuilder {
                 iteration_count,
                 run_time_budget,
                 max_spawns,
+                shard_faults,
                 task_panics: tracker,
             })
             .await
@@ -1320,6 +1323,7 @@ impl SimulationBuilder {
             obs_handle: obs_handle.clone(),
             run_time_budget: self.run_time_budget,
             max_spawns: self.max_spawns,
+            shard_faults: self.shard_faults.clone(),
         });
         (outcome, start_time)
     }

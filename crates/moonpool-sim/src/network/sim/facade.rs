@@ -47,6 +47,11 @@ impl SimWorld {
         self.inner.write().network.set_localities(localities);
     }
 
+    /// Installs (or with `None` removes) the guard random partitions ask.
+    pub(crate) fn set_partition_guard(&self, guard: Option<crate::network::PartitionGuard>) {
+        self.inner.write().network.set_partition_guard(guard);
+    }
+
     /// Borrows the network configuration.
     pub fn with_network_config<F, R>(&self, f: F) -> R
     where

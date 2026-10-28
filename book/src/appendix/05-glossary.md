@@ -56,7 +56,7 @@ Terms are listed alphabetically. Cross-references are in **bold**. Type and macr
 
 **Journal** -- `moonpool-journal`: a CLSTORE write-ahead log over `StorageProvider`. Positions in any order, a crash told apart from corruption, damage named by position and `Id`, and `Journal::layout` / `Journal::regions` exposing `LayoutRegion`s for aimed faults.
 
-**LayoutRegion** -- `moonpool_core::LayoutRegion { path, bytes, kind, stripe }`: a named byte range of a file. Published with `SimWorld::publish_layout`, consumed by **fault focus** and **replicated fault patterns**.
+**LayoutRegion** -- `moonpool_core::LayoutRegion { path, bytes, kind, stripe, shard }`: a named byte range of a file. Published with `SimWorld::publish_layout`, consumed by **fault focus** and **replicated fault patterns**.
 
 **Locality** -- The datacenter, zone and machine of a process (`LocalityInfo`), sampled from `LocalityConfig` by `SimulationBuilder::cluster`. Drives `LinkLatencyConfig`, partition strategies and attrition scopes.
 
@@ -87,6 +87,8 @@ Terms are listed alphabetically. Cross-references are in **bold**. Type and macr
 **Seed** -- A `u64` that determines a simulation's randomness. Pinned with `set_debug_seeds`.
 
 **SelfCrash** -- `SimContext::self_crash()` and `crash_self(kind, delay)`: a process kills itself at an exact point of its own protocol, without a fault injector and without a draw.
+
+**Shard** -- `moonpool_buggify::shard!(name, current = r1[, next = r2])`: the code declares a shard's `Replication { replicas, progress, durable }` (`Need` = `AtLeast` / `All` / `Any`). The run's shard book (`ctx.shards()`) keeps every view not yet superseded, and the **shard gate** downgrades any destructive fault that would break a need: a kill becomes a clean restart, a wipe a crash, a crash a `KillKeepCache`, an outage spares victims, a partition or disk failure is not made, damage is not placed. `ShardFaults` adds aim, edge and a liveness core. Inert in production, like `hint!`.
 
 **Slowness** -- `Slowness { cpu, disk, network }` multipliers on one process, `HEALTHY` when all are 1. Set by **gray failure** or `FaultContext::set_slowness`.
 

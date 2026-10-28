@@ -43,6 +43,7 @@ fn layout(rank: u64) -> Vec<LayoutRegion> {
         bytes: 0..SECTOR,
         kind: "header",
         stripe: None,
+        shard: None,
     }];
     for stripe in 0..STRIPES {
         let sector = 1 + (stripe + rank * 5) % STRIPES;
@@ -51,6 +52,7 @@ fn layout(rank: u64) -> Vec<LayoutRegion> {
             bytes: sector * SECTOR..(sector + 1) * SECTOR,
             kind: "record",
             stripe: Some(stripe),
+            shard: None,
         });
     }
     regions

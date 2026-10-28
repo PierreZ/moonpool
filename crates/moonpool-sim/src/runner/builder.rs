@@ -181,6 +181,7 @@ pub struct SimulationBuilder {
     pub(super) run_time_budget: Duration,
     /// How many processes the workloads may spawn per run.
     pub(super) max_spawns: usize,
+    pub(super) shard_faults: crate::runner::shard::ShardFaults,
 }
 
 /// The default [`SimulationBuilder::max_spawns`] cap.
@@ -242,6 +243,7 @@ impl SimulationBuilder {
             replay_recipe: None,
             run_time_budget: super::stall::DEFAULT_RUN_TIME_BUDGET,
             max_spawns: DEFAULT_MAX_SPAWNS,
+            shard_faults: crate::runner::shard::ShardFaults::default(),
         }
     }
 
@@ -1016,6 +1018,20 @@ impl SimulationBuilder {
     #[must_use]
     pub fn max_spawns(mut self, max_spawns: usize) -> Self {
         self.max_spawns = max_spawns;
+        self
+    }
+
+    /// Shape faults around the shards the code declares with
+    /// [`shard!`](moonpool_buggify::shard!): aim faults at moves, push
+    /// shards to their edge, and keep a liveness core at the end of the
+    /// chaos window (see [`ShardFaults`](crate::ShardFaults)).
+    ///
+    /// The shard gate itself is always on: once the code declares a shard,
+    /// every destructive fault keeps it alive and durable, with or without
+    /// this call.
+    #[must_use]
+    pub fn shard_faults(mut self, faults: crate::runner::shard::ShardFaults) -> Self {
+        self.shard_faults = faults;
         self
     }
 
