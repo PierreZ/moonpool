@@ -47,6 +47,9 @@
 //! its disk has not failed, and, per stripe, no sector of its copy is
 //! damaged. An address the simulator does not know counts as up and intact.
 //!
+//! Under [`ShardFaults::durable_only`] the gate judges `durable` alone, and
+//! kills, outages and partitions are never downgraded.
+//!
 //! The gate draws no randomness: it reads the book, the dead set, the
 //! network and the disks. Every gate evaluation asserts it.
 
@@ -115,6 +118,8 @@ pub struct ShardFaults {
     edge: f64,
     core: Option<Core>,
     off: BTreeSet<String>,
+    all_off: bool,
+    durable_only: bool,
 }
 
 impl ShardFaults {
@@ -160,6 +165,34 @@ impl ShardFaults {
         self
     }
 
+    /// Take every shard out of the gate, the aim, the edge and the core:
+    /// [`off_for`](Self::off_for) for all of them. Declarations are still
+    /// recorded.
+    #[must_use]
+    pub fn off_all(mut self) -> Self {
+        self.all_off = true;
+        self
+    }
+
+    /// Judge only each shard's `durable` need: kills, hold-downs, outages
+    /// and partitions are never downgraded for `progress`, while wipes,
+    /// disk failures, a crash's dirty sectors and damage still are. For a
+    /// system whose chaos takes a whole quorum down on purpose and checks
+    /// that it recovers: unavailability is a fault it must survive, lost
+    /// data is not.
+    #[must_use]
+    pub fn durable_only(mut self) -> Self {
+        self.durable_only = true;
+        self
+    }
+
+    /// Whether the gate judges `progress` (see
+    /// [`durable_only`](Self::durable_only)).
+    #[must_use]
+    pub fn judges_progress(&self) -> bool {
+        !self.durable_only
+    }
+
     /// The aim, if set.
     #[must_use]
     pub fn aim_config(&self) -> Option<Aim> {
@@ -181,7 +214,7 @@ impl ShardFaults {
     /// Whether the shard `name` is out of the gate.
     #[must_use]
     pub fn is_off(&self, name: &str) -> bool {
-        self.off.contains(name)
+        self.all_off || self.off.contains(name)
     }
 }
 
@@ -399,6 +432,18 @@ impl ShardBook {
     /// The run's shard fault shapes.
     pub(crate) fn config(&self) -> ShardFaults {
         self.lock().config.clone()
+    }
+
+    /// Take `name` (or, with `None`, every shard) out of the gate for the
+    /// rest of the run.
+    fn switch_off(&self, name: Option<&str>) {
+        let mut book = self.lock();
+        match name {
+            Some(name) => {
+                book.config.off.insert(name.to_string());
+            }
+            None => book.config.all_off = true,
+        }
     }
 
     /// Record one declaration from `declarer` at `at`. `activate` draws a
@@ -734,6 +779,21 @@ impl Shards {
         self.book.snapshot().counts
     }
 
+    /// Take the shard `name` out of the gate, the aim, the edge and the
+    /// core for the rest of the run, as [`ShardFaults::off_for`] does from
+    /// the start: for a scenario that decides per seed, mid-run, to go past
+    /// the shard's tolerance on purpose. Its declarations are still
+    /// recorded.
+    pub fn switch_off(&self, name: &str) {
+        self.book.switch_off(Some(name));
+    }
+
+    /// [`switch_off`](Self::switch_off) for every shard, those declared
+    /// later included.
+    pub fn switch_off_all(&self) {
+        self.book.switch_off(None);
+    }
+
     /// The liveness core of `name`, once the chaos window closed under
     /// [`ShardFaults::core`].
     #[must_use]
@@ -936,6 +996,9 @@ pub(crate) fn partition_guard(
 ) -> crate::network::PartitionGuard {
     Arc::new(
         move |a: &[IpAddr], b: &[IpAddr], cut: &dyn Fn(IpAddr, IpAddr) -> bool| {
+            if !book.config().judges_progress() {
+                return true;
+            }
             let requirements = book.requirements();
             if requirements.is_empty() {
                 return true;
@@ -1043,6 +1106,32 @@ mod tests {
 
     fn requirements(book: &ShardBook) -> Requirements {
         book.requirements()
+    }
+
+    #[test]
+    fn a_shard_switched_off_leaves_the_gate() {
+        let book = ShardBook::new(ShardFaults::default());
+        let a = Some(ip("10.0.0.1"));
+        for name in ["orders", "users"] {
+            book.declare(
+                a,
+                Duration::ZERO,
+                declaration(name, Some(r(&["10.0.0.1", "10.0.0.2"])), None, "s:1"),
+                || false,
+            );
+        }
+        assert_eq!(requirements(&book).len(), 2);
+        book.switch_off(Some("orders"));
+        let left: Vec<String> = requirements(&book)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(left, vec!["users".to_string()]);
+        book.switch_off(None);
+        assert!(requirements(&book).is_empty());
+        assert!(ShardFaults::default().off_all().is_off("anything"));
+        assert!(ShardFaults::default().judges_progress());
+        assert!(!ShardFaults::default().durable_only().judges_progress());
     }
 
     #[test]
