@@ -47,6 +47,9 @@
 //! its disk has not failed, and, per stripe, no sector of its copy is
 //! damaged. An address the simulator does not know counts as up and intact.
 //!
+//! Under [`ShardFaults::durable_only`] the gate judges `durable` alone, and
+//! kills, outages and partitions are never downgraded.
+//!
 //! The gate draws no randomness: it reads the book, the dead set, the
 //! network and the disks. Every gate evaluation asserts it.
 
@@ -116,6 +119,7 @@ pub struct ShardFaults {
     core: Option<Core>,
     off: BTreeSet<String>,
     all_off: bool,
+    durable_only: bool,
 }
 
 impl ShardFaults {
@@ -168,6 +172,25 @@ impl ShardFaults {
     pub fn off_all(mut self) -> Self {
         self.all_off = true;
         self
+    }
+
+    /// Judge only each shard's `durable` need: kills, hold-downs, outages
+    /// and partitions are never downgraded for `progress`, while wipes,
+    /// disk failures, a crash's dirty sectors and damage still are. For a
+    /// system whose chaos takes a whole quorum down on purpose and checks
+    /// that it recovers: unavailability is a fault it must survive, lost
+    /// data is not.
+    #[must_use]
+    pub fn durable_only(mut self) -> Self {
+        self.durable_only = true;
+        self
+    }
+
+    /// Whether the gate judges `progress` (see
+    /// [`durable_only`](Self::durable_only)).
+    #[must_use]
+    pub fn judges_progress(&self) -> bool {
+        !self.durable_only
     }
 
     /// The aim, if set.
@@ -973,6 +996,9 @@ pub(crate) fn partition_guard(
 ) -> crate::network::PartitionGuard {
     Arc::new(
         move |a: &[IpAddr], b: &[IpAddr], cut: &dyn Fn(IpAddr, IpAddr) -> bool| {
+            if !book.config().judges_progress() {
+                return true;
+            }
             let requirements = book.requirements();
             if requirements.is_empty() {
                 return true;
@@ -1104,6 +1130,8 @@ mod tests {
         book.switch_off(None);
         assert!(requirements(&book).is_empty());
         assert!(ShardFaults::default().off_all().is_off("anything"));
+        assert!(ShardFaults::default().judges_progress());
+        assert!(!ShardFaults::default().durable_only().judges_progress());
     }
 
     #[test]

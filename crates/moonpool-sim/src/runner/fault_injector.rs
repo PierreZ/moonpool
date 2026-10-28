@@ -210,9 +210,11 @@ impl FaultContext {
         if let Some((book, requirements)) = self.gate_requirements() {
             let dead = self.dead_set();
             let cut = self.cut();
-            if !super::shard::pure(|| {
-                super::shard::split_ok(&requirements, &dead, &[a_ip], &[b_ip], &cut)
-            }) {
+            if book.config().judges_progress()
+                && !super::shard::pure(|| {
+                    super::shard::split_ok(&requirements, &dead, &[a_ip], &[b_ip], &cut)
+                })
+            {
                 assert_reachable!("shard gate: a scripted partition is refused");
                 book.count(Downgrade::PartitionRefused);
                 return Ok(());
@@ -733,7 +735,9 @@ impl FaultContext {
             }
             let dead = self.dead_set();
             let cut = self.cut();
-            if !super::shard::down_ok(&requirements, &dead, &[ip], &cut) {
+            if book.config().judges_progress()
+                && !super::shard::down_ok(&requirements, &dead, &[ip], &cut)
+            {
                 return None;
             }
             if kind == RebootKind::Crash && self.sim.crash_endangers_shards(ip) {
