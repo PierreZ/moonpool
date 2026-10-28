@@ -156,7 +156,7 @@ fn parse_method(service: &Ident, item: TraitItemFn) -> syn::Result<Method> {
     let mut inputs = signature.inputs.iter();
     match inputs.next() {
         Some(FnArg::Receiver(receiver))
-            if receiver.reference.is_some() && receiver.mutability.is_none() => {}
+            if matches!(receiver.kind, syn::ReceiverKind::Reference(_, _, None)) => {}
         _ => {
             return Err(syn::Error::new(
                 signature.inputs.span(),
@@ -227,7 +227,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             "service traits cannot declare supertraits (Send + Sync is added)",
         ));
     }
-    if service.unsafety.is_some() || service.auto_token.is_some() {
+    if service.unsafety.is_some() || service.modifiers.auto_token.is_some() {
         return Err(syn::Error::new(span, "service traits are plain traits"));
     }
     let ident = service.ident.clone();
