@@ -21,7 +21,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-syn = { version = "2", features = ["full"] }
+syn = { version = "3", features = ["full"] }
 
 [dev-dependencies]
 # Compile-fail tests (tests/compile_fail.rs): the cases expand against the
