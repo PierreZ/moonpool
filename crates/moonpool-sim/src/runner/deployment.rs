@@ -43,33 +43,35 @@ use std::time::Duration;
 use crate::sim::{Event, WeakSimWorld};
 use crate::{SimulationError, SimulationResult, assert_reachable};
 
+use super::context::ProviderBundle;
 use super::membership::{DomainSpec, Membership};
 use super::process::Process;
+use crate::SimProviders;
 
 /// A factory a workload hands to [`Deployment::spawn_group`].
-pub(crate) type SharedFactory = Arc<dyn Fn() -> Box<dyn Process> + Send + Sync>;
+pub(crate) type SharedFactory<P> = Arc<dyn Fn() -> Box<dyn Process<P>> + Send + Sync>;
 
 /// The factories of the groups started mid-run, by group name, shared with
 /// the process manager.
-pub(crate) type SpawnFactories = Arc<Mutex<BTreeMap<String, SharedFactory>>>;
+pub(crate) type SpawnFactories<P> = Arc<Mutex<BTreeMap<String, SharedFactory<P>>>>;
 
 /// A workload's handle on the run's deployment (see the
 /// [module documentation](self)).
 #[derive(Clone)]
-pub struct Deployment {
-    inner: Option<Attached>,
+pub struct Deployment<P: ProviderBundle = SimProviders> {
+    inner: Option<Attached<P>>,
 }
 
 #[derive(Clone)]
-struct Attached {
+struct Attached<P: ProviderBundle> {
     membership: Membership,
     sim: WeakSimWorld,
-    factories: SpawnFactories,
+    factories: SpawnFactories<P>,
     /// A process's handle: every call refuses.
     from_process: bool,
 }
 
-impl std::fmt::Debug for Deployment {
+impl<P: ProviderBundle> std::fmt::Debug for Deployment<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Deployment")
             .field("attached", &self.inner.is_some())
@@ -83,7 +85,7 @@ fn parse_ip(ip: &str) -> SimulationResult<IpAddr> {
         .map_err(|e| SimulationError::InvalidState(format!("invalid IP '{ip}': {e}")))
 }
 
-impl Deployment {
+impl<P: ProviderBundle> Deployment<P> {
     /// A handle attached to no run: every call refuses. What a hand-built
     /// [`SimContext`](crate::SimContext) carries.
     #[must_use]
@@ -95,7 +97,7 @@ impl Deployment {
     pub(crate) fn new(
         membership: Membership,
         sim: WeakSimWorld,
-        factories: SpawnFactories,
+        factories: SpawnFactories<P>,
         from_process: bool,
     ) -> Self {
         Self {
@@ -109,7 +111,7 @@ impl Deployment {
     }
 
     /// The attached run, or why this handle refuses.
-    fn attached(&self, call: &str) -> SimulationResult<&Attached> {
+    fn attached(&self, call: &str) -> SimulationResult<&Attached<P>> {
         match &self.inner {
             None => Err(SimulationError::InvalidState(format!(
                 "deployment().{call}: this context is attached to no run"
@@ -182,7 +184,7 @@ impl Deployment {
         &self,
         name: &str,
         count: usize,
-        factory: impl Fn() -> Box<dyn Process> + Send + Sync + 'static,
+        factory: impl Fn() -> Box<dyn Process<P>> + Send + Sync + 'static,
     ) -> SimulationResult<Vec<String>> {
         let attached = self.attached("spawn_group")?;
         let sim = attached.sim.upgrade()?;

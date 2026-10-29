@@ -7,8 +7,10 @@ use std::time::Duration;
 
 use tracing::instrument;
 
+use crate::SimProviders;
 use crate::SimulationError;
 use crate::observability::{Invariant, TraceQuery};
+use crate::runner::context::{ProviderBundle, ProviderEnv, ProviderFactory, sim_providers};
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::locality::LocalityConfig;
 use crate::runner::process::{Attrition, Process};
@@ -31,9 +33,9 @@ pub(crate) struct WorkloadClientInfo {
 
 /// Internal storage for one process group in the builder: a `.processes()` or
 /// `.cluster()` registration.
-pub(crate) struct ProcessEntry {
+pub(crate) struct ProcessEntry<P: ProviderBundle> {
     pub(crate) count: ProcessCount,
-    pub(crate) factory: Box<dyn Fn() -> Box<dyn Process>>,
+    pub(crate) factory: Box<dyn Fn() -> Box<dyn Process<P>>>,
     pub(crate) tags: TagDistribution,
     /// The group's name: its process type's [`Process::name`].
     pub(crate) name: String,
@@ -42,7 +44,7 @@ pub(crate) struct ProcessEntry {
     pub(crate) locality: Option<LocalityConfig>,
 }
 
-impl ProcessEntry {
+impl<P: ProviderBundle> ProcessEntry<P> {
     /// Resolve this group's process count for the current seed, drawing from
     /// the sim RNG (already seeded) when the count or topology is a range.
     pub(super) fn resolve_shape(&self) -> (usize, Option<Vec<crate::LocalityInfo>>) {
@@ -75,13 +77,13 @@ pub(super) fn process_ip(group: usize, index: usize) -> String {
 }
 
 /// Internal storage for workload entries in the builder.
-pub(super) enum WorkloadEntry {
+pub(super) enum WorkloadEntry<P: ProviderBundle> {
     /// Single instance, reused across iterations (from `.workload()`).
-    Instance(Option<Box<dyn Workload>>),
+    Instance(Option<Box<dyn Workload<P>>>),
     /// Factory-based, fresh instances per iteration (from `.workloads()`).
     Factory {
         count: WorkloadCount,
-        factory: Box<dyn Fn(usize) -> Box<dyn Workload>>,
+        factory: Box<dyn Fn(usize) -> Box<dyn Workload<P>>>,
     },
 }
 
@@ -111,11 +113,11 @@ pub(super) enum TimelineCapture {
 /// | Seeds and stopping | [`until_coverage_stable`](Self::until_coverage_stable), [`set_iterations`](Self::set_iterations), [`set_debug_seeds`](Self::set_debug_seeds), [`replay_timeline`](Self::replay_timeline), [`run_time_budget`](Self::run_time_budget), `enable_exploration` (feature `exploration`) |
 ///
 /// The crate-level documentation has a complete example.
-pub struct SimulationBuilder {
+pub struct SimulationBuilder<P: ProviderBundle = SimProviders> {
     pub(super) iteration_control: IterationControl,
-    pub(super) entries: Vec<WorkloadEntry>,
+    pub(super) entries: Vec<WorkloadEntry<P>>,
     /// Server-process groups in registration order; each gets its own IP range.
-    pub(super) process_entries: Vec<ProcessEntry>,
+    pub(super) process_entries: Vec<ProcessEntry<P>>,
     /// Built-in attrition regimes, one injector each, with their per-seed
     /// sampling mode. Several entries let each process group (or tag) carry
     /// its own reboot regime and `max_dead` budget.
@@ -182,6 +184,8 @@ pub struct SimulationBuilder {
     /// How many processes the workloads may spawn per run.
     pub(super) max_spawns: usize,
     pub(super) shard_faults: crate::runner::shard::ShardFaults,
+    /// Builds each process boot's and each workload's providers bundle.
+    pub(super) providers: Box<ProviderFactory<P>>,
 }
 
 /// The default [`SimulationBuilder::max_spawns`] cap.
@@ -204,10 +208,28 @@ impl SimulationBuilder {
     /// - chaos: every surface off, both fault masks retain every family;
     /// - trace floor: `INFO`;
     /// - [`run_time_budget`](Self::run_time_budget): one simulated hour;
-    /// - [`max_spawns`](Self::max_spawns): 16 processes per run.
+    /// - [`max_spawns`](Self::max_spawns): 16 processes per run;
+    /// - providers: [`SimProviders`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_providers(sim_providers)
+    }
+}
+
+impl<P: ProviderBundle> SimulationBuilder<P> {
+    /// Create a builder like [`new`](SimulationBuilder::new), whose
+    /// processes and workloads get the bundle `factory` builds instead of
+    /// [`SimProviders`]: once per process boot, once per workload.
+    ///
+    /// Build the bundle on top of the simulation the [`ProviderEnv`]
+    /// describes (see its documentation).
+    ///
+    /// # Safety
+    /// A provider that bypasses the [`ProviderEnv`] escapes determinism and the faults.
+    #[must_use]
+    pub fn with_providers(factory: impl Fn(&ProviderEnv) -> P + 'static) -> Self {
         Self {
+            providers: Box::new(factory),
             iteration_control: IterationControl::UntilCoverageStable {
                 plateau_seeds: 10,
                 max_iterations: 1000,
@@ -257,7 +279,7 @@ impl SimulationBuilder {
     /// this form, because a used trait object cannot be rebuilt with fresh
     /// state. Prefer [`Self::workload_factory`] or [`Self::workloads`].
     #[must_use]
-    pub fn workload(mut self, w: impl Workload) -> Self {
+    pub fn workload(mut self, w: impl Workload<P>) -> Self {
         self.entries
             .push(WorkloadEntry::Instance(Some(Box::new(w))));
         self
@@ -296,7 +318,10 @@ impl SimulationBuilder {
     ///     .workload_factory(|| Box::new(ClientWorkload::default()));
     /// ```
     #[must_use]
-    pub fn workload_factory(mut self, factory: impl Fn() -> Box<dyn Workload> + 'static) -> Self {
+    pub fn workload_factory(
+        mut self,
+        factory: impl Fn() -> Box<dyn Workload<P>> + 'static,
+    ) -> Self {
         self.entries.push(WorkloadEntry::Factory {
             count: WorkloadCount::Fixed(1),
             factory: Box::new(move |_| factory()),
@@ -372,7 +397,7 @@ impl SimulationBuilder {
     pub fn processes(
         self,
         count: impl Into<ProcessCount>,
-        factory: impl Fn() -> Box<dyn Process> + 'static,
+        factory: impl Fn() -> Box<dyn Process<P>> + 'static,
     ) -> Self {
         self.register_group(count.into(), factory, None)
     }
@@ -381,7 +406,7 @@ impl SimulationBuilder {
     fn register_group(
         mut self,
         count: ProcessCount,
-        factory: impl Fn() -> Box<dyn Process> + 'static,
+        factory: impl Fn() -> Box<dyn Process<P>> + 'static,
         locality: Option<LocalityConfig>,
     ) -> Self {
         let sample = factory();
@@ -441,7 +466,7 @@ impl SimulationBuilder {
     pub fn cluster(
         self,
         config: LocalityConfig,
-        factory: impl Fn() -> Box<dyn Process> + 'static,
+        factory: impl Fn() -> Box<dyn Process<P>> + 'static,
     ) -> Self {
         // `count` is unused when locality is present; the topology decides it.
         self.register_group(ProcessCount::Fixed(0), factory, Some(config))
@@ -699,7 +724,7 @@ impl SimulationBuilder {
     pub fn workloads(
         mut self,
         count: WorkloadCount,
-        factory: impl Fn(usize) -> Box<dyn Workload> + 'static,
+        factory: impl Fn(usize) -> Box<dyn Workload<P>> + 'static,
     ) -> Self {
         self.entries.push(WorkloadEntry::Factory {
             count,
@@ -1638,5 +1663,60 @@ mod tests {
             report.successful_runs > 0,
             "expected at least one success across 10 seeds"
         );
+    }
+
+    #[derive(Clone)]
+    struct TaggedProviders {
+        _sim: SimProviders,
+        tag: &'static str,
+    }
+
+    struct TaggedProcess;
+
+    #[async_trait]
+    impl Process<TaggedProviders> for TaggedProcess {
+        fn name(&self) -> &'static str {
+            "tagged_process"
+        }
+
+        async fn run(&mut self, ctx: &SimContext<TaggedProviders>) -> SimulationResult<()> {
+            // A process panic fails the seed; an `Err` would only stop it.
+            assert_eq!(ctx.providers().tag, "custom");
+            Ok(())
+        }
+    }
+
+    struct TaggedWorkload;
+
+    #[async_trait]
+    impl Workload<TaggedProviders> for TaggedWorkload {
+        fn name(&self) -> &'static str {
+            "tagged_workload"
+        }
+
+        async fn run(&mut self, ctx: &SimContext<TaggedProviders>) -> SimulationResult<()> {
+            if ctx.providers().tag == "custom" {
+                Ok(())
+            } else {
+                Err(SimulationError::InvalidState("default bundle".to_string()))
+            }
+        }
+    }
+
+    #[test]
+    fn with_providers_reaches_processes_and_workloads() {
+        let report = SimulationBuilder::with_providers(|env| TaggedProviders {
+            _sim: sim_providers(env),
+            tag: "custom",
+        })
+        .processes(1, || Box::new(TaggedProcess))
+        .workload(TaggedWorkload)
+        .set_iterations(2)
+        .set_debug_seeds(vec![1, 2])
+        .run()
+        .expect("simulation configuration is valid");
+
+        assert_eq!(report.successful_runs, 2);
+        assert_eq!(report.failed_runs, 0);
     }
 }

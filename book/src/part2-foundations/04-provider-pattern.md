@@ -90,6 +90,30 @@ Same `run_server`. Same code path. The only difference is which `Providers` is p
 
 On the simulation side each provider is deliberately thin. `SimTimeProvider::sleep` schedules a timer in the global `Scheduler<Event>`. `SimNetworkProvider::connect` asks `NetworkSimulation` for a delayed connect operation. `SimStorageProvider::open` asks `StorageEngine`. The engines own the state, the exact pending results, the faults and the wakers. They return scheduling effects to `SimWorld`, which puts them on the one timeline. The application-facing trait stays familiar, and the simulator never collapses into one global state object.
 
+## Bringing Your Own Bundle
+
+What if our code needs a provider that moonpool-core does not define? A clock with drift, a transport with framing, a key-value store over storage. We do not have to fork the runner for it. `SimulationBuilder::with_providers` takes a factory, and the runner calls it once per process boot and once per workload:
+
+```rust,ignore
+#[derive(Clone)]
+struct AppProviders {
+    sim: SimProviders,
+    kv: SimKv, // our own trait, implemented over sim storage
+}
+
+SimulationBuilder::with_providers(|env: &ProviderEnv| {
+    // Spawn through the runner's task provider: a process kill cancels it.
+    let sim = SimProviders::new(env.world().clone(), env.ip()).with_task(env.task().clone());
+    AppProviders { kv: SimKv::new(sim.storage().clone()), sim }
+})
+.processes(3, || Box::new(KvNode))   // impl Process<AppProviders>
+.workload(KvClient)                  // impl Workload<AppProviders>
+```
+
+The bundle is the type parameter `P` of `SimContext<P>`, `Process<P>`, `Workload<P>` and `Deployment<P>`. It needs only `Clone + Send + Sync + 'static`, so it does not have to implement `Providers`. When it does, `ctx.network()`, `ctx.time()`, `ctx.random()` and `ctx.storage()` return its providers. `ctx.providers()` always returns the whole bundle. Every `P` defaults to `SimProviders`, so `SimulationBuilder::new()` and a plain `SimContext` stay what they were.
+
+There is one hard rule: **the bundle must stay driven by the simulation.** The `ProviderEnv` carries the world, the actor's IP and its task provider. Build network, storage and time on top of the simulated providers for that world and IP. Spawn through `env.task()`, which is bound to the boot scope a crash cancels. A bundle that reads the wall clock or opens a real socket escapes the seed, and its traffic never sees a partition or a torn write.
+
 ## What Stays Outside the Bundle
 
 Name resolution is a separate trait, `Resolver`, with `TokioResolver` in production and `ScriptedResolver` in simulation. Most code never resolves a name, and code that does picks its resolver next to its providers. `moonpool_core::select!` is a macro, not a provider: it is tokio's own `select!` expansion with a seeded start offset once moonpool-sim is in the build graph. [The Six Providers](./07-provider-traits.md) lists every trait, method by method.

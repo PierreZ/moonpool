@@ -9,9 +9,9 @@ use tracing::Instrument as _;
 
 use crate::chaos::state_handle::StateHandle;
 use crate::observability::SimulationLayerHandle;
-use crate::providers::{TaskPanicTracker, panic_message};
+use crate::providers::{SimTaskProvider, TaskPanicTracker, panic_message};
 use crate::runner::app_metrics::MetricsHandle;
-use crate::runner::context::SimContext;
+use crate::runner::context::{ProviderBundle, ProviderEnv, ProviderFactory, SimContext};
 use crate::runner::deployment::{Deployment, SpawnFactories};
 use crate::runner::fault_injector::{DeadSet, ProcessInfo};
 use crate::runner::groups::GroupRegistry;
@@ -23,13 +23,13 @@ use crate::runner::topology::{TopologyFactory, TopologyInputs};
 use crate::{assert_always_less_than_or_equal_to, assert_reachable};
 
 /// A process factory borrowed from the builder for one iteration.
-pub(crate) type ProcessFactory<'a> = &'a dyn Fn() -> Box<dyn Process>;
+pub(crate) type ProcessFactory<'a, P> = &'a dyn Fn() -> Box<dyn Process<P>>;
 
 /// Resolved server-process configuration for one iteration.
-pub(crate) struct ProcessConfig<'a> {
+pub(crate) struct ProcessConfig<'a, P: ProviderBundle> {
     /// Each builder group's factory, by group name (groups that drew zero
     /// processes included, so a spawn can still boot one).
-    pub(crate) factories: BTreeMap<String, ProcessFactory<'a>>,
+    pub(crate) factories: BTreeMap<String, ProcessFactory<'a, P>>,
     pub(crate) info: Vec<(String, String)>,
     pub(crate) ips: Vec<String>,
     pub(crate) tag_registry: TagRegistry,
@@ -39,7 +39,7 @@ pub(crate) struct ProcessConfig<'a> {
     pub(crate) plans: BTreeMap<String, GroupPlan>,
 }
 
-impl ProcessConfig<'_> {
+impl<P: ProviderBundle> ProcessConfig<'_, P> {
     /// The run's live membership, starting from this boot shape.
     pub(crate) fn membership(&self, max_spawns: usize) -> Membership {
         Membership::new(
@@ -57,17 +57,15 @@ impl ProcessConfig<'_> {
 }
 
 /// Everything a booted or restarted process needs to build its [`SimContext`].
-///
-/// `Copy`, being nothing but shared borrows.
-#[derive(Clone, Copy)]
-pub(crate) struct ProcessEnv<'a> {
+pub(crate) struct ProcessEnv<'a, P: ProviderBundle> {
     pub(crate) sim: &'a crate::sim::WeakSimWorld,
     pub(crate) state: &'a StateHandle,
     pub(crate) obs: &'a SimulationLayerHandle,
     pub(crate) metrics: &'a MetricsHandle,
     pub(crate) shutdown_signal: &'a tokio_util::sync::CancellationToken,
     pub(crate) membership: &'a Membership,
-    pub(crate) spawn_factories: &'a SpawnFactories,
+    pub(crate) spawn_factories: &'a SpawnFactories<P>,
+    pub(crate) providers: &'a ProviderFactory<P>,
 }
 
 /// A panic that killed a process task: which process, and what it said.
@@ -114,9 +112,9 @@ impl ProcessBoot {
 /// that stopped, and a run whose workloads did not notice reported success.
 /// An ordinary `Err` from `run` is still an exit, not a failure: a process may
 /// legitimately stop.
-pub(crate) fn spawn_process(
-    mut process: Box<dyn Process>,
-    ctx: SimContext,
+pub(crate) fn spawn_process<P: ProviderBundle>(
+    mut process: Box<dyn Process<P>>,
+    ctx: SimContext<P>,
     ip: &str,
     panics: &ProcessPanics,
     scope: tokio_util::sync::CancellationToken,
@@ -153,9 +151,9 @@ pub(crate) fn spawn_process(
 }
 
 /// Owns running process tasks and their restart state.
-pub(crate) struct ProcessManager<'a> {
+pub(crate) struct ProcessManager<'a, P: ProviderBundle> {
     /// Each builder group's factory, by group name.
-    factories: BTreeMap<String, ProcessFactory<'a>>,
+    factories: BTreeMap<String, ProcessFactory<'a, P>>,
     handles: Vec<Option<ProcessBoot>>,
     process_tokens: Vec<Option<tokio_util::sync::CancellationToken>>,
     /// Every process ever booted this iteration, retired ones included, in
@@ -174,7 +172,7 @@ pub(crate) struct ProcessManager<'a> {
     task_panics: TaskPanicTracker,
 }
 
-impl<'a> ProcessManager<'a> {
+impl<'a, P: ProviderBundle> ProcessManager<'a, P> {
     /// A manager with no process yet: a run without `.processes()`, where a
     /// workload may still start a group mid-run.
     pub(crate) fn empty(
@@ -198,7 +196,7 @@ impl<'a> ProcessManager<'a> {
     /// A manager for `config`'s processes, none of them booted yet (see
     /// [`Self::boot_all`]).
     pub(crate) fn new(
-        config: ProcessConfig<'a>,
+        config: ProcessConfig<'a, P>,
         membership: Membership,
         all_entities: Vec<(String, String)>,
         task_panics: TaskPanicTracker,
@@ -222,7 +220,7 @@ impl<'a> ProcessManager<'a> {
     /// # Errors
     ///
     /// Returns `Err(())` if a process IP fails to parse.
-    pub(crate) fn boot_all(&mut self, env: &ProcessEnv<'_>) -> Result<(), ()> {
+    pub(crate) fn boot_all(&mut self, env: &ProcessEnv<'_, P>) -> Result<(), ()> {
         for index in 0..self.ips.len() {
             let ip: std::net::IpAddr = self.ips[index].parse().map_err(|_| ())?;
             self.boot(index, ip, env);
@@ -233,7 +231,7 @@ impl<'a> ProcessManager<'a> {
 
     /// Boot a process spawned mid-run at `ip` (already active in the
     /// membership) from its group's factory.
-    pub(crate) fn add(&mut self, ip: std::net::IpAddr, env: &ProcessEnv<'_>) {
+    pub(crate) fn add(&mut self, ip: std::net::IpAddr, env: &ProcessEnv<'_, P>) {
         if self.index_for_ip(ip).is_some() {
             tracing::warn!(%ip, "ProcessSpawn for a known IP");
             return;
@@ -344,7 +342,7 @@ impl<'a> ProcessManager<'a> {
             .insert(ip);
     }
 
-    pub(crate) fn restart(&mut self, ip: std::net::IpAddr, env: &ProcessEnv<'_>) {
+    pub(crate) fn restart(&mut self, ip: std::net::IpAddr, env: &ProcessEnv<'_, P>) {
         let Some(index) = self.index_for_ip(ip) else {
             tracing::warn!(%ip, "ProcessRestart for unknown IP");
             return;
@@ -373,7 +371,7 @@ impl<'a> ProcessManager<'a> {
     /// Spawn a fresh instance of process `index` from its factory, with a new
     /// per-process token (a child of the global shutdown signal) and a new
     /// task scope.
-    fn boot(&mut self, index: usize, ip: std::net::IpAddr, env: &ProcessEnv<'_>) {
+    fn boot(&mut self, index: usize, ip: std::net::IpAddr, env: &ProcessEnv<'_, P>) {
         let ProcessEnv {
             sim,
             state,
@@ -382,6 +380,7 @@ impl<'a> ProcessManager<'a> {
             shutdown_signal,
             membership,
             spawn_factories,
+            providers,
         } = *env;
         let Some(group) = self.membership.group_for(ip) else {
             tracing::warn!(%ip, "boot of a process outside every group");
@@ -416,12 +415,13 @@ impl<'a> ProcessManager<'a> {
             membership: self.membership.clone(),
             shutdown_signal: process_token,
         });
+        let task = SimTaskProvider::default()
+            .with_scope(scope.clone())
+            .with_panic_reporter(self.task_panics.reporter(format!("process@{ip_string}")));
+        let provider_env = ProviderEnv::new(sim.clone(), ip).with_task(task);
         let ctx = SimContext::new(
-            crate::SimProviders::new(sim.clone(), ip)
-                .with_task_scope(scope.clone())
-                .with_task_panic_reporter(
-                    self.task_panics.reporter(format!("process@{ip_string}")),
-                ),
+            providers(&provider_env),
+            provider_env,
             topology,
             state.clone(),
             obs.clone(),

@@ -13,6 +13,7 @@ use tracing::instrument;
 use crate::SimulationError;
 use crate::observability::{SimulationLayer, SimulationLayerHandle};
 use crate::providers::TaskPanicTracker;
+use crate::runner::context::{ProviderBundle, ProviderFactory};
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::groups::GroupRegistry;
 use crate::runner::locality::MachineRegistry;
@@ -26,14 +27,14 @@ use super::metrics::{GenerateReportInputs, MetricsCollector};
 use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestrator};
 
 /// Inputs to `run_orchestrator_blocking`.
-struct RunOrchestratorInputs<'a> {
+struct RunOrchestratorInputs<'a, P: ProviderBundle> {
     seed: u64,
     metrics_factory: Option<&'a SourceFactory>,
     iteration_count: usize,
-    workloads: Vec<Box<dyn Workload>>,
+    workloads: Vec<Box<dyn Workload<P>>>,
     workload_info: Vec<(String, String)>,
     client_info: Vec<WorkloadClientInfo>,
-    process_config: Option<super::process_manager::ProcessConfig<'a>>,
+    process_config: Option<super::process_manager::ProcessConfig<'a, P>>,
     sim: crate::sim::SimWorld,
     fault_injectors: Vec<Box<dyn FaultInjector>>,
     chaos_duration: Option<Duration>,
@@ -42,10 +43,11 @@ struct RunOrchestratorInputs<'a> {
     run_time_budget: Duration,
     max_spawns: usize,
     shard_faults: crate::runner::shard::ShardFaults,
+    providers: &'a ProviderFactory<P>,
 }
 
 /// Outcome of an orchestration attempt.
-type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
+type OrchestrationOutcome<P> = Result<OrchestrateOutput<P>, (Vec<u64>, usize)>;
 
 /// Whether an iteration let the run loop continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +148,7 @@ struct ConvergenceState<'a> {
 
 impl RunState {
     /// Initialise per-run accumulators from the builder's configuration.
-    fn new(builder: &SimulationBuilder) -> Self {
+    fn new<P: ProviderBundle>(builder: &SimulationBuilder<P>) -> Self {
         let iteration_manager =
             IterationManager::new(builder.iteration_control.clone(), builder.seeds.clone());
         let progress_milestone = std::cmp::max(iteration_manager.max_iterations() / 10, 1);
@@ -198,8 +200,8 @@ struct RunState {
 }
 
 /// Resolved workload entries for a single iteration.
-struct ResolvedEntries {
-    workloads: Vec<Box<dyn Workload>>,
+struct ResolvedEntries<P: ProviderBundle> {
+    workloads: Vec<Box<dyn Workload<P>>>,
     /// `return_map[i] = Some(entry_idx)` means `workloads[i]` should be
     /// returned to `entries[entry_idx]` after the iteration.
     return_map: Vec<Option<usize>>,
@@ -209,9 +211,9 @@ struct ResolvedEntries {
 
 use super::report::{SimulationMetrics, SimulationReport};
 
-impl SimulationBuilder {
+impl<P: ProviderBundle> SimulationBuilder<P> {
     /// Resolve all entries into a flat workload list for one iteration.
-    fn resolve_entries(&mut self) -> ResolvedEntries {
+    fn resolve_entries(&mut self) -> ResolvedEntries<P> {
         let mut workloads = Vec::new();
         let mut return_map = Vec::new();
         let mut client_info = Vec::new();
@@ -252,7 +254,7 @@ impl SimulationBuilder {
     /// Return instance-based workloads to their entry slots after an
     /// iteration, following the `return_map` stashed in `state` when the
     /// entries were resolved.
-    fn return_entries(&mut self, state: &mut RunState, workloads: Vec<Box<dyn Workload>>) {
+    fn return_entries(&mut self, state: &mut RunState, workloads: Vec<Box<dyn Workload<P>>>) {
         let return_map = std::mem::take(&mut state.pending_return_map);
         for (w, slot) in workloads.into_iter().zip(return_map) {
             if let Some(entry_idx) = slot
@@ -266,7 +268,7 @@ impl SimulationBuilder {
 
     /// Spin up a fresh deterministic executor, run the orchestrator on it,
     /// and return its outcome.
-    fn run_orchestrator_blocking(inputs: RunOrchestratorInputs<'_>) -> OrchestrationOutcome {
+    fn run_orchestrator_blocking(inputs: RunOrchestratorInputs<'_, P>) -> OrchestrationOutcome<P> {
         let RunOrchestratorInputs {
             seed,
             metrics_factory,
@@ -283,6 +285,7 @@ impl SimulationBuilder {
             run_time_budget,
             max_spawns,
             shard_faults,
+            providers,
         } = inputs;
         // Fresh executor per iteration: dropping it cancels every task that
         // leaked past the settle phase, so no state crosses into the next seed
@@ -309,6 +312,7 @@ impl SimulationBuilder {
                 max_spawns,
                 shard_faults,
                 task_panics: tracker,
+                providers,
             })
             .await
         });
@@ -710,8 +714,8 @@ impl SimulationBuilder {
     /// group's members are contiguous and a single-group builder keeps its
     /// historical `10.0.1.x` addresses.
     fn resolve_process_config(
-        entries: &[ProcessEntry],
-    ) -> Option<super::process_manager::ProcessConfig<'_>> {
+        entries: &[ProcessEntry<P>],
+    ) -> Option<super::process_manager::ProcessConfig<'_, P>> {
         if entries.is_empty() {
             return None;
         }
@@ -1160,7 +1164,7 @@ impl SimulationBuilder {
     /// Whether a completed run failed: a workload error or an `always`
     /// violation.
     #[cfg(feature = "exploration")]
-    fn run_failed(output: &OrchestrateOutput) -> bool {
+    fn run_failed(output: &OrchestrateOutput<P>) -> bool {
         output.results.iter().any(std::result::Result::is_err)
             || crate::chaos::has_always_violations()
     }
@@ -1203,7 +1207,7 @@ impl SimulationBuilder {
         obs_handle: &SimulationLayerHandle,
         seed: u64,
         iteration_count: usize,
-    ) -> (OrchestrationOutcome, Instant) {
+    ) -> (OrchestrationOutcome<P>, Instant) {
         let ResolvedEntries {
             workloads,
             return_map,
@@ -1324,6 +1328,7 @@ impl SimulationBuilder {
             run_time_budget: self.run_time_budget,
             max_spawns: self.max_spawns,
             shard_faults: self.shard_faults.clone(),
+            providers: &*self.providers,
         });
         (outcome, start_time)
     }
@@ -1333,7 +1338,7 @@ impl SimulationBuilder {
     fn handle_orchestration_result(
         &mut self,
         state: &mut RunState,
-        result: OrchestrationOutcome,
+        result: OrchestrationOutcome<P>,
         seed: u64,
         iteration_count: usize,
         start_time: Instant,

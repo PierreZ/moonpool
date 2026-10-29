@@ -50,7 +50,7 @@ To carry a fact across boots **for the test's sake**, use `ctx.state()`, the sha
 | Call | What it gives |
 |------|---------------|
 | `ctx.my_ip()` | this process's address, as a `&str` |
-| `ctx.providers()` | the `SimProviders` bundle, for code generic over `P: Providers` |
+| `ctx.providers()` | the providers bundle, `SimProviders` unless the builder used [`with_providers`](./04-provider-pattern.md#bringing-your-own-bundle), for code generic over `P: Providers` |
 | `ctx.network()`, `ctx.time()`, `ctx.task()`, `ctx.random()`, `ctx.storage()` | the individual providers |
 | `ctx.providers().system()` | the system provider: CPU and disk counters |
 | `ctx.topology()` | process IPs, groups, tags, locality |
