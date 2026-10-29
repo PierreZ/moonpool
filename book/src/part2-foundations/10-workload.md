@@ -106,7 +106,7 @@ Every phase receives a `SimContext`. The parts a workload uses:
 |------|---------------|
 | `ctx.my_ip()` | this workload's address, on `10.0.0.x` |
 | `ctx.client_id()`, `ctx.client_count()` | this instance's index and the instance count of its builder entry |
-| `ctx.providers()` | the `SimProviders` bundle, for code generic over `P: Providers` |
+| `ctx.providers()` | the providers bundle, `SimProviders` unless the builder used [`with_providers`](./04-provider-pattern.md#bringing-your-own-bundle), for code generic over `P: Providers` |
 | `ctx.network()`, `ctx.time()`, `ctx.task()`, `ctx.random()`, `ctx.storage()` | the individual providers |
 | `ctx.topology()` | `all_process_ips()`, `ips_in_group(name)`, `ips_tagged(key, value)`, locality |
 | `ctx.peer(name)`, `ctx.peers()` | other workloads by name |

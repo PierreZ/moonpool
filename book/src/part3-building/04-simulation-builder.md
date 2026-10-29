@@ -136,6 +136,7 @@ SimulationBuilder::new()
 | Method | Purpose | Chapter |
 |---|---|---|
 | `new()` | Empty builder. `Default` is the same. | this chapter |
+| `with_providers(f)` | Empty builder whose actors get the providers bundle `f` builds instead of `SimProviders`. | [The Provider Pattern](../part2-foundations/04-provider-pattern.md#bringing-your-own-bundle) |
 | `workload(w)` | One instance, reused across seeds, `client_id` 0. | [Writing a Workload](./03-writing-workload.md#one-instance-or-many) |
 | `workload_factory(f)` | One fresh instance per seed and per explored timeline. | [Multiverse Exploration](../part5-building-on-top/01-exploration.md) |
 | `workloads(count, f)` | `WorkloadCount::Fixed(n)` or `Random(range)` fresh instances per seed, indexed. | [Writing a Workload](./03-writing-workload.md#one-instance-or-many) |
