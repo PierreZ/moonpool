@@ -116,7 +116,8 @@ and under the simulator in its own `#[test]`.
   `RandomProvider`, `StorageProvider` and `SystemProvider`, bundled by
   `Providers`.
 - `TokioProviders` for production, behind the `tokio-providers` feature.
-  `SimProviders` for simulation.
+  `SimProviders` for simulation. `SimulationBuilder::with_providers` swaps
+  in your own providers.
 - Local (non-`Send`) forms of the traits for thread-per-core runtimes:
   `LocalStorageProvider`, `LocalNetworkProvider`, `LocalTimeProvider`,
   `LocalTaskProvider`, the `LocalProviders` bundle, and `ThreadProviders`
