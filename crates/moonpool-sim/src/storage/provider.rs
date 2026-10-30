@@ -101,6 +101,26 @@ impl SimStorageProvider {
             .map_err(io::Error::from)
     }
 
+    /// Durably damage `bytes` of this process's file at `path` without
+    /// asking the shard gate: damage a scenario places on purpose past a
+    /// shard's need (see
+    /// [`SimWorld::corrupt_process_file_bytes`](crate::SimWorld::corrupt_process_file_bytes)).
+    /// The gate still sees it, so it places nothing more on that stripe.
+    /// Takes no simulated time and draws no randomness.
+    ///
+    /// # Errors
+    ///
+    /// As [`corrupt_bytes`](Self::corrupt_bytes).
+    pub fn corrupt_bytes_past_gate(
+        &self,
+        path: &str,
+        bytes: std::ops::Range<u64>,
+    ) -> io::Result<()> {
+        self.sim()?
+            .corrupt_process_file_bytes(self.owner_ip, path, bytes)
+            .map_err(io::Error::from)
+    }
+
     /// Ask the shard gate whether this process may lose every copy it
     /// holds, and count the loss if so (see
     /// [`SimWorld::lose_replica_gated`](crate::SimWorld::lose_replica_gated)).
