@@ -721,7 +721,11 @@ impl FaultContext {
             let mut kind = kind;
             if kind == RebootKind::CrashAndWipe {
                 let not_intact = self.not_intact(&book, &requirements);
-                if !super::shard::lose_ok(&requirements, &not_intact, &[ip]) {
+                // Also per stripe: a copy damaged elsewhere leaves fewer
+                // clean ones than intact replicas.
+                if !super::shard::lose_ok(&requirements, &not_intact, &[ip])
+                    || !self.sim.replica_loss_allowed(ip)
+                {
                     assert_reachable!("shard gate: a wipe becomes a crash");
                     book.count(Downgrade::WipeToCrash);
                     kind = RebootKind::Crash;

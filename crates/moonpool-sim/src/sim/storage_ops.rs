@@ -641,6 +641,12 @@ impl SimWorld {
         Ok(true)
     }
 
+    /// Whether `ip` may lose every copy it holds and every shard keep its
+    /// `durable` need, per stripe on the copies left clean.
+    pub(crate) fn replica_loss_allowed(&self, ip: IpAddr) -> bool {
+        self.inner.read().storage.replica_loss_allowed(ip)
+    }
+
     /// Say that `ip` loses every copy it holds, if the shard gate allows
     /// it: the replica is then not intact until it heals, as after a
     /// wipe. A harness calls this before it destroys a replica's data
