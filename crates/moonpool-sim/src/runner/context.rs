@@ -23,15 +23,15 @@
 //! }
 //! ```
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use moonpool_core::metrics::MetricsSource;
 
 use crate::chaos::state_handle::StateHandle;
-use crate::network::SimNetworkProvider;
 use crate::observability::SimulationLayerHandle;
-use crate::providers::{SimProviders, SimRandomProvider, SimTimeProvider};
-use crate::storage::SimStorageProvider;
+use crate::providers::{SimProviders, SimTaskProvider};
+use crate::sim::WeakSimWorld;
 
 use moonpool_core::Providers;
 
@@ -39,11 +39,83 @@ use super::app_metrics::MetricsHandle;
 use super::deployment::Deployment;
 use super::topology::WorkloadTopology;
 
+/// A providers bundle the runner can hand to processes and workloads.
+///
+/// Any `Clone + Send + Sync + 'static` type qualifies: the bundle need not
+/// implement [`Providers`], so it may carry provider traits of its own.
+pub trait ProviderBundle: Clone + Send + Sync + 'static {}
+
+impl<T: Clone + Send + Sync + 'static> ProviderBundle for T {}
+
+/// Builds the providers bundle of one process boot or one workload (see
+/// [`SimulationBuilder::with_providers`](crate::SimulationBuilder::with_providers)).
+pub type ProviderFactory<P> = dyn Fn(&ProviderEnv) -> P;
+
+/// What the runner hands a [`ProviderFactory`] to build one actor's bundle.
+///
+/// A bundle must stay driven by the simulation to keep the run
+/// deterministic and the faults effective: build its network, storage and
+/// time on top of the simulated providers for [`world`](Self::world) and
+/// [`ip`](Self::ip), and spawn through [`task`](Self::task), which a
+/// process kill cancels.
+#[derive(Clone)]
+pub struct ProviderEnv {
+    world: WeakSimWorld,
+    ip: IpAddr,
+    task: SimTaskProvider,
+}
+
+impl ProviderEnv {
+    /// An environment for the actor at `ip`, with an unscoped task provider.
+    ///
+    /// The runner builds its own; call this only to drive a
+    /// [`SimWorld`](crate::SimWorld) by hand.
+    #[must_use]
+    pub fn new(world: WeakSimWorld, ip: IpAddr) -> Self {
+        Self {
+            world,
+            ip,
+            task: SimTaskProvider::default(),
+        }
+    }
+
+    /// Replace the task provider (the runner's scoped, panic-reporting one).
+    pub(crate) fn with_task(mut self, task: SimTaskProvider) -> Self {
+        self.task = task;
+        self
+    }
+
+    /// A weak handle on the simulation.
+    #[must_use]
+    pub fn world(&self) -> &WeakSimWorld {
+        &self.world
+    }
+
+    /// The actor's IP.
+    #[must_use]
+    pub fn ip(&self) -> IpAddr {
+        self.ip
+    }
+
+    /// The actor's task provider, bound to its boot scope.
+    #[must_use]
+    pub fn task(&self) -> &SimTaskProvider {
+        &self.task
+    }
+}
+
+/// The default [`ProviderFactory`]: the simulated [`SimProviders`].
+pub(crate) fn sim_providers(env: &ProviderEnv) -> SimProviders {
+    SimProviders::new(env.world().clone(), env.ip()).with_task(env.task().clone())
+}
+
 /// Simulation context provided to processes and workloads.
 ///
-/// Wraps all simulation infrastructure into a single, non-generic struct.
-/// For code generic over `P: Providers`, pass `ctx.providers()`: that is how
-/// shipped code, written against the provider traits, runs in simulation.
+/// Generic over its providers bundle `P`, [`SimProviders`] unless the
+/// builder was made with
+/// [`with_providers`](crate::SimulationBuilder::with_providers). For code
+/// generic over `P: Providers`, pass `ctx.providers()`: that is how shipped
+/// code, written against the provider traits, runs in simulation.
 ///
 /// A process gets a fresh context on every boot, with fresh providers. A
 /// workload keeps one context for the whole iteration. A clone shares every
@@ -51,23 +123,25 @@ use super::topology::WorkloadTopology;
 /// program that runs on from `run()` into `check()` under
 /// [`chaos_until_run_ends`](crate::SimulationBuilder::chaos_until_run_ends)).
 #[derive(Clone)]
-pub struct SimContext {
-    providers: SimProviders,
+pub struct SimContext<P: ProviderBundle = SimProviders> {
+    providers: P,
+    env: ProviderEnv,
     topology: WorkloadTopology,
     state: StateHandle,
     obs: SimulationLayerHandle,
     metrics: MetricsHandle,
-    deployment: Deployment,
+    deployment: Deployment<P>,
 }
 
-impl SimContext {
-    /// Create a new simulation context.
+impl<P: ProviderBundle> SimContext<P> {
+    /// Create a new simulation context, `providers` built from `env`.
     ///
     /// The runner builds one per process boot and per workload; call this
     /// only to drive a [`SimWorld`](crate::SimWorld) by hand.
     #[must_use]
     pub fn new(
-        providers: SimProviders,
+        providers: P,
+        env: ProviderEnv,
         topology: WorkloadTopology,
         state: StateHandle,
         obs: SimulationLayerHandle,
@@ -75,6 +149,7 @@ impl SimContext {
     ) -> Self {
         Self {
             providers,
+            env,
             topology,
             state,
             obs,
@@ -84,7 +159,7 @@ impl SimContext {
     }
 
     /// Attach the run's deployment handle.
-    pub(crate) fn with_deployment(mut self, deployment: Deployment) -> Self {
+    pub(crate) fn with_deployment(mut self, deployment: Deployment<P>) -> Self {
         self.deployment = deployment;
         self
     }
@@ -96,7 +171,7 @@ impl SimContext {
     /// changes the deployment. A hand-built context's handle is detached and
     /// refuses as well.
     #[must_use]
-    pub fn deployment(&self) -> &Deployment {
+    pub fn deployment(&self) -> &Deployment<P> {
         &self.deployment
     }
 
@@ -105,36 +180,18 @@ impl SimContext {
     /// Code that takes `P: Providers` (the same type parameter production
     /// fills with `TokioProviders`) gets this bundle in simulation.
     #[must_use]
-    pub fn providers(&self) -> &SimProviders {
+    pub fn providers(&self) -> &P {
         &self.providers
     }
 
-    /// Get the simulated network provider, bound to this actor's IP.
-    ///
-    /// Bind with [`my_ip`](Self::my_ip) as the address; connect to an IP
-    /// from the [`topology`](Self::topology).
-    #[must_use]
-    pub fn network(&self) -> &SimNetworkProvider {
-        self.providers.network()
-    }
-
-    /// Get the simulated time provider: logical time that moves only when
-    /// the world steps.
-    ///
-    /// Use it for every sleep, timeout and timestamp. Durations measured
-    /// with it replay identically; wall-clock time does not.
-    #[must_use]
-    pub fn time(&self) -> &SimTimeProvider {
-        self.providers.time()
-    }
-
-    /// Get the task provider, which spawns on the deterministic executor.
+    /// Get the runner's task provider, which spawns on the deterministic
+    /// executor. It is the one the bundle was built from.
     ///
     /// Tasks a process spawns belong to that process: a reboot aborts them,
     /// and the CPU gate charges their polls to its core.
     #[must_use]
-    pub fn task(&self) -> &crate::providers::SimTaskProvider {
-        self.providers.task()
+    pub fn task(&self) -> &SimTaskProvider {
+        self.env.task()
     }
 
     /// Run `body`, a future that need not be `Send`, as a local task of
@@ -158,7 +215,7 @@ impl SimContext {
     ///     ctx.run_local("node", |ctx| async move { local_node(&ctx).await }).await
     /// }
     /// ```
-    pub async fn run_local<T, F>(&self, name: &str, body: impl FnOnce(SimContext) -> F) -> T
+    pub async fn run_local<T, F>(&self, name: &str, body: impl FnOnce(SimContext<P>) -> F) -> T
     where
         T: Send + 'static,
         F: std::future::Future<Output = T> + 'static,
@@ -182,33 +239,13 @@ impl SimContext {
         }
     }
 
-    /// Get the seeded random provider.
-    ///
-    /// Every draw comes from the simulation's one random stream, so it is
-    /// part of the seed's replay. Never use an OS random source in
-    /// simulated code.
-    #[must_use]
-    pub fn random(&self) -> &SimRandomProvider {
-        self.providers.random()
-    }
-
-    /// Get the simulated storage provider, scoped to this actor's IP.
-    ///
-    /// Files opened through it belong to this process: its crashes resolve
-    /// their unsynced writes, a wipe deletes them, and storage chaos aims at
-    /// them. Files survive a process reboot; in-memory state does not.
-    #[must_use]
-    pub fn storage(&self) -> &SimStorageProvider {
-        self.providers.storage()
-    }
-
     /// The cumulative counters of the simulated disk of the process at `ip`
     /// now, the simulator's ground truth (see
     /// [`SimWorld::disk_counters`](crate::SimWorld::disk_counters)). `None`
     /// once the simulation is gone.
     #[must_use]
     pub fn disk_counters(&self, ip: std::net::IpAddr) -> Option<moonpool_core::DiskCounters> {
-        let world = self.providers.weak_world().upgrade().ok()?;
+        let world = self.env.world().upgrade().ok()?;
         Some(world.disk_counters(ip))
     }
 
@@ -216,8 +253,8 @@ impl SimContext {
     /// (see [`SimWorld::system_samples`](crate::SimWorld::system_samples)).
     #[must_use]
     pub fn system_samples(&self, ip: std::net::IpAddr) -> Vec<moonpool_core::SystemSample> {
-        self.providers
-            .weak_world()
+        self.env
+            .world()
             .upgrade()
             .map(|world| world.system_samples(ip))
             .unwrap_or_default()
@@ -228,8 +265,8 @@ impl SimContext {
     /// simulation is gone.
     #[must_use]
     pub fn slowness(&self, ip: std::net::IpAddr) -> crate::Slowness {
-        self.providers
-            .weak_world()
+        self.env
+            .world()
             .upgrade()
             .map_or(crate::Slowness::HEALTHY, |world| world.slowness(ip))
     }
@@ -327,7 +364,7 @@ impl SimContext {
             ));
         }
         Ok(SelfCrash {
-            sim: self.providers.weak_world(),
+            sim: self.env.world().clone(),
             ip,
         })
     }
@@ -358,7 +395,7 @@ impl SimContext {
     pub fn shards(&self) -> crate::Shards {
         crate::Shards::new(
             crate::runner::shard::ShardBook::of(&self.state).unwrap_or_default(),
-            self.providers.weak_world(),
+            self.env.world().clone(),
         )
     }
 
@@ -403,6 +440,49 @@ impl SimContext {
     #[must_use]
     pub fn metrics_handle(&self) -> &MetricsHandle {
         &self.metrics
+    }
+}
+
+impl<P: Providers> SimContext<P> {
+    /// Get the bundle's network provider; the simulated one, bound to this
+    /// actor's IP, by default.
+    ///
+    /// Bind with [`my_ip`](Self::my_ip) as the address; connect to an IP
+    /// from the [`topology`](Self::topology).
+    #[must_use]
+    pub fn network(&self) -> &P::Network {
+        self.providers.network()
+    }
+
+    /// Get the bundle's time provider; by default logical time that moves
+    /// only when the world steps.
+    ///
+    /// Use it for every sleep, timeout and timestamp. Durations measured
+    /// with it replay identically; wall-clock time does not.
+    #[must_use]
+    pub fn time(&self) -> &P::Time {
+        self.providers.time()
+    }
+
+    /// Get the bundle's random provider; by default the seeded one.
+    ///
+    /// Every draw comes from the simulation's one random stream, so it is
+    /// part of the seed's replay. Never use an OS random source in
+    /// simulated code.
+    #[must_use]
+    pub fn random(&self) -> &P::Random {
+        self.providers.random()
+    }
+
+    /// Get the bundle's storage provider; by default the simulated one,
+    /// scoped to this actor's IP.
+    ///
+    /// Files opened through it belong to this process: its crashes resolve
+    /// their unsynced writes, a wipe deletes them, and storage chaos aims at
+    /// them. Files survive a process reboot; in-memory state does not.
+    #[must_use]
+    pub fn storage(&self) -> &P::Storage {
+        self.providers.storage()
     }
 }
 

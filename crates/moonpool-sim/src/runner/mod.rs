@@ -11,7 +11,7 @@
 //! | [`builder`] | [`SimulationBuilder`], [`Chaos`], [`ChaosMode`], [`IterationControl`], [`WorkloadCount`] |
 //! | [`process`] | [`Process`] (the system under test), [`RebootKind`], [`Attrition`] and its victim filters |
 //! | [`workload`] | [`Workload`] (the test driver) |
-//! | [`context`] | [`SimContext`], [`SelfCrash`] |
+//! | [`context`] | [`SimContext`], [`SelfCrash`], [`ProviderEnv`] |
 //! | [`deployment`] | [`Deployment`]: a workload spawns and retires processes mid-run |
 //! | [`membership`] | [`Membership`], [`DomainSpec`], [`DeploymentChanges`]: the live process set |
 //! | [`fault_injector`] | [`FaultInjector`], [`FaultContext`], the built-in attrition injector |
@@ -59,7 +59,7 @@ pub mod workload;
 pub use app_metrics::{INSTANCE_LABEL, MetricsHandle};
 pub use builder::{Chaos, ChaosMode, WorkloadCount};
 pub use builder::{DEFAULT_MAX_SPAWNS, IterationControl, SimulationBuilder};
-pub use context::{SelfCrash, SimContext};
+pub use context::{ProviderBundle, ProviderEnv, ProviderFactory, SelfCrash, SimContext};
 pub use deployment::Deployment;
 pub use fault_injector::{FaultContext, FaultInjector};
 pub use gray_failure::{GrayFailure, GrayKinds};

@@ -46,7 +46,8 @@ use async_trait::async_trait;
 
 use crate::SimulationResult;
 
-use super::context::SimContext;
+use super::context::{ProviderBundle, SimContext};
+use crate::SimProviders;
 
 /// A process that participates in simulation as part of the system under test.
 ///
@@ -56,7 +57,7 @@ use super::context::SimContext;
 ///
 /// The process reads its tags and index from [`SimContext`] to determine its role.
 #[async_trait]
-pub trait Process: Send + Sync + 'static {
+pub trait Process<P: ProviderBundle = SimProviders>: Send + Sync + 'static {
     /// Name of this process type for reporting.
     fn name(&self) -> &str;
 
@@ -66,7 +67,7 @@ pub trait Process: Send + Sync + 'static {
     /// bind listeners, establish connections, and run its main loop.
     ///
     /// Returns when the process exits voluntarily, or gets cancelled on reboot.
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()>;
+    async fn run(&mut self, ctx: &SimContext<P>) -> SimulationResult<()>;
 }
 
 /// The type of reboot to perform on a process.
