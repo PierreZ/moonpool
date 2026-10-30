@@ -214,3 +214,56 @@ fn two_shards_on_one_machine_take_independent_damage() {
     }
     assert!(loose_lost, "the loose shard lost two copies of a stripe");
 }
+
+/// A harness that damages bytes or gives up a whole replica from inside a
+/// process asks the same gate: the second copy of one stripe is refused,
+/// and so is a replica loss that would leave a stripe one clean copy.
+#[test]
+fn in_process_damage_and_replica_loss_ask_the_gate() {
+    let nodes = ips(3);
+    let mut sim = SimWorld::new_with_seed(7);
+    let book = sim.install_shard_book(ShardFaults::default());
+    moonpool_sim::shard!(
+        "s",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    for (rank, ip) in (0u64..).zip(&nodes) {
+        let regions = layout(rank, &["s"]);
+        local_runtime().block_on(async {
+            run_as(&mut sim, *ip, move |provider| async move {
+                provider.publish_layout(&regions).expect("publish");
+                let file = provider
+                    .open("replica", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open");
+                let len = usize::try_from(STRIPES).expect("small") * SECTOR_SIZE;
+                file.write_at(0, &vec![0x5A; len]).await.expect("write");
+                file.sync_all().await.expect("sync");
+            })
+            .await;
+        });
+    }
+    // Stripe 0's sector on each replica.
+    let at = |rank: u64| {
+        let sector = (rank * 3) % STRIPES;
+        sector * SECTOR..sector * SECTOR + 8
+    };
+    let first = sim.storage_provider(nodes[0]);
+    let second = sim.storage_provider(nodes[1]);
+    assert!(first.corrupt_bytes("replica", at(0)).expect("corrupt"));
+    assert!(!second.corrupt_bytes("replica", at(1)).expect("corrupt"));
+    assert!(
+        !second.lose_replica().expect("lose"),
+        "stripe 0 keeps two copies"
+    );
+    assert_eq!(book.clean_copies("s", 0).len(), 2);
+    assert!(
+        first.lose_replica().expect("lose"),
+        "its own damage costs nothing more"
+    );
+    assert!(
+        !second.lose_replica().expect("lose"),
+        "one replica is gone already"
+    );
+    moonpool_sim::shard::clear_sink();
+}

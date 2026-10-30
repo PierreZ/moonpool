@@ -866,6 +866,14 @@ impl Shards {
         self.book.switch_off(None);
     }
 
+    /// Whether the gate is off for `name`: switched off, or off in the
+    /// run's [`ShardFaults`]. An oracle that reads [`clean_copies`](Self::clean_copies)
+    /// as the gate's promise skips such a shard.
+    #[must_use]
+    pub fn is_off(&self, name: &str) -> bool {
+        self.book.lock().config.is_off(name)
+    }
+
     /// The liveness core of `name`, once the chaos window closed under
     /// [`ShardFaults::core`].
     #[must_use]

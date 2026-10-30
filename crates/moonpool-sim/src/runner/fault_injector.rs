@@ -259,15 +259,9 @@ impl FaultContext {
         bytes: std::ops::Range<u64>,
     ) -> SimulationResult<()> {
         let ip = parse_ip(ip)?;
-        if let Some(book) = ShardBook::of(&self.state)
-            && !super::shard::pure(|| self.sim.shard_damage_allowed(ip, path, &bytes))
-        {
-            assert_reachable!("shard gate: scripted damage is refused");
-            book.count(Downgrade::DamageRefused);
-            return Ok(());
-        }
         self.sim
-            .corrupt_process_file_bytes(ip, path, bytes)
+            .corrupt_process_file_bytes_gated(ip, path, bytes)
+            .map(|_| ())
             .map_err(|error| std::io::Error::from(error).into())
     }
 
@@ -727,7 +721,11 @@ impl FaultContext {
             let mut kind = kind;
             if kind == RebootKind::CrashAndWipe {
                 let not_intact = self.not_intact(&book, &requirements);
-                if !super::shard::lose_ok(&requirements, &not_intact, &[ip]) {
+                // Also per stripe: a copy damaged elsewhere leaves fewer
+                // clean ones than intact replicas.
+                if !super::shard::lose_ok(&requirements, &not_intact, &[ip])
+                    || !self.sim.replica_loss_allowed(ip)
+                {
                     assert_reachable!("shard gate: a wipe becomes a crash");
                     book.count(Downgrade::WipeToCrash);
                     kind = RebootKind::Crash;
