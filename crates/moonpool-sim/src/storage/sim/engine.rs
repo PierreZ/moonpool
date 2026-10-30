@@ -500,6 +500,26 @@ impl StorageEngine {
         self.state.shards = book;
     }
 
+    /// Whether `ip` may lose every copy it holds (see
+    /// `StorageState::replica_loss_allowed`).
+    pub(crate) fn replica_loss_allowed(&self, ip: IpAddr) -> bool {
+        self.state.replica_loss_allowed(ip)
+    }
+
+    /// Mark `ip` wiped in the shard book, if one is installed.
+    pub(crate) fn note_shard_wipe(&self, ip: IpAddr) {
+        if let Some(book) = &self.state.shards {
+            book.note_wipe(ip);
+        }
+    }
+
+    /// Count one shard-gate downgrade, if a book is installed.
+    pub(crate) fn count_shard_downgrade(&self, kind: crate::runner::shard::Downgrade) {
+        if let Some(book) = &self.state.shards {
+            book.count(kind);
+        }
+    }
+
     /// Whether `ip`'s copy of `(shard, stripe)` is clean on its disk.
     pub(crate) fn shard_copy_intact(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {
         self.state.copy_intact(ip, shard, stripe)

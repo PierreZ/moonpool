@@ -356,19 +356,6 @@ impl SimWorld {
             .shard_copy_intact(ip, shard, stripe)
     }
 
-    /// Whether damage to `bytes` of `owner`'s `path` keeps every shard durable.
-    pub(crate) fn shard_damage_allowed(
-        &self,
-        owner: IpAddr,
-        path: &str,
-        bytes: &std::ops::Range<u64>,
-    ) -> bool {
-        self.inner
-            .read()
-            .storage
-            .shard_damage_allowed(owner, path, bytes)
-    }
-
     /// Whether a crash of `ip` now could break a shard's `durable` need.
     pub(crate) fn crash_endangers_shards(&self, ip: IpAddr) -> bool {
         self.inner.read().storage.crash_endangers_shards(ip)
@@ -618,6 +605,67 @@ impl SimWorld {
         bytes: std::ops::Range<u64>,
     ) -> Result<(), StorageError> {
         self.inner.write().storage.corrupt_bytes(ip, path, bytes)
+    }
+
+    /// [`corrupt_process_file_bytes`](Self::corrupt_process_file_bytes),
+    /// asked of the shard gate first: damage that would cost a declared
+    /// shard its `durable` need is not placed (counted as
+    /// [`Downgrade::DamageRefused`](crate::Downgrade::DamageRefused)).
+    /// Returns whether the bytes changed. Draws no randomness.
+    ///
+    /// # Errors
+    ///
+    /// As [`corrupt_process_file_bytes`](Self::corrupt_process_file_bytes).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn corrupt_process_file_bytes_gated(
+        &self,
+        ip: IpAddr,
+        path: &str,
+        bytes: std::ops::Range<u64>,
+    ) -> Result<bool, StorageError> {
+        let mut inner = self.inner.write();
+        let allowed =
+            crate::runner::shard::pure(|| inner.storage.shard_damage_allowed(ip, path, &bytes));
+        if !allowed {
+            crate::assert_reachable!("shard gate: scripted damage is refused");
+            inner
+                .storage
+                .count_shard_downgrade(crate::runner::shard::Downgrade::DamageRefused);
+            return Ok(false);
+        }
+        inner.storage.corrupt_bytes(ip, path, bytes)?;
+        Ok(true)
+    }
+
+    /// Say that `ip` loses every copy it holds, if the shard gate allows
+    /// it: the replica is then not intact until it heals, as after a
+    /// wipe. A harness calls this before it destroys a replica's data
+    /// itself (deletes its files, or damages them so that the format gives
+    /// the whole replica up), so the gate counts the loss. Returns whether
+    /// the loss is allowed; a refusal counts as
+    /// [`Downgrade::WipeToCrash`](crate::Downgrade::WipeToCrash). Draws no
+    /// randomness.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn lose_replica_gated(&self, ip: IpAddr) -> bool {
+        let inner = self.inner.read();
+        let allowed = crate::runner::shard::pure(|| inner.storage.replica_loss_allowed(ip));
+        if allowed {
+            inner.storage.note_shard_wipe(ip);
+        } else {
+            crate::assert_reachable!("shard gate: a replica loss is refused");
+            inner
+                .storage
+                .count_shard_downgrade(crate::runner::shard::Downgrade::WipeToCrash);
+        }
+        allowed
     }
 
     /// A copy of the durable image of `ip`'s file at `path`: the bytes as of

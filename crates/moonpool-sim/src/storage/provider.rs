@@ -82,6 +82,37 @@ impl SimStorageProvider {
         Ok(())
     }
 
+    /// Durably damage `bytes` of this process's file at `path`, unless the
+    /// shard gate refuses it (see
+    /// [`SimWorld::corrupt_process_file_bytes_gated`](crate::SimWorld::corrupt_process_file_bytes_gated)).
+    /// The in-process twin of
+    /// [`FaultContext::corrupt_bytes`](crate::FaultContext::corrupt_bytes):
+    /// a harness that aims damage from inside a process places it where
+    /// the simulator sees it. Returns whether the bytes changed. Takes no
+    /// simulated time and draws no randomness.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down, there is no file at
+    /// `path`, or `bytes` reach past its durable end.
+    pub fn corrupt_bytes(&self, path: &str, bytes: std::ops::Range<u64>) -> io::Result<bool> {
+        self.sim()?
+            .corrupt_process_file_bytes_gated(self.owner_ip, path, bytes)
+            .map_err(io::Error::from)
+    }
+
+    /// Ask the shard gate whether this process may lose every copy it
+    /// holds, and count the loss if so (see
+    /// [`SimWorld::lose_replica_gated`](crate::SimWorld::lose_replica_gated)).
+    /// A harness calls it before it destroys this process's data itself.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn lose_replica(&self) -> io::Result<bool> {
+        Ok(self.sim()?.lose_replica_gated(self.owner_ip))
+    }
+
     /// The replicated fault pattern this seed drew for this process's
     /// group, if the run covers it.
     ///

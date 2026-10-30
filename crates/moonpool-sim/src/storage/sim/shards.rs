@@ -178,6 +178,29 @@ impl StorageState {
         })
     }
 
+    /// Whether `owner` may lose every copy it holds (a wipe, or damage its
+    /// format answers by giving up the whole replica) and every shard keep
+    /// its `durable` need: on the replicas left intact, and per stripe on
+    /// the copies left clean.
+    pub(crate) fn replica_loss_allowed(&self, owner: IpAddr) -> bool {
+        let Some(requirements) = self.shard_requirements() else {
+            return true;
+        };
+        let not_intact = self.not_intact();
+        if !crate::runner::shard::lose_ok(&requirements, &not_intact, &[owner]) {
+            return false;
+        }
+        self.layouts
+            .iter()
+            .filter(|(ip, _)| **ip != owner)
+            .all(|(ip, layout)| {
+                layout.sharded().all(|(_, _, shard, stripe)| {
+                    !self.copy_damaged(*ip, shard, stripe)
+                        || self.stripe_survives(&requirements, &not_intact, owner, shard, stripe)
+                })
+            })
+    }
+
     /// Whether a crash of `ip` now could break a shard's `durable` need: a
     /// dirty sector of one of its files lies in a region whose copy the
     /// shard cannot afford to lose.
