@@ -143,4 +143,15 @@ impl StorageProvider for SimStorageProvider {
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
         Ok(self.sim()?.sync_dir(path, self.owner_ip)?)
     }
+
+    fn publish_store_layout(
+        &self,
+        store: &str,
+        regions: impl FnOnce() -> Vec<moonpool_core::LayoutRegion>,
+    ) {
+        // Only a shut-down simulation refuses, and then nothing is placed.
+        if let Ok(sim) = self.sim() {
+            sim.publish_store_layout(self.owner_ip, store, &regions());
+        }
+    }
 }

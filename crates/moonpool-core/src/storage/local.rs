@@ -37,7 +37,7 @@ use std::io;
 
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
-use super::{AlignedBuf, IoConstraints, OpenOptions, StorageFile, StorageProvider};
+use super::{AlignedBuf, IoConstraints, LayoutRegion, OpenOptions, StorageFile, StorageProvider};
 
 /// Local (non-`Send`) form of [`StorageProvider`]: the filesystem namespace.
 ///
@@ -85,6 +85,12 @@ pub trait LocalStorageProvider: Clone + 'static {
     /// Make the directory entries under `path` durable. See
     /// [`StorageProvider::sync_dir`].
     fn sync_dir(&self, path: &str) -> impl Future<Output = io::Result<()>>;
+
+    /// Say where a store lays out its records. See
+    /// [`StorageProvider::publish_store_layout`].
+    fn publish_store_layout(&self, store: &str, regions: impl FnOnce() -> Vec<LayoutRegion>) {
+        let _ = (store, regions);
+    }
 }
 
 /// Local (non-`Send`) form of [`StorageFile`]: one already-open file.
@@ -246,6 +252,10 @@ impl<P: StorageProvider> LocalStorageProvider for P {
 
     fn sync_dir(&self, path: &str) -> impl Future<Output = io::Result<()>> {
         StorageProvider::sync_dir(self, path)
+    }
+
+    fn publish_store_layout(&self, store: &str, regions: impl FnOnce() -> Vec<LayoutRegion>) {
+        StorageProvider::publish_store_layout(self, store, regions);
     }
 }
 

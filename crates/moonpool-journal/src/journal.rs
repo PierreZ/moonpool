@@ -177,6 +177,9 @@ pub struct Journal<P: LocalStorageProvider> {
     /// This open's generation: the high bits of every batch it writes.
     generation: u32,
     poisoned: bool,
+    /// The shard this journal's regions are published in
+    /// ([`Journal::publish_layout`]); `None` publishes nothing.
+    layout_shard: Option<String>,
     /// The name of the spare, a dead segment's file kept for the next roll.
     spare: Option<String>,
     /// Spares this open has named: the number in the next one's name.
@@ -398,6 +401,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             ambiguous_batch: None,
             generation: 1,
             poisoned: false,
+            layout_shard: None,
             spare: None,
             spares_named: 0,
             rolls: Rolls::default(),
@@ -515,6 +519,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             ambiguous_batch,
             generation,
             poisoned: false,
+            layout_shard: None,
             spare,
             spares_named: 0,
             rolls: Rolls::default(),
@@ -669,6 +674,61 @@ impl<P: LocalStorageProvider> Journal<P> {
         for layout in self.index.keys().filter_map(|&p| self.layout(p)) {
             regions.push(layout.record);
             regions.push(layout.entry);
+        }
+        regions
+    }
+
+    /// Publish [`Journal::regions`] to the provider in `shard`
+    /// ([`LocalStorageProvider::publish_store_layout`]), now and after every
+    /// commit, and the regions of each batch before its writes start: a
+    /// simulator then keeps a crash from tearing the copy of a position
+    /// the shard cannot afford to lose, the batch in flight included.
+    /// `None` stops publishing. Every provider but a simulator ignores it.
+    ///
+    /// [`LocalStorageProvider::publish_store_layout`]: moonpool_core::LocalStorageProvider::publish_store_layout
+    pub fn publish_layout(&mut self, shard: Option<String>) {
+        self.layout_shard = shard;
+        self.publish_regions(Vec::new());
+    }
+
+    /// Publish [`Journal::regions`] and `in_flight`, in the layout shard.
+    fn publish_regions(&self, in_flight: Vec<LayoutRegion>) {
+        let Some(shard) = &self.layout_shard else {
+            return;
+        };
+        self.provider.publish_store_layout(&self.dir, || {
+            self.regions()
+                .into_iter()
+                .chain(in_flight)
+                .map(|region| region.sharded(Some(shard.clone())))
+                .collect()
+        });
+    }
+
+    /// The regions a prepared batch placed in `segment` will write.
+    fn in_flight(&self, segment: &Segment<P::File>, prepared: &Prepared) -> Vec<LayoutRegion> {
+        let path = format!("{}/{}", self.dir, segment.name);
+        let mut regions = Vec::new();
+        for (index, record) in (0u16..).zip(&prepared.decoded) {
+            if record.kind != Kind::Put {
+                continue;
+            }
+            let record_at = prepared.persist_at + Record::slot_offset(index);
+            let offset = u64::from(record.offset);
+            regions.push(LayoutRegion {
+                path: path.clone(),
+                bytes: record_at..record_at + u64_of(RECORD_SIZE),
+                kind: Layout::RECORD,
+                stripe: Some(record.position),
+                shard: None,
+            });
+            regions.push(LayoutRegion {
+                path: path.clone(),
+                bytes: offset..offset + u64_of(RECORD_SIZE) + u64::from(record.len),
+                kind: Layout::ENTRY,
+                stripe: Some(record.position),
+                shard: None,
+            });
         }
         regions
     }
@@ -846,6 +906,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         let at = self.segment_for(&prepared).await?;
         let segment = &self.segments[at];
         prepared.place(segment.persist_next, segment.entry_next);
+        if self.layout_shard.is_some() {
+            self.publish_regions(self.in_flight(segment, &prepared));
+        }
         let ordered = self.config.durability == Durability::Ordered;
         let meta = meta_changes.then_some(&next_meta);
         if let Err((error, durable)) =
@@ -890,7 +953,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         if meta_changes {
             self.meta = next_meta;
         }
-        self.after_commit().await
+        let committed = self.after_commit().await;
+        self.publish_regions(Vec::new());
+        committed
     }
 
     /// The floor took effect and segments emptied: recycle or drop what is
