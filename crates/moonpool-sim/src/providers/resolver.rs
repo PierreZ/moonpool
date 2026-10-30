@@ -69,6 +69,17 @@ impl ScriptedResolver {
         self.table().names.remove(name);
     }
 
+    /// The IPs `name` points at now, or `None` when it is unknown or
+    /// scripted to fail. Not a lookup: it counts nothing, for a reader of
+    /// the table such as the shard book (`Shards::resolve_names`).
+    #[must_use]
+    pub fn addresses(&self, name: &str) -> Option<Vec<IpAddr>> {
+        match self.table().names.get(name) {
+            Some(Answer::Addresses(addresses)) if !addresses.is_empty() => Some(addresses.clone()),
+            _ => None,
+        }
+    }
+
     /// Lookups answered so far (numeric targets included).
     #[must_use]
     pub fn lookups(&self) -> u64 {

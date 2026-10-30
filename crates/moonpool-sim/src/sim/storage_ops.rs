@@ -482,6 +482,26 @@ impl SimWorld {
         self.inner.write().storage.publish_layout(ip, regions);
     }
 
+    /// Replace what the store `store` of `ip` says about its layout, and
+    /// publish the union of every store of `ip` as its layout (see
+    /// [`StorageProvider::publish_store_layout`](moonpool_core::StorageProvider::publish_store_layout)).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self, regions))]
+    pub fn publish_store_layout(
+        &self,
+        ip: IpAddr,
+        store: &str,
+        regions: &[moonpool_core::LayoutRegion],
+    ) {
+        self.inner
+            .write()
+            .storage
+            .publish_store_layout(ip, store, regions);
+    }
+
     /// Remove `ip`'s fault focus: every sector of its disk weighs 1 again.
     ///
     /// # Panics

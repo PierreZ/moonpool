@@ -193,6 +193,18 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
     /// the filesystem namespace rather than the contents of an already-open
     /// file — the same reason `rename` and `delete` live here.
     fn sync_dir(&self, path: &str) -> impl std::future::Future<Output = io::Result<()>> + Send;
+
+    /// Say where the store kept under `store` (a directory, say) lays out
+    /// its records: the regions `regions` builds, each in the shard and
+    /// stripe its bytes hold ([`LayoutRegion`]). A simulator places damage
+    /// and judges a crash's unsynced sectors by them, so a fault never
+    /// costs a shard a copy it needs; each call replaces what `store` said
+    /// before, and the stores of one process add up. Every other provider
+    /// ignores it and never calls `regions`, so the same code runs in
+    /// production at no cost.
+    fn publish_store_layout(&self, store: &str, regions: impl FnOnce() -> Vec<LayoutRegion>) {
+        let _ = (store, regions);
+    }
 }
 
 /// Trait for file handles that support async read/write/seek operations.

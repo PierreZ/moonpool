@@ -529,6 +529,20 @@ impl StorageEngine {
         self.state.note_damage_changed();
     }
 
+    /// Replace the regions of `ip`'s store `store`, and publish every store
+    /// of `ip` as its layout.
+    pub(crate) fn publish_store_layout(
+        &mut self,
+        ip: IpAddr,
+        store: &str,
+        regions: &[moonpool_core::LayoutRegion],
+    ) {
+        let stores = self.state.store_layouts.entry(ip).or_default();
+        stores.insert(store.to_string(), regions.to_vec());
+        let union: Vec<moonpool_core::LayoutRegion> = stores.values().flatten().cloned().collect();
+        self.publish_layout(ip, &union);
+    }
+
     /// Install, replace, or (with `None`) remove `ip`'s fault focus.
     pub(crate) fn set_fault_focus(&mut self, ip: IpAddr, focus: Option<FaultFocus>) {
         match focus {
@@ -1515,6 +1529,7 @@ impl StorageEngine {
         self.state.disk_episodes.remove(&ip);
         self.state.focus.remove(&ip);
         self.state.layouts.remove(&ip);
+        self.state.store_layouts.remove(&ip);
         let files = self
             .state
             .files

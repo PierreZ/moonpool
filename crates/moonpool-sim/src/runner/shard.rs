@@ -61,6 +61,7 @@ use std::time::Duration;
 use moonpool_buggify::shard::{Declaration, Need, Replica, Replication, Sink};
 
 use crate::chaos::state_handle::StateHandle;
+use crate::providers::ScriptedResolver;
 use crate::sim::WeakSimWorld;
 
 /// The run's state key the [`ShardBook`] is published under. The runner
@@ -393,6 +394,61 @@ struct Book {
     core: BTreeMap<String, Vec<Replica>>,
     core_members: BTreeSet<IpAddr>,
     held_down: BTreeSet<IpAddr>,
+    /// The name table a replica named by `host:port` is resolved through
+    /// ([`ShardBook::resolve_names`]).
+    names: Option<ScriptedResolver>,
+}
+
+impl Book {
+    /// `replica` named by its IP: a `host:port` the name table knows
+    /// becomes `ip:port`, its first address. Any other replica is kept.
+    fn resolved(&self, replica: &Replica) -> Replica {
+        if replica_ip(replica).is_some() {
+            return replica.clone();
+        }
+        let Some(names) = &self.names else {
+            return replica.clone();
+        };
+        let Ok((host, port)) = moonpool_core::split_host_port(replica.address()) else {
+            return replica.clone();
+        };
+        match names.addresses(host).and_then(|ips| ips.first().copied()) {
+            Some(ip) => Replica::new(std::net::SocketAddr::new(ip, port).to_string()),
+            None => replica.clone(),
+        }
+    }
+
+    /// `need` with every replica [`resolved`](Self::resolved).
+    fn resolved_need(&self, need: Need) -> Need {
+        match need {
+            Need::AtLeast(count, replicas) => Need::AtLeast(
+                count,
+                replicas
+                    .iter()
+                    .map(|replica| self.resolved(replica))
+                    .collect(),
+            ),
+            Need::All(needs) => {
+                Need::All(needs.into_iter().map(|n| self.resolved_need(n)).collect())
+            }
+            Need::Any(needs) => {
+                Need::Any(needs.into_iter().map(|n| self.resolved_need(n)).collect())
+            }
+        }
+    }
+
+    /// `replication` with every replica [`resolved`](Self::resolved).
+    fn resolved_replication(&self, replication: Replication) -> Replication {
+        Replication {
+            replicas: replication
+                .replicas
+                .iter()
+                .map(|replica| self.resolved(replica))
+                .collect(),
+            progress: self.resolved_need(replication.progress),
+            durable: self.resolved_need(replication.durable),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +485,17 @@ impl ShardBook {
         self.0.lock().expect("Mutex poisoned: prior task panicked")
     }
 
+    /// Resolve every replica a later declaration names by `host:port`
+    /// through `names`, the run's name table: the book holds it as
+    /// `ip:port`, so a wipe, a failed disk or damage on that process counts
+    /// against it. The gate cannot map a host name to a process, so such a
+    /// replica counts as intact whatever happens to it: a system under test
+    /// that names its replicas by host installs its table here before it
+    /// declares. A name the table does not know is kept as it is.
+    pub fn resolve_names(&self, names: ScriptedResolver) {
+        self.lock().names = Some(names);
+    }
+
     /// The run's shard fault shapes.
     pub(crate) fn config(&self) -> ShardFaults {
         self.lock().config.clone()
@@ -458,6 +525,11 @@ impl ShardBook {
     ) {
         let mut book = self.lock();
         let book = &mut *book;
+        let declaration = Declaration {
+            current: declaration.current.map(|r| book.resolved_replication(r)),
+            next: declaration.next.map(|r| book.resolved_replication(r)),
+            ..declaration
+        };
         book.counts.declarations += 1;
         book.events.push(ShardEvent {
             at,
@@ -562,10 +634,10 @@ impl ShardBook {
     /// `replica`'s copy of `shard` caught up: it heals if a declaration
     /// listed it after its wipe. Returns whether it healed.
     pub(crate) fn caught_up(&self, _shard: &str, replica: &Replica) -> bool {
-        let Some(ip) = replica_ip(replica) else {
+        let mut book = self.lock();
+        let Some(ip) = replica_ip(&book.resolved(replica)) else {
             return false;
         };
-        let mut book = self.lock();
         if book.wiped.get(&ip).is_some_and(|wiped| wiped.listed) {
             book.wiped.remove(&ip);
             book.counts.healed += 1;
@@ -799,6 +871,11 @@ impl Shards {
     #[must_use]
     pub fn core(&self, name: &str) -> Option<Vec<Replica>> {
         self.book.snapshot().core.remove(name)
+    }
+
+    /// [`ShardBook::resolve_names`] on the run's book.
+    pub fn resolve_names(&self, names: ScriptedResolver) {
+        self.book.resolve_names(names);
     }
 
     /// Say that `replica`'s copy of `shard` caught up, as
@@ -1354,5 +1431,53 @@ mod tests {
             Some(ip("10.0.0.1"))
         );
         assert_eq!(replica_ip(&Replica::new("node-a")), None);
+    }
+
+    #[test]
+    fn a_replica_named_by_host_counts_by_its_ip() {
+        let book = ShardBook::new(ShardFaults::default());
+        let table = ScriptedResolver::new();
+        table.set("db-1", vec![ip("10.0.0.1")]);
+        book.lock().names = Some(table);
+        let named = |hosts: &[&str]| {
+            Replication::tolerates(
+                hosts
+                    .iter()
+                    .map(|h| Replica::new(format!("{h}:4500")))
+                    .collect(),
+                1,
+                1,
+            )
+        };
+        book.declare(
+            None,
+            Duration::ZERO,
+            declaration("s", Some(named(&["db-1", "10.0.0.2", "db-3"])), None, "s:1"),
+            || true,
+        );
+        let reqs = requirements(&book);
+        let replicas = reqs[0].1[0].replicas.clone();
+        assert_eq!(
+            replicas,
+            vec![
+                Replica::new("10.0.0.1:4500"),
+                Replica::new("10.0.0.2:4500"),
+                Replica::new("db-3:4500"),
+            ],
+            "a known name becomes its IP; an unknown one stays"
+        );
+        // The wipe of the named process now counts against the shard.
+        let mut lost = BTreeSet::new();
+        lost.insert(ip("10.0.0.1"));
+        assert!(!lose_ok(&reqs, &lost, &[ip("10.0.0.2")]));
+        // A heal names the process as the code does, by its host.
+        book.note_wipe(ip("10.0.0.1"));
+        book.declare(
+            None,
+            Duration::ZERO,
+            declaration("s", Some(named(&["db-1", "10.0.0.2", "db-3"])), None, "s:1"),
+            || true,
+        );
+        assert!(book.caught_up("s", &Replica::new("db-1:4500")));
     }
 }
