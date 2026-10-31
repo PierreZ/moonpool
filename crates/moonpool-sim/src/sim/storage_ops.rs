@@ -674,6 +674,20 @@ impl SimWorld {
         allowed
     }
 
+    /// Count every copy `ip` holds lost, whatever the shard gate says: the
+    /// process found its data lost for good (a format that refuses a torn
+    /// store, say) after a fault the gate let land. The gate then keeps the
+    /// lost copies out of every shard's clean copies until the replica
+    /// heals ([`moonpool_buggify::shard::caught_up`]). Draws no randomness.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the simulation lock is poisoned by a prior task panic.
+    #[instrument(level = "debug", skip(self))]
+    pub fn lose_replica_past_gate(&self, ip: IpAddr) {
+        self.inner.read().storage.note_shard_wipe(ip);
+    }
+
     /// A copy of the durable image of `ip`'s file at `path`: the bytes as of
     /// its last successful sync, which a crash keeps and
     /// [`corrupt_process_file_bytes`](Self::corrupt_process_file_bytes)
