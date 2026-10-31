@@ -26,7 +26,7 @@ use super::metrics::{GenerateReportInputs, MetricsCollector};
 use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestrator};
 
 /// Inputs to `run_orchestrator_blocking`.
-struct RunOrchestratorInputs<'a> {
+pub(super) struct RunOrchestratorInputs<'a> {
     seed: u64,
     metrics_factory: Option<&'a SourceFactory>,
     iteration_count: usize,
@@ -44,8 +44,15 @@ struct RunOrchestratorInputs<'a> {
     shard_faults: crate::runner::shard::ShardFaults,
 }
 
+impl RunOrchestratorInputs<'_> {
+    /// The iteration's world.
+    pub(super) fn sim(&self) -> &crate::sim::SimWorld {
+        &self.sim
+    }
+}
+
 /// Outcome of an orchestration attempt.
-type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
+pub(super) type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usize)>;
 
 /// Whether an iteration let the run loop continue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +274,24 @@ impl SimulationBuilder {
     /// Spin up a fresh deterministic executor, run the orchestrator on it,
     /// and return its outcome.
     fn run_orchestrator_blocking(inputs: RunOrchestratorInputs<'_>) -> OrchestrationOutcome {
+        // Fresh executor per iteration: dropping it cancels every task that
+        // leaked past the settle phase, so no state crosses into the next seed
+        // (the same contract dropping the per-iteration tokio runtime gave).
+        let mut executor = crate::executor::Executor::new(inputs.seed);
+        let task_panics = TaskPanicTracker::default();
+        let diagnostics = inputs.obs_handle.clone();
+        let outcome = executor.block_on(Self::orchestrator_future(inputs, task_panics.clone()));
+        drop(executor);
+        Self::finish_orchestration(outcome, &task_panics, &diagnostics)
+    }
+
+    /// The orchestrator of one iteration, as a future the caller drives on
+    /// its own executor: to completion ([`Self::run_orchestrator_blocking`])
+    /// or in steps (a live simulation, `super::live`).
+    pub(super) fn orchestrator_future(
+        inputs: RunOrchestratorInputs<'_>,
+        tracker: TaskPanicTracker,
+    ) -> impl std::future::Future<Output = OrchestrationOutcome> + '_ {
         let RunOrchestratorInputs {
             seed,
             metrics_factory,
@@ -284,14 +309,7 @@ impl SimulationBuilder {
             max_spawns,
             shard_faults,
         } = inputs;
-        // Fresh executor per iteration: dropping it cancels every task that
-        // leaked past the settle phase, so no state crosses into the next seed
-        // (the same contract dropping the per-iteration tokio runtime gave).
-        let mut executor = crate::executor::Executor::new(seed);
-        let task_panics = TaskPanicTracker::default();
-        let tracker = task_panics.clone();
-        let diagnostics = obs_handle.clone();
-        let outcome = executor.block_on(async move {
+        async move {
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
                 workloads,
                 fault_injectors,
@@ -311,9 +329,16 @@ impl SimulationBuilder {
                 task_panics: tracker,
             })
             .await
-        });
-        drop(executor);
+        }
+    }
 
+    /// Report the task panics no one observed, once the orchestrator's
+    /// executor is gone, and fold them into the outcome.
+    pub(super) fn finish_orchestration(
+        outcome: OrchestrationOutcome,
+        task_panics: &TaskPanicTracker,
+        diagnostics: &SimulationLayerHandle,
+    ) -> OrchestrationOutcome {
         let panics = task_panics.take();
         for panic in &panics {
             tracing::error!(
@@ -488,7 +513,7 @@ impl SimulationBuilder {
     /// window, so without [`Self::chaos_duration`] they would be dropped
     /// unrun while the campaign reports success. Also refuse an outage that
     /// names no registered group or carries a malformed range.
-    fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
+    pub(super) fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
         let registered: Vec<&str> = self
             .process_entries
             .iter()
@@ -767,7 +792,7 @@ impl SimulationBuilder {
     /// Initialise the assertion region (heap, or `MAP_SHARED` + explorer), and
     /// create the frontier controller when an exploration config is present.
     #[cfg(feature = "exploration")]
-    fn init_assertions_and_exploration(
+    pub(super) fn init_assertions_and_exploration(
         exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
     ) -> Option<moonpool_explorer::Explorer> {
         crate::chaos::exploration_glue::init_assertion_region();
@@ -784,7 +809,7 @@ impl SimulationBuilder {
 
     /// Initialise the assertion region (heap table without the explorer).
     #[cfg(not(feature = "exploration"))]
-    fn init_assertions_and_exploration(
+    pub(super) fn init_assertions_and_exploration(
         _exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
     ) {
         crate::chaos::exploration_glue::init_assertion_region();
@@ -1167,7 +1192,7 @@ impl SimulationBuilder {
 
     /// Run all per-iteration setup steps before the orchestrator starts:
     /// prepare-next-seed, user hooks, reset state.
-    fn prepare_iteration(
+    pub(super) fn prepare_iteration(
         &mut self,
         obs_handle: &SimulationLayerHandle,
         seed: u64,
@@ -1204,12 +1229,29 @@ impl SimulationBuilder {
         seed: u64,
         iteration_count: usize,
     ) -> (OrchestrationOutcome, Instant) {
+        let return_map = &mut state.pending_return_map;
+        let inputs = self.orchestrator_inputs(return_map, obs_handle, seed, iteration_count);
+        let start_time = Instant::now();
+        let outcome = Self::run_orchestrator_blocking(inputs);
+        (outcome, start_time)
+    }
+
+    /// Resolve workload entries and build the per-iteration sim and fault
+    /// injectors: everything the orchestrator of one iteration needs. Stores
+    /// the workloads' `return_map` in `return_map`.
+    pub(super) fn orchestrator_inputs(
+        &mut self,
+        return_map: &mut Vec<Option<usize>>,
+        obs_handle: &SimulationLayerHandle,
+        seed: u64,
+        iteration_count: usize,
+    ) -> RunOrchestratorInputs<'_> {
         let ResolvedEntries {
             workloads,
-            return_map,
             client_info,
+            return_map: resolved_map,
         } = self.resolve_entries();
-        state.pending_return_map = return_map;
+        *return_map = resolved_map;
 
         let workload_info: Vec<(String, String)> = workloads
             .iter()
@@ -1239,7 +1281,6 @@ impl SimulationBuilder {
         if let Some(config) = &process_config {
             sim.set_localities(config.machine_registry.locality_map());
         }
-        let start_time = Instant::now();
         // Derive the per-seed attrition regimes, in registration order: `Swarm`
         // draws a fresh reboot regime from the simulation stream (after the
         // reset and the breakpoints — the draw-order contract on
@@ -1308,7 +1349,7 @@ impl SimulationBuilder {
             }
         }
         let fault_injectors = self.fault_injectors_for_seed(&sim, attritions, outages);
-        let outcome = Self::run_orchestrator_blocking(RunOrchestratorInputs {
+        RunOrchestratorInputs {
             seed,
             metrics_factory: self.metrics_factory.as_ref(),
             iteration_count,
@@ -1324,8 +1365,7 @@ impl SimulationBuilder {
             run_time_budget: self.run_time_budget,
             max_spawns: self.max_spawns,
             shard_faults: self.shard_faults.clone(),
-        });
-        (outcome, start_time)
+        }
     }
 
     /// Process the orchestration outcome: route the success path back into

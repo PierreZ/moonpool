@@ -476,24 +476,54 @@ impl Executor {
     ///   and no task is runnable (with the seed in the message, replacing
     ///   tokio's silent forever-park).
     pub fn block_on<F: Future>(&mut self, main: F) -> F::Output {
+        let main = std::pin::pin!(main);
+        match self.drive(main, &mut || false) {
+            Some(output) => output,
+            None => unreachable!("a drive that never stops returns only the output"),
+        }
+    }
+
+    /// Run `main` as the driver future, as [`Executor::block_on`] does, and
+    /// stop early once `stop` answers `true`: `stop` is asked after each
+    /// pass over the task pool. Returns the output once `main` completes,
+    /// or `None` when `stop` paused the drive first.
+    ///
+    /// A paused drive is resumed by calling `drive` again with the same
+    /// pinned future: the task pool and every timer keep their state in
+    /// between. This is how a live simulation advances in steps
+    /// (`SimulationBuilder::live`).
+    ///
+    /// # Panics
+    ///
+    /// The same as [`Executor::block_on`].
+    pub fn drive<F: Future + ?Sized>(
+        &mut self,
+        mut main: std::pin::Pin<&mut F>,
+        stop: &mut dyn FnMut() -> bool,
+    ) -> Option<F::Output> {
         let _guard = CurrentGuard::install(Handle {
             shared: Arc::clone(&self.shared),
         });
 
-        let mut main = std::pin::pin!(main);
         let driver_waker = Arc::new(DriverWaker {
             woken: AtomicBool::new(false),
         });
         let waker = Waker::from(Arc::clone(&driver_waker));
         let mut cx = Context::from_waker(&waker);
-
+        // A paused drive stops right after a pass over the task pool, where
+        // a running drive would poll the driver next: a resumed drive polls
+        // it first, so pausing changes no poll order.
         loop {
             driver_waker.woken.store(false, Ordering::Relaxed);
             if let Poll::Ready(output) = main.as_mut().poll(&mut cx) {
-                return output;
+                return Some(output);
             }
 
             self.run_until_stalled();
+
+            if stop() {
+                return None;
+            }
 
             assert!(
                 driver_waker.woken.load(Ordering::Acquire) || !self.shared.queue.lock().is_empty(),
