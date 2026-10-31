@@ -180,6 +180,9 @@ pub struct Journal<P: LocalStorageProvider> {
     /// The shard this journal's regions are published in
     /// ([`Journal::publish_layout`]); `None` publishes nothing.
     layout_shard: Option<String>,
+    /// Whether the regions are published whole: with no stripe
+    /// ([`Journal::publish_layout_whole`]).
+    layout_whole: bool,
     /// The name of the spare, a dead segment's file kept for the next roll.
     spare: Option<String>,
     /// Spares this open has named: the number in the next one's name.
@@ -402,6 +405,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation: 1,
             poisoned: false,
             layout_shard: None,
+            layout_whole: false,
             spare: None,
             spares_named: 0,
             rolls: Rolls::default(),
@@ -520,6 +524,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation,
             poisoned: false,
             layout_shard: None,
+            layout_whole: false,
             spare,
             spares_named: 0,
             rolls: Rolls::default(),
@@ -688,6 +693,19 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// [`LocalStorageProvider::publish_store_layout`]: moonpool_core::LocalStorageProvider::publish_store_layout
     pub fn publish_layout(&mut self, shard: Option<String>) {
         self.layout_shard = shard;
+        self.layout_whole = false;
+        self.publish_regions(Vec::new());
+    }
+
+    /// [`Journal::publish_layout`] with no stripe on any region: the copy
+    /// stands or falls whole. For a store whose replicas write different
+    /// records at the same position (a registry each replica fills in its
+    /// own order), so a position names no record shared between replicas.
+    /// A simulator then counts damage anywhere in the journal against the
+    /// whole copy.
+    pub fn publish_layout_whole(&mut self, shard: Option<String>) {
+        self.layout_shard = shard;
+        self.layout_whole = true;
         self.publish_regions(Vec::new());
     }
 
@@ -700,7 +718,17 @@ impl<P: LocalStorageProvider> Journal<P> {
             self.regions()
                 .into_iter()
                 .chain(in_flight)
-                .map(|region| region.sharded(Some(shard.clone())))
+                .map(|region| {
+                    let region = region.sharded(Some(shard.clone()));
+                    if self.layout_whole {
+                        LayoutRegion {
+                            stripe: None,
+                            ..region
+                        }
+                    } else {
+                        region
+                    }
+                })
                 .collect()
         });
     }

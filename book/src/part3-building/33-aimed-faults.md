@@ -99,6 +99,8 @@ SimulationBuilder::new()
 
 Each process publishes what its disk holds with `ctx.storage().publish_layout(&regions)`. The `stripe` of each region is the record's key, shared by every replica's copy. A `ReplicatedFaults` covers one process group (`.group(name)`, the processes' `Process::name`), or the whole topology without one. Call `replicated_storage_faults` once per replicated group, so acceptors and matchmakers each draw their own pattern. Processes outside every covered group keep plain storage chaos.
 
+A `moonpool_journal::Journal` publishes its own regions in a shard with `Journal::publish_layout(Some(shard))`, its positions as stripes. A store whose replicas write different records at the same position (a registry each replica fills in its own order) calls `Journal::publish_layout_whole` instead: no region has a stripe, so damage anywhere counts against the whole copy.
+
 Each seed draws one `FaultPattern` per group over the failure domains at the chosen `DomainLevel` (`Machine`, `Zone` or `Datacenter`):
 
 | `FaultPattern` | Where damage may land |
