@@ -414,13 +414,13 @@ pub use locality::{DomainLevel, LinkClass, LocalityInfo};
 pub use runner::{
     Aim, Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, Core, DEFAULT_MAX_SPAWNS,
     Deployment, DeploymentChanges, DomainSpec, Downgrade, FaultContext, FaultInjector, GrayFailure,
-    GrayKinds, GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl,
-    LocalityConfig, MachineRegistry, Membership, MetricsHandle, OUTAGE_STATE_KEY, OUTAGE_VETO_KEY,
-    Outage, OutageLanded, OutageVeto, Process, ProcessTags, RebootKind, SHARD_BOOK_KEY, SelfCrash,
-    ShardBook, ShardCounts, ShardEvent, ShardFaults, ShardState, ShardView, Shards, SimContext,
-    SimulationBuilder, SimulationMetrics, SimulationReport, TIMED_REBOOT_LABEL, TagRegistry,
-    VETO_RETRY, WIPE_LEDGER_KEY, WipeBudget, WipeHeal, WipeLedger, Workload, WorkloadCount,
-    WorkloadTopology,
+    GrayKinds, GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl, LiveClock,
+    LiveSimulation, LiveStatus, LocalityConfig, MachineRegistry, Membership, MetricsHandle,
+    OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, Process, ProcessTags,
+    RebootKind, SHARD_BOOK_KEY, SelfCrash, ShardBook, ShardCounts, ShardEvent, ShardFaults,
+    ShardState, ShardView, Shards, SimContext, SimulationBuilder, SimulationMetrics,
+    SimulationReport, TIMED_REBOOT_LABEL, TagRegistry, VETO_RETRY, WIPE_LEDGER_KEY, WipeBudget,
+    WipeHeal, WipeLedger, Workload, WorkloadCount, WorkloadTopology,
 };
 
 // Application-metrics vocabulary, re-exported from moonpool-core so a
