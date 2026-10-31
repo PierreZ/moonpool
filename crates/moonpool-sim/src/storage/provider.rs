@@ -133,6 +133,19 @@ impl SimStorageProvider {
         Ok(self.sim()?.lose_replica_gated(self.owner_ip))
     }
 
+    /// Count every copy this process holds lost, past the shard gate (see
+    /// [`SimWorld::lose_replica_past_gate`](crate::SimWorld::lose_replica_past_gate)).
+    /// A harness calls it when the process finds its data lost for good
+    /// after a fault the gate let land.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error if the simulation has shut down.
+    pub fn lose_replica_past_gate(&self) -> io::Result<()> {
+        self.sim()?.lose_replica_past_gate(self.owner_ip);
+        Ok(())
+    }
+
     /// The replicated fault pattern this seed drew for this process's
     /// group, if the run covers it.
     ///
