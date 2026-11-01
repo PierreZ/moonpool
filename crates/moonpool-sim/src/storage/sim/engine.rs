@@ -513,6 +513,14 @@ impl StorageEngine {
         }
     }
 
+    /// Mark `ip`'s copy of `shard` alone lost in the shard book, if one is
+    /// installed.
+    pub(crate) fn note_shard_loss(&self, ip: IpAddr, shard: &str) {
+        if let Some(book) = &self.state.shards {
+            book.note_shard_loss(ip, shard);
+        }
+    }
+
     /// Count one shard-gate downgrade, if a book is installed.
     pub(crate) fn count_shard_downgrade(&self, kind: crate::runner::shard::Downgrade) {
         if let Some(book) = &self.state.shards {

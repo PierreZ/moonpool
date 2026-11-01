@@ -101,7 +101,7 @@ Each process publishes what its disk holds with `ctx.storage().publish_layout(&r
 
 A `moonpool_journal::Journal` publishes its own regions in a shard with `Journal::publish_layout(Some(shard))`, its positions as stripes. A store whose replicas write different records at the same position (a registry each replica fills in its own order) calls `Journal::publish_layout_whole` instead: no region has a stripe, so damage anywhere counts against the whole copy.
 
-Such a store may lose its copy to a crash that tears its last batch without a damaged sector, when the format refuses the torn batch. The gate let that crash land, so it still counts the copy clean. The harness then calls `SimStorageProvider::lose_replica_past_gate`, and the gate counts the copy lost until the replica heals.
+Such a store may lose its copy to a crash that tears its last batch without a damaged sector, when the format refuses the torn batch. The gate let that crash land, so it still counts the copy clean. The harness then calls `SimStorageProvider::lose_replica_past_gate`, and the gate counts the copy lost until the replica heals. A process that keeps several stores, one per shard, may give up one torn store and keep the others. The harness then calls `SimStorageProvider::lose_shard_past_gate(shard)`: the gate counts that one copy lost until it catches up, and the replica's copies of other shards stay clean.
 
 Each seed draws one `FaultPattern` per group over the failure domains at the chosen `DomainLevel` (`Machine`, `Zone` or `Datacenter`):
 

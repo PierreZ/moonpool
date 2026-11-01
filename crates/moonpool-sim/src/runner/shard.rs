@@ -390,6 +390,9 @@ struct Book {
     events: Vec<ShardEvent>,
     counts: ShardCounts,
     wiped: BTreeMap<IpAddr, Wiped>,
+    /// Copies lost for good in one shard only, per shard
+    /// ([`ShardBook::note_shard_loss`]).
+    lost: ShardLosses,
     sites: BTreeMap<&'static str, Site>,
     core: BTreeMap<String, Vec<Replica>>,
     core_members: BTreeSet<IpAddr>,
@@ -631,13 +634,38 @@ impl ShardBook {
         self.lock().wiped.insert(ip, Wiped::default());
     }
 
+    /// The replica at `ip` lost its copy of `shard` alone: that copy is
+    /// not intact until it heals, and its copies of other shards stay as
+    /// they are.
+    pub(crate) fn note_shard_loss(&self, ip: IpAddr, shard: &str) {
+        self.lock()
+            .lost
+            .entry(shard.to_string())
+            .or_default()
+            .insert(ip);
+    }
+
+    /// The copies lost in one shard only, per shard.
+    pub(crate) fn losses(&self) -> ShardLosses {
+        self.lock().lost.clone()
+    }
+
     /// `replica`'s copy of `shard` caught up: it heals if a declaration
-    /// listed it after its wipe. Returns whether it healed.
-    pub(crate) fn caught_up(&self, _shard: &str, replica: &Replica) -> bool {
+    /// listed it after its wipe, or if it lost that shard's copy alone.
+    /// Returns whether it healed.
+    pub(crate) fn caught_up(&self, shard: &str, replica: &Replica) -> bool {
         let mut book = self.lock();
         let Some(ip) = replica_ip(&book.resolved(replica)) else {
             return false;
         };
+        if book
+            .lost
+            .get_mut(shard)
+            .is_some_and(|lost| lost.remove(&ip))
+        {
+            book.counts.healed += 1;
+            return true;
+        }
         if book.wiped.get(&ip).is_some_and(|wiped| wiped.listed) {
             book.wiped.remove(&ip);
             book.counts.healed += 1;
@@ -907,12 +935,15 @@ impl Shards {
             return Vec::new();
         };
         let wiped = self.book.wiped();
+        let lost = self.book.losses().remove(shard).unwrap_or_default();
         state
             .replicas()
             .into_iter()
             .filter(|replica| {
                 replica_ip(replica).is_none_or(|ip| {
-                    !wiped.contains(&ip) && world.shard_copy_intact(ip, shard, Some(stripe))
+                    !wiped.contains(&ip)
+                        && !lost.contains(&ip)
+                        && world.shard_copy_intact(ip, shard, Some(stripe))
                 })
             })
             .collect()
@@ -1018,20 +1049,29 @@ pub(crate) fn down_ok(
     })
 }
 
+/// Copies lost for good in one shard only: per shard name, the replicas
+/// whose copy of it is gone while their other copies stay.
+pub(crate) type ShardLosses = BTreeMap<String, BTreeSet<IpAddr>>;
+
 /// Whether losing the copies of `victims` keeps `durable` of every
-/// replication that lists one of them, with `not_intact` lost already.
+/// replication that lists one of them, with `not_intact` lost already in
+/// every shard and `losses` in theirs.
 pub(crate) fn lose_ok(
     requirements: &Requirements,
     not_intact: &BTreeSet<IpAddr>,
+    losses: &ShardLosses,
     victims: &[IpAddr],
 ) -> bool {
-    requirements.iter().all(|(_, replications)| {
+    requirements.iter().all(|(name, replications)| {
+        let lost = losses.get(name);
         replications.iter().all(|replication| {
             if !ips_of(replication).iter().any(|ip| victims.contains(ip)) {
                 return true;
             }
             holds_without(&replication.durable, &|ip| {
-                not_intact.contains(&ip) || victims.contains(&ip)
+                not_intact.contains(&ip)
+                    || lost.is_some_and(|lost| lost.contains(&ip))
+                    || victims.contains(&ip)
             })
         })
     })
@@ -1383,11 +1423,21 @@ mod tests {
     fn the_gate_judges_wipes_on_intact_copies() {
         let reqs: Requirements = vec![("s".into(), vec![r(&["10.0.0.1", "10.0.0.2", "10.0.0.3"])])];
         let mut lost = BTreeSet::new();
-        assert!(lose_ok(&reqs, &lost, &[ip("10.0.0.1")]));
+        assert!(lose_ok(
+            &reqs,
+            &lost,
+            &ShardLosses::new(),
+            &[ip("10.0.0.1")]
+        ));
         lost.insert(ip("10.0.0.1"));
-        assert!(!lose_ok(&reqs, &lost, &[ip("10.0.0.2")]));
+        assert!(!lose_ok(
+            &reqs,
+            &lost,
+            &ShardLosses::new(),
+            &[ip("10.0.0.2")]
+        ));
         assert!(
-            lose_ok(&reqs, &lost, &[ip("10.0.0.1")]),
+            lose_ok(&reqs, &lost, &ShardLosses::new(), &[ip("10.0.0.1")]),
             "re-wiping loses nothing more"
         );
     }
@@ -1477,7 +1527,12 @@ mod tests {
         // The wipe of the named process now counts against the shard.
         let mut lost = BTreeSet::new();
         lost.insert(ip("10.0.0.1"));
-        assert!(!lose_ok(&reqs, &lost, &[ip("10.0.0.2")]));
+        assert!(!lose_ok(
+            &reqs,
+            &lost,
+            &ShardLosses::new(),
+            &[ip("10.0.0.2")]
+        ));
         // A heal names the process as the code does, by its host.
         book.note_wipe(ip("10.0.0.1"));
         book.declare(
