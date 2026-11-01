@@ -262,6 +262,34 @@ impl StorageState {
         })
     }
 
+    /// Count `owner`'s copy of a shard lost when a crash changed a dirty
+    /// sector of one of its regions with no stripe: such a copy stands or
+    /// falls whole, and a format may refuse it whole at its next open (a
+    /// registry whose last batch was torn). The copy counts lost until the
+    /// code under test says it caught up
+    /// ([`moonpool_buggify::shard::caught_up`]), at an open that found it
+    /// intact. A copy the format refuses stays lost.
+    pub(crate) fn note_torn_whole_copies(
+        &self,
+        owner: IpAddr,
+        path: &str,
+        report: &crate::storage::faults::FileCrashReport,
+    ) {
+        let (Some(book), Some(layout)) = (self.shards.as_ref(), self.layouts.get(&owner)) else {
+            return;
+        };
+        for resolution in &report.resolutions {
+            if resolution.outcome == crate::storage::faults::CrashOutcome::KeptNew {
+                continue;
+            }
+            for (stripe, shard) in layout.entries(path, resolution.sector) {
+                if let (None, Some(shard)) = (stripe, shard) {
+                    book.note_shard_loss(owner, &shard);
+                }
+            }
+        }
+    }
+
     /// Whether failing `ip`'s disk keeps every shard that lists it durable.
     pub(crate) fn disk_failure_allowed(&self, ip: IpAddr) -> bool {
         let Some(requirements) = self.shard_requirements() else {
