@@ -1,0 +1,33 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.9.0] - 2026-11-01
+
+### 🚀 Features
+
+- **moonpool-sim**: A crash that tears a whole copy counts it lost ([#377](https://github.com/PierreZ/moonpool/pull/377))
+- **moonpool-sim**: Shards, the code declares its replication ([#369](https://github.com/PierreZ/moonpool/pull/369))
+- **moonpool-buggify**: Cpu_charge, an inert CPU-cost hint
+- **moonpool-buggify**: Buggify_named! and set_activation for per-seed scenarios
+- **moonpool-buggify**: Hint!, the code names a moment and the simulator strikes
+- **moonpool-rpc**: Buggify points inside the runtime
+- Standalone moonpool-buggify crate + exploration-compatible scripted lifecycle faults (#165, #182) ([#188](https://github.com/PierreZ/moonpool/pull/188))
+
+### 📚 Documentation
+
+- Rewrite the README, the book and the crate docs for every feature
+- Rebuild the Claude Code skills and agents for moonpool development ([#207](https://github.com/PierreZ/moonpool/pull/207))
+
+### 🚜 Refactor
+
+- Simplify and factorize every crate ([#274](https://github.com/PierreZ/moonpool/pull/274))
+- Delete dead surface, stop the RNG rewind on restart, make numeric casts safe ([#200](https://github.com/PierreZ/moonpool/pull/200))
+
+### 📦 Other
+
+- Close packaging metadata gaps across the publishable crates
+
