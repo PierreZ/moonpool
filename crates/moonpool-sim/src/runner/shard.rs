@@ -645,6 +645,21 @@ impl ShardBook {
             .insert(ip);
     }
 
+    /// `ip` opened its copy of `shard` intact: a copy lost in that shard
+    /// alone is clean again. A wipe stays until the replica catches up.
+    /// Returns whether a lost copy healed.
+    pub(crate) fn intact(&self, ip: IpAddr, shard: &str) -> bool {
+        let mut book = self.lock();
+        let healed = book
+            .lost
+            .get_mut(shard)
+            .is_some_and(|lost| lost.remove(&ip));
+        if healed {
+            book.counts.healed += 1;
+        }
+        healed
+    }
+
     /// The copies lost in one shard only, per shard.
     pub(crate) fn losses(&self) -> ShardLosses {
         self.lock().lost.clone()
@@ -914,6 +929,14 @@ impl Shards {
         self.book.resolve_names(names);
     }
 
+    /// Say that `ip`'s copy of `shard` opened intact, as
+    /// [`moonpool_buggify::shard::intact`] does from the code under test on
+    /// that process. Returns whether a copy lost in that shard healed.
+    #[must_use = "says whether a lost copy healed"]
+    pub fn intact(&self, ip: IpAddr, shard: &str) -> bool {
+        self.book.intact(ip, shard)
+    }
+
     /// Say that `replica`'s copy of `shard` caught up, as
     /// [`moonpool_buggify::shard::caught_up`] does from the code under test.
     /// Returns whether a wiped replica healed.
@@ -983,6 +1006,12 @@ impl Sink for ShardSink {
 
     fn caught_up(&self, shard: &str, replica: &Replica) {
         self.book.caught_up(shard, replica);
+    }
+
+    fn intact(&self, shard: &str) {
+        if let Some(ip) = crate::executor::current_owner() {
+            self.book.intact(ip, shard);
+        }
     }
 }
 

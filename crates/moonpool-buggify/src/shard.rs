@@ -320,6 +320,9 @@ pub trait Sink {
     /// The code says `replica`'s copy of `shard` has caught up after a wipe
     /// (see [`caught_up`]).
     fn caught_up(&self, shard: &str, replica: &Replica);
+    /// The calling process opened its copy of `shard` and found it intact
+    /// (see [`intact`]).
+    fn intact(&self, shard: &str);
 }
 
 thread_local! {
@@ -359,6 +362,19 @@ pub fn declare_at(
                 next,
                 site,
             });
+        }
+    });
+}
+
+/// Say that the calling process's copy of `shard` opened intact: a store
+/// verified it at open and kept it. A simulator counts a copy whose last
+/// batch a crash tore as lost until this call, because a format may refuse
+/// such a copy whole. Call it only after the store's own check passed; a
+/// copy the store refuses stays lost. Inert outside a simulation.
+pub fn intact(shard: &str) {
+    SINK.with(|slot| {
+        if let Some(sink) = slot.borrow().as_ref() {
+            sink.intact(shard);
         }
     });
 }
@@ -457,6 +473,7 @@ mod tests {
             self.0.borrow_mut().push(declaration);
         }
         fn caught_up(&self, _shard: &str, _replica: &Replica) {}
+        fn intact(&self, _shard: &str) {}
     }
 
     #[test]

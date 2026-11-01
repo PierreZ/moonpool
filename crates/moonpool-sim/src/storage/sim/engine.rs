@@ -1512,6 +1512,9 @@ impl StorageEngine {
             };
             // The reboot starts with an empty page cache: no error is pending.
             file.writeback.reported = file.writeback.count;
+            if !keep_cache {
+                self.state.note_torn_whole_copies(ip, &path, &report);
+            }
             for sector in &report.lost_synced {
                 self.state.record_fault(StorageFaultRecord {
                     path: path.clone(),

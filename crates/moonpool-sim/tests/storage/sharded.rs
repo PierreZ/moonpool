@@ -365,3 +365,85 @@ fn a_shard_copy_lost_past_the_gate_counts_against_that_shard_alone() {
     assert_eq!(book.clean_copies("s", 0).len(), 3, "the copy healed");
     moonpool_sim::shard::clear_sink();
 }
+
+/// One replica's whole copy of `shard`: a region with no stripe, so the
+/// copy stands or falls whole.
+fn whole_layout(shard: &str) -> Vec<LayoutRegion> {
+    vec![LayoutRegion {
+        path: "registry".to_string(),
+        bytes: 0..4 * SECTOR,
+        kind: "registry",
+        stripe: None,
+        shard: Some(shard.to_string()),
+    }]
+}
+
+/// Write `nodes`' whole copies of `s` without a sync, then crash the first
+/// under `config`. Returns the world, its shards and the replicas.
+fn crash_a_whole_copy(
+    config: StorageConfiguration,
+) -> (SimWorld, moonpool_sim::Shards, Vec<IpAddr>) {
+    let nodes = ips(3);
+    let mut sim = SimWorld::new_with_seed(7);
+    sim.set_storage_config(config);
+    let book = sim.install_shard_book(ShardFaults::default());
+    moonpool_sim::shard!(
+        "s",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    for ip in &nodes {
+        let regions = whole_layout("s");
+        local_runtime().block_on(async {
+            run_as(&mut sim, *ip, move |provider| async move {
+                provider.publish_layout(&regions).expect("publish");
+                let file = provider
+                    .open("registry", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open");
+                file.write_at(0, &vec![0x5A; 4 * SECTOR_SIZE])
+                    .await
+                    .expect("write");
+            })
+            .await;
+        });
+    }
+    sim.simulate_crash_for_process(nodes[0], true);
+    (sim, book, nodes)
+}
+
+/// A crash that rolls back a dirty sector of a whole copy (a torn tail)
+/// counts that copy lost until its store opens it intact; a crash that
+/// keeps every write counts nothing.
+#[test]
+fn a_crash_that_tears_a_whole_copy_counts_it_lost_until_it_opens_intact() {
+    let (_sim, book, nodes) = crash_a_whole_copy(StorageConfiguration {
+        clean_crash_probability: 0.0,
+        correlated_rollback_probability: 1.0,
+        crash_lost_probability: 0.0,
+        crash_latent_fault_probability: 0.0,
+        shorn_write_probability: 0.0,
+        length_survives_crash_probability: 1.0,
+        ..StorageConfiguration::fast_local()
+    });
+    assert_eq!(
+        book.clean_copies("s", 0).len(),
+        2,
+        "the torn copy is not clean"
+    );
+    // Its store opens the copy, checks it and keeps it.
+    assert!(book.intact(nodes[0], "s"));
+    assert!(!book.intact(nodes[0], "s"), "nothing more to heal");
+    assert_eq!(book.clean_copies("s", 0).len(), 3, "the copy opened intact");
+    moonpool_sim::shard::clear_sink();
+
+    let (_sim, book, _) = crash_a_whole_copy(StorageConfiguration {
+        clean_crash_probability: 1.0,
+        ..StorageConfiguration::fast_local()
+    });
+    assert_eq!(
+        book.clean_copies("s", 0).len(),
+        3,
+        "a clean crash tears nothing"
+    );
+    moonpool_sim::shard::clear_sink();
+}
