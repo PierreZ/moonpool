@@ -263,8 +263,8 @@ impl StorageState {
     }
 
     /// Count `owner`'s copy of a shard lost when a crash changed a dirty
-    /// sector of one of its regions with no stripe: such a copy stands or
-    /// falls whole, and a format may refuse it whole at its next open (a
+    /// sector of a copy with no striped region in that shard: such a copy
+    /// stands or falls whole, and a format may refuse it whole at its next open (a
     /// registry whose last batch was torn). The copy counts lost until the
     /// code under test says it caught up
     /// ([`moonpool_buggify::shard::caught_up`]), at an open that found it
@@ -283,7 +283,14 @@ impl StorageState {
                 continue;
             }
             for (stripe, shard) in layout.entries(path, resolution.sector) {
-                if let (None, Some(shard)) = (stripe, shard) {
+                // Only a copy with no striped region at all is whole: a
+                // stripe-less region beside striped ones (a journal's
+                // metainfo, kept twice) is not the copy itself.
+                if let (None, Some(shard)) = (stripe, shard)
+                    && !layout
+                        .sharded()
+                        .any(|(_, _, name, stripe)| name == &*shard && stripe.is_some())
+                {
                     book.note_shard_loss(owner, &shard);
                 }
             }
