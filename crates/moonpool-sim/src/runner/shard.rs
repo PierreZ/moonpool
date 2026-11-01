@@ -45,7 +45,7 @@
 //! another live replica of the same replication. A replica is intact when it
 //! is not wiped (until it heals, see [`moonpool_buggify::shard::caught_up`]),
 //! its disk has not failed, and, per stripe, no sector of its copy is
-//! damaged. An address the simulator does not know counts as up and intact.
+//! damaged or stranded by a failed writeback. An address the simulator does not know counts as up and intact.
 //!
 //! Under [`ShardFaults::durable_only`] the gate judges `durable` alone, and
 //! kills, outages and partitions are never downgraded.

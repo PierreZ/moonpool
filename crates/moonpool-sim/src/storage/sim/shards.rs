@@ -4,7 +4,8 @@
 //! A replica's copy of `(shard, stripe)` is the bytes it publishes for that
 //! key with [`publish_layout`](crate::SimStorageProvider::publish_layout).
 //! The copy is clean while the replica is not wiped (or healed), its disk
-//! has not failed, and none of those bytes is damaged. A region of the
+//! has not failed, and none of those bytes is damaged or stranded by a
+//! failed writeback (a later open may find a stranded record torn). A region of the
 //! shard with no stripe holds bytes the whole copy depends on: damage there
 //! costs the replica every stripe of the shard.
 
@@ -75,7 +76,8 @@ impl StorageState {
         (!requirements.is_empty()).then_some(requirements)
     }
 
-    /// Whether `ip`'s copy of `(shard, stripe)` holds a damaged sector: a
+    /// Whether `ip`'s copy of `(shard, stripe)` holds a damaged or stranded
+    /// sector: a
     /// region of that key, or a stripe-less region of the shard. With
     /// `stripe` `None`, any region of the shard counts.
     pub(crate) fn copy_damaged(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {
@@ -94,13 +96,17 @@ impl StorageState {
             else {
                 return false;
             };
-            if !file.image.has_damage() {
+            let sectors = bytes.start / size..bytes.end.div_ceil(size);
+            // A stranded sector (a failed writeback) is not known clean
+            // either: the next open may find its record torn.
+            let stranded = file.image.stranded_sectors();
+            if !file.image.has_damage() && stranded.is_empty() {
                 return false;
             }
-            let sectors = bytes.start / size..bytes.end.div_ceil(size);
             file.image
                 .damaged_sectors()
                 .into_iter()
+                .chain(stranded)
                 .any(|sector| sectors.contains(&sector))
         })
     }

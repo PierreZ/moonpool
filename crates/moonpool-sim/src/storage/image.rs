@@ -616,6 +616,18 @@ impl FileImage {
             .collect()
     }
 
+    /// The sectors a failed writeback stranded: their durable bytes are the
+    /// old ones while reads see the new, until a write dirties them again
+    /// or a crash or a dropped cache resolves them. A copy that holds one
+    /// is not known clean: a later open may find its record torn.
+    #[must_use]
+    pub fn stranded_sectors(&self) -> Vec<u64> {
+        (0..self.stranded.len())
+            .filter(|index| self.stranded.is_set(*index))
+            .map(|index| index as u64)
+            .collect()
+    }
+
     /// Whether any sector is [damaged](Self::damaged_sectors).
     #[must_use]
     pub fn has_damage(&self) -> bool {
@@ -1120,6 +1132,28 @@ mod tests {
             image.read(0, &mut buf).expect("read failed");
             assert_eq!(&buf, b"a", "seed {seed}: the sector rolled back");
         }
+    }
+
+    /// A failed writeback strands its sectors until a write dirties them
+    /// again: the shard gate does not count such a copy clean.
+    #[test]
+    fn a_failed_writeback_strands_its_sectors_until_rewritten() {
+        seeded(5);
+        let config = StorageConfiguration::fast_local();
+        let size = SECTOR_SIZE as u64;
+        let mut image = image(3 * size);
+        image.write(0, &[1; 2 * SECTOR_SIZE]);
+        image.sync(&config, &always_eligible);
+        assert!(image.stranded_sectors().is_empty());
+        image.write(0, &[2; 2 * SECTOR_SIZE]);
+        assert_eq!(image.fail_writeback(false), vec![0, 1]);
+        assert_eq!(image.stranded_sectors(), vec![0, 1]);
+        image.write(size, &[3; SECTOR_SIZE]);
+        assert_eq!(
+            image.stranded_sectors(),
+            vec![0],
+            "a write dirties it again"
+        );
     }
 
     /// fsyncgate: a failed writeback leaves the new bytes in the cache and
