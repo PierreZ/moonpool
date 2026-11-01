@@ -383,6 +383,14 @@ fn whole_layout(shard: &str) -> Vec<LayoutRegion> {
 fn crash_a_whole_copy(
     config: StorageConfiguration,
 ) -> (SimWorld, moonpool_sim::Shards, Vec<IpAddr>) {
+    crash_a_copy(config, whole_layout)
+}
+
+/// [`crash_a_whole_copy`] with each replica's layout of `s` from `layout`.
+fn crash_a_copy(
+    config: StorageConfiguration,
+    layout: fn(&str) -> Vec<LayoutRegion>,
+) -> (SimWorld, moonpool_sim::Shards, Vec<IpAddr>) {
     let nodes = ips(3);
     let mut sim = SimWorld::new_with_seed(7);
     sim.set_storage_config(config);
@@ -392,7 +400,7 @@ fn crash_a_whole_copy(
         current = Replication::tolerates(replicas(&nodes), 1, 1)
     );
     for ip in &nodes {
-        let regions = whole_layout("s");
+        let regions = layout("s");
         local_runtime().block_on(async {
             run_as(&mut sim, *ip, move |provider| async move {
                 provider.publish_layout(&regions).expect("publish");
@@ -444,6 +452,49 @@ fn a_crash_that_tears_a_whole_copy_counts_it_lost_until_it_opens_intact() {
         book.clean_copies("s", 0).len(),
         3,
         "a clean crash tears nothing"
+    );
+    moonpool_sim::shard::clear_sink();
+}
+
+/// A striped copy beside a stripe-less header (a journal's metainfo): the
+/// header is not the copy, so a crash that rolls it back counts nothing.
+#[test]
+fn a_torn_header_beside_striped_records_counts_no_copy_lost() {
+    fn header_and_records(shard: &str) -> Vec<LayoutRegion> {
+        let mut regions = vec![LayoutRegion {
+            path: "registry".to_string(),
+            bytes: 0..SECTOR,
+            kind: "header",
+            stripe: None,
+            shard: Some(shard.to_string()),
+        }];
+        for stripe in 1..4 {
+            regions.push(LayoutRegion {
+                path: "registry".to_string(),
+                bytes: stripe * SECTOR..(stripe + 1) * SECTOR,
+                kind: "record",
+                stripe: Some(stripe),
+                shard: Some(shard.to_string()),
+            });
+        }
+        regions
+    }
+    let (_sim, book, _) = crash_a_copy(
+        StorageConfiguration {
+            clean_crash_probability: 0.0,
+            correlated_rollback_probability: 1.0,
+            crash_lost_probability: 0.0,
+            crash_latent_fault_probability: 0.0,
+            shorn_write_probability: 0.0,
+            length_survives_crash_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        },
+        header_and_records,
+    );
+    assert_eq!(
+        book.clean_copies("s", 1).len(),
+        3,
+        "a torn header is not a lost copy"
     );
     moonpool_sim::shard::clear_sink();
 }
