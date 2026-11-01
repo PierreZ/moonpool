@@ -311,3 +311,57 @@ fn a_replica_lost_past_the_gate_counts_against_the_shard() {
     );
     moonpool_sim::shard::clear_sink();
 }
+
+/// A copy lost in one shard counts against that shard alone: the replica's
+/// copy of another shard stays clean, and the lost copy heals once it
+/// catches up.
+#[test]
+fn a_shard_copy_lost_past_the_gate_counts_against_that_shard_alone() {
+    let nodes = ips(3);
+    let mut sim = SimWorld::new_with_seed(12);
+    let book = sim.install_shard_book(ShardFaults::default());
+    moonpool_sim::shard!(
+        "s",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    moonpool_sim::shard!(
+        "t",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    for (rank, ip) in (0u64..).zip(&nodes) {
+        let regions = layout(rank, &["s", "t"]);
+        local_runtime().block_on(async {
+            run_as(&mut sim, *ip, move |provider| async move {
+                provider.publish_layout(&regions).expect("publish");
+                let file = provider
+                    .open("replica", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open");
+                let len = 2 * usize::try_from(STRIPES).expect("small") * SECTOR_SIZE;
+                file.write_at(0, &vec![0x5A; len]).await.expect("write");
+                file.sync_all().await.expect("sync");
+            })
+            .await;
+        });
+    }
+    let first = sim.storage_provider(nodes[0]);
+    let second = sim.storage_provider(nodes[1]);
+    first.lose_shard_past_gate("s").expect("lose");
+    assert_eq!(
+        book.clean_copies("s", 0).len(),
+        2,
+        "the lost copy is not clean"
+    );
+    assert_eq!(
+        book.clean_copies("t", 0).len(),
+        3,
+        "the other shard keeps its copy"
+    );
+    assert!(
+        !second.lose_replica().expect("lose"),
+        "one copy of s is gone already"
+    );
+    assert!(book.caught_up("s", &Replica::new(nodes[0].to_string())));
+    assert_eq!(book.clean_copies("s", 0).len(), 3, "the copy healed");
+    moonpool_sim::shard::clear_sink();
+}

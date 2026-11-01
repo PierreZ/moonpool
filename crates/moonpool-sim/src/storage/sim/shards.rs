@@ -16,7 +16,7 @@ use std::sync::Arc;
 use moonpool_buggify::shard::Replication;
 
 use super::state::StorageState;
-use crate::runner::shard::{Requirements, replica_ip};
+use crate::runner::shard::{Requirements, ShardLosses, replica_ip};
 use crate::storage::faults::SECTOR_SIZE;
 
 /// For one file: whether damage may land on each `(shard, stripe)` key of
@@ -28,6 +28,25 @@ pub(crate) struct ShardRule {
 
 /// A `(shard, stripe)` key.
 type ShardKey = (Arc<str>, Option<u64>);
+
+/// The copies lost whatever their bytes say ([`StorageState::not_intact`]).
+struct NotIntact {
+    /// Replicas whose copies of every shard are lost.
+    everywhere: BTreeSet<IpAddr>,
+    /// Per shard, the replicas whose copy of that shard alone is lost.
+    per_shard: ShardLosses,
+}
+
+impl NotIntact {
+    /// Whether `ip`'s copy of `shard` is lost.
+    fn lost(&self, ip: IpAddr, shard: &str) -> bool {
+        self.everywhere.contains(&ip)
+            || self
+                .per_shard
+                .get(shard)
+                .is_some_and(|lost| lost.contains(&ip))
+    }
+}
 
 impl ShardRule {
     /// For a sector whose regions are `entries`: `None` when no region is
@@ -57,16 +76,25 @@ impl ShardRule {
 }
 
 impl StorageState {
-    /// The replicas whose copies count as lost whatever their bytes say:
-    /// wiped and not healed, or on a failed disk.
-    fn not_intact(&self) -> BTreeSet<IpAddr> {
-        let mut out = self
+    /// The copies that count as lost whatever their bytes say: in every
+    /// shard, the replicas wiped and not healed or on a failed disk; in one
+    /// shard, the copies lost in that shard alone.
+    fn not_intact(&self) -> NotIntact {
+        let mut everywhere = self
             .shards
             .as_ref()
             .map(crate::runner::shard::ShardBook::wiped)
             .unwrap_or_default();
-        out.extend(self.failed_disks.iter().copied());
-        out
+        everywhere.extend(self.failed_disks.iter().copied());
+        let per_shard = self
+            .shards
+            .as_ref()
+            .map(crate::runner::shard::ShardBook::losses)
+            .unwrap_or_default();
+        NotIntact {
+            everywhere,
+            per_shard,
+        }
     }
 
     /// The shards the gate covers, if a book is installed and declares any.
@@ -117,7 +145,7 @@ impl StorageState {
     fn stripe_survives(
         &self,
         requirements: &Requirements,
-        not_intact: &BTreeSet<IpAddr>,
+        not_intact: &NotIntact,
         owner: IpAddr,
         shard: &str,
         stripe: Option<u64>,
@@ -129,7 +157,7 @@ impl StorageState {
             replication.durable.holds(&|replica| {
                 replica_ip(replica).is_none_or(|ip| {
                     ip != owner
-                        && !not_intact.contains(&ip)
+                        && !not_intact.lost(ip, shard)
                         && !self.copy_damaged(ip, shard, stripe)
                 })
             })
@@ -187,7 +215,12 @@ impl StorageState {
             return true;
         };
         let not_intact = self.not_intact();
-        if !crate::runner::shard::lose_ok(&requirements, &not_intact, &[owner]) {
+        if !crate::runner::shard::lose_ok(
+            &requirements,
+            &not_intact.everywhere,
+            &not_intact.per_shard,
+            &[owner],
+        ) {
             return false;
         }
         self.layouts
@@ -236,7 +269,12 @@ impl StorageState {
         };
         let not_intact = self.not_intact();
         crate::runner::shard::pure(|| {
-            crate::runner::shard::lose_ok(&requirements, &not_intact, &[ip])
+            crate::runner::shard::lose_ok(
+                &requirements,
+                &not_intact.everywhere,
+                &not_intact.per_shard,
+                &[ip],
+            )
         })
     }
 }

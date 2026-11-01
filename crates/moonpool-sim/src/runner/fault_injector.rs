@@ -723,7 +723,7 @@ impl FaultContext {
                 let not_intact = self.not_intact(&book, &requirements);
                 // Also per stripe: a copy damaged elsewhere leaves fewer
                 // clean ones than intact replicas.
-                if !super::shard::lose_ok(&requirements, &not_intact, &[ip])
+                if !super::shard::lose_ok(&requirements, &not_intact, &book.losses(), &[ip])
                     || !self.sim.replica_loss_allowed(ip)
                 {
                     assert_reachable!("shard gate: a wipe becomes a crash");
