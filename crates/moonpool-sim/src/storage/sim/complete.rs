@@ -13,7 +13,7 @@ use crate::{
     sim::rng::{sim_random, sim_random_range},
     storage::{
         StorageConfiguration, StorageError, StorageFaultKind,
-        faults::{sector_range, weighted},
+        faults::{SECTOR_SIZE, sector_range, weighted},
     },
 };
 
@@ -516,6 +516,28 @@ impl StorageEngine {
             return;
         }
         let revert = sim_random::<f64>() < config.writeback_error_revert_probability;
+        // The shard gate: a failed writeback loses the unsynced bytes as a
+        // crash does (a reverted cache drops them and clears their dirty
+        // marks, so the crash gate no longer sees them). It lands only where
+        // every shard those bytes belong to stays durable without this copy.
+        let flushable = file.image.flushable_sectors();
+        let size = SECTOR_SIZE as u64;
+        let allowed = crate::runner::shard::pure(|| {
+            flushable.iter().all(|sector| {
+                self.state
+                    .damage_allowed(owner_ip, path, &(sector * size..(sector + 1) * size))
+            })
+        });
+        if !allowed {
+            assert_reachable!("shard gate: a failed writeback is refused");
+            if let Some(book) = &self.state.shards {
+                book.count(crate::runner::shard::Downgrade::WritebackRefused);
+            }
+            return;
+        }
+        let Some(file) = self.state.files.get_mut(&file_id) else {
+            return;
+        };
         let sectors = file.image.fail_writeback(revert);
         file.writeback.count += 1;
         if revert {

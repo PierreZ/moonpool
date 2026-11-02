@@ -236,6 +236,9 @@ pub enum Downgrade {
     DiskFailureRefused,
     /// Scripted damage (`corrupt_bytes`) was not placed.
     DamageRefused,
+    /// A failed background writeback (fsyncgate) was not rolled: it would
+    /// drop or strand the unsynced bytes of a copy its shard cannot lose.
+    WritebackRefused,
 }
 
 /// What the book saw in one run: see [`Shards::counts`].

@@ -723,7 +723,8 @@ impl FileImage {
         self.dirty.is_set(index) && !self.stranded.is_set(index)
     }
 
-    fn flushable_sectors(&self) -> Vec<u64> {
+    /// The sectors a sync would flush now: dirty and not stranded.
+    pub(crate) fn flushable_sectors(&self) -> Vec<u64> {
         (0..self.sectors())
             .filter(|s| self.is_flushable(*s))
             .collect()

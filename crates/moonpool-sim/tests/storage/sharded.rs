@@ -498,3 +498,84 @@ fn a_torn_header_beside_striped_records_counts_no_copy_lost() {
     );
     moonpool_sim::shard::clear_sink();
 }
+
+/// Write `nodes`' whole copies of `s` and sync them, then lose the second
+/// copy past the gate when `lose_one`. Then write the first copy again,
+/// with every write's background writeback failing and reverting the
+/// cache. Returns whether that sync reported the failed writeback, and the
+/// gate's count of refused writebacks.
+fn fail_a_whole_copys_writeback(lose_one: bool) -> (bool, u64) {
+    let nodes = ips(3);
+    let mut sim = SimWorld::new_with_seed(7);
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let book = sim.install_shard_book(ShardFaults::default());
+    moonpool_sim::shard!(
+        "s",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    for ip in &nodes {
+        let regions = whole_layout("s");
+        local_runtime().block_on(async {
+            run_as(&mut sim, *ip, move |provider| async move {
+                provider.publish_layout(&regions).expect("publish");
+                let file = provider
+                    .open("registry", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open");
+                file.write_at(0, &vec![0x5A; 4 * SECTOR_SIZE])
+                    .await
+                    .expect("write");
+                file.sync_all().await.expect("sync");
+            })
+            .await;
+        });
+    }
+    if lose_one {
+        sim.storage_provider(nodes[1])
+            .lose_shard_past_gate("s")
+            .expect("lose");
+    }
+    sim.set_process_storage_config(
+        nodes[0],
+        StorageConfiguration {
+            writeback_error_probability: 1.0,
+            writeback_error_revert_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        },
+    );
+    let failed = local_runtime().block_on(async {
+        run_as(&mut sim, nodes[0], move |provider| async move {
+            let file = provider
+                .open("registry", OpenOptions::read_write())
+                .await
+                .expect("open");
+            file.write_at(0, &vec![0xA5; SECTOR_SIZE])
+                .await
+                .expect("write");
+            file.sync_all().await.is_err()
+        })
+        .await
+    });
+    let refused = book
+        .counts()
+        .downgrades_of(moonpool_sim::Downgrade::WritebackRefused);
+    moonpool_sim::shard::clear_sink();
+    (failed, refused)
+}
+
+/// A failed writeback drops a whole copy's unsynced bytes as a crash
+/// tears them: it lands only while the shard stays durable without that
+/// copy (paros #851 (cell plan journals grow), seed 2754680571775703918).
+#[test]
+fn a_failed_writeback_lands_only_where_the_shard_can_lose_the_copy() {
+    assert_eq!(
+        fail_a_whole_copys_writeback(false),
+        (true, 0),
+        "two other clean copies: the writeback fails"
+    );
+    assert_eq!(
+        fail_a_whole_copys_writeback(true),
+        (false, 1),
+        "the last copy the shard needs: the gate refuses the failure"
+    );
+}
