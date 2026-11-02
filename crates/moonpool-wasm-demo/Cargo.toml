@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The simulator without its production (tokio net/fs) features is wasm-able.
-moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", default-features = false }
+moonpool-sim = { path = "../moonpool-sim", version = "0.9.0", default-features = false }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
