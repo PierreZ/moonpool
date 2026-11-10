@@ -959,6 +959,15 @@ impl SimulationBuilder {
         let explorer = Self::init_assertions_and_exploration(self.exploration_config.as_ref());
         #[cfg(not(feature = "exploration"))]
         Self::init_assertions_and_exploration(self.exploration_config.as_ref());
+        // Declared sites get their slots before the first seed, so a site
+        // that no seed reaches is reported (#383).
+        let declared = crate::chaos::assertions::declare_sites(
+            &self.declared_site_modules,
+            &self.exempt_declared_sites,
+        );
+        if !self.declared_site_modules.is_empty() {
+            tracing::info!(declared, "assertion sites declared at link time");
+        }
 
         let mut state = RunState::new(&self);
         #[cfg(feature = "exploration")]
@@ -1207,7 +1216,9 @@ impl SimulationBuilder {
         // reflects all seeds, not just the last one. Under exploration this
         // also keeps the discovery latches: novelty is cumulative, so later
         // seeds only get exploration effort for genuinely new discoveries.
-        if iteration_count > 1 {
+        // The slots of declared sites were made before the first seed, and
+        // must survive its reset too.
+        if iteration_count > 1 || !self.declared_site_modules.is_empty() {
             crate::chaos::assertions::skip_next_assertion_reset();
         }
 

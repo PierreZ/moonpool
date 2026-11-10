@@ -129,6 +129,11 @@ pub struct SimulationBuilder {
     /// mode.
     pub(super) gray_failures: Vec<(crate::runner::gray_failure::GrayFailure, ChaosMode)>,
     pub(super) seeds: Vec<u64>,
+    /// Module-path prefixes whose declared assertion sites get their slots
+    /// before the first seed.
+    pub(super) declared_site_modules: Vec<String>,
+    /// Messages of declared sites that are not required.
+    pub(super) exempt_declared_sites: Vec<String>,
     /// The base seed every drawn iteration seed derives from; `None` draws
     /// one from the wall clock.
     pub(super) base_seed: Option<u64>,
@@ -222,6 +227,8 @@ impl SimulationBuilder {
             cpu_chaos: None,
             gray_failures: Vec::new(),
             seeds: Vec::new(),
+            declared_site_modules: Vec::new(),
+            exempt_declared_sites: Vec::new(),
             base_seed: None,
             network_chaos: None,
             storage_chaos: None,
@@ -1056,6 +1063,45 @@ impl SimulationBuilder {
             plateau_seeds,
             max_iterations,
         };
+        self
+    }
+
+    /// Require every assertion site declared in these modules.
+    ///
+    /// An assertion macro with a literal message declares its site at link
+    /// time ([`declared_sites`](crate::chaos::assertions::declared_sites)).
+    /// The run makes the slot of each declared site whose `module_path!()`
+    /// starts with one of `module_prefixes` before the first seed. So a site
+    /// that no seed reaches is reported: an `assert_always!` or a numeric
+    /// `assert_always_*!` as "was never reached" in
+    /// [`assertion_violations`](crate::SimulationReport::assertion_violations),
+    /// an `assert_sometimes!`, an `assert_reachable!` or a numeric
+    /// `assert_sometimes_*!` in
+    /// [`coverage_violations`](crate::SimulationReport::coverage_violations).
+    /// `UntilCoverageStable` also waits for those sites. Use a prefix such as
+    /// `"my_crate"`: the sites of moonpool itself are out of scope unless a
+    /// prefix names them. Not available on wasm, which has no link-time
+    /// registry.
+    #[must_use]
+    pub fn require_declared_sites<S: Into<String>>(
+        mut self,
+        module_prefixes: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.declared_site_modules
+            .extend(module_prefixes.into_iter().map(Into::into));
+        self
+    }
+
+    /// Exempt these messages from
+    /// [`require_declared_sites`](Self::require_declared_sites): sites that
+    /// are known to be rare, which a sweep may not reach.
+    #[must_use]
+    pub fn exempt_declared_sites<S: Into<String>>(
+        mut self,
+        messages: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.exempt_declared_sites
+            .extend(messages.into_iter().map(Into::into));
         self
     }
 

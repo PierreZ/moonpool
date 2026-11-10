@@ -1,11 +1,14 @@
 //! The publication protocol shared by the slot table and the each-bucket table.
 //!
-//! Both regions are laid out as `[count: u32, header: u32, entries: [E; N]]`.
-//! `count` is incremented atomically (via `AtomicU32::fetch_add`) to claim an
-//! entry safely across process boundaries; every entry carries an identity
-//! and a publication byte (zero = unused, one = initializing, two = ready).
-//! Entry metadata is fully initialized before a release-store publishes it, so
-//! concurrent readers never observe a partially initialized entry.
+//! Both regions are laid out as `[count: u32, dropped: u32, entries: [E; N]]`.
+//! The entries are an open-addressed hash table: an identity lives at its
+//! hash modulo `N` or at the next free entry after it. Every entry carries an
+//! identity and a publication byte (zero = unused, one = initializing, two =
+//! ready). A claimant takes an entry with a compare-and-swap of that byte, so
+//! a claim is safe across process boundaries. Entry metadata is fully
+//! initialized before a release-store publishes it, so concurrent readers
+//! never observe a partially initialized entry. `count` is the number of
+//! claimed entries, kept for diagnostics.
 
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -91,6 +94,9 @@ pub(crate) trait Entry: Sized {
     /// Number of entries the region holds.
     const CAPACITY: usize;
 
+    /// The hash that places `id` in the table.
+    fn home(id: Self::Id) -> u64;
+
     /// Pointer to the entry's publication byte.
     ///
     /// # Safety
@@ -146,17 +152,30 @@ fn await_published(published: &AtomicU8) -> u8 {
     published.load(Ordering::Acquire)
 }
 
-/// The claimed-entry count, clamped to the table capacity, and the entry base.
-unsafe fn entries<E: Entry>(region: *mut u8) -> (usize, *mut E) {
-    unsafe {
-        let count = header_word(region, 0).load(Ordering::Acquire) as usize;
-        let base = region.add(ENTRIES_OFFSET).cast::<()>().cast::<E>();
-        (count.min(E::CAPACITY), base)
-    }
+/// The entry base of a region.
+unsafe fn base<E: Entry>(region: *mut u8) -> *mut E {
+    unsafe { region.add(ENTRIES_OFFSET).cast::<()>().cast::<E>() }
+}
+
+/// The index where the probe sequence of `id` starts: its hash modulo the
+/// capacity.
+pub(crate) fn home_index<E: Entry>(id: E::Id) -> usize {
+    // The modulo keeps the value below the capacity, which is a `usize`.
+    usize::try_from(E::home(id) % E::CAPACITY as u64).unwrap_or(0)
 }
 
 /// Find the published entry for `id`, or claim a fresh one, fill it with
 /// `init` and publish it.
+///
+/// The table is open-addressed: the search starts at
+/// [`home_index`]`(id)` and probes the next entries in order, so a lookup
+/// reads one or two entries, not every claimed one. A claimant takes an
+/// unused entry with a compare-and-swap of its publication byte (unused to
+/// initializing), stores the identity and the metadata, then publishes it
+/// with a release-store. A reader that meets an entry still being
+/// initialized waits for it, bounded by [`BUSY_SPINS`], before it reads
+/// the identity. The table stays fixed-size and position-independent, so it
+/// works in `MAP_SHARED` memory across forked processes.
 ///
 /// # Safety
 ///
@@ -168,67 +187,52 @@ pub(crate) unsafe fn claim<E: Entry>(
     init: impl FnOnce(*mut E),
 ) -> Claim<E> {
     unsafe {
-        let next = header_word(region, 0);
-        let (count, base) = entries::<E>(region);
-
-        // Search only claimed entries. The acquire pairs with the
-        // release-stores below, making immutable metadata safe to read.
-        for i in 0..count {
-            let entry = base.add(i);
+        let base = base::<E>(region);
+        let home = home_index::<E>(id);
+        let mut init = Some(init);
+        for probe in 0..E::CAPACITY {
+            let entry = base.add((home + probe) % E::CAPACITY);
             let published = atomic(E::published(entry));
-            let state = published.load(Ordering::Acquire);
-            if state != UNUSED && E::load_id(entry) == id {
-                // An entry still being initialized is waited for, not skipped:
-                // dropping the observation would silently lose accounting.
-                return match await_published(published) {
-                    READY => Claim::Entry(entry),
-                    // The initializer lost a claim race and released the
-                    // entry: the winner is published elsewhere, so search again.
-                    UNUSED => claim(region, id, init),
-                    _ => Claim::Busy,
-                };
+            let mut state = published.load(Ordering::Acquire);
+            if state == UNUSED {
+                match published.compare_exchange(
+                    UNUSED,
+                    INITIALIZING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        E::store_id(entry, id);
+                        if let Some(init) = init.take() {
+                            init(entry);
+                        }
+                        header_word(region, 0).fetch_add(1, Ordering::AcqRel);
+                        published.store(READY, Ordering::Release);
+                        return Claim::Entry(entry);
+                    }
+                    Err(current) => state = current,
+                }
+            }
+            // The entry is taken. An entry still being initialized is waited
+            // for, not skipped: it can hold this identity, and dropping the
+            // observation would silently lose accounting.
+            if state == INITIALIZING {
+                state = await_published(published);
+            }
+            match state {
+                READY if E::load_id(entry) == id => return Claim::Entry(entry),
+                // The initializer did not publish within the bounded wait: it
+                // most likely died mid-initialization. Its identity decides
+                // whether the observation is lost or the probe goes on.
+                INITIALIZING if E::load_id(entry) == id => return Claim::Busy,
+                _ => {}
             }
         }
-
-        // Claim a new entry atomically.
-        let new_idx = next.fetch_add(1, Ordering::AcqRel) as usize;
-        if new_idx >= E::CAPACITY {
-            next.fetch_sub(1, Ordering::AcqRel);
-            return Claim::Full;
-        }
-
-        let entry = base.add(new_idx);
-        let published = atomic(E::published(entry));
-        E::store_id(entry, id);
-        published.store(INITIALIZING, Ordering::Release);
-
-        // A published claim wins immediately; among simultaneous initializers,
-        // the lower index wins deterministically.
-        let (claimed, _) = entries::<E>(region);
-        for i in (0..claimed).filter(|&i| i != new_idx) {
-            let existing = base.add(i);
-            let state = atomic(E::published(existing)).load(Ordering::Acquire);
-            if state == UNUSED
-                || E::load_id(existing) != id
-                || (state == INITIALIZING && i > new_idx)
-            {
-                continue;
-            }
-            E::store_id(entry, E::Id::default());
-            published.store(UNUSED, Ordering::Release);
-            return match await_published(atomic(E::published(existing))) {
-                READY => Claim::Entry(existing),
-                _ => Claim::Busy,
-            };
-        }
-
-        init(entry);
-        published.store(READY, Ordering::Release);
-        Claim::Entry(entry)
+        Claim::Full
     }
 }
 
-/// Every published entry of the region, in claim order.
+/// Every published entry of the region, in table order.
 ///
 /// # Safety
 ///
@@ -237,8 +241,8 @@ pub(crate) unsafe fn published_entries<E: Entry>(region: *mut u8) -> impl Iterat
     // Safety: the loop bound keeps `base.add(i)` inside the region, and the
     // acquire on the publication byte makes the entry's metadata readable.
     unsafe {
-        let (count, base) = entries::<E>(region);
-        (0..count)
+        let base = base::<E>(region);
+        (0..E::CAPACITY)
             .map(move |i| base.add(i))
             .filter(|&entry| atomic(E::published(entry)).load(Ordering::Acquire) == READY)
     }

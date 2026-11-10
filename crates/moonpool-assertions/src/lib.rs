@@ -100,7 +100,7 @@ pub use region::{assertion_table_ptr, clear, each_bucket_ptr, init, install_regi
 pub use slots::{
     ASSERTION_TABLE_MEM_SIZE, AssertCmp, AssertKind, AssertionSlot, AssertionSlotSnapshot,
     MAX_ASSERTION_SLOTS, assertion_bool, assertion_dropped_allocations, assertion_numeric,
-    assertion_read_all, assertion_sometimes_all, msg_hash,
+    assertion_read_all, assertion_sometimes_all, declare_site, msg_hash,
 };
 
 /// A probe: production code marks a path it walked (`FoundationDB`'s

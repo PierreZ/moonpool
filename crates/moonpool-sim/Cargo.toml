@@ -61,6 +61,12 @@ tracing = "0.1"
 
 tracing-subscriber = { version = "0.3", features = ["registry"] }
 
+# Link-time registry of assertion sites (#383): each assert_* macro with a
+# literal message adds a `DeclaredSite` to a distributed slice. linkme has no
+# wasm32 support, so wasm builds carry no registry.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+linkme = "0.3"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "tracing"] }
 bytes = "1"
