@@ -154,9 +154,9 @@ impl StorageFile for SimStorageFile {
         WriteAtFuture::new(self.sim.clone(), self.handle_id, offset, buf.to_vec()).await
     }
 
-    /// Modelled as exactly what the default does: [`write_at`](Self::write_at),
-    /// then [`sync_data`](Self::sync_data). The write lands as a dirty range
-    /// and the sync commits it, so the barrier-bounded crash model, the
+    /// Modelled as [`write_at`](Self::write_at), then a sync of that range
+    /// only, as `RWF_DSYNC` does on Linux. The write lands as a dirty range
+    /// and the range sync commits it, so the barrier-bounded crash model, the
     /// lost-synced-write oracle, sync failures and lying syncs all apply to a
     /// durable write unchanged, as they do in `FoundationDB`'s
     /// `AsyncFileNonDurable`, where only `sync()` makes a write durable.
@@ -166,9 +166,9 @@ impl StorageFile for SimStorageFile {
     /// the process may die with the bytes written and not yet synced, and
     /// the crash model resolves them.
     ///
-    /// The sync is file-wide, which is stronger than the contract's "this
-    /// write only": a caller that relies on a durable write covering an
-    /// earlier unsynced write passes here and loses data on Linux.
+    /// An earlier unsynced write outside the range stays volatile: a caller
+    /// that relies on a durable write to cover it loses it in a crash, as on
+    /// Linux.
     async fn write_at_durable(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
         let written = self.write_at(offset, buf).await?;
         if written == 0 {
@@ -179,7 +179,8 @@ impl StorageFile for SimStorageFile {
             DURABLE_WRITE_HINT_PROB
         )
         .await;
-        self.sync_data().await?;
+        self.ensure_open()?;
+        SyncFuture::range(self.sim.clone(), self.handle_id, offset, written).await?;
         Ok(written)
     }
 
@@ -194,14 +195,15 @@ impl StorageFile for SimStorageFile {
         SetLenFuture::new(self.sim.clone(), self.handle_id, size).await
     }
 
-    /// Growth through `set_len`: the simulated disk already counts a grown
-    /// range against its capacity, so growing is reserving here, and the
-    /// new range reads as zeros.
+    /// Reserves disk space for `[0, len)`, as `fallocate` does: the file
+    /// grows to `len` when it is shorter, the new range reads as zeros, and
+    /// a later write inside the range never fails for space. `ENOSPC` when
+    /// the space does not fit; then nothing changes. A `set_len` growth, by
+    /// contrast, is a hole that reserves nothing.
     async fn allocate(&self, len: u64) -> io::Result<()> {
-        if self.size().await? < len {
-            self.set_len(len).await?;
-        }
-        Ok(())
+        self.ensure_open()?;
+        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
+        sim.allocate_file(self.handle_id, len).map_err(Into::into)
     }
 
     async fn drop_cache(&self) -> io::Result<()> {

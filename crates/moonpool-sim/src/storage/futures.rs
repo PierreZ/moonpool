@@ -85,6 +85,7 @@ impl Drop for PendingOperation {
 pub struct SyncFuture {
     op: PendingOperation,
     handle_id: HandleId,
+    range: Option<(u64, usize)>,
 }
 
 impl SyncFuture {
@@ -93,6 +94,16 @@ impl SyncFuture {
         Self {
             op: PendingOperation::new(sim),
             handle_id,
+            range: None,
+        }
+    }
+
+    /// Create a sync future for `[offset, offset + len)` only.
+    pub(crate) fn range(sim: WeakSimWorld, handle_id: HandleId, offset: u64, len: usize) -> Self {
+        Self {
+            op: PendingOperation::new(sim),
+            handle_id,
+            range: Some((offset, len)),
         }
     }
 }
@@ -103,7 +114,7 @@ impl Future for SyncFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.op.poll(
             cx,
-            |sim| Ok(sim.schedule_sync(self.handle_id)?),
+            |sim| Ok(sim.schedule_sync(self.handle_id, self.range)?),
             |completion| matches!(completion, StorageCompletion::Unit).then_some(()),
             "sync operation returned a value completion",
         )

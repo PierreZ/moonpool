@@ -348,7 +348,7 @@ impl StorageState {
         self.files
             .values()
             .filter(|file| file.owner_ip == ip)
-            .map(|file| file.image.size())
+            .map(|file| file.image.allocated_bytes())
             .fold(0, u64::saturating_add)
     }
 

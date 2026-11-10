@@ -3,14 +3,16 @@
 //! A process's disk has no size limit by default. A harness gives one a
 //! [`DiskCapacity`] with [`SimWorld::set_disk_capacity`](crate::SimWorld::set_disk_capacity)
 //! (or [`FaultContext::set_disk_capacity`](crate::FaultContext::set_disk_capacity)).
-//! From then on the disk counts the bytes its files use: the sum of every
-//! file's length, an unlinked file still open included, times the
-//! capacity's `amplification`. A write past the end of a file or a
-//! `set_len` that grows one fails with [`std::io::ErrorKind::StorageFull`]
-//! (`ENOSPC`) when the growth does not fit, and none of its bytes land. A
-//! write inside a file's length never needs space, so a preallocated file
-//! stays writable on a full disk. Deleting a file or shrinking one frees its
-//! space at once.
+//! From then on the disk counts the bytes its files have allocated, an
+//! unlinked file still open included, times the capacity's
+//! `amplification`. A file is sparse, as on Linux: a `set_len` growth is a
+//! hole that uses no space and never fails for space. A write past the end
+//! of a file or into a hole fails with `ENOSPC` (`raw_os_error() ==
+//! Some(28)`) when its new sectors do not fit, and none of its bytes land.
+//! `allocate` reserves its range at once, or fails with `ENOSPC` and changes
+//! nothing. A write into allocated sectors never needs space, so a
+//! preallocated file stays writable on a full disk. Deleting a file or
+//! shrinking one frees its space at once.
 //!
 //! A full disk is a normal result, not chaos with a rate: the harness
 //! decides which disk is small and when. Recovery mode

@@ -254,10 +254,14 @@ impl SimWorld {
         })
     }
 
-    pub(crate) fn schedule_sync(&self, handle_id: HandleId) -> Result<OperationId, StorageError> {
+    pub(crate) fn schedule_sync(
+        &self,
+        handle_id: HandleId,
+        range: Option<(u64, usize)>,
+    ) -> Result<OperationId, StorageError> {
         self.try_storage_transition(|inner| {
             let now = inner.now();
-            inner.storage.schedule_sync(handle_id, now)
+            inner.storage.schedule_sync(handle_id, range, now)
         })
     }
 
@@ -304,6 +308,10 @@ impl SimWorld {
 
     pub(crate) fn drop_file_cache(&self, handle_id: HandleId) -> Result<(), StorageError> {
         self.inner.write().storage.drop_cache(handle_id)
+    }
+
+    pub(crate) fn allocate_file(&self, handle_id: HandleId, len: u64) -> Result<(), StorageError> {
+        self.storage_transition(|inner| inner.storage.allocate(handle_id, len))
     }
 
     pub(crate) fn file_size(&self, handle_id: HandleId) -> Result<u64, StorageError> {

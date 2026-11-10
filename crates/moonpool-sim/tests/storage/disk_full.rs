@@ -103,12 +103,19 @@ fn deleting_or_shrinking_a_file_frees_its_space() {
     let new = open(&mut sim, ip(1), "new.bin");
     settle(&mut sim, old.write_at(0, &[1; 900])).expect("fits");
 
-    let refused = settle(&mut sim, new.set_len(200)).expect_err("a grown set_len does not fit");
+    // A grown `set_len` is a hole, as `ftruncate` on Linux: it needs no
+    // space, and the write into the hole is what fails.
+    settle(&mut sim, new.set_len(200)).expect("a hole needs no space");
+    assert_eq!(
+        sim.disk_space(ip(1)).map(|space| space.free_bytes),
+        Some(100)
+    );
+    let refused = settle(&mut sim, new.write_at(0, &[2; 200]))
+        .expect_err("a write into the hole does not fit");
     assert_eq!(refused.kind(), ErrorKind::StorageFull);
-    assert_eq!(settle(&mut sim, new.size()).expect("size"), 0);
 
     settle(&mut sim, old.set_len(700)).expect("a shrink always fits");
-    settle(&mut sim, new.set_len(200)).expect("the shrink freed 200 bytes");
+    settle(&mut sim, new.write_at(0, &[2; 200])).expect("the shrink freed 200 bytes");
 
     drop(old);
     settle(&mut sim, provider.delete("old.bin")).expect("delete");
@@ -181,4 +188,34 @@ fn a_capacity_draws_nothing_from_the_random_stream() {
         rng_call_count() - before
     };
     assert_eq!(draws(None), draws(Some(DiskCapacity::new(1 << 20))));
+}
+
+#[test]
+fn allocate_reserves_space_and_a_set_len_hole_does_not() {
+    let mut sim = world();
+    sim.set_disk_capacity(ip(1), Some(DiskCapacity::new(1_000)));
+    let reserved = open(&mut sim, ip(1), "reserved.bin");
+    let other = open(&mut sim, ip(1), "other.bin");
+
+    let refused = settle(&mut sim, reserved.allocate(1_001)).expect_err("too large to reserve");
+    assert_eq!(refused.raw_os_error(), Some(28), "ENOSPC");
+    assert_eq!(
+        settle(&mut sim, reserved.size()).expect("size"),
+        0,
+        "nothing changed"
+    );
+
+    settle(&mut sim, reserved.allocate(800)).expect("fits");
+    assert_eq!(settle(&mut sim, reserved.size()).expect("size"), 800);
+    assert_eq!(
+        sim.disk_space(ip(1)).map(|space| space.free_bytes),
+        Some(200)
+    );
+    let mut zeros = vec![1; 800];
+    settle(&mut sim, reserved.read_at(0, &mut zeros)).expect("read");
+    assert_eq!(zeros, vec![0; 800], "an allocated range reads as zeros");
+
+    settle(&mut sim, other.write_at(0, &[3; 200])).expect("the rest fits");
+    settle(&mut sim, reserved.write_at(0, &[4; 800])).expect("a reserved range needs no space");
+    assert_eq!(sim.disk_space(ip(1)).map(|space| space.free_bytes), Some(0));
 }

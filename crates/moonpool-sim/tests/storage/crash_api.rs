@@ -519,7 +519,8 @@ fn crash_returns_error_to_pending_write() {
             .await
             .expect("task panicked")
             .expect_err("crashed write must fail");
-        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        // Not `Interrupted`: a retry helper would take that for `EINTR`.
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
         assert_eq!(
             sim.pending_event_count(),
             0,

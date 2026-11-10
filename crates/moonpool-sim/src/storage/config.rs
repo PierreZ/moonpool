@@ -530,8 +530,11 @@ pub struct StorageConfiguration {
     /// synced. This is the fault that catches an engine which fsyncs its
     /// journal and forgets the directory holding it.
     ///
-    /// The coin is drawn once per divergence between the visible namespace and
-    /// the durable one, at crash time. While `0.0` (the default) a crash draws
+    /// The coin is drawn once per unit of divergence between the visible
+    /// namespace and the durable one, at crash time. The names that reach one
+    /// file form one unit, so a rename survives whole or is lost whole, as a
+    /// journaling filesystem logs it; and a `sync_dir` of either directory of
+    /// a rename makes both of its names durable. While `0.0` (the default) a crash draws
     /// nothing here and the whole visible namespace survives.
     pub unsynced_dir_entry_loss_probability: f64,
 
@@ -753,7 +756,10 @@ impl StorageConfiguration {
             misdirect_read_probability: f64::from(sim_random_range(0..10)) / 100_000.0,
             phantom_write_probability: f64::from(sim_random_range(0..20)) / 100_000.0,
             sync_failure_probability: f64::from(sim_random_range(0..50)) / 100_000.0,
-            unsynced_dir_entry_loss_probability: f64::from(sim_random_range(0..500)) / 100_000.0,
+            // A missing `sync_dir` is caught only when a crash loses the
+            // entry often: 30% to 70% per unsynced entry (one coin per
+            // rename unit), like an unsynced sector's rollback.
+            unsynced_dir_entry_loss_probability: f64::from(sim_random_range(30..70)) / 100.0,
             direct_io_alignment: 4096,
             direct_io_supported: true,
             short_transfer_probability: f64::from(sim_random_range(0..200)) / 100_000.0,
@@ -874,6 +880,13 @@ impl StorageConfiguration {
         self.bandwidth = crate::buggify_knob!(self.bandwidth, 1_000_000..20_000_000);
         self.sync_failure_probability =
             crate::buggify_knob!(self.sync_failure_probability, 0.05..0.2);
+        // The Linux writeback error, where a retried fsync reports success
+        // for lost data, is spiked too, so the sweep does not reward "retry
+        // fsync on error". It stays off when the swarm turned it off.
+        if self.writeback_error_probability > 0.0 {
+            self.writeback_error_probability =
+                crate::buggify_knob!(self.writeback_error_probability, 0.01..0.05);
+        }
         self.disk_stall_probability = crate::buggify_knob!(self.disk_stall_probability, 0.1..0.5);
         self.disk_stall_duration = crate::buggify_knob!(
             self.disk_stall_duration,
