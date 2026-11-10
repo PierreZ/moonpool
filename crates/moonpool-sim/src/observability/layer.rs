@@ -204,8 +204,12 @@ impl SimulationLayer {
         // another thread, or a guard dropping mid-run), silently dropping our
         // events. Holding one dispatcher that votes "interested" for every
         // callsite guarantees the cache can never collapse to `never` while a
-        // layer is installed. See issue #112.
-        let interest_anchor = tracing::Dispatch::new(tracing_subscriber::registry());
+        // layer is installed. See issue #112. The anchor carries the same
+        // level floor: a bare registry has no level hint, so it would raise
+        // the global max level to TRACE and every disabled callsite would pay
+        // a dispatch instead of one level compare.
+        let interest_anchor =
+            tracing::Dispatch::new(tracing_subscriber::registry().with(self.level));
         // A global floor, not a per-layer filter: `LevelFilter` as a layer in
         // the stack makes the whole subscriber's `enabled` false below the
         // floor, so the registry never allocates the span. (A `Filtered`
