@@ -291,8 +291,9 @@ impl<P: RpcProviders> Shared<P> {
     /// dial. A peer that cannot or will not adopt (sharing off, an
     /// unverified claim, a full table) is therefore never locked out; the
     /// pair just keeps one connection per direction. Queued, never-written
-    /// requests move to the adopted connection; anything already written
-    /// rides the replaced one down.
+    /// requests move to the adopted connection; the replaced one drains:
+    /// it takes no new request, its written calls get their replies on it,
+    /// and it closes once nothing is owed.
     ///
     /// [`InboundSharing`]: crate::InboundSharing
     /// [`PeerPolicy::always_accept_after`]: crate::PeerPolicy::always_accept_after
@@ -363,9 +364,8 @@ impl<P: RpcProviders> Shared<P> {
     }
 
     /// Make `connection` the selected connection to `listen`, moving the
-    /// never-written requests of the connection it replaces and closing
-    /// that one (its driver then reports the end and fails what it had
-    /// written).
+    /// never-written requests of the connection it replaces. That one
+    /// closes now when it carries no written call, and drains otherwise.
     pub(super) fn adopt(
         &self,
         state: &mut State,
@@ -383,13 +383,22 @@ impl<P: RpcProviders> Shared<P> {
         Counters::bump(&self.counters.adopted_connections);
         if let Some(replaced) = replaced {
             let moved = replaced.take_requests();
-            for (_, call_id) in &moved {
-                if let Some(call) = call_id.and_then(|call_id| state.pending.get_mut(&call_id)) {
-                    call.origin = Origin::Connection(connection.id());
-                }
+            for call_id in moved.iter().filter_map(|(_, call_id)| *call_id) {
+                state
+                    .pending
+                    .set_origin(call_id, Origin::Connection(connection.id()));
             }
             let _ = connection.adopt_requests(moved, now);
-            let _ = replaced.close(CloseReason::Replaced);
+            // A reply comes back on the session that carried its request:
+            // closing one with written calls now would fail them while the
+            // peer is healthy (and send the reliable ones twice). It drains
+            // instead, and the monitor closes it once nothing is owed.
+            if state.pending.rides(replaced.id()) {
+                replaced.drain();
+                Counters::bump(&self.counters.drained_connections);
+            } else {
+                let _ = replaced.close(CloseReason::Replaced);
+            }
             tracing::debug!(%listen, "rpc accepted session replaces the selected connection");
         }
     }
@@ -399,13 +408,12 @@ impl<P: RpcProviders> Shared<P> {
         let now = self.now();
         let state = self.lock();
         let selected = connection.peer_address().is_some();
-        if selected {
-            let origin = Origin::Connection(connection.id());
-            if state.pending.values().any(|call| call.origin == origin) {
-                return false;
-            }
+        if selected && state.pending.rides(connection.id()) {
+            return false;
         }
-        let idle = if selected {
+        let idle = if connection.is_draining() {
+            std::time::Duration::ZERO
+        } else if selected {
             self.config.peer.idle_timeout
         } else {
             self.config.peer.inbound_idle_timeout

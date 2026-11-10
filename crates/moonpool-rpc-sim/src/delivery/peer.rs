@@ -205,6 +205,10 @@ async fn call_other(
                 stats.replaced_connections > 0 && outcome.is_ok(),
                 "rpc simultaneous connect resolved to one shared connection"
             );
+            assert_always!(
+                stats.calls_cut_by_replacement == 0,
+                "a replaced connection never fails or resends a call it carried"
+            );
             assert_sometimes!(
                 stats.adopted_connections > 0,
                 "rpc accepted session adopted as the peer connection"

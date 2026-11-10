@@ -44,6 +44,17 @@ pub struct RpcStats {
     pub checksum_failures: u64,
     /// Of those, peers that speak no supported protocol version.
     pub version_rejections: u64,
+    /// Connections whose stream ended inside a frame: a cut, not a
+    /// protocol violation.
+    pub truncated_sessions: u64,
+    /// Replaced connections that still carried written calls, so they
+    /// drained (took no new request and closed once their replies came)
+    /// instead of closing at once.
+    pub drained_connections: u64,
+    /// Replaced connections that closed while calls still rode on them
+    /// (failed or sent again with no fault on their path). Always 0 unless
+    /// the drain has a bug.
+    pub calls_cut_by_replacement: u64,
     /// Connections established (either direction).
     pub connections_opened: u64,
     /// Connections refused by the connection budget.
@@ -190,6 +201,9 @@ pub(crate) struct Counters {
     pub(crate) protocol_violations: AtomicU64,
     pub(crate) checksum_failures: AtomicU64,
     pub(crate) version_rejections: AtomicU64,
+    pub(crate) truncated_sessions: AtomicU64,
+    pub(crate) drained_connections: AtomicU64,
+    pub(crate) calls_cut_by_replacement: AtomicU64,
     pub(crate) connections_opened: AtomicU64,
     pub(crate) connections_rejected: AtomicU64,
     pub(crate) accept_errors: AtomicU64,
@@ -307,6 +321,9 @@ impl Counters {
             protocol_violations: load(&self.protocol_violations),
             checksum_failures: load(&self.checksum_failures),
             version_rejections: load(&self.version_rejections),
+            truncated_sessions: load(&self.truncated_sessions),
+            drained_connections: load(&self.drained_connections),
+            calls_cut_by_replacement: load(&self.calls_cut_by_replacement),
             connections_opened: load(&self.connections_opened),
             connections_rejected: load(&self.connections_rejected),
             accept_errors: load(&self.accept_errors),

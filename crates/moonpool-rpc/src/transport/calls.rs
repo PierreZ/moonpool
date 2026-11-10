@@ -181,12 +181,7 @@ impl<P: RpcProviders> Shared<P> {
     /// Refuse a reliable call whose body would exceed the retained-bytes
     /// budget.
     fn check_retention(&self, state: &State, body_len: usize) -> Result<(), RpcError> {
-        let retained: u64 = state
-            .pending
-            .values()
-            .filter_map(|call| call.retained.as_ref())
-            .map(|body| body.len() as u64)
-            .sum();
+        let retained = state.pending.retained_bytes();
         if retained.saturating_add(body_len as u64) > self.config.limits.max_retained_bytes {
             Counters::bump(&self.counters.overload_refusals);
             return Err(overloaded());
@@ -412,7 +407,7 @@ impl<P: RpcProviders> Shared<P> {
         };
         let mut state = self.lock();
         if let Some(refusal) = refusal {
-            let call = call_id.and_then(|call_id| state.pending.remove(&call_id));
+            let call = call_id.and_then(|call_id| state.pending.remove(call_id));
             drop(state);
             match call {
                 Some(call) => {
@@ -431,7 +426,7 @@ impl<P: RpcProviders> Shared<P> {
         if crate::protocol::request_metadata_len(payload).is_some_and(|len| len > 0) {
             Counters::bump(&self.counters.credentials_attached);
         }
-        let Some(call) = call_id.and_then(|call_id| state.pending.get_mut(&call_id)) else {
+        let Some(call) = call_id.and_then(|call_id| state.pending.get_mut(call_id)) else {
             return Transmit::Send;
         };
         call.transmitted = true;
@@ -465,7 +460,7 @@ impl<P: RpcProviders> Shared<P> {
     /// Complete a pending call from `origin`.
     pub(super) fn complete(&self, origin: Origin, call_id: u64, outcome: WireOutcome) {
         let mut state = self.lock();
-        let Some(call) = state.pending.get(&call_id) else {
+        let Some(call) = state.pending.get(call_id) else {
             drop(state);
             Counters::bump(&self.counters.late_replies);
             tracing::debug!(call_id, "rpc late reply discarded");
@@ -481,7 +476,7 @@ impl<P: RpcProviders> Shared<P> {
             );
             return;
         }
-        let Some(call) = state.pending.remove(&call_id) else {
+        let Some(call) = state.pending.remove(call_id) else {
             return;
         };
         let mut released = Vec::new();
@@ -533,7 +528,7 @@ impl<P: RpcProviders> Shared<P> {
         doomed
             .into_iter()
             .filter_map(|(call_id, reason)| {
-                let mut call = state.pending.remove(&call_id)?;
+                let mut call = state.pending.remove(call_id)?;
                 if let Origin::Connection(id) = call.origin
                     && let Some(connection) = state.connections.get(&id)
                     && !call.transmitted
@@ -556,7 +551,7 @@ impl<P: RpcProviders> Shared<P> {
     pub(crate) fn call_transmitted(&self, call_id: u64) -> Option<bool> {
         self.lock()
             .pending
-            .get(&call_id)
+            .get(call_id)
             .map(PendingCall::may_have_executed)
     }
 
@@ -592,16 +587,16 @@ impl<P: RpcProviders> Shared<P> {
             notify = true;
         }
         let origin = Origin::Connection(connection.id());
-        let carried: Vec<u64> = state
-            .pending
-            .iter()
-            .filter(|(_, call)| call.origin == origin)
-            .map(|(call_id, _)| *call_id)
-            .collect();
+        let carried = state.pending.on_connection(connection.id());
+        if reason == CloseReason::Replaced && !carried.is_empty() {
+            // Never expected: a replaced connection drains until no call
+            // rides on it. The delivery campaign asserts this stays 0.
+            Counters::bump(&self.counters.calls_cut_by_replacement);
+        }
         let mut failed = Vec::new();
         let mut resend = Vec::new();
         for call_id in carried {
-            let Some(call) = state.pending.get_mut(&call_id) else {
+            let Some(call) = state.pending.get_mut(call_id) else {
                 continue;
             };
             if call.retained.is_some() && address.is_some() && call.stream().is_none() {
@@ -616,7 +611,7 @@ impl<P: RpcProviders> Shared<P> {
                     body: call.retained.clone().unwrap_or_default(),
                     credentials: call.credentials.clone(),
                 });
-            } else if let Some(call) = state.pending.remove(&call_id) {
+            } else if let Some(call) = state.pending.remove(call_id) {
                 let error = disconnect_error(&reason, established, &call);
                 if call.transmitted && matches!(reason, CloseReason::Checksum(_)) {
                     Counters::bump(&self.counters.calls_failed_by_corruption);
@@ -693,12 +688,12 @@ impl<P: RpcProviders> Shared<P> {
         for (call_id, frame) in copies {
             if state
                 .pending
-                .get(&call_id)
+                .get(call_id)
                 .is_none_or(|call| call.origin != ended)
             {
                 continue;
             }
-            let Some(mut call) = state.pending.remove(&call_id) else {
+            let Some(mut call) = state.pending.remove(call_id) else {
                 continue;
             };
             if let Some(failure) = state.monitor.permanent_failure(&call.endpoint) {
@@ -751,6 +746,10 @@ impl<P: RpcProviders> Shared<P> {
                 }
                 tracing::warn!(peer = %connection.peer(), %detail, "rpc protocol violation, connection closed");
             }
+            CloseReason::Truncated(detail) => {
+                Counters::bump(&self.counters.truncated_sessions);
+                tracing::debug!(peer = %connection.peer(), %detail, "rpc session cut inside a frame");
+            }
             CloseReason::PingTimeout => {
                 Counters::bump(&self.counters.ping_timeouts);
                 tracing::debug!(peer = %connection.peer(), "rpc connection failed its ping");
@@ -796,7 +795,7 @@ fn disconnect_error(reason: &CloseReason, established: bool, call: &PendingCall)
 impl<P: RpcProviders> CallOwner for Shared<P> {
     fn abandon(&self, call_id: u64) -> Option<bool> {
         let mut state = self.lock();
-        let call = state.pending.remove(&call_id)?;
+        let call = state.pending.remove(call_id)?;
         // A request still queued behind the handshake or other frames is
         // withdrawn, so "not transmitted" stays true after the caller leaves.
         // If the writer already took it, it may be on the wire. Retention

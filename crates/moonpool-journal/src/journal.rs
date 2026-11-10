@@ -1370,10 +1370,13 @@ async fn write_protocol<F: moonpool_core::LocalStorageFile>(
         // journal), and data-only durability suffices because a segment
         // never changes size. The windows inside each write (bytes landed,
         // not yet durable) are the storage layer's to name.
+        // A failed write can still have landed some bytes, and a failed
+        // durable write can have landed all of them: recovery rebuilds a
+        // batch from its first entry, so the batch is not known absent.
         batch.entries = segment
             .write_durable(batch.entry_at, entries)
             .await
-            .map_err(|error| (error, Durable::No))?;
+            .map_err(unknown)?;
         batch.records = segment
             .write_durable(batch.persist_at, records)
             .await
@@ -1384,7 +1387,7 @@ async fn write_protocol<F: moonpool_core::LocalStorageFile>(
         batch.entries = segment
             .write(batch.entry_at, entries)
             .await
-            .map_err(|error| (error, Durable::No))?;
+            .map_err(unknown)?;
         // A power loss here tears entries no record points at yet.
         moonpool_buggify::hint!(
             "journal commit: entries written, not synced",

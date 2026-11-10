@@ -372,7 +372,18 @@ assert_always!(present, "no acknowledged write is lost");
 
 A failed sync is an operating error, not a verdict: `CommitError::Io` says
 whether the batch may be durable anyway (`Durable::Unknown`), the journal is
-poisoned, and the node reopens it.
+poisoned, and the node reopens it. `Durable::No` is a promise: no byte of the
+batch was issued (the commit failed before its first write, for example when
+it could not create its next segment). A failed entries write is always
+`Unknown`, because recovery rebuilds a batch from its first entry, so even a
+partial write can be live after a reopen. The example checks the promise:
+
+```rust
+assert_always!(
+    journal.floor() == floor && journal.meta() == meta.as_slice(),
+    "a commit that reported Durable::No is never live after a reopen"
+);
+```
 
 ## On a Real Disk
 
