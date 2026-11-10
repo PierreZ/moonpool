@@ -27,6 +27,14 @@ slow-timeout = { period = "10s", terminate-after = 6 }
 filter = 'package(moonpool-sim) and test(=runner::builder::tests::a_storage_fault_mask_keeps_its_family_out_and_draws_nothing)'
 slow-timeout = { period = "10s", terminate-after = 4 }
 
+# The busy-yield test under the CPU model polls one task a million times,
+# and each poll is a CPU slot and a world step: about 6.5s in the debug
+# profile locally, past the 10s kill on a loaded CI runner. The bound is
+# the one production code meets, so the test keeps it.
+[[profile.default.overrides]]
+filter = 'package(moonpool-sim) and test(=a_busy_yield_fails_under_the_cpu_model_too)'
+slow-timeout = { period = "10s", terminate-after = 4 }
+
 # The journal's crash loops run 120 seeds, one test per fault model and
 # durability setting, every seed eight crashed incarnations of a writer on
 # the simulated disk and a recovery per crash: about 6s each in the debug
