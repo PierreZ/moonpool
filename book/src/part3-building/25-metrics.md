@@ -224,7 +224,7 @@ Totals say what a run did. The series says **when** it went wrong, which is the 
 
 ```bash
 cargo run --release --example metastable_grpc_retry_storm \
-    --features hyper,prometheus -- --seed 1
+    --features hyper,prometheus -- --seed 0
 ```
 
 It runs query pipelines over the recorded series and prints the buckets as an ASCII graph, one column per simulated second. The slowdown lasts 650 ms. The service never recovers: retries from that window keep the server saturated for the remaining 29 seconds at the same offered load it carried before. The trigger is gone, the bad state is not.

@@ -1050,7 +1050,7 @@ fn graph(seed: u64) -> Result<String, String> {
 /// moves which seeds storm (about half of them do), and the test below then
 /// fails until this is re-picked with `--search`. Seed 4 stormed when the
 /// example landed, then quietly recovered while CI never ran the test (#264).
-const DEMO_SEED: u64 = 1;
+const DEMO_SEED: u64 = 0;
 
 #[cfg(test)]
 mod tests {
