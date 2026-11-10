@@ -15,6 +15,8 @@ mod sync_drive;
 mod backlog;
 #[path = "network/endpoints.rs"]
 mod endpoints;
+#[path = "network/failure_model.rs"]
+mod failure_model;
 #[path = "network/half_close.rs"]
 mod half_close;
 #[path = "network/in_flight.rs"]

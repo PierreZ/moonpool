@@ -149,7 +149,7 @@ fn a_crashed_process_releases_its_listeners() {
     let client = sim.network_provider(client_ip());
     let dead = drive(&mut sim, server.bind(SERVER)).expect("bind before the crash");
 
-    sim.abort_all_connections_for_ip(server_ip());
+    sim.kill_connections_for_ip(server_ip(), moonpool_sim::DeathNotice::Reset);
     assert_eq!(
         kind_of(drive(&mut sim, client.connect(SERVER))),
         Some(io::ErrorKind::ConnectionRefused),

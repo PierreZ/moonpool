@@ -246,13 +246,11 @@ impl AsyncRead for SimTcpStream {
             return Poll::Ready(Err(connection_aborted_error()));
         }
 
-        // Check if receive side is closed (asymmetric closure)
-        if sim.is_recv_closed(self.connection_id) {
-            tracing::debug!(
-                "SimTcpStream::poll_read connection_id={} recv side closed, returning EOF",
-                self.connection_id.0
-            );
-            return Poll::Ready(Ok(0)); // EOF
+        // A receive side that a random close cut is reset: the unread bytes
+        // are gone, so the read is an error, never an EOF that would let a
+        // protocol framing by EOF take a cut message as complete.
+        if let Some(result) = Self::recv_closed_result(&sim, self.connection_id) {
+            return Poll::Ready(result);
         }
 
         // Check for read clogging (symmetric with write clogging)
@@ -286,8 +284,8 @@ impl AsyncRead for SimTcpStream {
         {
             return Poll::Ready(Err(connection_aborted_error()));
         }
-        if sim.is_recv_closed(self.connection_id) {
-            return Poll::Ready(Ok(0));
+        if let Some(result) = Self::recv_closed_result(&sim, self.connection_id) {
+            return Poll::Ready(result);
         }
 
         // Try to read from connection's receive buffer first
@@ -348,6 +346,27 @@ impl SimTcpStream {
             return Poll::Ready(result);
         }
         Poll::Pending
+    }
+
+    /// The read result of a closed receive side: `Ok(0)` after this side's
+    /// own close, `ConnectionReset` when a random close cut the receive side
+    /// (its unread bytes were discarded, as an RST does), `None` when the
+    /// receive side is open.
+    fn recv_closed_result(
+        sim: &crate::sim::SimWorld,
+        connection_id: ConnectionId,
+    ) -> Option<io::Result<usize>> {
+        if !sim.is_recv_closed(connection_id) {
+            return None;
+        }
+        if sim.is_connection_closed(connection_id) {
+            return Some(Ok(0));
+        }
+        crate::assert_reachable!("network: a read meets a receive side that a random close reset");
+        Some(Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "Random connection failure: receive side reset",
+        )))
     }
 
     /// Return the result of a terminal receive state, if the connection reached one.

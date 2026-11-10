@@ -40,6 +40,19 @@ pub(crate) struct ClogState {
     pub(crate) expires_at: Duration,
 }
 
+/// What the peers of a dead process learn, and when.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathNotice {
+    /// The process died and its host lives on (a kill, an expired grace
+    /// period, a restart in place): the host resets each connection. The
+    /// RST is in flight like data, behind the bytes already on the wire.
+    Reset,
+    /// The host lost power: nothing is sent. A peer learns of the death only
+    /// when its own data or FIN reaches the dead endpoint, which answers
+    /// with one RST.
+    Silent,
+}
+
 /// Reason for connection closure, distinguishing FIN from RST semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloseReason {
@@ -75,13 +88,17 @@ pub(crate) enum InFlightPayload {
     Data(Vec<u8>),
     /// A graceful close; always the last item of a stream.
     Fin,
+    /// A reset from an endpoint whose process died; always the last item of
+    /// a stream. It lands like data: behind the bytes already on the wire,
+    /// after the link latency, and never across a partition.
+    Rst,
 }
 
 impl InFlightPayload {
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Data(bytes) => bytes.len(),
-            Self::Fin => 0,
+            Self::Fin | Self::Rst => 0,
         }
     }
 }
@@ -105,6 +122,7 @@ impl ConnectionFlags {
     const SEND_IN_PROGRESS: u16 = 1 << 8;
     const SEND_STALLED: u16 = 1 << 9;
     const SEND_BLACK_HOLED: u16 = 1 << 10;
+    const RESET_ON_ARRIVAL: u16 = 1 << 11;
 
     fn get(self, mask: u16) -> bool {
         (self.0 & mask) != 0
@@ -189,6 +207,16 @@ impl ConnectionFlags {
 
     pub(crate) fn set_send_black_holed(&mut self, value: bool) {
         self.set_bit(Self::SEND_BLACK_HOLED, value);
+    }
+
+    /// The endpoint died silently (power loss): the first data or FIN that
+    /// lands on it sends one RST back.
+    pub(crate) fn reset_on_arrival(self) -> bool {
+        self.get(Self::RESET_ON_ARRIVAL)
+    }
+
+    pub(crate) fn set_reset_on_arrival(&mut self, value: bool) {
+        self.set_bit(Self::RESET_ON_ARRIVAL, value);
     }
 }
 
@@ -369,6 +397,9 @@ pub(crate) struct NetworkState {
     /// When the next random interface clog starts; `None` like
     /// [`next_partition_at`](Self::next_partition_at).
     pub(crate) next_clog_at: Option<Duration>,
+    /// When the next idle drop happens; `None` like
+    /// [`next_partition_at`](Self::next_partition_at).
+    pub(crate) next_idle_drop_at: Option<Duration>,
     pub(crate) pair_latencies: BTreeMap<(IpAddr, IpAddr), Duration>,
     /// Per-process network slowness of a gray failure (see
     /// [`Slowness`](crate::Slowness)): the latency of every chunk to or from
@@ -400,6 +431,7 @@ impl NetworkState {
             last_black_hole_time: Duration::ZERO,
             next_partition_at: None,
             next_clog_at: None,
+            next_idle_drop_at: None,
             pair_latencies: BTreeMap::new(),
             slow_factors: BTreeMap::new(),
         }

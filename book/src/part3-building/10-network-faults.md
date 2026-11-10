@@ -40,12 +40,12 @@ Each family is one `NetworkFault` variant, one bit of the swarm mask, and a few 
 | `Clog` | `clog_rate` (clogs per simulated second), `clog_duration` (100 to 300 ms) | Code that assumes a write lands promptly. One IP's sends, receives or both stall on every connection, then resume in order (FoundationDB's `RandomClogging`). |
 | `Partition` | `partition_rate` (partitions per simulated second), `partition_duration`, `partition_strategy` | Split brain, quorum loss, failure detectors. See below. |
 | `BitFlip` | `bit_flip_probability`, `bit_flip_min_bits`/`max_bits` (1 to 32), `bit_flip_cooldown` | Missing checksums. The flip count follows a power law. |
-| `RandomClose` | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` (30%) | Reconnection and redelivery. 30% of closes return an error, 70% go silent and end in EOF, FoundationDB's ratio. |
-| `ConnectFailure` | `connect_failure_mode` (`Disabled`, `AlwaysFail`, `Probabilistic`), `connect_failure_probability` | Missing connect timeouts. In `Probabilistic` mode a buggified connect returns `ConnectionRefused`, and a small share of the others (one in ten) hangs forever. |
+| `RandomClose` | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` (30%) | Reconnection and redelivery. 30% of closes return an error, 70% go silent, FoundationDB's ratio. A close that cuts the receive side discards the unread bytes, so the next read fails with `ConnectionReset`, never a clean EOF: a protocol that frames by EOF must not take a cut message as complete. |
+| `ConnectFailure` | `connect_failure_mode` (`Disabled`, `AlwaysFail`, `Probabilistic`), `connect_failure_probability` | Missing connect timeouts. In `Probabilistic` mode a buggified connect fails with `ConnectionRefused` (or, one time in five, `HostUnreachable`). A small share of the others (one in ten) hangs like an unanswered SYN: after 127 simulated seconds it fails with `TimedOut`, as Linux does. |
 | `ClockDrift` | `clock_drift_enabled`, `clock_drift_max` (100 ms) | Leases, TTLs, anything that compares clocks across nodes. |
 | `BuggifiedDelay` | `buggified_delay_enabled`, `buggified_delay_max`, `buggified_delay_probability` (25%) | Timeouts. `TimeProvider::sleep` stretches by a power-law delay, only inside the chaos window. |
 | `PairLatency` | `max_pair_latency` (off at `ZERO..ZERO`) | A stably slow peer. Each ordered IP pair draws one extra latency at first contact and keeps it for the run (FoundationDB's `SimClogging`). |
-| `BlackHole` | `black_hole_probability`, `black_hole_cooldown` | Requests without a deadline. See below. |
+| `BlackHole` | `black_hole_probability`, `black_hole_cooldown`, `idle_drop_rate` | Requests without a deadline, and pooled connections without keep-alive. See below. |
 
 Bit flips are off in the default profile, because TCP delivers what was written: only a protocol that checksums its frames can tell a flip from data. FoundationDB flips bits only where `FlowTransport` verifies a packet checksum. If your protocol has no checksum (HTTP/2, gRPC), mask the family out.
 
@@ -98,13 +98,22 @@ config.chaos.black_hole_cooldown = Duration::from_secs(5);
 
 A black hole is permanent for its connection. The only way out is a new connection. A process kill still resets its connections, so a hung peer is never mistaken for a dead one. `SimWorld::black_hole_connection(id, hole_send, hole_recv)` is the scripted form.
 
+The coin above fires only on I/O, so it cannot reach a connection that carries no traffic. The **idle drop** can. While the family is on, a Poisson process in simulated time (`idle_drop_rate`, 0.05 per second by default) picks one idle connection (nothing queued, nothing in flight, nothing unread) and black-holes both of its directions, as a NAT or a load balancer forgets a pooled connection. The next request on it hangs until its deadline. With the family off, the idle drop draws nothing.
+
 ## Closing a Connection
 
 Moonpool models three ways a connection ends, and your protocol must survive all three:
 
 - **Graceful close**: the closer's FIN goes behind every queued byte. The peer reads everything, then EOF. Dropping a drained stream does this.
 - **Write shutdown**: `AsyncWrite::close` sends the FIN, further writes fail with `BrokenPipe`, and the read half stays open. The reply to an EOF-delimited request still arrives.
-- **Abort**: no FIN, no drain. The peer gets a reset on its next read or write. A process crash does this, and so does dropping a stream with unread bytes.
+- **Abort**: no FIN, no drain. The peer gets a reset on its next read or write. Dropping a stream with unread bytes does this.
+
+A process death is not an instant reset of both ends. The dead side's bytes already on the wire still land, so the last reply that a process wrote before it died can still arrive. What it queued but did not send, and what it received but did not read, is gone. Then the peer learns of the death through the network:
+
+- **The host lives on** (a kill, an expired grace period, a restart in place, `RebootKind::KillKeepCache`, a retired process): the host sends an RST behind those bytes. The RST takes the link latency, and a partition holds it until the heal.
+- **The host lost power** (`RebootKind::Crash`, `RebootKind::CrashAndWipe`, an outage): nothing is sent. A peer that only reads waits until its own deadline. A peer that writes gets an RST back one round trip later.
+
+So crashes exercise timeouts and failure detectors. `SimWorld::kill_connections_for_ip(ip, DeathNotice::Reset | DeathNotice::Silent)` is the scripted form. A connection that no application accepted yet lives only in a listener backlog, and it is still reset at once on both sides.
 
 HTTP/1.1 chunked bodies and gRPC trailers both depend on reading after the peer's shutdown. A simulator with only aborts never finds those bugs.
 

@@ -23,8 +23,8 @@ use super::{
     ConnectionId, ListenerId, NetworkEvent,
     event::NetworkOperationId,
     state::{
-        BoundListener, CloseReason, ConnectionFlags, ConnectionState, NetworkState, SendChunk,
-        SendWindow,
+        BoundListener, CloseReason, ConnectionFlags, ConnectionState, DeathNotice, NetworkState,
+        SendChunk, SendWindow,
     },
 };
 
@@ -370,6 +370,9 @@ impl NetworkSimulation {
         } else {
             available
         };
+        if limit < available {
+            crate::assert_reachable!("network: a read returns partially");
+        }
         for (slot, byte) in buf.iter_mut().zip(connection.receive_buffer.drain(..limit)) {
             *slot = byte;
         }
@@ -478,7 +481,15 @@ impl NetworkSimulation {
         let server_conn = ConnectionId(self.state.next_connection_id);
         self.state.next_connection_id += 1;
         let client_endpoint = NetworkState::parse_ip_from_addr(client_addr);
-        let server_endpoint = NetworkState::parse_ip_from_addr(server_addr);
+        // The server's IP is the one in the address; a listener bound by a
+        // logical name has none, so its owner serves it. Partitions, clogs,
+        // slowness and kills then reach the connection through that machine.
+        let server_endpoint = NetworkState::parse_ip_from_addr(server_addr).or_else(|| {
+            self.state
+                .bound
+                .get(server_addr)
+                .map(|listener| listener.owner)
+        });
         let ephemeral_peer_addr = match client_endpoint {
             Some(IpAddr::V4(ipv4)) => {
                 let octets = ipv4.octets();
@@ -903,10 +914,10 @@ impl NetworkSimulation {
     }
 
     /// Per-step network work done before the popped event is handled: start
-    /// the random partition and the random interface clog whose arrival time
-    /// has passed.
+    /// the random partition, the random interface clog and the idle drop
+    /// whose arrival time has passed.
     ///
-    /// Both are Poisson processes in simulated time, so the work here draws
+    /// All are Poisson processes in simulated time, so the work here draws
     /// randomness only at an arrival, never per event. Clog expiry is not
     /// swept here: `clog_write` and `clog_read` each schedule their own
     /// `ClogClear` / `ReadClogClear` at the deadline, and that event alone
@@ -914,6 +925,7 @@ impl NetworkSimulation {
     pub(crate) fn before_event(&mut self, now: Duration) -> NetworkActions {
         let mut actions = self.randomly_trigger_partitions(now);
         actions.extend(self.randomly_trigger_clogs(now));
+        actions.extend(self.randomly_drop_idle_connection(now));
         actions
     }
 
@@ -1346,6 +1358,123 @@ impl NetworkSimulation {
         wakes
     }
 
+    /// An RST reached `id`: this endpoint alone is reset. Its queue, its
+    /// flight and its unread bytes are gone, and every task parked on it
+    /// wakes to the error. The peer that sent the RST closed already.
+    pub(super) fn reset_endpoint(&mut self, id: ConnectionId) -> WakeBatch {
+        let mut wakes = WakeBatch::default();
+        let Some(c) = self.state.connections.get_mut(&id) else {
+            return wakes;
+        };
+        c.flags.set_is_closed(true);
+        c.flags.set_send_closed(true);
+        c.flags.set_recv_closed(true);
+        c.flags.set_send_in_progress(false);
+        c.flags.set_send_stalled(false);
+        c.flags.set_graceful_close_pending(false);
+        c.close_reason = CloseReason::Aborted;
+        self.discard_send_queue(id);
+        self.discard_in_flight(id);
+        self.discard_receive_buffer(id, &mut wakes);
+        self.wake_all_waiters(id, &mut wakes);
+        wakes
+    }
+
+    fn wake_all_waiters(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
+        wakes.push(self.waiters.reads.take(&id));
+        Self::take_waiter(&mut self.waiters.write_clogs, id, wakes);
+        Self::take_waiter(&mut self.waiters.read_clogs, id, wakes);
+        Self::take_waiter(&mut self.waiters.send_buffers, id, wakes);
+    }
+
+    /// The process on `ip` died. Each endpoint it owned closes on its own
+    /// side; its peers learn of the death through the network, never at the
+    /// same instant:
+    ///
+    /// - the bytes it had on the wire still land, so the last reply that it
+    ///   wrote before it died can still arrive;
+    /// - what it had queued but not sent, and what it had received but not
+    ///   read, is gone;
+    /// - [`DeathNotice::Reset`] puts an RST on the wire behind those bytes,
+    ///   which honors the link latency and partitions;
+    ///   [`DeathNotice::Silent`] sends nothing, and the endpoint answers the
+    ///   first data or FIN that reaches it with an RST.
+    ///
+    /// A connection whose server endpoint no application accepted yet is
+    /// reset at once on both sides, as before: it lives only in a listener
+    /// backlog, and a backlog must never hold a dead endpoint.
+    pub(crate) fn kill_endpoints_for_ip(
+        &mut self,
+        ip: IpAddr,
+        notice: DeathNotice,
+        now: Duration,
+    ) -> (NetworkActions, WakeBatch) {
+        let mut actions = NetworkActions::default();
+        let mut wakes = WakeBatch::default();
+        let owned = self
+            .state
+            .connections
+            .iter()
+            .filter_map(|(id, c)| (c.local_ip == Some(ip)).then_some(*id))
+            .collect::<Vec<_>>();
+        for id in owned {
+            if self.is_unaccepted(id)
+                || self.paired(id).is_some_and(|peer| self.is_unaccepted(peer))
+            {
+                wakes.append(self.close_aborted(id));
+                continue;
+            }
+            let Some(c) = self.state.connections.get_mut(&id) else {
+                continue;
+            };
+            if c.close_reason == CloseReason::Aborted {
+                continue;
+            }
+            // A side that the application closed already sent its FIN (or
+            // queued it): the host has nothing more to say on it.
+            let notify = !c.flags.is_closed();
+            c.flags.set_is_closed(true);
+            c.flags.set_send_closed(true);
+            c.flags.set_recv_closed(true);
+            c.flags.set_send_in_progress(false);
+            c.flags.set_send_stalled(false);
+            c.flags.set_graceful_close_pending(false);
+            c.close_reason = CloseReason::Aborted;
+            self.discard_send_queue(id);
+            self.discard_receive_buffer(id, &mut wakes);
+            self.wake_all_waiters(id, &mut wakes);
+            match notice {
+                DeathNotice::Reset if notify => self.put_rst_in_flight(id, now, &mut actions),
+                DeathNotice::Reset => {}
+                DeathNotice::Silent => {
+                    if let Some(c) = self.state.connections.get_mut(&id) {
+                        c.flags.set_reset_on_arrival(true);
+                    }
+                }
+            }
+        }
+        (actions, wakes)
+    }
+
+    /// Whether `id` still waits in a listener backlog, an accept
+    /// reservation or a parked connect: no application holds it yet.
+    fn is_unaccepted(&self, id: ConnectionId) -> bool {
+        self.state
+            .pending_connections
+            .values()
+            .any(|queue| queue.contains(&id))
+            || self
+                .accept_reservations
+                .values()
+                .any(|reservation| reservation.connection_id == id)
+            || self
+                .waiters
+                .connects
+                .values()
+                .flat_map(|waiters| waiters.values())
+                .any(|waiter| waiter.connection_id == id)
+    }
+
     /// A reset destroys unaccepted endpoints as well as their stream buffers.
     /// Remove them before waking parked connects, so an aborted endpoint never
     /// holds a backlog slot until a later accept happens to poll.
@@ -1423,16 +1552,6 @@ impl NetworkSimulation {
             self.discard_receive_buffer(peer, &mut wakes);
         }
         wakes
-    }
-
-    pub(crate) fn connections_for_ip(&self, ip: IpAddr) -> Vec<ConnectionId> {
-        self.state
-            .connections
-            .iter()
-            .filter_map(|(id, c)| {
-                (c.local_ip == Some(ip) || c.remote_ip == Some(ip)).then_some(*id)
-            })
-            .collect()
     }
 }
 

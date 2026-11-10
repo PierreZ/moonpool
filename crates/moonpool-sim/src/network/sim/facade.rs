@@ -538,21 +538,14 @@ impl SimWorld {
             .is_partitioned(from, to, inner.scheduler_now())
     }
 
-    /// Aborts every connection involving an IP.
-    #[instrument(level = "debug", skip(self))]
-    pub fn abort_all_connections_for_ip(&self, ip: IpAddr) {
-        let wakes = {
-            let mut inner = self.inner.write();
-            let ids = inner.network.connections_for_ip(ip);
-            let mut wakes = WakeBatch::default();
-            for id in ids {
-                wakes.append(inner.network.close_aborted(id));
-            }
-            // A dead process listens on nothing: its addresses are free and
-            // a connect to them is refused until something binds them again.
+    /// The process on `ip` died: each endpoint it owned closes, and its
+    /// peers learn of it through the network, as `notice` says. Its
+    /// listeners are unbound.
+    pub fn kill_connections_for_ip(&self, ip: IpAddr, notice: super::DeathNotice) {
+        self.network_transition_waking(|inner, now| {
+            let (actions, mut wakes) = inner.network.kill_endpoints_for_ip(ip, notice, now);
             wakes.append(inner.network.unbind_listeners_for_ip(ip));
-            wakes
-        };
-        self.release_wakes(wakes);
+            (actions, wakes)
+        });
     }
 }

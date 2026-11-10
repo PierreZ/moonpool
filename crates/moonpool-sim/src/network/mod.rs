@@ -65,4 +65,4 @@ pub(crate) type PartitionGuard = std::sync::Arc<
 >;
 
 // Re-export simulation network provider
-pub use sim::SimNetworkProvider;
+pub use sim::{DeathNotice, SimNetworkProvider};

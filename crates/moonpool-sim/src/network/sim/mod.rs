@@ -25,6 +25,6 @@ pub(crate) use engine::{
 };
 pub use event::{NetworkEvent, NetworkOperationId};
 pub use provider::SimNetworkProvider;
-pub use state::CloseReason;
+pub use state::{CloseReason, DeathNotice};
 pub use stream::{SimTcpListener, SimTcpStream};
 pub use types::{ConnectionId, ListenerId};

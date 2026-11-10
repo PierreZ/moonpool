@@ -114,7 +114,7 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `set_iterations(n)`, `until_coverage_stable(10, 1000)` (default), `set_debug_seeds(seeds)`, `run_time_budget(d)` (1 h) | Campaign control. |
 | `enable_exploration(ExplorationConfig)`, `replay_timeline(seed, recipe)`, `check_determinism()` | Exploration, replay, canary. |
 
-No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Without `Chaos::Network` the network has no faults (`NetworkConfiguration::without_chaos()`: default latencies, chaos disabled). Without `Chaos::Storage` storage has no faults.
+No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Without `Chaos::Network` the network has no faults (`NetworkConfiguration::without_chaos()`: default latencies, chaos disabled). Network failures follow TCP: a killed process's bytes on the wire still land and its RST follows them through latency and partitions; a host that lost power (`RebootKind::Crash`) sends nothing and answers the peer's next segment with an RST; a hung connect fails with `TimedOut` after 127 s; a refused one is `ConnectionRefused` or `HostUnreachable`; a random close of the receive side reads as `ConnectionReset`, never EOF; the black-hole family also drops idle connections in simulated time (`idle_drop_rate`). Without `Chaos::Storage` storage has no faults.
 
 ## SimulationReport
 

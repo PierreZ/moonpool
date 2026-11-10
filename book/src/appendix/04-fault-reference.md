@@ -18,7 +18,7 @@ Enabled by `Chaos::Network(mode)`, limited by `network_fault_mask`. Each family 
 | `ClockDrift` | `1 << 5` | Each node's clock drifts up to a bound. | `clock_drift_enabled`, `clock_drift_max` |
 | `BuggifiedDelay` | `1 << 6` | Timers fire late by an extra random delay. | `buggified_delay_enabled`, `buggified_delay_max`, `buggified_delay_probability` |
 | `PairLatency` | `1 << 7` | One IP pair gets permanent extra latency. | `max_pair_latency` |
-| `BlackHole` | `1 << 8` | A connection whose sends vanish silently and forever. | `black_hole_probability`, `black_hole_cooldown` |
+| `BlackHole` | `1 << 8` | A connection whose sends vanish silently and forever. The idle drop black-holes an idle connection in simulated time. | `black_hole_probability`, `black_hole_cooldown`, `idle_drop_rate` |
 
 Partial reads and writes (`partial_write_max_bytes`, `partial_read_max_bytes`) are TCP behaviour exercised through buggify. The mask does not touch them.
 
@@ -115,7 +115,7 @@ The stripe key comes from `LayoutRegion::stripe` (the journal uses the entry pos
 | Fault | Source | What happens |
 |-------|--------|--------------|
 | Graceful reboot | `Attrition` (`prob_graceful`), `FaultContext::reboot(ip, RebootKind::Graceful)` | The shutdown token is cancelled. After the grace period the process is force killed, then restarted after the recovery delay. |
-| Crash | `prob_crash`, `RebootKind::Crash`, `FaultContext::crash(ip)` | Tasks aborted, connections reset, storage through crash resolution. |
+| Crash | `prob_crash`, `RebootKind::Crash`, `FaultContext::crash(ip)` | Tasks aborted, storage through crash resolution. The host lost power, so its connections send nothing: a peer learns of the death when its own data draws an RST. A kill with the host alive puts an RST in flight instead. |
 | Crash and wipe | `prob_wipe`, `RebootKind::CrashAndWipe` | Crash plus deletion of every owned file. |
 | Timed crash | `FaultContext::crash_for(ip, down)` | Crash, restart after `down`. |
 | Restart | `FaultContext::restart(ip)` | Restart a process that `crash` left down. |
