@@ -735,11 +735,7 @@ mod tests {
         // Safety: `init` installed a correctly aligned table region.
         unsafe {
             let home = crate::table::home_index::<AssertionSlot>(msg_hash("orphan"));
-            let slot = table
-                .add(8)
-                .cast::<()>()
-                .cast::<AssertionSlot>()
-                .add(home);
+            let slot = table.add(8).cast::<()>().cast::<AssertionSlot>().add(home);
             crate::table::header_word(table, 0).store(1, Ordering::Release);
             <AssertionSlot as Entry>::store_id(slot, msg_hash("orphan"));
             atomic(<AssertionSlot as Entry>::published(slot)).store(1, Ordering::Release);

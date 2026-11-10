@@ -828,9 +828,9 @@ macro_rules! assert_sometimes_each {
 
 /// Re-exports for macro hygiene (`$crate::chaos::assertions::_re_export::*`).
 pub mod _re_export {
-    pub use moonpool_assertions::{AssertCmp, AssertKind};
     #[cfg(not(target_family = "wasm"))]
     pub use linkme;
+    pub use moonpool_assertions::{AssertCmp, AssertKind};
 }
 
 // =============================================================================
