@@ -64,7 +64,9 @@ The journal holds at most 256 entries (`MAX_JOURNAL_ENTRIES`). Repeated events f
 
 A run with at least one discovery is **productive**. The controller expands it **exactly once**: it enqueues `branching_factor` children, anchored at the highest-priority discovery. A run that made five discoveries is still one productive execution, not five branching events. The child seeds are derived by hashing the root seed, the base seed, the anchor, the state id, the continuation round and the child index, so the frontier is deterministic too.
 
-A run with an empty journal found nothing the multiverse had not seen. It is not punished or scored. Its branch produces no children and dies. There is no energy accounting. The only global limits are the per-seed run budget, the frontier size and the recipe length.
+What about a run that reached new code but no new assertion state? Under `cargo xtask sim run` the binary carries sancov edge counters, and the controller checks each run against the edge history. A run whose only novelty is new edges is productive at **low priority**: it gets **one** child, not `branching_factor`, queued at the back of the frontier. The edges carry no RNG coordinate, so the child branches in the middle of the run's last replay segment. The report counts these as `edge_expansions`. So the search is **assertion-guided first**, edge coverage adds a weak pull, and the edge plateau decides when the campaign stops.
+
+A run with an empty journal and no new edges found nothing the multiverse had not seen. It is not punished or scored. Its branch produces no children and dies. There is no energy accounting. The only global limits are the per-seed run budget, the frontier size and the recipe length.
 
 ```rust,ignore
 ExplorationConfig {

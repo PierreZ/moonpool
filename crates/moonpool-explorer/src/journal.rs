@@ -92,6 +92,11 @@ pub fn set_rng_count_hook(get_count: fn() -> u64) {
     RNG_COUNT_HOOK.with(|c| c.set(get_count));
 }
 
+/// The simulation's RNG call count now, in the current replay segment.
+pub(crate) fn rng_count() -> u64 {
+    RNG_COUNT_HOOK.with(Cell::get)()
+}
+
 /// Install the discovery hook that records events into this journal.
 pub(crate) fn install_hooks() {
     fn on_discovery(kind: DiscoveryKind, state_id: u64) {

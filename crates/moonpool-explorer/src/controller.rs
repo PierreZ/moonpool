@@ -178,6 +178,9 @@ pub struct ExplorationStats {
     pub bug_found: u64,
     /// Peak number of simultaneously live worker processes.
     pub max_active_workers: usize,
+    /// Runs with new sancov edges and no new assertion state, expanded once
+    /// at low priority.
+    pub edge_expansions: u64,
 }
 
 /// A replayable way to reach one semantic state: replay `recipe`, and the
@@ -413,10 +416,17 @@ impl Explorer {
     /// Collect an in-process run's journal and coverage, then consume them.
     fn finish_in_process_run(&mut self, job: &ExploreJob, failed: bool, from_exploration: bool) {
         let events = journal::take();
+        let end_count = journal::rng_count();
         // The novelty check doubles as the merge into the sancov history.
         crate::sancov::copy_counters_to_shared();
-        let _ = crate::sancov::has_new_sancov_coverage();
-        self.process_result(job, &events, failed, from_exploration);
+        let new_edges = crate::sancov::has_new_sancov_coverage();
+        let run = RunResult {
+            events: &events,
+            failed,
+            new_edges,
+            end_count,
+        };
+        self.process_result(job, &run, from_exploration);
     }
 
     /// Fork one worker for `job`. The child runs exactly one timeline, writes
@@ -445,7 +455,7 @@ impl Explorer {
                 let failed = run_one(&job);
                 let events = journal::take();
                 let slots = self.slots.as_ref().expect("worker mode has slots");
-                slots.write_slot(slot, &events);
+                slots.write_slot(slot, &events, journal::rng_count());
                 crate::sancov::copy_counters_to_shared();
                 // Safety: _exit is always safe; skips atexit/stdio flushing,
                 // which is what a forked worker wants.
@@ -523,13 +533,13 @@ impl Explorer {
             return;
         };
         let slots = self.slots.as_ref().expect("worker mode has slots");
-        let events = if status.is_some() {
+        let (events, end_count) = if status.is_some() {
             slots.read_slot(slot)
         } else {
-            Vec::new()
+            (Vec::new(), 0)
         };
         // Novelty check doubles as merge into the sancov history.
-        let _ = crate::sancov::has_new_pool_coverage(slot);
+        let new_edges = crate::sancov::has_new_pool_coverage(slot);
         self.free_slots.push(slot);
 
         let exit = status.map_or(WorkerExit::Crashed, worker::classify_exit);
@@ -539,8 +549,13 @@ impl Explorer {
                 crate::replay::format_timeline(&job.recipe)
             );
         }
-        let failed = exit != WorkerExit::Ok;
-        self.process_result(&job, &events, failed, true);
+        let run = RunResult {
+            events: &events,
+            failed: exit != WorkerExit::Ok,
+            new_edges,
+            end_count,
+        };
+        self.process_result(&job, &run, true);
     }
 
     // -----------------------------------------------------------------
@@ -549,13 +564,18 @@ impl Explorer {
 
     /// Consume one run's observations: account stats, register exemplars,
     /// and expand the run at most once if it was productive.
-    fn process_result(
-        &mut self,
-        job: &ExploreJob,
-        events: &[DiscoveryEvent],
-        failed: bool,
-        from_exploration: bool,
-    ) {
+    ///
+    /// A run is productive when it made a new assertion discovery, or, at
+    /// low priority, when it reached new sancov edges and made none: that
+    /// run gets one child, branched in the middle of its last replay
+    /// segment, so coverage guides the sweep and not only its stop rule.
+    fn process_result(&mut self, job: &ExploreJob, run: &RunResult<'_>, from_exploration: bool) {
+        let RunResult {
+            events,
+            failed,
+            new_edges,
+            end_count,
+        } = *run;
         self.stats.total_timelines += 1;
         self.stats.discoveries += events.len() as u64;
 
@@ -566,8 +586,11 @@ impl Explorer {
             }
         }
 
-        // Barren run: nothing globally new — the branch dies here.
         let Some(anchor_event) = select_anchor(events) else {
+            if new_edges {
+                self.expand_on_edges(job, end_count);
+            }
+            // Otherwise a barren run: nothing globally new, the branch dies.
             return;
         };
 
@@ -629,6 +652,32 @@ impl Explorer {
     }
 
     /// Enqueue `branching_factor` children extending `base` at `anchor`.
+    /// One low-priority child for a run whose only novelty is new sancov
+    /// edges. The edges carry no RNG coordinate, so the child branches in
+    /// the middle of the run's last replay segment: late enough to keep a
+    /// share of the path that found them, early enough to diverge.
+    fn expand_on_edges(&mut self, job: &ExploreJob, end_count: u64) {
+        if job.recipe.len() >= self.config.max_recipe_len
+            || self.frontier.len() >= self.config.max_frontier
+        {
+            return;
+        }
+        let anchor = end_count / 2;
+        let base_seed = job.recipe.last().map_or(self.root_seed, |&(_, seed)| seed);
+        let seed = derive_seed(
+            self.root_seed,
+            base_seed,
+            anchor,
+            SANCOV_STATE_ID,
+            self.stats.edge_expansions,
+            0,
+        );
+        let mut recipe = job.recipe.clone();
+        recipe.push((anchor, seed));
+        self.frontier.push_back(ExploreJob { recipe });
+        self.stats.edge_expansions += 1;
+    }
+
     fn expand_from(&mut self, base: &Recipe, anchor: u64, state_id: u64, round: u64) {
         let base_seed = base.last().map_or(self.root_seed, |&(_, seed)| seed);
         for child in 0..self.config.branching_factor {
@@ -739,6 +788,23 @@ fn derive_seed(
 /// Progress toward an assertion goal outranks structured state novelty, which
 /// outranks a one-shot coverage hit. Within the same class, the latest replay
 /// coordinate preserves the deepest prefix.
+/// The seed-derivation key of a sancov-only expansion: no assertion state
+/// names it, so it takes a fixed id ("sancov" in ASCII).
+const SANCOV_STATE_ID: u64 = 0x7361_6e63_6f76;
+
+/// What one finished run reported to the controller.
+#[derive(Clone, Copy)]
+struct RunResult<'a> {
+    /// Globally new discoveries of the assertion journal.
+    events: &'a [DiscoveryEvent],
+    /// The run failed (a simulation failure or a worker crash).
+    failed: bool,
+    /// The run reached sancov edges no earlier run reached.
+    new_edges: bool,
+    /// The RNG call count at the end of the run, in its last segment.
+    end_count: u64,
+}
+
 fn select_anchor(events: &[DiscoveryEvent]) -> Option<DiscoveryEvent> {
     events
         .iter()
@@ -880,6 +946,43 @@ mod tests {
         drop(explorer);
 
         assert!(!process_exists(pid), "the worker was killed and reaped");
+        crate::cleanup_assertions();
+    }
+
+    /// A timeline with new sancov edges and no new assertion state gets
+    /// exactly one low-priority child, branched mid-segment; without new
+    /// edges it is barren (#391).
+    #[test]
+    fn new_edges_alone_earn_one_expansion() {
+        let mut explorer = Explorer::new(ExplorationConfig::default()).expect("explorer init");
+        explorer.begin_seed(7);
+        explorer.frontier.clear();
+        let job = ExploreJob { recipe: Vec::new() };
+        let barren = RunResult {
+            events: &[],
+            failed: false,
+            new_edges: false,
+            end_count: 1_000,
+        };
+        explorer.process_result(&job, &barren, true);
+        assert!(explorer.frontier.is_empty(), "no novelty, no child");
+
+        let edges = RunResult {
+            new_edges: true,
+            ..barren
+        };
+        explorer.process_result(&job, &edges, true);
+        assert_eq!(
+            explorer.frontier.len(),
+            1,
+            "one child, not a full branching"
+        );
+        let child = explorer.frontier.front().expect("one child");
+        assert_eq!(child.recipe.len(), 1);
+        assert_eq!(child.recipe[0].0, 500, "branched mid-segment");
+        assert_eq!(explorer.stats.edge_expansions, 1);
+        assert_eq!(explorer.stats.expansions, 0, "not an assertion expansion");
+        drop(explorer);
         crate::cleanup_assertions();
     }
 

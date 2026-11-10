@@ -128,7 +128,7 @@ so none of them mistakes corruption for message loss on healthy TCP.
 To run them:
 
 ```bash
-cargo xtask sim run rpc-qualification          # coverage-guided, every seed twice under the RNG canary
+cargo xtask sim run rpc-qualification          # runs until coverage is stable, every seed twice under the RNG canary
 cargo xtask sim run rpc-streams                # or any other campaign name
 cargo nextest run -p moonpool-rpc-sim --test qualification
 cargo run --release -p moonpool-rpc-sim --example rpc_soak -- --smoke   # real TCP, both Tokio flavors

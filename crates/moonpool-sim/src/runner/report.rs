@@ -226,6 +226,9 @@ pub struct ExplorationReport {
     pub total_timelines: u64,
     /// Productive runs expanded into follow-up jobs.
     pub expansions: u64,
+    /// Runs whose only novelty was new sancov edges, expanded once at low
+    /// priority. Always 0 without sancov instrumentation.
+    pub edge_expansions: u64,
     /// Globally-new discovery events observed (assertion firsts, new buckets,
     /// watermark/frontier/quality improvements).
     pub discoveries: u64,

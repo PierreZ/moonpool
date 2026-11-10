@@ -49,7 +49,7 @@ Only the crates in `SANCOV_CRATES` get counters. Instrument the crate under test
 
 ## What Coverage Changes
 
-With counters present, `moonpool_explorer::sancov_is_available()` is true and the runner uses `SaturationSignal::CodeCoverage`: edges covered per seed, cumulative, judged against `plateau_seeds`. Without counters it falls back to `SaturationSignal::AssertionCoverage`. The report shows which one it used, with `edges_covered` and `edges_total` in `report.saturation`. Under exploration, `ExplorationReport` carries `sancov_edges_total` and `sancov_edges_covered`, and `code_coverage_edges` merges every worker's counters into one history map. Coverage is a plateau signal only. It never anchors an exploration recipe.
+With counters present, `moonpool_explorer::sancov_is_available()` is true and the runner uses `SaturationSignal::CodeCoverage`: edges covered per seed, cumulative, judged against `plateau_seeds`. Without counters it falls back to `SaturationSignal::AssertionCoverage`. The report shows which one it used, with `edges_covered` and `edges_total` in `report.saturation`. Under exploration, `ExplorationReport` carries `sancov_edges_total` and `sancov_edges_covered`, and `code_coverage_edges` merges every worker's counters into one history map. Coverage is the plateau signal, and a weak guide: a run whose only novelty is new edges gets one low-priority child, branched in the middle of its last replay segment (`edge_expansions`). An assertion discovery always anchors the full expansion.
 
 Without the wrapper (plain `cargo run`), the binary still runs. It only loses the code-coverage signal.
 
