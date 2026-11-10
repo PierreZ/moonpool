@@ -996,3 +996,61 @@ fn the_simulator_keeps_open_files_alive_across_unlink_and_rename() {
         assert_eq!(outcome("charlie exists after rename"), Ok(vec![0]));
     });
 }
+
+/// What a file reads after growth, on both backends: a `set_len` growth,
+/// an `allocate`, the hole before a write past the end, and a positioned
+/// read that runs past the end (a short read, then zero bytes at the end).
+async fn growth_bytes_contract<P: StorageProvider>(
+    provider: P,
+    root: String,
+) -> std::io::Result<Vec<(&'static str, Vec<u8>)>> {
+    let file = provider
+        .open(
+            &format!("{root}grown"),
+            OpenOptions::create_write().read(true),
+        )
+        .await?;
+    file.write_at(0, b"head").await?;
+    let mut log = Vec::new();
+    let read = |len: usize, offset: u64| {
+        let file = &file;
+        async move {
+            let mut buf = vec![0xEE; len];
+            let read = file.read_at(offset, &mut buf).await?;
+            buf.truncate(read);
+            std::io::Result::Ok(buf)
+        }
+    };
+    file.set_len(1_000).await?;
+    log.push(("set_len growth", read(1_000, 0).await?));
+    file.allocate(3_000).await?;
+    log.push(("allocate", read(2_000, 1_000).await?));
+    file.write_at(5_000, b"tail").await?;
+    log.push(("hole", read(2_004, 3_000).await?));
+    log.push(("short read at the end", read(100, 5_000).await?));
+    log.push(("read at the end", read(100, 5_004).await?));
+    Ok(log)
+}
+
+#[test]
+fn growth_reads_the_same_bytes_on_both_backends() {
+    local_runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let prefix = format!("{}/", dir.path().to_str().expect("temp path is UTF-8"));
+        let production = growth_bytes_contract(TokioStorageProvider::new(), prefix)
+            .await
+            .expect("production growth scenario");
+        let mut config = StorageConfiguration::fast_local();
+        // A garbage fill must not show through a growth: only a crash can
+        // lose bytes to the fill pattern.
+        config.garbage_fill_probability = 1.0;
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(config);
+        let simulated = run_storage_test(sim, |provider| {
+            growth_bytes_contract(provider, String::new())
+        })
+        .await
+        .expect("simulated growth scenario");
+        assert_eq!(production, simulated, "growth bytes must match Tokio");
+    });
+}

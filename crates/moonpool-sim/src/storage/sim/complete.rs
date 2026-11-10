@@ -88,9 +88,9 @@ impl StorageEngine {
                 ip: owner_ip.to_string(),
                 file_id: pending.file_id.0,
             });
-            return Err(StorageError::Io {
+            return Err(StorageError::Os {
                 file_id: pending.file_id,
-                kind: std::io::ErrorKind::Other,
+                code: crate::storage::error::EIO,
                 message: "read failed (simulated I/O error)".to_string(),
             });
         }
@@ -184,32 +184,21 @@ impl StorageEngine {
         // A full disk refuses growth before the disk has any other say, so a
         // disk with room draws exactly what it drew before (see
         // `storage::capacity`).
-        let growth = (offset + data.len() as u64).saturating_sub(file_size);
-        if !self.has_room(owner_ip, growth) {
-            let sectors = sector_range(offset, data.len());
-            return Err(self.refuse_full((owner_ip, pending.file_id), &path, sectors, actions));
-        }
+        self.require_room_for_write(
+            (owner_ip, pending.file_id),
+            &path,
+            offset,
+            data.len(),
+            actions,
+        )?;
 
         let landing =
             self.decide_write_landing(pending.file_id, offset, data.len(), file_size, &config);
         let mut fault_kind = None;
         match landing {
             WriteLanding::Eio => {
-                self.record(
-                    &path,
-                    StorageFaultKind::EioWrite,
-                    Some(sector_range(offset, data.len())),
-                );
-                actions.fault(SimFaultEvent::StorageWriteFault {
-                    ip: owner_ip.to_string(),
-                    file_id: pending.file_id.0,
-                    write_kind: "eio".to_string(),
-                });
-                return Err(StorageError::Io {
-                    file_id: pending.file_id,
-                    kind: std::io::ErrorKind::Other,
-                    message: "write failed (simulated I/O error)".to_string(),
-                });
+                let sectors = sector_range(offset, data.len());
+                return Err(self.refuse_eio((owner_ip, pending.file_id), &path, sectors, actions));
             }
             WriteLanding::Phantom => {
                 // Acknowledged, never applied: the bytes never reach the disk
@@ -395,9 +384,9 @@ impl StorageEngine {
                 ip: owner_ip.to_string(),
                 file_id: pending.file_id.0,
             });
-            return Err(StorageError::Io {
+            return Err(StorageError::Os {
                 file_id: pending.file_id,
-                kind: std::io::ErrorKind::Other,
+                code: crate::storage::error::EIO,
                 message: "sync failed (simulated I/O error)".to_string(),
             });
         }
@@ -413,7 +402,13 @@ impl StorageEngine {
             });
         };
         // A sync flushes what it can even when it reports a writeback error.
-        file.image.sync(&config, &weigh);
+        // A range sync (`len > 0`) flushes only the sectors of its range.
+        if pending.len > 0 {
+            file.image
+                .sync_range(pending.offset, pending.len, &config, &weigh);
+        } else {
+            file.image.sync(&config, &weigh);
+        }
         let reporting = config.writeback_error_reporting;
         let reported = self
             .state
@@ -426,9 +421,9 @@ impl StorageEngine {
         if reported {
             assert_reachable!("disk fault: sync reported a writeback error");
             self.record(&path, StorageFaultKind::SyncFailure, None);
-            return Err(StorageError::Io {
+            return Err(StorageError::Os {
                 file_id: pending.file_id,
-                kind: std::io::ErrorKind::Other,
+                code: crate::storage::error::EIO,
                 message: "sync failed: writeback error (simulated)".to_string(),
             });
         }
@@ -439,23 +434,9 @@ impl StorageEngine {
         &mut self,
         pending: &PendingStorageOp,
         new_len: u64,
-        actions: &mut StorageActions,
     ) -> Result<(), StorageError> {
-        let Some((owner_ip, path, file_size)) = self
-            .state
-            .files
-            .get(&pending.file_id)
-            .map(|file| (file.owner_ip, file.path.clone(), file.image.size()))
-        else {
-            return Err(StorageError::InvalidFileHandle {
-                handle_id: pending.handle_id,
-            });
-        };
-        if !self.has_room(owner_ip, new_len.saturating_sub(file_size)) {
-            let growth = usize::try_from(new_len - file_size).unwrap_or(usize::MAX);
-            let sectors = sector_range(file_size, growth);
-            return Err(self.refuse_full((owner_ip, pending.file_id), &path, sectors, actions));
-        }
+        // A growth is a hole: it needs no space and cannot fail for space,
+        // as `ftruncate` on Linux. A later write into the hole can.
         let Some(file) = self.state.files.get_mut(&pending.file_id) else {
             return Err(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
@@ -466,10 +447,53 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Refuse a write or `set_len` that would grow a file past its disk's
-    /// capacity: `ENOSPC`, nothing landed. `sectors` are the ones the
+    /// Fail a write with an injected `EIO`: nothing landed.
+    fn refuse_eio(
+        &mut self,
+        (owner_ip, file_id): (IpAddr, FileId),
+        path: &str,
+        sectors: Range<u64>,
+        actions: &mut StorageActions,
+    ) -> StorageError {
+        self.record(path, StorageFaultKind::EioWrite, Some(sectors));
+        actions.fault(SimFaultEvent::StorageWriteFault {
+            ip: owner_ip.to_string(),
+            file_id: file_id.0,
+            write_kind: "eio".to_string(),
+        });
+        StorageError::Os {
+            file_id,
+            code: crate::storage::error::EIO,
+            message: "write failed (simulated I/O error)".to_string(),
+        }
+    }
+
+    /// `ENOSPC` when the sectors of a write that have no space yet (holes,
+    /// and sectors past the end) do not fit on the disk.
+    fn require_room_for_write(
+        &mut self,
+        (owner_ip, file_id): (IpAddr, FileId),
+        path: &str,
+        offset: u64,
+        len: usize,
+        actions: &mut StorageActions,
+    ) -> Result<(), StorageError> {
+        let growth = self
+            .state
+            .files
+            .get(&file_id)
+            .map_or(0, |file| file.image.space_needed_for_write(offset, len));
+        if self.has_room(owner_ip, growth) {
+            return Ok(());
+        }
+        let sectors = sector_range(offset, len);
+        Err(self.refuse_full((owner_ip, file_id), path, sectors, actions))
+    }
+
+    /// Refuse a write or an `allocate` that needs more space than the disk
+    /// has: `ENOSPC`, nothing landed. `sectors` are the ones the
     /// operation would have written or grown into.
-    fn refuse_full(
+    pub(super) fn refuse_full(
         &mut self,
         (owner_ip, file_id): (IpAddr, FileId),
         path: &str,
@@ -483,9 +507,9 @@ impl StorageEngine {
             file_id: file_id.0,
             write_kind: "full".to_string(),
         });
-        StorageError::Io {
+        StorageError::Os {
             file_id,
-            kind: std::io::ErrorKind::StorageFull,
+            code: crate::storage::error::ENOSPC,
             message: "no space left on device (simulated disk full)".to_string(),
         }
     }

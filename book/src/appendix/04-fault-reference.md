@@ -49,7 +49,7 @@ Enabled by `Chaos::Storage(mode)`, limited by `storage_fault_mask`. Fault coordi
 | `PhantomWrite` | A write reports success and never reaches the disk. | `phantom_write_probability` | `PhantomWrite` |
 | `SyncFailure` | `sync_all`, `sync_data` or `sync_dir` fails. | `sync_failure_probability` | `SyncFailure` |
 | `ShortTransfer` | A read or write transfers fewer bytes than asked. | `short_transfer_probability` | |
-| `DirEntryLoss` | A crash loses a directory entry that was not `sync_dir`'d. | `unsynced_dir_entry_loss_probability` | `DirEntryLost` |
+| `DirEntryLoss` | A crash loses a directory entry that was not `sync_dir`'d. A rename is lost whole or kept whole. | `unsynced_dir_entry_loss_probability` | `DirEntryLost` |
 | `CrashDamage` | Unsynced sectors resolve by crash physics (below). | `crash_lost_probability`, `crash_latent_fault_probability`, `shorn_write_probability` | `FileCrashReport` |
 | `Degradation` | Disk stall (operations wait) or throttle (iops and bandwidth divided) episodes. | `disk_stall_*`, `disk_throttle_*` | |
 | `DiskFailure` | The disk fails for good. Every later operation stays pending forever. | `disk_failure_probability` | `storage_disk_failure` event |

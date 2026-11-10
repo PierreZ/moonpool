@@ -408,8 +408,12 @@ fn failed_directory_sync_reaches_the_simulation_fault_timeline() {
         std::io::ErrorKind::NotFound
     );
     assert_eq!(
-        results.1.expect_err("injected sync must fail").kind(),
-        std::io::ErrorKind::Other
+        results
+            .1
+            .expect_err("injected sync must fail")
+            .raw_os_error(),
+        Some(5),
+        "an injected failure is EIO"
     );
 
     let faults = sim.take_faults();
@@ -542,57 +546,70 @@ fn rolled_back_rename_restores_the_original_fault_coordinate() {
             .await
             .expect("reopen recovered file");
         let error = file.write_at(0, b"later").await.expect_err("masked EIO");
-        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        assert_eq!(error.raw_os_error(), Some(5), "an injected failure is EIO");
     });
 }
 
-/// Per-name crash rolls can retain both rename aliases. They must share one
-/// image and use the first surviving name as their fault coordinate.
+/// A rename is one journal transaction: a crash keeps it whole or loses it
+/// whole. It never keeps both names, and never loses both.
 #[test]
-fn surviving_rename_aliases_use_the_first_name_for_faults() {
-    let mut found = false;
-    for seed in 0..200_u64 {
+fn a_crash_keeps_exactly_one_name_of_an_unsynced_rename() {
+    let (mut kept, mut lost) = (false, false);
+    for seed in 0..64_u64 {
         let mut sim = masked_rename_sim(seed, 0.5);
         make_unsynced_rename(&mut sim);
         sim.simulate_crash_for_process(test_ip(), true);
         let provider = sim.storage_provider(test_ip());
-        let both_survived = drive_on(&mut sim, async move {
-            provider
-                .exists("a-original")
-                .await
-                .expect("old name exists")
-                && provider.exists("z-renamed").await.expect("new name exists")
+        let (old, new) = drive_on(&mut sim, async move {
+            (
+                provider.exists("a-original").await.expect("old name"),
+                provider.exists("z-renamed").await.expect("new name"),
+            )
         });
-        if !both_survived {
-            continue;
-        }
-        found = true;
-        let reports = sim.take_storage_crash_reports();
-        assert_eq!(reports[0].path, "a-original", "seed {seed}");
-        assert_eq!(
-            reports[0].resolutions[0].outcome,
-            CrashOutcome::Lost,
-            "seed {seed}"
-        );
+        assert!(old != new, "seed {seed}: old {old}, new {new}");
+        kept |= new;
+        lost |= old;
+    }
+    assert!(
+        kept && lost,
+        "both outcomes occur: kept {kept}, lost {lost}"
+    );
+}
 
-        let mut config = StorageConfiguration::fast_local();
-        config.write_eio_probability = 1.0;
-        sim.set_storage_config(config);
+/// A `sync_dir` of the source directory commits the whole rename, so the
+/// new name in another directory survives a crash too.
+#[test]
+fn a_sync_of_the_source_directory_commits_a_cross_directory_rename() {
+    for seed in 0..32_u64 {
+        let mut sim = masked_rename_sim(seed, 1.0);
         let provider = sim.storage_provider(test_ip());
         drive_on(&mut sim, async move {
-            for name in ["a-original", "z-renamed"] {
-                let file = provider
-                    .open(name, OpenOptions::read_write())
-                    .await
-                    .expect("reopen alias");
-                file.write_at(0, b"later")
-                    .await
-                    .expect_err("canonical masked EIO");
-            }
+            provider.create_dir_all("src").await.expect("src");
+            provider.create_dir_all("dst").await.expect("dst");
+            provider.sync_dir(".").await.expect("durable dirs");
+            let file = provider
+                .open("src/data", OpenOptions::create_write())
+                .await
+                .expect("create");
+            file.write_at(0, b"data").await.expect("write");
+            file.sync_all().await.expect("sync");
+            provider.sync_dir("src").await.expect("durable old name");
+            provider
+                .rename("src/data", "dst/data")
+                .await
+                .expect("rename");
+            provider.sync_dir("src").await.expect("commit the rename");
         });
-        break;
+        sim.simulate_crash_for_process(test_ip(), true);
+        let provider = sim.storage_provider(test_ip());
+        let (old, new) = drive_on(&mut sim, async move {
+            (
+                provider.exists("src/data").await.expect("old name"),
+                provider.exists("dst/data").await.expect("new name"),
+            )
+        });
+        assert!(!old && new, "seed {seed}: old {old}, new {new}");
     }
-    assert!(found, "some seed must retain both rename aliases");
 }
 
 /// Losing the only unsynced name must not skip the byte-crash oracle for the

@@ -13,7 +13,7 @@ use moonpool_core::{DirectIo, IoConstraints, OpenOptions};
 use super::{
     DiskDegradationState, DiskEpisodeKind, FileId, HandleId, OperationId, StorageEvent,
     state::{
-        FileState, HandleState, PendingOpType, PendingStorageOp, StorageState, Wait,
+        FileState, HandleState, Name, PendingOpType, PendingStorageOp, StorageState, Wait,
         WritebackErrors,
     },
 };
@@ -818,9 +818,9 @@ impl StorageEngine {
                 file_id: u64::MAX,
             });
             return (
-                Err(StorageError::Io {
+                Err(StorageError::Os {
                     file_id: FileId(u64::MAX),
-                    kind: std::io::ErrorKind::Other,
+                    code: crate::storage::error::EIO,
                     message: "directory sync failed (simulated I/O error)".to_string(),
                 }),
                 actions,
@@ -829,15 +829,50 @@ impl StorageEngine {
 
         // One process's directory sync commits that process's entries and
         // nobody else's: another disk's metadata is not made durable by it.
+        let in_directory = |owner: &IpAddr, entry: &str| {
+            *owner == owner_ip && parent_directory(entry) == directory
+        };
+        let before: BTreeSet<(String, FileId)> = self
+            .state
+            .durable_paths
+            .iter()
+            .filter(|((owner, entry), _)| in_directory(owner, entry))
+            .map(|((_, entry), file_id)| (entry.clone(), *file_id))
+            .collect();
+        let after: BTreeSet<(String, FileId)> = self
+            .state
+            .path_to_file
+            .iter()
+            .filter(|((owner, entry), _)| in_directory(owner, entry))
+            .map(|((_, entry), file_id)| (entry.clone(), *file_id))
+            .collect();
         self.state
             .durable_paths
-            .retain(|(owner, entry), _| *owner != owner_ip || parent_directory(entry) != directory);
-        for ((owner, entry), file_id) in &self.state.path_to_file {
-            if *owner == owner_ip && parent_directory(entry) == directory {
-                self.state
-                    .durable_paths
-                    .insert((*owner, entry.clone()), *file_id);
-            }
+            .retain(|(owner, entry), _| !in_directory(owner, entry));
+        for (entry, file_id) in &after {
+            self.state
+                .durable_paths
+                .insert((owner_ip, entry.clone()), *file_id);
+        }
+        // A rename is one journal transaction: committing one side of it
+        // commits the other side too, in whichever directory it is. So every
+        // file whose entry changed here gets its full visible set of names.
+        let touched: BTreeSet<FileId> = before
+            .symmetric_difference(&after)
+            .map(|(_, file_id)| *file_id)
+            .collect();
+        if !touched.is_empty() {
+            self.state
+                .durable_paths
+                .retain(|(owner, _), file_id| *owner != owner_ip || !touched.contains(file_id));
+            let visible: Vec<(Name, FileId)> = self
+                .state
+                .path_to_file
+                .iter()
+                .filter(|((owner, _), file_id)| *owner == owner_ip && touched.contains(file_id))
+                .map(|(name, file_id)| (name.clone(), *file_id))
+                .collect();
+            self.state.durable_paths.extend(visible);
         }
         self.state
             .durable_directories
@@ -942,20 +977,25 @@ impl StorageEngine {
         )
     }
 
+    /// Schedule a sync. `range` is `None` for a whole-file sync, or the
+    /// `(offset, len)` of a range sync (`len > 0`), which flushes only the
+    /// sectors of that range.
     pub(crate) fn schedule_sync(
         &mut self,
         handle_id: HandleId,
+        range: Option<(u64, usize)>,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
         self.set_clock(now);
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
+        let (offset, len) = range.unwrap_or((0, 0));
         let pending = PendingStorageOp {
             handle_id,
             file_id,
             op_type: PendingOpType::Sync,
-            offset: 0,
-            len: 0,
+            offset,
+            len,
             data: None,
             append: false,
             positioned: false,
@@ -1260,7 +1300,7 @@ impl StorageEngine {
                 .complete_sync(&pending, &mut actions)
                 .map(|()| StorageCompletion::Unit),
             (PendingOpType::SetLen, StorageOperation::SetLenComplete { new_len }) => self
-                .complete_set_len(&pending, new_len, &mut actions)
+                .complete_set_len(&pending, new_len)
                 .map(|()| StorageCompletion::Unit),
             _ => Err(StorageError::InvalidOperation {
                 operation_id: event.operation_id(),
@@ -1429,6 +1469,40 @@ impl StorageEngine {
             .ok_or(StorageError::InvalidFileHandle { handle_id })?;
         file.image.drop_cache();
         Ok(())
+    }
+
+    /// Reserve disk space for `[0, len)` of the file (`fallocate`), growing
+    /// it first when it is shorter. `ENOSPC` when the sectors that have no
+    /// space yet do not fit; then nothing changes.
+    pub(crate) fn allocate(
+        &mut self,
+        handle_id: HandleId,
+        len: u64,
+    ) -> (Result<(), StorageError>, StorageActions) {
+        let mut actions = StorageActions::default();
+        let file_id = match self.open_file_id(handle_id) {
+            Ok(file_id) => file_id,
+            Err(error) => return (Err(error), actions),
+        };
+        let Some((owner_ip, path, needed)) = self.state.files.get(&file_id).map(|file| {
+            (
+                file.owner_ip,
+                file.path.clone(),
+                file.image.space_needed_to_allocate(len),
+            )
+        }) else {
+            return (Err(StorageError::InvalidFileHandle { handle_id }), actions);
+        };
+        if !self.has_room(owner_ip, needed) {
+            let sectors = 0..len.div_ceil(crate::storage::SECTOR_SIZE as u64);
+            let error = self.refuse_full((owner_ip, file_id), &path, sectors, &mut actions);
+            return (Err(error), actions);
+        }
+        if let Some(file) = self.state.files.get_mut(&file_id) {
+            file.image.allocate(len);
+        }
+        self.state.note_damage_changed();
+        (Ok(()), actions)
     }
 
     pub(crate) fn file_size(&self, handle_id: HandleId) -> Result<u64, StorageError> {

@@ -108,7 +108,8 @@ pub struct FileCrashReport {
     pub clean: bool,
     /// Per-sector resolutions of the sectors dirty at crash time.
     pub resolutions: Vec<SectorResolution>,
-    /// The file's unsynced length change was reverted.
+    /// The file's unsynced length change was reverted, in whole or in part
+    /// (an unsynced growth can come back at a length between the two).
     pub length_reverted: bool,
     /// Sectors a sync reported durable that the crash lost anyway — non-empty
     /// only with the barrier-violation family armed.

@@ -167,6 +167,11 @@ impl StorageEngine {
     /// Resolve each unsynced name as one complete entry type. A file replaced
     /// by a directory can roll back to the file or keep the directory, but a
     /// crash cannot leave both at that name.
+    ///
+    /// Names that reach one file, visible or durable, resolve as one unit
+    /// with one coin: a rename is one journal transaction on ext4, XFS and
+    /// btrfs, so a crash keeps it whole or loses it whole. It never loses
+    /// both the old and the new name of a renamed file.
     fn resolve_unsynced_entries(&mut self, ip: IpAddr, probability: f64) {
         let mut names: Vec<Name> = self
             .state
@@ -180,29 +185,78 @@ impl StorageEngine {
             .collect();
         names.sort_unstable();
         names.dedup();
-        for name in names {
-            let visible = self.namespace_entry(&name, false);
-            let durable = self.namespace_entry(&name, true);
-            if visible == durable || sim_random::<f64>() >= probability {
+        let diverged: Vec<Name> = names
+            .into_iter()
+            .filter(|name| self.namespace_entry(name, false) != self.namespace_entry(name, true))
+            .collect();
+        for unit in self.rename_units(diverged) {
+            if sim_random::<f64>() >= probability {
                 continue;
             }
             assert_reachable!("disk: crash lost an unsynced directory entry");
-            self.state.record_fault(StorageFaultRecord {
-                path: name.1.clone(),
-                kind: StorageFaultKind::DirEntryLost,
-                sectors: None,
-            });
-            self.state.path_to_file.remove(&name);
-            self.state.directories.remove(&name);
-            match durable {
-                NamespaceEntry::File(file_id) => {
-                    self.state.path_to_file.insert(name, file_id);
-                }
-                NamespaceEntry::Directory => {
-                    self.state.directories.insert(name);
-                }
-                NamespaceEntry::Missing => {}
+            if unit.len() > 1 {
+                assert_reachable!("disk: crash rolled back a rename as one unit");
             }
+            for name in unit {
+                self.roll_back_entry(name);
+            }
+        }
+    }
+
+    /// Group diverged names into units: two names are in one unit when they
+    /// reach one file, in the visible or the durable namespace. The units
+    /// are in the order of their first name.
+    fn rename_units(&self, diverged: Vec<Name>) -> Vec<Vec<Name>> {
+        let files_of = |name: &Name| -> Vec<FileId> {
+            [false, true]
+                .into_iter()
+                .filter_map(|durable| match self.namespace_entry(name, durable) {
+                    NamespaceEntry::File(file_id) => Some(file_id),
+                    NamespaceEntry::Missing | NamespaceEntry::Directory => None,
+                })
+                .collect()
+        };
+        let mut units: Vec<(Vec<FileId>, Vec<Name>)> = Vec::new();
+        for name in diverged {
+            let files = files_of(&name);
+            let mut merged = (files.clone(), vec![name]);
+            let mut index = 0;
+            while index < units.len() {
+                if units[index].0.iter().any(|file_id| files.contains(file_id)) {
+                    let (unit_files, unit_names) = units.remove(index);
+                    merged.0.extend(unit_files);
+                    let mut combined = unit_names;
+                    combined.append(&mut merged.1);
+                    merged.1 = combined;
+                } else {
+                    index += 1;
+                }
+            }
+            merged.1.sort_unstable();
+            units.push(merged);
+        }
+        units.sort_by(|left, right| left.1.first().cmp(&right.1.first()));
+        units.into_iter().map(|(_, names)| names).collect()
+    }
+
+    /// Put the durable entry back at `name`.
+    fn roll_back_entry(&mut self, name: Name) {
+        let durable = self.namespace_entry(&name, true);
+        self.state.record_fault(StorageFaultRecord {
+            path: name.1.clone(),
+            kind: StorageFaultKind::DirEntryLost,
+            sectors: None,
+        });
+        self.state.path_to_file.remove(&name);
+        self.state.directories.remove(&name);
+        match durable {
+            NamespaceEntry::File(file_id) => {
+                self.state.path_to_file.insert(name, file_id);
+            }
+            NamespaceEntry::Directory => {
+                self.state.directories.insert(name);
+            }
+            NamespaceEntry::Missing => {}
         }
     }
 

@@ -49,7 +49,7 @@ use super::{
     faults::{CrashOutcome, EioTarget, FileCrashReport, SECTOR_SIZE, SectorResolution, weighted},
 };
 use crate::assert_reachable;
-use crate::sim::rng::{sim_random, sim_random_range};
+use crate::sim::rng::{sim_random, sim_random_bool, sim_random_range};
 
 /// A simple bitset for tracking sector states.
 ///
@@ -112,6 +112,15 @@ impl SectorBitSet {
         sectors
             .map_while(|s| usize::try_from(s).ok())
             .any(|s| self.is_set(s))
+    }
+
+    /// The number of set bits.
+    #[must_use]
+    pub fn count_ones(&self) -> u64 {
+        self.bits
+            .iter()
+            .map(|word| u64::from(word.count_ones()))
+            .sum()
     }
 
     /// Clear every bit.
@@ -188,6 +197,10 @@ pub struct FileImage {
     /// can make a stamped sector longer than what was ever claimed durable.
     oracle: BTreeMap<u64, (u32, usize)>,
     fill: FillPattern,
+    /// Sectors with disk space behind them: written, or reserved by
+    /// [`allocate`](Self::allocate). A sector that `set_len` added is a hole
+    /// and uses no space, as an `ftruncate` growth on Linux does.
+    allocated: SectorBitSet,
 }
 
 impl FileImage {
@@ -214,8 +227,12 @@ impl FileImage {
             damaged: SectorBitSet::new(0),
             oracle: BTreeMap::new(),
             fill,
+            allocated: SectorBitSet::new(0),
         };
-        image.resize_visible(size);
+        image.resize_visible(size, true);
+        for sector in 0..image.sectors() {
+            image.allocated.set(as_index(sector));
+        }
         image.committed = image.visible.clone();
         // The initial image *is* the durable one.
         image.dirty.clear_all();
@@ -311,10 +328,13 @@ impl FileImage {
     pub fn write(&mut self, offset: u64, data: &[u8]) -> bool {
         let end = offset.saturating_add(data.len() as u64);
         if end > self.size() {
-            self.resize_visible(end);
+            self.resize_visible(end, false);
         }
         let start = as_index(offset);
         self.visible[start..start + data.len()].copy_from_slice(data);
+        for sector in super::faults::sector_range(offset, data.len()) {
+            self.allocated.set(as_index(sector));
+        }
         let mut healed = false;
         for sector in super::faults::sector_range(offset, data.len()) {
             let index = as_index(sector);
@@ -335,7 +355,7 @@ impl FileImage {
     pub fn set_len(&mut self, new_len: u64) {
         let old_len = self.size();
         let old_sectors = self.sectors();
-        self.resize_visible(new_len);
+        self.resize_visible(new_len, false);
         // Sectors that fell off the end carry nothing forward. The length
         // change itself is unsynced metadata: the crash model resolves it
         // against the durable length.
@@ -354,29 +374,75 @@ impl FileImage {
     #[instrument(level = "trace", skip_all)]
     pub fn sync(&mut self, config: &StorageConfiguration, weight: &dyn Fn(u64) -> f64) -> Vec<u64> {
         self.committed.resize(self.visible.len(), 0);
-        let lie_probability = config.barrier_violation_probability;
         let mut lied = Vec::new();
         for sector in self.flushable_sectors() {
-            let index = as_index(sector);
-            let lie = lie_probability > 0.0
-                && sim_random::<f64>() < weighted(lie_probability, weight(sector));
-            let range = self.visible_bounds(sector);
-            self.oracle.insert(
-                sector,
-                (crc32c::crc32c(&self.visible[range.clone()]), range.len()),
-            );
-            if lie {
-                assert_reachable!("disk: sync lied, a synced write was left volatile");
-                self.lied.set(index);
-                lied.push(sector);
-            } else {
-                let bytes = self.visible[range.clone()].to_vec();
-                self.committed[range].copy_from_slice(&bytes);
-                self.dirty.clear(index);
-                self.lied.clear(index);
-            }
+            self.flush_sector(sector, config, weight, &mut lied);
         }
         lied
+    }
+
+    /// Make the visible bytes of `[offset, offset + len)` durable, and
+    /// nothing else: the range sync of a durable write (`RWF_DSYNC`).
+    ///
+    /// The durable length grows to cover the range (the size is metadata
+    /// that the data needs), but a dirty sector outside the range stays
+    /// volatile, and a shrink that the range does not reach stays unsynced.
+    /// Bytes between the old durable end and the range read the fill
+    /// pattern in the durable image until a sync covers them. Returns the
+    /// sectors this sync lied about.
+    #[instrument(level = "trace", skip(self, config, weight))]
+    pub fn sync_range(
+        &mut self,
+        offset: u64,
+        len: usize,
+        config: &StorageConfiguration,
+        weight: &dyn Fn(u64) -> f64,
+    ) -> Vec<u64> {
+        let sectors: Vec<u64> = super::faults::sector_range(offset, len)
+            .filter(|sector| *sector < self.sectors() && self.is_flushable(*sector))
+            .collect();
+        let end = sectors
+            .last()
+            .map_or(0, |sector| self.visible_bounds(*sector).end);
+        let old_len = self.committed.len();
+        if end > old_len {
+            self.committed.resize(end, 0);
+            fill_extension(&mut self.committed, old_len, self.fill);
+        }
+        let mut lied = Vec::new();
+        for sector in sectors {
+            self.flush_sector(sector, config, weight, &mut lied);
+        }
+        lied
+    }
+
+    /// Flush one sector to the durable image, or lie about it.
+    fn flush_sector(
+        &mut self,
+        sector: u64,
+        config: &StorageConfiguration,
+        weight: &dyn Fn(u64) -> f64,
+        lied: &mut Vec<u64>,
+    ) {
+        let index = as_index(sector);
+        let lie_probability = config.barrier_violation_probability;
+        let lie = lie_probability > 0.0
+            && sim_random::<f64>() < weighted(lie_probability, weight(sector));
+        let range = self.visible_bounds(sector);
+        self.oracle.insert(
+            sector,
+            (crc32c::crc32c(&self.visible[range.clone()]), range.len()),
+        );
+        if lie {
+            assert_reachable!("disk: sync lied, a synced write was left volatile");
+            self.lied.set(index);
+            lied.push(sector);
+        } else {
+            let bytes = self.visible[range.clone()].to_vec();
+            self.committed[range].copy_from_slice(&bytes);
+            self.dirty.clear(index);
+            self.lied.clear(index);
+        }
     }
 
     /// Whether a sync has sectors to flush.
@@ -478,6 +544,16 @@ impl FileImage {
                 // of a partial tail sector included: the durable image must not
                 // invent zeros where the visible one holds garbage.
                 fill_extension(&mut self.committed, old_len, self.fill);
+            } else if let Some(partial) = self.partial_growth_length() {
+                // Writeback reached part of an unsynced growth: the file
+                // comes back at a sector boundary between the two lengths.
+                assert_reachable!("disk crash: an unsynced growth survived in part");
+                let old_len = self.committed.len();
+                self.committed.resize(partial, 0);
+                fill_extension(&mut self.committed, old_len, self.fill);
+                self.visible.truncate(partial);
+                self.resize_bitsets(self.sectors());
+                report.length_reverted = true;
             } else {
                 assert_reachable!("disk crash: an unsynced length change reverted");
                 let durable = self.committed.len();
@@ -545,6 +621,22 @@ impl FileImage {
             self.damaged.set(as_index(*sector));
         }
         report
+    }
+
+    /// For an unsynced growth, half of the time (one draw), a sector
+    /// boundary strictly between the durable and the visible length (one
+    /// more draw): the length that writeback reached. `None` for a shrink,
+    /// or when no boundary lies between the two lengths.
+    fn partial_growth_length(&self) -> Option<usize> {
+        let durable = self.committed.len();
+        let first =
+            durable.div_ceil(SECTOR_SIZE) + usize::from(durable.is_multiple_of(SECTOR_SIZE));
+        let last = self.visible.len().saturating_sub(1) / SECTOR_SIZE;
+        if self.visible.len() <= durable || first > last || !sim_random_bool(0.5) {
+            return None;
+        }
+        let boundary = sim_random_range(first as u64..last as u64 + 1);
+        Some(as_index(boundary) * SECTOR_SIZE)
     }
 
     /// Resolve a kill that keeps the page cache: the machine stays up, so
@@ -780,9 +872,12 @@ impl FileImage {
         clamp_sector(sector, self.visible.len())
     }
 
-    /// Grow or shrink the visible image, filling any extension with the
-    /// file's fill pattern.
-    fn resize_visible(&mut self, new_len: u64) {
+    /// Resize the visible image. The bytes it gains read as zeros, as POSIX
+    /// requires for `ftruncate` growth and for the hole before a write past
+    /// the end. Only a new image (`fill`) starts with the fill pattern: that
+    /// is a device region nobody wrote. A crash can still lose the zeros of
+    /// an unsynced growth to the fill pattern, like any unsynced sector.
+    fn resize_visible(&mut self, new_len: u64, fill: bool) {
         let old_len = self.visible.len();
         let new_len = as_index(new_len);
         self.visible.resize(new_len, 0);
@@ -790,7 +885,9 @@ impl FileImage {
         if new_len <= old_len {
             return;
         }
-        fill_extension(&mut self.visible, old_len, self.fill);
+        if fill {
+            fill_extension(&mut self.visible, old_len, self.fill);
+        }
         // Newly addressable bytes are not durable until the next sync, so they
         // resolve through the crash model like any other write. That dirties
         // the whole sector holding the old end of file, while the durability
@@ -811,6 +908,87 @@ impl FileImage {
         self.eio_read = self.eio_read.resized(len);
         self.eio_write = self.eio_write.resized(len);
         self.damaged = self.damaged.resized(len);
+        self.allocated = self.allocated.resized(len);
+    }
+
+    /// The bytes of `sector` inside a file of `size` bytes.
+    fn sector_bytes(sector: u64, size: u64) -> u64 {
+        let start = sector.saturating_mul(SECTOR_SIZE as u64);
+        size.min(start.saturating_add(SECTOR_SIZE as u64))
+            .saturating_sub(start)
+    }
+
+    /// The disk space the file uses: the bytes of its allocated sectors
+    /// that are inside its length. A hole uses nothing.
+    #[must_use]
+    pub fn allocated_bytes(&self) -> u64 {
+        let size = self.size();
+        let mut bytes = self.allocated.count_ones() * SECTOR_SIZE as u64;
+        if let Some(last) = self.sectors().checked_sub(1)
+            && self.allocated.is_set(as_index(last))
+        {
+            bytes -= SECTOR_SIZE as u64 - Self::sector_bytes(last, size);
+        }
+        bytes
+    }
+
+    /// The disk space a write of `len` bytes at `offset` needs: the bytes
+    /// of its holes and of its growth past the end.
+    #[must_use]
+    pub fn space_needed_for_write(&self, offset: u64, len: usize) -> u64 {
+        let end = offset.saturating_add(len as u64);
+        self.space_needed(super::faults::sector_range(offset, len), end)
+    }
+
+    /// The disk space that [`allocate`](Self::allocate) of `len` needs.
+    #[must_use]
+    pub fn space_needed_to_allocate(&self, len: u64) -> u64 {
+        self.space_needed(0..len.div_ceil(SECTOR_SIZE as u64), len)
+    }
+
+    /// The growth of [`allocated_bytes`](Self::allocated_bytes) when the
+    /// file reaches `end` bytes and `sectors` become allocated. Only those
+    /// sectors and the old last sector (whose bytes inside the length grow)
+    /// can change.
+    fn space_needed(&self, sectors: Range<u64>, end: u64) -> u64 {
+        let old_size = self.size();
+        let new_size = old_size.max(end);
+        let mut affected: Vec<u64> = sectors.clone().collect();
+        if let Some(last) = self.sectors().checked_sub(1)
+            && !sectors.contains(&last)
+        {
+            affected.push(last);
+        }
+        affected
+            .into_iter()
+            .map(|sector| {
+                let was = self.allocated.is_set(as_index(sector));
+                let will = was || sectors.contains(&sector);
+                let after = if will {
+                    Self::sector_bytes(sector, new_size)
+                } else {
+                    0
+                };
+                let before = if was {
+                    Self::sector_bytes(sector, old_size)
+                } else {
+                    0
+                };
+                after.saturating_sub(before)
+            })
+            .sum()
+    }
+
+    /// Reserve disk space for `[0, len)`, growing the file to `len` first
+    /// when it is shorter (`fallocate`). A later write inside the range
+    /// needs no space.
+    pub fn allocate(&mut self, len: u64) {
+        if len > self.size() {
+            self.set_len(len);
+        }
+        for sector in 0..len.div_ceil(SECTOR_SIZE as u64) {
+            self.allocated.set(as_index(sector));
+        }
     }
 
     /// Commit one dirty sector honestly: the visible bytes become durable.
@@ -1304,5 +1482,36 @@ mod tests {
         bits.clear_all();
         assert!(!bits.any_in(0..100));
         assert_eq!(bits.len(), 100);
+    }
+
+    #[test]
+    fn growth_reads_zeros_on_a_garbage_filled_disk() {
+        let mut image = FileImage::new(0, 42, true);
+        image.set_len(1_024);
+        let mut grown = [1u8; 1_024];
+        image.read(0, &mut grown).expect("read failed");
+        assert_eq!(grown, [0u8; 1_024], "set_len growth reads zeros");
+        image.write(2_000, b"tail");
+        let mut hole = [1u8; 976];
+        image.read(1_024, &mut hole).expect("read failed");
+        assert_eq!(
+            hole, [0u8; 976],
+            "the hole before a write past the end reads zeros"
+        );
+    }
+
+    #[test]
+    fn a_hole_uses_no_space_and_a_write_into_it_does() {
+        let mut image = FileImage::new(0, 42, false);
+        image.set_len(2_048);
+        assert_eq!(image.allocated_bytes(), 0);
+        assert_eq!(image.space_needed_for_write(600, 10), 512, "a whole block");
+        assert_eq!(image.space_needed_for_write(0, 1), 512);
+        image.write(0, &[1; 600]);
+        assert_eq!(image.allocated_bytes(), 1_024);
+        assert_eq!(image.space_needed_to_allocate(2_048), 1_024);
+        image.allocate(2_048);
+        assert_eq!(image.allocated_bytes(), 2_048);
+        assert_eq!(image.space_needed_for_write(2_048, 100), 100);
     }
 }

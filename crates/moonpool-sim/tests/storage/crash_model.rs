@@ -566,9 +566,16 @@ fn growing_past_a_synced_tail_sector_keeps_it_durable_when_the_length_reverts() 
             })
             .await;
 
-            assert_eq!(image.len(), 100, "seed {seed}: the grow was rolled back");
+            // The length reverts in whole, or in part to a sector boundary
+            // that writeback reached.
             assert!(
-                image.iter().all(|byte| *byte == 0xA7),
+                image.len() == 100
+                    || (image.len() % SECTOR_SIZE == 0 && image.len() < 8 * SECTOR_SIZE),
+                "seed {seed}: the grow was rolled back, length {}",
+                image.len()
+            );
+            assert!(
+                image[..100].iter().all(|byte| *byte == 0xA7),
                 "seed {seed}: losing the grown tail must not touch the synced prefix"
             );
         });
@@ -651,9 +658,16 @@ fn a_write_growing_past_a_synced_tail_sector_keeps_it_durable() {
             })
             .await;
 
-            assert_eq!(image.len(), 100, "seed {seed}: the grow was rolled back");
+            // The length reverts in whole, or in part to a sector boundary
+            // that writeback reached.
             assert!(
-                image.iter().all(|byte| *byte == 0xA7),
+                image.len() == 100
+                    || (image.len() % SECTOR_SIZE == 0 && image.len() < 2 * SECTOR_SIZE),
+                "seed {seed}: the grow was rolled back, length {}",
+                image.len()
+            );
+            assert!(
+                image[..100].iter().all(|byte| *byte == 0xA7),
                 "seed {seed}: losing the grown tail must not touch the synced prefix"
             );
         });
@@ -762,4 +776,83 @@ fn shrinking_then_growing_does_not_trip_the_oracle() {
             assert_eq!(image, vec![0x5A; 50], "seed {seed}: the surviving prefix");
         });
     }
+}
+
+/// A durable write makes its own range durable and nothing else, as
+/// `RWF_DSYNC` does: an earlier unsynced write elsewhere in the file is
+/// still lost in a crash.
+#[test]
+fn a_durable_write_does_not_cover_an_earlier_unsynced_write() {
+    for seed in 0..8_u64 {
+        local_runtime().block_on(async {
+            let mut sim = sim_with(seed, grow_config(1.0));
+            run_on(&mut sim, |provider| async move {
+                let file = provider
+                    .open("range", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open failed");
+                file.write_at(0, &sectors(2, 0)).await.expect("write");
+                file.sync_all().await.expect("sync");
+                file.write_at(0, &sectors(1, 0xA1))
+                    .await
+                    .expect("unsynced write");
+                file.write_at_durable(SECTOR, &sectors(1, 0xB2))
+                    .await
+                    .expect("durable write");
+            })
+            .await;
+
+            sim.simulate_crash_for_process(test_ip(), true);
+            let image = run_on(&mut sim, |provider| async move {
+                read_image(&provider, "range", 2 * SECTOR_SIZE).await
+            })
+            .await;
+            assert!(
+                image[SECTOR_SIZE..].iter().all(|byte| *byte == 0xB2),
+                "seed {seed}: the durable write survives"
+            );
+            assert!(
+                image[..SECTOR_SIZE] != sectors(1, 0xA1)[..],
+                "seed {seed}: the earlier unsynced write is lost"
+            );
+        });
+    }
+}
+
+/// An unsynced growth can come back at a length between the durable and
+/// the visible one: the point that writeback reached.
+#[test]
+fn an_unsynced_growth_can_survive_in_part() {
+    let mut lengths = std::collections::BTreeSet::new();
+    for seed in 0..32_u64 {
+        local_runtime().block_on(async {
+            let mut sim = sim_with(seed, grow_config(0.0));
+            run_on(&mut sim, |provider| async move {
+                let file = provider
+                    .open("grow", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open failed");
+                file.write_at(0, &sectors(8, 0xC3))
+                    .await
+                    .expect("unsynced growth");
+            })
+            .await;
+            sim.simulate_crash_for_process(test_ip(), true);
+            let image = run_on(&mut sim, |provider| async move {
+                read_image(&provider, "grow", 8 * SECTOR_SIZE).await
+            })
+            .await;
+            assert_eq!(image.len() % SECTOR_SIZE, 0, "seed {seed}");
+            assert!(
+                image.len() < 8 * SECTOR_SIZE,
+                "seed {seed}: the growth never survives whole"
+            );
+            lengths.insert(image.len());
+        });
+    }
+    assert!(lengths.contains(&0), "a full revert occurs: {lengths:?}");
+    assert!(
+        lengths.iter().any(|len| *len > 0),
+        "a partial growth occurs: {lengths:?}"
+    );
 }

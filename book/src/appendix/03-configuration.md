@@ -217,7 +217,7 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 | `sync_failure_probability` | 0.0 | 0 to 0.0005 | 0 |
 | `direct_io_alignment` | 4096 | | |
 | `direct_io_supported` | true | | |
-| `unsynced_dir_entry_loss_probability` | 0.0 | 0 to 0.005 | 0 |
+| `unsynced_dir_entry_loss_probability` | 0.0 | 0.3 to 0.7 | 0 |
 | `short_transfer_probability` | 0.0 | 0 to 0.002 | 0 |
 | `disk_stall_probability` | 0.0 | 0 to 0.001 | 0 |
 | `disk_stall_duration` | 0 | 50 ms to 500 ms | |
@@ -228,7 +228,7 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 | `disk_failure_probability` | 0.0 | 0 to 0.0001 | 0 |
 | `dropped_mutation_discard_probability` | 0.0 | 0 to 0.49 | 0 |
 
-`swarm_for_seed()` draws `random_for_seed()` then 15 coins over the families. `apply_buggify_knobs()` spikes iops to 100..5000, bandwidth to 1 MB/s..20 MB/s, sync failure to 0.05..0.2, disk stall to 0.1..0.5 with 100 ms to 500 ms episodes, throttle to 0.1..0.5 with 1 s to 5 s episodes, and disk failure to 0.001..0.01. `disable_fault_injection()` zeroes every family, including barrier violation. Sectors are `SECTOR_SIZE` = 512 bytes.
+`swarm_for_seed()` draws `random_for_seed()` then 15 coins over the families. `apply_buggify_knobs()` spikes iops to 100..5000, bandwidth to 1 MB/s..20 MB/s, sync failure to 0.05..0.2, writeback error to 0.01..0.05 (only when it is already above 0), disk stall to 0.1..0.5 with 100 ms to 500 ms episodes, throttle to 0.1..0.5 with 1 s to 5 s episodes, and disk failure to 0.001..0.01. `disable_fault_injection()` zeroes every family, including barrier violation. Sectors are `SECTOR_SIZE` = 512 bytes. An injected I/O error is `EIO` with its OS code (`raw_os_error() == Some(5)`), and a full disk is `ENOSPC` (`Some(28)`), as a real failure is. An operation that a crash cuts fails with `BrokenPipe`, not `Interrupted`, so a retry helper does not take it for `EINTR`. A crash can bring an unsynced growth back at its old length, its new length, or a sector boundary between the two.
 
 ## Aiming Storage Faults
 

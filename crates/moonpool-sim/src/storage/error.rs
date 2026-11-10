@@ -152,6 +152,20 @@ pub enum StorageError {
         len: u64,
     },
 
+    /// A simulated OS error, with the code that the kernel returns: an
+    /// injected fault is [`EIO`] and a full disk is [`ENOSPC`]. It converts
+    /// with [`io::Error::from_raw_os_error`], so `raw_os_error()` and
+    /// `kind()` are the ones that a real failure gives.
+    #[error("OS error {code} on {file_id:?}: {message}")]
+    Os {
+        /// The file that encountered the error.
+        file_id: FileId,
+        /// The OS error code.
+        code: i32,
+        /// What failed.
+        message: String,
+    },
+
     /// Underlying I/O error from in-memory storage.
     #[error("I/O error on {file_id:?} ({kind:?}): {message}")]
     Io {
@@ -164,8 +178,17 @@ pub enum StorageError {
     },
 }
 
+/// The `EIO` code (Linux and macOS): an I/O error of the device.
+pub const EIO: i32 = 5;
+
+/// The `ENOSPC` code (Linux and macOS): no space left on the device.
+pub const ENOSPC: i32 = 28;
+
 impl From<StorageError> for io::Error {
     fn from(e: StorageError) -> Self {
+        if let StorageError::Os { code, .. } = &e {
+            return io::Error::from_raw_os_error(*code);
+        }
         let kind = match &e {
             StorageError::NotFound { .. } | StorageError::MissingFile { .. } => {
                 io::ErrorKind::NotFound
@@ -173,9 +196,12 @@ impl From<StorageError> for io::Error {
             StorageError::AlreadyExists { .. } => io::ErrorKind::AlreadyExists,
             StorageError::NotADirectory { .. } => io::ErrorKind::NotADirectory,
             StorageError::IsADirectory { .. } => io::ErrorKind::IsADirectory,
-            StorageError::InvalidFileHandle { .. } | StorageError::FileClosed { .. } => {
-                io::ErrorKind::BrokenPipe
-            }
+            // A crash's interruption is never `Interrupted`: a retry helper
+            // would take it for a transient `EINTR`.
+            StorageError::InvalidFileHandle { .. }
+            | StorageError::FileClosed { .. }
+            | StorageError::OperationInterrupted { .. }
+            | StorageError::SimulationShutdown { .. } => io::ErrorKind::BrokenPipe,
             StorageError::PermissionDenied { .. } => io::ErrorKind::PermissionDenied,
             StorageError::InvalidOperation { .. }
             | StorageError::InvalidOperationData { .. }
@@ -185,11 +211,36 @@ impl From<StorageError> for io::Error {
             StorageError::DirectIoUnsupported | StorageError::DirectIoCreate { .. } => {
                 io::ErrorKind::Unsupported
             }
-            StorageError::OperationInterrupted { .. } => io::ErrorKind::Interrupted,
-            StorageError::SimulationShutdown { .. } => io::ErrorKind::BrokenPipe,
-            StorageError::ScheduleFailed { .. } => io::ErrorKind::Other,
+
+            StorageError::ScheduleFailed { .. } | StorageError::Os { .. } => io::ErrorKind::Other,
             StorageError::Io { kind, .. } => *kind,
         };
         io::Error::new(kind, e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EIO, ENOSPC, FileId, StorageError};
+
+    #[test]
+    fn an_injected_error_has_the_os_code_of_a_real_one() {
+        let eio: std::io::Error = StorageError::Os {
+            file_id: FileId(1),
+            code: EIO,
+            message: "read failed".to_string(),
+        }
+        .into();
+        assert_eq!(eio.raw_os_error(), Some(EIO));
+        assert_eq!(eio.kind(), std::io::Error::from_raw_os_error(EIO).kind());
+        let full: std::io::Error = StorageError::Os {
+            file_id: FileId(1),
+            code: ENOSPC,
+            message: "disk full".to_string(),
+        }
+        .into();
+        assert_eq!(full.raw_os_error(), Some(ENOSPC));
+        #[cfg(unix)]
+        assert_eq!(full.kind(), std::io::ErrorKind::StorageFull);
     }
 }
