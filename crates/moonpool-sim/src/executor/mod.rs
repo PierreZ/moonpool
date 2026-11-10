@@ -132,6 +132,28 @@ use parking_lot::Mutex;
 /// debug-only: release CI is exactly where a silent hang hurts most.
 const DRAIN_POLL_BOUND: u64 = 1_000_000;
 
+/// Ceiling on the polls of one task between two outside world events.
+///
+/// Under the CPU model a self-wake is not a drain-local spin: each poll
+/// costs simulated time and the wake comes back as a `CpuWake` event, so
+/// [`DRAIN_POLL_BOUND`] never trips. The world counts the events that come
+/// from outside the CPU model ([`note_world_event`]); a task polled this many
+/// times with none between them busy-yields in both modes, and fails the
+/// same way.
+const TASK_POLL_BOUND: u64 = 1_000_000;
+
+thread_local! {
+    /// Outside world events processed on this thread (see
+    /// [`TASK_POLL_BOUND`]).
+    static WORLD_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Count one world event that does not come from the CPU model (a timer, a
+/// network or storage completion, a process event).
+pub(crate) fn note_world_event() {
+    WORLD_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
+}
+
 /// Per-task metadata attached through `async_task::Builder::metadata`.
 ///
 /// The `id` keys the kill-on-drop waker registry; the `name` makes the
@@ -146,6 +168,11 @@ pub(crate) struct TaskMeta {
     /// task, inherited by every task spawned while one of its tasks polls.
     /// `None` for the driver's, the workloads' and the injectors' tasks.
     pub(crate) owner: Option<std::net::IpAddr>,
+    /// The boot of the owner this task belongs to. A kill ends the boot
+    /// ([`end_boot`]); a runnable of an ended boot is dropped before its
+    /// next poll, so a task spawned with the bare [`spawn`] dies with its
+    /// process too.
+    pub(crate) boot: u64,
 }
 
 /// A schedulable task holding our metadata.
@@ -188,6 +215,17 @@ struct Shared {
     wakers: Mutex<BTreeMap<u64, Waker>>,
     /// Next task id.
     next_id: AtomicU64,
+    /// The OS thread that runs the executor. A wake from another thread
+    /// would race the seeded queue and break replay, so it panics.
+    thread: std::thread::ThreadId,
+    /// The current boot of each process owner (see [`TaskMeta::boot`]).
+    boots: Mutex<BTreeMap<std::net::IpAddr, u64>>,
+}
+
+impl Shared {
+    fn boot_of(&self, ip: std::net::IpAddr) -> u64 {
+        self.boots.lock().get(&ip).copied().unwrap_or(0)
+    }
 }
 
 /// Removes a task's waker from the registry when its future is dropped
@@ -280,10 +318,12 @@ impl Handle {
         F: Future<Output = T> + 'static,
     {
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
+        let boot = owner.map_or(0, |ip| self.shared.boot_of(ip));
         let meta = TaskMeta {
             id,
             name: Arc::from(name),
             owner,
+            boot,
         };
 
         // catch_unwind: a panicking task must resolve its JoinHandle with
@@ -306,6 +346,11 @@ impl Handle {
 
         let schedule_shared = Arc::clone(&self.shared);
         let schedule = move |runnable: ExecRunnable| {
+            assert!(
+                std::thread::current().id() == schedule_shared.thread,
+                "a simulation task was woken from another OS thread: the \
+                 executor is single-threaded, and a foreign wake breaks replay"
+            );
             schedule_shared.queue.lock().push(runnable);
         };
 
@@ -420,6 +465,17 @@ where
     })
 }
 
+/// End the current boot of the process at `owner`: every task of that boot
+/// still alive, however it was spawned, is dropped before its next poll.
+/// Outside an executor this does nothing.
+pub(crate) fn end_boot(owner: std::net::IpAddr) {
+    CURRENT.with(|current| {
+        if let Some(handle) = current.borrow().as_ref() {
+            *handle.shared.boots.lock().entry(owner).or_insert(0) += 1;
+        }
+    });
+}
+
 /// The deterministic single-threaded executor.
 ///
 /// One instance is created per simulation iteration; its scheduling draws
@@ -443,6 +499,9 @@ pub struct Executor {
     shared: Arc<Shared>,
     /// The iteration seed, kept for stall diagnostics.
     seed: u64,
+    /// Polls per task since the last outside world event, and that event's
+    /// epoch (see [`TASK_POLL_BOUND`]).
+    task_polls: (u64, BTreeMap<u64, u64>),
 }
 
 impl Executor {
@@ -458,8 +517,11 @@ impl Executor {
                 queue: Mutex::new(Vec::new()),
                 wakers: Mutex::new(BTreeMap::new()),
                 next_id: AtomicU64::new(0),
+                thread: std::thread::current().id(),
+                boots: Mutex::new(BTreeMap::new()),
             }),
             seed,
+            task_polls: (0, BTreeMap::new()),
         }
     }
 
@@ -541,6 +603,27 @@ impl Executor {
     ///
     /// The queue lock is released around every `runnable.run()`; wakes fired
     /// during a poll re-acquire it to enqueue.
+    /// Count a poll of `runnable`'s task and panic when it passes
+    /// [`TASK_POLL_BOUND`] with no outside world event since its count began.
+    fn count_task_poll(&mut self, runnable: &ExecRunnable) {
+        let epoch = WORLD_EPOCH.with(Cell::get);
+        let (seen, counts) = &mut self.task_polls;
+        if *seen != epoch {
+            *seen = epoch;
+            counts.clear();
+        }
+        let count = counts.entry(runnable.metadata().id).or_insert(0);
+        *count += 1;
+        assert!(
+            *count < TASK_POLL_BOUND,
+            "task '{}' was polled {} times with no outside world event between \
+             (seed {}): it appears to busy-yield forever",
+            runnable.metadata().name,
+            TASK_POLL_BOUND,
+            self.seed,
+        );
+    }
+
     fn run_until_stalled(&mut self) {
         let mut polls: u64 = 0;
 
@@ -560,11 +643,20 @@ impl Executor {
                 };
                 queue.swap_remove(index)
             };
+            crate::sim::rng::note_activity(runnable.metadata().id);
 
             // A process's task polls only when its CPU slot is free (the
             // CPU model, `crate::sim::cpu`); otherwise the world parks the
             // runnable until its `CpuFree` event. Not runnable, so not here.
             let owner = runnable.metadata().owner;
+            // A task of an ended boot dies here, unpolled: dropping its
+            // runnable cancels it.
+            if let Some(ip) = owner
+                && runnable.metadata().boot != self.shared.boot_of(ip)
+            {
+                drop(runnable);
+                continue;
+            }
             let runnable = match owner {
                 Some(ip) => match crate::sim::cpu::admit(ip, runnable) {
                     Some(runnable) => runnable,
@@ -573,6 +665,7 @@ impl Executor {
                 None => runnable,
             };
 
+            self.count_task_poll(&runnable);
             polls += 1;
             assert!(
                 polls < DRAIN_POLL_BOUND,

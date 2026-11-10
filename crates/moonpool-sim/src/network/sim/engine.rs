@@ -437,6 +437,14 @@ impl NetworkSimulation {
         }
     }
 
+    /// Whether a partition holds bytes in flight on some connection.
+    pub(crate) fn has_held_in_flight(&self) -> bool {
+        self.state
+            .connections
+            .values()
+            .any(|connection| connection.in_flight_held_since.is_some())
+    }
+
     pub(crate) fn has_readable_data(&self, connection_id: ConnectionId) -> bool {
         self.state
             .connections

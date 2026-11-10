@@ -118,7 +118,7 @@ impl DeliveryFaults {
     async fn crash(ctx: &FaultContext, server: &str) -> SimulationResult<()> {
         ctx.crash(server)?;
         assert_reachable!("rpc delivery server crashed after a handler received a job");
-        let down = ctx.random().random_range(100..2500);
+        let down = ctx.random().random_range(100..5000);
         pause(ctx, Duration::from_millis(down)).await?;
         ctx.restart(server)
     }

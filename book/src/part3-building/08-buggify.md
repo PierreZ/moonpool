@@ -117,7 +117,7 @@ The patterns above scatter `buggify!` through your own code. The simulation has 
 if (randomize && BUGGIFY) KNOB = deterministicRandom()->random(lo, hi);
 ```
 
-Moonpool has `buggify_knob!(default, lo..hi)`. It returns `default` on most seeds. When its call site activates and fires it returns a value drawn inside the range:
+Moonpool has `buggify_knob!(default, lo..hi)`. It returns `default` on most seeds. When its call site activates and fires it returns a value drawn inside the range. The first call of a site decides for the whole run, so a knob read in a loop keeps one value inside a seed:
 
 ```rust
 // Most seeds keep the sampled IOPS. A few push the disk to a crawl.

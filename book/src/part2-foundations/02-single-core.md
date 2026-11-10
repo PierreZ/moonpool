@@ -49,7 +49,7 @@ The traits the runner stores as `dyn` objects (`Process`, `Workload`, `FaultInje
 The runtime still runs on one thread. No future ever moves between threads at runtime. But the **type system** commits to `Send + Sync` at every trait boundary, so your code can use the ecosystem it already knows:
 
 - `Arc<RwLock<State>>` for shared state
-- `DashMap` for concurrent maps
+- `DashMap` for concurrent maps, with a fixed hasher or never iterated: `DashMap::new()` uses `RandomState`, so its iteration order changes from run to run and a seed stops replaying
 - `Arc<AtomicBool>` for flags
 - `Send`-bounded spawning: `ctx.task().spawn_task("name", fut)` in the sim, `tokio::spawn` in production
 

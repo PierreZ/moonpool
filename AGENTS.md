@@ -47,7 +47,8 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 ## Core Constraints
 - Single-thread execution via the moonpool deterministic executor
   (`moonpool_sim::executor::Executor`, seeded-random task scheduling), but traits
-  are Send-bounded so customer code can use `Arc<RwLock<…>>`, `DashMap`, and
+  are Send-bounded so customer code can use `Arc<RwLock<…>>`, `DashMap` (with a
+  fixed hasher, or never iterated: `DashMap::new()` uses `RandomState`), and
   `Arc<AtomicBool>` naturally. There is NO tokio runtime inside a simulation:
   a bare `tokio::spawn` panics at runtime — spawn via `ctx.task().spawn_task()`
   or `moonpool_sim::executor::spawn()`
@@ -135,7 +136,7 @@ Where generics hurt, erase at an application boundary with a narrowly scoped tra
 
 **Multi-seed testing**: Default `UntilCoverageStable` runs adaptively until all assert_sometimes! statements have triggered and code coverage plateaus (`.until_coverage_stable(plateau_seeds, max_iterations)` to tune)
 **Failing seeds**: Debug with `SimulationBuilder::set_debug_seeds(vec![failing_seed])` → fix root cause → verify → re-enable chaos
-**Infrastructure events**: Tests terminate early when only partition-expiry events remain
+**Infrastructure events**: `SimWorld::run_until_empty` (low-level tests only, not the runner) stops early when only partition heals and restarts remain, unless a partition holds bytes in flight
 **Invariant checking**: Cross-workload properties validated after every simulation step
 **Goal**: Find bugs, not regression testing
 **NEVER remove assertions that catch bugs** — if an assertion fails, fix the underlying bug. Assertions exist to find real issues; deleting a failing assertion hides the bug.

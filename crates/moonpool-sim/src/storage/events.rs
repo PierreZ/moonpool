@@ -9,7 +9,7 @@
 /// Unlike network operations which model data delivery, storage operations
 /// model the completion of I/O requests. Each operation represents a
 /// pending I/O that completes at the scheduled time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StorageOperation {
     /// Read operation completed.
     ///

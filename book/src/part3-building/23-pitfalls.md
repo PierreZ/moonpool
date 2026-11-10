@@ -121,6 +121,14 @@ network.send(&payload).await?;
 
 **Fix**: plain `#[async_trait]` on dyn-stored impls. `Arc<RwLock<..>>` or `Arc<AtomicX>` for shared state. Provider traits use native `async fn` with `-> impl Future<..> + Send` and need no attribute.
 
+## A Map With a Random Hasher
+
+**Symptom**: the same seed fails once and passes the next time, or the determinism canary trips with no extra draw.
+
+**Cause**: `std::collections::HashMap`, `HashSet` and `DashMap::new()` hash with `RandomState`, a per-process random key. Iteration order then changes from run to run, and so does the order of the sends and draws that follow it.
+
+**Fix**: `BTreeMap` and `BTreeSet`, or a fixed hasher (`BuildHasherDefault::<DefaultHasher>`), or a map that is never iterated. The workspace `clippy.toml` bans the std hash maps, and moonpool-sim also bans `RandomState`. The canary mixes each processed event, each task pick and each captured trace event into its fingerprints, so a replay that talks to another peer trips it.
+
 ## Delayed Operations Need the Scheduler
 
 **Symptom**: a low-level provider test awaits a storage write or a network connect and hangs.

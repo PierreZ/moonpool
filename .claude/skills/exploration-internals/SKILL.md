@@ -49,7 +49,7 @@ factory-created, because a worker rebuilds the world from a fresh builder.
 Under `cargo xtask sim run <name>` the binary is built with edge
 instrumentation: the flake's `shellHook` exports `scripts/sancov-rustc.sh` as
 `RUSTC_WRAPPER`, xtask sets `SANCOV_CRATES` to the crates (underscored) whose
-edges count and builds into `target/sancov`, the wrapper adds
+edges count and builds into `target/sancov/<crates>` (one dir per set), the wrapper adds
 `-Cpasses=sancov-module` for exactly those crates, and `until_coverage_stable`
 plateaus on real edges.
 Under plain `cargo run` it falls back to assertion coverage. Any change to

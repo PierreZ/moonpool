@@ -20,7 +20,9 @@
 //! mechanism madsim's `Runtime::check_determinism` uses: a run is executed
 //! twice with the same seed; the first run records a fingerprint after every
 //! draw (a probe of the stream's state after the draw, taken on a *clone* so
-//! the check consumes no randomness, mixed with the logical clock), the second
+//! the check consumes no randomness, mixed with the logical clock and with a
+//! rolling hash of the world's activity: each processed event, each executor
+//! pick and each captured trace event), the second
 //! compares each fingerprint against the record, and at the end the whole
 //! record must have been consumed. Any uncontrolled difference — task
 //! scheduling, operation order, the number or order of draws, simulated
@@ -68,6 +70,17 @@ thread_local! {
 
     /// The determinism canary (see the module docs).
     static CANARY: RefCell<Canary> = const { RefCell::new(Canary::Off) };
+
+    /// Whether the canary records or checks: the activity hooks below cost
+    /// nothing while it is off.
+    static CANARY_ARMED: Cell<bool> = const { Cell::new(false) };
+
+    /// A rolling hash of what the world did since the last reset: each
+    /// processed event, each executor pick, each captured trace event. Mixed
+    /// into every fingerprint, so a replay that sends to another peer or in
+    /// another order trips the canary even when it makes the same draws at
+    /// the same instants.
+    static SIM_ACTIVITY: Cell<u64> = const { Cell::new(0) };
 }
 
 /// The determinism canary's state.
@@ -79,6 +92,8 @@ enum Canary {
     /// Second run: every draw is compared against the record.
     Checking {
         expected: Vec<u64>,
+        /// The recorded run's activity after its last draw.
+        last_activity: u64,
         /// Fingerprints consumed so far.
         index: usize,
         /// The first mismatch; comparison stops once it is set.
@@ -112,6 +127,14 @@ pub enum DeterminismViolation {
         /// Number of draws the replay made.
         consumed: usize,
     },
+    /// Every draw matched, but the world did something else after the last
+    /// draw: another event, another task, another trace event.
+    ActivityDiverged {
+        /// The recorded activity fingerprint.
+        expected: u64,
+        /// The replay's activity fingerprint.
+        actual: u64,
+    },
 }
 
 impl fmt::Display for DeterminismViolation {
@@ -132,6 +155,10 @@ impl fmt::Display for DeterminismViolation {
                 f,
                 "the replay stopped after {consumed} of the {recorded} draws recorded"
             ),
+            Self::ActivityDiverged { expected, actual } => write!(
+                f,
+                "after the last draw the world's activity fingerprinted {actual:#018x}, the recorded run had {expected:#018x}"
+            ),
         }
     }
 }
@@ -145,6 +172,7 @@ impl Canary {
                 expected,
                 index,
                 tripped,
+                ..
             } => {
                 if tripped.is_some() {
                     return;
@@ -191,7 +219,8 @@ fn draw<T>(op: impl FnOnce(&mut ChaCha8Rng) -> T) -> T {
         let result = op(&mut rng);
         if armed {
             let probe: u64 = rng.clone().random();
-            let fingerprint = probe ^ mix64(SIM_CLOCK_NANOS.with(Cell::get));
+            let fingerprint =
+                probe ^ mix64(SIM_CLOCK_NANOS.with(Cell::get)) ^ SIM_ACTIVITY.with(Cell::get);
             CANARY.with(|canary| canary.borrow_mut().observe(fingerprint));
         }
         result
@@ -315,6 +344,7 @@ pub fn reset_sim_rng() {
     RNG_BREAKPOINTS.with(|bp| bp.borrow_mut().clear());
     SWARM_OP_MASK.with(|mask| mask.set(None));
     SIM_CLOCK_NANOS.with(|clock| clock.set(0));
+    SIM_ACTIVITY.with(|activity| activity.set(0));
 }
 
 /// Draws since the last seed set or reset — the fork explorer's coordinate.
@@ -370,10 +400,37 @@ pub(crate) fn note_logical_time(now: Duration) {
     SIM_CLOCK_NANOS.with(|clock| clock.set(nanos));
 }
 
+/// Fold one word of world activity into the canary's rolling hash. Does
+/// nothing while the canary is off.
+pub(crate) fn note_activity(word: u64) {
+    if CANARY_ARMED.with(Cell::get) {
+        SIM_ACTIVITY.with(|activity| activity.set(mix64(activity.get().rotate_left(7) ^ word)));
+    }
+}
+
+/// Fold the hash of `value` into the canary's rolling hash. Does nothing,
+/// and hashes nothing, while the canary is off.
+pub(crate) fn note_activity_of<T: std::hash::Hash + ?Sized>(value: &T) {
+    if CANARY_ARMED.with(Cell::get) {
+        // `DefaultHasher::new()` uses fixed keys: the same value hashes the
+        // same in both runs.
+        let mut hasher = std::hash::DefaultHasher::new();
+        value.hash(&mut hasher);
+        note_activity(std::hash::Hasher::finish(&hasher));
+    }
+}
+
+/// The fingerprint of the activity after the last draw: one more record
+/// entry, so a divergence after the run's last draw still trips.
+fn final_activity_fingerprint() -> u64 {
+    mix64(SIM_ACTIVITY.with(Cell::get) ^ 0x5eed_f1a1_ac71_7177)
+}
+
 /// Arm the determinism canary for the recording run: from now on every draw
 /// appends its fingerprint to a fresh record (any earlier record is dropped).
 pub fn begin_determinism_record() {
     CANARY.with(|canary| *canary.borrow_mut() = Canary::Recording(Vec::new()));
+    CANARY_ARMED.with(|armed| armed.set(true));
 }
 
 /// Switch the canary from recording to checking: the next draws are compared,
@@ -391,6 +448,7 @@ pub fn begin_determinism_check() {
         };
         *canary = Canary::Checking {
             expected,
+            last_activity: final_activity_fingerprint(),
             index: 0,
             tripped: None,
         };
@@ -413,9 +471,12 @@ pub fn begin_determinism_check() {
 /// Panics if no checking run is in progress — a programmer error in the
 /// runner, never an operating condition.
 pub fn finish_determinism_check() -> Result<usize, DeterminismViolation> {
+    let actual_activity = final_activity_fingerprint();
+    CANARY_ARMED.with(|armed| armed.set(false));
     CANARY.with(|canary| {
         let Canary::Checking {
             expected,
+            last_activity,
             index,
             tripped,
         } = canary.replace(Canary::Off)
@@ -431,6 +492,12 @@ pub fn finish_determinism_check() -> Result<usize, DeterminismViolation> {
                 consumed: index,
             });
         }
+        if actual_activity != last_activity {
+            return Err(DeterminismViolation::ActivityDiverged {
+                expected: last_activity,
+                actual: actual_activity,
+            });
+        }
         Ok(index)
     })
 }
@@ -438,6 +505,7 @@ pub fn finish_determinism_check() -> Result<usize, DeterminismViolation> {
 /// Disarm the canary without a verdict (an aborted run).
 pub fn stop_determinism_canary() {
     CANARY.with(|canary| *canary.borrow_mut() = Canary::Off);
+    CANARY_ARMED.with(|armed| armed.set(false));
 }
 
 /// Draw this iteration's operation-alphabet swarm mask from the simulation

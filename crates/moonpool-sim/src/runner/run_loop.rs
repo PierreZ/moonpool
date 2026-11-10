@@ -934,18 +934,22 @@ impl SimulationBuilder {
             return Ok(Self::empty_report());
         }
 
-        // Uninstall the select! offset override on every exit path (normal,
-        // early return, panic): without this, the source installed by
-        // install_select_offset would leak past run() and later selects on
-        // this thread would silently keep drawing from the stale sim stream
-        // instead of the documented entropy fallback.
-        struct SelectOverrideReset;
-        impl Drop for SelectOverrideReset {
+        // Reset every piece of per-run thread-local state on every exit path
+        // (normal, early return, panic): the select! offset override (or
+        // later selects on this thread keep drawing from a stale sim stream
+        // instead of the entropy fallback), the determinism canary (or the
+        // next run on this thread records into this run's fingerprints), and
+        // buggify with its sinks and knob values (or code outside a run keeps
+        // firing faults).
+        struct PerRunStateReset;
+        impl Drop for PerRunStateReset {
             fn drop(&mut self) {
                 crate::sim::uninstall_select_offset();
+                crate::sim::stop_determinism_canary();
+                crate::chaos::buggify_reset();
             }
         }
-        let _select_reset = SelectOverrideReset;
+        let _per_run_reset = PerRunStateReset;
 
         // Free the assertion region on every exit path, including a panic:
         // otherwise the next run() on this thread would inherit this run's

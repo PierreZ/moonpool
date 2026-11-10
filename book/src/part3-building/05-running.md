@@ -133,7 +133,7 @@ Two more things end a campaign early. A workload task that panics or is cancelle
 
 ## Checking Determinism
 
-`check_determinism()` runs every seed twice and compares a fingerprint after every draw on the simulation stream. The replay is a full run, judged like one. Any uncontrolled difference, a `HashMap` iterated in random order, a wall-clock read, a static that survives a run, fails the seed with the always-assertion `"determinism canary: replay matched the recorded draw sequence"` and names the first diverging draw. It doubles the cost and needs factory workloads. Turn it on when a seed stops reproducing, and [Reproducing with FixedCount](./21-reproducing.md#when-the-bug-disappears) shows how to bisect from there.
+`check_determinism()` runs every seed twice and compares a fingerprint after every draw on the simulation stream. The fingerprint mixes in the logical clock and a hash of the processed events, the executor picks and the captured trace events. The replay is a full run, judged like one. Any uncontrolled difference, a `HashMap` iterated in random order, a wall-clock read, a static that survives a run, fails the seed with the always-assertion `"determinism canary: replay matched the recorded draw sequence"` and names the first diverging draw. It doubles the cost and needs factory workloads. Turn it on when a seed stops reproducing, and [Reproducing with FixedCount](./21-reproducing.md#when-the-bug-disappears) shows how to bisect from there.
 
 ## Exit Codes
 

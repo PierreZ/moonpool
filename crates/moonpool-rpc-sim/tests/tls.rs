@@ -55,3 +55,20 @@ fn bounded_campaign_hits_every_required_scenario() {
     }
     assert!(missing.is_empty(), "never observed: {missing:?}");
 }
+
+/// The seed that tripped the canary: its bit flip landed inside a
+/// `ClientHello`, and with the operating system's randomness rustls ordered
+/// the extensions differently on each run, so the flip hit another field
+/// and the replay diverged. The TLS randomness now comes from the seed
+/// (which also moves what this seed draws).
+#[test]
+fn a_bit_flip_in_a_client_hello_replays() {
+    let report = moonpool_rpc_sim::tls::tls_campaign()
+        .check_determinism()
+        .set_debug_seeds(vec![1_394_813_207_319_705_728])
+        .set_iterations(1)
+        .run()
+        .expect("simulation configuration is valid");
+    report.eprint();
+    assert_eq!(report.failed_runs, 0, "the seed replays");
+}
