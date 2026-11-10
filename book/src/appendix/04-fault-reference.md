@@ -174,6 +174,7 @@ The engine records `SimFaultEvent`s. The runner merges them into the trace under
 | Preset | Use |
 |--------|-----|
 | `NetworkConfiguration::default()` | FoundationDB's always-on rates: rare random closes, clock drift, buggified delays, probabilistic connect failures. No clogs, partitions, bit flips or black holes. |
+| `NetworkConfiguration::without_chaos()` | The default latencies, no fault. The runner uses it when the simulation has no `Chaos::Network`. |
 | `NetworkConfiguration::fast_local()` | Microsecond latencies, chaos disabled. |
 | `ChaosConfiguration::disabled()` | Every network fault off. |
 | `StorageConfiguration::default()` | Realistic SSD timing, no faults. |

@@ -114,7 +114,7 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `set_iterations(n)`, `until_coverage_stable(10, 1000)` (default), `set_debug_seeds(seeds)`, `run_time_budget(d)` (1 h) | Campaign control. |
 | `enable_exploration(ExplorationConfig)`, `replay_timeline(seed, recipe)`, `check_determinism()` | Exploration, replay, canary. |
 
-No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Without `Chaos::Network` the network still has FoundationDB's always-on faults (random close, clock drift, buggified delay, probabilistic connect failure). Without `Chaos::Storage` storage has no faults.
+No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Without `Chaos::Network` the network has no faults (`NetworkConfiguration::without_chaos()`: default latencies, chaos disabled). Without `Chaos::Storage` storage has no faults.
 
 ## SimulationReport
 
