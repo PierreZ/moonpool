@@ -83,6 +83,9 @@ pub(crate) struct SimInner {
     /// The CPU model: one slot per process, the parked runnables, the
     /// active poll's local clock (see `crate::sim::cpu`).
     pub(crate) cpu: CpuState,
+    /// The per-process clock model and the clock of each booted process
+    /// (see `crate::sim::clock`).
+    pub(crate) clocks: super::clock::ClockState,
 }
 
 /// Campaign lifetime for the global sleep-delay fault.
@@ -117,6 +120,7 @@ impl SimInner {
             buggified_delay_window: BuggifiedDelayWindow::Unbounded,
             recovery_mode: false,
             cpu: CpuState::default(),
+            clocks: super::clock::ClockState::default(),
         }
     }
 

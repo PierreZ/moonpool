@@ -1,40 +1,73 @@
 //! Simulation time provider implementation.
 
-use std::time::Duration;
+use std::{net::IpAddr, time::Duration};
 
 use moonpool_core::{TimeError, TimeProvider};
 
 use crate::sim::WeakSimWorld;
 
 /// Simulation time provider that integrates with `SimWorld`.
+///
+/// A provider made with [`for_ip`](Self::for_ip) reads the clock of the
+/// process at that address when the world has a
+/// [`ClockModel`](crate::ClockModel): `now()` and `timer()` are process
+/// time, and each sleep and timeout lasts its duration in process time. Else
+/// it reads world time.
 #[derive(Debug, Clone)]
 pub struct SimTimeProvider {
     sim: WeakSimWorld,
+    ip: Option<IpAddr>,
 }
 
 impl SimTimeProvider {
     /// Create a new simulation time provider.
     #[must_use]
     pub fn new(sim: WeakSimWorld) -> Self {
-        Self { sim }
+        Self { sim, ip: None }
+    }
+
+    /// Create a time provider for the process at `ip`: it reads the
+    /// process's own clock while one exists (see
+    /// [`SimWorld::process_clock`](crate::SimWorld::process_clock)).
+    #[must_use]
+    pub fn for_ip(sim: WeakSimWorld, ip: IpAddr) -> Self {
+        Self { sim, ip: Some(ip) }
+    }
+
+    fn clock(&self) -> Option<crate::ProcessClock> {
+        self.sim.process_clock(self.ip?)
+    }
+
+    /// The world duration of `duration` of this provider's time.
+    fn world_duration(&self, duration: Duration) -> Duration {
+        self.clock()
+            .map_or(duration, |clock| clock.world_duration(duration))
+    }
+
+    /// This provider's reading of world time `world`.
+    fn local(&self, world: Duration) -> Duration {
+        self.clock().map_or(world, |clock| clock.local(world))
     }
 }
 
 impl TimeProvider for SimTimeProvider {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
-        let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
+        let sleep_future = self
+            .sim
+            .sleep(self.world_duration(duration))
+            .map_err(|_| TimeError::Shutdown)?;
         sleep_future.await.map_err(|_| TimeError::Shutdown)
     }
 
     fn now(&self) -> Duration {
         // Return exact simulation time (equivalent to FDB's now())
-        self.sim.now().unwrap_or(Duration::ZERO)
+        self.local(self.sim.now().unwrap_or(Duration::ZERO))
     }
 
     fn timer(&self) -> Duration {
         // Return drifted timer time (equivalent to FDB's timer())
         // Can be up to clock_drift_max ahead of now()
-        self.sim.timer().unwrap_or(Duration::ZERO)
+        self.local(self.sim.timer().unwrap_or(Duration::ZERO))
     }
 
     async fn timeout<F, T>(&self, duration: Duration, future: F) -> Result<T, TimeError>
@@ -42,7 +75,10 @@ impl TimeProvider for SimTimeProvider {
         F: std::future::Future<Output = T> + Send,
         T: Send,
     {
-        let sleep_future = self.sim.sleep(duration).map_err(|_| TimeError::Shutdown)?;
+        let sleep_future = self
+            .sim
+            .sleep(self.world_duration(duration))
+            .map_err(|_| TimeError::Shutdown)?;
 
         // Race the future against the timeout. Both become ready via distinct
         // simulation events, so the event queue's deterministic ordering (not

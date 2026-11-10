@@ -15,7 +15,7 @@ Enabled by `Chaos::Network(mode)`, limited by `network_fault_mask`. Each family 
 | `BitFlip` | `1 << 2` | 1 to 32 bits of in-flight data are flipped. | `bit_flip_probability`, `bit_flip_min_bits`, `bit_flip_max_bits`, `bit_flip_cooldown` |
 | `RandomClose` | `1 << 3` | A connection closes during I/O. A share is an explicit close, the rest a reset. | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` |
 | `ConnectFailure` | `1 << 4` | `connect` fails or hangs. | `connect_failure_mode`, `connect_failure_probability` |
-| `ClockDrift` | `1 << 5` | Each node's clock drifts up to a bound. | `clock_drift_enabled`, `clock_drift_max` |
+| `ClockDrift` | `1 << 5` | One world-wide `timer()` runs ahead of `now()` up to a bound. It is not per node; see `Chaos::Clocks`. | `clock_drift_enabled`, `clock_drift_max` |
 | `BuggifiedDelay` | `1 << 6` | Timers fire late by an extra random delay. | `buggified_delay_enabled`, `buggified_delay_max`, `buggified_delay_probability` |
 | `PairLatency` | `1 << 7` | One IP pair gets permanent extra latency. | `max_pair_latency` |
 | `BlackHole` | `1 << 8` | A connection whose sends vanish silently and forever. The idle drop black-holes an idle connection in simulated time. | `black_hole_probability`, `black_hole_cooldown`, `idle_drop_rate` |
@@ -132,6 +132,7 @@ Reboots are bounded by `max_dead` per injector pool. The restart runs the proces
 | Fault | Source | What happens |
 |-------|--------|--------------|
 | CPU time | `Chaos::Cpu(mode)`, `SimWorld::set_cpu_model` | Every poll, sent byte and written byte costs simulated time on the process's one core. `cpu_charge(Duration)` adds explicit work. |
+| Process clocks | `Chaos::Clocks(mode)`, `SimWorld::set_clock_model` | Each process boot reads its own `now()` from a random epoch near zero, and each machine's clock runs up to 5 % fast or slow, sleeps included. A persisted `now()` can be larger than the `now()` after a reboot. |
 | Gray failure | `Chaos::GrayFailure { config, mode }` | Up to `max_slow` machines run slow for a long window: CPU, disk and network multipliers. |
 | Manual slowness | `FaultContext::set_slowness(ip, Slowness)`, `SimWorld::set_slowness` | Install multipliers by hand. `SimContext::slowness(ip)` reads them. |
 

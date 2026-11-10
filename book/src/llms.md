@@ -100,7 +100,7 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `processes(count, factory)`, `cluster(LocalityConfig, factory)` | `count`: `usize` or `RangeInclusive<usize>`. One call per role. |
 | `tags(&[(key, &[values])]) -> Result` | Over the last group. |
 | `workload(w)`, `workload_factory(f)`, `workloads(WorkloadCount, f)` | Exploration and `check_determinism` need a factory. |
-| `enable_chaos([Chaos..])` | `Network(mode)`, `Storage(mode)`, `Attrition { config, mode }`, `Outage { config, mode }`, `BuggifyKnobs`, `Cpu(mode)`, `GrayFailure { config, mode }`. |
+| `enable_chaos([Chaos..])` | `Network(mode)`, `Storage(mode)`, `Attrition { config, mode }`, `Outage { config, mode }`, `BuggifyKnobs`, `Cpu(mode)`, `Clocks(mode)`, `GrayFailure { config, mode }`. |
 | `chaos_duration(d)` | Required by `fault_factory`. After it: recovery mode. |
 | `chaos_until_run_ends()` | Chaos ends when the last `run()` returns (`chaos_duration` is the cap); `check()` runs on live processes after the cutoff. `chaos_ended_at()` gives the cutoff. |
 | `fault_factory(\|\| Box<dyn FaultInjector>)` | Custom injector per run. |
@@ -183,6 +183,7 @@ All are no-ops in production. `moonpool-journal` shows the pattern: four `hint!`
 | `Outage` | `Outage::groups(["acceptors"])`: probability 1.0, start 0–10 s, down 1–10 s, no straggler. `OutageVeto::new(\|victims\| bool).publish(ctx.state())`. |
 | `GrayFailure` | `GrayFailure::new(max_slow)`: window 0.3–1.0 of the chaos window, cpu 10–1000, disk 5–100, network 2–20, `GrayKinds::ALL`. |
 | `CpuModel` | Drawn per seed under `Chaos::Cpu`; `SimWorld::set_cpu_model` by hand. |
+| `ClockModel` | Drawn per seed under `Chaos::Clocks`: per-boot `now()` from a random epoch, per-machine rate on `now`/`timer`/`sleep`/`timeout`. Workloads keep world time. `SimWorld::set_clock_model` by hand. |
 | `NetworkFaultMask`, `StorageFaultMask` | `all()`, `none()`, `.with(f)`, `.without(f)`. `NetworkFault::{Clog, Partition, BitFlip, RandomClose, ConnectFailure, ClockDrift, BuggifiedDelay, PairLatency, BlackHole}`. `StorageFault::{Corruption, Eio, Misdirect, PhantomWrite, SyncFailure, ShortTransfer, DirEntryLoss, CrashDamage, Degradation, DiskFailure, DroppedMutationDiscard}`. A dropped write, sync or `set_len` future still lands at its scheduled time (as on Tokio and io_uring) unless `dropped_mutation_discard_probability` discards it whole. A dropped read is cancelled. |
 | `ReplicatedFaults` | `ReplicatedFaults::new(DomainLevel::Machine).tolerance(1).group("acceptors")`. Patterns `Minority`, `Striped`, `Rolling`, `Spared`. |
 | `FaultFocus` | `FaultFocus::new().background(0.0).layout(journal.regions().iter(), \|r\| if r.kind == Layout::RECORD { 1.0 } else { 0.0 })` (`Journal::regions()` returns `Vec<LayoutRegion>`). |
@@ -234,7 +235,7 @@ For provider tests without the runner: `SimWorld::new_with_seed(seed)`, `new_wit
 2. **Driver and oracle.** Write the `Workload` with a small reference model (`BTreeMap` of expected state, not a copy of the server). Reconcile ambiguous results: a timed-out write may have committed.
 3. **Facts and invariants.** Emit `tracing` events for every protocol decision. Write cursor-based invariants for agreement, validity, persistence, prefix, client semantics.
 4. **Guidance.** Add `assert_sometimes!` on every retry, timeout and recovery path. Add watermarks for depth. Keep bucket vocabularies coarse.
-5. **Chaos.** Enable `Chaos::Network(Swarm)`, then `Storage(Swarm)`, then `Attrition`, then `Outage`, `Cpu`, `GrayFailure`. Add `hint!` moments in storage code. Add `buggify!` at dangerous choices. Mask what the harness cannot observe.
+5. **Chaos.** Enable `Chaos::Network(Swarm)`, then `Storage(Swarm)`, then `Attrition`, then `Outage`, `Cpu`, `Clocks`, `GrayFailure`. Add `hint!` moments in storage code. Add `buggify!` at dangerous choices. Mask what the harness cannot observe.
 6. **Campaign.** Keep the default `UntilCoverageStable`. Register the binary in xtask ([Running Simulation Binaries with xtask](./appendix/08-xtask.md)). Add exploration when a bug needs a sequence of rare events.
 7. **Debug.** Pin the seed with `set_debug_seeds`, `set_iterations(1)`, `trace_level(LevelFilter::ERROR)`. Read the event trace. Fix the root cause. Re-enable chaos.
 

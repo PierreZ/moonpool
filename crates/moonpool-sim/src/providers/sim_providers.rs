@@ -68,7 +68,7 @@ impl SimProviders {
     pub fn new(sim: WeakSimWorld, ip: IpAddr) -> Self {
         Self {
             network: SimNetworkProvider::new(sim.clone(), ip),
-            time: SimTimeProvider::new(sim.clone()),
+            time: SimTimeProvider::for_ip(sim.clone(), ip),
             task: SimTaskProvider::default(),
             random: SimRandomProvider::new(),
             storage: SimStorageProvider::new(sim.clone(), ip),

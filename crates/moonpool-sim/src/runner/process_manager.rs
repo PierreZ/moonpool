@@ -401,6 +401,10 @@ impl<'a> ProcessManager<'a> {
             };
             factory()
         };
+        // Each boot starts its own clock, read by the process's time provider.
+        if let Ok(world) = sim.upgrade() {
+            world.boot_process_clock(ip);
+        }
         let ip_string = ip.to_string();
         let process_token = shutdown_signal.child_token();
         let scope = tokio_util::sync::CancellationToken::new();

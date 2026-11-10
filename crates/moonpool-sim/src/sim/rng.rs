@@ -171,7 +171,7 @@ impl Canary {
 
 /// 64-bit `SplitMix64` finalizer: spreads the logical clock over all 64 bits
 /// before it is mixed into a fingerprint.
-fn mix64(mut x: u64) -> u64 {
+pub(crate) fn mix64(mut x: u64) -> u64 {
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     x ^ (x >> 31)

@@ -172,6 +172,8 @@ and under the simulator in its own `#[test]`.
   optional straggler. An `OutageVeto` lets the harness defer it.
 - `Chaos::Cpu` and `Chaos::GrayFailure`: a CPU model per process and slow
   but alive machines. Workloads read `SimContext::slowness`.
+- `Chaos::Clocks`: each process boot has its own `now()`, which starts
+  near zero, and each machine's clock runs fast or slow, sleeps included.
 - `Chaos::BuggifyKnobs` moves network and storage knobs to extremes.
 - `SimContext::crash_self` and `SelfCrash`: a process crashes itself, as a
   power loss would.
