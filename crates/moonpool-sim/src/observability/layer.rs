@@ -517,6 +517,7 @@ where
             return;
         };
 
+        crate::sim::rng::note_activity_of(&(&source, &name));
         let mut store = self.events.lock();
         let time_ms = store.last_sim_time_ms;
         store.push(

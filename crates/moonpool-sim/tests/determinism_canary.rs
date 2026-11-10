@@ -258,7 +258,9 @@ fn early_exit_after_a_matching_prefix_trips_the_canary() {
 
 /// Draws exactly like [`Honest`] on every run, but its `check()` reads a
 /// process-wide counter the seed does not control and fails on the replay.
-/// The fingerprints match; the replay's own failure must still fail the seed.
+/// The draws match, but the world does something else after the last draw
+/// (the failed check), so the canary trips on the activity, and the seed
+/// fails.
 struct FailsOnReplay {
     runs: &'static AtomicUsize,
 }
@@ -295,8 +297,11 @@ fn replay_failure_with_matching_draws_fails_the_seed() {
         .expect("simulation configuration is valid");
 
     assert_eq!(report.iterations, 1);
-    assert_eq!(canary_pass_count(&report), 1, "the draws did replay");
-    assert!(!canary_violated(&report));
+    assert!(
+        canary_violated(&report),
+        "the activity after the last draw differs: {:?}",
+        report.assertion_violations
+    );
     assert_eq!(report.failed_runs, 1, "the replay's failure fails the seed");
     assert_eq!(report.seeds_failing, vec![13]);
 }
@@ -315,4 +320,56 @@ fn instance_workloads_are_rejected() {
         ),
         other => panic!("expected InvalidConfiguration, got {other:?}"),
     }
+}
+
+/// Sends one message to one of two echo processes. The record run talks to
+/// the first and the replay to the second, from a process-wide counter the
+/// seed does not control: the same number of draws, only another peer.
+struct WrongPeer {
+    runs: &'static AtomicUsize,
+}
+
+#[async_trait]
+impl Workload for WrongPeer {
+    fn name(&self) -> &'static str {
+        "client"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let run = self.runs.fetch_add(1, Ordering::SeqCst);
+        let peers = ctx.topology().all_process_ips();
+        let peer = &peers[run % 2];
+        let exchange = async {
+            let mut stream = ctx.network().connect(peer).await?;
+            stream.write_all(b"ping").await?;
+            let mut reply = [0_u8; 4];
+            stream.read_exact(&mut reply).await?;
+            Ok::<_, std::io::Error>(())
+        };
+        let _ = ctx
+            .time()
+            .timeout(Duration::from_millis(500), exchange)
+            .await;
+        Ok(())
+    }
+}
+
+#[test]
+fn a_replay_that_talks_to_another_peer_trips_the_canary() {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let report = SimulationBuilder::new()
+        .check_determinism()
+        .set_iterations(1)
+        .set_debug_seeds(vec![13])
+        .processes(2, || Box::new(Echo))
+        .workload_factory(|| Box::new(WrongPeer { runs: &RUNS }))
+        .run()
+        .expect("simulation configuration is valid");
+
+    assert_eq!(report.failed_runs, 1, "another peer is another run");
+    assert!(
+        canary_violated(&report),
+        "{:?}",
+        report.assertion_violations
+    );
 }

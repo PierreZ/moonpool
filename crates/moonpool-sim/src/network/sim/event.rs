@@ -13,7 +13,7 @@ pub struct NetworkOperationId(pub(crate) u64);
 /// Events carry identities and deadlines only, never payload: the bytes an
 /// event lands live in the engine's per-connection in-flight queue, where a
 /// fault injected after scheduling can still reach them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NetworkEvent {
     /// Wake-up feed used to evaluate network maintenance at the current time.
     Maintenance,

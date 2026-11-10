@@ -8,7 +8,7 @@ use crate::storage::StorageOperation;
 pub struct OperationId(pub(crate) u64);
 
 /// A completion targeted at one exact pending storage operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StorageEvent {
     operation_id: OperationId,
     handle_id: HandleId,

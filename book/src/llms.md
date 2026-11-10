@@ -169,7 +169,7 @@ Capture rule: INFO and above, constant message, inside a process or workload tas
 | `buggify_with_prob!(p)`, `buggify_fault_with_prob!(p)` | `p` at an active site. The fault form is silent in recovery mode. |
 | `buggify_named!("label", p)` + `set_activation("label", bool)` | Named sites a harness can mask. |
 | `buggify_pick!(p, n)`, `buggify_range!(p, range)` | `Option<usize>`, `Option<u64>`. |
-| `buggify_knob!(default, lo..hi)` | A knob value in range on some seeds (`moonpool-sim`). |
+| `buggify_knob!(default, lo..hi)` | A knob value in range on some seeds (`moonpool-sim`). The first call of a site decides for the whole run. |
 | `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it, and a per-process regime's timed reboots too (label `TIMED_REBOOT_LABEL`). |
 | `cpu_charge(Duration)` | Explicit CPU work under `Chaos::Cpu`. |
 

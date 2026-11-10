@@ -44,6 +44,10 @@ async-task = "4.7"
 async-trait = "0.1"
 crc32c = "0.6"
 futures = "0.3"
+# Pure-Rust math (ln, pow): the platform libm may differ by one ulp between
+# Linux, macOS and wasm, which moves a delay by a nanosecond and can swap two
+# events, so a seed would not replay across platforms.
+libm = "0.2"
 # Seeded ChaCha8 only — no OS entropy, so no getrandom (keeps the sim wasm-clean).
 rand = { version = "0.10", default-features = false }
 rand_chacha = { version = "0.10", default-features = false }

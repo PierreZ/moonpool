@@ -17,8 +17,12 @@ use moonpool_sim::{
 };
 
 /// Spawns a detached worker that bumps a per-IP counter every 10ms, then
-/// parks until shut down. All of its work happens in the child task.
-struct WorkerProcess;
+/// parks until shut down. All of its work happens in the child task. With
+/// `bare`, the worker is spawned with the bare `executor::spawn`, which has
+/// no task scope: the boot it carries must still end it.
+struct WorkerProcess {
+    bare: bool,
+}
 
 #[async_trait]
 impl Process for WorkerProcess {
@@ -30,17 +34,20 @@ impl Process for WorkerProcess {
         let key = format!("worker_ticks:{}", ctx.my_ip());
         let time = ctx.time().clone();
         let state = ctx.state().clone();
-        ctx.task()
-            .spawn_task("worker", async move {
-                loop {
-                    if time.sleep(Duration::from_millis(10)).await.is_err() {
-                        return;
-                    }
-                    let ticks: u64 = state.get(&key).unwrap_or(0);
-                    state.publish(&key, ticks + 1);
+        let worker = async move {
+            loop {
+                if time.sleep(Duration::from_millis(10)).await.is_err() {
+                    return;
                 }
-            })
-            .detach();
+                let ticks: u64 = state.get(&key).unwrap_or(0);
+                state.publish(&key, ticks + 1);
+            }
+        };
+        if self.bare {
+            moonpool_sim::executor::spawn("worker", worker).detach();
+        } else {
+            ctx.task().spawn_task("worker", worker).detach();
+        }
         ctx.shutdown().cancelled().await;
         Ok(())
     }
@@ -129,10 +136,9 @@ impl FaultInjector for CrashAndWatchWorker {
     }
 }
 
-#[test]
-fn a_crash_stops_the_tasks_the_process_spawned() {
+fn crash_stops_worker(bare: bool) {
     let report = SimulationBuilder::new()
-        .processes(1, || Box::new(WorkerProcess))
+        .processes(1, move || Box::new(WorkerProcess { bare }))
         .workload_factory(|| Box::new(PatientWorkload))
         .fault_factory(|| Box::new(CrashAndWatchWorker))
         .chaos_duration(Duration::from_secs(30))
@@ -147,6 +153,18 @@ fn a_crash_stops_the_tasks_the_process_spawned() {
         "no spawned task may outlive its process's crash"
     );
     assert_eq!(report.successful_runs, 3);
+}
+
+#[test]
+fn a_crash_stops_the_tasks_the_process_spawned() {
+    crash_stops_worker(false);
+}
+
+/// A task spawned with the bare `executor::spawn` has no task scope, but it
+/// carries its process's boot, and a kill ends the boot.
+#[test]
+fn a_crash_stops_a_task_spawned_with_the_bare_executor() {
+    crash_stops_worker(true);
 }
 
 /// Owns a guard for as long as its boot lives, and on every boot requires

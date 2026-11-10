@@ -32,7 +32,7 @@ fn sample_arrival_gap(rate: f64) -> Duration {
     }
     // `1 - u` is in (0, 1], so the logarithm is finite and not positive.
     let u = sim_random_f64();
-    let seconds = -(1.0 - u).ln() / rate;
+    let seconds = -libm::log(1.0 - u) / rate;
     Duration::try_from_secs_f64(seconds).unwrap_or(Duration::MAX)
 }
 
