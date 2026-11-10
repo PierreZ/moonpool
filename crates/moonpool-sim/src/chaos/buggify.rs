@@ -13,6 +13,16 @@
 
 use crate::sim::rng::sim_random_f64;
 use rand::distr::uniform::SampleUniform;
+use std::any::Any;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+
+thread_local! {
+    /// The value each [`buggify_knob!`](crate::buggify_knob) site took in
+    /// this run: the first call decides, later calls read it back.
+    static KNOBS: RefCell<BTreeMap<&'static str, Box<dyn Any>>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
 
 pub use moonpool_buggify::buggify_internal;
 
@@ -25,6 +35,7 @@ pub use moonpool_buggify::buggify_internal;
 /// [`buggify!`](crate::buggify), the per-site argument for
 /// [`buggify_with_prob!`](crate::buggify_with_prob)).
 pub fn buggify_init(activation_prob: f64) {
+    KNOBS.with(|knobs| knobs.borrow_mut().clear());
     moonpool_buggify::hint::clear_sink();
     moonpool_buggify::set_random_source(sim_random_f64);
     moonpool_buggify::buggify_init(activation_prob);
@@ -35,6 +46,7 @@ pub fn buggify_init(activation_prob: f64) {
 /// Buggify is inert again after this call, as it is outside an active
 /// simulation.
 pub fn buggify_reset() {
+    KNOBS.with(|knobs| knobs.borrow_mut().clear());
     moonpool_buggify::hint::clear_sink();
     moonpool_buggify::shard::clear_sink();
     moonpool_buggify::buggify_reset();
@@ -45,20 +57,38 @@ pub fn buggify_reset() {
 ///
 /// Returns `default` on most seeds, but when this call site is buggify-activated
 /// and fires (same two-phase model as [`buggify_internal`]) it returns a random
-/// value drawn from `range`. Deterministic per `(location, seed)`; varies across
-/// seeds. Mirrors `FoundationDB`'s `if (randomize && BUGGIFY) KNOB = random(lo, hi)`
+/// value drawn from `range`. The first call of a run decides; every later call
+/// of the same site in that run returns the same value, so a knob read in a
+/// loop never changes inside one seed. Deterministic per `(location, seed)`;
+/// varies across seeds. Mirrors `FoundationDB`'s `if (randomize && BUGGIFY) KNOB = random(lo, hi)`
 /// (`Buggify.h`): a knob keeps its configured value most of the time, but a given
 /// seed occasionally spikes it to an extreme within `range`.
 #[must_use]
 pub fn buggify_knob_internal<T>(default: T, range: std::ops::Range<T>, location: &'static str) -> T
 where
-    T: SampleUniform + PartialOrd + Clone,
+    T: SampleUniform + PartialOrd + Clone + 'static,
 {
-    if buggify_internal(0.25, location) {
+    let kept = KNOBS.with(|knobs| {
+        knobs
+            .borrow()
+            .get(location)
+            .and_then(|value| value.downcast_ref::<T>())
+            .cloned()
+    });
+    if let Some(value) = kept {
+        return value;
+    }
+    let value = if buggify_internal(0.25, location) {
         crate::sim::sim_random_range_or_default(range)
     } else {
         default
-    }
+    };
+    KNOBS.with(|knobs| {
+        knobs
+            .borrow_mut()
+            .insert(location, Box::new(value.clone()));
+    });
+    value
 }
 
 /// Buggify a config knob *value* within bounds.
@@ -66,6 +96,7 @@ where
 /// `buggify_knob!(default, lo..hi)` evaluates to `default` on most seeds, but when
 /// buggify is enabled and this call site is activated + fires (same model as
 /// [`buggify!`](crate::buggify)) it evaluates to a random value in `lo..hi`.
+/// One value per site per run: the first call decides, later calls read it.
 /// Deterministic per `(location, seed)`, so replay is exact. Mirrors
 /// `FoundationDB`'s `if (randomize && BUGGIFY) KNOB = random(lo, hi)`.
 #[macro_export]
@@ -206,5 +237,25 @@ mod tests {
             (1_000..2_000).contains(&v),
             "spiked value must be in range, got {v}"
         );
+    }
+
+    /// A knob read in a loop keeps one value for the whole run, and a new
+    /// run decides again.
+    #[test]
+    fn test_buggify_knob_keeps_its_value_in_a_run() {
+        for seed in 0..50_u64 {
+            reset_sim_rng();
+            set_sim_seed(seed);
+            buggify_init(1.0);
+            let first = buggify_knob_internal::<u64>(100, 1_000..2_000, "looped");
+            for _ in 0..20 {
+                assert_eq!(
+                    buggify_knob_internal::<u64>(100, 1_000..2_000, "looped"),
+                    first,
+                    "seed {seed}: the knob changed inside one run"
+                );
+            }
+            buggify_reset();
+        }
     }
 }

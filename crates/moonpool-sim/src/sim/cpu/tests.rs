@@ -176,7 +176,7 @@ fn poisson_arrivals_use_the_core_at_their_offered_load() {
         let _generator = spawn("generator", async move {
             let world = weak.upgrade().expect("world alive");
             loop {
-                let gap = -(1.0 - sim_random_f64()).ln() / rate_per_sec;
+                let gap = -libm::log(1.0 - sim_random_f64()) / rate_per_sec;
                 world
                     .sleep(Duration::from_secs_f64(gap))
                     .await

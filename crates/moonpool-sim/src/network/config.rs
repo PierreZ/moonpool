@@ -991,7 +991,7 @@ pub fn sample_latency(distribution: &LatencyDistribution) -> Duration {
             // to avoid lossy manual casts. A product that overflows `Duration`
             // saturates to `Duration::MAX` instead of panicking.
             let u = sim_random_f64();
-            let factor = -(1.0 - u).ln();
+            let factor = -libm::log(1.0 - u);
             let extra_secs = mean.as_secs_f64() * factor;
             let extra = Duration::try_from_secs_f64(extra_secs).unwrap_or(Duration::MAX);
             min.saturating_add(extra)

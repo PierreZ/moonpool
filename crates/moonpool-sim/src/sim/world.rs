@@ -669,7 +669,7 @@ impl SimWorld {
             duration.saturating_add(
                 chaos
                     .buggified_delay_max
-                    .mul_f64(sim_random::<f64>().powf(1000.0)),
+                    .mul_f64(libm::pow(sim_random::<f64>(), 1000.0)),
             )
         } else {
             duration
