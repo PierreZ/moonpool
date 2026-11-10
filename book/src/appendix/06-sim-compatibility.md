@@ -85,7 +85,7 @@ All of these come from `moonpool-buggify` and `moonpool-assertions`, which have 
 ## 9. Type Bounds
 
 - Futures that cross a trait are `Send + 'static`. The executor is single-threaded, but spawned futures are Send-bounded.
-- Shared state: `Arc<RwLock<..>>`, `Arc<AtomicBool>`, `DashMap`. `Rc<RefCell<..>>` only in code written against the local traits (`LocalProviders`, `LocalTaskProvider`) and spawned with `spawn_local_task`.
+- Shared state: `Arc<RwLock<..>>`, `Arc<AtomicBool>`, `DashMap` (with a fixed hasher, such as `DashMap::with_hasher(BuildHasherDefault::<DefaultHasher>::default())`, or never iterated: the default `RandomState` changes the iteration order from run to run). `Rc<RefCell<..>>` only in code written against the local traits (`LocalProviders`, `LocalTaskProvider`) and spawned with `spawn_local_task`.
 - `Process`, `Workload` and `FaultInjector` are dyn-stored: `#[async_trait]` with `Send + Sync + 'static`.
 - Provider traits use native `async fn` with `-> impl Future<..> + Send`. No `#[async_trait]`.
 - Never hold a `MutexGuard` or `RwLockGuard` across `.await`.

@@ -84,9 +84,7 @@ where
         default
     };
     KNOBS.with(|knobs| {
-        knobs
-            .borrow_mut()
-            .insert(location, Box::new(value.clone()));
+        knobs.borrow_mut().insert(location, Box::new(value.clone()));
     });
     value
 }

@@ -285,3 +285,25 @@ fn genuine_deadlock_panics_with_the_seed() {
 fn spawn_outside_block_on_panics() {
     drop(spawn("orphan", async {}));
 }
+
+/// A wake from another OS thread would race the seeded ready queue and break
+/// replay: it panics on that thread instead of queueing the task.
+#[test]
+fn a_wake_from_another_thread_panics() {
+    let slot: Arc<Mutex<Option<std::task::Waker>>> = Arc::new(Mutex::new(None));
+    let mut executor = Executor::new(1);
+    let task_slot = Arc::clone(&slot);
+    let foreign = executor.block_on(async move {
+        let _parked = spawn(
+            "parked",
+            std::future::poll_fn(move |cx| {
+                *task_slot.lock() = Some(cx.waker().clone());
+                std::task::Poll::<()>::Pending
+            }),
+        );
+        until_stalled().await;
+        let waker = slot.lock().take().expect("the task was polled");
+        std::thread::spawn(move || waker.wake()).join()
+    });
+    assert!(foreign.is_err(), "the foreign wake must panic");
+}

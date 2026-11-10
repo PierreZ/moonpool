@@ -188,6 +188,9 @@ struct Shared {
     wakers: Mutex<BTreeMap<u64, Waker>>,
     /// Next task id.
     next_id: AtomicU64,
+    /// The OS thread that runs the executor. A wake from another thread
+    /// would race the seeded queue and break replay, so it panics.
+    thread: std::thread::ThreadId,
 }
 
 /// Removes a task's waker from the registry when its future is dropped
@@ -306,6 +309,11 @@ impl Handle {
 
         let schedule_shared = Arc::clone(&self.shared);
         let schedule = move |runnable: ExecRunnable| {
+            assert!(
+                std::thread::current().id() == schedule_shared.thread,
+                "a simulation task was woken from another OS thread: the \
+                 executor is single-threaded, and a foreign wake breaks replay"
+            );
             schedule_shared.queue.lock().push(runnable);
         };
 
@@ -458,6 +466,7 @@ impl Executor {
                 queue: Mutex::new(Vec::new()),
                 wakers: Mutex::new(BTreeMap::new()),
                 next_id: AtomicU64::new(0),
+                thread: std::thread::current().id(),
             }),
             seed,
         }

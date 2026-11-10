@@ -1,0 +1,13 @@
+# moonpool-sim's own clippy configuration. Clippy reads the nearest
+# clippy.toml, so this file repeats the workspace rules and adds the
+# replay rules of the simulator.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "randomized iteration order breaks deterministic replay", replacement = "std::collections::BTreeMap" },
+    { path = "std::collections::HashSet", reason = "randomized iteration order breaks deterministic replay", replacement = "std::collections::BTreeSet" },
+    { path = "std::hash::RandomState", reason = "a per-process random hasher breaks deterministic replay", replacement = "std::hash::DefaultHasher (fixed keys)" },
+]
+disallowed-methods = [
+    { path = "f64::ln", reason = "the platform libm may differ by one ulp, so a seed may not replay on another platform", replacement = "libm::log" },
+    { path = "f64::exp", reason = "the platform libm may differ by one ulp, so a seed may not replay on another platform", replacement = "libm::exp" },
+    { path = "f64::powf", reason = "the platform libm may differ by one ulp, so a seed may not replay on another platform", replacement = "libm::pow" },
+]

@@ -365,11 +365,16 @@ impl SimWorld {
     }
 
     /// Processes queued workload events until stalled.
+    ///
+    /// It stops early when only infrastructure events remain (partition
+    /// heals, restarts), unless a partition holds bytes in flight: its heal
+    /// releases them, so it is not inert.
     #[instrument(level = "debug", skip(self))]
     pub fn run_until_empty(&mut self) {
         while self.step() {
             let inner = self.inner.read();
             if inner.events_processed.is_multiple_of(50)
+                && !inner.network.has_held_in_flight()
                 && inner
                     .scheduler
                     .iter()
