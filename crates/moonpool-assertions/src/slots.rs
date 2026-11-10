@@ -24,7 +24,7 @@ use crate::hooks::{DiscoveryKind, on_discovery};
 use crate::table::{self, Claim, Entry, atomic};
 
 /// Maximum number of tracked assertion slots.
-pub const MAX_ASSERTION_SLOTS: usize = 4096;
+pub const MAX_ASSERTION_SLOTS: usize = 8192;
 
 /// Maximum length of the assertion message stored in a slot.
 const SLOT_MSG_LEN: usize = 64;
@@ -185,7 +185,7 @@ pub(crate) fn fnv1a_64(hash: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
 /// Two messages that hash alike share one slot and silently merge their
 /// accounting, so the hash is 64 bits wide: across a full table of
 /// [`MAX_ASSERTION_SLOTS`] sites the birthday bound puts the chance of any
-/// collision below 10⁻¹², where 32 bits put it near 10⁻³.
+/// collision near 2·10⁻¹², where 32 bits put it near 10⁻².
 #[must_use]
 pub fn msg_hash(msg: &str) -> u64 {
     fnv1a_64(FNV64_OFFSET, msg.bytes())
