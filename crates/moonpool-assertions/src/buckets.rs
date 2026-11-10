@@ -85,6 +85,10 @@ impl Entry for EachBucket {
     type Id = (u64, u64);
     const CAPACITY: usize = MAX_EACH_BUCKETS;
 
+    fn home((site_hash, bucket_hash): (u64, u64)) -> u64 {
+        site_hash ^ bucket_hash.rotate_left(32)
+    }
+
     unsafe fn published(entry: *mut Self) -> *const u8 {
         unsafe { &raw const (*entry).published }
     }
@@ -502,11 +506,20 @@ mod tests {
         // observation of key = 2 hashes onto the bucket holding key = 1.
         let ptr = crate::region::each_bucket_ptr();
         let site = msg_hash("collide");
+        // Move the key = 1 bucket to the home of key = 2 and give it the
+        // identity of key = 2.
         // Safety: `init` installed a correctly aligned bucket region, and the
-        // bucket at index zero is published.
+        // bucket at the home of key = 1 is published.
         unsafe {
-            let bucket = ptr.add(8).cast::<()>().cast::<EachBucket>();
-            <EachBucket as Entry>::store_id(bucket, (site, bucket_hash(site, &[("key", 2)])));
+            let base = ptr.add(8).cast::<()>().cast::<EachBucket>();
+            let one = (site, bucket_hash(site, &[("key", 1)]));
+            let two = (site, bucket_hash(site, &[("key", 2)]));
+            let from = base.add(table::home_index::<EachBucket>(one));
+            let to = base.add(table::home_index::<EachBucket>(two));
+            assert_ne!(from, to, "the forged move needs two homes");
+            std::ptr::copy_nonoverlapping(from, to, 1);
+            atomic(<EachBucket as Entry>::published(from)).store(0, Ordering::Release);
+            <EachBucket as Entry>::store_id(to, two);
         }
         assertion_sometimes_each("collide", &[("key", 2)], &[]);
 
@@ -532,9 +545,14 @@ mod tests {
 
         // Safety: `init` installed a correctly aligned bucket region.
         unsafe {
-            let bucket = ptr.add(8).cast::<()>().cast::<EachBucket>();
+            let id = (site, bucket_hash(site, &[("key", 1)]));
+            let bucket = ptr
+                .add(8)
+                .cast::<()>()
+                .cast::<EachBucket>()
+                .add(table::home_index::<EachBucket>(id));
             table::header_word(ptr, 0).store(1, Ordering::Release);
-            <EachBucket as Entry>::store_id(bucket, (site, bucket_hash(site, &[("key", 1)])));
+            <EachBucket as Entry>::store_id(bucket, id);
             atomic(<EachBucket as Entry>::published(bucket)).store(1, Ordering::Release);
         }
 

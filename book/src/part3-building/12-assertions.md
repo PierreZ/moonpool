@@ -54,6 +54,22 @@ Three rules follow from "the message is the identity":
 2. **One message, one kind.** An `assert_always!` and an `assert_sometimes!` that share a message would evaluate one site under the other's contract. The table flags the slot as conflicted instead, and the run fails with "assertion '...' is shared by call sites of different kinds".
 3. **Never let the table overflow silently.** An evaluation that finds the table full is counted. `SimulationReport::dropped_assertion_allocations` reports the count, and `is_failure()` returns true when it is non-zero. A full table fails loudly instead of looking green.
 
+## Sites That Never Run
+
+A slot is made by the first evaluation of its site. So how can a run report a site that **no seed ever reached**? The macros also declare each site at link time. An assertion macro with a literal message adds its kind, message, `module_path!()`, file and line to a registry (`moonpool_sim::chaos::assertions::declared_sites()`, a `linkme` distributed slice). A message computed at run time is not declared.
+
+The registry does nothing until a run asks for it:
+
+```rust
+SimulationBuilder::new()
+    // Make the slot of every declared site in our crate before seed 1.
+    .require_declared_sites(["my_service"])
+    // A site we know a sweep can miss.
+    .exempt_declared_sites(["compaction: a level overflows twice"])
+```
+
+Each declared site whose module path starts with a prefix gets a slot with zero counts before the first seed. An `assert_always!` that no seed reaches is then a violation ("was never reached"), and an `assert_sometimes!` or `assert_reachable!` that no seed reaches is a coverage violation. `UntilCoverageStable` waits for those sites too. Name your own crates: moonpool's sites stay out of scope unless a prefix names them. wasm has no link-time registry, so there the call declares nothing.
+
 The counts accumulate across seeds. `reset_assertion_results()` zeroes them once at the start of `run()`, not between seeds, so a `sometimes` that fired in seed 7 still counts as reached in seed 300.
 
 ## The Reporting Pipeline
@@ -63,13 +79,13 @@ When the last seed ends, the runner calls `validate_assertion_contracts()`. It r
 **Always violations** are definite bugs, valid at any iteration count:
 
 - an `always`-type assertion failed at least once,
-- an `assert_always!` was never reached (a `must_hit` site with zero evaluations),
+- an `assert_always!` or a numeric `always` was never reached (a `must_hit` site with zero evaluations),
 - an `assert_unreachable!` was reached,
 - the slot or bucket table dropped evaluations, or two sites collided.
 
 **Coverage violations** are statistical and only mean something after enough seeds:
 
-- an `assert_sometimes!` or numeric `sometimes` was evaluated but never passed,
+- an `assert_sometimes!` or numeric `sometimes` was evaluated but never passed, or was never reached,
 - an `assert_reachable!` was never reached,
 - an `assert_sometimes_all!` never had every proposition true at once.
 

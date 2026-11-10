@@ -121,7 +121,7 @@ No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Wi
 | Field | Meaning |
 |-------|---------|
 | `iterations`, `successful_runs`, `failed_runs`, `seeds_used`, `seeds_failing` | Campaign outcome. `is_failure()` is true when a seed failed, an always-assertion was violated, or assertion slots were dropped. |
-| `assertion_results`, `assertion_details`, `bucket_summaries`, `assertion_violations`, `coverage_violations`, `dropped_assertion_allocations` | Assertion accounting. |
+| `assertion_results`, `assertion_details`, `bucket_summaries`, `assertion_violations`, `coverage_violations`, `dropped_assertion_allocations` | Assertion accounting. With `.require_declared_sites(["my_crate"])` (and `.exempt_declared_sites([..])`) every literal-message assertion site of those modules gets a slot before seed 1, so a site no seed reaches is reported as "never reached". |
 | `saturation: Option<SaturationReport { signal, edges_covered, edges_total, sometimes_hit, sometimes_total, plateau_seeds }>`, `convergence_timeout` | How `UntilCoverageStable` stopped. |
 | `exploration: Option<ExplorationReport { total_timelines, expansions, discoveries, bugs_found, bug_recipes, max_active_workers, sancov_edges_total, sancov_edges_covered, converged, per_seed_timelines }>` | Exploration. |
 | `metrics`, `individual_metrics`, `app_metrics`, `metric_queries`, `run_id` | Timing and application metrics. |

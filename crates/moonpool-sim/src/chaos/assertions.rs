@@ -336,6 +336,13 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     slot.msg, slot.fail_count, total
                 ));
             }
+            Some(
+                moonpool_assertions::AssertKind::Sometimes
+                | moonpool_assertions::AssertKind::NumericSometimes,
+            ) if total == 0 => {
+                // Only a declared site has a slot with no evaluation.
+                coverage_violations.push(format!("'{}' was never reached", slot.msg));
+            }
             Some(moonpool_assertions::AssertKind::Sometimes)
                 if total > 0 && slot.pass_count == 0 =>
             {
@@ -356,11 +363,19 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                     slot.msg, slot.pass_count
                 ));
             }
-            Some(moonpool_assertions::AssertKind::NumericAlways) if slot.fail_count > 0 => {
-                always_violations.push(format!(
-                    "numeric assert_always ('{}') failed {} times out of {}",
-                    slot.msg, slot.fail_count, total
-                ));
+            Some(moonpool_assertions::AssertKind::NumericAlways) => {
+                if slot.fail_count > 0 {
+                    always_violations.push(format!(
+                        "numeric assert_always ('{}') failed {} times out of {}",
+                        slot.msg, slot.fail_count, total
+                    ));
+                }
+                if slot.must_hit != 0 && total == 0 {
+                    always_violations.push(format!(
+                        "numeric assert_always ('{}') was never reached",
+                        slot.msg
+                    ));
+                }
             }
             Some(moonpool_assertions::AssertKind::NumericSometimes)
                 if total > 0 && slot.pass_count == 0 =>
@@ -383,7 +398,6 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                 | moonpool_assertions::AssertKind::Sometimes
                 | moonpool_assertions::AssertKind::Reachable
                 | moonpool_assertions::AssertKind::Unreachable
-                | moonpool_assertions::AssertKind::NumericAlways
                 | moonpool_assertions::AssertKind::NumericSometimes
                 | moonpool_assertions::AssertKind::BooleanSometimesAll,
             )
@@ -421,6 +435,10 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
 /// that assertions never crash the program.
 #[macro_export]
 macro_rules! assert_always {
+    ($condition:expr, $message:literal $(, { $($key:expr => $val:expr),+ $(,)? })?) => {{
+        $crate::__declare_site!(Always, true, false, $message);
+        $crate::assert_always!($condition, ($message) $(, { $($key => $val),+ })?)
+    }};
     ($condition:expr, $message:expr) => {{
         let __msg = $message;
         let cond = $condition;
@@ -504,6 +522,10 @@ macro_rules! assert_always_or_unreachable {
 /// Does not panic. Its first success creates a replay anchor for exploration.
 #[macro_export]
 macro_rules! assert_sometimes {
+    ($condition:expr, $message:literal) => {{
+        $crate::__declare_site!(Sometimes, true, false, $message);
+        $crate::assert_sometimes!($condition, ($message))
+    }};
     ($condition:expr, $message:expr) => {{
         $crate::chaos::assertions::on_assertion_bool(
             &$message,
@@ -519,6 +541,10 @@ macro_rules! assert_sometimes {
 /// Does not panic. Its first reach creates a replay anchor for exploration.
 #[macro_export]
 macro_rules! assert_reachable {
+    ($message:literal) => {{
+        $crate::__declare_site!(Reachable, true, false, $message);
+        $crate::assert_reachable!(($message))
+    }};
     ($message:expr) => {{
         $crate::chaos::assertions::on_assertion_bool(
             &$message,
@@ -633,6 +659,10 @@ macro_rules! __assert_sometimes_numeric {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_greater_than {
+    ($val:expr, $thresh:expr, $message:literal $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
+        $crate::__declare_site!(NumericAlways, true, false, $message);
+        $crate::assert_always_greater_than!($val, $thresh, ($message) $(, { $($key => $dval),+ })?)
+    }};
     ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Gt, >, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
@@ -645,6 +675,10 @@ macro_rules! assert_always_greater_than {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_greater_than_or_equal_to {
+    ($val:expr, $thresh:expr, $message:literal $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
+        $crate::__declare_site!(NumericAlways, true, false, $message);
+        $crate::assert_always_greater_than_or_equal_to!($val, $thresh, ($message) $(, { $($key => $dval),+ })?)
+    }};
     ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Ge, >=, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
@@ -657,6 +691,10 @@ macro_rules! assert_always_greater_than_or_equal_to {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than {
+    ($val:expr, $thresh:expr, $message:literal $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
+        $crate::__declare_site!(NumericAlways, true, true, $message);
+        $crate::assert_always_less_than!($val, $thresh, ($message) $(, { $($key => $dval),+ })?)
+    }};
     ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Lt, <, true, $val, $thresh, $message $(, { $($key => $dval),+ })?
@@ -669,6 +707,10 @@ macro_rules! assert_always_less_than {
 /// Does **not** panic on failure — records the violation and logs at ERROR level.
 #[macro_export]
 macro_rules! assert_always_less_than_or_equal_to {
+    ($val:expr, $thresh:expr, $message:literal $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
+        $crate::__declare_site!(NumericAlways, true, true, $message);
+        $crate::assert_always_less_than_or_equal_to!($val, $thresh, ($message) $(, { $($key => $dval),+ })?)
+    }};
     ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
         $crate::__assert_always_numeric!(
             Le, <=, true, $val, $thresh, $message $(, { $($key => $dval),+ })?
@@ -679,6 +721,10 @@ macro_rules! assert_always_less_than_or_equal_to {
 /// Assert that `val > threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_greater_than {
+    ($val:expr, $thresh:expr, $message:literal) => {{
+        $crate::__declare_site!(NumericSometimes, true, true, $message);
+        $crate::assert_sometimes_greater_than!($val, $thresh, ($message))
+    }};
     ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Gt, true, $val, $thresh, $message);
     }};
@@ -687,6 +733,10 @@ macro_rules! assert_sometimes_greater_than {
 /// Assert that `val >= threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_greater_than_or_equal_to {
+    ($val:expr, $thresh:expr, $message:literal) => {{
+        $crate::__declare_site!(NumericSometimes, true, true, $message);
+        $crate::assert_sometimes_greater_than_or_equal_to!($val, $thresh, ($message))
+    }};
     ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Ge, true, $val, $thresh, $message);
     }};
@@ -695,6 +745,10 @@ macro_rules! assert_sometimes_greater_than_or_equal_to {
 /// Assert that `val < threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_less_than {
+    ($val:expr, $thresh:expr, $message:literal) => {{
+        $crate::__declare_site!(NumericSometimes, true, false, $message);
+        $crate::assert_sometimes_less_than!($val, $thresh, ($message))
+    }};
     ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Lt, false, $val, $thresh, $message);
     }};
@@ -703,6 +757,10 @@ macro_rules! assert_sometimes_less_than {
 /// Assert that `val <= threshold` sometimes holds. Guides on watermark improvement.
 #[macro_export]
 macro_rules! assert_sometimes_less_than_or_equal_to {
+    ($val:expr, $thresh:expr, $message:literal) => {{
+        $crate::__declare_site!(NumericSometimes, true, false, $message);
+        $crate::assert_sometimes_less_than_or_equal_to!($val, $thresh, ($message))
+    }};
     ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Le, false, $val, $thresh, $message);
     }};
@@ -771,6 +829,109 @@ macro_rules! assert_sometimes_each {
 /// Re-exports for macro hygiene (`$crate::chaos::assertions::_re_export::*`).
 pub mod _re_export {
     pub use moonpool_assertions::{AssertCmp, AssertKind};
+    #[cfg(not(target_family = "wasm"))]
+    pub use linkme;
+}
+
+// =============================================================================
+// Link-time site registry (#383)
+// =============================================================================
+
+/// One assertion site, declared at link time by the macro that evaluates it.
+///
+/// Each `assert_always!`, `assert_sometimes!`, `assert_reachable!` and
+/// numeric `assert_*` call with a **literal** message adds one entry to
+/// [`declared_sites`]. A site whose message is computed at run time is not
+/// declared. [`SimulationBuilder::require_declared_sites`](crate::SimulationBuilder::require_declared_sites)
+/// makes the slots of the declared sites before the first seed, so a site
+/// that no seed reaches is reported.
+#[derive(Debug, Clone, Copy)]
+pub struct DeclaredSite {
+    /// The assertion kind of the site.
+    pub kind: moonpool_assertions::AssertKind,
+    /// The `must_hit` flag the site's evaluations pass.
+    pub must_hit: bool,
+    /// The watermark direction the site's evaluations pass.
+    pub maximize: bool,
+    /// The site's message: its identity.
+    pub msg: &'static str,
+    /// `module_path!()` of the call site.
+    pub module: &'static str,
+    /// `file!()` of the call site.
+    pub file: &'static str,
+    /// `line!()` of the call site.
+    pub line: u32,
+}
+
+/// The distributed slice that the assertion macros add their sites to.
+#[cfg(not(target_family = "wasm"))]
+#[doc(hidden)]
+#[linkme::distributed_slice]
+pub static DECLARED_SITES: [DeclaredSite];
+
+/// Every assertion site linked into this binary that has a literal message.
+///
+/// Empty on wasm, which has no link-time registry.
+#[must_use]
+pub fn declared_sites() -> &'static [DeclaredSite] {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        &DECLARED_SITES
+    }
+    #[cfg(target_family = "wasm")]
+    {
+        &[]
+    }
+}
+
+/// Make the slots of the declared sites whose module path starts with one
+/// of `module_prefixes`, except the sites whose message is in `exempt`.
+/// Returns how many sites it declared.
+pub(crate) fn declare_sites(module_prefixes: &[String], exempt: &[String]) -> usize {
+    let mut declared = 0;
+    for site in declared_sites() {
+        let in_scope = module_prefixes
+            .iter()
+            .any(|prefix| site.module.starts_with(prefix.as_str()));
+        if !in_scope || exempt.iter().any(|msg| msg == site.msg) {
+            continue;
+        }
+        moonpool_assertions::declare_site(site.kind, site.must_hit, site.maximize, site.msg);
+        declared += 1;
+    }
+    declared
+}
+
+/// Add one site to [`DECLARED_SITES`]. Used by the assertion macros; a
+/// literal message is declared, any other message is not.
+#[cfg(not(target_family = "wasm"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declare_site {
+    ($kind:ident, $must_hit:expr, $maximize:expr, $msg:literal) => {
+        #[$crate::chaos::assertions::_re_export::linkme::distributed_slice(
+            $crate::chaos::assertions::DECLARED_SITES
+        )]
+        #[linkme(crate = $crate::chaos::assertions::_re_export::linkme)]
+        static __MOONPOOL_DECLARED_SITE: $crate::chaos::assertions::DeclaredSite =
+            $crate::chaos::assertions::DeclaredSite {
+                kind: $crate::chaos::assertions::_re_export::AssertKind::$kind,
+                must_hit: $must_hit,
+                maximize: $maximize,
+                msg: $msg,
+                module: module_path!(),
+                file: file!(),
+                line: line!(),
+            };
+    };
+}
+
+/// wasm has no link-time registry: declaring is a no-op.
+#[cfg(target_family = "wasm")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __declare_site {
+    ($($tokens:tt)*) => {};
 }
 
 #[cfg(test)]
