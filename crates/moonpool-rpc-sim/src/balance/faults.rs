@@ -27,9 +27,12 @@ async fn pause(ctx: &FaultContext, millis: std::ops::Range<u64>) -> SimulationRe
 
 /// How long a whole outage holds: `usual`, or, when buggified, long enough
 /// to outlast the client's failure detection, its `all_failed_wait` and its
-/// probe, so a call reports that every alternative failed.
+/// probe, so a call reports that every alternative failed. A server that
+/// lost power sends no reset: the client learns of it from its pings (a
+/// `ping_interval` of 1 s, then a `ping_timeout` of 2 s), so the long
+/// outage starts above that.
 fn outage_millis(usual: std::ops::Range<u64>) -> std::ops::Range<u64> {
-    if buggify!() { 2500..5000 } else { usual }
+    if buggify!() { 5000..8000 } else { usual }
 }
 
 #[async_trait]

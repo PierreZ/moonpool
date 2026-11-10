@@ -10,6 +10,7 @@
 //! - Are deterministic across runs with the same seed
 
 use super::local_runtime;
+use moonpool_sim::TcpListenerTrait as _;
 use moonpool_sim::{
     ConnectFailureMode, NetworkConfiguration, NetworkProvider, SimWorld, buggify_init,
     buggify_reset,
@@ -124,7 +125,13 @@ fn test_connect_failure_mode_probabilistic_error() {
         match settle(&mut sim, provider.connect(addr)) {
             Some(Ok(_)) => success_count += 1,
             Some(Err(e)) => {
-                assert_eq!(e.kind(), std::io::ErrorKind::ConnectionRefused);
+                assert!(
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::HostUnreachable
+                    ),
+                    "a refused connect is an RST or an ICMP host unreachable, got {e}"
+                );
                 error_count += 1;
             }
             None => panic!("connect {i} hung with connect_failure_probability = 1.0"),
@@ -139,7 +146,8 @@ fn test_connect_failure_mode_probabilistic_error() {
 }
 
 /// Test that `connect_failure_probability = 0.0` never refuses a connect:
-/// a buggified connect hangs, every other one succeeds.
+/// a buggified connect hangs until the SYN timeout and fails with
+/// `TimedOut`, every other one succeeds.
 #[test]
 fn test_connect_failure_mode_probabilistic_hang() {
     moonpool_sim::set_sim_seed(99999);
@@ -153,19 +161,25 @@ fn test_connect_failure_mode_probabilistic_hang() {
     let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
     let addr = "hang-server";
-    let _listener = settle(&mut sim, provider.bind(addr))
+    let listener = settle(&mut sim, provider.bind(addr))
         .expect("bind settles")
         .expect("bind succeeds");
 
-    // Only a share of the buggified connects hangs, so give it room.
+    // Only a share of the buggified connects hangs, so give it room. Each
+    // connect that succeeds is accepted, so the backlog never fills.
     let mut hang_count = 0;
     for i in 0..400 {
         match settle(&mut sim, provider.connect(addr)) {
-            Some(Ok(_)) => {}
+            Some(Ok(_)) => {
+                settle(&mut sim, listener.accept())
+                    .expect("accept settles")
+                    .expect("accept succeeds");
+            }
+            Some(Err(e)) if e.kind() == std::io::ErrorKind::TimedOut => hang_count += 1,
             Some(Err(e)) => {
                 panic!("connect {i} refused with connect_failure_probability = 0.0: {e}")
             }
-            None => hang_count += 1,
+            None => panic!("connect {i} never ended: a hung connect must time out"),
         }
     }
 

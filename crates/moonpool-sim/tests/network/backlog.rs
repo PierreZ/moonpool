@@ -358,7 +358,7 @@ fn aborting_parked_unpublished_pair_fails_connect_instead_of_publishing_it() {
 
     // Killing only the client leaves the server listener live. It aborts
     // both the queued endpoint and the unpublished pair held by connect.
-    sim.abort_all_connections_for_ip(ip("10.0.1.1"));
+    sim.kill_connections_for_ip(ip("10.0.1.1"), moonpool_sim::DeathNotice::Reset);
     assert!(
         wake_count.load(Ordering::SeqCst) > 0,
         "aborted connect must wake"
@@ -500,7 +500,7 @@ fn retained_old_listener_accept_cannot_use_a_replacement_generation() {
 
     // A process crash releases the registry entry, but customer code may
     // still hold the old listener object while a replacement binds.
-    sim.abort_all_connections_for_ip(ip("10.0.1.2"));
+    sim.kill_connections_for_ip(ip("10.0.1.2"), moonpool_sim::DeathNotice::Reset);
     let replacement = drive(&mut sim, server.bind(SERVER)).expect("bind replacement");
     assert!(matches!(
         poll_once(waiting_on_old.as_mut()),

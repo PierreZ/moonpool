@@ -19,6 +19,15 @@ use super::{ConnectWaiterId, ConnectionId, PendingPublish};
 /// enough that a retrying client still reaches its peers.
 const CONNECT_HANG_SHARE: f64 = 0.1;
 
+/// How long a hung connect waits before it fails with `TimedOut`: Linux
+/// retries an unanswered SYN with `tcp_syn_retries = 6` and gives up with
+/// `ETIMEDOUT` after about 127 seconds.
+const SYN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(127);
+
+/// Share of the refused connects that fail with `HostUnreachable` (an ICMP
+/// host unreachable) instead of `ConnectionRefused` (an RST).
+const HOST_UNREACHABLE_SHARE: f64 = 0.2;
+
 struct PendingConnectionPair {
     sim: WeakSimWorld,
     client: ConnectionId,
@@ -151,7 +160,9 @@ impl NetworkProvider for SimNetworkProvider {
     /// - Disabled: Normal operation (no failure injection)
     /// - `AlwaysFail`: Always fail with `ConnectionRefused` when buggified
     /// - Probabilistic: a buggified connect is refused with probability
-    ///   `connect_failure_probability` and hangs forever otherwise (tests timeout handling)
+    ///   `connect_failure_probability` (`ConnectionRefused`, or
+    ///   `HostUnreachable` for a share of them); a share of the rest hangs
+    ///   until the SYN timeout (127 s) and fails with `TimedOut`
     #[instrument(skip(self))]
     async fn connect(&self, addr: &str) -> io::Result<Self::TcpStream> {
         let sim = self
@@ -188,19 +199,35 @@ impl NetworkProvider for SimNetworkProvider {
                 // is still reached, rarely.
                 if buggify!() {
                     if sim_random::<f64>() < failure_probability {
-                        // Throw connection_failed error
-                        tracing::debug!(addr = %addr, "Connection establishment failed (Probabilistic mode - error)");
+                        // An RST, or an ICMP host unreachable.
+                        let kind = if sim_random::<f64>() < HOST_UNREACHABLE_SHARE {
+                            crate::assert_reachable!("network: a connect fails host unreachable");
+                            io::ErrorKind::HostUnreachable
+                        } else {
+                            crate::assert_reachable!("network: a connect is refused");
+                            io::ErrorKind::ConnectionRefused
+                        };
+                        tracing::debug!(addr = %addr, ?kind, "Connection establishment failed (Probabilistic mode - error)");
                         return Err(io::Error::new(
-                            io::ErrorKind::ConnectionRefused,
+                            kind,
                             "Connection establishment failed (Probabilistic mode)",
                         ));
                     }
                     if sim_random::<f64>() < CONNECT_HANG_SHARE {
-                        // Hang forever - create a future that never completes
-                        // This tests timeout handling in connection retry logic
-                        tracing::debug!(addr = %addr, "Connection hanging forever (Probabilistic mode - hang)");
-                        std::future::pending::<()>().await;
-                        unreachable!("pending() never resolves");
+                        // An unanswered SYN: the connect hangs until the SYN
+                        // timeout, then fails with `TimedOut`, as on Linux.
+                        // This tests timeout handling in connection retry
+                        // logic, and the connect still ends in the quiet tail.
+                        tracing::debug!(addr = %addr, "Connection hanging until the SYN timeout (Probabilistic mode - hang)");
+                        crate::assert_reachable!("network: a connect hangs until the SYN timeout");
+                        drop(sim);
+                        if let Ok(sleep) = self.sim.sleep(SYN_TIMEOUT) {
+                            let _ = sleep.await;
+                        }
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "connection timed out: no answer to the SYN",
+                        ));
                     }
                 }
             }

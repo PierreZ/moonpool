@@ -11,6 +11,7 @@
 //! | Random close | `random_close_probability` | 0.001% | Reconnection logic, message redelivery, connection pooling |
 //! | Close error surfacing | `random_close_explicit_ratio` | 30% explicit | Immediate-error vs timeout-based detection |
 //! | Black hole | `black_hole_probability` + `black_hole_cooldown` | 0% | Missing request timeouts, keep-alive / heartbeat detection, half-open connections |
+//! | Idle drop | `idle_drop_rate` (black-hole family) | 0.05/s, while black holes are on | A pooled connection that a NAT or a load balancer forgot |
 //! | Connect failure | `connect_failure_mode` | Probabilistic | Connection establishment retries, timeout handling |
 //!
 //! ## Network Latency & Congestion
@@ -408,6 +409,15 @@ pub struct ChaosConfiguration {
     /// Cooldown after a black hole before another connection may be holed.
     pub black_hole_cooldown: Duration,
 
+    /// Idle drops per simulated second for the whole network: a Poisson
+    /// process in sim time that black-holes both directions of one idle
+    /// connection (nothing queued, nothing in flight, nothing unread), as a
+    /// NAT or a load balancer forgets a pooled connection. It belongs to
+    /// the black-hole family: it runs only while
+    /// [`black_hole_probability`](Self::black_hole_probability) is above
+    /// zero, and draws nothing otherwise.
+    pub idle_drop_rate: f64,
+
     /// Enable clock drift simulation
     /// When enabled, `timer()` can return a time up to `clock_drift_max` ahead of `now()`
     /// FDB ref: sim2.actor.cpp:1058-1064
@@ -484,6 +494,7 @@ impl Default for ChaosConfiguration {
             random_close_explicit_ratio: 0.3,  // 30% explicit - matches FDB's sim2.actor.cpp:602
             black_hole_probability: 0.0,       // Off by default: opt-in, like clogs and partitions
             black_hole_cooldown: Duration::from_secs(5),
+            idle_drop_rate: 0.05,
             clock_drift_enabled: true, // Enable by default for chaos testing
             clock_drift_max: Duration::from_millis(100), // FDB default: 0.1 seconds
             buggified_delay_enabled: true, // Enable by default for chaos testing
@@ -517,6 +528,7 @@ impl ChaosConfiguration {
             random_close_explicit_ratio: 0.3,
             black_hole_probability: 0.0,
             black_hole_cooldown: Duration::ZERO,
+            idle_drop_rate: 0.0,
             clock_drift_enabled: false,
             clock_drift_max: Duration::from_millis(100),
             buggified_delay_enabled: false,
@@ -536,15 +548,13 @@ impl ChaosConfiguration {
             // 0.05-1 clogs per connection direction per simulated second: low,
             // never zero, so the swarm mask alone decides whether the family is off.
             clog_rate: f64::from(sim_random_range(1..21)) / 20.0,
-            clog_duration: Duration::from_micros(sim_random_range(50_000..300_000))
-                ..Duration::from_micros(sim_random_range(100_000..500_000)),
+            clog_duration: floor_and_width_micros(50_000..300_000, 50_000..300_000),
             // 0.05-0.5 partitions per simulated second (one every 2-20 s on
             // average), one at a time. FDB has none by default; TigerBeetle
             // keeps a partition about every few seconds. Never zero, so the
             // swarm mask alone decides whether the family is off.
             partition_rate: f64::from(sim_random_range(1..11)) / 20.0,
-            partition_duration: Duration::from_millis(sim_random_range(100..1000))
-                ..Duration::from_millis(sim_random_range(500..3000)),
+            partition_duration: floor_and_width_micros(100_000..1_000_000, 100_000..2_000_000),
             // Bit flip probability range: 0.001% to 0.02% (very low, like FDB)
             bit_flip_probability: f64::from(sim_random_range(1..20)) / 100_000.0,
             bit_flip_min_bits: 1,
@@ -585,6 +595,9 @@ impl ChaosConfiguration {
             // range. Drawn after partial_read_max_bytes for the same reason.
             black_hole_probability: f64::from(sim_random_range(1..100)) / 1_000_000.0,
             black_hole_cooldown: Duration::from_millis(sim_random_range(1000..10_000)),
+            // One idle drop every 20 s on average while the family is on; a
+            // constant, so the seeded draws above keep their values.
+            idle_drop_rate: 0.05,
         }
     }
 
@@ -999,6 +1012,19 @@ pub fn sample_latency(distribution: &LatencyDistribution) -> Duration {
     }
 }
 
+/// A latency range drawn as a floor and a width, in microseconds: the end is
+/// always after the start. Two independent draws for the start and the end
+/// invert on some seeds, and an inverted range samples its start only, so a
+/// seed got one constant latency. Two draws, as before.
+fn floor_and_width_micros(
+    floor: std::ops::Range<u64>,
+    width: std::ops::Range<u64>,
+) -> std::ops::Range<Duration> {
+    let start = sim_random_range(floor);
+    let width = sim_random_range(width).max(1);
+    Duration::from_micros(start)..Duration::from_micros(start.saturating_add(width))
+}
+
 /// Pick a per-field [`LatencyDistribution`] for chaos seeds, mixing all three
 /// variants around a baseline uniform range.
 ///
@@ -1041,22 +1067,16 @@ impl NetworkConfiguration {
     #[must_use]
     pub fn random_for_seed() -> Self {
         Self {
-            bind_latency: random_latency_for_seed(
-                Duration::from_micros(sim_random_range(10..200))
-                    ..Duration::from_micros(sim_random_range(50..300)),
-            ),
-            accept_latency: random_latency_for_seed(
-                Duration::from_micros(sim_random_range(1000..10_000))
-                    ..Duration::from_micros(sim_random_range(5000..15_000)),
-            ),
-            connect_latency: random_latency_for_seed(
-                Duration::from_micros(sim_random_range(1000..50_000))
-                    ..Duration::from_micros(sim_random_range(10_000..100_000)),
-            ),
-            write_latency: random_latency_for_seed(
-                Duration::from_micros(sim_random_range(50..1000))
-                    ..Duration::from_micros(sim_random_range(200..2000)),
-            ),
+            bind_latency: random_latency_for_seed(floor_and_width_micros(10..200, 10..200)),
+            accept_latency: random_latency_for_seed(floor_and_width_micros(
+                1000..10_000,
+                1000..10_000,
+            )),
+            connect_latency: random_latency_for_seed(floor_and_width_micros(
+                1000..50_000,
+                5000..50_000,
+            )),
+            write_latency: random_latency_for_seed(floor_and_width_micros(50..1000, 100..1500)),
             // Distance latency models the deployment, not the seed, so chaos
             // runs leave it to the caller (and draw no RNG for it).
             link_latency: None,
@@ -1124,6 +1144,34 @@ mod swarm_tests {
         reset_sim_rng();
         set_sim_seed(seed);
         NetworkConfiguration::swarm_for_seed()
+    }
+
+    /// No seed gets a latency or duration range that inverts into a
+    /// constant: every range drawn per seed has its end after its start.
+    #[test]
+    fn seeded_ranges_never_invert() {
+        use super::LatencyDistribution;
+        for seed in 0..1000_u64 {
+            reset_sim_rng();
+            set_sim_seed(seed);
+            let config = NetworkConfiguration::random_for_seed();
+            for range in [
+                &config.chaos.clog_duration,
+                &config.chaos.partition_duration,
+            ] {
+                assert!(range.start < range.end, "seed {seed}: {range:?}");
+            }
+            for latency in [
+                &config.bind_latency,
+                &config.accept_latency,
+                &config.connect_latency,
+                &config.write_latency,
+            ] {
+                if let LatencyDistribution::Uniform { start, end } = latency {
+                    assert!(start < end, "seed {seed}: {latency:?}");
+                }
+            }
+        }
     }
 
     /// The bit-flip knob spikes the rate on some seeds and never switches

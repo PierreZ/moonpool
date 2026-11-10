@@ -105,6 +105,22 @@ impl NetworkSimulation {
         let receiver_open = receiver
             .and_then(|id| self.state.connections.get(&id))
             .is_some_and(|connection| !connection.flags.is_closed());
+        // A receiver that lost power answers the first data or FIN that
+        // reaches it with one RST: the peer learns of the death only now.
+        if !matches!(payload, InFlightPayload::Rst)
+            && let Some(dead) = receiver
+            && self
+                .state
+                .connections
+                .get(&dead)
+                .is_some_and(|connection| connection.flags.reset_on_arrival())
+        {
+            if let Some(connection) = self.state.connections.get_mut(&dead) {
+                connection.flags.set_reset_on_arrival(false);
+            }
+            crate::assert_reachable!("network: data reaches a dead endpoint and draws an RST");
+            self.put_rst_in_flight(dead, now, actions);
+        }
         match payload {
             InFlightPayload::Data(data) => {
                 let receiver_reading = receiver
@@ -131,6 +147,12 @@ impl NetworkSimulation {
                 {
                     connection.flags.set_remote_fin_received(true);
                     wakes.push(self.waiters.reads.take(&receiver));
+                }
+            }
+            InFlightPayload::Rst => {
+                if let Some(receiver) = receiver.filter(|_| receiver_open) {
+                    crate::assert_reachable!("network: an RST from a dead process lands");
+                    wakes.append(self.reset_endpoint(receiver));
                 }
             }
         }
@@ -292,6 +314,7 @@ impl NetworkSimulation {
                 result[byte] ^= 1 << bit;
             }
         }
+        crate::assert_reachable!("network: bits flip in a delivered chunk");
         self.last_bit_flip_time = now;
         actions.record(SimFaultEvent::BitFlip {
             connection_id: id.0,
@@ -437,6 +460,7 @@ impl NetworkSimulation {
             // nothing.
             let truncate_to = sim_random_range(1..max_send + 1);
             if truncate_to < data.len() {
+                crate::assert_reachable!("network: a write goes out partially");
                 connection.send_buffer.push_front(SendChunk {
                     data: data.split_off(truncate_to),
                     ready_at,
@@ -490,6 +514,31 @@ impl NetworkSimulation {
             id,
             InFlightPayload::Fin,
             now.saturating_add(Duration::from_nanos(1)),
+            now,
+            actions,
+        );
+    }
+
+    /// Put `id`'s RST on the wire, behind every item in flight.
+    pub(super) fn put_rst_in_flight(
+        &mut self,
+        id: ConnectionId,
+        now: Duration,
+        actions: &mut NetworkActions,
+    ) {
+        if self
+            .connection(id)
+            .is_none_or(|connection| connection.paired_connection.is_none())
+        {
+            return;
+        }
+        // An RST crosses the link like a data segment: it takes the link's
+        // latency, so a peer never learns of a death at the same instant.
+        let latency = crate::network::sample_latency(&self.state.config.write_latency);
+        self.put_in_flight(
+            id,
+            InFlightPayload::Rst,
+            now.saturating_add(latency.max(Duration::from_nanos(1))),
             now,
             actions,
         );

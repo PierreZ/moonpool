@@ -1392,7 +1392,7 @@ impl WorkloadOrchestrator {
                 // Its parked runnables die with it, and its CPU slot starts
                 // over: a free core and zero counters for the next boot.
                 sim.reset_cpu_owner(ip);
-                sim.abort_all_connections_for_ip(ip);
+                sim.kill_connections_for_ip(ip, Self::death_notice(cause));
                 Self::apply_kill_to_storage(sim, env.state, ip, cause);
                 // A held-down crash (None) schedules no restart: the process
                 // stays dead until a fault injector explicitly restarts it.
@@ -1414,7 +1414,7 @@ impl WorkloadOrchestrator {
                 // what it held, for a checker to read.
                 process_manager.retire(ip);
                 sim.reset_cpu_owner(ip);
-                sim.abort_all_connections_for_ip(ip);
+                sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
                 sim.set_slowness(ip, crate::Slowness::HEALTHY);
             }
             Some(crate::sim::Event::ProcessRestart { ip }) => {
@@ -1445,7 +1445,7 @@ impl WorkloadOrchestrator {
                     );
                     process_manager.abort_process(ip);
                     sim.reset_cpu_owner(ip);
-                    sim.abort_all_connections_for_ip(ip);
+                    sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
                     sim.schedule_process_restart(ip, Duration::from_nanos(1));
                     assert_reachable!(
                         "process_manager: running process stopped before its restart"
@@ -1464,6 +1464,20 @@ impl WorkloadOrchestrator {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// What the peers of a process killed by `cause` learn: a host that
+    /// lost power sends nothing, a host that lives on resets each
+    /// connection of the dead process.
+    fn death_notice(cause: ProcessKillKind) -> crate::network::sim::DeathNotice {
+        match cause {
+            ProcessKillKind::Crash | ProcessKillKind::CrashAndWipe => {
+                crate::network::sim::DeathNotice::Silent
+            }
+            ProcessKillKind::GracePeriodExpired
+            | ProcessKillKind::RestartInPlace
+            | ProcessKillKind::KillKeepCache => crate::network::sim::DeathNotice::Reset,
         }
     }
 

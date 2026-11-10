@@ -274,19 +274,21 @@ fn test_random_close_buffer_clearing() {
         let mut client = super::drive(&mut sim, provider.connect(addr))
             .await
             .unwrap();
-        let (mut _server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
+        let (server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
 
         // Queue some data
         client.write_all(b"test message").await.unwrap();
+        assert!(sim.queued_send_bytes(client.connection_id()) > 0);
 
         // Close send side immediately - buffered data should be cleared
         sim.close_connection_asymmetric(client.connection_id(), true, false);
 
         sim.run_until_empty();
 
-        // The data should have been cleared, not delivered
-        // (This matches TCP RST behavior where in-flight data is lost)
-        println!("✅ Buffer clearing on closure executed");
+        // The data was cleared, not delivered (as a TCP RST loses the
+        // bytes that were not sent yet).
+        assert_eq!(sim.queued_send_bytes(client.connection_id()), 0);
+        assert_eq!(sim.unread_bytes(server.connection_id()), 0);
     });
 }
 
@@ -353,22 +355,34 @@ fn test_random_close_with_partitions() {
     local_runtime().block_on(async move {
         let mut config = NetworkConfiguration::fast_local();
         config.chaos.random_close_probability = 0.01;
-        config.chaos.partition_rate = 0.05;
+        config.chaos.partition_rate = 1000.0;
 
         let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
+        // Two machines: a listener bound by name is served by its owner, so
+        // a partition between the machines reaches the connection.
+        let server_provider = sim.network_provider("10.0.1.2".parse().expect("valid ip"));
+        let provider = sim.network_provider("10.0.1.1".parse().expect("valid ip"));
 
         let addr = "partition-test";
-        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let listener = super::drive(&mut sim, server_provider.bind(addr))
+            .await
+            .unwrap();
         let mut client = super::drive(&mut sim, provider.connect(addr))
             .await
             .unwrap();
         let (_server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
+        let _ = sim.take_faults();
 
         // Send messages with both partition and random close chaos active
         for i in 0..30 {
             match client.write_all(format!("msg {i}").as_bytes()).await {
-                Ok(()) => sim.run_until_empty(),
+                Ok(()) => {
+                    // Let simulated time pass, so partitions arrive while
+                    // the messages flow.
+                    let timer = sim.sleep(Duration::from_millis(10));
+                    let _ = super::drive(&mut sim, timer).await;
+                    sim.run_until_empty();
+                }
                 Err(e) => {
                     println!("Failure at message {i}: {e:?}");
                     break;
@@ -376,6 +390,14 @@ fn test_random_close_with_partitions() {
             }
         }
 
-        println!("✅ Random close and partition interaction tested");
+        let faults = sim.take_faults();
+        assert!(
+            faults.iter().any(|record| matches!(
+                record.event,
+                moonpool_sim::SimFaultEvent::PartitionCreated { .. }
+                    | moonpool_sim::SimFaultEvent::RandomClose { .. }
+            )),
+            "partitions and random closes reach the connection: {faults:?}"
+        );
     });
 }

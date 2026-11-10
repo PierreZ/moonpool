@@ -97,8 +97,10 @@ impl NetworkSimulation {
                 return (NetworkActions::default(), now);
             }
             let actions = if strategy == PartitionStrategy::AsymmetricSend {
+                assert_reachable!("network: an asymmetric send partition goes up");
                 self.insert_send_partition(ip, duration, now)
             } else {
+                assert_reachable!("network: an asymmetric receive partition goes up");
                 self.insert_recv_partition(ip, duration, now)
             };
             return (actions, deadline);
@@ -139,6 +141,7 @@ impl NetworkSimulation {
                 });
             }
         }
+        Self::reach_partition_strategy(strategy);
         actions.schedule_at(
             deadline,
             NetworkEvent::PartitionRestore {
@@ -213,6 +216,50 @@ impl NetworkSimulation {
         actions
     }
 
+    /// Black-hole one idle connection when the idle-drop arrival is due: a
+    /// Poisson process in sim time, so a connection that carries no traffic
+    /// can still fail, as a pooled connection that a NAT or a load balancer
+    /// forgot. Both directions go silent; the endpoints learn of it only
+    /// through their own timeouts. Draws nothing while the black-hole family
+    /// is off.
+    pub(super) fn randomly_drop_idle_connection(&mut self, now: Duration) -> NetworkActions {
+        let chaos = &self.state.config.chaos;
+        if chaos.black_hole_probability <= 0.0 {
+            return NetworkActions::default();
+        }
+        let rate = chaos.idle_drop_rate;
+        if !arrival_due(&mut self.state.next_idle_drop_at, rate, now) {
+            return NetworkActions::default();
+        }
+        self.state.next_idle_drop_at = Some(now.saturating_add(sample_arrival_gap(rate)));
+        let is_quiet = |connection: &super::state::ConnectionState| {
+            !connection.flags.is_closed()
+                && !connection.flags.send_black_holed()
+                && connection.send_buffer.is_empty()
+                && connection.in_flight.is_empty()
+                && connection.receive_buffer.is_empty()
+        };
+        let idle = self
+            .state
+            .connections
+            .iter()
+            .filter(|(_, connection)| {
+                is_quiet(connection)
+                    && connection
+                        .paired_connection
+                        .and_then(|peer| self.state.connections.get(&peer))
+                        .is_some_and(is_quiet)
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        if idle.is_empty() {
+            return NetworkActions::default();
+        }
+        let id = idle[sim_random_range(0..idle.len())];
+        assert_reachable!("network: an idle connection is dropped");
+        self.black_hole(id, true, true)
+    }
+
     /// Whether the partition guard, if one is installed, allows splitting
     /// `a` from `b` (an empty `b`: cutting `a` off). Draws nothing.
     fn partition_allowed(&self, a: &[IpAddr], b: &[IpAddr], now: Duration) -> bool {
@@ -223,6 +270,26 @@ impl NetworkSimulation {
             self.state.is_partitioned(x, y, now) || self.state.is_partitioned(y, x, now)
         };
         guard(a, b, &cut)
+    }
+
+    /// A reach gate per group strategy: it draws nothing, so it shifts no
+    /// seed.
+    fn reach_partition_strategy(strategy: PartitionStrategy) {
+        match strategy {
+            PartitionStrategy::UniformSize => {
+                assert_reachable!("network: a uniform-size partition goes up");
+            }
+            PartitionStrategy::IsolateSingle => {
+                assert_reachable!("network: a single process is isolated");
+            }
+            PartitionStrategy::IsolateZone => {
+                assert_reachable!("network: a zone is isolated");
+            }
+            PartitionStrategy::IsolateDatacenter => {
+                assert_reachable!("network: a datacenter is isolated");
+            }
+            _ => assert_reachable!("network: a random partition goes up"),
+        }
     }
 
     fn select_partition_group(&self, ips: &[IpAddr], strategy: PartitionStrategy) -> Vec<IpAddr> {
@@ -416,6 +483,11 @@ impl NetworkSimulation {
         }
         self.state.last_random_close_time = now;
         let (close_send, close_recv) = draw_fault_direction();
+        match (close_send, close_recv) {
+            (true, true) => assert_reachable!("network: a random close cuts both directions"),
+            (true, false) => assert_reachable!("network: a random close cuts the send side"),
+            _ => assert_reachable!("network: a random close cuts the receive side"),
+        }
         let wakes = self.close_asymmetric(id, close_send, close_recv);
         let explicit = sim_random_f64() < self.state.config.chaos.random_close_explicit_ratio;
         let mut actions = NetworkActions::default();
