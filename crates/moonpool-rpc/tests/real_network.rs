@@ -721,7 +721,11 @@ async fn a_session_cut_inside_a_frame_is_not_a_protocol_violation() {
         .write_all(&hello[..hello.len() / 2])
         .await
         .expect("write");
-    drop(session);
+    // A clean FIN after half a frame, then read the server's own hello until
+    // it closes: dropping the socket with that hello unread would send a
+    // reset, which is an I/O error and not a cut inside a frame.
+    session.shutdown().await.expect("shutdown");
+    assert!(closed_by_server(&mut session).await, "closed");
     assert!(
         eventually(|| server
             .stats()
