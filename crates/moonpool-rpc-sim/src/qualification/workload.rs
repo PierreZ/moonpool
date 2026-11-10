@@ -639,6 +639,11 @@ impl QualificationWorkload {
                     break;
                 }
                 if super::pause(ctx, Duration::from_millis(50)).await.is_err() {
+                    // The lead returns after its baseline and so shuts the
+                    // run down: that cut is expected once the baseline is in.
+                    if ctx.state().contains(QUIESCED_KEY) {
+                        break;
+                    }
                     super::recovery::cut_short("waiting for the lead's baseline");
                     return Ok(());
                 }
