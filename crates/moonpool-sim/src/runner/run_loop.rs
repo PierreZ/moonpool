@@ -373,7 +373,8 @@ impl SimulationBuilder {
     }
 
     /// Build a `SimWorld` for the iteration, picking each chaos surface's config
-    /// from its [`ChaosMode`]: `None` ⇒ default (off), `Random` ⇒ `random_for_seed`,
+    /// from its [`ChaosMode`]: `None` ⇒ off (default latencies, no fault),
+    /// `Random` ⇒ `random_for_seed`,
     /// `Swarm` ⇒ `swarm_for_seed`.
     ///
     /// The Swarm network subset (if any) draws from the simulation stream
@@ -389,7 +390,7 @@ impl SimulationBuilder {
         // (the draw-order contract on `ChaosMode::resolve`).
         let mut network_config = ChaosMode::resolve(
             network_chaos,
-            crate::NetworkConfiguration::default,
+            crate::NetworkConfiguration::without_chaos,
             crate::NetworkConfiguration::random_for_seed,
             crate::NetworkConfiguration::swarm_for_seed,
         );

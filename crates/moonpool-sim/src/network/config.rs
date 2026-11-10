@@ -40,7 +40,7 @@
 //!
 //! | Fault | Config Field | Default | Real-World Scenario |
 //! |-------|--------------|---------|---------------------|
-//! | Bit flip | `bit_flip_probability` + `bit_flip_min/max_bits` | 0.01%, 1-32 bits | CRC/checksum validation, data corruption detection |
+//! | Bit flip | `bit_flip_probability` + `bit_flip_min/max_bits` | 0 (off), 1-32 bits | CRC/checksum validation, data corruption detection |
 //!
 //! ## Partial Write/Read Simulation
 //!
@@ -816,6 +816,20 @@ pub const DEFAULT_TCP_SEND_WINDOW_BYTES: usize = 64 * 1024;
 
 /// Default number of unaccepted TCP connections held by one listener.
 pub const DEFAULT_ACCEPT_BACKLOG_CAPACITY: usize = 128;
+
+impl NetworkConfiguration {
+    /// The default latencies with every fault family off
+    /// ([`ChaosConfiguration::disabled`]): no random close, no connect
+    /// failure or hang, no clock drift and no buggified delay. The runner
+    /// uses it when the simulation has no `Chaos::Network`.
+    #[must_use]
+    pub fn without_chaos() -> Self {
+        Self {
+            chaos: ChaosConfiguration::disabled(),
+            ..Self::default()
+        }
+    }
+}
 
 impl Default for NetworkConfiguration {
     fn default() -> Self {
