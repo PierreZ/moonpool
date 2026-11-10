@@ -26,7 +26,7 @@ Terms are listed alphabetically. Cross-references are in **bold**. Type and macr
 
 **Determinism** -- The same **seed** produces the same execution. Every draw goes through one counted RNG stream, and all I/O is simulated.
 
-**Determinism canary** -- `SimulationBuilder::check_determinism()`. Each seed runs twice; a diverging draw fails the seed with the `"determinism canary"` always-assertion and names the first diverging draw.
+**Determinism canary** -- `SimulationBuilder::check_determinism()`. Each seed runs twice; a diverging draw, or diverging world activity (events, task picks, trace events), fails the seed with the `"determinism canary"` always-assertion and names the first diverging draw.
 
 **Discovery** -- A globally new interesting state seen by the assertion accounting: a first pass, a new bucket, a watermark, frontier or quality improvement. Latched by compare-and-swap, so it is journaled once across every **timeline** and **seed**. The explorer anchors continuations at discoveries.
 
