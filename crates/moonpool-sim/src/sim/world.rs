@@ -226,6 +226,30 @@ pub struct SimWorld {
     pub(crate) inner: Arc<WorldLock<SimInner>>,
 }
 
+thread_local! {
+    /// Live worlds on this thread: the first installs the seeded `select!`
+    /// offset, the last one dropped uninstalls it.
+    static LIVE_WORLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl Drop for SimWorld {
+    fn drop(&mut self) {
+        // A handle made from a weak reference shares the world: only the
+        // last handle of a world ends it.
+        if Arc::strong_count(&self.inner) > 1 {
+            return;
+        }
+        let left = LIVE_WORLDS.with(|live| {
+            let left = live.get().saturating_sub(1);
+            live.set(left);
+            left
+        });
+        if left == 0 {
+            super::rng::uninstall_select_offset();
+        }
+    }
+}
+
 impl SimWorld {
     fn create(network_config: NetworkConfiguration, seed: u64) -> Self {
         // A new world starts without a CPU model: the thread's gate, if an
@@ -233,6 +257,10 @@ impl SimWorld {
         super::cpu::uninstall();
         reset_sim_rng();
         set_sim_seed(seed);
+        // A raw world (a low-level test, no runner) draws its `select!`
+        // offsets from the seeded stream too, never from OS entropy.
+        LIVE_WORLDS.with(|live| live.set(live.get() + 1));
+        super::rng::install_select_offset();
         crate::chaos::assertions::reset_assertion_results();
         Self {
             inner: Arc::new(WorldLock::new(SimInner::new_with_config(network_config))),
