@@ -15,8 +15,8 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, FaultContext, FaultInjector,
-    NetworkProvider, Process, SimContext, SimulationBuilder, SimulationError, SimulationResult,
-    TcpListenerTrait, TimeProvider, Workload,
+    GrayFailure, NetworkProvider, OUTAGE_STATE_KEY, Outage, OutageLanded, Process, SimContext,
+    SimulationBuilder, SimulationError, SimulationResult, TcpListenerTrait, TimeProvider, Workload,
 };
 
 /// `(sim time in ms, ip)` of every boot, shared with the factories.
@@ -269,6 +269,160 @@ fn spawn_group_takes_the_next_range_and_ranks_from_zero() {
             ("10.0.2.3".to_string(), 2, 3),
         ]
     );
+}
+
+// ============================================================================
+// gray failure on a group spawned mid-run
+// ============================================================================
+
+/// Starts the `spare` group at once, then outlives the chaos window.
+struct StartSpares;
+
+#[async_trait]
+impl Workload for StartSpares {
+    fn name(&self) -> &'static str {
+        "operator"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        ctx.deployment().spawn_group("spare", 2, || {
+            Box::new(Spare {
+                ranks: Arc::default(),
+            })
+        })?;
+        let _ = ctx.time().sleep(Duration::from_secs(5)).await;
+        Ok(())
+    }
+}
+
+/// Records every machine it sees slow during the chaos window.
+struct SlowWatch(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl FaultInjector for SlowWatch {
+    fn name(&self) -> &'static str {
+        "slow_watch"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        while !ctx.chaos_shutdown().is_cancelled() {
+            for ip in ctx.process_ips() {
+                if !ctx.slowness(&ip)?.is_healthy() {
+                    self.0
+                        .lock()
+                        .expect("Mutex poisoned: prior task panicked")
+                        .push(ip);
+                }
+            }
+            let _ = ctx.time().sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    }
+}
+
+fn gray_on_spares(declared: bool, slowed: &Arc<Mutex<Vec<String>>>) -> SimulationBuilder {
+    let log = boot_log();
+    let watch = slowed.clone();
+    let builder = SimulationBuilder::new()
+        .processes(1, Server::factory(&log))
+        .workload(StartSpares)
+        .enable_chaos([Chaos::GrayFailure {
+            config: GrayFailure::new(1).victims(AttritionVictims::group("spare")),
+            mode: ChaosMode::Random,
+        }])
+        .fault_factory(move || Box::new(SlowWatch(watch.clone())))
+        .chaos_duration(Duration::from_secs(4))
+        .set_iterations(8)
+        .set_debug_seeds((1..=8).collect());
+    if declared {
+        builder.spawnable_group("spare")
+    } else {
+        builder
+    }
+}
+
+#[test]
+fn a_gray_failure_slows_a_group_spawned_mid_run() {
+    let slowed = Arc::new(Mutex::new(Vec::new()));
+    let report = gray_on_spares(true, &slowed)
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "{report}");
+    let slowed = slowed
+        .lock()
+        .expect("Mutex poisoned: prior task panicked")
+        .clone();
+    assert!(!slowed.is_empty(), "no spare was ever slowed");
+    assert!(
+        slowed.iter().all(|ip| ip.starts_with("10.0.2.")),
+        "only the spawned group goes slow: {slowed:?}"
+    );
+}
+
+#[test]
+fn a_gray_failure_on_an_undeclared_spawned_group_is_refused() {
+    let result = gray_on_spares(false, &Arc::default()).run();
+    assert!(matches!(
+        result,
+        Err(SimulationError::InvalidConfiguration(_))
+    ));
+}
+
+/// Publishes every outage that landed during the chaos window.
+struct OutageWatch(Arc<Mutex<Vec<OutageLanded>>>);
+
+#[async_trait]
+impl FaultInjector for OutageWatch {
+    fn name(&self) -> &'static str {
+        "outage_watch"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        while !ctx.chaos_shutdown().is_cancelled() {
+            if let Some(landed) = ctx.state().get::<OutageLanded>(OUTAGE_STATE_KEY) {
+                self.0
+                    .lock()
+                    .expect("Mutex poisoned: prior task panicked")
+                    .push(landed);
+                return Ok(());
+            }
+            let _ = ctx.time().sleep(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn an_outage_strikes_a_declared_group_spawned_mid_run() {
+    let log = boot_log();
+    let landed = Arc::new(Mutex::new(Vec::new()));
+    let watch = landed.clone();
+    let report = SimulationBuilder::new()
+        .processes(1, Server::factory(&log))
+        .workload(StartSpares)
+        .spawnable_group("spare")
+        .enable_chaos([Chaos::Outage {
+            config: Outage {
+                start: Duration::from_millis(500)..Duration::from_secs(1),
+                ..Outage::groups(["spare"])
+            },
+            mode: ChaosMode::Random,
+        }])
+        .fault_factory(move || Box::new(OutageWatch(watch.clone())))
+        .chaos_duration(Duration::from_secs(4))
+        .set_iterations(2)
+        .set_debug_seeds(vec![1, 2])
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "{report}");
+    let landed = landed
+        .lock()
+        .expect("Mutex poisoned: prior task panicked")
+        .clone();
+    assert_eq!(landed.len(), 2, "one outage per seed: {landed:?}");
+    for outage in landed {
+        assert_eq!(outage.victims, ["10.0.2.1", "10.0.2.2"]);
+    }
 }
 
 // ============================================================================

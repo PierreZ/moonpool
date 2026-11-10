@@ -39,7 +39,7 @@ SimulationBuilder::new()
 | `down` | How long each victim stays down, drawn per victim. |
 | `straggler` | How long the one straggler stays down. Must start at or after the end of `down`, so the straggler is always the last one back. |
 
-The builder validates the regime before the first seed. An unregistered group, a probability outside `0..=1`, a range that ends before it starts, or a straggler range inside `down` returns `SimulationError::InvalidConfiguration` from `run()`. So does an outage registered without `chaos_duration`.
+The builder validates the regime before the first seed. An unregistered group (declare a group spawned mid-run with `SimulationBuilder::spawnable_group`), a probability outside `0..=1`, a range that ends before it starts, or a straggler range inside `down` returns `SimulationError::InvalidConfiguration` from `run()`. So does an outage registered without `chaos_duration`.
 
 At most once per run, with `probability`, at a time drawn from `start`, every live process of the named groups crashes in the same tick. Each one restarts after its own draw from `down`. With a `straggler` range, one victim, picked at random, is held down for a draw from that range instead. A process already dead at the outage instant is not a victim: it comes back on its own schedule. A `.cluster()` group whose per-seed count drew zero has no live victim, so the outage lands on no one and the run goes on.
 

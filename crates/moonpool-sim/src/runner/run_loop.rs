@@ -494,6 +494,7 @@ impl SimulationBuilder {
             attritions,
             outages,
             gray_failures,
+            &self.spawnable_groups,
             self.chaos_duration,
         )
     }
@@ -507,6 +508,7 @@ impl SimulationBuilder {
         attritions: Vec<Attrition>,
         outages: Vec<crate::runner::outage::Outage>,
         gray_failures: Vec<crate::runner::gray_failure::GrayFailure>,
+        spawnable_groups: &[String],
         chaos_duration: Option<Duration>,
     ) -> Vec<Box<dyn FaultInjector>> {
         let mut fault_injectors: Vec<Box<dyn FaultInjector>> =
@@ -522,8 +524,17 @@ impl SimulationBuilder {
         // Without a chaos window no injector runs (validated up front).
         if let Some(chaos_duration) = chaos_duration {
             for gray in gray_failures {
+                // A regime on a group spawned mid-run picks its victims late.
+                let late = matches!(
+                    &gray.victims,
+                    crate::AttritionVictims::Group(group) if spawnable_groups.contains(group)
+                );
                 fault_injectors.push(Box::new(
-                    crate::runner::gray_failure::GrayFailureInjector::new(gray, chaos_duration),
+                    crate::runner::gray_failure::GrayFailureInjector::new(
+                        gray,
+                        chaos_duration,
+                        late,
+                    ),
                 ));
             }
         }
@@ -536,10 +547,12 @@ impl SimulationBuilder {
     /// unrun while the campaign reports success. Also refuse an outage that
     /// names no registered group or carries a malformed range.
     pub(super) fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
+        // A group spawned mid-run counts once it is declared.
         let registered: Vec<&str> = self
             .process_entries
             .iter()
             .map(|entry| entry.name.as_str())
+            .chain(self.spawnable_groups.iter().map(String::as_str))
             .collect();
         if let Some(reason) = self
             .outages

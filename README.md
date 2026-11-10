@@ -146,6 +146,8 @@ and under the simulator in its own `#[test]`.
   `spawn_in` and `spawn_group` boot new processes, `retire` stops one for
   good, and topology queries and chaos victim pools follow the live
   membership. An operator is an ordinary workload (`max_spawns` caps it).
+  `spawnable_group` declares a group spawned later, so a gray failure or an
+  outage can name it.
 - Iteration control: `set_iterations`, `until_coverage_stable`,
   `set_debug_seeds`, `run_time_budget`, `replay_timeline`.
 - `check_determinism` runs each seed twice and fails it when the draw

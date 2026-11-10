@@ -129,6 +129,10 @@ pub struct SimulationBuilder {
     /// Gray-failure regimes, one injector each, with their per-seed sampling
     /// mode.
     pub(super) gray_failures: Vec<(crate::runner::gray_failure::GrayFailure, ChaosMode)>,
+    /// Group names a workload spawns later with
+    /// [`Deployment::spawn_group`](crate::Deployment::spawn_group), declared
+    /// so a gray failure or an outage may name them.
+    pub(super) spawnable_groups: Vec<String>,
     pub(super) seeds: Vec<u64>,
     /// Module-path prefixes whose declared assertion sites get their slots
     /// before the first seed.
@@ -228,6 +232,7 @@ impl SimulationBuilder {
             cpu_chaos: None,
             clock_chaos: None,
             gray_failures: Vec::new(),
+            spawnable_groups: Vec::new(),
             seeds: Vec::new(),
             declared_site_modules: Vec::new(),
             exempt_declared_sites: Vec::new(),
@@ -1031,6 +1036,26 @@ impl SimulationBuilder {
     #[must_use]
     pub fn max_spawns(mut self, max_spawns: usize) -> Self {
         self.max_spawns = max_spawns;
+        self
+    }
+
+    /// Declare a group that a workload starts later with
+    /// [`Deployment::spawn_group`](crate::Deployment::spawn_group), so a
+    /// [`GrayFailure`](crate::GrayFailure) or an [`Outage`](crate::Outage)
+    /// may name it. Without the declaration such a regime is refused at
+    /// build time, which catches a typo in the group name.
+    ///
+    /// A gray failure on a declared group picks each window's victim when
+    /// the window starts, among the processes the group has then; a window
+    /// that starts before the group has a process slows nothing. An outage
+    /// strikes the group's live processes at its drawn instant, as for any
+    /// group. Declaring a group starts nothing and draws no randomness.
+    #[must_use]
+    pub fn spawnable_group(mut self, name: impl Into<String>) -> Self {
+        let name = name.into();
+        if !self.spawnable_groups.contains(&name) {
+            self.spawnable_groups.push(name);
+        }
         self
     }
 

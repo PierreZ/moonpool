@@ -145,7 +145,10 @@ impl Outage {
             .iter()
             .find(|group| !registered.contains(&group.as_str()))
         {
-            return Some(format!("an Outage names the unregistered group '{group}'"));
+            return Some(format!(
+                "an Outage names the unregistered group '{group}' \
+                 (declare a group spawned mid-run with SimulationBuilder::spawnable_group)"
+            ));
         }
         if !(0.0..=1.0).contains(&self.probability) {
             return Some(format!(

@@ -52,6 +52,20 @@ A process gets a handle too, but every call returns an error: only a client chan
 - **Attrition** draws its victim from the live pool at each decision, and `max_dead` counts against the live pool. A spawned process can be rebooted once it booted, never before.
 - **Outages** pick their groups' live members when they fire.
 - **Gray failure** keeps the windows it drew at the start of the chaos window. Once the deployment changed, a window that starts picks its victim from the live pool (one draw), so a spawned machine can go slow and a retired one never does.
+
+But what if a regime names a group that does not exist yet? The builder refuses a `GrayFailure` or an `Outage` that names a group it does not know, because that catches a typo. A group that a workload starts with `spawn_group` is not known at build time, so declare it first:
+
+```rust
+SimulationBuilder::new()
+    .processes(3, || Box::new(Node))
+    .spawnable_group("cell-2")
+    .enable_chaos([Chaos::GrayFailure {
+        config: GrayFailure::new(1).victims(AttritionVictims::group("cell-2")),
+        mode: ChaosMode::Swarm,
+    }])
+```
+
+The declaration starts nothing and draws nothing. A gray failure on a declared group draws its windows at the start of the chaos window, but no victims: each window picks its victim from the group's processes when it starts (one draw), and a window that starts before the group has a process slows nothing. An outage on a declared group strikes the group's live members when it fires, as for any group. Attrition needs no declaration.
 - A fault aimed at a retired IP (`reboot`, `crash`, `restart`) is dropped.
 
 ## Determinism
