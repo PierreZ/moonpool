@@ -52,7 +52,7 @@ bucket reaches the hook exactly once across all processes.
 
 ## Budgets
 
-The tables have a fixed size: 2048 assertion sites and 256 `sometimes_each`
+The tables have a fixed size: 4096 assertion sites and 256 `sometimes_each`
 buckets of at most six identity keys each. An evaluation that finds a table
 full is counted. A site reached with a different kind, or a message that
 collides with another, is flagged as conflicted. `moonpool-sim` reports both
