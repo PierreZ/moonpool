@@ -194,8 +194,15 @@ yet, a name dropped, the wrong use) and say so in `Issued::flaw`.
 code over the simulated network, with the seed's client authentication
 mode, an impostor server whose stray authority copies the real one's name,
 certificate rotation, UTC jumps past certificate lifetimes, and bit flips.
-Ed25519 and X25519 keep every handshake the same size, so the determinism
-canary holds; the ciphertext bytes still differ between runs.
+Ed25519 and X25519 keep every handshake the same size. Size is not
+enough: rustls also draws the `ClientHello` random, its legacy session id
+and the order of its extensions, and with the operating system's entropy
+a bit flip at one offset hit another field on each run. The campaign
+installs a source from the simulation's random stream with
+`security::tls::install_secure_random`, so the handshake bytes replay and
+the determinism canary holds. The X25519 ephemeral keys still come from
+the operating system, so the ciphertext bytes differ between runs; a flip
+in them fails the handshake on every run alike.
 
 **Two clocks.** `TimeProvider::now` is scheduling time, never Unix time, so
 credential and certificate validity read a separate `UtcClock`: `SystemUtc`
