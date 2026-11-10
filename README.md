@@ -163,7 +163,10 @@ and under the simulator in its own `#[test]`.
 - `Chaos::Storage`: corruption, EIO, misdirected and phantom writes, sync
   failures, short transfers, lost directory entries, crash damage,
   degradation and disk failure. The crash model is bounded by sync barriers,
-  with an oracle for lost synced writes.
+  with an oracle for lost synced writes. Each disk has a queue, a sync pays
+  for the bytes it flushes, and `open`, `rename`, `delete` and `sync_dir`
+  are delayed disk operations, so a crash can land between a `rename` and
+  its `sync_dir`.
 - `Chaos::Attrition`: graceful, crash and wipe reboots under a `max_dead`
   budget, scoped per process, machine, zone or datacenter. An optional wipe
   budget makes wipes roll: a wiped process stays unhealed until the harness

@@ -589,22 +589,29 @@ fn shutdown_overrides_unconsumed_read_write_and_sync_results() {
         }
         setup.await.expect("task panicked").expect("setup failed");
 
-        let old_idle = provider
-            .open("shutdown_race.txt", OpenOptions::read_only())
+        // Opens are delayed namespace operations: drive the world while
+        // they wait in the disk queue.
+        let open_provider = provider.clone();
+        let opens = tokio::spawn(async move {
+            let name = "shutdown_race.txt";
+            let write = || OpenOptions::new().write(true);
+            Ok::<_, std::io::Error>((
+                open_provider.open(name, OpenOptions::read_only()).await?,
+                open_provider.open(name, OpenOptions::read_only()).await?,
+                open_provider.open(name, write()).await?,
+                open_provider.open(name, write()).await?,
+            ))
+        });
+        while !opens.is_finished() {
+            while sim.pending_event_count() > 0 {
+                sim.step();
+            }
+            tokio::task::yield_now().await;
+        }
+        let (old_idle, mut read_file, mut write_file, sync_file) = opens
             .await
-            .expect("open idle handle");
-        let mut read_file = provider
-            .open("shutdown_race.txt", OpenOptions::read_only())
-            .await
-            .expect("open read handle");
-        let mut write_file = provider
-            .open("shutdown_race.txt", OpenOptions::new().write(true))
-            .await
-            .expect("open write handle");
-        let sync_file = provider
-            .open("shutdown_race.txt", OpenOptions::new().write(true))
-            .await
-            .expect("open sync handle");
+            .expect("open task panicked")
+            .expect("open the handles");
 
         let read = tokio::spawn(async move {
             let mut bytes = [0; 3];

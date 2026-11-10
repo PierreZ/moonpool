@@ -479,6 +479,11 @@ fn test_disk_episode_correlated_per_owner() {
         );
 
         let provider_a = sim.storage_provider(ip_a);
+        // The opens wait out stalls of their own (a namespace operation is a
+        // disk operation too): measure the writes alone, from when both
+        // files are open.
+        let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let opened_flag = opened.clone();
         let handle = tokio::spawn(async move {
             let mut a1 = provider_a
                 .open("a1.txt", OpenOptions::create_write())
@@ -486,6 +491,7 @@ fn test_disk_episode_correlated_per_owner() {
             let mut a2 = provider_a
                 .open("a2.txt", OpenOptions::create_write())
                 .await?;
+            opened_flag.store(true, std::sync::atomic::Ordering::SeqCst);
             // Write both files concurrently: both ops are scheduled in the same
             // window, so they share the owner's single episode.
             futures::future::try_join(async { a1.write_all(b"x").await }, async {
@@ -499,7 +505,11 @@ fn test_disk_episode_correlated_per_owner() {
         // stalled writes complete) and confirm machine B never enters one.
         let mut active_a = None;
         let mut b_ever_episode = false;
+        let mut writes_start = None;
         while !handle.is_finished() {
+            if writes_start.is_none() && opened.load(std::sync::atomic::Ordering::SeqCst) {
+                writes_start = Some(sim.current_time());
+            }
             if let Some(episode) = sim.disk_episode_for(ip_a)
                 && sim.current_time() < episode.expires_at
             {
@@ -527,7 +537,9 @@ fn test_disk_episode_correlated_per_owner() {
         );
         // Both files waited out the *same* shared window: total elapsed is
         // bounded by one episode duration, not one per file.
-        let elapsed = sim.current_time();
+        let elapsed = sim
+            .current_time()
+            .saturating_sub(writes_start.expect("both files opened"));
         assert!(
             elapsed >= Duration::from_secs(10),
             "both files waited out the shared stall window, got {elapsed:?}"

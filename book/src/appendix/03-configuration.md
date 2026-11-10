@@ -210,6 +210,7 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 | `read_latency` | 50 µs to 200 µs | | 1 µs |
 | `write_latency` | 100 µs to 500 µs | | 1 µs |
 | `sync_latency` | 1 ms to 5 ms | | 1 µs |
+| `namespace_latency` | 0.2 ms to 1.2 ms | 0.1..0.5 ms to 0.5..3 ms | 1 µs |
 | `read_corruption_probability` | 0.0 | 0 to 0.001 | 0 |
 | `write_corruption_probability` | 0.0 | 0 to 0.001 | 0 |
 | `read_eio_probability` | 0.0 | 0 to 0.001 | 0 |

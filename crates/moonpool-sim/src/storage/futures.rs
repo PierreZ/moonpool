@@ -5,10 +5,11 @@
 //! traits.
 
 use crate::sim::{SimWorld, WeakSimWorld};
-use crate::storage::sim::{HandleId, OperationId, StorageCompletion};
+use crate::storage::sim::{HandleId, NamespaceOp, OperationId, StorageCompletion};
 use std::cell::Cell;
 use std::future::Future;
 use std::io;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -78,6 +79,43 @@ impl Drop for PendingOperation {
         {
             sim.cancel_storage_operation(operation_id);
         }
+    }
+}
+
+/// Future for one namespace operation (open, delete, rename,
+/// `create_dir_all`, `sync_dir`): it resolves to the engine's completion
+/// once the operation has waited in the disk queue and taken effect.
+///
+/// Dropping it while the operation is pending detaches a mutation, which
+/// still lands, and cancels a read-only open.
+pub(crate) struct NamespaceFuture {
+    op: PendingOperation,
+    owner_ip: IpAddr,
+    request: NamespaceOp,
+}
+
+impl NamespaceFuture {
+    /// Create a future that submits `request` on `owner_ip`'s disk on its
+    /// first poll.
+    pub(crate) fn new(sim: WeakSimWorld, owner_ip: IpAddr, request: NamespaceOp) -> Self {
+        Self {
+            op: PendingOperation::new(sim),
+            owner_ip,
+            request,
+        }
+    }
+}
+
+impl Future for NamespaceFuture {
+    type Output = io::Result<StorageCompletion>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.op.poll(
+            cx,
+            |sim| Ok(sim.schedule_namespace(self.owner_ip, self.request.clone())),
+            Some,
+            "namespace operation returned no completion",
+        )
     }
 }
 

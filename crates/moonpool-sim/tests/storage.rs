@@ -67,6 +67,8 @@ mod directory;
 mod disk_failure;
 #[path = "storage/disk_full.rs"]
 mod disk_full;
+#[path = "storage/disk_queue.rs"]
+mod disk_queue;
 #[path = "storage/dropped.rs"]
 mod dropped;
 #[path = "storage/faults.rs"]

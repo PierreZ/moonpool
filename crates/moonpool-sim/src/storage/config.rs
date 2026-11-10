@@ -13,6 +13,12 @@
 //! | Read latency | `read_latency` | 50-200µs | Time for read operations |
 //! | Write latency | `write_latency` | 100-500µs | Time for write operations |
 //! | Sync latency | `sync_latency` | 1-5ms | Time for sync operations |
+//! | Namespace latency | `namespace_latency` | 0.2-1.2ms | Time for open, delete, rename, `create_dir_all`, `sync_dir` |
+//!
+//! Every operation also waits in its disk's queue: the disk serves one
+//! operation at a time, each for `1/iops` plus its bytes over `bandwidth`
+//! (a sync pays for the bytes it flushes), so parallel operations finish
+//! one after the other and a slow disk builds a backlog.
 //!
 //! ## Fault Injection
 //!
@@ -345,6 +351,16 @@ pub struct StorageConfiguration {
     /// longer than regular read/write operations.
     pub sync_latency: LatencyDistribution,
 
+    /// Latency distribution for namespace operations: `open`, `delete`,
+    /// `rename`, `create_dir_all` and `sync_dir`.
+    ///
+    /// Each one is a delayed operation that takes effect when it completes,
+    /// so a crash can land between a `rename` and its `sync_dir`, and a
+    /// failed disk hangs it. `exists` and `list_dir` read the cached
+    /// namespace and take no time. The `FoundationDB` simulator opens a file in
+    /// 0.2 ms to 1.2 ms (`MIN_OPEN_TIME`, `MAX_OPEN_TIME`).
+    pub namespace_latency: LatencyDistribution,
+
     // =========================================================================
     // Fault Injection Probabilities
     // =========================================================================
@@ -660,6 +676,10 @@ impl Default for StorageConfiguration {
                 start: Duration::from_millis(1),
                 end: Duration::from_millis(5),
             },
+            namespace_latency: LatencyDistribution::Uniform {
+                start: Duration::from_micros(200),
+                end: Duration::from_micros(1200),
+            },
 
             // Fault probabilities - disabled by default for predictable behavior
             read_corruption_probability: 0.0,
@@ -788,6 +808,13 @@ impl StorageConfiguration {
             writeback_error_revert_probability: f64::from(sim_random_range(0..101)) / 100.0,
             writeback_error_reporting: WritebackErrorReporting::REPORTING
                 [sim_random_range(0..WritebackErrorReporting::REPORTING.len())],
+
+            // Namespace latency, drawn last so every field above keeps its
+            // per-seed value.
+            namespace_latency: random_latency_for_seed(
+                Duration::from_micros(sim_random_range(100..500))
+                    ..Duration::from_micros(sim_random_range(500..3000)),
+            ),
         }
     }
 
@@ -961,7 +988,8 @@ impl StorageConfiguration {
             bandwidth: 1_000_000_000, // 1 GB/s
             read_latency: uniform.clone(),
             write_latency: uniform.clone(),
-            sync_latency: uniform,
+            sync_latency: uniform.clone(),
+            namespace_latency: uniform,
 
             // All faults disabled
             read_corruption_probability: 0.0,

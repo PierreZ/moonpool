@@ -1,6 +1,8 @@
 //! Simulated storage provider implementation.
 
 use super::file::SimStorageFile;
+use super::futures::NamespaceFuture;
+use super::sim::{NamespaceOp, StorageCompletion};
 use crate::sim::WeakSimWorld;
 use moonpool_core::{OpenOptions, StorageProvider};
 use std::io;
@@ -170,6 +172,19 @@ impl SimStorageProvider {
         Ok(self.sim()?.fault_pattern(self.owner_ip))
     }
 
+    /// Run one namespace operation through the disk queue.
+    fn namespace(&self, op: NamespaceOp) -> NamespaceFuture {
+        NamespaceFuture::new(self.sim.clone(), self.owner_ip, op)
+    }
+
+    /// Run one namespace operation that answers with no value.
+    async fn namespace_unit(&self, op: NamespaceOp) -> io::Result<()> {
+        match self.namespace(op).await? {
+            StorageCompletion::Unit => Ok(()),
+            _ => Err(io::Error::other("namespace operation returned a value")),
+        }
+    }
+
     /// Upgrade the weak simulation handle, mapping a dropped simulation to an
     /// I/O error so storage operations can propagate it with `?`.
     fn sim(&self) -> io::Result<crate::sim::SimWorld> {
@@ -183,9 +198,14 @@ impl StorageProvider for SimStorageProvider {
     type File = SimStorageFile;
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
+        let op = NamespaceOp::Open {
+            path: path.to_string(),
+            options,
+        };
+        let StorageCompletion::Opened(handle_id) = self.namespace(op).await? else {
+            return Err(io::Error::other("open returned no handle"));
+        };
         let sim = self.sim()?;
-
-        let handle_id = sim.open_file(path, options, 0, self.owner_ip)?;
         let constraints = sim.handle_constraints(handle_id)?;
         let direct_io = sim.handle_is_direct_io(handle_id)?;
 
@@ -202,16 +222,26 @@ impl StorageProvider for SimStorageProvider {
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
-        Ok(self.sim()?.delete_file(self.owner_ip, path)?)
+        self.namespace_unit(NamespaceOp::Delete {
+            path: path.to_string(),
+        })
+        .await
     }
 
     async fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        Ok(self.sim()?.rename_file(self.owner_ip, from, to)?)
+        self.namespace_unit(NamespaceOp::Rename {
+            from: from.to_string(),
+            to: to.to_string(),
+        })
+        .await
     }
 
     #[instrument(skip(self))]
     async fn create_dir_all(&self, path: &str) -> io::Result<()> {
-        Ok(self.sim()?.create_dir_all(path, self.owner_ip)?)
+        self.namespace_unit(NamespaceOp::CreateDirAll {
+            path: path.to_string(),
+        })
+        .await
     }
 
     async fn list_dir(&self, path: &str) -> io::Result<Vec<String>> {
@@ -219,7 +249,10 @@ impl StorageProvider for SimStorageProvider {
     }
 
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
-        Ok(self.sim()?.sync_dir(path, self.owner_ip)?)
+        self.namespace_unit(NamespaceOp::SyncDir {
+            path: path.to_string(),
+        })
+        .await
     }
 
     fn publish_store_layout(

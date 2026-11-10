@@ -193,6 +193,17 @@ impl StorageEngine {
             if sim_random::<f64>() >= probability {
                 continue;
             }
+            // The shard gate: a lost entry costs the copy its file holds, so
+            // a loss that would break a shard's durable need is not made.
+            let paths: Vec<&str> = unit.iter().map(|(_, path)| path.as_str()).collect();
+            if !self.state.entry_loss_allowed(ip, &paths) {
+                assert_reachable!("shard gate: a directory-entry loss is refused");
+                if let Some(book) = &self.state.shards {
+                    book.count(crate::runner::shard::Downgrade::DirEntryLossRefused);
+                }
+                continue;
+            }
+            self.state.note_lost_entries(ip, &paths);
             assert_reachable!("disk: crash lost an unsynced directory entry");
             if unit.len() > 1 {
                 assert_reachable!("disk: crash rolled back a rename as one unit");

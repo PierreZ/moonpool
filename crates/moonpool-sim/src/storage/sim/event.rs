@@ -11,14 +11,14 @@ pub struct OperationId(pub(crate) u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StorageEvent {
     operation_id: OperationId,
-    handle_id: HandleId,
+    handle_id: Option<HandleId>,
     operation: StorageOperation,
 }
 
 impl StorageEvent {
     pub(crate) fn new(
         operation_id: OperationId,
-        handle_id: HandleId,
+        handle_id: Option<HandleId>,
         operation: StorageOperation,
     ) -> Self {
         Self {
@@ -34,9 +34,11 @@ impl StorageEvent {
         self.operation_id
     }
 
-    /// Returns the handle that submitted the operation.
+    /// Returns the handle that submitted the operation, or `None` for a
+    /// namespace operation (open, delete, rename, `create_dir_all`,
+    /// `sync_dir`), which holds no handle.
     #[must_use]
-    pub fn handle_id(&self) -> HandleId {
+    pub fn handle_id(&self) -> Option<HandleId> {
         self.handle_id
     }
 
