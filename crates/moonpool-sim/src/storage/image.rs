@@ -106,12 +106,41 @@ impl SectorBitSet {
         self.len == 0
     }
 
-    /// Whether any sector in the range is set.
+    /// Whether any sector in the range is set. Checks whole 64-bit words.
     #[must_use]
     pub fn any_in(&self, sectors: Range<u64>) -> bool {
-        sectors
-            .map_while(|s| usize::try_from(s).ok())
-            .any(|s| self.is_set(s))
+        let len = self.len as u64;
+        let (start, end) = (sectors.start.min(len), sectors.end.min(len));
+        if start >= end {
+            return false;
+        }
+        let (start, end) = (as_index(start), as_index(end));
+        let (first, last) = (start / 64, (end - 1) / 64);
+        (first..=last).any(|at| {
+            let mut word = self.bits[at];
+            if at == first {
+                word &= u64::MAX << (start % 64);
+            }
+            if at == last {
+                word &= u64::MAX >> (63 - (end - 1) % 64);
+            }
+            word != 0
+        })
+    }
+
+    /// The set sectors, in ascending order. Skips clear words whole.
+    pub fn iter_ones(&self) -> impl Iterator<Item = u64> + '_ {
+        set_bits(self.bits.iter().copied())
+    }
+
+    /// The sectors set here and clear in `other`, in ascending order.
+    pub fn iter_ones_without<'a>(&'a self, other: &'a Self) -> impl Iterator<Item = u64> + 'a {
+        set_bits(
+            self.bits
+                .iter()
+                .enumerate()
+                .map(|(at, word)| word & !other.bits.get(at).copied().unwrap_or(0)),
+        )
     }
 
     /// The number of set bits.
@@ -128,16 +157,32 @@ impl SectorBitSet {
         self.bits.iter_mut().for_each(|word| *word = 0);
     }
 
-    /// Resize, preserving the bits that still fit.
-    fn resized(&self, new_len: usize) -> Self {
-        let mut resized = Self::new(new_len);
-        for sector in 0..self.len.min(new_len) {
-            if self.is_set(sector) {
-                resized.set(sector);
-            }
+    /// Resize in place, preserving the bits that still fit. A growth is
+    /// amortized constant time, so an appended file stays linear.
+    fn resize(&mut self, new_len: usize) {
+        self.bits.resize(new_len.div_ceil(64), 0);
+        if !new_len.is_multiple_of(64)
+            && let Some(last) = self.bits.last_mut()
+        {
+            // Bits past the length are always clear.
+            *last &= u64::MAX >> (64 - new_len % 64);
         }
-        resized
+        self.len = new_len;
     }
+}
+
+/// The indices of the set bits of `words`, in ascending order.
+fn set_bits(words: impl Iterator<Item = u64>) -> impl Iterator<Item = u64> {
+    words.enumerate().flat_map(|(at, mut word)| {
+        std::iter::from_fn(move || {
+            if word == 0 {
+                return None;
+            }
+            let bit = word.trailing_zeros();
+            word &= word - 1;
+            Some(at as u64 * 64 + u64::from(bit))
+        })
+    })
 }
 
 /// Deterministic fill for never-written and lost sectors: zeros or per-sector
@@ -448,7 +493,10 @@ impl FileImage {
     /// Whether a sync has sectors to flush.
     #[must_use]
     pub fn has_flushable(&self) -> bool {
-        (0..self.sectors()).any(|s| self.is_flushable(s))
+        self.dirty
+            .iter_ones_without(&self.stranded)
+            .next()
+            .is_some()
     }
 
     /// Fail the background writeback of every sector a sync would flush
@@ -485,9 +533,7 @@ impl FileImage {
     /// will flush stays. Returns the sectors it dropped.
     #[instrument(level = "trace", skip(self))]
     pub fn drop_cache(&mut self) -> Vec<u64> {
-        let dropped: Vec<u64> = (0..self.sectors())
-            .filter(|&s| self.stranded.is_set(as_index(s)))
-            .collect();
+        let dropped: Vec<u64> = self.stranded.iter_ones().collect();
         for &sector in &dropped {
             let shared = self.shared_bounds(sector);
             let visible = self.visible_bounds(sector);
@@ -702,10 +748,7 @@ impl FileImage {
     /// corruption), until they are rewritten or truncated away.
     #[must_use]
     pub fn damaged_sectors(&self) -> Vec<u64> {
-        (0..self.damaged.len())
-            .filter(|index| self.damaged.is_set(*index))
-            .map(|index| index as u64)
-            .collect()
+        self.damaged.iter_ones().collect()
     }
 
     /// Whether any sector is [damaged](Self::damaged_sectors).
@@ -804,9 +847,7 @@ impl FileImage {
 
     /// The sectors written since the last sync that reached them.
     pub(crate) fn dirty_sectors(&self) -> Vec<u64> {
-        (0..self.sectors())
-            .filter(|s| self.dirty.is_set(as_index(*s)))
-            .collect()
+        self.dirty.iter_ones().collect()
     }
 
     /// Whether a sync flushes `sector`: dirty and not stranded.
@@ -817,9 +858,7 @@ impl FileImage {
 
     /// The sectors a sync would flush now: dirty and not stranded.
     pub(crate) fn flushable_sectors(&self) -> Vec<u64> {
-        (0..self.sectors())
-            .filter(|s| self.is_flushable(*s))
-            .collect()
+        self.dirty.iter_ones_without(&self.stranded).collect()
     }
 
     /// Bytes at the start of `sector` that the last sync reported durable and
@@ -901,14 +940,14 @@ impl FileImage {
 
     fn resize_bitsets(&mut self, sectors: u64) {
         let len = as_index(sectors);
-        self.dirty = self.dirty.resized(len);
-        self.lied = self.lied.resized(len);
-        self.stranded = self.stranded.resized(len);
-        self.faults = self.faults.resized(len);
-        self.eio_read = self.eio_read.resized(len);
-        self.eio_write = self.eio_write.resized(len);
-        self.damaged = self.damaged.resized(len);
-        self.allocated = self.allocated.resized(len);
+        self.dirty.resize(len);
+        self.lied.resize(len);
+        self.stranded.resize(len);
+        self.faults.resize(len);
+        self.eio_read.resize(len);
+        self.eio_write.resize(len);
+        self.damaged.resize(len);
+        self.allocated.resize(len);
     }
 
     /// The bytes of `sector` inside a file of `size` bytes.
@@ -1253,6 +1292,33 @@ mod tests {
     use super::{FileImage, SECTOR_SIZE, SectorBitSet};
     use crate::sim::rng::{reset_sim_rng, set_sim_seed};
     use crate::storage::{EioTarget, StorageConfiguration};
+
+    /// The word-wise operations agree with a bit-by-bit reference.
+    #[test]
+    fn bitset_word_operations_match_the_bit_by_bit_reference() {
+        let mut set = SectorBitSet::new(200);
+        let mut other = SectorBitSet::new(200);
+        for sector in [0, 5, 63, 64, 127, 128, 190, 199] {
+            set.set(sector);
+        }
+        other.set(5);
+        other.set(128);
+        let ones: Vec<u64> = set.iter_ones().collect();
+        assert_eq!(ones, [0, 5, 63, 64, 127, 128, 190, 199]);
+        let without: Vec<u64> = set.iter_ones_without(&other).collect();
+        assert_eq!(without, [0, 63, 64, 127, 190, 199]);
+        for start in 0..205u64 {
+            for end in start..205u64 {
+                let reference = (start..end).any(|s| set.is_set(super::as_index(s)));
+                assert_eq!(set.any_in(start..end), reference, "{start}..{end}");
+            }
+        }
+        set.resize(100);
+        assert_eq!(set.iter_ones().collect::<Vec<_>>(), [0, 5, 63, 64]);
+        set.resize(200);
+        assert!(!set.any_in(100..200), "a shrink clears the bits it drops");
+        assert_eq!(set.count_ones(), 4);
+    }
 
     fn seeded(seed: u64) {
         reset_sim_rng();

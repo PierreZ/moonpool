@@ -143,9 +143,10 @@ impl HistogramValue {
     }
 }
 
-/// Order two floats, treating an incomparable pair (a NaN) as equal.
+/// Order two floats with the IEEE total order: a NaN sorts after every
+/// number, so `sort_by` always sees a total order and never panics.
 fn cmp_f64(a: f64, b: f64) -> std::cmp::Ordering {
-    a.partial_cmp(&b).unwrap_or(std::cmp::Ordering::Equal)
+    a.total_cmp(&b)
 }
 
 /// One metric, at one label combination, at one point in time.
@@ -421,6 +422,23 @@ pub trait MetricsSource: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_sorts_a_nan_bound_without_panicking() {
+        let mut left = HistogramValue {
+            count: 1,
+            sum: 1.0,
+            buckets: vec![(1.0, 1), (f64::NAN, 1)],
+        };
+        let right = HistogramValue {
+            count: 1,
+            sum: 0.5,
+            buckets: vec![(0.5, 1), (f64::NAN, 1)],
+        };
+        left.merge(&right);
+        assert_eq!(left.buckets[0].0.to_bits(), 0.5_f64.to_bits());
+        assert!(left.buckets.last().is_some_and(|(bound, _)| bound.is_nan()));
+    }
 
     #[test]
     fn new_sorts_labels() {
