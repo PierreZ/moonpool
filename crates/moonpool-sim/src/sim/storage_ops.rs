@@ -9,7 +9,7 @@ use tracing::instrument;
 
 use crate::storage::{
     StorageConfiguration, StorageError,
-    sim::{HandleId, OperationId, StorageActions, StorageCompletion, StorageEvent},
+    sim::{HandleId, NamespaceOp, OperationId, StorageActions, StorageCompletion, StorageEvent},
 };
 
 use super::{
@@ -106,17 +106,14 @@ impl SimWorld {
         f(inner.storage.config())
     }
 
-    pub(crate) fn open_file(
-        &self,
-        path: &str,
-        options: moonpool_core::OpenOptions,
-        initial_size: u64,
-        owner_ip: IpAddr,
-    ) -> Result<HandleId, StorageError> {
-        self.inner
-            .write()
-            .storage
-            .open_file(path, options, initial_size, owner_ip)
+    /// Submit one namespace operation (open, delete, rename,
+    /// `create_dir_all`, `sync_dir`) on `owner_ip`'s disk. It takes effect
+    /// when its scheduled completion runs.
+    pub(crate) fn schedule_namespace(&self, owner_ip: IpAddr, op: NamespaceOp) -> OperationId {
+        self.storage_transition(|inner| {
+            let now = inner.now();
+            inner.storage.schedule_namespace(owner_ip, op, now)
+        })
     }
 
     pub(crate) fn handle_constraints(
@@ -134,38 +131,6 @@ impl SimWorld {
         self.inner.read().storage.file_exists(owner_ip, path)
     }
 
-    pub(crate) fn create_dir_all(&self, path: &str, owner_ip: IpAddr) -> Result<(), StorageError> {
-        self.try_storage_transition(|inner| {
-            inner
-                .storage
-                .create_dir_all(path, owner_ip)
-                .map(|actions| ((), actions))
-        })
-    }
-
-    pub(crate) fn delete_file(&self, owner_ip: IpAddr, path: &str) -> Result<(), StorageError> {
-        self.try_storage_transition(|inner| {
-            inner
-                .storage
-                .delete_file(owner_ip, path)
-                .map(|actions| ((), actions))
-        })
-    }
-
-    pub(crate) fn rename_file(
-        &self,
-        owner_ip: IpAddr,
-        from: &str,
-        to: &str,
-    ) -> Result<(), StorageError> {
-        self.try_storage_transition(|inner| {
-            inner
-                .storage
-                .rename_file(owner_ip, from, to)
-                .map(|actions| ((), actions))
-        })
-    }
-
     /// The visible names directly under `path`; see
     /// [`StorageProvider::list_dir`](moonpool_core::StorageProvider::list_dir).
     /// A namespace read: it schedules nothing and draws no randomness.
@@ -175,10 +140,6 @@ impl SimWorld {
         owner_ip: IpAddr,
     ) -> Result<Vec<String>, StorageError> {
         self.inner.read().storage.list_dir(path, owner_ip)
-    }
-
-    pub(crate) fn sync_dir(&self, path: &str, owner_ip: IpAddr) -> Result<(), StorageError> {
-        self.storage_transition(|inner| inner.storage.sync_dir(path, owner_ip))
     }
 
     pub(crate) fn schedule_read(

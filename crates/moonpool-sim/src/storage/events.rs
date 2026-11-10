@@ -40,4 +40,8 @@ pub enum StorageOperation {
         /// New file length
         new_len: u64,
     },
+
+    /// Namespace operation completed: an open, delete, rename,
+    /// `create_dir_all` or `sync_dir`. It takes effect now.
+    NamespaceComplete,
 }

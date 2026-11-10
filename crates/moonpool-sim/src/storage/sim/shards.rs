@@ -328,6 +328,47 @@ impl StorageState {
         }
     }
 
+    /// Whether a crash may lose the unsynced directory entries at `paths` on
+    /// `owner`'s disk: a lost entry costs every `(shard, stripe)` copy its
+    /// file holds, so each must survive on the other clean copies.
+    pub(crate) fn entry_loss_allowed(&self, owner: IpAddr, paths: &[&str]) -> bool {
+        let Some(layout) = self.layouts.get(&owner) else {
+            return true;
+        };
+        let keys: Vec<ShardKey> = paths
+            .iter()
+            .flat_map(|path| layout.shard_keys(path))
+            .collect();
+        if keys.is_empty() {
+            return true;
+        }
+        let Some(requirements) = self.shard_requirements() else {
+            return true;
+        };
+        let not_intact = self.not_intact();
+        keys.iter().all(|(shard, stripe)| {
+            self.stripe_survives(&requirements, &not_intact, owner, shard, *stripe)
+        })
+    }
+
+    /// Count `owner`'s copies at `paths` lost after a crash lost their
+    /// directory entries: the file is gone or back to an older one, so each
+    /// shard it held counts lost until the code under test opens it intact
+    /// ([`moonpool_buggify::shard::intact`]).
+    pub(crate) fn note_lost_entries(&self, owner: IpAddr, paths: &[&str]) {
+        let (Some(book), Some(layout)) = (self.shards.as_ref(), self.layouts.get(&owner)) else {
+            return;
+        };
+        let shards: BTreeSet<Arc<str>> = paths
+            .iter()
+            .flat_map(|path| layout.shard_keys(path))
+            .map(|(shard, _)| shard)
+            .collect();
+        for shard in shards {
+            book.note_shard_loss(owner, &shard);
+        }
+    }
+
     /// Whether failing `ip`'s disk keeps every shard that lists it durable.
     pub(crate) fn disk_failure_allowed(&self, ip: IpAddr) -> bool {
         let Some(requirements) = self.shard_requirements() else {

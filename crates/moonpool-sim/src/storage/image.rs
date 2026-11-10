@@ -861,6 +861,17 @@ impl FileImage {
         self.dirty.iter_ones_without(&self.stranded).collect()
     }
 
+    /// How many sectors in `sectors` a sync would flush now: the bytes a sync
+    /// of that range pays for in the disk queue.
+    pub(crate) fn flushable_in(&self, sectors: Range<u64>) -> u64 {
+        let count = self
+            .dirty
+            .iter_ones_without(&self.stranded)
+            .filter(|sector| sectors.contains(sector))
+            .count();
+        u64::try_from(count).unwrap_or(u64::MAX)
+    }
+
     /// Bytes at the start of `sector` that the last sync reported durable and
     /// no write has touched since: the prefix a crash must leave alone.
     ///

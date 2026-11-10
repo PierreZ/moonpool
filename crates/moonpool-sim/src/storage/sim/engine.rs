@@ -58,12 +58,14 @@ pub(crate) enum StorageCompletion {
     Read(Vec<u8>),
     /// Location and length committed by a write event.
     Write { offset: u64, len: usize },
+    /// The handle a namespace open created.
+    Opened(HandleId),
     /// Completion for operations without a value.
     Unit,
 }
 
 impl StorageActions {
-    fn schedule(&mut self, at: Duration, event: StorageEvent) {
+    pub(super) fn schedule(&mut self, at: Duration, event: StorageEvent) {
         self.scheduled.push(ScheduledStorageEvent { at, event });
     }
 
@@ -71,8 +73,16 @@ impl StorageActions {
         self.faults.push(event);
     }
 
-    fn cancel(&mut self, operation_id: OperationId) {
+    pub(super) fn cancel(&mut self, operation_id: OperationId) {
         self.canceled.push(operation_id);
+    }
+
+    /// Append `other`'s effects after this one's, in order.
+    pub(super) fn absorb(&mut self, mut other: StorageActions) {
+        self.scheduled.append(&mut other.scheduled);
+        self.canceled.append(&mut other.canceled);
+        self.faults.append(&mut other.faults);
+        self.wakes.append(other.wakes);
     }
 }
 
@@ -80,8 +90,8 @@ impl StorageActions {
 #[derive(Debug)]
 pub struct StorageEngine {
     pub(super) state: StorageState,
-    results: BTreeMap<OperationId, Result<StorageCompletion, StorageError>>,
-    wakers: WakerRegistry<OperationId>,
+    pub(super) results: BTreeMap<OperationId, Result<StorageCompletion, StorageError>>,
+    pub(super) wakers: WakerRegistry<OperationId>,
 }
 
 impl StorageEngine {
@@ -1006,16 +1016,21 @@ impl StorageEngine {
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
         }
+        // A sync pays for the bytes it flushes: the disk is busy writing
+        // them back before the flush itself.
+        let flushed = self.state.files.get(&file_id).map_or(0, |file| {
+            let sector = crate::storage::SECTOR_SIZE as u64;
+            let sectors = match range {
+                Some((offset, len)) => offset / sector..(offset + len as u64).div_ceil(sector),
+                None => 0..u64::MAX,
+            };
+            file.image.flushable_in(sectors).saturating_mul(sector)
+        });
         let episode = self.update_disk_episode(owner_ip, now);
-        let mut latency = sample_latency(&self.state.config_for(owner_ip).sync_latency);
-        if let Some(DiskDegradationState {
-            kind: DiskEpisodeKind::Stall,
-            expires_at,
-        }) = episode
-        {
-            latency = latency.saturating_add(expires_at.saturating_sub(now));
-        }
-        let latency = latency.saturating_mul(self.slow_factor(owner_ip));
+        let config = self.state.config_for(owner_ip);
+        let base = sample_latency(&config.sync_latency);
+        let service = service_time(config, flushed, episode);
+        let latency = self.queued_latency(owner_ip, episode, service, base, now);
         self.schedule_operation(
             pending,
             StorageOperation::SyncComplete,
@@ -1060,7 +1075,8 @@ impl StorageEngine {
     }
 
     /// Advance `owner_ip`'s disk episode and sample the latency of one
-    /// `len`-byte read or write issued at `now`.
+    /// `len`-byte read or write issued at `now`, queued behind the work the
+    /// disk already has.
     fn transfer_latency(
         &mut self,
         owner_ip: IpAddr,
@@ -1069,14 +1085,47 @@ impl StorageEngine {
         now: Duration,
     ) -> Duration {
         let episode = self.update_disk_episode(owner_ip, now);
-        Self::calculate_storage_latency(
-            self.state.config_for(owner_ip),
-            len,
-            is_write,
-            episode,
-            now,
-        )
-        .saturating_mul(self.slow_factor(owner_ip))
+        let config = self.state.config_for(owner_ip);
+        let base = sample_latency(if is_write {
+            &config.write_latency
+        } else {
+            &config.read_latency
+        });
+        let service = service_time(config, len as u64, episode);
+        self.queued_latency(owner_ip, episode, service, base, now)
+    }
+
+    /// Put one operation in `owner_ip`'s disk queue and return how long after
+    /// `now` it completes.
+    ///
+    /// The disk serves one operation at a time: this one starts when the
+    /// disk is free (and a stall has expired), occupies the disk for
+    /// `service`, and completes `base` after that. So 10,000 parallel writes
+    /// finish one after the other, and a slow disk builds a backlog, as with
+    /// the `FoundationDB` `waitUntilDiskReady`. The disk's slowness multiplies
+    /// both parts. Draws nothing.
+    pub(super) fn queued_latency(
+        &mut self,
+        owner_ip: IpAddr,
+        episode: Option<DiskDegradationState>,
+        service: Duration,
+        base: Duration,
+        now: Duration,
+    ) -> Duration {
+        let slow = self.slow_factor(owner_ip);
+        let stall_end = match episode {
+            Some(DiskDegradationState {
+                kind: DiskEpisodeKind::Stall,
+                expires_at,
+            }) => expires_at,
+            _ => now,
+        };
+        let free_at = self.state.busy_until.get(&owner_ip).copied().unwrap_or(now);
+        let start = now.max(free_at).max(stall_end);
+        let done = start.saturating_add(service.saturating_mul(slow));
+        self.state.busy_until.insert(owner_ip, done);
+        done.saturating_add(base.saturating_mul(slow))
+            .saturating_sub(now)
     }
 
     /// Shorten one transfer to a deterministic prefix, the way a real
@@ -1156,7 +1205,10 @@ impl StorageEngine {
         let handle_id = pending.handle_id;
         let operation_id = self.register_operation(pending)?;
         let mut actions = StorageActions::default();
-        actions.schedule(at, StorageEvent::new(operation_id, handle_id, operation));
+        actions.schedule(
+            at,
+            StorageEvent::new(operation_id, Some(handle_id), operation),
+        );
         Ok((operation_id, actions))
     }
 
@@ -1255,11 +1307,14 @@ impl StorageEngine {
     }
 
     pub(crate) fn handle_event(&mut self, event: StorageEvent) -> StorageActions {
+        if event.handle_id().is_none() {
+            return self.complete_namespace(event.operation_id());
+        }
         let mut actions = StorageActions::default();
         let Some(pending) = self.take_pending(event.operation_id()) else {
             return actions;
         };
-        if pending.handle_id != event.handle_id() {
+        if Some(pending.handle_id) != event.handle_id() {
             tracing::warn!(
                 operation_id = ?event.operation_id(),
                 expected_handle = ?pending.handle_id,
@@ -1369,7 +1424,9 @@ impl StorageEngine {
         if let Some(result) = self.results.remove(&operation_id) {
             return Poll::Ready(result);
         }
-        if self.state.pending_ops.contains_key(&operation_id) {
+        if self.state.pending_ops.contains_key(&operation_id)
+            || self.namespace_in_flight(operation_id)
+        {
             self.wakers.register(operation_id, waker);
             Poll::Pending
         } else {
@@ -1390,9 +1447,15 @@ impl StorageEngine {
     /// [`dropped_mutation_discard_probability`]: StorageConfiguration::dropped_mutation_discard_probability
     pub(crate) fn cancel_operation(&mut self, operation_id: OperationId) -> StorageActions {
         let mut actions = StorageActions::default();
-        self.results.remove(&operation_id);
+        // An open that completed with nobody left to take its handle: close
+        // the handle, or it would stay open for good.
+        if let Some(Ok(StorageCompletion::Opened(handle_id))) = self.results.remove(&operation_id) {
+            actions.absorb(self.close_handle(handle_id));
+        }
         self.wakers.take(&operation_id);
-        self.drop_operation(operation_id, &mut actions);
+        if !self.drop_namespace(operation_id, &mut actions) {
+            self.drop_operation(operation_id, &mut actions);
+        }
         actions
     }
 
@@ -1427,6 +1490,9 @@ impl StorageEngine {
     }
 
     pub(crate) fn fail_scheduled_operation(&mut self, operation_id: OperationId) -> WakeBatch {
+        if let Some(wakes) = self.fail_scheduled_namespace(operation_id) {
+            return wakes;
+        }
         let Some(pending) = self.take_pending(operation_id) else {
             return WakeBatch::default();
         };
@@ -1608,6 +1674,8 @@ impl StorageEngine {
         self.state.note_damage_changed();
 
         let mut actions = StorageActions::default();
+        // A namespace operation still in flight never takes effect.
+        self.fail_namespace_ops(ip, &mut actions);
         let handle_ids = self
             .state
             .handles
@@ -1637,6 +1705,7 @@ impl StorageEngine {
     pub(crate) fn wipe_process(&mut self, ip: IpAddr) -> StorageActions {
         self.state.failed_disks.remove(&ip);
         self.state.disk_episodes.remove(&ip);
+        self.state.busy_until.remove(&ip);
         self.state.focus.remove(&ip);
         self.state.layouts.remove(&ip);
         self.state.store_layouts.remove(&ip);
@@ -1648,6 +1717,7 @@ impl StorageEngine {
             .map(|(id, _)| *id)
             .collect::<Vec<_>>();
         let mut actions = StorageActions::default();
+        self.fail_namespace_ops(ip, &mut actions);
         self.state.path_to_file.retain(|(owner, _), _| *owner != ip);
         self.state
             .durable_paths
@@ -1692,6 +1762,7 @@ impl StorageEngine {
             actions.cancel(operation_id);
             actions.wakes.push(self.wakers.take(&operation_id));
         }
+        self.shut_down_namespace_ops(&mut actions);
         for handle in self.state.handles.values_mut() {
             handle.is_closed = true;
         }
@@ -1811,7 +1882,7 @@ impl StorageEngine {
             .ok_or(StorageError::MissingFile { file_id })
     }
 
-    fn update_disk_episode(
+    pub(super) fn update_disk_episode(
         &mut self,
         owner_ip: IpAddr,
         now: Duration,
@@ -1858,45 +1929,6 @@ impl StorageEngine {
         }
         episode
     }
-
-    fn calculate_storage_latency(
-        config: &StorageConfiguration,
-        size: usize,
-        is_write: bool,
-        episode: Option<DiskDegradationState>,
-        now: Duration,
-    ) -> Duration {
-        let base = sample_latency(if is_write {
-            &config.write_latency
-        } else {
-            &config.read_latency
-        });
-        let (iops_divisor, bandwidth_divisor) = match episode {
-            Some(DiskDegradationState {
-                kind: DiskEpisodeKind::Throttle,
-                ..
-            }) => (
-                config.disk_throttle_iops_multiplier.max(1.0),
-                config.disk_throttle_bandwidth_multiplier.max(1.0),
-            ),
-            _ => (1.0, 1.0),
-        };
-        let iops = u32::try_from(config.iops).map_or(f64::from(u32::MAX), f64::from);
-        let size = u32::try_from(size).map_or(f64::from(u32::MAX), f64::from);
-        let bandwidth = u32::try_from(config.bandwidth).map_or(f64::from(u32::MAX), f64::from);
-        let steady = base
-            .saturating_add(saturating_duration_from_secs(iops_divisor / iops))
-            .saturating_add(saturating_duration_from_secs(
-                size * bandwidth_divisor / bandwidth,
-            ));
-        match episode {
-            Some(DiskDegradationState {
-                kind: DiskEpisodeKind::Stall,
-                expires_at,
-            }) => steady.saturating_add(expires_at.saturating_sub(now)),
-            _ => steady,
-        }
-    }
 }
 
 /// Where a `len`-byte read at `offset` is actually served from: `offset`
@@ -1938,6 +1970,31 @@ pub(super) fn parent_directory(path: &str) -> &str {
         Some(index) => &path[..index],
         None => ".",
     }
+}
+
+/// How long one operation of `bytes` bytes occupies the disk: one I/O at
+/// `iops`, plus the bytes at `bandwidth`. A throttle episode divides both.
+pub(super) fn service_time(
+    config: &StorageConfiguration,
+    bytes: u64,
+    episode: Option<DiskDegradationState>,
+) -> Duration {
+    let (iops_divisor, bandwidth_divisor) = match episode {
+        Some(DiskDegradationState {
+            kind: DiskEpisodeKind::Throttle,
+            ..
+        }) => (
+            config.disk_throttle_iops_multiplier.max(1.0),
+            config.disk_throttle_bandwidth_multiplier.max(1.0),
+        ),
+        _ => (1.0, 1.0),
+    };
+    let iops = u32::try_from(config.iops).map_or(f64::from(u32::MAX), f64::from);
+    let size = u32::try_from(bytes).map_or(f64::from(u32::MAX), f64::from);
+    let bandwidth = u32::try_from(config.bandwidth).map_or(f64::from(u32::MAX), f64::from);
+    saturating_duration_from_secs(iops_divisor / iops).saturating_add(
+        saturating_duration_from_secs(size * bandwidth_divisor / bandwidth),
+    )
 }
 
 fn saturating_duration_from_secs(seconds: f64) -> Duration {

@@ -162,6 +162,33 @@ pub(crate) struct PendingStorageOp {
     pub(crate) wait: Wait,
 }
 
+/// A namespace operation the engine applies when its completion runs.
+#[derive(Debug, Clone)]
+pub(crate) enum NamespaceOp {
+    /// `open(2)`, with or without create.
+    Open { path: String, options: OpenOptions },
+    /// `unlink(2)`.
+    Delete { path: String },
+    /// `rename(2)`.
+    Rename { from: String, to: String },
+    /// `mkdir -p`.
+    CreateDirAll { path: String },
+    /// `fsync` of a directory.
+    SyncDir { path: String },
+}
+
+/// One namespace operation in flight.
+#[derive(Debug)]
+pub(crate) struct PendingNamespaceOp {
+    /// The process whose disk serves the operation.
+    pub(crate) owner_ip: IpAddr,
+    pub(crate) op: NamespaceOp,
+    /// Who, if anyone, waits for it. A dropped namespace operation is
+    /// detached and still lands, as a real `rename(2)` that a dropped
+    /// future started still does.
+    pub(crate) wait: Wait,
+}
+
 /// How an in-flight operation ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Wait {
@@ -265,6 +292,16 @@ pub(crate) struct StorageState {
     /// Directory entries made durable by syncing their parent directory.
     pub(crate) durable_directories: BTreeSet<Name>,
     pub(crate) pending_ops: BTreeMap<OperationId, PendingStorageOp>,
+    /// Namespace operations in flight (open, delete, rename,
+    /// `create_dir_all`, `sync_dir`): they hold no handle, and they take
+    /// effect when their completion runs.
+    pub(crate) namespace_ops: BTreeMap<OperationId, PendingNamespaceOp>,
+    /// Per-process disk queue: the time the disk finishes the work already
+    /// submitted to it. A new operation starts its service at this time or
+    /// later, so parallel operations wait for each other, as on a real
+    /// device (the `FoundationDB` `DiskParameters::nextOperation`). A process
+    /// absent here has an idle disk.
+    pub(crate) busy_until: BTreeMap<IpAddr, Duration>,
     /// The clock of the caller of the current transition: the scheduler's
     /// for a completion, or the local clock of the process whose poll
     /// submits (see the CPU model, `crate::sim::cpu`). It may go back between
@@ -326,6 +363,8 @@ impl StorageState {
             directories: BTreeSet::new(),
             durable_directories: BTreeSet::new(),
             pending_ops: BTreeMap::new(),
+            namespace_ops: BTreeMap::new(),
+            busy_until: BTreeMap::new(),
             clock: Duration::ZERO,
             activity: BTreeMap::new(),
             slow_factors: BTreeMap::new(),

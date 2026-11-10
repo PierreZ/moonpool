@@ -579,3 +579,77 @@ fn a_failed_writeback_lands_only_where_the_shard_can_lose_the_copy() {
         "the last copy the shard needs: the gate refuses the failure"
     );
 }
+
+/// Write and sync `nodes`' whole copies of `s` in a file whose directory
+/// entry is never synced, then lose the second copy past the gate when
+/// `lose_one`. Then crash the first replica with every unsynced entry lost.
+/// Returns whether its file still exists, and the gate's count of refused
+/// entry losses.
+fn lose_a_whole_copys_entry(lose_one: bool) -> (bool, u64) {
+    let nodes = ips(3);
+    let mut sim = SimWorld::new_with_seed(7);
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let book = sim.install_shard_book(ShardFaults::default());
+    moonpool_sim::shard!(
+        "s",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    for ip in &nodes {
+        let regions = whole_layout("s");
+        local_runtime().block_on(async {
+            run_as(&mut sim, *ip, move |provider| async move {
+                provider.publish_layout(&regions).expect("publish");
+                let file = provider
+                    .open("registry", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open");
+                file.write_at(0, &vec![0x5A; 4 * SECTOR_SIZE])
+                    .await
+                    .expect("write");
+                // The bytes are durable; the name is not (no `sync_dir`).
+                file.sync_all().await.expect("sync");
+            })
+            .await;
+        });
+    }
+    if lose_one {
+        sim.storage_provider(nodes[1])
+            .lose_shard_past_gate("s")
+            .expect("lose");
+    }
+    sim.set_process_storage_config(
+        nodes[0],
+        StorageConfiguration {
+            unsynced_dir_entry_loss_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        },
+    );
+    sim.simulate_crash_for_process(nodes[0], true);
+    let exists = local_runtime().block_on(async {
+        run_as(&mut sim, nodes[0], move |provider| async move {
+            provider.exists("registry").await.expect("exists")
+        })
+        .await
+    });
+    let refused = book
+        .counts()
+        .downgrades_of(moonpool_sim::Downgrade::DirEntryLossRefused);
+    moonpool_sim::shard::clear_sink();
+    (exists, refused)
+}
+
+/// A crash that loses an unsynced directory entry loses the copy its file
+/// holds: it lands only while the shard stays durable without that copy.
+#[test]
+fn a_lost_directory_entry_lands_only_where_the_shard_can_lose_the_copy() {
+    assert_eq!(
+        lose_a_whole_copys_entry(false),
+        (false, 0),
+        "two other clean copies: the crash loses the entry"
+    );
+    assert_eq!(
+        lose_a_whole_copys_entry(true),
+        (true, 1),
+        "the last copy the shard needs: the gate keeps the entry"
+    );
+}

@@ -126,6 +126,15 @@ pub enum StorageError {
         file_id: FileId,
     },
 
+    /// An in-flight namespace operation (open, delete, rename,
+    /// `create_dir_all`, `sync_dir`) was interrupted by a simulated process
+    /// crash or wipe before it took effect.
+    #[error("namespace operation {operation_id:?} was interrupted")]
+    NamespaceInterrupted {
+        /// The interrupted operation.
+        operation_id: OperationId,
+    },
+
     /// An in-flight operation was failed by simulation shutdown.
     #[error("simulation shut down during storage operation {operation_id:?}")]
     SimulationShutdown {
@@ -201,6 +210,7 @@ impl From<StorageError> for io::Error {
             StorageError::InvalidFileHandle { .. }
             | StorageError::FileClosed { .. }
             | StorageError::OperationInterrupted { .. }
+            | StorageError::NamespaceInterrupted { .. }
             | StorageError::SimulationShutdown { .. } => io::ErrorKind::BrokenPipe,
             StorageError::PermissionDenied { .. } => io::ErrorKind::PermissionDenied,
             StorageError::InvalidOperation { .. }

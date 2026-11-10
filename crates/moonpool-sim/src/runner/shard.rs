@@ -250,6 +250,9 @@ pub enum Downgrade {
     /// A failed background writeback (fsyncgate) was not rolled: it would
     /// drop or strand the unsynced bytes of a copy its shard cannot lose.
     WritebackRefused,
+    /// A crash did not lose an unsynced directory entry: the entry's file
+    /// holds a copy its shard cannot lose.
+    DirEntryLossRefused,
 }
 
 /// What the book saw in one run: see [`Shards::counts`].
