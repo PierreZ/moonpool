@@ -1071,15 +1071,16 @@ impl QualificationWorkload {
             let class = match (answer, failure) {
                 (Some(done), _) => {
                     Self::judge_reply(ctx, *id, &expected, done);
-                    match op {
-                        QualOp::Recruit => assert_sometimes!(
+                    if op == QualOp::Recruit {
+                        assert_sometimes!(
                             true,
                             "rpc qual recruited interface invoked by the third participant"
-                        ),
-                        _ => assert_sometimes!(
+                        );
+                    } else {
+                        assert_sometimes!(
                             true,
                             "rpc qual callback invoked through a third participant"
-                        ),
+                        );
                     }
                     Class::Replied
                 }

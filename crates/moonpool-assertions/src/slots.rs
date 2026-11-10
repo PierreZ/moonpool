@@ -152,6 +152,10 @@ impl Entry for AssertionSlot {
     type Id = u64;
     const CAPACITY: usize = MAX_ASSERTION_SLOTS;
 
+    fn home(id: u64) -> u64 {
+        id
+    }
+
     unsafe fn published(entry: *mut Self) -> *const u8 {
         unsafe { &raw const (*entry).published }
     }
@@ -308,6 +312,21 @@ unsafe fn record(slot: *mut AssertionSlot, passed: bool) -> u64 {
         };
         atomic(counter).fetch_add(1, Ordering::Relaxed)
     }
+}
+
+/// Declare an assertion site before any run reaches it: make its slot with
+/// zero counts.
+///
+/// A slot is otherwise made by the first evaluation, so a site that no run
+/// reaches is invisible. A declared site that stays at zero is reported:
+/// an `Always` site with `must_hit` as "never reached" (a violation), a
+/// `Sometimes`, `Reachable` or `NumericSometimes` site as a coverage gap.
+/// `must_hit` and `maximize` must be the values the site's evaluations pass
+/// (`true` and `false` for a boolean site; `true` and the comparison's
+/// direction for a numeric one), or the slot is flagged as conflicted.
+/// Declaring fires no discovery hook. Inert when no table is installed.
+pub fn declare_site(kind: AssertKind, must_hit: bool, maximize: bool, msg: &str) {
+    let _ = find_or_alloc_slot(kind, must_hit, maximize, msg);
 }
 
 /// Boolean assertion backing function.
@@ -715,7 +734,8 @@ mod tests {
         // A claimant reserved index zero for "orphan" and died mid-init.
         // Safety: `init` installed a correctly aligned table region.
         unsafe {
-            let slot = table.add(8).cast::<()>().cast::<AssertionSlot>();
+            let home = crate::table::home_index::<AssertionSlot>(msg_hash("orphan"));
+            let slot = table.add(8).cast::<()>().cast::<AssertionSlot>().add(home);
             crate::table::header_word(table, 0).store(1, Ordering::Release);
             <AssertionSlot as Entry>::store_id(slot, msg_hash("orphan"));
             atomic(<AssertionSlot as Entry>::published(slot)).store(1, Ordering::Release);
