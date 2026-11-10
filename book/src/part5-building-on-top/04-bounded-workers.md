@@ -42,7 +42,7 @@ The controller polls its own children by pid with `WNOHANG`, never `waitpid(-1)`
 
 Exactly three things are shared between controller and workers:
 
-1. **The assertion region**: the 4096-slot assertion table and the 256-bucket `assert_sometimes_each!` table from `moonpool-assertions`, mapped `MAP_SHARED | MAP_ANONYMOUS` by `init_assertions`. Pass and fail counts accumulate across processes. The discovery latches make novelty a race-free, exactly-once decision.
+1. **The assertion region**: the 8192-slot assertion table and the 256-bucket `assert_sometimes_each!` table from `moonpool-assertions`, mapped `MAP_SHARED | MAP_ANONYMOUS` by `init_assertions`. Pass and fail counts accumulate across processes. The discovery latches make novelty a race-free, exactly-once decision.
 2. **Result slots**: one per worker. A slot holds a `u32` length and up to 256 raw events of `(call_count, state_id, kind)`. The controller zeroes the slot before the fork. The worker writes the entries first and the length last, so an interrupted worker leaves an empty journal. Its recipe is still kept as a crash reproducer.
 3. **Sancov buffers**: LLVM `inline-8bit-counters` copied into a per-worker slot and merged into the controller-owned history map after `waitpid`. One owner, no concurrent merges. See [Running Simulation Binaries with xtask](../appendix/08-xtask.md) for how the counters get into the binary.
 

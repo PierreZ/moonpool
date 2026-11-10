@@ -98,7 +98,7 @@ assert_sometimes_each!("paxos transition",
     [("decided slots", decided_slots)]);
 ```
 
-Keep identity keys coarse. The shared table holds 4096 assertion sites, 256 `sometimes_each` buckets, and at most 6 keys per site. Bucketing every node, ballot, slot and value exhausts the table and teaches the controller identifiers instead of protocol structure. Good identity dimensions: phase, role, quorum state, recovery mode, fault regime. Good quality values: decided slot count, ballot depth, retry depth, inverse replica lag.
+Keep identity keys coarse. The shared table holds 8192 assertion sites, 256 `sometimes_each` buckets, and at most 6 keys per site. Bucketing every node, ballot, slot and value exhausts the table and teaches the controller identifiers instead of protocol structure. Good identity dimensions: phase, role, quorum state, recovery mode, fault regime. Good quality values: decided slot count, ballot depth, retry depth, inverse replica lag.
 
 ## Combine Exploration With Broad Seeds
 

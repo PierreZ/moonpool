@@ -141,7 +141,7 @@ No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Wi
 | `assert_sometimes_each!("msg", [("phase", p)], [("quality", q)])` | Per-identity coverage. At most 6 keys, 256 buckets. No contract. |
 | `reachable!("msg")`, `sometimes!(cond, "msg")` | Probes from `moonpool-assertions` for libraries. |
 
-Limits: 4096 sites, 256 buckets. Only sometimes-style assertions create discoveries. Full table: [Assertion Reference](./appendix/01-assertion-reference.md).
+Limits: 8192 sites, 256 buckets. Only sometimes-style assertions create discoveries. Full table: [Assertion Reference](./appendix/01-assertion-reference.md).
 
 ## Invariants and Traces
 
