@@ -48,8 +48,12 @@ struct RawEvent {
     kind: u64,
 }
 
+/// Byte size of a slot header: the entry count (`u32`, padded to 8) and the
+/// run's final RNG call count (`u64`).
+const SLOT_HEADER: usize = 16;
+
 /// Byte size of one journal result slot.
-const SLOT_SIZE: usize = 8 + MAX_JOURNAL_ENTRIES * std::mem::size_of::<RawEvent>();
+const SLOT_SIZE: usize = SLOT_HEADER + MAX_JOURNAL_ENTRIES * std::mem::size_of::<RawEvent>();
 
 thread_local! {
     /// True in a forked worker process.
@@ -99,14 +103,17 @@ impl SlotPool {
         unsafe { self.memory.as_ptr().add(idx * SLOT_SIZE) }
     }
 
-    /// A slot's `len` header and the start of its entry array.
-    fn slot_parts(&self, idx: usize) -> (*mut u32, *mut RawEvent) {
+    /// A slot's `len` header, its final-count header and the start of its
+    /// entry array.
+    fn slot_parts(&self, idx: usize) -> (*mut u32, *mut u64, *mut RawEvent) {
         let ptr = self.slot_ptr(idx);
-        // Safety: the slot is SLOT_SIZE bytes: an 8-byte header followed by
-        // MAX_JOURNAL_ENTRIES RawEvents.
-        let entries = unsafe { ptr.add(8) };
+        // Safety: the slot is SLOT_SIZE bytes: a SLOT_HEADER-byte header (len
+        // at 0, the final count at 8) followed by MAX_JOURNAL_ENTRIES
+        // RawEvents.
+        let (end_count, entries) = unsafe { (ptr.add(8), ptr.add(SLOT_HEADER)) };
         (
             ptr.cast::<()>().cast::<u32>(),
+            end_count.cast::<()>().cast::<u64>(),
             entries.cast::<()>().cast::<RawEvent>(),
         )
     }
@@ -117,9 +124,10 @@ impl SlotPool {
         unsafe { std::ptr::write_bytes(self.slot_ptr(idx), 0, SLOT_SIZE) };
     }
 
-    /// Serialize the given journal into a slot (called in the worker).
-    pub fn write_slot(&self, idx: usize, journal: &[DiscoveryEvent]) {
-        let (header, entries) = self.slot_parts(idx);
+    /// Serialize the given journal and the run's final RNG call count into a
+    /// slot (called in the worker).
+    pub fn write_slot(&self, idx: usize, journal: &[DiscoveryEvent], end_count: u64) {
+        let (header, end, entries) = self.slot_parts(idx);
         let len = journal.len().min(MAX_JOURNAL_ENTRIES);
         // Safety: len is capped to the slot's MAX_JOURNAL_ENTRIES entries.
         // Write the entries before publishing len so a worker interrupted
@@ -132,18 +140,20 @@ impl SlotPool {
                     kind: event.kind as u64,
                 });
             }
+            end.write(end_count);
             *header = u32::try_from(len).expect("len capped at MAX_JOURNAL_ENTRIES");
         }
     }
 
-    /// Deserialize a slot's journal (called in the controller after reaping).
-    pub fn read_slot(&self, idx: usize) -> Vec<DiscoveryEvent> {
-        let (header, entries) = self.slot_parts(idx);
+    /// Deserialize a slot's journal and the run's final RNG call count
+    /// (called in the controller after reaping).
+    pub fn read_slot(&self, idx: usize) -> (Vec<DiscoveryEvent>, u64) {
+        let (header, end, entries) = self.slot_parts(idx);
         // Safety: the slot layout matches write_slot; len is re-capped on read
         // so a corrupted header cannot walk out of the slot.
         unsafe {
             let len = (*header as usize).min(MAX_JOURNAL_ENTRIES);
-            (0..len)
+            let events = (0..len)
                 .filter_map(|i| {
                     let raw = entries.add(i).read();
                     let kind = u8::try_from(raw.kind)
@@ -155,7 +165,8 @@ impl SlotPool {
                         state_id: raw.state_id,
                     })
                 })
-                .collect()
+                .collect();
+            (events, end.read())
         }
     }
 }
@@ -257,14 +268,14 @@ mod tests {
         ];
         pool.clear_slot(0);
         pool.clear_slot(1);
-        pool.write_slot(1, &journal);
+        pool.write_slot(1, &journal, 4_096);
 
-        assert!(pool.read_slot(0).is_empty());
-        assert_eq!(pool.read_slot(1), journal);
+        assert_eq!(pool.read_slot(0), (Vec::new(), 0));
+        assert_eq!(pool.read_slot(1), (journal, 4_096));
 
-        // Clearing wipes the journal.
+        // Clearing wipes the journal and the final count.
         pool.clear_slot(1);
-        assert!(pool.read_slot(1).is_empty());
+        assert_eq!(pool.read_slot(1), (Vec::new(), 0));
     }
 
     #[test]

@@ -24,7 +24,7 @@ Follow a two-seed campaign on the maze workload:
 seed 1, root run:   discovers "exit found" on gate 3, "retry fired", "turned back"
                     -> productive, expands, explores up to 2400 timelines
 seed 2, root run:   same semantic states, all latches already taken
-                    -> journal empty -> barren -> zero children
+                    -> journal empty, no new edge -> barren -> zero children
 ```
 
 The second seed finishes after exactly one timeline. The report shows it in `report.exploration.per_seed_timelines`, a vector parallel to `report.seeds_used`. A typical print after a campaign:

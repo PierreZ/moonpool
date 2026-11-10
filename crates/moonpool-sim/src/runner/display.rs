@@ -422,6 +422,9 @@ fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
         fmt_num(exp.expansions),
         fmt_num(exp.discoveries),
     );
+    if exp.edge_expansions > 0 {
+        let _ = writeln!(w, "  Edge Expand  {}", fmt_num(exp.edge_expansions));
+    }
     if exp.max_active_workers > 0 {
         let _ = writeln!(
             w,

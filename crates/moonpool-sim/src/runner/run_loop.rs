@@ -80,6 +80,7 @@ struct FinalReportInputs {
 struct ExplorationTotals {
     timelines: u64,
     expansions: u64,
+    edge_expansions: u64,
     discoveries: u64,
     bugs: u64,
     max_active_workers: usize,
@@ -100,6 +101,7 @@ impl ExplorationTotals {
         self.per_seed_timelines.push(seed_stats.total_timelines);
         self.timelines += seed_stats.total_timelines;
         self.expansions += seed_stats.expansions;
+        self.edge_expansions += seed_stats.edge_expansions;
         self.discoveries += seed_stats.discoveries;
         self.bugs += seed_stats.bug_found;
         self.max_active_workers = self.max_active_workers.max(seed_stats.max_active_workers);
@@ -123,6 +125,7 @@ impl ExplorationTotals {
         super::report::ExplorationReport {
             total_timelines: self.timelines,
             expansions: self.expansions,
+            edge_expansions: self.edge_expansions,
             discoveries: self.discoveries,
             bugs_found: self.bugs,
             bug_recipes: self.bug_recipes,
