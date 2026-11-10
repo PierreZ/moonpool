@@ -170,7 +170,7 @@ A model that only knows what **this** client wrote is wrong under crashes: a `Cr
 
 ## Check: Final Validation
 
-`check()` runs after the world is quiet. No messages in flight, no faults, processes aborted. (With `chaos_until_run_ends()` it runs on the live processes instead, after the cutoff: the quiet tail where the workload reads the final state back. See [Chaos in Moonpool](./07-chaos.md#chaos-for-the-whole-run).) It is the place for whole-run properties:
+`check()` runs after the world is quiet. No messages in flight, no faults, processes aborted. Chaos ends before `check()` in every mode, also when each workload returns before `chaos_duration` elapses. (With `chaos_until_run_ends()` it runs on the live processes instead, after the cutoff: the quiet tail where the workload reads the final state back. See [Chaos in Moonpool](./07-chaos.md#chaos-for-the-whole-run).) It is the place for whole-run properties:
 
 ```rust
     async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {

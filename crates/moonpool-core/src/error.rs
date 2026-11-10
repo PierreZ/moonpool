@@ -18,6 +18,11 @@ pub enum SimulationError {
     /// An I/O error occurred during simulation.
     #[error("I/O error: {0}")]
     IoError(String),
+    /// A stall guard of the runner breached: the seed made no progress, or
+    /// ran past its virtual-time budget. The runner triggered shutdown so
+    /// that the seed ends, and the seed fails.
+    #[error("Stall: {0}")]
+    Stall(String),
     /// The simulation did not settle within the timeout after shutdown.
     #[error("Settle timeout: {pending_events} events still pending after {elapsed:?}")]
     SettleTimeout {

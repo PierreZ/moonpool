@@ -78,8 +78,8 @@ impl Workload for ProcessMonitorWorkload {
             "workload should see process IPs in topology"
         );
 
-        // Wait for shutdown
-        ctx.shutdown().cancelled().await;
+        // Return at once: waiting on shutdown with nothing to end the run
+        // is a stall, and a stall fails the seed.
         Ok(())
     }
 }
@@ -125,7 +125,7 @@ impl Workload for TagVerifierWorkload {
         assert_eq!(east_ips.len(), 2, "should have 2 east processes");
         assert_eq!(west_ips.len(), 2, "should have 2 west processes");
 
-        ctx.shutdown().cancelled().await;
+        // Return at once: a stall fails the seed.
         Ok(())
     }
 }

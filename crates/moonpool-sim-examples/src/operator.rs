@@ -76,10 +76,16 @@ impl Workload for OperatorWorkload {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         for _ in 0..12 {
-            ctx.time()
+            // A sleep that the runner's shutdown cuts returns an error: the
+            // run is over.
+            if ctx
+                .time()
                 .sleep(Duration::from_millis(ctx.random().random_range(300..1500)))
                 .await
-                .map_err(|e| invalid_state(format!("sleep failed: {e}")))?;
+                .is_err()
+            {
+                break;
+            }
             let live = ctx.topology().ips_in_group(GROUP);
             let version = ctx.deployment().version();
             if live.len() > MIN_NODES && ctx.random().random_bool(0.4) {
@@ -111,10 +117,9 @@ impl Workload for OperatorWorkload {
                 );
                 assert_sometimes!(true, "operator: a node is racked");
             }
-            ctx.time()
-                .sleep(Duration::from_millis(10))
-                .await
-                .map_err(|e| invalid_state(format!("sleep failed: {e}")))?;
+            if ctx.time().sleep(Duration::from_millis(10)).await.is_err() {
+                break;
+            }
             assert_always!(
                 ctx.deployment().version() > version,
                 "operator: every change moves the membership version"
@@ -169,10 +174,10 @@ impl Workload for PingWorkload {
                     assert_sometimes!(true, "operator: a racked node answers a ping");
                 }
             }
-            ctx.time()
-                .sleep(Duration::from_millis(200))
-                .await
-                .map_err(|e| invalid_state(format!("sleep failed: {e}")))?;
+            // A sleep that the runner's shutdown cuts returns an error.
+            if ctx.time().sleep(Duration::from_millis(200)).await.is_err() {
+                break;
+            }
         }
         Ok(())
     }

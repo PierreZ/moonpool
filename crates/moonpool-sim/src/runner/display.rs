@@ -198,6 +198,11 @@ fn write_report_summary(w: &mut impl Write, report: &SimulationReport, color: bo
         rate = rate,
         reset = paint(ansi::RESET, color),
     );
+    let _ = writeln!(
+        w,
+        "  Base seed    {} (replay the run with .base_seed({}))",
+        report.run_id, report.run_id
+    );
 }
 
 fn write_report_timing(w: &mut impl Write, report: &SimulationReport) {
@@ -269,6 +274,12 @@ fn write_report_faulty_seeds(w: &mut impl Write, report: &SimulationReport, colo
         paint(ansi::RESET, color)
     );
     let _ = writeln!(w, "{:?}", report.seeds_failing);
+    if !report.seeds_stalled.is_empty() {
+        let _ = writeln!(w, "  Stalled seeds: {:?}", report.seeds_stalled);
+    }
+    for seed in &report.seeds_failing {
+        let _ = writeln!(w, "  Replay: .set_debug_seeds(vec![{seed}])");
+    }
 }
 
 /// Render the whole report — every section, in order — to `w`, with ANSI
@@ -445,6 +456,17 @@ fn write_exploration(w: &mut impl Write, exp: &ExplorationReport, color: bool) {
         );
         for br in &exp.bug_recipes {
             let _ = writeln!(w, "    seed={}: {}", br.seed, format_recipe(&br.recipe));
+            let pairs: Vec<String> = br
+                .recipe
+                .iter()
+                .map(|(count, seed)| format!("({count}, {seed})"))
+                .collect();
+            let _ = writeln!(
+                w,
+                "      Replay: .replay_timeline({}, vec![{}])",
+                br.seed,
+                pairs.join(", ")
+            );
         }
     }
 }

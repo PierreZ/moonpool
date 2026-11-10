@@ -52,6 +52,9 @@ type SetupOutput = (
 /// and the setup result.
 type SetupTaskOutput = (Box<dyn Workload>, SimContext, SimulationResult<()>);
 
+/// The workloads and fault injectors of one iteration.
+type Actors = (Vec<Box<dyn Workload>>, Vec<Box<dyn FaultInjector>>);
+
 /// Result of a completed fault injector task.
 type InjectorResult = SimulationResult<()>;
 
@@ -87,6 +90,9 @@ struct IterationEnv<'a> {
     seed: u64,
     iteration_count: usize,
     run_time_budget: Duration,
+    /// The stall guards that breached in this iteration, by reason. Each one
+    /// fails the seed, also when the shutdown it triggered let the seed end.
+    stalls: &'a std::sync::Mutex<Vec<&'static str>>,
 }
 
 impl IterationEnv<'_> {
@@ -142,11 +148,12 @@ impl PhaseStall {
 
     /// Evaluate both stall guards (virtual-time budget + classic no-progress
     /// detector) after one loop pass and act on the most severe verdict: a
-    /// first breach triggers shutdown. Returns `true` on deadlock.
+    /// first breach triggers shutdown and is recorded, so the seed fails.
+    /// Returns `true` on deadlock.
     fn deadlocked(
         &mut self,
         sim: &mut SimWorld,
-        shutdown_signal: &CancellationToken,
+        env: &IterationEnv<'_>,
         current_active: usize,
         initial_active: usize,
         initial_event_count: usize,
@@ -159,8 +166,12 @@ impl PhaseStall {
             initial_event_count,
         ) {
             StallOutcome::Ok => false,
-            StallOutcome::Breached => {
-                WorkloadOrchestrator::trigger_shutdown(sim, shutdown_signal);
+            StallOutcome::Breached(reason) => {
+                env.stalls
+                    .lock()
+                    .expect("Mutex poisoned: prior task panicked")
+                    .push(reason);
+                WorkloadOrchestrator::trigger_shutdown(sim, env.shutdown_signal);
                 self.shutdown_triggered = true;
                 self.guard.reset_after_shutdown();
                 false
@@ -316,6 +327,7 @@ impl WorkloadOrchestrator {
         )));
         let metrics = Self::build_metrics(metrics_factory, &topology.all_entities, &obs);
         let shutdown_signal = CancellationToken::new();
+        let stalls = std::sync::Mutex::new(Vec::new());
         let env = IterationEnv {
             metrics: &metrics,
             state: &state,
@@ -330,10 +342,40 @@ impl WorkloadOrchestrator {
             seed,
             iteration_count,
             run_time_budget,
+            stalls: &stalls,
         };
 
+        let mut output = Self::run_phases(
+            &mut sim,
+            env,
+            process_config,
+            (workloads, fault_injectors),
+            (chaos_duration, chaos_until_run_ends),
+        )
+        .await?;
+        // A stall fails the seed. The shutdown it triggered only lets the
+        // seed end: a workload that obeys `ctx.shutdown()` returns `Ok`.
+        for reason in stalls
+            .into_inner()
+            .expect("Mutex poisoned: prior task panicked")
+        {
+            output
+                .results
+                .push(Err(crate::SimulationError::Stall(reason.to_string())));
+        }
+        Ok(output)
+    }
+
+    /// Boot, set up, run and check one iteration in `env`.
+    async fn run_phases(
+        sim: &mut SimWorld,
+        env: IterationEnv<'_>,
+        process_config: Option<ProcessConfig<'_>>,
+        (workloads, fault_injectors): Actors,
+        (chaos_duration, chaos_until_run_ends): (Option<Duration>, bool),
+    ) -> Result<OrchestrateOutput, Deadlock> {
         let (workloads, contexts, mut process_manager) =
-            match Self::boot_and_setup(&mut sim, env, process_config, workloads).await? {
+            match Self::boot_and_setup(sim, env, process_config, workloads).await? {
                 BootAndSetupOutcome::Continue {
                     workloads,
                     contexts,
@@ -343,13 +385,13 @@ impl WorkloadOrchestrator {
                     return Ok(OrchestrateOutput {
                         workloads,
                         results,
-                        metrics: Self::extract_metrics(&sim, &metrics, &topology.membership),
+                        metrics: Self::extract_metrics(sim, env.metrics, &env.topology.membership),
                     });
                 }
             };
 
         let ((returned_workloads, results), injectors) = Self::do_chaos_and_run_phase(
-            &mut sim,
+            sim,
             &mut process_manager,
             env,
             (workloads, contexts),
@@ -360,7 +402,7 @@ impl WorkloadOrchestrator {
 
         if chaos_until_run_ends {
             return Self::finalize_live_check(
-                &mut sim,
+                sim,
                 &mut process_manager,
                 env,
                 (returned_workloads, results),
@@ -369,14 +411,8 @@ impl WorkloadOrchestrator {
             .await;
         }
         Self::abort_running_injectors(injectors);
-        Self::finalize_orchestration(
-            &mut sim,
-            &mut process_manager,
-            env,
-            returned_workloads,
-            results,
-        )
-        .await
+        Self::finalize_orchestration(sim, &mut process_manager, env, returned_workloads, results)
+            .await
     }
 
     /// The end of a run whose chaos ended with its run phase
@@ -722,7 +758,7 @@ impl WorkloadOrchestrator {
         // running `sim.current_time()` are pure functions of the event
         // schedule, so the budget trip point is bit-for-bit deterministic
         // across replays (no wall clock, no RNG).
-        let mut chaos_ended = chaos_duration.is_none();
+        let mut chaos_ended = false;
         let mut stall = PhaseStall::new(sim, &env);
         let mut loop_count: u64 = 0;
 
@@ -772,7 +808,7 @@ impl WorkloadOrchestrator {
             let current_active = workload_handles.iter().filter(|h| h.is_some()).count();
             if stall.deadlocked(
                 sim,
-                env.shutdown_signal,
+                &env,
                 current_active,
                 initial_handle_count,
                 initial_event_count,
@@ -784,9 +820,23 @@ impl WorkloadOrchestrator {
                 crate::executor::until_stalled().await;
             }
         }
-        if chaos_until_run_ends && !chaos_ended {
-            assert_reachable!("phase: chaos ends with the run");
-            Self::end_chaos(sim, chaos_shutdown, process_manager, env.state);
+        // Chaos ends before `check()` in every mode: with the run when it
+        // lasts until the run ends, and also when every workload returned
+        // before `chaos_duration` elapsed, or when no duration was set. So
+        // `check()` runs with no fault injection, no partition, no
+        // disruptive buggify site and no hint sink. `end_chaos` only stops
+        // fault sources, so a run with no chaos loses nothing.
+        if !chaos_ended {
+            if chaos_duration.is_none() {
+                Self::stop_fault_sources(sim, chaos_shutdown, process_manager, env.state);
+            } else {
+                if chaos_until_run_ends {
+                    assert_reachable!("phase: chaos ends with the run");
+                } else {
+                    assert_reachable!("phase: chaos ends early, every workload returned");
+                }
+                Self::end_chaos(sim, chaos_shutdown, process_manager, env.state);
+            }
         }
         // Final pump: capture events emitted after the last step.
         Self::pump_observability(sim, env.obs);
@@ -806,6 +856,19 @@ impl WorkloadOrchestrator {
         state: &StateHandle,
     ) {
         tracing::debug!("Chaos phase ended");
+        Self::stop_fault_sources(sim, chaos_shutdown, process_manager, state);
+        assert_reachable!("phase: chaos ended");
+    }
+
+    /// Stop every source of new faults; the work of
+    /// [`end_chaos`](Self::end_chaos) without its coverage gate, for a run
+    /// that set no chaos duration.
+    fn stop_fault_sources(
+        sim: &mut SimWorld,
+        chaos_shutdown: &CancellationToken,
+        process_manager: &ProcessManager<'_>,
+        state: &StateHandle,
+    ) {
         chaos_shutdown.cancel();
         sim.enter_recovery_mode();
         Self::enter_shard_core(sim, process_manager, state);
@@ -814,7 +877,6 @@ impl WorkloadOrchestrator {
         moonpool_buggify::buggify_enter_recovery();
         moonpool_buggify::hint::clear_sink();
         crate::chaos::window::set_chaos_ended_at(Some(sim.current_time()));
-        assert_reachable!("phase: chaos ended");
     }
 
     /// The liveness core, when the run asks for one (see
@@ -1112,13 +1174,7 @@ impl WorkloadOrchestrator {
             }
             let initial_event_count = sim.pending_event_count();
             Self::step_and_pump(sim, process_manager.as_deref_mut(), &env);
-            if stall.deadlocked(
-                sim,
-                env.shutdown_signal,
-                active(),
-                active_handles,
-                initial_event_count,
-            ) {
+            if stall.deadlocked(sim, &env, active(), active_handles, initial_event_count) {
                 return false;
             }
             crate::executor::until_stalled().await;

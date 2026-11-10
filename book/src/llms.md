@@ -114,13 +114,13 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `set_iterations(n)`, `until_coverage_stable(10, 1000)` (default), `set_debug_seeds(seeds)`, `run_time_budget(d)` (1 h) | Campaign control. |
 | `enable_exploration(ExplorationConfig)`, `replay_timeline(seed, recipe)`, `check_determinism()` | Exploration, replay, canary. |
 
-No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Without `Chaos::Network` the network still has FoundationDB's always-on faults (random close, clock drift, buggified delay, probabilistic connect failure). Without `Chaos::Storage` storage has no faults.
+No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Without `Chaos::Network` the network has no faults (`NetworkConfiguration::without_chaos()`: default latencies, chaos disabled). Without `Chaos::Storage` storage has no faults.
 
 ## SimulationReport
 
 | Field | Meaning |
 |-------|---------|
-| `iterations`, `successful_runs`, `failed_runs`, `seeds_used`, `seeds_failing` | Campaign outcome. `is_failure()` is true when a seed failed, an always-assertion was violated, or assertion slots were dropped. |
+| `iterations`, `successful_runs`, `failed_runs`, `seeds_used`, `seeds_failing`, `seeds_stalled` | Campaign outcome. `is_failure()` is true when a seed failed, an always-assertion was violated, or assertion slots were dropped. `exit_code()` is 1 also on a coverage gap or a `convergence_timeout`; every sim binary exits with it. A stall guard that triggers shutdown fails the seed (`seeds_stalled`). |
 | `assertion_results`, `assertion_details`, `bucket_summaries`, `assertion_violations`, `coverage_violations`, `dropped_assertion_allocations` | Assertion accounting. With `.require_declared_sites(["my_crate"])` (and `.exempt_declared_sites([..])`) every literal-message assertion site of those modules gets a slot before seed 1, so a site no seed reaches is reported as "never reached". |
 | `saturation: Option<SaturationReport { signal, edges_covered, edges_total, sometimes_hit, sometimes_total, plateau_seeds }>`, `convergence_timeout` | How `UntilCoverageStable` stopped. |
 | `exploration: Option<ExplorationReport { total_timelines, expansions, discoveries, bugs_found, bug_recipes, max_active_workers, sancov_edges_total, sancov_edges_covered, converged, per_seed_timelines }>` | Exploration. |

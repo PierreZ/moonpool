@@ -4,7 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak},
-    task::Waker,
+    task::{Poll, Waker},
     time::Duration,
 };
 
@@ -70,6 +70,9 @@ pub(crate) struct SimInner {
     timer_schedules: BTreeMap<u64, ScheduleId>,
     pub(crate) next_task_id: u64,
     pub(crate) awakened_tasks: BTreeSet<u64>,
+    /// Timers that the `Shutdown` event cut before they fired. Their sleeps
+    /// return `Err(SimulationShutdown)`, not `Ok`.
+    cut_timers: BTreeSet<u64>,
     pub(crate) events_processed: u64,
     pub(crate) last_processed_event: Option<Event>,
     pub(crate) pending_faults: Vec<SimFaultRecord>,
@@ -106,6 +109,7 @@ impl SimInner {
             timer_schedules: BTreeMap::new(),
             next_task_id: 0,
             awakened_tasks: BTreeSet::new(),
+            cut_timers: BTreeSet::new(),
             events_processed: 0,
             last_processed_event: None,
             pending_faults: Vec::new(),
@@ -303,7 +307,8 @@ impl SimWorld {
                     super::storage_ops::handle_storage_event(&mut inner, event, &mut wakes);
                 }
                 Event::Shutdown => {
-                    // Every cancelled timer resolves, whether or not its sleep
+                    // Every cancelled timer resolves with an error (its full
+                    // duration did not elapse), whether or not its sleep
                     // was polled yet: a sleep constructed but not polled has a
                     // schedule and no waker, and would otherwise pend forever
                     // on a timer that no longer exists.
@@ -311,6 +316,7 @@ impl SimWorld {
                     for (task_id, schedule_id) in timer_schedules {
                         inner.scheduler.cancel(schedule_id);
                         inner.awakened_tasks.insert(task_id);
+                        inner.cut_timers.insert(task_id);
                     }
                     let task_wakers = inner.wakers.tasks.drain().collect::<Vec<_>>();
                     for (task_id, waker) in task_wakers {
@@ -795,14 +801,16 @@ impl SimWorld {
         self.inner.read().recovery_mode
     }
 
-    pub(crate) fn poll_sleep(&self, task_id: u64, waker: &Waker) -> bool {
+    /// Poll the timer of one sleep: `Ready(true)` when it fired,
+    /// `Ready(false)` when the `Shutdown` event cut it, `Pending` otherwise.
+    pub(crate) fn poll_sleep(&self, task_id: u64, waker: &Waker) -> Poll<bool> {
         let mut inner = self.inner.write();
         if inner.awakened_tasks.remove(&task_id) {
             inner.wakers.tasks.take(&task_id);
-            true
+            Poll::Ready(!inner.cut_timers.remove(&task_id))
         } else {
             inner.wakers.tasks.register(task_id, waker);
-            false
+            Poll::Pending
         }
     }
 
@@ -812,6 +820,7 @@ impl SimWorld {
         inner.timer_schedules.remove(&task_id);
         inner.wakers.tasks.take(&task_id);
         inner.awakened_tasks.remove(&task_id);
+        inner.cut_timers.remove(&task_id);
     }
 
     /// Schedules a process restart.
@@ -1015,7 +1024,7 @@ mod tests {
         }
         assert!(matches!(
             sleep.as_mut().poll(&mut context),
-            Poll::Ready(Ok(()))
+            Poll::Ready(Err(SimulationError::SimulationShutdown))
         ));
         assert!(matches!(
             network.as_mut().poll(&mut context),
@@ -1049,11 +1058,11 @@ mod tests {
         // waker; its first poll must still complete rather than pend forever.
         assert!(matches!(
             stashed.as_mut().poll(&mut context),
-            Poll::Ready(Ok(()))
+            Poll::Ready(Err(SimulationError::SimulationShutdown))
         ));
         assert!(matches!(
             polled.as_mut().poll(&mut context),
-            Poll::Ready(Ok(()))
+            Poll::Ready(Err(SimulationError::SimulationShutdown))
         ));
         assert!(sim.inner.read().awakened_tasks.is_empty());
     }

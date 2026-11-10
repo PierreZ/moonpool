@@ -59,23 +59,27 @@ pub fn reboot_attrition(max_dead: usize, scope: AttritionScope) -> Chaos {
     }
 }
 
-/// Print the report and exit non-zero when the run found a failure.
+/// Print the report and exit non-zero when the run did not pass.
 ///
-/// Gates on [`SimulationReport::is_failure`], not on `seeds_failing` alone: an
-/// always-violation or an assertion-table overflow is recorded at run level
-/// and may fail no individual seed.
+/// Gates on [`SimulationReport::exit_code`], not on `seeds_failing` alone: an
+/// always-violation, an assertion-table overflow, a coverage gap and an
+/// unsaturated sweep are recorded at run level and may fail no individual
+/// seed.
 pub fn finish_or_exit_on_failure(report: &SimulationReport) {
     report.eprint();
 
-    if report.is_failure() {
+    let code = report.exit_code();
+    if code != 0 {
         eprintln!(
-            "ERROR: {} seeds failed {:?}, {} assertion violations, {} dropped assertion allocations",
+            "ERROR: {} seeds failed {:?}, {} assertion violations, {} dropped assertion allocations, {} coverage violations, convergence timeout: {}",
             report.seeds_failing.len(),
             report.seeds_failing,
             report.assertion_violations.len(),
-            report.dropped_assertion_allocations
+            report.dropped_assertion_allocations,
+            report.coverage_violations.len(),
+            report.convergence_timeout
         );
-        process::exit(1);
+        process::exit(code);
     }
 }
 

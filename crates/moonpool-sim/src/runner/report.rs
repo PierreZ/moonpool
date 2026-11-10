@@ -340,6 +340,10 @@ pub struct SimulationReport {
     pub seeds_used: Vec<u64>,
     /// failed seeds
     pub seeds_failing: Vec<u64>,
+    /// Seeds that a stall guard of the runner stopped: no progress, a loop
+    /// of events at one logical time, or a run phase past its virtual-time
+    /// budget. Each one is also in [`seeds_failing`](Self::seeds_failing).
+    pub seeds_stalled: Vec<u64>,
     /// Aggregated assertion results across all iterations
     pub assertion_results: BTreeMap<String, AssertionStats>,
     /// Always-type assertion violations (definite bugs).
@@ -403,6 +407,27 @@ impl SimulationReport {
         !self.seeds_failing.is_empty()
             || !self.assertion_violations.is_empty()
             || self.dropped_assertion_allocations > 0
+    }
+
+    /// The exit code for a simulation binary: `0` when the run passed, `1`
+    /// when it did not.
+    ///
+    /// A run fails when [`is_failure`](Self::is_failure) is true, when a
+    /// `sometimes` or `reachable` assertion was not satisfied
+    /// ([`coverage_violations`](Self::coverage_violations)), or when an
+    /// `UntilCoverageStable` run reached its cap before saturation
+    /// ([`convergence_timeout`](Self::convergence_timeout)). Use it in every
+    /// simulation binary, so that CI fails on each of these:
+    ///
+    /// ```ignore
+    /// report.eprint();
+    /// std::process::exit(report.exit_code());
+    /// ```
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        i32::from(
+            self.is_failure() || !self.coverage_violations.is_empty() || self.convergence_timeout,
+        )
     }
 
     /// Calculate the success rate as a percentage.
@@ -557,6 +582,7 @@ mod tests {
             individual_metrics: Vec::new(),
             seeds_used: vec![1],
             seeds_failing: Vec::new(),
+            seeds_stalled: Vec::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             dropped_assertion_allocations: 0,
@@ -601,5 +627,24 @@ mod tests {
             !unconverged.is_failure(),
             "coverage is the caller's choice, not a definite failure"
         );
+    }
+
+    /// A sim binary fails on a failing seed and also on a coverage gap or an
+    /// unsaturated sweep (#382).
+    #[test]
+    fn exit_code_gates_on_coverage_and_saturation() {
+        assert_eq!(clean_report().exit_code(), 0);
+
+        let mut failing_seed = clean_report();
+        failing_seed.seeds_failing.push(1);
+        assert_eq!(failing_seed.exit_code(), 1);
+
+        let mut gap = clean_report();
+        gap.coverage_violations.push("never reached".to_owned());
+        assert_eq!(gap.exit_code(), 1);
+
+        let mut unsaturated = clean_report();
+        unsaturated.convergence_timeout = true;
+        assert_eq!(unsaturated.exit_code(), 1);
     }
 }

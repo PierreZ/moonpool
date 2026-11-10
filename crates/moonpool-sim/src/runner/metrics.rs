@@ -22,6 +22,8 @@ pub(crate) struct MetricsCollector {
     aggregated_metrics: SimulationMetrics,
     individual_metrics: Vec<SimulationResult<SimulationMetrics>>,
     faulty_seeds: Vec<u64>,
+    /// Seeds that a stall guard stopped (each one is also faulty).
+    stalled_seeds: Vec<u64>,
     /// Application-metric series folded across seeds, keyed by series identity.
     app_metrics: BTreeMap<String, MetricAggregate>,
     /// Identity of this `run()` invocation, stamped onto every query row.
@@ -43,6 +45,7 @@ impl MetricsCollector {
             aggregated_metrics: SimulationMetrics::default(),
             individual_metrics: Vec::new(),
             faulty_seeds: Vec::new(),
+            stalled_seeds: Vec::new(),
             app_metrics: BTreeMap::new(),
             run_id,
             metric_queries,
@@ -59,6 +62,12 @@ impl MetricsCollector {
         has_assertion_violations: bool,
         metrics: SimulationMetrics,
     ) {
+        if results
+            .iter()
+            .any(|result| matches!(result, Err(SimulationError::Stall(_))))
+        {
+            self.stalled_seeds.push(seed);
+        }
         if results.iter().all(Result::is_ok) && !has_assertion_violations {
             self.record_success(seed, wall_time, metrics);
         } else {
@@ -189,6 +198,7 @@ impl MetricsCollector {
             individual_metrics: self.individual_metrics,
             seeds_used: inputs.seeds_used,
             seeds_failing: self.faulty_seeds,
+            seeds_stalled: self.stalled_seeds,
             assertion_results: inputs.assertion_results,
             assertion_violations: inputs.assertion_violations,
             dropped_assertion_allocations: inputs.dropped_assertion_allocations,

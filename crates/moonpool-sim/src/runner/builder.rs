@@ -134,6 +134,9 @@ pub struct SimulationBuilder {
     pub(super) declared_site_modules: Vec<String>,
     /// Messages of declared sites that are not required.
     pub(super) exempt_declared_sites: Vec<String>,
+    /// The base seed every drawn iteration seed derives from; `None` draws
+    /// one from the wall clock.
+    pub(super) base_seed: Option<u64>,
     pub(super) network_chaos: Option<ChaosMode>,
     pub(super) storage_chaos: Option<ChaosMode>,
     /// Replicated storage fault patterns, drawn per seed over the topology.
@@ -226,6 +229,7 @@ impl SimulationBuilder {
             seeds: Vec::new(),
             declared_site_modules: Vec::new(),
             exempt_declared_sites: Vec::new(),
+            base_seed: None,
             network_chaos: None,
             storage_chaos: None,
             replicated_faults: Vec::new(),
@@ -1098,6 +1102,18 @@ impl SimulationBuilder {
     ) -> Self {
         self.exempt_declared_sites
             .extend(messages.into_iter().map(Into::into));
+        self
+    }
+
+    /// Derive the drawn iteration seeds from `base_seed` instead of the wall
+    /// clock.
+    ///
+    /// The report prints the base seed of each run (it is also
+    /// [`run_id`](crate::SimulationReport::run_id)). Pass it here to run the
+    /// same sequence of seeds again, for example to replay a whole CI job.
+    #[must_use]
+    pub fn base_seed(mut self, base_seed: u64) -> Self {
+        self.base_seed = Some(base_seed);
         self
     }
 
