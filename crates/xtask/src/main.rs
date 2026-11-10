@@ -205,7 +205,19 @@ fn sim_run_all() -> bool {
     run_binaries(SIM_BINARIES, &[])
 }
 
+/// The target directory of one instrumentation set: `SANCOV_CRATES` is not
+/// in cargo's fingerprint, so two binaries that instrument other crates must
+/// never share a build, or the second gets the first one's instrumentation.
+fn sancov_target_dir(sancov_crates: &str) -> String {
+    let set: String = sancov_crates
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("target/sancov/{set}")
+}
+
 fn simulation_command(binary: &SimBinary, extra_args: &[String]) -> Command {
+    let target_dir = sancov_target_dir(binary.sancov_crates);
     let mut command = Command::new("cargo");
     command
         .current_dir(Path::new(WORKSPACE_ROOT))
@@ -216,7 +228,7 @@ fn simulation_command(binary: &SimBinary, extra_args: &[String]) -> Command {
             "--bin",
             binary.name,
             "--target-dir",
-            "target/sancov",
+            &target_dir,
         ])
         .env("SANCOV_CRATES", binary.sancov_crates);
     if !extra_args.is_empty() {
@@ -283,8 +295,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        SIM_BINARIES, WORKSPACE_ROOT, filter_binaries, fmt_duration, simulation_command,
-        split_run_args,
+        SIM_BINARIES, WORKSPACE_ROOT, filter_binaries, fmt_duration, sancov_target_dir,
+        simulation_command, split_run_args,
     };
 
     fn strings(values: &[&str]) -> Vec<String> {
@@ -305,6 +317,15 @@ mod tests {
         let (filters, binary_args) = split_run_args(&args);
         assert_eq!(filters, strings(&["maze"]));
         assert_eq!(binary_args, strings(&["--seed", "42"]));
+    }
+
+    #[test]
+    fn each_instrumentation_set_has_its_own_target_dir() {
+        assert_eq!(
+            sancov_target_dir("moonpool_journal,moonpool_sim_examples"),
+            "target/sancov/moonpool-journal-moonpool-sim-examples"
+        );
+        assert_ne!(sancov_target_dir("a"), sancov_target_dir("b"));
     }
 
     #[test]
@@ -334,7 +355,7 @@ mod tests {
                 "--bin",
                 "sim-maze-explore",
                 "--target-dir",
-                "target/sancov",
+                sancov_target_dir(SIM_BINARIES[0].sancov_crates).as_str(),
                 "--",
                 "--seed",
                 "42",

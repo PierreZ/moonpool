@@ -37,12 +37,12 @@ The list is the `SIM_BINARIES` constant in `crates/xtask/src/main.rs`.
 For each binary, xtask executes from the workspace root:
 
 ```text
-SANCOV_CRATES=<crates> cargo run --package <pkg> --bin <name> --target-dir target/sancov [-- <args>]
+SANCOV_CRATES=<crates> cargo run --package <pkg> --bin <name> --target-dir target/sancov/<crates> [-- <args>]
 ```
 
 Two details matter:
 
-1. **A separate target directory.** `SANCOV_CRATES` is not part of cargo's fingerprint. Without `target/sancov`, cargo would serve a cached, uninstrumented build.
+1. **A target directory per crate set.** `SANCOV_CRATES` is not part of cargo's fingerprint. In a shared directory, cargo would serve a crate built with the instrumentation of the previous binary, or with none. So each set of instrumented crates builds in its own `target/sancov/<crates>`.
 2. **The RUSTC_WRAPPER.** The Nix shell exports `RUSTC_WRAPPER=scripts/sancov-rustc.sh`. The wrapper reads `SANCOV_CRATES` and adds, for the listed crates only, `-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Ccodegen-units=1`. It never instruments build scripts or proc macros. With `SANCOV_CRATES` unset it passes through to rustc unchanged.
 
 Only the crates in `SANCOV_CRATES` get counters. Instrument the crate under test and the library whose branches the campaign exercises (`moonpool_journal` for the journal campaign), not the whole framework. More instrumented edges make the plateau slower to reach.
