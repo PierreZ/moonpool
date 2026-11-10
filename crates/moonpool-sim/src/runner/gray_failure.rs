@@ -110,7 +110,8 @@ impl GrayFailure {
             && !registered.contains(&group.as_str())
         {
             return Some(format!(
-                "a GrayFailure names the unregistered group '{group}'"
+                "a GrayFailure names the unregistered group '{group}' \
+                 (declare a group spawned mid-run with SimulationBuilder::spawnable_group)"
             ));
         }
         let (start, end) = (*self.window.start(), *self.window.end());
@@ -154,7 +155,9 @@ impl GrayFailure {
 /// One machine's drawn gray window.
 #[derive(Debug, Clone, Copy)]
 struct SlowWindow {
-    ip: IpAddr,
+    /// The machine drawn at the start of the chaos window, or `None` when
+    /// the window picks its victim when it starts.
+    ip: Option<IpAddr>,
     start: Duration,
     end: Duration,
     slowness: Slowness,
@@ -164,13 +167,19 @@ struct SlowWindow {
 pub(crate) struct GrayFailureInjector {
     config: GrayFailure,
     chaos_duration: Duration,
+    /// Whether the victims are a group a workload spawns mid-run
+    /// ([`SimulationBuilder::spawnable_group`](crate::SimulationBuilder::spawnable_group)):
+    /// it has no process when the windows are drawn, so each window picks
+    /// its victim when it starts.
+    late: bool,
 }
 
 impl GrayFailureInjector {
-    pub(crate) fn new(config: GrayFailure, chaos_duration: Duration) -> Self {
+    pub(crate) fn new(config: GrayFailure, chaos_duration: Duration, late: bool) -> Self {
         Self {
             config,
             chaos_duration,
+            late,
         }
     }
 
@@ -189,23 +198,35 @@ impl GrayFailureInjector {
 
     /// Draw every slow window of this seed. The draws per victim are fixed:
     /// the window's length and start, then the three factors.
+    ///
+    /// A late regime draws `1..=max_slow` windows with no victim: each one
+    /// picks its victim when it starts.
     fn draw_windows(&self, ctx: &FaultContext) -> Vec<SlowWindow> {
         let mut pool = self.pool(ctx);
-        let budget = self.config.max_slow.min(pool.len());
+        let budget = if self.late {
+            self.config.max_slow
+        } else {
+            self.config.max_slow.min(pool.len())
+        };
         if budget == 0 {
             assert_reachable!("gray: no machine to slow");
             return Vec::new();
         }
         let count = sim_random_range(1..budget + 1);
-        // A partial Fisher-Yates shuffle: the first `count` are the victims.
-        for index in 0..count {
-            let pick = sim_random_range(index..pool.len());
-            pool.swap(index, pick);
-        }
+        let victims: Vec<Option<IpAddr>> = if self.late {
+            vec![None; count]
+        } else {
+            // A partial Fisher-Yates shuffle: the first `count` are the victims.
+            for index in 0..count {
+                let pick = sim_random_range(index..pool.len());
+                pool.swap(index, pick);
+            }
+            pool.into_iter().take(count).map(Some).collect()
+        };
         let cpu_on = ctx.cpu_model().is_some();
         let kinds = self.config.kinds;
-        pool.into_iter()
-            .take(count)
+        victims
+            .into_iter()
             .map(|ip| {
                 let (low, high) = (*self.config.window.start(), *self.config.window.end());
                 let fraction = low + sim_random_f64() * (high - low);
@@ -314,16 +335,19 @@ impl GrayFailureInjector {
     /// of the chaos window while the deployment is unchanged. Once a workload
     /// spawned or retired a process, one draw picks a victim from the live
     /// pool, leaving out the machines other windows slow now, so a spawned
-    /// process can go slow and a retired one never does. `None` when no
+    /// process can go slow and a retired one never does. A late window
+    /// (no machine drawn) always picks from the live pool. `None` when no
     /// machine is left.
     fn victim_now(
         &self,
         ctx: &FaultContext,
-        drawn: IpAddr,
+        drawn: Option<IpAddr>,
         drawn_version: u64,
         slowed: &[Option<IpAddr>],
     ) -> Option<IpAddr> {
-        if ctx.membership_version() == drawn_version {
+        if let Some(drawn) = drawn
+            && ctx.membership_version() == drawn_version
+        {
             return Some(drawn);
         }
         let pool: Vec<IpAddr> = self
