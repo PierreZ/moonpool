@@ -86,11 +86,13 @@ pub(crate) type ProcessPanics = Arc<Mutex<Vec<ProcessPanic>>>;
 /// One boot of a process: its root task, and the scope every task it spawns
 /// through its provider is bound to.
 ///
-/// Killing the boot is both halves: abort the root and cancel the scope, so
-/// the descendants a crash would otherwise leave running die with it.
+/// Killing the boot aborts the root, cancels the scope and ends the boot in
+/// the executor, so the descendants a crash would otherwise leave running
+/// die with it, however they were spawned.
 pub(crate) struct ProcessBoot {
     handle: crate::executor::JoinHandle<()>,
     scope: tokio_util::sync::CancellationToken,
+    owner: std::net::IpAddr,
 }
 
 impl ProcessBoot {
@@ -99,6 +101,9 @@ impl ProcessBoot {
     fn kill(self) {
         self.handle.abort();
         self.scope.cancel();
+        // A task spawned with the bare `executor::spawn` has no scope, but
+        // it carries the boot: it dies before its next poll too.
+        crate::executor::end_boot(self.owner);
     }
 }
 
@@ -149,7 +154,11 @@ pub(crate) fn spawn_process(
         }
         .instrument(tracing::info_span!("process", ip = %span_ip)),
     );
-    ProcessBoot { handle, scope }
+    ProcessBoot {
+        handle,
+        scope,
+        owner,
+    }
 }
 
 /// Owns running process tasks and their restart state.

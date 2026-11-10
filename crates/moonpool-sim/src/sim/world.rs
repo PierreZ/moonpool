@@ -309,6 +309,9 @@ impl SimWorld {
 
             let event = scheduled.into_value();
             super::rng::note_activity_of(&event);
+            if !matches!(event, Event::CpuFree { .. } | Event::CpuWake { .. }) {
+                crate::executor::note_world_event();
+            }
             inner.last_processed_event = Some(event.clone());
             inner.events_processed += 1;
             match event {

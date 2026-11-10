@@ -337,3 +337,59 @@ fn recovery_mode_makes_every_machine_healthy() {
     sim.enter_recovery_mode();
     assert!(sim.slowness(ip).is_healthy());
 }
+
+/// Yields forever, with no exit and no outside wake.
+struct Spinner;
+
+#[async_trait]
+impl Process for Spinner {
+    fn name(&self) -> &'static str {
+        "spinner"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        loop {
+            moonpool_sim::executor::yield_now().await;
+        }
+    }
+}
+
+/// Waits long enough for the spinner to run.
+struct Idle;
+
+#[async_trait]
+impl Workload for Idle {
+    fn name(&self) -> &'static str {
+        "idle"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let _ = ctx.time().sleep(Duration::from_secs(3600)).await;
+        Ok(())
+    }
+}
+
+/// Under the CPU model each poll costs simulated time and a self-wake comes
+/// back as an event, so the drain bound never trips. The per-task bound
+/// counts the polls between outside world events and fails the run with the
+/// task's name, as without the model.
+#[test]
+fn a_busy_yield_fails_under_the_cpu_model_too() {
+    let outcome = std::panic::catch_unwind(|| {
+        SimulationBuilder::new()
+            .processes(1, || Box::new(Spinner))
+            .workload_factory(|| Box::new(Idle))
+            .enable_chaos([Chaos::Cpu(ChaosMode::Random)])
+            .chaos_duration(CHAOS)
+            .set_iterations(1)
+            .set_debug_seeds(vec![1])
+            .run()
+    });
+    let payload = outcome.expect_err("a task that yields forever must fail the run");
+    let message = payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(ToString::to_string))
+        .unwrap_or_default();
+    assert!(message.contains("no outside world event"), "{message}");
+}
