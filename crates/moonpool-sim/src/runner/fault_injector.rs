@@ -748,6 +748,12 @@ impl FaultContext {
         if verdict.is_some() {
             book.note_fault(ip);
         }
+        // Until it lands, the next victim is judged as if this crash tore
+        // its dirty whole copies (a domain reboot judges one process at a
+        // time).
+        if verdict == Some(RebootKind::Crash) {
+            book.note_pending_crash(ip);
+        }
         verdict
     }
 

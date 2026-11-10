@@ -88,7 +88,7 @@ Terms are listed alphabetically. Cross-references are in **bold**. Type and macr
 
 **SelfCrash** -- `SimContext::self_crash()` and `crash_self(kind, delay)`: a process kills itself at an exact point of its own protocol, without a fault injector and without a draw.
 
-**Shard** -- `moonpool_buggify::shard!(name, current = r1[, next = r2])`: the code declares a shard's `Replication { replicas, progress, durable }` (`Need` = `AtLeast` / `All` / `Any`). The run's shard book (`ctx.shards()`) keeps every view not yet superseded, and the **shard gate** downgrades any destructive fault that would break a need: a kill becomes a clean restart, a wipe a crash, a crash a `KillKeepCache`, an outage spares victims, a partition or disk failure is not made, damage is not placed. `ShardFaults` adds aim, edge and a liveness core. Inert in production, like `hint!`.
+**Shard** -- `moonpool_buggify::shard!(name, current = r1[, next = r2])`: the code declares a shard's `Replication { replicas, progress, durable }` (`Need` = `AtLeast` / `All` / `Any`). The run's shard book (`ctx.shards()`) keeps every view not yet superseded, and the **shard gate** downgrades any destructive fault that would break a need: a kill becomes a clean restart, a wipe a crash, a crash with a dirty sector in a whole copy a `KillKeepCache` (a crash already decided counts until it lands, so a domain reboot cannot tear two copies), an outage spares victims, a partition or disk failure is not made, damage is not placed. `ShardFaults` adds aim, edge and a liveness core. Inert in production, like `hint!`.
 
 **Slowness** -- `Slowness { cpu, disk, network }` multipliers on one process, `HEALTHY` when all are 1. Set by **gray failure** or `FaultContext::set_slowness`.
 

@@ -38,8 +38,19 @@
 //! | partition | `progress` on one side | not made |
 //! | wipe | `durable` on the replicas left intact | a crash |
 //! | disk failure | `durable` | not made |
-//! | crash with dirty sectors | `durable` per stripe | a kill that keeps the page cache |
+//! | crash with dirty sectors in a whole copy | `durable`, counting the crashes already decided and not yet landed | a kill that keeps the page cache |
 //! | random or scripted damage | `durable` per stripe | not placed on that sector |
+//! | `SimContext::crash(CrashAndWipe)` (a process wipes itself) | nothing | always made |
+//!
+//! A crash is downgraded only for a dirty sector of a **whole copy** (a
+//! region of a shard with no striped region): such a copy stands or falls
+//! whole, so even the old bytes of a sector count as a lost copy. A dirty
+//! sector in a striped region needs no downgrade: the crash model already
+//! keeps it old or new while its stripe cannot afford damage. A crash that
+//! the gate let through counts as pending until it lands, so the second
+//! victim of a domain reboot is judged as if the first had torn its copies.
+//! A process that wipes itself is the code under test's own decision, so
+//! the gate does not judge it.
 //!
 //! A replica is up when its process is alive and it is not partitioned from
 //! another live replica of the same replication. A replica is intact when it
@@ -400,6 +411,9 @@ struct Book {
     core: BTreeMap<String, Vec<Replica>>,
     core_members: BTreeSet<IpAddr>,
     held_down: BTreeSet<IpAddr>,
+    /// Crashes the gate let through that have not landed yet
+    /// ([`ShardBook::note_pending_crash`]).
+    pending_crashes: BTreeSet<IpAddr>,
     /// The name table a replica named by `host:port` is resolved through
     /// ([`ShardBook::resolve_names`]).
     names: Option<ScriptedResolver>,
@@ -694,6 +708,24 @@ impl ShardBook {
     }
 
     /// The wiped replicas not yet healed.
+    /// A crash of `ip` was decided and will land later (at its force-kill
+    /// event): until it lands, a crash of another replica is judged as if
+    /// this one tore its dirty whole copies.
+    pub(crate) fn note_pending_crash(&self, ip: IpAddr) {
+        self.lock().pending_crashes.insert(ip);
+    }
+
+    /// The crash of `ip` landed (or was replaced by a kill that keeps the
+    /// cache).
+    pub(crate) fn clear_pending_crash(&self, ip: IpAddr) {
+        self.lock().pending_crashes.remove(&ip);
+    }
+
+    /// The crashes decided and not landed yet.
+    pub(crate) fn pending_crashes(&self) -> BTreeSet<IpAddr> {
+        self.lock().pending_crashes.clone()
+    }
+
     pub(crate) fn wiped(&self) -> BTreeSet<IpAddr> {
         self.lock().wiped.keys().copied().collect()
     }
