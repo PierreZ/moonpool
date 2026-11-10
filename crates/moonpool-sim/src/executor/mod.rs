@@ -560,6 +560,7 @@ impl Executor {
                 };
                 queue.swap_remove(index)
             };
+            crate::sim::rng::note_activity(runnable.metadata().id);
 
             // A process's task polls only when its CPU slot is free (the
             // CPU model, `crate::sim::cpu`); otherwise the world parks the

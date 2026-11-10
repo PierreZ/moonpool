@@ -16,7 +16,7 @@ pub use crate::storage::StorageOperation;
 use crate::storage::sim::StorageEvent;
 
 /// Events that can be scheduled in the simulation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Event {
     /// Timer event for waking sleeping tasks.
     Timer {
@@ -83,7 +83,7 @@ pub enum Event {
 }
 
 /// Why a process task is force-killed, and what the kill does to its storage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessKillKind {
     /// A graceful reboot's grace period expired: persistent storage survives.
