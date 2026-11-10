@@ -1561,6 +1561,11 @@ impl StorageEngine {
         // The reboot replaces a failed disk; the operations it parked are
         // failed below with the rest of the process's in-flight I/O.
         self.state.failed_disks.remove(&ip);
+        // A crash the shard gate let through lands now: its torn copies are
+        // counted below, not presumed any more.
+        if let Some(book) = self.state.shards.as_ref() {
+            book.clear_pending_crash(ip);
+        }
         let config = self.state.config_for(ip).clone();
         let armed = self.state.barrier_violation_armed;
         let file_ids = self.files_owned_by(ip);

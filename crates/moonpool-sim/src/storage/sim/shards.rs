@@ -238,28 +238,59 @@ impl StorageState {
     /// dirty sector of one of its files lies in a region whose copy the
     /// shard cannot afford to lose.
     pub(crate) fn crash_endangers_shards(&self, ip: IpAddr) -> bool {
-        let Some(layout) = self.layouts.get(&ip) else {
+        if !self.layouts.contains_key(&ip) {
             return false;
-        };
+        }
         let Some(requirements) = self.shard_requirements() else {
             return false;
         };
-        let not_intact = self.not_intact();
-        self.path_to_file.iter().any(|((owner, path), file_id)| {
+        let mut not_intact = self.not_intact();
+        // A crash decided for another replica and not landed yet may tear
+        // that replica's dirty whole copies: judge as if it did.
+        let pending = self
+            .shards
+            .as_ref()
+            .map(crate::runner::shard::ShardBook::pending_crashes)
+            .unwrap_or_default();
+        for other in pending.into_iter().filter(|other| *other != ip) {
+            for shard in self.dirty_whole_copies(other) {
+                not_intact.per_shard.entry(shard).or_default().insert(other);
+            }
+        }
+        self.dirty_whole_copies(ip)
+            .iter()
+            .any(|shard| !self.stripe_survives(&requirements, &not_intact, ip, shard, None))
+    }
+
+    /// The shards of which `ip` holds a whole copy (no striped region) with
+    /// a dirty sector: the copies a crash of `ip` can tear. A dirty sector
+    /// of a striped region is left out: while its stripe cannot afford
+    /// damage, the crash model keeps it old or new, which costs no copy.
+    fn dirty_whole_copies(&self, ip: IpAddr) -> BTreeSet<String> {
+        let Some(layout) = self.layouts.get(&ip) else {
+            return BTreeSet::new();
+        };
+        let mut shards = BTreeSet::new();
+        for ((owner, path), file_id) in &self.path_to_file {
             if *owner != ip {
-                return false;
+                continue;
             }
             let Some(file) = self.files.get(file_id) else {
-                return false;
+                continue;
             };
-            file.image.dirty_sectors().into_iter().any(|sector| {
-                layout.entries(path, sector).iter().any(|(stripe, shard)| {
-                    shard.as_deref().is_some_and(|shard| {
-                        !self.stripe_survives(&requirements, &not_intact, ip, shard, *stripe)
-                    })
-                })
-            })
-        })
+            for sector in file.image.dirty_sectors() {
+                for (stripe, shard) in layout.entries(path, sector) {
+                    if let (None, Some(shard)) = (stripe, shard)
+                        && !layout
+                            .sharded()
+                            .any(|(_, _, name, stripe)| name == &*shard && stripe.is_some())
+                    {
+                        shards.insert(shard.to_string());
+                    }
+                }
+            }
+        }
+        shards
     }
 
     /// Count `owner`'s copy of a shard lost when a crash changed a dirty
@@ -311,5 +342,155 @@ impl StorageState {
                 &[ip],
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{future::Future, net::IpAddr, task::Poll, time::Duration};
+
+    use moonpool_buggify::shard::{Declaration, Replica, Replication};
+    use moonpool_core::{LayoutRegion, OpenOptions, StorageFile, StorageProvider};
+
+    use crate::runner::shard::{ShardBook, ShardFaults};
+    use crate::{SimWorld, StorageConfiguration};
+
+    const A: &str = "10.0.1.1";
+    const B: &str = "10.0.1.2";
+    const C: &str = "10.0.1.3";
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("test IP")
+    }
+
+    async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
+        futures::pin_mut!(future);
+        futures::future::poll_fn(|cx| match future.as_mut().poll(cx) {
+            Poll::Ready(output) => Poll::Ready(output),
+            Poll::Pending if sim.has_pending_events() => {
+                sim.step();
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Poll::Pending => Poll::Pending,
+        })
+        .await
+    }
+
+    /// A world whose crashes lose every unsynced sector, and a book with one
+    /// shard `s` on A, B and C that must keep two copies.
+    fn world() -> (SimWorld, ShardBook) {
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration {
+            clean_crash_probability: 0.0,
+            correlated_rollback_probability: 0.0,
+            crash_lost_probability: 1.0,
+            length_survives_crash_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        });
+        let book = ShardBook::new(ShardFaults::default());
+        sim.set_shard_book(Some(book.clone()));
+        let replicas = [A, B, C].into_iter().map(Replica::new).collect();
+        book.declare(
+            Some(ip(A)),
+            Duration::ZERO,
+            Declaration {
+                name: "s".to_string(),
+                current: Some(Replication::tolerates(replicas, 1, 1)),
+                next: None,
+                site: "test:1",
+            },
+            || true,
+        );
+        (sim, book)
+    }
+
+    /// On `owner`: a synced file `path` with one region of shard `s` (striped
+    /// or a whole copy), then an unsynced write into it.
+    fn dirty_copy(sim: &mut SimWorld, owner: &str, path: &'static str, stripe: Option<u64>) {
+        sim.publish_layout(
+            ip(owner),
+            &[LayoutRegion {
+                path: path.to_string(),
+                bytes: 0..4096,
+                kind: "copy",
+                stripe,
+                shard: Some("s".to_string()),
+            }],
+        );
+        write_unsynced(sim, owner, path);
+    }
+
+    fn write_unsynced(sim: &mut SimWorld, owner: &str, path: &'static str) {
+        let provider = sim.storage_provider(ip(owner));
+        crate::executor::Executor::new(0).block_on(drive(sim, async move {
+            let file = provider
+                .open(path, OpenOptions::create_write())
+                .await
+                .expect("open");
+            file.write_at(0, &[1; 4096]).await.expect("write");
+            file.sync_all().await.expect("sync");
+            provider.sync_dir(".").await.expect("sync dir");
+            file.write_at(0, &[2; 512]).await.expect("unsynced write");
+        }));
+    }
+
+    #[test]
+    fn a_domain_reboot_cannot_tear_two_whole_copies() {
+        let (mut sim, book) = world();
+        dirty_copy(&mut sim, A, "copy", None);
+        dirty_copy(&mut sim, B, "copy", None);
+        dirty_copy(&mut sim, C, "copy", None);
+        assert!(
+            !sim.crash_endangers_shards(ip(A)),
+            "one torn copy leaves two"
+        );
+        // The gate let A's crash through; it lands later.
+        book.note_pending_crash(ip(A));
+        assert!(
+            sim.crash_endangers_shards(ip(B)),
+            "B's crash, judged with A's pending, would leave one copy"
+        );
+        sim.simulate_crash_for_process(ip(A), true);
+        // A's crash landed and tore its copy for good.
+        assert!(sim.crash_endangers_shards(ip(B)), "A's copy is lost now");
+    }
+
+    #[test]
+    fn a_crash_on_a_degraded_striped_shard_still_rolls_back_unsynced_sectors() {
+        let (mut sim, book) = world();
+        dirty_copy(&mut sim, A, "striped", Some(7));
+        // The shard is degraded: B lost its copies, so A's stripe cannot
+        // afford damage.
+        book.note_wipe(ip(B));
+        write_unsynced(&mut sim, A, "unrelated");
+        assert!(
+            !sim.crash_endangers_shards(ip(A)),
+            "a striped region needs no kept cache: the crash model guards it"
+        );
+        sim.simulate_crash_for_process(ip(A), true);
+        let reports = sim.take_storage_crash_reports();
+        let unrelated = reports
+            .iter()
+            .find(|report| report.path == "unrelated")
+            .expect("a report for the unrelated file");
+        assert!(
+            unrelated
+                .resolutions
+                .iter()
+                .any(|resolution| resolution.outcome == crate::CrashOutcome::Lost),
+            "the unrelated file's unsynced sector rolled back: {unrelated:?}"
+        );
+        let striped = reports
+            .iter()
+            .find(|report| report.path == "striped")
+            .expect("a report for the striped file");
+        assert!(
+            striped.resolutions.iter().all(|resolution| matches!(
+                resolution.outcome,
+                crate::CrashOutcome::KeptOld | crate::CrashOutcome::KeptNew
+            )),
+            "the guarded stripe kept old or new bytes: {striped:?}"
+        );
     }
 }
