@@ -703,6 +703,41 @@ async fn malformed_oversized_and_corrupt_input_close_the_session_observably() {
     client_driver.abort();
 }
 
+/// A session cut inside a frame is a truncation, not a protocol violation:
+/// a network failure must not look like a peer that broke the protocol.
+#[tokio::test(flavor = "current_thread")]
+async fn a_session_cut_inside_a_frame_is_not_a_protocol_violation() {
+    let (server, server_driver) = listen(RpcConfig::default()).await;
+    let (service, _stream) = server
+        .register::<Echo>(AccessClass::Private)
+        .expect("register");
+    let address = service.endpoint().address().to_string();
+    let hello = raw_hello(
+        moonpool_rpc::protocol::MIN_PROTOCOL_VERSION,
+        moonpool_rpc::protocol::PROTOCOL_VERSION,
+    );
+    let mut session = raw_session(&address).await;
+    session
+        .write_all(&hello[..hello.len() / 2])
+        .await
+        .expect("write");
+    // A clean FIN after half a frame, then read the server's own hello until
+    // it closes: dropping the socket with that hello unread would send a
+    // reset, which is an I/O error and not a cut inside a frame.
+    session.shutdown().await.expect("shutdown");
+    assert!(closed_by_server(&mut session).await, "closed");
+    assert!(
+        eventually(|| server
+            .stats()
+            .is_some_and(|stats| stats.truncated_sessions == 1))
+        .await,
+        "{:?}",
+        server.stats()
+    );
+    assert_eq!(server.stats().expect("running").protocol_violations, 0);
+    server_driver.abort();
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn references_are_runtime_free_and_typed() {
     let (server, server_driver) = listen(RpcConfig::default()).await;

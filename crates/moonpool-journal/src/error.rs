@@ -65,7 +65,9 @@ pub enum OpenError {
 /// Whether a failed write's effect may have reached the disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Durable {
-    /// Nothing was written: the batch is known absent.
+    /// No byte of the batch was issued to the disk (the commit failed
+    /// before its first write): the batch is known absent, and stays absent
+    /// after a reopen.
     No,
     /// Some write was issued: the batch may be durable anyway. Neither
     /// outcome may be assumed; reopen and read what the disk holds.

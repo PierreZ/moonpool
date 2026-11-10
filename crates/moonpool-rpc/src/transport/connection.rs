@@ -23,6 +23,9 @@ pub(crate) enum CloseReason {
     ConnectFailed(String),
     /// The peer closed the stream cleanly between frames.
     PeerClosed,
+    /// The stream ended inside a frame: a cut, as a network failure or a
+    /// crashed peer gives. A failure, but not a protocol violation.
+    Truncated(String),
     /// A socket read or write failed.
     Io(String),
     /// Framing, envelope or handshake violation.
@@ -182,6 +185,10 @@ struct QueueState {
     /// an adopted inbound session. `None` for an inbound session this
     /// runtime only serves.
     peer_address: Option<SocketAddr>,
+    /// Replaced by an adopted session while calls it wrote still wait for
+    /// their replies: no new request goes on it, and it closes as
+    /// [`CloseReason::Replaced`] once nothing is owed in either direction.
+    draining: bool,
     /// Frames received so far (liveness).
     received: u64,
     /// When the last frame arrived.
@@ -294,6 +301,7 @@ impl Connection {
                 peer_context: None,
                 peer_hello: None,
                 peer_address: None,
+                draining: false,
                 received: 0,
                 last_received: now,
                 last_used: now,
@@ -627,6 +635,17 @@ impl Connection {
         self.lock().peer_address
     }
 
+    /// This connection was replaced but still carries written calls: let
+    /// their replies arrive, then close (see [`Self::close_if_idle`]).
+    pub(crate) fn drain(&self) {
+        self.lock().draining = true;
+    }
+
+    /// Whether this connection was replaced and waits for its last replies.
+    pub(crate) fn is_draining(&self) -> bool {
+        self.lock().draining
+    }
+
     /// A frame arrived at `now`.
     pub(crate) fn note_received(&self, now: Duration) {
         let mut queue = self.lock();
@@ -664,7 +683,8 @@ impl Connection {
     /// owed, and no traffic for `idle` — measured from the last request or
     /// reply when `selected`, from the last received frame otherwise (an
     /// inbound session this side only serves). The caller has checked that
-    /// no pending call rides on it. Returns whether it closed.
+    /// no pending call rides on it. A draining connection closes as
+    /// [`CloseReason::Replaced`]. Returns whether it closed.
     pub(crate) fn close_if_idle(&self, now: Duration, idle: Duration, selected: bool) -> bool {
         let mut queue = self.lock();
         let since = if selected {
@@ -682,7 +702,11 @@ impl Connection {
             && self.outstanding.load(Ordering::Relaxed) == 0
             && now.saturating_sub(since) >= idle;
         if idle_now {
-            queue.closed = Some(CloseReason::Idle);
+            queue.closed = Some(if queue.draining {
+                CloseReason::Replaced
+            } else {
+                CloseReason::Idle
+            });
             queue.control.clear();
         }
         drop(queue);
@@ -966,7 +990,7 @@ pub(crate) async fn read_loop<R: AsyncRead + Unpin>(
             return if decoder.is_idle() {
                 CloseReason::PeerClosed
             } else {
-                CloseReason::Protocol(format!(
+                CloseReason::Truncated(format!(
                     "stream ended inside a frame ({} bytes buffered)",
                     decoder.buffered()
                 ))

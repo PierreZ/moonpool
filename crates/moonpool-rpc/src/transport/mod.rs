@@ -54,6 +54,7 @@ pub(crate) mod connection;
 mod driver;
 mod handle;
 pub(crate) mod peer;
+mod pending;
 mod sessions;
 mod shutdown;
 mod streams;
@@ -264,7 +265,7 @@ impl Registration {
 struct State {
     registry: Registry<Registration>,
     well_known: BTreeMap<WellKnownId, Registration>,
-    pending: BTreeMap<u64, PendingCall>,
+    pending: pending::PendingCalls,
     next_call_id: u64,
     /// One relationship per canonical remote address.
     peers: BTreeMap<SocketAddr, Peer>,
@@ -343,7 +344,7 @@ impl<P: RpcProviders> Shared<P> {
             state: Mutex::new(State {
                 registry: Registry::new(config.max_endpoints),
                 well_known: BTreeMap::new(),
-                pending: BTreeMap::new(),
+                pending: pending::PendingCalls::default(),
                 next_call_id: 0,
                 peers: BTreeMap::new(),
                 connections: BTreeMap::new(),
@@ -781,11 +782,7 @@ impl<P: RpcProviders> Shared<P> {
     fn stats(&self) -> RpcStats {
         let state = self.lock();
         let endpoints = state.registry.live() + state.well_known.len();
-        let retained = state
-            .pending
-            .values()
-            .filter(|call| call.retained.is_some())
-            .count();
+        let retained = state.pending.retained_calls();
         let consuming = state
             .pending
             .values()

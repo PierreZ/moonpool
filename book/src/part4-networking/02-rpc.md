@@ -166,7 +166,14 @@ gave up during a partition once left its producer blocked on credit forever.
 
 Two listening runtimes that call each other share one connection.
 `InboundSharing::SameIp` (the default) adopts an accepted session only when
-its socket really comes from the IP its `Hello` claims. All of this timing
+its socket really comes from the IP its `Hello` claims. But what happens to
+the calls the losing connection already wrote? Their replies come back on
+that connection. So the loser **drains**: it takes no new request, its
+written calls get their replies, and the monitor closes it once nothing is
+owed. A healthy peer never fails a call because of the tie-break
+(`RpcStats::drained_connections`, `calls_cut_by_replacement`). A session cut
+inside a frame counts as `truncated_sessions`, not as a protocol violation,
+because a network failure is not a peer that broke the protocol. All of this timing
 is one plain struct, `PeerPolicy`, inside `RpcConfig`, so the simulation
 pushes every field to an extreme on some seeds.
 

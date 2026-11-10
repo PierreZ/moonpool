@@ -37,8 +37,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_journal::{
-    Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
-    OpenError, Recovery,
+    Batch, CommitError, Durability, Durable, Geometry, ID_SIZE, Id, Journal, JournalConfig,
+    JournalId, OpenError, Recovery,
 };
 use moonpool_sim::{
     Process, RandomProvider, RebootKind, SimContext, SimStorageProvider, SimulationResult,
@@ -84,6 +84,9 @@ struct Pending {
     clears: Vec<Range<u64>>,
     floor: Option<u64>,
     meta: Option<Vec<u8>>,
+    /// The commit failed with `Durable::No`: the journal promised that
+    /// nothing of it reached the disk.
+    known_absent: bool,
 }
 
 impl Pending {
@@ -263,7 +266,7 @@ async fn reconcile(
     journal: &mut Journal<SimStorageProvider>,
     ledger: &Ledger,
 ) -> Result<(), CommitError> {
-    let (acked, floor, meta, pending) = ledger.with(|state| {
+    let (acked, floor, meta, mut pending) = ledger.with(|state| {
         (
             state.acked.clone(),
             state.floor,
@@ -271,6 +274,21 @@ async fn reconcile(
             state.pending.clone().unwrap_or_default(),
         )
     });
+    let absent = pending.known_absent;
+    if absent {
+        assert_always!(
+            journal.floor() == floor && journal.meta() == meta.as_slice(),
+            "a commit that reported Durable::No is never live after a reopen",
+            { "floor" => journal.floor(), "acked" => floor }
+        );
+    }
+    // What the failed commit tried to write, kept for the check below; the
+    // other checks then treat the disk as holding no batch in flight.
+    let absent_puts = if absent {
+        std::mem::take(&mut pending).puts
+    } else {
+        Vec::new()
+    };
     assert_always!(
         journal.floor() == floor || pending.floor.is_some_and(|f| journal.floor() == f.max(floor)),
         "the floor is the acknowledged one or the one in flight",
@@ -286,7 +304,7 @@ async fn reconcile(
         Err(error) => {
             return Err(CommitError::Io {
                 error,
-                durable: moonpool_journal::Durable::No,
+                durable: Durable::No,
             });
         }
     };
@@ -296,6 +314,13 @@ async fn reconcile(
         match read {
             Ok(entry) => {
                 let value = (entry.id, entry.payload);
+                assert_always!(
+                    !absent_puts
+                        .iter()
+                        .any(|(p, v)| *p == position && *v == value),
+                    "a commit that reported Durable::No is never live after a reopen",
+                    { "position" => position }
+                );
                 let written = acked.get(&position) == Some(&value)
                     || pending
                         .puts
@@ -405,7 +430,22 @@ async fn step(
     }
     ledger.with(|state| state.pending = Some(pending.clone()));
     let rolls = journal.rolls();
-    journal.commit(batch).await?;
+    if let Err(error) = journal.commit(batch).await {
+        if matches!(
+            error,
+            CommitError::Io {
+                durable: Durable::No,
+                ..
+            }
+        ) {
+            ledger.with(|state| {
+                if let Some(pending) = state.pending.as_mut() {
+                    pending.known_absent = true;
+                }
+            });
+        }
+        return Err(error);
+    }
     if journal.rolls().onto_spare > rolls.onto_spare {
         assert_reachable!("a commit rolled onto a recycled segment");
     }

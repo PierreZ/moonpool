@@ -27,13 +27,15 @@ pub(crate) fn block_buf(len: usize) -> AlignedBuf {
     AlignedBuf::zeroed(len, BLOCK)
 }
 
-/// Whether a read error is the medium failing, rather than a request this
-/// file can never satisfy.
+/// The `EIO` code (Linux and macOS): the device failed the transfer.
+const EIO: i32 = 5;
+
+/// Whether a read error is the medium failing: `EIO` only. Every other
+/// error (an interrupted or timed-out read, no memory, a shutdown, a bad
+/// request) says nothing about the bytes on the disk, so it fails the read
+/// instead of counting the blocks as damaged.
 fn is_media_error(error: &io::Error) -> bool {
-    !matches!(
-        error.kind(),
-        io::ErrorKind::InvalidInput | io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData
-    )
+    error.raw_os_error() == Some(EIO)
 }
 
 /// Read whole blocks from `first_block` into `buf`, zero-filling every block
@@ -129,4 +131,26 @@ pub(crate) async fn write_blocks_durable<F: LocalStorageFile>(
         return Ok(buf);
     }
     file.write_blocks_durable_aligned(first_block, buf).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::{EIO, is_media_error};
+
+    #[test]
+    fn only_eio_counts_as_media_damage() {
+        assert!(is_media_error(&io::Error::from_raw_os_error(EIO)));
+        for kind in [
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::OutOfMemory,
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!is_media_error(&io::Error::from(kind)), "{kind:?}");
+        }
+    }
 }

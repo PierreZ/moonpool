@@ -78,8 +78,7 @@ impl<P: RpcProviders> Shared<P> {
         report.replies_abandoned = self.counters.inflight_requests.load(Ordering::Relaxed)
             + self.counters.live_server_streams.load(Ordering::Relaxed);
         let mut state = self.lock();
-        let pending: Vec<(u64, PendingCall)> =
-            std::mem::take(&mut state.pending).into_iter().collect();
+        let pending: Vec<(u64, PendingCall)> = state.pending.take_all();
         let mut ended = Vec::with_capacity(pending.len());
         for (call_id, mut call) in pending {
             // A request still queued behind others is withdrawn, so "never

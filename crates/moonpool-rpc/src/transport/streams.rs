@@ -231,7 +231,7 @@ impl<P: RpcProviders> Shared<P> {
                 let consumer = self
                     .lock()
                     .pending
-                    .get(call_id)
+                    .get(*call_id)
                     .and_then(|call| call.stream().cloned());
                 if let Some(consumer) = consumer {
                     consumer.set_route(AckRoute::Local(Arc::downgrade(&core)));
@@ -248,7 +248,7 @@ impl<P: RpcProviders> Shared<P> {
     /// The consumer of the pending stream `call_id` from `origin`, if any.
     fn consumer(&self, origin: Origin, call_id: u64) -> Option<Arc<ConsumerCore>> {
         let state = self.lock();
-        match state.pending.get(&call_id) {
+        match state.pending.get(call_id) {
             Some(call) if call.origin == origin => {
                 if let Some(stream) = call.stream() {
                     return Some(Arc::clone(stream));
@@ -288,7 +288,7 @@ impl<P: RpcProviders> Shared<P> {
         if let Intook::Violation(violation) = consumer.on_item(route, sequence, codec, body) {
             tracing::debug!(call_id, %violation, "rpc stream refused an item");
             // The consumer ended the stream; stop the producer.
-            let removed = self.lock().pending.remove(&call_id);
+            let removed = self.lock().pending.remove(call_id);
             drop(removed);
             match route {
                 AckRoute::Remote(connection) => {
@@ -316,7 +316,7 @@ impl<P: RpcProviders> Shared<P> {
         let Some(consumer) = self.consumer(origin, call_id) else {
             return;
         };
-        let call = self.lock().pending.remove(&call_id);
+        let call = self.lock().pending.remove(call_id);
         let Some(call) = call else {
             return;
         };
