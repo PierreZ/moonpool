@@ -154,8 +154,11 @@ struct ConvergenceState<'a> {
 impl RunState {
     /// Initialise per-run accumulators from the builder's configuration.
     fn new(builder: &SimulationBuilder) -> Self {
-        let iteration_manager =
-            IterationManager::new(builder.iteration_control.clone(), builder.seeds.clone());
+        let iteration_manager = IterationManager::new(
+            builder.iteration_control.clone(),
+            builder.seeds.clone(),
+            builder.base_seed,
+        );
         let progress_milestone = std::cmp::max(iteration_manager.max_iterations() / 10, 1);
         let run_id = iteration_manager.run_id();
         Self {
@@ -869,6 +872,7 @@ impl SimulationBuilder {
             individual_metrics: Vec::new(),
             seeds_used: Vec::new(),
             seeds_failing: Vec::new(),
+            seeds_stalled: Vec::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             dropped_assertion_allocations: 0,

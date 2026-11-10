@@ -83,19 +83,22 @@ A campaign succeeds when two conditions hold at once:
 
 Both matter. A run that never violates an invariant but never reaches an error path is not testing enough. A run that reaches every path but tolerates wrong answers is not checking enough.
 
-`report.is_failure()` covers the first condition and more: it is true when `seeds_failing` is non-empty, when `assertion_violations` is non-empty, or when `dropped_assertion_allocations` is above zero, which means the assertion table overflowed and some evaluations were never counted. Coverage is deliberately not part of it. Check `coverage_violations` and `convergence_timeout` yourself when CI should fail on a coverage gap.
+`report.is_failure()` covers the first condition and more: it is true when `seeds_failing` is non-empty, when `assertion_violations` is non-empty, or when `dropped_assertion_allocations` is above zero, which means the assertion table overflowed and some evaluations were never counted. Coverage is deliberately not part of it. `report.exit_code()` adds the coverage checks: it is 1 also when `coverage_violations` is non-empty or `convergence_timeout` is set.
 
 ## When Things Fail
 
 ```text
 ━━━ Simulation Report ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   100 iterations   98 passed   2 failed   ✗ 98.0%
+  Base seed    1730000000 (replay the run with .base_seed(1730000000))
 
   Wall Time    12ms avg        1.20s total
   Sim Time     45.23s avg
   Events       8,432 avg
 
   Faulty seeds: [7891, 42033]
+  Replay: .set_debug_seeds(vec![7891])
+  Replay: .set_debug_seeds(vec![42033])
 
 ━━━ Assertions (4) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   ✗  always       "kv: read matches the model"   12,800 pass  47 fail
@@ -111,13 +114,13 @@ The report says which seeds failed, which assertion broke, and how rare it was. 
 
 How long should a campaign run? Any fixed count is wrong: too small misses bugs, too large burns time. The right answer is to **stop on a signal, not a count**.
 
-**`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default. It stops when every observed sometimes, numeric-sometimes and reachable assertion has fired **and** coverage has not grown for `plateau_seeds` consecutive seeds. Under `cargo xtask sim run` the binary is sancov-instrumented, so the signal is **real code coverage**, the count of distinct edges exercised. Under `cargo nextest run` there is no instrumentation and it falls back to **assertion coverage**, the set of coverage messages that fired. The **Saturated** section names which signal it used. A campaign with no coverage assertion stops on the plateau alone and logs a warning. `max_iterations` is a safety cap: hitting it sets `report.convergence_timeout = true` and prints **Saturation FAILED**, so CI can fail loudly instead of treating "we ran out of seeds" as success. No fork happens unless `enable_exploration` is set.
+**`UntilCoverageStable { plateau_seeds, max_iterations }`** is the default. It stops when every observed sometimes, numeric-sometimes and reachable assertion has fired **and** coverage has not grown for `plateau_seeds` consecutive seeds. Under `cargo xtask sim run` the binary is sancov-instrumented, so the signal is **real code coverage**, the count of distinct edges exercised. Under `cargo nextest run` there is no instrumentation and it falls back to **assertion coverage**, the set of coverage messages that fired. The **Saturated** section names which signal it used. A campaign with no coverage assertion stops on the plateau alone and logs a warning. `max_iterations` is a safety cap: hitting it sets `report.convergence_timeout = true` and prints **Saturation FAILED**, so CI can fail loudly instead of treating "we ran out of seeds" as success. A simulation binary ends with `std::process::exit(report.exit_code())`: the code is 1 on a failing seed, a violation, a coverage gap or an unsaturated sweep. No fork happens unless `enable_exploration` is set.
 
 **`FixedCount(n)`** runs exactly `n` seeds. Use it to replay, and when a budget must be predictable.
 
 ## Stall Detection
 
-A seed must end. Four deterministic guards make sure it does, each a pure function of the simulated schedule, so a replay hits the same guard at the same step.
+A seed must end. Four deterministic guards make sure it does, each a pure function of the simulated schedule, so a replay hits the same guard at the same step. A guard that requests a shutdown **fails the seed**, also when the workloads then obey `ctx.shutdown()` and return `Ok`: the shutdown only lets the seed end. The seed is in `seeds_failing` and in `seeds_stalled`, and its result is `SimulationError::Stall`.
 
 - **No progress.** More than three consecutive loop passes with an empty event queue and no workload finished trigger a shutdown request. The same count again after the request declares a deadlock.
 - **Same-time loop.** 100,000 consecutive events at one logical time, such as a re-armed zero-duration sleep, trigger a shutdown request, then a deadlock.
@@ -134,22 +137,16 @@ Two more things end a campaign early. A workload task that panics or is cancelle
 
 ## Exit Codes
 
-A binary exits 0 on success and 1 on failure. Gate on `is_failure()`:
+A binary exits 0 on success and 1 on failure. Use `exit_code()`:
 
 ```rust
-if report.is_failure() {
-    eprintln!(
-        "ERROR: {} seeds failed {:?}, {} violations, {} dropped allocations",
-        report.seeds_failing.len(),
-        report.seeds_failing,
-        report.assertion_violations.len(),
-        report.dropped_assertion_allocations
-    );
-    std::process::exit(1);
-}
+report.eprint();
+// 1 on a failing seed, a violation, a dropped assertion slot,
+// a coverage gap or an unsaturated sweep.
+std::process::exit(report.exit_code());
 ```
 
-Gating on `seeds_failing` alone lets a run with partial assertion accounting pass. The examples' `finish_or_exit_on_failure` helper in `crates/moonpool-sim-examples/src/support.rs` is exactly this.
+Gating on `seeds_failing` alone lets a run with partial assertion accounting pass, and a sweep that ran out of seeds before saturation. The examples' `finish_or_exit_on_failure` helper in `crates/moonpool-sim-examples/src/support.rs` and every `sim-rpc-*` binary use it.
 
 ## The Feedback Loop
 

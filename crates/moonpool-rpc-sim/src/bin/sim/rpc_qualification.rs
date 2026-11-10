@@ -21,12 +21,7 @@ fn main() {
 
     report.eprint();
 
-    if !report.seeds_failing.is_empty() {
-        eprintln!(
-            "ERROR: {} seeds failed: {:?}",
-            report.seeds_failing.len(),
-            report.seeds_failing
-        );
-        process::exit(1);
-    }
+    // Fails on a failing seed, a violation, a coverage gap and an
+    // unsaturated sweep.
+    process::exit(report.exit_code());
 }

@@ -16,11 +16,12 @@ pub(crate) struct IterationManager {
 
 impl IterationManager {
     /// Create a manager with the requested control strategy and replay seeds.
-    pub(crate) fn new(control: IterationControl, seeds: Vec<u64>) -> Self {
+    /// `base_seed` pins the base seed; `None` draws it from the wall clock.
+    pub(crate) fn new(control: IterationControl, seeds: Vec<u64>, base_seed: Option<u64>) -> Self {
         Self {
             control,
             seeds,
-            base_seed: wall_clock::default_base_seed(),
+            base_seed: base_seed.unwrap_or_else(wall_clock::default_base_seed),
             iteration_count: 0,
         }
     }

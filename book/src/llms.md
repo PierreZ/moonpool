@@ -120,7 +120,7 @@ No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Wi
 
 | Field | Meaning |
 |-------|---------|
-| `iterations`, `successful_runs`, `failed_runs`, `seeds_used`, `seeds_failing` | Campaign outcome. `is_failure()` is true when a seed failed, an always-assertion was violated, or assertion slots were dropped. |
+| `iterations`, `successful_runs`, `failed_runs`, `seeds_used`, `seeds_failing`, `seeds_stalled` | Campaign outcome. `is_failure()` is true when a seed failed, an always-assertion was violated, or assertion slots were dropped. `exit_code()` is 1 also on a coverage gap or a `convergence_timeout`; every sim binary exits with it. A stall guard that triggers shutdown fails the seed (`seeds_stalled`). |
 | `assertion_results`, `assertion_details`, `bucket_summaries`, `assertion_violations`, `coverage_violations`, `dropped_assertion_allocations` | Assertion accounting. |
 | `saturation: Option<SaturationReport { signal, edges_covered, edges_total, sometimes_hit, sometimes_total, plateau_seeds }>`, `convergence_timeout` | How `UntilCoverageStable` stopped. |
 | `exploration: Option<ExplorationReport { total_timelines, expansions, discoveries, bugs_found, bug_recipes, max_active_workers, sancov_edges_total, sancov_edges_covered, converged, per_seed_timelines }>` | Exploration. |

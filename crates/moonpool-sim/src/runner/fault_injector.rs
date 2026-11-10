@@ -1064,7 +1064,8 @@ impl AttritionInjector {
 
     /// Reboot `ip` at its own [hint](moonpool_buggify::hint), under this
     /// regime: within the `max_dead` budget of the eligible pool, with a
-    /// kind and delays drawn as for a timed reboot. Returns whether the
+    /// kind and delays drawn as for a timed reboot, except that a graceful
+    /// kind becomes [`RebootKind::Crash`]. Returns whether the
     /// reboot was scheduled. The hinting process alone is rebooted, whatever
     /// the regime's failure scope. `permit` is asked last, once the reboot
     /// fits the budget, and draws nothing: a refusal leaves the process
@@ -1088,7 +1089,18 @@ impl AttritionInjector {
             return Ok(false);
         }
         let ip_string = ip.to_string();
-        let kind = self.within_wipe_budget(ctx, self.choose_kind(), &eligible, &[&ip_string]);
+        // A hint names a moment, and the hinting task never resumes: a
+        // graceful reboot would let the other tasks drain and then force-kill
+        // with no crash physics, so the moment would get no crash. A hint
+        // draws a crash kind only. The draw stays the same.
+        let kind = match self.choose_kind() {
+            RebootKind::Graceful => {
+                assert_reachable!("attrition: a graceful draw on a hint becomes a crash");
+                RebootKind::Crash
+            }
+            kind => kind,
+        };
+        let kind = self.within_wipe_budget(ctx, kind, &eligible, &[&ip_string]);
         let (recovery_range, grace_range) = self.delay_ranges();
         self.check_victim(ctx, ip);
         ctx.reboot_with_delays(ip, kind, &recovery_range, &grace_range)?;

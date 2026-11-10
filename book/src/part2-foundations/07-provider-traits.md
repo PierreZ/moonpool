@@ -21,7 +21,7 @@ pub trait TimeProvider: Clone + Send + Sync + 'static {
 }
 ```
 
-The `now()` and `timer()` split comes from FoundationDB's `sim2`. `now()` is the exact clock. `timer()` is a default method that returns `now()`, which is what production keeps. The simulation overrides it: `timer()` can run up to `clock_drift_max` (default 100 ms) ahead of `now()`. Use `now()` for scheduling. Use `timer()` for lease expiry and heartbeat deadlines, so clock skew between processes is part of every seed. `sleep` returns `TimeError::Shutdown` when the simulation is gone, and `timeout` returns `TimeError::Elapsed`.
+The `now()` and `timer()` split comes from FoundationDB's `sim2`. `now()` is the exact clock. `timer()` is a default method that returns `now()`, which is what production keeps. The simulation overrides it: `timer()` can run up to `clock_drift_max` (default 100 ms) ahead of `now()`. Use `now()` for scheduling. Use `timer()` for lease expiry and heartbeat deadlines, so clock skew between processes is part of every seed. `sleep` returns `TimeError::Shutdown` when the simulation is gone, and also when the runner's shutdown cuts it before its full duration elapsed: a cut sleep never reports `Ok`. `timeout` returns `TimeError::Elapsed` when the duration elapsed, and `TimeError::Shutdown` when the shutdown cut it.
 
 **Production**: `TokioTimeProvider` delegates to `tokio::time::sleep` and `tokio::time::timeout`. `now()` is the elapsed time since the provider was created.
 

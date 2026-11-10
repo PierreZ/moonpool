@@ -117,8 +117,11 @@ impl SimulationBuilder {
         #[cfg(not(feature = "exploration"))]
         Self::init_assertions_and_exploration(None);
 
-        let mut iterations =
-            IterationManager::new(self.iteration_control.clone(), self.seeds.clone());
+        let mut iterations = IterationManager::new(
+            self.iteration_control.clone(),
+            self.seeds.clone(),
+            self.base_seed,
+        );
         let seed = iterations.next_iteration();
         let iteration = iterations.current_iteration();
         self.prepare_iteration(&obs, seed, iteration);

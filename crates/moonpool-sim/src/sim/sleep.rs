@@ -66,11 +66,20 @@ impl Future for SleepFuture {
                     Ok(sim) => sim,
                     Err(error) => return Poll::Ready(Err(error)),
                 };
-                if sim.poll_sleep(task_id, cx.waker()) {
-                    self.state = SleepState::Complete;
-                    Poll::Ready(Ok(()))
-                } else {
-                    Poll::Pending
+                match sim.poll_sleep(task_id, cx.waker()) {
+                    Poll::Ready(true) => {
+                        self.state = SleepState::Complete;
+                        Poll::Ready(Ok(()))
+                    }
+                    // The `Shutdown` event cut the timer: the full duration
+                    // did not elapse, so the sleep must not report that it
+                    // did.
+                    Poll::Ready(false) => {
+                        self.state =
+                            SleepState::Failed("sleep cut by simulation shutdown".to_string());
+                        Poll::Ready(Err(SimulationError::SimulationShutdown))
+                    }
+                    Poll::Pending => Poll::Pending,
                 }
             }
         }

@@ -15,13 +15,23 @@ pub(crate) const DEFAULT_RUN_TIME_BUDGET: Duration = Duration::from_hours(1);
 /// a deterministic failure instead of an infinite loop.
 const SAME_TIME_EVENT_THRESHOLD: usize = 100_000;
 
+/// Why a stall guard breached: the same-time event loop guard.
+pub(crate) const SAME_TIME_REASON: &str = "too many events at one logical time";
+
+/// Why a stall guard breached: the no-progress guard.
+pub(crate) const NO_PROGRESS_REASON: &str = "no event and no task progress";
+
+/// Why a stall guard breached: the virtual-time budget.
+pub(crate) const BUDGET_REASON: &str = "run-phase virtual-time budget exceeded";
+
 /// Outcome of checking the run-phase stall guards.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StallOutcome {
     /// The run is making progress, or remains inside its shutdown grace window.
     Ok,
-    /// A stall was first detected and graceful shutdown should begin.
-    Breached,
+    /// A stall was first detected and graceful shutdown should begin. The
+    /// seed fails: the shutdown only lets it end. The text names the guard.
+    Breached(&'static str),
     /// The run remains stalled after graceful shutdown.
     Deadlock,
 }
@@ -30,7 +40,7 @@ impl StallOutcome {
     fn merge(self, other: Self) -> Self {
         match (self, other) {
             (Self::Deadlock, _) | (_, Self::Deadlock) => Self::Deadlock,
-            (Self::Breached, _) | (_, Self::Breached) => Self::Breached,
+            (breach @ Self::Breached(_), _) | (_, breach @ Self::Breached(_)) => breach,
             _ => Self::Ok,
         }
     }
@@ -88,7 +98,7 @@ impl RunStallGuard {
     ) -> StallOutcome {
         let now = sim.current_time();
         let budget = self.check_budget(current_active, now);
-        if budget == StallOutcome::Breached {
+        if matches!(budget, StallOutcome::Breached(_)) {
             self.budget_breach_time = Some(now);
         }
 
@@ -157,7 +167,7 @@ impl RunStallGuard {
             self.seed,
             current_active,
         );
-        StallOutcome::Breached
+        StallOutcome::Breached(SAME_TIME_REASON)
     }
 
     fn check_no_progress(
@@ -193,7 +203,7 @@ impl RunStallGuard {
             self.seed,
             current_active,
         );
-        StallOutcome::Breached
+        StallOutcome::Breached(NO_PROGRESS_REASON)
     }
 
     fn check_budget(&self, current_active: usize, now: Duration) -> StallOutcome {
@@ -212,7 +222,7 @@ impl RunStallGuard {
                     self.run_time_budget,
                     current_active,
                 );
-                StallOutcome::Breached
+                StallOutcome::Breached(BUDGET_REASON)
             }
             Some(breach) if now.saturating_sub(breach) > self.run_time_budget => {
                 tracing::error!(
@@ -233,7 +243,7 @@ impl RunStallGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunStallGuard, StallOutcome};
+    use super::{BUDGET_REASON, NO_PROGRESS_REASON, RunStallGuard, SAME_TIME_REASON, StallOutcome};
     use std::time::Duration;
 
     fn guard() -> RunStallGuard {
@@ -249,7 +259,7 @@ mod tests {
         }
         assert_eq!(
             guard.check_no_progress(false, 1, 1, 0, 0),
-            StallOutcome::Breached
+            StallOutcome::Breached(NO_PROGRESS_REASON)
         );
         guard.reset_after_shutdown();
         for _ in 0..3 {
@@ -287,7 +297,7 @@ mod tests {
         );
         assert_eq!(
             guard.check_same_time(false, 1, 1, 1, Duration::ZERO),
-            StallOutcome::Breached
+            StallOutcome::Breached(SAME_TIME_REASON)
         );
 
         guard.reset_after_shutdown();
@@ -319,7 +329,7 @@ mod tests {
         );
         assert_eq!(
             guard.check_budget(1, Duration::from_secs(11)),
-            StallOutcome::Breached
+            StallOutcome::Breached(BUDGET_REASON)
         );
         guard.budget_breach_time = Some(Duration::from_secs(11));
         assert_eq!(

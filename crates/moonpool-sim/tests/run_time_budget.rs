@@ -195,3 +195,45 @@ fn deadlock_report_keeps_the_accumulated_state() {
         "the next run inherited the deadlocked run's assertions: {fresh:?}"
     );
 }
+
+/// A workload that obeys `ctx.shutdown()` behind a detached keepalive
+/// timer: the budget breach triggers shutdown, and the workload returns
+/// `Ok(())`.
+struct ShutdownObeyingStallWorkload;
+
+#[async_trait]
+impl Workload for ShutdownObeyingStallWorkload {
+    fn name(&self) -> &'static str {
+        "shutdown_obeying_stall"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let time = ctx.time().clone();
+        ctx.task().spawn_task("keepalive", async move {
+            loop {
+                let _ = time.sleep(Duration::from_secs(30)).await;
+            }
+        });
+        ctx.shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+/// A stall that the runner ends by shutdown still fails the seed (#382): the
+/// workload returns `Ok(())` only because the runner asked it to stop. The
+/// report lists the seed as stalled.
+#[test]
+fn a_stall_ended_by_shutdown_fails_the_seed() {
+    let report = SimulationBuilder::new()
+        .workload(ShutdownObeyingStallWorkload)
+        .run_time_budget(Duration::from_mins(1))
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .run()
+        .expect("simulation configuration is valid");
+
+    assert_eq!(report.failed_runs, 1, "a stall fails the seed: {report:?}");
+    assert_eq!(report.seeds_failing, vec![42]);
+    assert_eq!(report.seeds_stalled, vec![42]);
+    assert_eq!(report.exit_code(), 1);
+}
