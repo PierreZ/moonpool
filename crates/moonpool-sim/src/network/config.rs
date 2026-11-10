@@ -187,7 +187,9 @@ pub enum NetworkFault {
     RandomClose,
     /// Connection-establishment failures and hangs.
     ConnectFailure,
-    /// Per-node simulated clock drift.
+    /// One world-wide drift of `timer()` ahead of `now()` (never behind,
+    /// no rate error). It is not per node: per-process clocks are
+    /// [`Chaos::Clocks`](crate::Chaos::Clocks).
     ClockDrift,
     /// Buggify-driven extra timer delay.
     BuggifiedDelay,

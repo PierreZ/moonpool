@@ -14,11 +14,13 @@ Terms are listed alphabetically. Cross-references are in **bold**. Type and macr
 
 **Buggify knob** -- `buggify_knob!(default, lo..hi)` in `moonpool-sim`: a configuration value that takes a random value in range on some seeds. `Chaos::BuggifyKnobs` applies the same idea to the network and storage profiles.
 
-**Chaos surface** -- One entry of `SimulationBuilder::enable_chaos`: `Chaos::Network`, `Storage`, `Attrition`, `Outage`, `BuggifyKnobs`, `Cpu` or `GrayFailure`. Each carries a **chaos mode**.
+**Chaos surface** -- One entry of `SimulationBuilder::enable_chaos`: `Chaos::Network`, `Storage`, `Attrition`, `Outage`, `BuggifyKnobs`, `Cpu`, `Clocks` or `GrayFailure`. Each carries a **chaos mode**.
 
 **Chaos mode** -- `ChaosMode::Random` (every family on, rates drawn per seed) or `ChaosMode::Swarm` (a per-seed subset of families). See **swarm testing**.
 
 **Chaos window** -- The `chaos_duration` during which injectors generate faults. At its end the runner enters **recovery mode**. The consequences of earlier faults remain.
+
+**Clock model** -- `ClockModel { max_epoch, max_rate_error_ppm, salt }`. Under `Chaos::Clocks` each process boot reads its own `now()`, from a random epoch, at its machine's rate. Workloads keep world time.
 
 **CPU model** -- `CpuModel { poll_cost, sent_byte_cost_ps, written_byte_cost_ps }`. Under `Chaos::Cpu` every poll, sent byte and written byte costs simulated time on the process's one core. `cpu_charge(Duration)` adds explicit work.
 

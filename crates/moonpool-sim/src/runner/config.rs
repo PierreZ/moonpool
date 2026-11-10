@@ -231,6 +231,14 @@ pub enum Chaos {
     /// half of the seeds. A seed with the model off runs exactly as without
     /// this entry, apart from the draws that decided it.
     Cpu(ChaosMode),
+    /// Per-process clocks: each process boot reads its own `now()`, which
+    /// starts at a random epoch, and each machine's clock runs fast or slow
+    /// (see [`ClockModel`](crate::ClockModel)). A persisted `now()` can then
+    /// be larger than the `now()` after a reboot, and two machines disagree
+    /// on time and on how long a sleep lasts. Workloads keep world time.
+    /// `Random` turns it on for every seed; `Swarm` for half of the seeds.
+    /// It draws last, after the CPU model and the gray failures.
+    Clocks(ChaosMode),
     /// Gray failures: one or more machines stay alive and slow for a long
     /// window (see [`GrayFailure`](crate::GrayFailure)). At most one regime
     /// is useful per victim pool; each entry adds one injector.

@@ -24,6 +24,7 @@
 //! that inspect the world, and the determinism tools
 //! ([`rng_call_count`], [`set_rng_breakpoints`], [`swarm_op_enabled`]).
 
+pub mod clock;
 pub mod cpu;
 pub mod events;
 pub mod rng;
@@ -33,6 +34,7 @@ pub mod wakers;
 pub mod world;
 
 // Re-export main types at module level
+pub use clock::{ClockModel, ProcessClock};
 pub use cpu::{CpuModel, Slowness};
 pub use events::{
     Event, ProcessKillKind, ScheduleError, ScheduleId, Scheduled, Scheduler, StorageOperation,

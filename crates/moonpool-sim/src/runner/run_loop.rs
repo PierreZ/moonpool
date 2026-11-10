@@ -436,7 +436,7 @@ impl SimulationBuilder {
 
     /// Resolve this seed's CPU model (installed on `sim`) and gray-failure
     /// regimes, then build every fault injector of the timeline. The CPU
-    /// model, then the gray failures, draw last of all: a campaign without
+    /// model, then the gray failures, then the clock model, draw last of all: a campaign without
     /// them makes none of these draws, so opting in shifts no other surface's
     /// sample (the draw-order contract).
     fn fault_injectors_for_seed(
@@ -471,6 +471,21 @@ impl SimulationBuilder {
                 )
             })
             .collect();
+        // The clock model draws after every other surface.
+        let clock_model = self.clock_chaos.and_then(|mode| {
+            ChaosMode::resolve(
+                Some(mode),
+                || None,
+                || Some(crate::ClockModel::random_for_seed()),
+                crate::ClockModel::swarm_for_seed,
+            )
+        });
+        if clock_model.is_some() {
+            crate::assert_reachable!("clocks: a seed runs with per-process clocks");
+        } else if self.clock_chaos.is_some() {
+            crate::assert_reachable!("clocks: a seed runs with the world clock");
+        }
+        sim.set_clock_model(clock_model);
         Self::collect_fault_injectors(
             &self.fault_factories,
             attritions,

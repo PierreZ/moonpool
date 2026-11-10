@@ -51,7 +51,7 @@ There is no builder method that takes a `NetworkConfiguration` or `StorageConfig
 | `ProcessCount` | `Fixed(usize)`, `Range(RangeInclusive<usize>)` |
 | `WorkloadCount` | `Fixed(usize)`, `Random(Range<usize>)` |
 | `ChaosMode` | `Random` (every family on, rates drawn per seed), `Swarm` (a per-seed subset of families) |
-| `Chaos` | `Network(ChaosMode)`, `Storage(ChaosMode)`, `Attrition { config, mode }`, `Outage { config, mode }`, `BuggifyKnobs`, `Cpu(ChaosMode)`, `GrayFailure { config, mode }` |
+| `Chaos` | `Network(ChaosMode)`, `Storage(ChaosMode)`, `Attrition { config, mode }`, `Outage { config, mode }`, `BuggifyKnobs`, `Cpu(ChaosMode)`, `Clocks(ChaosMode)`, `GrayFailure { config, mode }` |
 
 Without `Chaos::Network`, the network is **not** fault-free. It uses `NetworkConfiguration::default()`, whose `ChaosConfiguration::default()` keeps random closes, clock drift, buggified delays and probabilistic connect failures on, as FoundationDB does. Without `Chaos::Storage`, storage uses `StorageConfiguration::default()`, where every fault probability is 0.
 
@@ -125,6 +125,18 @@ At most one outage per run. Under `Swarm` the outage is dropped on half the seed
 | `written_byte_cost_ps` | `BYTE_COST_PS` = `500..5001` ps | Cost per byte written to disk. |
 
 `CpuModel::random_for_seed()` draws 3 times. `CpuModel::swarm_for_seed() -> Option<CpuModel>` draws one coin (0.5) and then the three costs. `cpu_charge(Duration)` adds explicit CPU time from application code. `SimWorld::set_cpu_model` installs a model by hand.
+
+## Clock Model
+
+`Chaos::Clocks(mode)` installs a `ClockModel` per seed. Each process boot then reads its own clock: `now = epoch + (world_now - boot_instant) * rate`. Workloads keep world time.
+
+| Field | `random_for_seed()` | Meaning |
+|-------|-----------|---------|
+| `max_epoch` | `MAX_EPOCH` = 1 s | Each boot starts its clock at a value in `0..max_epoch`. |
+| `max_rate_error_ppm` | `MAX_RATE_ERROR_PPM` = 50 000 | Each machine's rate is in `1 ± max_rate_error_ppm / 10⁶`. It applies to `now()`, `timer()`, `sleep` and `timeout`. |
+| `salt` | one draw | The epochs and rates are a hash of the salt, the address and the boot number. They make no other draw. |
+
+`ClockModel::swarm_for_seed() -> Option<ClockModel>` draws one coin (0.5) and then the salt. The clock model draws last, after the CPU model and the gray failures. `SimWorld::set_clock_model` installs a model by hand, `SimWorld::boot_process_clock(ip)` starts a new boot clock, and `SimWorld::process_clock(ip)` returns it. `SimTimeProvider::for_ip(sim, ip)` reads that clock.
 
 ## Locality
 
