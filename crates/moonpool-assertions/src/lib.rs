@@ -61,7 +61,7 @@
 //!
 //! ## Budgets
 //!
-//! The tables have a fixed size: [`MAX_ASSERTION_SLOTS`] (2048) sites and
+//! The tables have a fixed size: [`MAX_ASSERTION_SLOTS`] (4096) sites and
 //! [`MAX_EACH_BUCKETS`] (256) `sometimes_each` buckets of at most six identity
 //! keys each. An evaluation that finds a table full is counted
 //! ([`assertion_dropped_allocations`], [`each_bucket_dropped_allocations`]).

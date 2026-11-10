@@ -43,7 +43,7 @@ The next chapter sorts the same fifteen by **purpose**: invariant, discovery or 
 
 The macros in `moonpool_sim` are thin wrappers. The accounting is `moonpool-assertions`, a crate with zero dependencies that compiles to wasm. It keeps two fixed-size tables:
 
-- The **slot table**: 2048 slots, one per assertion site. A slot's identity is the 64-bit FNV-1a hash of its message. Each slot holds the kind, the pass and fail counts, a numeric watermark, and the frontier of a compound assertion. The message itself is stored truncated to 64 bytes.
+- The **slot table**: 4096 slots, one per assertion site. A slot's identity is the 64-bit FNV-1a hash of its message. Each slot holds the kind, the pass and fail counts, a numeric watermark, and the frontier of a compound assertion. The message itself is stored truncated to 64 bytes.
 - The **bucket table**: 256 buckets for `assert_sometimes_each!`, keyed by message plus identity keys.
 
 By default both tables live on the heap of the test process. Under exploration, moonpool-explorer replaces them with `MAP_SHARED` memory, so forked worker processes write into the same counts. The macros behave the same either way.
