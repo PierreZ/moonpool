@@ -368,6 +368,7 @@ impl Pki {
 /// The campaign's builder without an iteration policy.
 #[must_use]
 pub fn tls_campaign() -> SimulationBuilder {
+    moonpool_rpc::security::tls::install_secure_random(&SimSecureRandom);
     SimulationBuilder::new()
         .processes(1, || Box::new(TlsServerProcess))
         .processes(1, || Box::new(ImpostorProcess))
@@ -375,4 +376,23 @@ pub fn tls_campaign() -> SimulationBuilder {
         .fault_factory(|| Box::new(TlsFaults))
         .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
         .chaos_duration(Duration::from_secs(8))
+}
+
+/// TLS randomness from the simulation's random stream, so that a seed sends
+/// the same handshake bytes on every run (see
+/// [`install_secure_random`](moonpool_rpc::security::tls::install_secure_random)).
+#[derive(Debug)]
+struct SimSecureRandom;
+
+impl moonpool_rpc::security::tls::rustls::crypto::SecureRandom for SimSecureRandom {
+    fn fill(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<(), moonpool_rpc::security::tls::rustls::crypto::GetRandomFailed> {
+        for chunk in buf.chunks_mut(8) {
+            let word = moonpool_sim::sim_random::<u64>().to_le_bytes();
+            chunk.copy_from_slice(&word[..chunk.len()]);
+        }
+        Ok(())
+    }
 }

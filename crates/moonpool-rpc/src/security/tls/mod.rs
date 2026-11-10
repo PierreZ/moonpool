@@ -63,11 +63,11 @@ pub mod pki;
 use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use futures::io::{AsyncRead, AsyncWrite};
 use futures_rustls::rustls::client::{ClientConfig, ResolvesClientCert};
-use futures_rustls::rustls::crypto::{CryptoProvider, ring};
+use futures_rustls::rustls::crypto::{CryptoProvider, SecureRandom, ring};
 use futures_rustls::rustls::server::{
     ClientHello, ResolvesServerCert, ServerConfig, WebPkiClientVerifier,
 };
@@ -113,8 +113,31 @@ impl rustls_crate::time_provider::TimeProvider for ValidationTime {
     }
 }
 
+/// The source of TLS randomness that replaces the operating system's, once
+/// installed (see [`install_secure_random`]).
+static SECURE_RANDOM: OnceLock<&'static dyn SecureRandom> = OnceLock::new();
+
+/// Take the random bytes of every later TLS configuration from `random`,
+/// not from the operating system, for the rest of the process.
+///
+/// rustls draws a `ClientHello`'s random, its legacy session id and the
+/// order of its extensions from this source. A deterministic simulation
+/// installs a seeded source here: with the operating system's, the same
+/// seed sends other bytes at the same offsets, so a fault that hits one
+/// offset (a bit flip) has another effect on each run, and the seed does
+/// not replay. Production never calls it.
+///
+/// Returns `false` when a source was already installed; the first stays.
+pub fn install_secure_random(random: &'static dyn SecureRandom) -> bool {
+    SECURE_RANDOM.set(random).is_ok()
+}
+
 fn provider() -> Arc<CryptoProvider> {
-    Arc::new(ring::default_provider())
+    let mut provider = ring::default_provider();
+    if let Some(random) = SECURE_RANDOM.get() {
+        provider.secure_random = *random;
+    }
+    Arc::new(provider)
 }
 
 /// The name a client expects the server's certificate to prove, per
