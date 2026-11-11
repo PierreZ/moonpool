@@ -163,20 +163,30 @@ impl Caller {
         );
     }
 
+    /// Whether a refusal is honest about admission. A refusal proves
+    /// non-admission of its own attempt only: a reliable call (the only
+    /// one that asks its credential source again) that was resent may
+    /// have run from an earlier copy, so its refusal says
+    /// [`Execution::MaybeExecuted`]. Any other refusal says
+    /// [`Execution::NotAdmitted`].
+    fn refusal_admits_nothing(&self, id: u64, issued: &Issued, error: &RpcError) -> bool {
+        match error.execution() {
+            Execution::NotAdmitted => true,
+            Execution::MaybeExecuted => resent_reliable(issued, self.ledger.carried(id).len()),
+            _ => false,
+        }
+    }
+
     fn judge_error(&self, id: u64, issued: &Issued, error: &RpcError) {
         match error.reason() {
             ErrorReason::Unauthenticated(reason) => {
                 // A refusal proves non-admission of its own attempt; a
                 // reliable call's earlier copy may still have run.
                 assert_always!(
-                    error.execution() == Execution::NotAdmitted
-                        || (issued.minted.kind == Kind::Refreshing
-                            && error.execution() == Execution::MaybeExecuted),
+                    self.refusal_admits_nothing(id, issued, error),
                     "a credential refusal is never admitted"
                 );
-                if issued.minted.kind == Kind::Refreshing
-                    && error.execution() == Execution::MaybeExecuted
-                {
+                if error.execution() == Execution::MaybeExecuted {
                     assert_sometimes!(
                         true,
                         "rpc security resent call refused after an earlier copy left"
@@ -214,7 +224,7 @@ impl Caller {
             }
             ErrorReason::EndpointNotFound if issued.target == Target::LegacyPrivate => {
                 assert_always!(
-                    error.execution() == Execution::NotAdmitted,
+                    self.refusal_admits_nothing(id, issued, error),
                     "never admitted"
                 );
                 assert_sometimes!(
@@ -235,7 +245,7 @@ impl Caller {
             }
             ErrorReason::ServerShuttingDown => {
                 assert_always!(
-                    error.execution() == Execution::NotAdmitted,
+                    self.refusal_admits_nothing(id, issued, error),
                     "never admitted"
                 );
                 assert_sometimes!(
@@ -249,6 +259,13 @@ impl Caller {
             _ => {}
         }
     }
+}
+
+/// Whether request `issued`, which carried `carried` credentials, is a
+/// reliable call that was sent more than once: each transmission of a
+/// refreshing call asks its source for a new credential.
+fn resent_reliable(issued: &Issued, carried: usize) -> bool {
+    issued.minted.kind == Kind::Refreshing && carried >= 2
 }
 
 fn denial_gate(kind: Kind, reason: CredentialError) {
@@ -284,5 +301,62 @@ fn denial_gate(kind: Kind, reason: CredentialError) {
             assert_sometimes!(true, "rpc security token refused after its key rotated out");
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moonpool_rpc::{ErrorReason, Execution, RpcError};
+    use moonpool_sim::StateHandle;
+
+    use super::Caller;
+    use crate::security::state::{Ledger, Route, Target};
+    use crate::security::trust::{Kind, Trust};
+
+    /// Regression (seed 8471474105033841448 of sim-rpc-security): a
+    /// reliable call whose session was cut was sent again to a server that
+    /// had begun to drain. The draining server refused the second copy,
+    /// and the runtime reported `MaybeExecuted` because the first copy had
+    /// left. That is honest, but the oracle accepted only `NotAdmitted` for
+    /// a `ServerShuttingDown` refusal. Every refusal is now judged by the
+    /// same rule: `NotAdmitted`, or `MaybeExecuted` for a reliable call
+    /// that was sent more than once.
+    #[test]
+    fn a_refusal_of_a_resent_reliable_call_may_follow_an_earlier_copy() {
+        let state = StateHandle::new();
+        let caller = Caller {
+            ledger: Ledger::of(&state),
+            trust: Trust::of(&state).expect("trust"),
+            route: Route::Remote,
+        };
+        let draining = |execution| RpcError::new(ErrorReason::ServerShuttingDown, execution);
+        let judge = |id| {
+            let issued = caller.ledger.issued(id).expect("issued");
+            (
+                caller.refusal_admits_nothing(id, &issued, &draining(Execution::NotAdmitted)),
+                caller.refusal_admits_nothing(id, &issued, &draining(Execution::MaybeExecuted)),
+                caller.refusal_admits_nothing(id, &issued, &draining(Execution::Executed)),
+            )
+        };
+        let mint_again = |id| {
+            caller.ledger.mint(
+                id,
+                caller.trust.mint(Kind::Refreshing, "refresher", 120, 0),
+                caller.trust.utc(),
+                caller.trust.generation(),
+            );
+        };
+
+        let (reliable, _) = caller.issue(Kind::Refreshing, Target::Private, 120, 0);
+        mint_again(reliable);
+        // Sent once: no earlier copy, so only `NotAdmitted` is honest.
+        assert_eq!(judge(reliable), (true, false, false));
+        mint_again(reliable);
+        // Sent twice: the earlier copy may have run.
+        assert_eq!(judge(reliable), (true, true, false));
+
+        // A call that is never resent must say `NotAdmitted`.
+        let (plain, _) = caller.issue(Kind::Valid, Target::Private, 120, 0);
+        assert_eq!(judge(plain), (true, false, false));
     }
 }
