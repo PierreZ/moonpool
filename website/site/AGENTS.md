@@ -23,7 +23,7 @@ The site presents moonpool as an engineering tool. The book is its manual.
 | `/guide/quick-start/` | `src/pages/guide/quick-start/index.astro` | install, the first test, run it, read the report, replay a seed |
 | `/<part>/<chapter>.html`, `/llms.html` | `src/pages/[...slug].astro` | each chapter of `book/src/SUMMARY.md`, at its mdbook address |
 
-Later issues add the other technique pages (#418) and `/playground/` (#419). Add a
+A later issue adds `/playground/` (#419). Add a
 section to the top bar (`src/nav.ts`) in the issue that adds its page.
 
 ## The Guide
@@ -90,9 +90,13 @@ per technique page:
 | `/techniques/network/` | `public/network.js` | a switch per network fault family (`NETWORK_FAULTS` of the engine) and the faults of each kind |
 | `/techniques/storage/` | `public/storage.js` | the log of each server as a row of sectors (`log_written`, `log_synced`, `storage_crash_sectors`) |
 | `/techniques/reboots/` | `public/reboots.js` | each reboot: kind, down, back, the version on its disk |
+| `/techniques/swarm/` | `public/swarm.js` | eight swarm seeds as rows, a dot per family each drew (`Run.families`, from the `chaos_families` event); a row opens its run |
+| `/techniques/assertions/` | `public/assertions.js` | the register's checks (`CHECKS`) turning green seed after seed, a coverage bar; the stop rule is the engine's `coverage` export |
+| `/techniques/exploration/` | `public/exploration.js` | the recorded tree of an exploration (`tests/exploration_tree.rs`, the explorer forks so it never runs in a browser); the bug timeline replays from its `recipe` |
+| `/techniques/debugging/` | `public/debugging.js` | the report of a failing seed, its replay, and the walk back from the broken invariant (`walkBack` in `public/run-model.js`) |
 
 A technique page reads its code samples and names from the files
-(`excerpt`, `lineWith`, `constNames`, `constStr`, `hintLabels` in
+(`excerpt` (with `after` to keep lines past the end marker), `lineWith`, `constList`, `constNames`, `constStr`, `hintLabels` in
 `src/lib/source.mjs`), so a sample never goes stale: a marker that is gone
 fails the build. Each page links to its Guide chapters, and each chapter links
 back to the page.

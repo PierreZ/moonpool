@@ -165,6 +165,22 @@ pub struct ExploreJob {
     pub recipe: Recipe,
 }
 
+/// One timeline the explorer ran, kept when
+/// [`Explorer::record_timelines`] is on: the tree of an exploration, one node
+/// per timeline. The parent of a timeline is the one whose recipe is this
+/// recipe without its last segment; the root has an empty recipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRecord {
+    /// The recipe it replayed: `(rng_call_count, seed)` segments from the
+    /// root. The last segment is the fork: the parent's state at that call
+    /// count, then fresh randomness.
+    pub recipe: Recipe,
+    /// The timeline failed (a bug) or its worker crashed.
+    pub failed: bool,
+    /// The globally new discoveries it made, in order.
+    pub discoveries: Vec<DiscoveryEvent>,
+}
+
 /// Per-seed exploration statistics.
 #[derive(Debug, Clone, Default)]
 pub struct ExplorationStats {
@@ -218,6 +234,9 @@ pub struct Explorer {
     continuation_round: u64,
     stats: ExplorationStats,
     bug_recipes: Vec<Recipe>,
+    /// Every timeline of the seed, when `record` is on.
+    timelines: Vec<TimelineRecord>,
+    record: bool,
 
     // --- worker pool (None = in-process mode) ---
     slots: Option<SlotPool>,
@@ -277,6 +296,8 @@ impl Explorer {
             continuation_round: 0,
             stats: ExplorationStats::default(),
             bug_recipes: Vec::new(),
+            timelines: Vec::new(),
+            record: false,
             slots,
             #[cfg(unix)]
             active: BTreeMap::new(),
@@ -290,6 +311,21 @@ impl Explorer {
     /// and its run recorded as a crash.
     pub fn set_worker_timeout(&mut self, timeout: Duration) {
         self.worker_timeout = timeout;
+    }
+
+    /// Keep a [`TimelineRecord`] of each timeline of a seed
+    /// ([`Self::timelines`]). Off by default: a campaign of many seeds runs
+    /// many timelines. With `workers > 0` the records come in the order the
+    /// workers finish; with `workers == 0` the order is deterministic.
+    pub fn record_timelines(&mut self, on: bool) {
+        self.record = on;
+    }
+
+    /// The timelines of the current seed, in the order they finished
+    /// (the root first), when [`Self::record_timelines`] is on.
+    #[must_use]
+    pub fn timelines(&self) -> &[TimelineRecord] {
+        &self.timelines
     }
 
     /// Reset per-seed state and prepare for the root run of `seed`.
@@ -306,6 +342,7 @@ impl Explorer {
         self.continuation_round = 0;
         self.stats = ExplorationStats::default();
         self.bug_recipes.clear();
+        self.timelines.clear();
         begin_run();
     }
 
@@ -578,6 +615,13 @@ impl Explorer {
         } = *run;
         self.stats.total_timelines += 1;
         self.stats.discoveries += events.len() as u64;
+        if self.record {
+            self.timelines.push(TimelineRecord {
+                recipe: job.recipe.clone(),
+                failed,
+                discoveries: events.to_vec(),
+            });
+        }
 
         if failed && from_exploration {
             self.stats.bug_found += 1;

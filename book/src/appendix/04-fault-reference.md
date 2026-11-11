@@ -168,6 +168,7 @@ The engine records `SimFaultEvent`s. The runner merges them into the trace under
 | `storage_read_fault`, `storage_write_fault`, `storage_sync_fault` | storage I/O faults |
 | `storage_disk_failure`, `storage_crash`, `storage_wipe` | disk and crash |
 | `storage_crash_sectors` | the fate of each unsynced sector of one file at a crash (read-only) |
+| `chaos_families` | the network and storage families this seed has on, after swarm and masks (read-only, once per seed) |
 
 `SimWorld::take_faults()` drains them in a low-level test.
 

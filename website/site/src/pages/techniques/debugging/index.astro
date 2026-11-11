@@ -1,0 +1,62 @@
+---
+// From a red seed to the bug (#418 (technique pages, part 2)): a seed of the
+// register with the planted bug. The recorded run is src/runs/debugging.json;
+// public/debugging.js shows the report, replays the seed and walks back
+// from the broken invariant (public/run-model.js walkBack).
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { excerpt, repoFile } from "../../../lib/source.mjs";
+import runs from "../../../runs/debugging.json";
+
+const engine = repoFile("crates/moonpool-wasm-demo/src/engine.rs");
+const pin = excerpt(engine, "let builder = match config.recipe", "};", 0);
+const [run] = runs;
+---
+<Technique
+  title="From a red seed to the bug"
+  description="Replay the failing seed alone, then walk back from the broken invariant to the first wrong event."
+  guide={[
+    "part3-building/20-debugging.md",
+    "part3-building/21-reproducing.md",
+    "part3-building/22-event-trace.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>A run of many seeds reports a red seed. The invariant broke at one event, but the cause is earlier: a
+    message that was lost, a server that was down, a rule in the code that is wrong. A log of a run on a real
+    cluster does not come back, so you guess.</p>
+
+  <h2>The technique</h2>
+  <p>The seed is the whole run. Run that seed alone and you get the same run, event for event, as many times
+    as you need. Then read the events backwards: from the broken invariant to the event that fed it, and from
+    there to the decision that was wrong. Each step is an event of the run, not a guess.</p>
+
+  <h2>The live run</h2>
+  <p>Seed {run.config.seed} of the register with the planted bug: a read takes the first reply in place of a
+    quorum. The report names the seed and the first violation. Replay the seed in your browser: the print is
+    the same. Then step back from the failed read, one event per click.</p>
+  <div class="breakout">
+    <div class="run">
+      <div class="run-head label"><span>the report</span></div>
+      <div class="report-box" id="debug-report" aria-live="polite"></div>
+      <div class="switches">
+        <button class="btn small" type="button" id="debug-replay">Replay this seed alone</button>
+        <button class="btn small" type="button" id="debug-back">Start the walk back</button>
+        <button class="btn small" type="button" id="debug-reset">Back to the end</button>
+      </div>
+      <ol class="walk" id="debug-walk" aria-live="polite"></ol>
+    </div>
+    <section class="run run-under" id="run" aria-label="The failing seed in the player"></section>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+
+  <h2>The code</h2>
+  <p>To replay one seed, pin it and run one iteration. The site's engine does this for each run, and replays
+    a timeline of an exploration from its recipe:</p>
+  <Code theme="css-variables" lang="rust" code={pin} />
+  <p>In a test, raise the log level to <code>ERROR</code> or <code>DEBUG</code> for the replay, then read the
+    events from the first violation backwards.</p>
+  <script is:inline type="module" src={url("debugging.js")}></script>
+</Technique>

@@ -111,11 +111,18 @@ export function repoFn(path, name) {
   return rustFn(readFileSync(ROOT + path, "utf8"), name);
 }
 
+/** The strings of a `pub const NAME: &[&str] = &["…", …];` list. */
+export function constList(text, name) {
+  const m = new RegExp("pub const " + name + ": &\\[&str\\] = &\\[([\\s\\S]*?)\\];").exec(text);
+  if (!m) throw new Error(`no const ${name}`);
+  return [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+}
+
 /** The names of a `pub const NAME: &[(&str, _)] = &[("name", …), …];` table. */
 export function constNames(text, name) {
   const m = new RegExp("pub const " + name + ":[^=]*= &\\[([\\s\\S]*?)\\];").exec(text);
   if (!m) throw new Error(`no const ${name}`);
-  return [...m[1].matchAll(/\("([a-z_]+)",/g)].map((x) => x[1]);
+  return [...m[1].matchAll(/\(\s*"([a-z_]+)",/g)].map((x) => x[1]);
 }
 
 /** The value of a `pub const NAME: &str = "…";`. */
@@ -144,16 +151,17 @@ export function repoFile(path) {
 
 /**
  * The lines of `text` from the first line with `from` to the next line with
- * `to`, both included, with their common indent taken off. Throws when one
- * is missing, so a page never shows code that is gone.
+ * `to`, both included, and `after` more lines, with their common indent
+ * taken off. Throws when one is missing, so a page never shows code that
+ * is gone.
  */
-export function excerpt(text, from, to) {
+export function excerpt(text, from, to, after = 0) {
   const lines = text.split("\n");
   const a = lines.findIndex((l) => l.includes(from));
   if (a < 0) throw new Error(`no line with ${from}`);
   const b = lines.findIndex((l, i) => i >= a && l.includes(to));
   if (b < 0) throw new Error(`no line with ${to} after ${from}`);
-  const part = lines.slice(a, b + 1);
+  const part = lines.slice(a, b + 1 + after);
   const indent = Math.min(...part.filter((l) => l.trim()).map((l) => l.match(/^ */)[0].length));
   return part.map((l) => l.slice(indent)).join("\n");
 }

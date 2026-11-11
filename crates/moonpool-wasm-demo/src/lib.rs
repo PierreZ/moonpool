@@ -42,6 +42,7 @@
 //! false`: no tokio providers and no fork-based exploration, which is the
 //! configuration that builds for `wasm32-unknown-unknown`.
 
+pub mod coverage;
 pub mod engine;
 pub mod register;
 
@@ -58,4 +59,15 @@ use wasm_bindgen::prelude::wasm_bindgen;
 pub fn run_wasm(config: &str) -> String {
     console_error_panic_hook::set_once();
     run_json(config)
+}
+
+/// JavaScript entry point exported as `coverage(config)` on wasm: a
+/// [`coverage::CoverageConfig`] as JSON in, the [`coverage::Coverage`] as
+/// JSON out.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = coverage)]
+#[must_use]
+pub fn coverage_wasm(config: &str) -> String {
+    console_error_panic_hook::set_once();
+    coverage::coverage_json(config)
 }

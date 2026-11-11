@@ -8,6 +8,8 @@ In production, debugging a concurrency bug means staring at interleaved logs fro
 
 Deterministic simulation changes this. A failing seed is not a clue. It is a **recording**. Same seed, same schedule, same draws, same bug, every time. Debugging becomes mechanical rather than archaeological.
 
+[From a red seed to the bug](../techniques/debugging/) does this on the website: the report of a seed with a planted bug, the replay of that seed alone in your browser, and the walk back from the failed read to the write that never reached a server, one event per click.
+
 ## The Workflow
 
 1. **Reproduce alone.** Pin the seed with `set_debug_seeds(vec![seed])` and `set_iterations(1)`. Raise the trace level. Confirm the same violation appears.

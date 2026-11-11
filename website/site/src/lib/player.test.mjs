@@ -136,3 +136,61 @@ test("the committed version at an event is the newest write_committed so far", (
   assert.equal(model.committedAt(run, 1), 1);
   assert.equal(model.committedAt(run, 5), 3);
 });
+
+const [debug] = load("debugging");
+const explored = load("exploration");
+const swarm = load("swarm");
+const cov = load("assertions");
+
+test("the walk back goes from the broken read to the missed write and the rule", () => {
+  const steps = model.walkBack(debug);
+  assert.ok(steps.length >= 5, JSON.stringify(steps));
+  assert.equal(steps[0].index, model.violationAt(debug));
+  assert.match(steps[1].text, /kept one reply/);
+  assert.match(steps[2].text, /served version \d+: it did not have version \d+/);
+  assert.equal(debug.events[steps[3].index].name, "write_committed");
+  assert.match(steps.at(-1).text, /quorum/);
+  for (const s of steps) assert.ok(s.index >= 0 && s.index < debug.events.length);
+  assert.deepEqual(model.walkBack(home), [], "a passing run has no walk back");
+});
+
+test("the exploration tree: the root first, each child under its parent, the bug a leaf", () => {
+  const rows = model.treeRows(explored.nodes);
+  assert.equal(rows.length, explored.nodes.length);
+  assert.equal(rows[0].index, 0);
+  assert.equal(rows[0].depth, 0);
+  rows.forEach((r, k) => {
+    if (r.parent === null) return;
+    const p = rows.findIndex((x) => x.index === r.parent);
+    assert.ok(p < k && rows[p].depth === r.depth - 1, "a child comes after its parent, one deeper");
+  });
+  assert.ok(explored.nodes.some((n) => n.failed));
+  assert.equal(explored.root.report.passed, true);
+  assert.equal(explored.bug.report.passed, false);
+});
+
+test("the exploration tree keeps each recipe as a string, so a 64-bit seed stays exact", () => {
+  const text = readFileSync(new URL("../runs/exploration.json", import.meta.url), "utf8");
+  for (const m of text.matchAll(/[:,[]\s*(\d{16,})/g)) assert.ok(Number.isSafeInteger(Number(m[1])), "a number above 2^53: " + m[1]);
+  assert.match(explored.bug.config.recipe, /^\d+@\d+( -> \d+@\d+)*$/);
+  const bug = explored.nodes.find((n) => n.failed);
+  assert.equal(bug.recipe, explored.bug.config.recipe);
+});
+
+test("swarm: no seed has every family on, and the eight seeds cover each family", () => {
+  const net = new Set();
+  const sto = new Set();
+  for (const r of swarm) {
+    assert.ok(r.families.network.length < 9 || r.families.storage.length < 12);
+    r.families.network.forEach((f) => net.add(f));
+    r.families.storage.forEach((f) => sto.add(f));
+  }
+  assert.equal(net.size, 9);
+  assert.equal(sto.size, 12);
+});
+
+test("coverage: a check no seed reaches stays missing, and the run is not stable", () => {
+  assert.equal(cov.stable, false);
+  assert.deepEqual(cov.missing, ["a server drops a damaged frame"]);
+  assert.equal(cov.seeds.length, cov.config.max_seeds);
+});

@@ -81,3 +81,88 @@ fn buggify_knobs_runs_clean_across_seeds() {
     );
     assert_eq!(report.iterations, 50, "expected all 50 seeds to run");
 }
+
+/// Collects the `chaos_families` fault events of each seed.
+struct Families {
+    cursor: std::cell::Cell<usize>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl moonpool_sim::Invariant for Families {
+    fn name(&self) -> &'static str {
+        "families"
+    }
+
+    fn observe(&self, q: &dyn moonpool_sim::TraceQuery, _sim_time_ms: u64) {
+        for event in q.since(moonpool_sim::SIM_FAULT_EVENT_NAME, &self.cursor) {
+            if event.str("kind") == Some("chaos_families") {
+                self.seen.lock().expect("families lock").push((
+                    event.str("network").unwrap_or("?").to_string(),
+                    event.str("storage").unwrap_or("?").to_string(),
+                ));
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.cursor.set(0);
+    }
+}
+
+/// Each swarm seed records the families it drew, once, in one
+/// `chaos_families` event: a subset of the families, never the same subset
+/// for every seed, and a family that the mask removed is never listed.
+#[test]
+fn each_swarm_seed_records_its_families_once() {
+    use moonpool_sim::{NetworkFault, NetworkFaultMask, StorageFault};
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let report = SimulationBuilder::new()
+        .enable_chaos([
+            Chaos::Network(ChaosMode::Swarm),
+            Chaos::Storage(ChaosMode::Swarm),
+        ])
+        .network_fault_mask(NetworkFaultMask::all().without(NetworkFault::BitFlip))
+        .set_iterations(20)
+        .workload(SwarmSmokeWorkload)
+        .invariant(Families {
+            cursor: std::cell::Cell::new(0),
+            seen: seen.clone(),
+        })
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0);
+    let seen = seen.lock().expect("families lock");
+    assert_eq!(seen.len(), 20, "one chaos_families event per seed");
+    let network: Vec<&str> = NetworkFault::ALL.iter().map(|f| f.name()).collect();
+    let storage: Vec<&str> = StorageFault::ALL.iter().map(|f| f.name()).collect();
+    for (net, sto) in seen.iter() {
+        for name in net.split(',').filter(|n| !n.is_empty()) {
+            assert!(network.contains(&name), "{name} is a network family");
+            assert_ne!(name, "bit_flip", "the mask removed bit_flip");
+        }
+        for name in sto.split(',').filter(|n| !n.is_empty()) {
+            assert!(storage.contains(&name), "{name} is a storage family");
+        }
+    }
+    assert!(
+        seen.iter().any(|s| s != &seen[0]),
+        "the seeds draw different subsets"
+    );
+}
+
+/// A run without network or storage chaos records no `chaos_families` event.
+#[test]
+fn a_run_without_chaos_records_no_families() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let report = SimulationBuilder::new()
+        .set_iterations(3)
+        .workload(SwarmSmokeWorkload)
+        .invariant(Families {
+            cursor: std::cell::Cell::new(0),
+            seen: seen.clone(),
+        })
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0);
+    assert!(seen.lock().expect("families lock").is_empty());
+}

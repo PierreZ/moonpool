@@ -219,6 +219,39 @@ pub struct BugRecipe {
     pub recipe: Vec<(u64, u64)>,
 }
 
+/// One timeline of an exploration tree, kept with
+/// [`SimulationBuilder::record_exploration_tree`](crate::SimulationBuilder::record_exploration_tree).
+///
+/// The parent of a timeline is the timeline of the same seed whose recipe is
+/// this recipe without its last segment; the root has an empty recipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExploredTimeline {
+    /// The root seed.
+    pub seed: u64,
+    /// Replay breakpoints: `(rng_call_count, seed)` pairs. The last one is
+    /// the fork from the parent.
+    pub recipe: Vec<(u64, u64)>,
+    /// The timeline failed: a bug.
+    pub failed: bool,
+    /// The globally new discoveries the timeline made, in order. A
+    /// productive timeline forks its children at one of them.
+    pub discoveries: Vec<ExploredDiscovery>,
+}
+
+/// One globally new discovery of an explored timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExploredDiscovery {
+    /// The random-stream call count at the discovery: a child forks here.
+    pub call_count: u64,
+    /// The kind in `snake_case`: `sometimes_pass`, `watermark_improvement`,
+    /// `frontier_advance`, `bucket_first`, `bucket_quality`,
+    /// `boolean_combination`.
+    pub kind: String,
+    /// The message of the assertion it is about, when the discovery names
+    /// one assertion site.
+    pub assertion: Option<String>,
+}
+
 /// Report from frontier-based exploration.
 #[derive(Debug, Clone)]
 pub struct ExplorationReport {
@@ -246,6 +279,10 @@ pub struct ExplorationReport {
     pub converged: bool,
     /// Timelines explored per seed (parallel to `seeds_used`).
     pub per_seed_timelines: Vec<u64>,
+    /// Every timeline of every seed, when
+    /// [`SimulationBuilder::record_exploration_tree`](crate::SimulationBuilder::record_exploration_tree)
+    /// is on; empty otherwise.
+    pub timelines: Vec<ExploredTimeline>,
 }
 
 /// Which progress signal an [`UntilCoverageStable`] run plateaued on.

@@ -332,6 +332,46 @@ pre {
 .run-out.bad { color: var(--fail); }
 .run-under { margin-top: 12px; }
 
+/* Swarm: one dot per fault family. Assertions: the coverage bar. */
+.swarm-table td, .swarm-table th { padding: 4px 2px; text-align: center; }
+.swarm-table td:first-child, .swarm-table th:first-child { padding-left: 12px; text-align: left; }
+.swarm-table td:nth-last-child(-n+2), .swarm-table th:nth-last-child(-n+2) { padding: 4px 8px; text-align: left; white-space: nowrap; }
+.swarm-table .fam { width: 1.6ch; }
+.swarm-table .fam.on { color: var(--fault); }
+.swarm-table .fam.off { color: var(--muted); }
+.swarm-table .gap { width: 10px; padding: 0; }
+.swarm-table tr.pick { cursor: pointer; }
+.swarm-table tr.pick:hover, .swarm-table tr.current { background: var(--info-tint); }
+.swarm-table tr.total td { border-top: 1px solid var(--rule-strong); color: var(--fg); }
+.fam-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 0; padding: 4px 12px 10px; list-style: none; color: var(--muted); }
+.fam-legend li::before { content: none !important; }
+.fam-legend b { color: var(--fg); font-weight: 600; }
+.bar { height: 10px; margin: 10px 12px 4px; border: 1px solid var(--rule-strong); }
+.bar-fill { height: 100%; width: 0; background: var(--accent); }
+.bar-fill.bad { background: var(--fail); }
+.bar-text { margin: 0; padding: 0 12px 8px; color: var(--muted); }
+.tree-wrap { overflow-x: auto; padding: 8px 0; border-bottom: 1px solid var(--rule); }
+.tree { display: block; font-family: var(--font-mono); font-size: 11px; }
+.tree-rule { stroke: var(--rule); stroke-dasharray: 2 4; }
+.tree-edge { fill: none; stroke: var(--rule-strong); stroke-width: 1.5; }
+.tree-node { cursor: pointer; outline: none; }
+.tree-node circle { fill: var(--bg); stroke: var(--muted); stroke-width: 1.5; }
+.tree-node text { fill: var(--fg); pointer-events: none; }
+.tree-node.found circle { stroke: var(--accent); fill: var(--accent-tint); }
+.tree-node.bug circle { stroke: var(--fail); fill: var(--fail); }
+.tree-node.bug text { fill: var(--bg); font-weight: 700; }
+.tree-node.sel circle, .tree-node:focus-visible circle { stroke-width: 3; stroke: var(--fg); }
+.tree-node.bug.sel circle { stroke: var(--fg); }
+.tree-info { padding: 8px 12px; font-size: 13.5px; }
+.tree-info p { margin: 0 0 4px; }
+.tree-info ul { margin: 4px 0 0; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+.walk { margin: 0; padding: 8px 12px 8px 32px; font-size: 13.5px; }
+.walk:empty { display: none; }
+.walk li { margin: 0 0 4px; }
+.walk li.current { color: var(--fg); font-weight: 600; }
+.report-box { margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 12.5px; white-space: pre-wrap; }
+.report-box .bad { color: var(--fail); font-weight: 600; }
+
 /* ---- the Guide: a sidebar from SUMMARY.md, the chapter, a search ---- */
 
 .guide { display: grid; grid-template-columns: 17rem minmax(0, 1fr); gap: 40px; max-width: calc(var(--measure) + 8ch + 17rem + 40px); margin: 0 auto; }

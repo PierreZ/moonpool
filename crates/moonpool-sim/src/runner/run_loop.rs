@@ -90,6 +90,7 @@ struct ExplorationTotals {
     max_active_workers: usize,
     bug_recipes: Vec<super::report::BugRecipe>,
     per_seed_timelines: Vec<u64>,
+    tree: Vec<super::report::ExploredTimeline>,
 }
 
 #[cfg(feature = "exploration")]
@@ -115,6 +116,30 @@ impl ExplorationTotals {
                 recipe: recipe.clone(),
             });
         }
+        if !explorer.timelines().is_empty() {
+            // A sometimes discovery's state is its assertion's message hash.
+            let names: std::collections::BTreeMap<u64, String> =
+                moonpool_assertions::assertion_read_all()
+                    .into_iter()
+                    .map(|slot| (moonpool_assertions::msg_hash(&slot.msg), slot.msg))
+                    .collect();
+            for timeline in explorer.timelines() {
+                self.tree.push(super::report::ExploredTimeline {
+                    seed,
+                    recipe: timeline.recipe.clone(),
+                    failed: timeline.failed,
+                    discoveries: timeline
+                        .discoveries
+                        .iter()
+                        .map(|d| super::report::ExploredDiscovery {
+                            call_count: d.call_count,
+                            kind: discovery_kind_name(d.kind).to_string(),
+                            assertion: names.get(&d.state_id).cloned(),
+                        })
+                        .collect(),
+                });
+            }
+        }
     }
 
     /// Build the final `ExplorationReport` from the running totals.
@@ -138,7 +163,23 @@ impl ExplorationTotals {
             sancov_edges_total: sancov_edges.1,
             converged,
             per_seed_timelines: self.per_seed_timelines,
+            timelines: self.tree,
         }
+    }
+}
+
+/// The `snake_case` name of a discovery kind, for
+/// [`ExploredDiscovery::kind`](super::report::ExploredDiscovery::kind).
+#[cfg(feature = "exploration")]
+fn discovery_kind_name(kind: moonpool_assertions::DiscoveryKind) -> &'static str {
+    use moonpool_assertions::DiscoveryKind;
+    match kind {
+        DiscoveryKind::SometimesPass => "sometimes_pass",
+        DiscoveryKind::WatermarkImprovement => "watermark_improvement",
+        DiscoveryKind::FrontierAdvance => "frontier_advance",
+        DiscoveryKind::BucketFirst => "bucket_first",
+        DiscoveryKind::BucketQuality => "bucket_quality",
+        DiscoveryKind::BooleanCombination => "boolean_combination",
     }
 }
 
@@ -438,12 +479,23 @@ impl SimulationBuilder {
         if let Some(capacity) = self.accept_backlog_capacity {
             network_config.accept_backlog_capacity = capacity;
         }
+        // Read-only: the families this seed can fire, after Swarm and the
+        // masks. It draws nothing.
+        let families = (network_chaos.is_some() || storage_chaos.is_some()).then(|| {
+            crate::SimFaultEvent::ChaosFamilies {
+                network: crate::NetworkFaultMask::of(&network_config.chaos).names(),
+                storage: crate::StorageFaultMask::of(&storage_config).names(),
+            }
+        });
         let mut sim = crate::sim::SimWorld::new_with_network_config_and_seed(network_config, seed);
         // Unlike raw `SimWorld` use, a builder campaign has explicit phases.
         // Setup and the post-chaos quiet tail must not inherit the global sleep
         // delay fault merely because the sampled network config enabled it.
         sim.prepare_buggified_delay_campaign();
         sim.set_storage_config(storage_config);
+        if let Some(event) = families {
+            sim.note_fault(event);
+        }
         sim
     }
 
@@ -837,27 +889,22 @@ impl SimulationBuilder {
     /// Initialise the assertion region (heap, or `MAP_SHARED` + explorer), and
     /// create the frontier controller when an exploration config is present.
     #[cfg(feature = "exploration")]
-    pub(super) fn init_assertions_and_exploration(
-        exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
-    ) -> Option<moonpool_explorer::Explorer> {
+    pub(super) fn init_assertions_and_exploration(&self) -> Option<moonpool_explorer::Explorer> {
         crate::chaos::exploration_glue::init_assertion_region();
-        let config = exploration_config?;
+        let config = self.exploration_config.as_ref()?;
         moonpool_explorer::set_rng_count_hook(crate::sim::rng_call_count);
         match moonpool_explorer::Explorer::new(config.clone()) {
-            Ok(explorer) => Some(explorer),
+            Ok(mut explorer) => {
+                explorer.record_timelines(
+                    self.exploration_tree == super::builder::ExplorationTree::Record,
+                );
+                Some(explorer)
+            }
             Err(e) => {
                 tracing::error!("Failed to initialize exploration: {}", e);
                 None
             }
         }
-    }
-
-    /// Initialise the assertion region (heap table without the explorer).
-    #[cfg(not(feature = "exploration"))]
-    pub(super) fn init_assertions_and_exploration(
-        _exploration_config: Option<&crate::chaos::exploration_glue::ExplorationConfig>,
-    ) {
-        crate::chaos::exploration_glue::init_assertion_region();
     }
 
     /// Scan all assertion slots from shared memory: insert the messages of
@@ -1003,9 +1050,9 @@ impl SimulationBuilder {
         }
 
         #[cfg(feature = "exploration")]
-        let explorer = Self::init_assertions_and_exploration(self.exploration_config.as_ref());
+        let explorer = self.init_assertions_and_exploration();
         #[cfg(not(feature = "exploration"))]
-        Self::init_assertions_and_exploration(self.exploration_config.as_ref());
+        crate::chaos::exploration_glue::init_assertion_region();
         // Declared sites get their slots before the first seed, so a site
         // that no seed reaches is reported (#383).
         let declared = crate::chaos::assertions::declare_sites(
