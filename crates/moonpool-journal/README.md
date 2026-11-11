@@ -197,3 +197,4 @@ cargo xtask sim run journal
 
 - [API documentation](https://docs.rs/moonpool-journal)
 - [A Crash-Aware Journal](https://pierrez.github.io/moonpool/part5-building-on-top/08-journal.html) in the Sim Book
+- [moonpool-journal, byte by byte](https://pierrez.github.io/moonpool/extras/journal/) on the website: each file, record and header of the format

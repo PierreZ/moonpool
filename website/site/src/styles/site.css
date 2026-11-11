@@ -212,7 +212,6 @@ pre {
 @keyframes blink { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
 .brand .mark-moon { color: var(--fg); }
-.brand .mark-moon .sea { fill: var(--accent); }
 
 /* The home page: one column of flat panels. */
 .home { display: flex; flex-direction: column; gap: 28px; }

@@ -7,7 +7,6 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Example simulation workloads for moonpool"
-documentation = "https://docs.rs/moonpool-sim-examples"
 
 [dependencies]
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
