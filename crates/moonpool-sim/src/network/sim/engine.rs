@@ -1497,7 +1497,7 @@ impl NetworkSimulation {
                 wakes.append(self.close_aborted(id));
                 continue;
             }
-            let Some(c) = self.state.connections.get_mut(&id) else {
+            let Some(c) = self.state.connections.get(&id) else {
                 continue;
             };
             if c.close_reason == CloseReason::Aborted {
@@ -1506,16 +1506,7 @@ impl NetworkSimulation {
             // A side that the application closed already sent its FIN (or
             // queued it): the host has nothing more to say on it.
             let notify = !c.flags.is_closed();
-            c.flags.set_is_closed(true);
-            c.flags.set_send_closed(true);
-            c.flags.set_recv_closed(true);
-            c.flags.set_send_in_progress(false);
-            c.flags.set_send_stalled(false);
-            c.flags.set_graceful_close_pending(false);
-            c.close_reason = CloseReason::Aborted;
-            self.discard_send_queue(id);
-            self.discard_receive_buffer(id, &mut wakes);
-            self.wake_all_waiters(id, &mut wakes);
+            self.close_endpoint_locally(id, &mut wakes);
             match notice {
                 DeathNotice::Reset if notify => self.put_rst_in_flight(id, now, &mut actions),
                 DeathNotice::Reset => {}
@@ -1526,6 +1517,58 @@ impl NetworkSimulation {
                 }
             }
         }
+        (actions, wakes)
+    }
+
+    /// Close `id` on its own side with RST semantics: what it queued and
+    /// what it received but never read are gone, and every task parked on
+    /// it wakes to the error. Bytes it already put on the wire stay there
+    /// and still land. Its peer is untouched: it learns of the close only
+    /// through the network.
+    fn close_endpoint_locally(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
+        let Some(c) = self.state.connections.get_mut(&id) else {
+            return;
+        };
+        c.flags.set_is_closed(true);
+        c.flags.set_send_closed(true);
+        c.flags.set_recv_closed(true);
+        c.flags.set_send_in_progress(false);
+        c.flags.set_send_stalled(false);
+        c.flags.set_graceful_close_pending(false);
+        c.close_reason = CloseReason::Aborted;
+        self.discard_send_queue(id);
+        self.discard_receive_buffer(id, wakes);
+        self.wake_all_waiters(id, wakes);
+    }
+
+    /// The application aborted `id` (`SO_LINGER` 0, or a drop with unread
+    /// bytes): this side is reset now, and an RST goes on the wire to the
+    /// peer behind the bytes already in flight. The RST takes the link
+    /// latency and a partition holds it, as the RST of a dead process does,
+    /// so a peer never learns of the abort at the same instant or across a
+    /// cut.
+    ///
+    /// A connection that no application accepted yet is reset at once on
+    /// both sides: it lives only in a listener backlog, and a backlog must
+    /// never hold a dead endpoint.
+    pub(crate) fn abort_endpoint(
+        &mut self,
+        id: ConnectionId,
+        now: Duration,
+    ) -> (NetworkActions, WakeBatch) {
+        let mut actions = NetworkActions::default();
+        if self.is_unaccepted(id) || self.paired(id).is_some_and(|peer| self.is_unaccepted(peer)) {
+            return (actions, self.close_aborted(id));
+        }
+        let mut wakes = WakeBatch::default();
+        if self
+            .connection(id)
+            .is_none_or(|c| c.close_reason == CloseReason::Aborted)
+        {
+            return (actions, wakes);
+        }
+        self.close_endpoint_locally(id, &mut wakes);
+        self.put_rst_in_flight(id, now, &mut actions);
         (actions, wakes)
     }
 

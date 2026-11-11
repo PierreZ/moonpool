@@ -238,3 +238,62 @@ fn a_clogged_write_draws_nothing_however_often_it_is_polled() {
     buggify_reset();
     assert_eq!(draws, 0, "a clogged write is not an I/O operation yet");
 }
+
+/// Make 4 bytes from the server land, unread, at the client, so that a drop
+/// of the client stream is an abort (an RST, not a FIN).
+fn unread_bytes_at_the_client(
+    sim: &mut SimWorld,
+    client: &SimTcpStream,
+    server: &mut SimTcpStream,
+) {
+    put_on_the_wire(sim, server, b"left");
+    sim.run_until_empty();
+    assert_eq!(sim.unread_bytes(client.connection_id()), 4);
+}
+
+/// An abort from a live endpoint reaches its peer through the network: the
+/// peer sees the reset one link latency later, never at the same instant.
+#[test]
+fn an_abort_resets_the_peer_after_the_link_latency() {
+    let (mut sim, client, mut server) = connected();
+    unread_bytes_at_the_client(&mut sim, &client, &mut server);
+    let aborted_at = sim.now();
+    drop(client);
+    let mut byte = [0_u8; 1];
+    assert!(
+        poll_read_once(&mut server, &mut byte).is_pending(),
+        "the peer cannot know of the abort yet"
+    );
+    assert_eq!(time_of_reset(&mut sim, &mut server), aborted_at + LATENCY);
+}
+
+/// The RST of an abort is on the wire like data: a partition holds it until
+/// the heal.
+#[test]
+fn a_partition_holds_the_reset_of_an_abort() {
+    let (mut sim, client, mut server) = connected();
+    unread_bytes_at_the_client(&mut sim, &client, &mut server);
+    let aborted_at = sim.now();
+    sim.partition_pair(client_ip(), server_ip(), Duration::from_hours(1));
+    sim.partition_pair(server_ip(), client_ip(), Duration::from_hours(1));
+    drop(client);
+    assert!(
+        time_of_reset(&mut sim, &mut server) >= aborted_at + Duration::from_hours(1),
+        "the reset crosses only after the heal"
+    );
+}
+
+/// `SimWorld::close_connection_abort` follows the same rule, and the bytes
+/// the aborting side already put on the wire still land before the RST.
+#[test]
+fn a_scripted_abort_lets_the_bytes_on_the_wire_land_first() {
+    const LAST: &[u8] = b"on-the-wire";
+    let (mut sim, mut client, mut server) = connected();
+    put_on_the_wire(&mut sim, &mut client, LAST);
+    let aborted_at = sim.now();
+    sim.close_connection_abort(client.connection_id());
+    let mut received = vec![0_u8; LAST.len()];
+    drive(&mut sim, server.read_exact(&mut received)).expect("the bytes on the wire land");
+    assert_eq!(received, LAST);
+    assert!(time_of_reset(&mut sim, &mut server) > aborted_at);
+}

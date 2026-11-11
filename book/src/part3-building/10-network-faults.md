@@ -108,7 +108,7 @@ Moonpool models three ways a connection ends, and your protocol must survive all
 
 - **Graceful close**: the closer's FIN goes behind every queued byte. The peer reads everything, then EOF. Dropping a drained stream does this.
 - **Write shutdown**: `AsyncWrite::close` sends the FIN, further writes fail with `BrokenPipe`, and the read half stays open. The reply to an EOF-delimited request still arrives.
-- **Abort**: no FIN, no drain. The peer gets a reset on its next read or write. Dropping a stream with unread bytes does this.
+- **Abort**: no FIN, no drain. The aborting side is reset at once, and an RST goes on the wire behind the bytes it already sent. The RST takes the link latency and a partition holds it, so the peer gets the reset on its next read or write after the RST lands, never at the same instant. Dropping a stream with unread bytes does this, and so does `SimWorld::close_connection_abort`.
 
 A process death is not an instant reset of both ends. The dead side's bytes already on the wire still land, so the last reply that a process wrote before it died can still arrive. What it queued but did not send, and what it received but did not read, is gone. Then the peer learns of the death through the network:
 

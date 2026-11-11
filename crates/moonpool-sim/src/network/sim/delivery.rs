@@ -98,8 +98,9 @@ impl NetworkSimulation {
         // side's window and is gone. No bytes, no EOF, no wake, and the
         // window credit it took is never returned — the reader keeps waiting
         // for data that will never come, and once the window is full the
-        // writer waits with it.
-        if black_holed {
+        // writer waits with it. An RST still crosses: a black hole swallows
+        // the stream, never the reset of an endpoint that is gone.
+        if black_holed && !matches!(payload, InFlightPayload::Rst) {
             return;
         }
         let receiver_open = receiver
@@ -151,7 +152,7 @@ impl NetworkSimulation {
             }
             InFlightPayload::Rst => {
                 if let Some(receiver) = receiver.filter(|_| receiver_open) {
-                    crate::assert_reachable!("network: an RST from a dead process lands");
+                    crate::assert_reachable!("network: an RST lands on its peer");
                     wakes.append(self.reset_endpoint(receiver));
                 }
             }
