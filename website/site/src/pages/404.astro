@@ -1,0 +1,8 @@
+---
+import Doc from "../layouts/Doc.astro";
+import { url } from "../nav";
+---
+<Doc title="No page at this address" kicker="404">
+  <p>The page moved or never was. The <a href={url()}>home page</a> and <a href={url("guide/")}>the Guide</a>
+    link to each page of the site.</p>
+</Doc>

@@ -1,0 +1,56 @@
+---
+// The crates page (#415 (new site with the book)): one entry per crate of the
+// table of the root README.md, with when to depend on it (src/lib/crates.mjs),
+// docs.rs for a published crate, and its Guide chapter.
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+import { crateEntries } from "../../lib/crates.mjs";
+import { moonpoolReadmeCrates, workspaceVersion } from "../../lib/source.mjs";
+import { pathOf } from "../../lib/book.mjs";
+
+const v = workspaceVersion();
+const crates = crateEntries(moonpoolReadmeCrates());
+const published = crates.filter((c) => c.published);
+const internal = crates.filter((c) => !c.published);
+// `code` spans of the README table become <code>.
+const md = (s: string) =>
+  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/`([^`]+)`/g, "<code>$1</code>");
+---
+<Doc
+  title="Crates"
+  kicker="cargo add moonpool"
+  section="crates/"
+  description="Most code depends only on moonpool, the facade. Each other crate is for one need."
+>
+  <p>A production build keeps the simulator out of its dependency tree:</p>
+  <pre><code>{`[dependencies]
+moonpool = { version = "${v}", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+moonpool = "${v}"`}</code></pre>
+  {[["Published", published], ["In the repository only", internal]].map(([name, list]) => (
+    <>
+      <h2>{name as string}</h2>
+      <ul class="crate-list">
+        {(list as typeof crates).map((c) => (
+          <li id={c.name}>
+            <div class="crate-head">
+              <span class="crate-name">{c.name}</span>
+              <span class={`chip-status ${c.published ? "done" : ""}`}>{c.published ? "crates.io" : "not published"}</span>
+            </div>
+            <p set:html={md(c.purpose)} />
+            <p class="when" set:html={md(c.when)} />
+            <div class="crate-links label">
+              {c.published && <a href={`https://docs.rs/${c.name}`}>docs.rs</a>}
+              {c.published && <a href={`https://crates.io/crates/${c.name}`}>crates.io</a>}
+              <a href={url(pathOf(c.chapter))}>Guide chapter</a>
+              <a href={`https://github.com/PierreZ/moonpool/tree/main/crates/${c.name}`}>Source</a>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
+  ))}
+  <p>The <a href={url("appendix/02-crate-map.html")}>Crate Map</a> of the Guide shows the dependency graph and
+    the public items of each crate.</p>
+</Doc>

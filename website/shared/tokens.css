@@ -1,0 +1,168 @@
+/* moonpool design tokens (#414 (website makeover)).
+ *
+ * This is the only file of the website with a colour. base.css, theme.js and
+ * the fonts are a copy of the paros files (PierreZ/paros, website/shared/);
+ * base.css reads only these tokens.
+ *
+ * One colour has one meaning: green is the accent and "passed", amber is a
+ * fault that the simulator injected, red is a failed assertion or a dead
+ * process, cyan is simulated time. Each text colour has a contrast of 4.5 to 1
+ * or more on --bg and on --panel; keep it so when a token changes.
+ *
+ * Theme: <html data-theme> is "goyo-light"/"light" or "goyo-dark"/"dark"
+ * (theme.js writes it). The dark values are written twice (the media query
+ * and the explicit choice) because CSS cannot share one block for both.
+ */
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-400-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-400-italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-600-normal.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-latin-700-normal.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("fonts/ibm-plex-sans-latin-400-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  color-scheme: light;
+
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --text: 15px;
+  --label: 12px;
+  --tracking: 0.06em;
+  --measure: 72ch;
+  --bar: 52px;
+
+  --bg: #f3f6f1;
+  --panel: #e8ede6;
+  --fg: #16201a;
+  --muted: #56635a;
+  --rule: #cdd5cb;
+  --rule-strong: #7a877c;
+  --accent: #14692f;
+  --accent-fg: #ffffff;
+  --accent-tint: rgba(20, 105, 47, 0.1);
+  --button: #dde4da;
+  --shadow: #16201a;
+  --fault: #8a5606;
+  --fault-tint: rgba(138, 86, 6, 0.12);
+  --fail: #a33a36;
+  --fail-tint: rgba(163, 58, 54, 0.1);
+  --info: #1b6678;
+  --info-tint: rgba(27, 102, 120, 0.1);
+  --syn-keyword: #14692f;
+  --syn-string: #3d5e44;
+  --syn-comment: #56635a;
+  --syn-constant: #1b6678;
+  --syn-name: #16201a;
+
+  /* The status names of the shared components (base.css): "done" is
+     passed, "gap" is failed, "shared" is an injected fault, "open" is idle. */
+  --done: var(--accent);
+  --done-tint: var(--accent-tint);
+  --gap: var(--fail);
+  --gap-tint: var(--fail-tint);
+  --shared: var(--fault);
+  --shared-tint: var(--fault-tint);
+  --open: var(--muted);
+  --open-tint: transparent;
+  /* The operator blocks of base.css (unused by moonpool, kept so base.css
+     stays a plain copy of the paros file). */
+  --block-fg: var(--accent-fg);
+  --block-bootstrap: var(--info);
+  --block-resources: var(--accent);
+  --block-workloads: var(--info);
+  --block-machines: var(--muted);
+  --block-faults: var(--fault);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="goyo-light"]):not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0a0f0b;
+    --panel: #111812;
+    --fg: #d3dcd2;
+    --muted: #8a9689;
+    --rule: #1f2a21;
+    --rule-strong: #5b6b5e;
+    --accent: #3fd97f;
+    --accent-fg: #06130a;
+    --accent-tint: rgba(63, 217, 127, 0.12);
+    --button: #1a231c;
+    --shadow: #3b4a3e;
+    --fault: #e0a94a;
+    --fault-tint: rgba(224, 169, 74, 0.13);
+    --fail: #e8736f;
+    --fail-tint: rgba(232, 115, 111, 0.13);
+    --info: #6cb8c9;
+    --info-tint: rgba(108, 184, 201, 0.12);
+    --syn-keyword: #3fd97f;
+    --syn-string: #a9c7a4;
+    --syn-comment: #8a9689;
+    --syn-constant: #6cb8c9;
+    --syn-name: #d3dcd2;
+  }
+}
+
+:root[data-theme="goyo-dark"],
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0a0f0b;
+  --panel: #111812;
+  --fg: #d3dcd2;
+  --muted: #8a9689;
+  --rule: #1f2a21;
+  --rule-strong: #5b6b5e;
+  --accent: #3fd97f;
+  --accent-fg: #06130a;
+  --accent-tint: rgba(63, 217, 127, 0.12);
+  --button: #1a231c;
+  --shadow: #3b4a3e;
+  --fault: #e0a94a;
+  --fault-tint: rgba(224, 169, 74, 0.13);
+  --fail: #e8736f;
+  --fail-tint: rgba(232, 115, 111, 0.13);
+  --info: #6cb8c9;
+  --info-tint: rgba(108, 184, 201, 0.12);
+  --syn-keyword: #3fd97f;
+  --syn-string: #a9c7a4;
+  --syn-comment: #8a9689;
+  --syn-constant: #6cb8c9;
+  --syn-name: #d3dcd2;
+}

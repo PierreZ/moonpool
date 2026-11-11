@@ -1,0 +1,15 @@
+---
+// The index of the Guide: the welcome text of the book, then its map
+// (book/src/welcome.md and book/src/index.md, unchanged but the logo block).
+import Guide from "../../layouts/Guide.astro";
+import { renderChapter } from "../../lib/book.mjs";
+
+const base = import.meta.env.BASE_URL.replace(/\/?$/, "/");
+const welcome = await renderChapter("welcome.md", base);
+const map = await renderChapter("index.md", base);
+---
+<Guide title={welcome.title ?? "The Sim Book"} here="guide/" next={{ title: "Quick start", path: "guide/quick-start/" }}>
+  <Fragment set:html={welcome.html} />
+  <h2 id="the-map-of-the-book">{map.title ?? "Index"}</h2>
+  <Fragment set:html={map.html} />
+</Guide>

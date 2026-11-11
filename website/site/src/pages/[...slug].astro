@@ -1,0 +1,22 @@
+---
+// One page per chapter of The Sim Book, at its mdbook address
+// (`part3-building/08-buggify.html`, `llms.html`). The text comes from
+// book/src/ unchanged; src/lib/book.mjs makes the links absolute and puts the
+// table of contents in place of the `<!-- toc -->` marker.
+import Guide from "../layouts/Guide.astro";
+import { chapters, GUIDE_INDEX, neighbours, pathOf, renderChapter, slugOf } from "../lib/book.mjs";
+
+export function getStaticPaths() {
+  return chapters()
+    .filter((c) => !GUIDE_INDEX.includes(c.file))
+    .map((c) => ({ params: { slug: slugOf(c.file) }, props: { file: c.file, title: c.title } }));
+}
+
+const { file, title } = Astro.props;
+const { title: h1, html } = await renderChapter(file, import.meta.env.BASE_URL.replace(/\/?$/, "/"));
+const { prev, next } = neighbours(chapters(), file);
+const link = (c?: { title: string; file: string }) => (c ? { title: c.title, path: pathOf(c.file) } : undefined);
+---
+<Guide title={h1 ?? title} here={pathOf(file)} prev={link(prev) ?? { title: "Quick start", path: "guide/quick-start/" }} next={link(next)}>
+  <Fragment set:html={html} />
+</Guide>

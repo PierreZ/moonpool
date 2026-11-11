@@ -82,4 +82,4 @@ The `moonpool` facade also carries examples: `retrying_worker` and `metastable_g
 | `nix develop --command cargo clippy -p moonpool-sim --no-default-features --all-targets -- -D warnings` | the feature-less sim |
 | `nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features` | the wasm build |
 | `nix develop --command cargo xtask sim run-all` | every simulation binary with sancov |
-| `nix develop --command mdbook build book/` | this book |
+| `nix develop --command bash -c 'cd website/site && npm ci && npm run build'` | the site, with this book in it |

@@ -116,10 +116,10 @@ It is running right here, compiled to wasm and served as a page asset. Press
 history.
 
 <iframe
+  class="demo-frame"
   src="../wasm-demo/index.html?embed=1&amp;seed=256"
   title="moonpool ping-pong wasm demo"
-  loading="lazy"
-  style="width:100%;height:640px;border:1px solid #30363d;border-radius:12px;background:#0d1117;color-scheme:dark">
+  loading="lazy">
 </iframe>
 
 To run it outside the book:
@@ -131,9 +131,9 @@ To run it outside the book:
 3. Serve `crates/moonpool-wasm-demo/web/` with any static file server and
    press **Run**.
 
-`book/build-wasm-demo.sh` runs those steps and stages the result in
-`book/src/wasm-demo/`, which is where the iframe above loads from. Run it
-before `mdbook build`. The `wasm-bindgen` crate version must match the CLI
+`website/site/scripts/build-wasm-demo.sh` runs those steps and stages the
+result in `website/site/public/wasm-demo/`, which is where the iframe above
+loads from. Run it before `npm run build` in `website/site/`. The `wasm-bindgen` crate version must match the CLI
 exactly (`0.2.129` in the Nix flake), or bindgen fails with an opaque schema
 error.
 

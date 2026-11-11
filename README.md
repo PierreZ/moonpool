@@ -335,7 +335,9 @@ nix develop --command cargo xtask sim run-all
 
 ## Documentation
 
-- [**The Sim Book**](https://pierrez.github.io/moonpool/): the user guide,
+- [**The site**](https://pierrez.github.io/moonpool/): a live run of a seed,
+  the [quick start](https://pierrez.github.io/moonpool/guide/quick-start/) and
+  [The Sim Book](https://pierrez.github.io/moonpool/guide/), the user guide
   from philosophy to fault reference.
 - API documentation on docs.rs: [`moonpool`](https://docs.rs/moonpool),
   [`moonpool-core`](https://docs.rs/moonpool-core),

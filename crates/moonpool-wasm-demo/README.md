@@ -68,8 +68,8 @@ receives. Seed `42` is calm; try `7`, `256` or `1000` for heavy chaos.
 4. Open <http://localhost:8917/>.
 
 Run the commands from the repository root. `web/pkg/` is a build artifact and
-is gitignored. `book/build-wasm-demo.sh` runs steps 1 and 2 and stages the
-page for the book.
+is gitignored. `website/site/scripts/build-wasm-demo.sh` runs steps 1 and 2
+and stages the page in the site.
 
 ### URL parameters
 

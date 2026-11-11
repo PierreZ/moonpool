@@ -1,9 +1,5 @@
 # The Sim Book
 
-<div style="text-align: center; margin: 2em 0;">
-  <img src="images/logo.png" alt="Moonpool logo" style="max-width: 300px;" />
-</div>
-
 A guide to building and testing distributed systems with **moonpool**, a deterministic simulation framework for Rust.
 
 Moonpool takes ideas from FoundationDB, TigerBeetle and Antithesis and puts them in one set of Rust crates. You write your system once against provider traits. In production the traits are backed by `TokioProviders`: real TCP, a real disk, a real clock. In tests the same code runs inside a simulator that is deliberately worse than production: partitions, torn writes, slow machines, reboots, all driven by one seed. No `#[cfg(test)]`. No mocks. No `Sim*` copies of your types.

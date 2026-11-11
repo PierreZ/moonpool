@@ -1,0 +1,9 @@
+---
+// A numbered panel (#810 in paros, #415 here): `01 TITLE ........ meta`, a rule, then the body.
+interface Props { num?: string; title: string; meta?: string; flush?: boolean }
+const { num, title, meta, flush = false } = Astro.props;
+---
+<section class="panel">
+  <div class="panel-head label">{num && <span class="num">{num}</span>}<span class="title">{title}</span>{meta && <span class="meta">{meta}</span>}</div>
+  <div class={flush ? undefined : "panel-body"}><slot /></div>
+</section>

@@ -1,0 +1,40 @@
+---
+// A reading page: the title block, the text, and the pages of its section.
+import Base from "./Base.astro";
+import { url } from "../nav";
+
+interface Sibling { title: string; path: string }
+interface Props {
+  frontmatter?: { title: string; description?: string; kicker?: string; section?: string };
+  title?: string;
+  description?: string;
+  kicker?: string;
+  section?: string;
+  prev?: Sibling;
+  next?: Sibling;
+}
+const fm = Astro.props.frontmatter ?? ({} as NonNullable<Props["frontmatter"]>);
+const title = Astro.props.title ?? fm.title;
+const description = Astro.props.description ?? fm.description;
+const kicker = Astro.props.kicker ?? fm.kicker ?? "";
+const section = Astro.props.section ?? fm.section ?? "";
+const { prev, next } = Astro.props;
+---
+<Base title={title} description={description} section={section}>
+  <div class="page">
+    <div class="titleblock">
+      {kicker && <div class="kicker label"><span class="prompt">$</span> {kicker}</div>}
+      <h1>{title}</h1>
+      {description && <p class="lede">{description}</p>}
+    </div>
+    <article class="prose">
+      <slot />
+    </article>
+    {(prev || next) && (
+      <nav class="pager label" aria-label="Next and previous pages">
+        {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}
+        {next ? <a href={url(next.path)}>{next.title} →</a> : <span />}
+      </nav>
+    )}
+  </div>
+</Base>

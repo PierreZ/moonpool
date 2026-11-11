@@ -13,7 +13,7 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 5. Every random decision is a counted draw on one seeded stream. `BTreeMap`, not `HashMap`. Futures are `Send + 'static`. No `unwrap()`.
 6. Replay before diagnosis: `set_debug_seeds(vec![seed]).set_iterations(1)` or `replay_timeline(seed, recipe)`.
 7. Never delete an assertion that catches a bug. Fix the bug.
-8. Validate with `nix develop --command cargo fmt`, `cargo clippy`, `cargo nextest run`, and `mdbook build book/` when a public API changes.
+8. Validate with `nix develop --command cargo fmt`, `cargo clippy`, `cargo nextest run`, and the site build (`npm run build` in `website/site/`) when a public API changes.
 
 ## Crates and Features
 

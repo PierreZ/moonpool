@@ -1,8 +1,14 @@
 # moonpool-wasm-demo
 
-Browser/wasm demo embedded in the book (`book/src/wasm-demo/`). Built by
-`book/build-wasm-demo.sh`: `cargo build --target wasm32-unknown-unknown` then
-`wasm-bindgen` to generate the JS glue.
+Browser/wasm demo: the live run of the site's home page and the demo page
+embedded in the chapter "Simulation in the Browser". Built and staged in
+`website/site/public/wasm-demo/` by `website/site/scripts/build-wasm-demo.sh`:
+`cargo build --target wasm32-unknown-unknown` then `wasm-bindgen` to generate
+the JS glue.
+
+`tests/site_runs.rs` records the home page runs (five seeds) in
+`website/site/src/runs/home.json`. A change to what a run does makes that test
+fail once and write the file again: commit the new file.
 
 ## The wasm-bindgen version coupling
 
@@ -42,7 +48,7 @@ nix develop --command wasm-bindgen --version    # e.g. "wasm-bindgen 0.2.129"
 #    wasm-bindgen = "=<that version>"
 
 # 4. Verify the demo builds end to end
-nix develop --command book/build-wasm-demo.sh
+nix develop --command website/site/scripts/build-wasm-demo.sh
 ```
 
 Commit `flake.lock` + `Cargo.toml` together. Update the version mentioned in the
