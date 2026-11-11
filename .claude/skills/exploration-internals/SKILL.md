@@ -5,6 +5,10 @@ description: Work on moonpool-explorer, the fork-based frontier exploration - co
 
 # Exploration internals
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What moonpool is for stays Pierre's call (root `AGENTS.md`). Merge
+repeated code and fix what you find next to your change, in the same PR.
+
 `crates/moonpool-explorer` turns runs into accumulated knowledge: a timeline
 that reaches a globally new interesting state is remembered as a **recipe**,
 a controller schedules bounded continuations from it, and timelines that find
@@ -40,8 +44,9 @@ assertion accounting must keep working without it (the heap table).
 | `simulations.rs`, `src/bin/sim/frontier_explore.rs` | the explorer's own scenarios (`sim-frontier-explore`) |
 | `crates/moonpool-sim/src/chaos/exploration_glue.rs` | the sim side: installs the discovery hook, forks at discovery |
 
-`workers: 0` explores in-process (one timeline at a time, no fork); paros runs
-that way. Forked workers need every workload and process to be
+`workers: 0` explores in-process (one timeline at a time, no fork); paros's
+replays and focused explorations run that way, while its sweep forks one worker
+per core. Forked workers need every workload and process to be
 factory-created, because a worker rebuilds the world from a fresh builder.
 
 ## Coverage

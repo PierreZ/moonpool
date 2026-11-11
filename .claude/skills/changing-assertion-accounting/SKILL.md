@@ -5,6 +5,10 @@ description: Change how moonpool counts assertions and fault injection - the fif
 
 # Changing assertion accounting
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What moonpool is for stays Pierre's call (root `AGENTS.md`). Merge
+repeated code and fix what you find next to your change, in the same PR.
+
 The assertion tables are a **wire format**. A slot's identity is the hash of
 its message truncated to 64 bytes, saturation history downstream (paros's
 sweep, anyone's `until_coverage_stable`) is keyed on it, and the explorer

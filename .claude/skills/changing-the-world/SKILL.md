@@ -5,6 +5,10 @@ description: Change moonpool's simulated world safely - SimWorld and the single 
 
 # Changing the world
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What moonpool is for stays Pierre's call (root `AGENTS.md`). Merge
+repeated code and fix what you find next to your change, in the same PR.
+
 The simulated world is split by **ownership**, and every determinism bug in
 this repository's history came from blurring one of the lines below or from a
 draw taken outside the one stream. Read the FoundationDB material first:

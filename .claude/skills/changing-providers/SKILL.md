@@ -5,6 +5,10 @@ description: Add or change a moonpool provider trait method or a whole provider 
 
 # Changing providers
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What moonpool is for stays Pierre's call (root `AGENTS.md`). Merge
+repeated code and fix what you find next to your change, in the same PR.
+
 A provider method exists three times: the trait, the tokio implementation
 and the sim implementation. The trait is the contract consumers write
 production code against, so a change here is an API change with a book

@@ -1,6 +1,6 @@
 ---
 name: sim-conformance-reviewer
-description: Reviews a diff or a set of files for violations of moonpool's core constraints - direct tokio calls or tokio::select! in simulated code, unwrap(), LocalSet/spawn_local, HashMap iteration leaking into decisions, wall-clock reads, non-Send futures, #[allow(clippy::...)], missing docs on public items, assertions that were deleted or reworded, book chapters left stale by a public API change. Use before committing any change to a moonpool crate, when reviewing a PR, or when asked whether code is "sim-safe".
+description: Reviews a diff or a set of files for violations of moonpool's core constraints - direct tokio calls or tokio::select! in simulated code, unwrap(), LocalSet/spawn_local, HashMap iteration leaking into decisions, wall-clock reads, non-Send futures, #[allow(clippy::...)], missing docs on public items, assertions that were deleted or reworded, book chapters left stale by a public API change. Use for a large or risky diff to a moonpool crate, when reviewing a PR, or when asked whether code is "sim-safe"; a small change is cheaper to check against the root AGENTS.md yourself.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:

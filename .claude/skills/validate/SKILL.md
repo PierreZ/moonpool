@@ -70,6 +70,7 @@ nix develop --command mdbook build book/
 ## Remote sessions
 
 If `CLAUDE_CODE_REMOTE=true`, Nix is not preinstalled. Install it first
-(`sudo apt-get install -y nix-bin`, then write
-`experimental-features = nix-command flakes` to `~/.config/nix/nix.conf`) as
-the root `AGENTS.md` describes. Do not fall back to the sandbox toolchain.
+(`sudo apt-get install -y nix-bin`, write `experimental-features = nix-command
+flakes` to `~/.config/nix/nix.conf`, and export
+`NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt`) as the root `AGENTS.md`
+describes. Do not fall back to the sandbox toolchain.

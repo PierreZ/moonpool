@@ -5,6 +5,10 @@ description: Change moonpool's runner layer - SimulationBuilder methods and defa
 
 # Changing the runner
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What moonpool is for stays Pierre's call (root `AGENTS.md`). Merge
+repeated code and fix what you find next to your change, in the same PR.
+
 `crates/moonpool-sim/src/runner/` is where a seed becomes a run: the builder
 collects configuration, `orchestrator.rs` / `iteration.rs` drive one
 iteration per seed, `process_manager.rs` boots and reboots processes,
