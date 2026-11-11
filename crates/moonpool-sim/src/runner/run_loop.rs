@@ -1668,7 +1668,7 @@ impl SimulationBuilder {
         }
         match std::fs::write(path, render_corpus(seeds)) {
             Ok(()) => {
-                tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: written")
+                tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: written");
             }
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "corpus: cannot write the file");
