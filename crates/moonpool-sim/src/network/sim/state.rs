@@ -21,7 +21,7 @@
 //! stalls the send queue *and* freezes what is already in flight
 //! ([`ConnectionState::in_flight_held_since`]); a black hole makes in-flight
 //! bytes vanish at the instant they would land; an abort discards the send
-//! queue and the flight and resets the peer. Bytes that reached the receive
+//! queue and puts an RST in flight behind what is already on the wire. Bytes that reached the receive
 //! buffer are the peer's: nothing on the wire can take them back.
 
 use std::{
@@ -88,8 +88,8 @@ pub(crate) enum InFlightPayload {
     Data(Vec<u8>),
     /// A graceful close; always the last item of a stream.
     Fin,
-    /// A reset from an endpoint whose process died; always the last item of
-    /// a stream. It lands like data: behind the bytes already on the wire,
+    /// A reset from an endpoint whose process died or whose application
+    /// aborted it; always the last item of a stream. It lands like data: behind the bytes already on the wire,
     /// after the link latency, and never across a partition.
     Rst,
 }

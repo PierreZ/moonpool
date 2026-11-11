@@ -1268,7 +1268,8 @@ mod tests {
             Duration::ZERO,
         );
 
-        assert!(!sim.step());
+        // The maintenance event, then the RST landing on the peer.
+        sim.run_until_empty();
 
         assert!(!sim.is_partitioned(first, second));
         assert!(!sim.is_partitioned(second, first));

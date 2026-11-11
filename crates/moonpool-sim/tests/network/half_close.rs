@@ -122,6 +122,8 @@ fn dropping_with_unread_received_bytes_resets_the_peer() {
     sim.run_until_empty();
 
     drop(client);
+    // The RST crosses the link like data.
+    sim.run_until_empty();
     let mut byte = [0_u8; 1];
     let error = match poll_read_once(&mut server, &mut byte) {
         Poll::Ready(Err(error)) => error,
