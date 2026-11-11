@@ -36,7 +36,7 @@ Every value on this page is read from the current source. The code wins when the
 | `set_debug_seeds(Vec<u64>)` | | Pin seeds. They run first. |
 | `run_time_budget(Duration)` | 1 simulated hour | A run past this budget is a stall. The runner shuts the seed down, and the seed fails and is listed in `report.seeds_stalled`. |
 | `wall_clock_budget(Duration)` | none | Stop the campaign between seeds once it has run this long in wall-clock time. Sets `report.wall_clock_budget_spent`, which is not a `convergence_timeout`. |
-| `corpus_file(path)` | none | Run the seeds listed in the file first; after the run, write the seeds that grew coverage (`report.corpus_seeds`) back to it. |
+| `corpus_file(path)` | none | Run the seeds listed in the file first; after the run, write the seeds that grew coverage (`report.corpus_seeds`) back to it, and keep the corpus seeds the run did not reach. |
 | `base_seed(u64)` | wall clock | The base seed that each drawn seed derives from. The report prints it, so a whole run can be replayed. |
 | `replay_timeline(seed, recipe)` | | One seed, one iteration, the recipe installed as RNG breakpoints. |
 | `enable_exploration(ExplorationConfig)` | off | Multiverse exploration. Needs factory workloads. Panics on a zero bound. |

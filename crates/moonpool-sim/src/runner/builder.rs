@@ -1180,8 +1180,13 @@ impl SimulationBuilder {
     ///
     /// A CI job that restores the corpus of `main` first replays the seeds
     /// that reached the most coverage, then draws new ones. A corpus seed
-    /// that adds nothing any more drops out of the next file. A read or a
-    /// write error is logged and does not fail the run. Ignored by
+    /// that this run replayed and that added nothing drops out of the next
+    /// file; a corpus seed that the run did not reach (a short
+    /// [`set_iterations`](Self::set_iterations), a spent budget, a
+    /// deadlock, convergence) stays in it. The file is replaced through a
+    /// temporary file and a rename, so an interrupted run never leaves a
+    /// partial file. A read or a write error is logged and does not fail
+    /// the run. Ignored by
     /// [`replay_timeline`](Self::replay_timeline).
     #[must_use]
     pub fn corpus_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
