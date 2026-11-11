@@ -216,3 +216,29 @@ pub mod prelude {
     #[cfg(feature = "tokio-providers")]
     pub use crate::TokioProviders;
 }
+
+/// Common imports for writing code against the local (non-`Send`) provider
+/// traits, for thread-per-core runtimes.
+///
+/// The local traits have the same method names as the `Send` traits of
+/// [`prelude`], so a module imports one of the two preludes, never both.
+/// [`RandomProvider`] and [`SystemProvider`] are in both: [`LocalProviders`]
+/// uses them as they are.
+///
+/// ```
+/// use moonpool_core::local_prelude::*;
+///
+/// async fn pause<P: LocalProviders>(providers: &P) -> Result<(), moonpool_core::TimeError> {
+///     providers.time().sleep(std::time::Duration::from_millis(1)).await
+/// }
+/// ```
+pub mod local_prelude {
+    pub use crate::{
+        Detach, LocalNetworkProvider, LocalProviders, LocalStorageFile, LocalStorageProvider,
+        LocalTaskProvider, LocalTcpListener, LocalTimeProvider, RandomProvider, SystemProvider,
+        ThreadProviders,
+    };
+
+    #[cfg(feature = "compio-providers")]
+    pub use crate::CompioProviders;
+}

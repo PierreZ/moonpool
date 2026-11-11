@@ -47,13 +47,22 @@ pub struct SystemSample {
     /// Monotonic instant of the reading. Only differences have a meaning.
     pub at: Duration,
     /// CPU time of this process, user plus system.
+    ///
+    /// Off Unix the OS backend cannot read it and reports zero: read zero as
+    /// "unknown", not as "idle".
     pub process_cpu: Duration,
     /// Logical cores this process may use (cgroup quota and affinity).
     pub cores: u32,
     /// Busy CPU time of the whole machine, summed over its cores
     /// (`/proc/stat`: total minus idle minus iowait).
+    ///
+    /// Off Linux there is no `/proc/stat`: the OS backend reports zero here
+    /// and the wall time in [`machine_total`](Self::machine_total), so the
+    /// ratio reads as 0%. Read a zero `machine_busy` as "unknown" there.
     pub machine_busy: Duration,
-    /// Total CPU time of the whole machine, summed over its cores.
+    /// Total CPU time of the whole machine, summed over its cores. Off Linux,
+    /// the wall time since the provider started (see
+    /// [`machine_busy`](Self::machine_busy)).
     pub machine_total: Duration,
     /// Busy time of the run loop: the busiest worker thread under Tokio, the
     /// sampling thread's CPU time under compio, the process's CPU under

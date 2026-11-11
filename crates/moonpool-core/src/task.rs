@@ -124,9 +124,10 @@ pub trait LocalTaskProvider: Clone + 'static {
 
 /// Tokio-based task provider.
 ///
-/// This provider creates tasks via `tokio::spawn`. The task name is emitted
-/// in `tracing::trace!` spans around the future rather than attached to the
-/// tokio task itself.
+/// This provider creates tasks via `tokio::spawn`. The task runs inside a
+/// `tracing` span at trace level named `task`, with the task name in its
+/// `name` field, so every event from inside the task carries the name. The
+/// name is not attached to the tokio task itself.
 #[cfg(feature = "tokio-task")]
 #[derive(Clone, Debug)]
 pub struct TokioTaskProvider;
@@ -174,12 +175,15 @@ impl TaskProvider for TokioTaskProvider {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let task_name = name.to_string();
+        use tracing::Instrument as _;
+
+        let span = tracing::trace_span!("task", name = %name);
         let fut = async move {
-            tracing::trace!("Task {} starting", task_name);
+            tracing::trace!("task starting");
             future.await;
-            tracing::trace!("Task {} completed", task_name);
-        };
+            tracing::trace!("task completed");
+        }
+        .instrument(span);
         TokioJoinHandle(tokio::spawn(fut))
     }
 
@@ -305,5 +309,63 @@ impl Future for YieldOnce {
         self.0 = true;
         cx.waker().wake_by_ref();
         std::task::Poll::Pending
+    }
+}
+
+#[cfg(all(test, feature = "tokio-task"))]
+mod tests {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use super::{TaskProvider, TokioTaskProvider};
+
+    /// Collects what the fmt subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("Mutex poisoned: prior test panicked")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn events_inside_a_task_carry_the_task_name() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        TokioTaskProvider
+            .spawn_task("probe-task", async {
+                tracing::info!("inside the task");
+            })
+            .await
+            .expect("task completed");
+
+        let text = String::from_utf8(
+            captured
+                .0
+                .lock()
+                .expect("Mutex poisoned: prior test panicked")
+                .clone(),
+        )
+        .expect("fmt output is UTF-8");
+        let line = text
+            .lines()
+            .find(|line| line.contains("inside the task"))
+            .expect("the event was written");
+        assert!(line.contains("probe-task"), "no task name in {line:?}");
     }
 }

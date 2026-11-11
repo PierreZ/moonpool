@@ -147,7 +147,9 @@ impl IoConstraints {
                 self.length
             )));
         }
-        if !(buf.as_ptr() as usize).is_multiple_of(self.memory) {
+        // An empty buffer transfers nothing, so its address does not matter
+        // (an empty `Vec` has a dangling one), as in `AlignedBuf::is_aligned_to`.
+        if !buf.is_empty() && !(buf.as_ptr() as usize).is_multiple_of(self.memory) {
             return Err(invalid_input(format!(
                 "buffer address is not aligned to the required memory alignment {}",
                 self.memory
@@ -353,6 +355,19 @@ mod tests {
         let constraints = IoConstraints::NONE;
         assert!(constraints.is_unconstrained());
         assert!(constraints.check(7, &[0u8; 13]).is_ok());
+    }
+
+    #[test]
+    fn an_empty_buffer_passes_at_an_aligned_offset() {
+        let constraints = IoConstraints::uniform(4096);
+        let empty = AlignedBuf::default();
+        assert!(empty.is_aligned_to(4096));
+        assert!(constraints.check(0, empty.as_slice()).is_ok());
+        assert!(constraints.check(0, &Vec::<u8>::new()).is_ok());
+        assert!(
+            constraints.check(1, empty.as_slice()).is_err(),
+            "the offset rule still holds"
+        );
     }
 
     #[test]
