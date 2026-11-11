@@ -49,6 +49,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+#[cfg(unix)]
+use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
 use crate::journal::{self, DiscoveryEvent};
@@ -235,7 +237,13 @@ impl Drop for Explorer {
     /// A controller that unwinds (a panic in the policy code, an early return
     /// by the embedding harness) must not orphan workers that keep running
     /// full simulations while holding the shared assertion and sancov regions.
+    ///
+    /// A forked worker has a copy of the controller, with the pids of its
+    /// siblings. It did not fork them, so it must not kill or reap them.
     fn drop(&mut self) {
+        if worker::explorer_is_child() {
+            return;
+        }
         #[cfg(unix)]
         for (pid, _) in std::mem::take(&mut self.active) {
             let _ = worker::kill_worker(pid);
@@ -452,14 +460,24 @@ impl Explorer {
                 worker::enter_worker();
                 begin_run();
                 crate::sancov::redirect_transfer_to_pool_slot(slot);
-                let failed = run_one(&job);
+                // A panic must not unwind out of the child: it would run the
+                // caller's code (the rest of `explore`, a test harness) in a
+                // process that must only run this one timeline. The panic is
+                // reported as a crash, and the controller records the recipe
+                // of the job.
+                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| run_one(&job)));
                 let events = journal::take();
                 let slots = self.slots.as_ref().expect("worker mode has slots");
                 slots.write_slot(slot, &events, journal::rng_count());
                 crate::sancov::copy_counters_to_shared();
+                let code = match outcome {
+                    Ok(false) => worker::EXIT_OK,
+                    Ok(true) => worker::EXIT_FAILED,
+                    Err(_) => worker::EXIT_PANICKED,
+                };
                 // Safety: _exit is always safe; skips atexit/stdio flushing,
                 // which is what a forked worker wants.
-                unsafe { libc::_exit(if failed { 42 } else { 0 }) }
+                unsafe { libc::_exit(code) }
             }
             child_pid => {
                 self.active.insert(child_pid, (slot, job, Instant::now()));
