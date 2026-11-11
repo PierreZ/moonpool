@@ -109,7 +109,7 @@ the injected faults under `SIM_FAULT_EVENT_NAME`, and returns the run as JSON.
 A `#[wasm_bindgen]` wrapper exports `run_json` to JavaScript as `run(config)`,
 and that is the whole browser surface. The config holds the seed, the chaos
 surfaces and a planted bug: the client reads from one server in place of a
-quorum, and about one seed in seven breaks the invariant.
+quorum, and about one seed in ten breaks the invariant.
 
 It is running right here, compiled to wasm in a Web Worker. Press **Play**,
 step with the arrow keys, or type a seed. The same seed always replays the

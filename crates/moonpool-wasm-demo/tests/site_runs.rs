@@ -26,9 +26,9 @@ fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
         ("determinism", vec![seed(256), seed(257)]),
         // Same code: a seed where a reboot strikes at the hint before the
         // sync, and buggify drops replies.
-        ("same-code", vec![seed(9)]),
-        // Network faults: a partition, clogs and a black hole.
-        ("network", vec![seed(18)]),
+        ("same-code", vec![seed(56)]),
+        // Network faults: two partitions, clogs and a black hole.
+        ("network", vec![seed(584)]),
         // Storage faults: crash damage only, so each crash decides the fate
         // of the unsynced sectors; this seed loses one.
         (
@@ -40,15 +40,15 @@ fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
                     reboots: true,
                 },
                 storage_faults: Some(vec!["crash_damage".into()]),
-                ..seed(84)
+                ..seed(27)
             }],
         ),
-        // Reboots: crashes, a restart, and one wipe.
+        // Reboots: a wipe at a hint, then a crash of another server.
         (
             "reboots",
             vec![RunConfig {
                 wipes: true,
-                ..seed(56)
+                ..seed(6)
             }],
         ),
     ]
