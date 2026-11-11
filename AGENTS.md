@@ -1,5 +1,38 @@
 # Moonpool: Deterministic Simulation Framework
 
+## Who owns the code
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. When you work in a file, leave it better: merge repeated code, fix the
+problems you find next to your change, and delete what your change makes
+obsolete, in the same PR. Name every change in the PR description, the small
+ones too, because the reviewer reads the diff against it.
+
+What moonpool is for is Pierre's call: a deterministic simulation framework in
+the FoundationDB tradition, with the book (`book/src/`) as its documentation of
+record and paros as its main consumer. A change to that scope, or a new public
+direction, is a proposal: write it in the PR or in an issue.
+
+## Finishing work
+Do not stop while you still owe work that was asked for. Carry on with work
+that does not depend on an open question. When you meet an ordinary obstacle
+(an error, a timeout, a failing tool, an empty result), diagnose it, then work
+through it: wait and retry, fix the request, or use another tool. Stop only
+when the task needs Pierre's input, or when the blocker is deliberate (access
+that was withheld, a rule in this file), and say plainly what you found.
+
+These steps need no approval: retry a command or a network call that is safe
+to repeat; open, update and rebase your own PR; merge your own PR once every CI
+job is green. These steps need Pierre's go-ahead: merging a release PR, a merge
+on red CI, and a force-push or a delete on a branch you did not create.
+
+## Writing for the reader
+A PR description, an issue, a commit body and a final report are read by
+someone who has not seen your tool calls or the files you opened. Put the key
+points first. Use plain words and full sentences, and do not use a term you
+made up during the work. Say what changed, why, how you proved it, and what is
+next. Subagents (`.claude/agents/`) each cost a fresh context: use one for a
+large or parallel job, and do a check of a few tool calls yourself.
+
 ## Environment & Commands
 **Nix shell required**: `nix develop --command <cargo-command>`
 
@@ -8,8 +41,9 @@ web): nix is not preinstalled. Install it via the Ubuntu package — the
 DeterminateSystems installer's CDN is blocked from these sandboxes:
 
 ```
-sudo apt-get install -y nix-bin
+sudo apt-get install -y nix-bin || { sudo apt-get update; sudo apt-get install -y nix-bin; }
 mkdir -p ~/.config/nix && echo 'experimental-features = nix-command flakes' > ~/.config/nix/nix.conf
+export NIX_SSL_CERT_FILE=/root/.ccr/ca-bundle.crt   # the sandbox's egress proxy CA
 ```
 
 (`nix-bin` ships nix 2.18, which doesn't enable flakes by default — the
@@ -100,6 +134,15 @@ crates/
 ├── moonpool-explorer/     - Frontier exploration controller (libc/fork/mmap; never wasm).
 │                            Recipes + bounded worker pool; depends on moonpool-assertions;
 │                            optional dep of moonpool-sim.
+├── moonpool-journal/      - A CLSTORE journal over the storage providers: positions in any
+│                            order, crash vs. corruption, identified damage.
+├── moonpool-rpc/          - Typed dynamic-endpoint RPC over the provider traits
+│                            (`moonpool-rpc-derive`: optional typed-interface generation).
+├── moonpool-rpc-sim/      - Simulation harness, oracles and campaigns for moonpool-rpc
+│                            (not published).
+├── moonpool-prometheus/   - Prometheus registry adapter for simulation metrics.
+├── moonpool-calibrate/    - Measures real storage and network latency and emits
+│                            LatencyDistribution constants (not published).
 ├── moonpool-sim-examples/ - Runnable simulation workloads discovered by xtask.
 ├── moonpool-wasm-demo/    - Browser demo embedded in the book.
 └── xtask/                 - Cargo xtask automation (simulation runner)
@@ -140,7 +183,7 @@ Where generics hurt, erase at an application boundary with a narrowly scoped tra
 **Invariant checking**: Cross-workload properties validated after every simulation step
 **Goal**: Find bugs, not regression testing
 **NEVER remove assertions that catch bugs** — if an assertion fails, fix the underlying bug. Assertions exist to find real issues; deleting a failing assertion hides the bug.
-**When an assertion catches a bug**: Stop, enter plan mode, and enable deep thinking. Read relevant reference code, trace the full data flow, and understand the root cause before attempting a fix. Do not rush.
+**When an assertion catches a bug**: find the root cause before you change code. Reproduce the seed alone, read the relevant reference code, and trace the full data flow from the first violation back to the decision that caused it (`debug-a-seed` skill). A fix that only makes the assertion quiet is not a fix.
 
 ## Storage Layering
 One provider, one file abstraction, one simulated file image. `StorageProvider`
@@ -244,8 +287,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - foundationdb/: Buggify.h, FlowTransport.cpp, FlowTransport.h, Net2.actor.cpp, Net2Packet.cpp, Net2Packet.h, Ping.actor.cpp, sim2.actor.cpp, and the fdbrpc layer (provenance per file in `docs/references/foundationdb/README.md`)
 - tigerbeetle/: packet_simulator.zig
 
-**IMPORTANT**: Always read FoundationDB's implementation first before making simulation changes.
-- For simulated networking and connection behavior, check Net2 and `sim2.actor.cpp`.
+**Read FoundationDB first** before you change how the simulated world behaves (`crates/moonpool-sim/src/{sim,network,storage}`, a new fault): moonpool copies its model, and its knobs and probabilities are the defaults we cite. For simulated networking and connection behavior, check Net2 and `sim2.actor.cpp`. A change that does not touch the world's behaviour (docs, the book, the runner's report, a lint fix) does not need this pass.
 
 **Code mapping**:
 - SimWorld → sim2.actor.cpp:1051+

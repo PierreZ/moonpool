@@ -5,6 +5,10 @@ description: Add or change a simulator fault in moonpool - a NetworkFault varian
 
 # Adding a fault
 
+This codebase is yours: how it's built is your call, and you'll keep building
+on it. What moonpool is for stays Pierre's call (root `AGENTS.md`). Merge
+repeated code and fix what you find next to your change, in the same PR.
+
 A fault in moonpool is configuration data sampled per seed, applied by an
 engine, and recorded as an event. Adding one touches all four places, and the
 swarm model only works if the new fault can be switched off independently of

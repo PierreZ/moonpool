@@ -1,6 +1,6 @@
 ---
 name: reference-reader
-description: Reads the FoundationDB, TigerBeetle and Orleans reference sources and moonpool's own analyses (docs/analysis/foundationdb, docs/references) before a simulation-internals change, and reports how the reference implements the mechanism in question - virtual time and the event queue, Sim2Conn and connection close, latency knobs, partitions, the IAsyncFile decorator stack, AsyncFileNonDurable power failure, AsyncFileChaos, BUGGIFY, Flow transport - with file:line citations and the mapping onto moonpool's SimWorld / NetworkSimulation / StorageEngine. Use whenever a change touches crates/moonpool-sim/src/{sim,network,storage} or adds a fault, per the repository's "read FoundationDB first" rule.
+description: Reads the FoundationDB, TigerBeetle and Orleans reference sources and moonpool's own analyses (docs/analysis/foundationdb, docs/references) before a simulation-internals change, and reports how the reference implements the mechanism in question - virtual time and the event queue, Sim2Conn and connection close, latency knobs, partitions, the IAsyncFile decorator stack, AsyncFileNonDurable power failure, AsyncFileChaos, BUGGIFY, Flow transport - with file:line citations and the mapping onto moonpool's SimWorld / NetworkSimulation / StorageEngine. Use when a change to crates/moonpool-sim/src/{sim,network,storage} or a new fault needs a long reading pass through the references that should not fill the main context; a single lookup is cheaper to do yourself.
 tools: Read, Grep, Glob
 model: inherit
 ---

@@ -1,6 +1,6 @@
 ---
 name: seed-debugger
-description: Root-causes one failing seed in moonpool's own tests or example simulations, or a determinism-canary trip. Delegate with the seed, the test or sim binary that ran it, and the first assertion message; it replays the seed alone, reads the timeline backwards from the first violation to the runtime decision (scheduler, engine, runner, executor) that caused it, and returns the causal chain and a proposed fix without editing the runtime. Use whenever nextest or cargo xtask sim run reports seeds_failing, an assertion violation, or a "determinism canary" always-violation.
+description: Root-causes one failing seed in moonpool's own tests or example simulations, or a determinism-canary trip. Delegate with the seed, the test or sim binary that ran it, and the first assertion message; it replays the seed alone, reads the timeline backwards from the first violation to the runtime decision (scheduler, engine, runner, executor) that caused it, and returns the causal chain and a proposed fix without editing the runtime. Use when a red seed or a determinism-canary trip needs a long diagnosis that should not fill the main context, or when several seeds can be diagnosed in parallel.
 tools: Read, Grep, Glob, Bash
 model: inherit
 skills:
