@@ -34,9 +34,22 @@
 //! ## Determinism
 //!
 //! Faults are applied on read, never stored in the pristine bytes, and every
-//! corruption is seeded from the content it damages: re-reading a damaged
-//! sector returns the same damaged bytes, so a retry never heals. All
-//! randomness comes from the simulation's one stream.
+//! corruption is seeded from the sector it damages: a latent fault flips one
+//! bit at a position inside the sector that depends only on the sector index
+//! and its content. Re-reading a damaged sector returns the same damaged
+//! bytes whatever the range of the read, so a retry never heals and a read
+//! split in parts sees the same damage as one whole read. A read that does
+//! not cover the damaged byte returns clean bytes. All randomness comes from
+//! the simulation's one stream.
+//!
+//! ## Durable damage
+//!
+//! The latent-fault and damage marks have a durable copy, as the bytes do.
+//! A write clears the marks of the sectors it touches, but only a sync (or a
+//! crash that keeps the new bytes) makes that durable. When a crash rolls a
+//! sector back to its old bytes, the old marks come back with them, unless
+//! the sector's fault weight is zero then: an immune or gated sector stays
+//! healed, so a rollback never breaks a replicated fault pattern.
 
 use std::{collections::BTreeMap, ops::Range};
 use tracing::instrument;
@@ -226,12 +239,18 @@ pub struct FileImage {
     stranded: SectorBitSet,
     /// Sectors with a latent read fault (deterministic corruption on read).
     faults: SectorBitSet,
+    /// The latent read faults of the durable image: what `faults` returns
+    /// to when a crash rolls a sector back.
+    durable_faults: SectorBitSet,
     /// Targeted EIO injections.
     eio_read: SectorBitSet,
     eio_write: SectorBitSet,
     /// Sectors a random fault left holding the wrong bytes, until rewritten
     /// or truncated away: what a rolling replicated fault pattern waits on.
     damaged: SectorBitSet,
+    /// The damage marks of the durable image: what `damaged` returns to when
+    /// a crash rolls a sector back.
+    durable_damaged: SectorBitSet,
     /// Per-sector `(CRC, byte length)` of the content the caller believes
     /// durable. A stamp exists only for sectors a sync claimed: a write to the
     /// sector drops it, a shrink into the sector narrows it to the surviving
@@ -267,9 +286,11 @@ impl FileImage {
             lied: SectorBitSet::new(0),
             stranded: SectorBitSet::new(0),
             faults: SectorBitSet::new(0),
+            durable_faults: SectorBitSet::new(0),
             eio_read: SectorBitSet::new(0),
             eio_write: SectorBitSet::new(0),
             damaged: SectorBitSet::new(0),
+            durable_damaged: SectorBitSet::new(0),
             oracle: BTreeMap::new(),
             fill,
             allocated: SectorBitSet::new(0),
@@ -344,20 +365,19 @@ impl FileImage {
         buf.copy_from_slice(&self.visible[start..start + buf.len()]);
 
         for sector in super::faults::sector_range(offset, buf.len()) {
-            let index = as_index(sector);
-            if !self.faults.is_set(index) {
+            if !self.faults.is_set(as_index(sector)) {
                 continue;
             }
-            let sector_start = index * SECTOR_SIZE;
-            let overlap_start = sector_start.max(start);
-            let overlap_end = (sector_start + SECTOR_SIZE).min(start + buf.len());
-            if overlap_start >= overlap_end {
+            let bounds = self.visible_bounds(sector);
+            let Some((at, bit)) = latent_flip(sector, &self.visible[bounds.clone()]) else {
                 continue;
+            };
+            // The flip sits at a fixed byte of the sector: it reaches the
+            // buffer only when the read covers that byte.
+            let at = bounds.start + at;
+            if (start..start + buf.len()).contains(&at) {
+                buf[at - start] ^= 1 << bit;
             }
-            corrupt_in_place(
-                &self.visible[self.visible_bounds(sector)],
-                &mut buf[overlap_start - start..overlap_end - start],
-            );
         }
         Ok(())
     }
@@ -418,7 +438,11 @@ impl FileImage {
     /// leaving them volatile (the opt-in barrier-violation family).
     #[instrument(level = "trace", skip_all)]
     pub fn sync(&mut self, config: &StorageConfiguration, weight: &dyn Fn(u64) -> f64) -> Vec<u64> {
+        let old_len = self.committed.len();
         self.committed.resize(self.visible.len(), 0);
+        // A sector this sync does not flush honestly (stranded, or lied
+        // about) keeps the fill pattern in the durable image, never zeros.
+        fill_extension(&mut self.committed, old_len, self.fill);
         let mut lied = Vec::new();
         for sector in self.flushable_sectors() {
             self.flush_sector(sector, config, weight, &mut lied);
@@ -485,6 +509,7 @@ impl FileImage {
         } else {
             let bytes = self.visible[range.clone()].to_vec();
             self.committed[range].copy_from_slice(&bytes);
+            self.commit_marks(index);
             self.dirty.clear(index);
             self.lied.clear(index);
         }
@@ -518,6 +543,9 @@ impl FileImage {
             if revert && whole && !self.lied.is_set(index) {
                 let bytes = self.committed[shared.clone()].to_vec();
                 self.visible[shared].copy_from_slice(&bytes);
+                // The cache drops the write, but the marks it cleared stay
+                // cleared: a clean sector's marks are its durable ones.
+                self.commit_marks(index);
                 self.dirty.clear(index);
             } else {
                 self.stranded.set(index);
@@ -550,6 +578,7 @@ impl FileImage {
             // Whole on the device: nothing left to resolve. A tail past the
             // durable end stays dirty, its length still volatile.
             if shared == self.visible_bounds(sector) {
+                self.commit_marks(as_index(sector));
                 self.dirty.clear(as_index(sector));
             }
         }
@@ -619,12 +648,7 @@ impl FileImage {
         if sim_random::<f64>() < config.clean_crash_probability {
             assert_reachable!("disk crash: clean crash preserved every unsynced write");
             report.clean = true;
-            for sector in dirty {
-                if !self.stranded.is_set(as_index(sector)) {
-                    self.commit_sector(sector);
-                    report.clean_kept.push(sector);
-                }
-            }
+            report.clean_kept = self.keep_unstranded(dirty, weight);
         } else {
             let window = correlated_window(&dirty, config);
             let mut correlated_fired = false;
@@ -642,6 +666,9 @@ impl FileImage {
                     weight,
                 );
                 let outcome = self.apply_outcome(sector, outcome);
+                if outcome == CrashOutcome::KeptOld {
+                    self.roll_back_marks(sector, weight);
+                }
                 note_outcome_reachable(outcome, self.fill.garbage);
                 report.resolutions.push(SectorResolution {
                     sector,
@@ -659,15 +686,33 @@ impl FileImage {
         self.visible.extend_from_slice(&self.committed);
         let sectors = self.sectors();
         self.resize_bitsets(sectors);
+        self.faults.clone_from(&self.durable_faults);
+        self.damaged.clone_from(&self.durable_damaged);
         self.dirty.clear_all();
         self.lied.clear_all();
         self.stranded.clear_all();
 
         report.lost_synced = self.oracle_sweep(path, &lied, barrier_violation_armed);
         for sector in &report.lost_synced {
-            self.damaged.set(as_index(*sector));
+            self.mark_durably(as_index(*sector), false);
         }
         report
+    }
+
+    /// Land every dirty sector new, except a stranded one, whose writeback
+    /// already failed: it keeps its durable bytes and their marks. Returns
+    /// the sectors that landed new.
+    fn keep_unstranded(&mut self, dirty: Vec<u64>, weight: &dyn Fn(u64) -> f64) -> Vec<u64> {
+        let mut kept = Vec::new();
+        for sector in dirty {
+            if self.stranded.is_set(as_index(sector)) {
+                self.roll_back_marks(sector, weight);
+            } else {
+                self.commit_sector(sector);
+                kept.push(sector);
+            }
+        }
+        kept
     }
 
     /// For an unsynced growth, half of the time (one draw), a sector
@@ -689,9 +734,15 @@ impl FileImage {
     /// Resolve a kill that keeps the page cache: the machine stays up, so
     /// every dirty sector lands new and an unsynced length change survives.
     /// A stranded sector, whose writeback already failed, keeps its durable
-    /// bytes, as in a clean crash. Draws nothing.
-    #[instrument(level = "trace", skip(self))]
-    pub fn keep_cache(&mut self, path: &str, barrier_violation_armed: bool) -> FileCrashReport {
+    /// bytes, as in a clean crash. `weight` decides whether such a sector
+    /// gets back the damage marks of its durable bytes. Draws nothing.
+    #[instrument(level = "trace", skip(self, weight))]
+    pub fn keep_cache(
+        &mut self,
+        path: &str,
+        barrier_violation_armed: bool,
+        weight: &dyn Fn(u64) -> f64,
+    ) -> FileCrashReport {
         let mut report = FileCrashReport {
             path: path.to_string(),
             clean: true,
@@ -708,22 +759,19 @@ impl FileImage {
             .copied()
             .filter(|s| self.lied.is_set(as_index(*s)))
             .collect();
-        for sector in dirty {
-            if !self.stranded.is_set(as_index(sector)) {
-                self.commit_sector(sector);
-                report.clean_kept.push(sector);
-            }
-        }
+        report.clean_kept = self.keep_unstranded(dirty, weight);
         self.visible.clear();
         self.visible.extend_from_slice(&self.committed);
         let sectors = self.sectors();
         self.resize_bitsets(sectors);
+        self.faults.clone_from(&self.durable_faults);
+        self.damaged.clone_from(&self.durable_damaged);
         self.dirty.clear_all();
         self.lied.clear_all();
         self.stranded.clear_all();
         report.lost_synced = self.oracle_sweep(path, &lied, barrier_violation_armed);
         for sector in &report.lost_synced {
-            self.damaged.set(as_index(*sector));
+            self.mark_durably(as_index(*sector), false);
         }
         report
     }
@@ -733,7 +781,11 @@ impl FileImage {
     #[instrument(level = "trace", skip(self))]
     pub fn corrupt(&mut self, sectors: Range<u64>) {
         for sector in sectors {
-            self.faults.set(as_index(sector));
+            let index = as_index(sector);
+            self.faults.set(index);
+            if !self.dirty.is_set(index) {
+                self.durable_faults.set(index);
+            }
         }
     }
 
@@ -741,7 +793,11 @@ impl FileImage {
     /// [`damaged_sectors`](Self::damaged_sectors)).
     pub fn mark_damaged(&mut self, sectors: Range<u64>) {
         for sector in sectors {
-            self.damaged.set(as_index(sector));
+            let index = as_index(sector);
+            self.damaged.set(index);
+            if !self.dirty.is_set(index) {
+                self.durable_damaged.set(index);
+            }
         }
     }
 
@@ -960,6 +1016,8 @@ impl FileImage {
         self.eio_read.resize(len);
         self.eio_write.resize(len);
         self.damaged.resize(len);
+        self.durable_faults.resize(len);
+        self.durable_damaged.resize(len);
         self.allocated.resize(len);
     }
 
@@ -1051,8 +1109,38 @@ impl FileImage {
             self.committed[range].copy_from_slice(&bytes);
         }
         let index = as_index(sector);
+        self.commit_marks(index);
         self.dirty.clear(index);
         self.lied.clear(index);
+    }
+
+    /// The sector's latent-fault and damage marks become its durable ones.
+    fn commit_marks(&mut self, index: usize) {
+        copy_bit(&self.faults, &mut self.durable_faults, index);
+        copy_bit(&self.damaged, &mut self.durable_damaged, index);
+    }
+
+    /// A sector that kept its old bytes across a crash: its marks return to
+    /// the durable ones, unless its weight is zero now, and then the heal
+    /// that the write brought becomes durable instead.
+    fn roll_back_marks(&mut self, sector: u64, weight: &dyn Fn(u64) -> f64) {
+        let index = as_index(sector);
+        if weight(sector) > 0.0 {
+            copy_bit(&self.durable_faults, &mut self.faults, index);
+            copy_bit(&self.durable_damaged, &mut self.damaged, index);
+        } else {
+            self.commit_marks(index);
+        }
+    }
+
+    /// Set a mark on both the visible and the durable image.
+    fn mark_durably(&mut self, index: usize, fault: bool) {
+        if fault {
+            self.faults.set(index);
+            self.durable_faults.set(index);
+        }
+        self.damaged.set(index);
+        self.durable_damaged.set(index);
     }
 
     /// Materialize one sector's crash resolution into the committed image,
@@ -1071,8 +1159,7 @@ impl FileImage {
             CrashOutcome::KeptNew => self.commit_sector(sector),
             CrashOutcome::LatentFault => {
                 self.commit_sector(sector);
-                self.faults.set(index);
-                self.damaged.set(index);
+                self.mark_durably(index, true);
             }
             CrashOutcome::Lost => {
                 // Only the part of the sector past its protected prefix is
@@ -1088,9 +1175,10 @@ impl FileImage {
                     self.committed[start..range.end]
                         .copy_from_slice(&bytes[start - range.start..range.end - range.start]);
                 }
+                self.commit_marks(index);
+                self.mark_durably(index, false);
                 self.dirty.clear(index);
                 self.lied.clear(index);
-                self.damaged.set(index);
             }
             CrashOutcome::Shorn => {
                 let range = self.shared_bounds(sector);
@@ -1107,9 +1195,10 @@ impl FileImage {
                 };
                 let bytes = self.visible[kept.clone()].to_vec();
                 self.committed[kept].copy_from_slice(&bytes);
+                self.commit_marks(index);
+                self.mark_durably(index, false);
                 self.dirty.clear(index);
                 self.lied.clear(index);
-                self.damaged.set(index);
             }
         }
         outcome
@@ -1285,19 +1374,31 @@ fn note_outcome_reachable(outcome: CrashOutcome, garbage_fill: bool) {
     }
 }
 
-/// Deterministically corrupt a read buffer, seeded from the pristine content
-/// so retries observe the identical corruption.
-fn corrupt_in_place(pristine: &[u8], buf: &mut [u8]) {
-    if buf.is_empty() {
-        return;
+/// The bit a latent fault flips in `sector`, whose pristine bytes are
+/// `pristine`: a byte offset inside the sector and a bit in that byte.
+///
+/// A pure function of the sector index and its content, never of the read
+/// that reaches it, so every read that covers the byte sees the same flip
+/// and a read split in parts sees the same damage as one whole read. `None`
+/// for an empty sector.
+fn latent_flip(sector: u64, pristine: &[u8]) -> Option<(usize, u8)> {
+    if pristine.is_empty() {
+        return None;
     }
-    let mut seed_bytes = [0u8; 8];
-    let n = pristine.len().min(8);
-    seed_bytes[..n].copy_from_slice(&pristine[..n]);
-    let mut rng = ChaCha8Rng::seed_from_u64(u64::from_le_bytes(seed_bytes));
-    let byte = rng.random_range(0..buf.len());
+    let seed = u64::from(crc32c::crc32c(pristine)) ^ sector.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let byte = rng.random_range(0..pristine.len());
     let bit = rng.random_range(0..8u8);
-    buf[byte] ^= 1 << bit;
+    Some((byte, bit))
+}
+
+/// Copy bit `index` of `from` into `to`.
+fn copy_bit(from: &SectorBitSet, to: &mut SectorBitSet, index: usize) {
+    if from.is_set(index) {
+        to.set(index);
+    } else {
+        to.clear(index);
+    }
 }
 
 #[cfg(test)]
@@ -1592,5 +1693,137 @@ mod tests {
         image.allocate(2_048);
         assert_eq!(image.allocated_bytes(), 2_048);
         assert_eq!(image.space_needed_for_write(2_048, 100), 100);
+    }
+
+    fn never_eligible(_sector: u64) -> f64 {
+        0.0
+    }
+
+    /// The durable bytes of `sector`, read straight from the durable image.
+    fn durable_sector(image: &FileImage, sector: u64) -> Vec<u8> {
+        let start = super::as_index(sector) * SECTOR_SIZE;
+        image.durable_bytes()[start..start + SECTOR_SIZE].to_vec()
+    }
+
+    /// A full sync grows the durable image with the fill pattern: a sector
+    /// that the sync did not flush honestly (stranded by a failed writeback)
+    /// and that keeps its durable bytes reads the fill, not zeros (#474).
+    #[test]
+    fn a_full_sync_grows_the_durable_image_with_the_fill_pattern() {
+        seeded(8);
+        let config = StorageConfiguration::fast_local();
+        let size = SECTOR_SIZE as u64;
+        let mut image = FileImage::new(0, 42, true);
+        image.write(0, &[1; SECTOR_SIZE]);
+        image.sync(&config, &always_eligible);
+        image.write(size, &[2; SECTOR_SIZE]);
+        assert_eq!(image.fail_writeback(false), vec![1]);
+        image.sync(&config, &always_eligible);
+        let fill = image.fill.sector(1).to_vec();
+        assert_eq!(durable_sector(&image, 1), fill, "the grown durable tail");
+
+        image.keep_cache("f", false, &always_eligible);
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        image.read(size, &mut buf).expect("read failed");
+        assert_eq!(buf, fill, "a stranded sector keeps the fill, not zeros");
+    }
+
+    /// A sync that lies about a sector in the grown region leaves the fill
+    /// pattern under it, so a rollback reads the fill (#474).
+    #[test]
+    fn a_lying_sync_over_a_growth_rolls_back_to_the_fill_pattern() {
+        let config = StorageConfiguration {
+            barrier_violation_probability: 1.0,
+            clean_crash_probability: 0.0,
+            ..StorageConfiguration::fast_local()
+        };
+        for seed in 0..8_u64 {
+            seeded(seed);
+            let mut image = FileImage::new(0, 42, true);
+            image.write(0, &[3; SECTOR_SIZE]);
+            assert_eq!(image.sync(&config, &always_eligible), vec![0]);
+            let fill = image.fill.sector(0).to_vec();
+            assert_eq!(durable_sector(&image, 0), fill, "seed {seed}");
+            image.crash("f", &config, true, &always_eligible);
+            let mut buf = vec![0u8; SECTOR_SIZE];
+            image.read(0, &mut buf).expect("read failed");
+            assert_eq!(buf, fill, "seed {seed}: a rolled-back lie reads the fill");
+        }
+    }
+
+    /// The damage of a latent fault is a property of the sector, not of the
+    /// read: one whole read and the same sector read in parts see the same
+    /// bytes (#470).
+    #[test]
+    fn latent_damage_does_not_depend_on_the_read_range() {
+        seeded(9);
+        let mut image = image(2 * SECTOR_SIZE as u64);
+        let payload: Vec<u8> = (0..=255u8).cycle().take(2 * SECTOR_SIZE).collect();
+        image.write(0, &payload);
+        image.corrupt(0..2);
+
+        let mut whole = vec![0u8; 2 * SECTOR_SIZE];
+        image.read(0, &mut whole).expect("read failed");
+        for part in [1, 7, 128, 300, SECTOR_SIZE] {
+            let mut split = vec![0u8; 2 * SECTOR_SIZE];
+            for (at, chunk) in split.chunks_mut(part).enumerate() {
+                image.read((at * part) as u64, chunk).expect("read failed");
+            }
+            assert_eq!(split, whole, "reads of {part} bytes");
+        }
+        let flipped: u32 = whole
+            .iter()
+            .zip(&payload)
+            .map(|(a, b)| (a ^ b).count_ones())
+            .sum();
+        assert_eq!(flipped, 2, "one bit in each faulted sector");
+    }
+
+    /// A latent fault that an unsynced overwrite cleared comes back when a
+    /// crash rolls the sector back to its old bytes (#470). An immune sector
+    /// stays healed.
+    #[test]
+    fn a_rollback_brings_back_the_old_latent_fault() {
+        let config = StorageConfiguration {
+            clean_crash_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        };
+        for (weight, faulted) in [
+            (always_eligible as fn(u64) -> f64, true),
+            (never_eligible as fn(u64) -> f64, false),
+        ] {
+            seeded(10);
+            let mut image = image(SECTOR_SIZE as u64);
+            image.write(0, &[5; SECTOR_SIZE]);
+            image.sync(&config, &always_eligible);
+            image.corrupt(0..1);
+            image.mark_damaged(0..1);
+            image.write(0, &[6; SECTOR_SIZE]);
+            assert!(!image.is_corrupt(0), "the write cleared the fault");
+            // The writeback fails: the sector keeps its old bytes on disk.
+            image.fail_writeback(false);
+            image.crash("f", &config, false, &weight);
+
+            assert_eq!(image.is_corrupt(0), faulted, "weight {}", weight(0));
+            assert_eq!(image.has_damage(), faulted, "weight {}", weight(0));
+            let mut buf = vec![0u8; SECTOR_SIZE];
+            image.read(0, &mut buf).expect("read failed");
+            let flipped: u32 = buf.iter().map(|byte| (byte ^ 5).count_ones()).sum();
+            assert_eq!(flipped, u32::from(faulted), "weight {}", weight(0));
+        }
+    }
+
+    /// A latent fault planted after a write and made durable by a sync stays
+    /// across a crash; the same fault on a rolled-back write does not.
+    #[test]
+    fn a_synced_fault_survives_a_crash() {
+        seeded(11);
+        let config = StorageConfiguration::fast_local();
+        let mut image = image(SECTOR_SIZE as u64);
+        image.write(0, &[7; SECTOR_SIZE]);
+        image.corrupt(0..1);
+        image.sync(&config, &always_eligible);
+        image.crash("f", &config, false, &always_eligible);
+        assert!(image.is_corrupt(0), "the fault is on the durable bytes");
     }
 }
