@@ -4,16 +4,17 @@
 // order of panels. It sells the tool: a hero, a live run of a seed, what you
 // get, a test, your code and the providers, the techniques, used by paros.
 //
-// The run is the ping-pong demo (crates/moonpool-wasm-demo). The page shows
-// the runs that `cargo test -p moonpool-wasm-demo --test site_runs` recorded
-// in src/runs/home.json, then public/home.js loads the demo compiled to wasm
-// and runs any seed in the browser.
+// The run is the small system of the site (crates/moonpool-wasm-demo): the
+// page shows the run that `cargo test -p moonpool-wasm-demo --test site_runs`
+// recorded in src/runs/home.json, then the player (public/player.js) runs the
+// same seed in the engine, compiled to wasm, in a Web Worker.
 import { Code } from "astro:components";
 import Base from "../layouts/Base.astro";
 import Panel from "../components/Panel.astro";
 import { url } from "../nav";
 import { builderCall, homeFigures, moonpoolDocTest } from "../lib/source.mjs";
 import runs from "../runs/home.json";
+import { TECHNIQUES } from "../lib/techniques.mjs";
 
 const call = builderCall(moonpoolDocTest());
 const test = `#[test]
@@ -22,18 +23,6 @@ ${call.split("\n").map((l) => "    " + l).join("\n")}
     Ok(())
 }`;
 const figures = homeFigures();
-const seeds = runs.map((r) => r.seed);
-const TECHNIQUES = [
-  ["One thread, one clock, one seed", "Run a seed twice and compare the two runs."],
-  ["Same code", "One function, two sets of providers."],
-  ["Network faults", "Cut a link, clog it, close a connection."],
-  ["Storage faults", "What a crash does to each sector after the last sync."],
-  ["Reboots", "A process starts again with fresh memory."],
-  ["Swarm testing", "Each seed draws its own set of faults."],
-  ["Assertions that must fire", "The coverage fills seed after seed."],
-  ["Multiverse exploration", "The run forks at each discovery."],
-  ["From a red seed to the bug", "Replay, then walk back to the first wrong event."],
-];
 ---
 <Base>
   <div class="home">
@@ -51,31 +40,13 @@ const TECHNIQUES = [
     </section>
 
     <section class="run" aria-label="A live run" id="run">
-      <div class="run-head label">
-        <span>seed <b id="r-seed">256</b> · run <span id="r-n">1</span> · <span id="r-src">recorded</span></span>
-        <span>2 processes · Chaos::Network(ChaosMode::Random)</span>
-      </div>
-      <div class="run-stage"><svg id="stage" role="img" aria-label="The timeline of the run. The list of events under it holds the same facts."></svg></div>
-      <div class="run-ctl">
-        <span class="cap label">seed</span>
-        {seeds.map((s) => <button class="btn small" type="button" data-seed={s}>{s}</button>)}
-        <form id="seed-form" hidden>
-          <label class="label" for="seed-input" hidden>Any seed</label>
-          <input id="seed-input" inputmode="numeric" pattern="[0-9]*" placeholder="any seed" />
-        </form>
-        <span class="sep" aria-hidden="true"></span>
-        <button class="btn small" type="button" id="play">Play</button>
-        <button class="btn small" type="button" id="step">Step</button>
-        <button class="btn small" type="button" id="again">Run again</button>
-      </div>
-      <div class="run-stats" id="stats"></div>
-      <div class="run-foot" id="foot"></div>
-      <details class="log"><summary class="label">The events of this run</summary><pre id="log"></pre></details>
+      <noscript><p class="aside">The live run needs JavaScript. The <a href={url("guide/")}>Guide</a> explains each part of it.</p></noscript>
     </section>
-    <p class="aside">The ping-pong demo of the repository (<a href={url("crates/#moonpool-wasm-demo")}><code>moonpool-wasm-demo</code></a>):
-      a client sends 12 requests to a server over a simulated network with faults. The page first shows the
-      recorded runs. Then it loads the simulator, compiled to wasm, and runs each seed in your browser.
-      The network and the clock are simulated.</p>
+    <p class="aside">The small system of the site (<a href={url("crates/#moonpool-wasm-demo")}><code>moonpool-wasm-demo</code></a>):
+      three servers keep one value on disk, and a client writes it to a quorum and reads it back, with network
+      faults and reboots on. The page first shows the run that a Rust test recorded. Then it loads moonpool,
+      compiled to wasm, and runs the same seed in your browser. The network, the disk and the clock are simulated.
+      Type another seed to see another run.</p>
     <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
 
     <div class="strip" aria-label="moonpool in figures">
@@ -100,11 +71,11 @@ const TECHNIQUES = [
     <Panel num="02" title="A test" meta="from the crate-level doc test">
       <div class="term">
         <div class="term-head label"><span>rust</span><span>ten seeds, network faults on</span></div>
-        <Code lang="rust" code={test} />
+        <Code theme="css-variables" lang="rust" code={test} />
       </div>
       <div class="term">
         <div class="term-head label"><span>rust</span><span>a seed failed: replay it alone</span></div>
-        <Code lang="rust" code={"SimulationBuilder::new()\n    .set_debug_seeds(vec![failing_seed])\n    .set_iterations(1)"} />
+        <Code theme="css-variables" lang="rust" code={"SimulationBuilder::new()\n    .set_debug_seeds(vec![failing_seed])\n    .set_iterations(1)"} />
       </div>
       <p class="aside"><a href={url("guide/quick-start/")}>Quick start</a>: the whole file, how to run it and how to read the report.</p>
     </Panel>
@@ -120,11 +91,11 @@ const TECHNIQUES = [
       </div>
     </Panel>
 
-    <Panel num="04" title="See each technique work" meta="pages to come">
+    <Panel num="04" title="See each technique work" meta={`${TECHNIQUES.filter((t) => t.path).length} of ${TECHNIQUES.length} pages up`}>
       <ol class="index-list">
-        {TECHNIQUES.map(([n, d]) => <li><span class="n">{n}</span><span class="desc">{d}</span></li>)}
+        {TECHNIQUES.map((t) => <li>{t.path ? <a class="n" href={url(t.path)}>{t.name}</a> : <span class="n">{t.name}</span>}<span class="desc">{t.line}</span></li>)}
       </ol>
-      <p class="aside">Until each page is up, the <a href={url("guide/")}>Guide</a> explains each technique in full.</p>
+      <p class="aside">Until each page is up, the <a href={url("guide/")}>Guide</a> explains each technique in full. <a href={url("techniques/")}>All the techniques</a>.</p>
     </Panel>
 
     <Panel num="05" title="Used by paros">
@@ -133,5 +104,5 @@ const TECHNIQUES = [
         Its CI runs a sweep of seeds on each pull request.</p>
     </Panel>
   </div>
-  <script is:inline src={url("home.js")} data-wasm={url("wasm-demo/pkg/moonpool_wasm_demo.js")}></script>
+  <script is:inline type="module" src={url("home.js")}></script>
 </Base>

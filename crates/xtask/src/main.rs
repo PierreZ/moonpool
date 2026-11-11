@@ -57,6 +57,10 @@ const SIM_BINARIES: &[SimBinary] = &[
         SIM_EXAMPLES_PACKAGE,
         "moonpool_sim_examples,moonpool_journal",
     ),
+    // The site's small system. Its crate builds moonpool-sim without the
+    // explorer (it compiles to wasm), so nothing provides the sancov hooks:
+    // no instrumentation, the coverage signal is the assertions.
+    SimBinary::new("sim-register", "moonpool-wasm-demo", ""),
     SimBinary::rpc("sim-rpc-foundations"),
     SimBinary::rpc("sim-rpc-delivery"),
     SimBinary::rpc("sim-rpc-interfaces"),

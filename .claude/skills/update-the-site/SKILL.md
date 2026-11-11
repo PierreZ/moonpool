@@ -1,6 +1,6 @@
 ---
 name: update-the-site
-description: Change the moonpool website (website/site/, an Astro app with The Sim Book in it as the Guide) - a page, the home run, the crates page, the Guide's sidebar or search, the design tokens, CI and deploy - and check it at 390 and 1280 px in light and dark. Use when touching website/, when a chapter link or SUMMARY.md change breaks the site build, or when a change moves a fact that a page reads from the code (the moonpool doc test, the README crate table, the Chaos variants, the wasm demo's runs).
+description: Change the moonpool website (website/site/, an Astro app with The Sim Book in it as the Guide) - a page, the home run, the crates page, the Guide's sidebar or search, the design tokens, CI and deploy - and check it at 390 and 1280 px in light and dark. Use when touching website/, when a chapter link or SUMMARY.md change breaks the site build, or when a change moves a fact that a page reads from the code (the moonpool doc test, the README crate table, the Chaos variants, the engine's recorded runs).
 ---
 
 # Update the site
@@ -15,13 +15,27 @@ in issue #414 (website makeover).
 ```bash
 nix develop --command website/site/scripts/build-wasm-demo.sh   # the wasm demo, once
 nix develop --command cargo test -p moonpool-wasm-demo --test site_runs
+nix develop --command scripts/check-site-wasm.sh 1 7 42 256   # native = wasm32
 nix develop --command bash -c 'cd website/site && npm ci && npm test && npm run build'
 ```
 
 `npm run build` fails on a link to a missing chapter, on a broken link inside
 the site, and on a crate of the README table with no entry in
-`src/lib/crates.mjs`. `site_runs` fails once when the recorded runs of the home
-page were stale, and writes them again: commit `src/runs/home.json`.
+`src/lib/crates.mjs`. `site_runs` fails once when the recorded runs of a page
+were stale, and writes them again: commit `src/runs/*.json`.
+
+## A live run on a new page
+
+1. Add the page's configs to `pages()` in
+   `crates/moonpool-wasm-demo/tests/site_runs.rs` and run the test twice.
+2. Inline the JSON in the page (`<script type="application/json">`, with `<`
+   escaped) and mount the player: `mount(root, run, opts)` from
+   `public/player.js`, or `new Player(...)` for a custom layout as
+   `public/compare.js` does.
+3. If the player needs a fact that the run does not hold, add a `tracing`
+   event to the scenario (`src/register.rs`) or a field to `Run`
+   (`src/engine.rs`, bump `MODEL`), then read it in `public/run-model.js`
+   with a test in `src/lib/player.test.mjs`. Never compute it in JavaScript.
 
 ## Look at it
 

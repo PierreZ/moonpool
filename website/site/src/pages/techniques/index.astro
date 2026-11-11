@@ -1,0 +1,25 @@
+---
+// The techniques index (#416 (engine and player)): one line per technique,
+// a link for each page that exists (src/lib/techniques.mjs).
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+import { TECHNIQUES } from "../../lib/techniques.mjs";
+---
+<Doc
+  title="Techniques"
+  kicker="techniques"
+  section="techniques/"
+  description="Each page shows one technique of moonpool in a live run: the problem, the technique, the run, the code."
+>
+  <ol class="index-list">
+    {TECHNIQUES.map((t) => (
+      <li>
+        {t.path ? <a class="n" href={url(t.path)}>{t.name}</a> : <span class="n">{t.name} <span class="chip-status">to come</span></span>}
+        <span class="desc">{t.line}</span>
+      </li>
+    ))}
+  </ol>
+  <p>Each live run is a real moonpool run, compiled to wasm, in your browser. The same small system runs on each
+    page: three servers keep one value on disk, and a client writes it and reads it back.
+    The <a href={url("guide/")}>Guide</a> explains each technique in full.</p>
+</Doc>

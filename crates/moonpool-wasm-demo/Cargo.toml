@@ -6,11 +6,21 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Browser/wasm demo: animate a deterministic ping-pong simulation and the impact of chaos"
+description = "The run engine of the moonpool website: a replicated register simulated natively and in the browser"
 
 [lib]
-# cdylib for the wasm32 build (wasm-bindgen), rlib for the native bin + tests.
+# cdylib for the wasm32 build (wasm-bindgen), rlib for the native bins + tests.
 crate-type = ["cdylib", "rlib"]
+
+# The small system of the website as an example simulation (cargo xtask sim run register).
+[[bin]]
+name = "sim-register"
+path = "src/bin/sim_register.rs"
+
+# Prints a run of the site's engine as JSON (scripts/check-site-wasm.sh).
+[[bin]]
+name = "site-run"
+path = "src/bin/site_run.rs"
 
 [dependencies]
 # The simulator without its production (tokio net/fs) features is wasm-able.
@@ -19,8 +29,7 @@ async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The workload emits standard `client_*` observability events; the generic
-# recorder reconstructs the timeline from them.
+# The scenario emits ordinary tracing events; the recorder reads them back.
 tracing = "0.1"
 
 # wasm-only glue. The crate version MUST exactly match the flake's

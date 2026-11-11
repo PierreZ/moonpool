@@ -93,3 +93,20 @@ export function workspaceVersion() {
   if (!m) throw new Error("Cargo.toml has no workspace version");
   return m[1];
 }
+
+/**
+ * The text of a top-level `fn name` of a Rust file, from its line to the `}`
+ * at the start of a line that closes it. A page shows code that CI compiles.
+ */
+export function rustFn(text, name) {
+  const start = text.search(new RegExp("^(pub )?fn " + name + "\\b", "m"));
+  if (start < 0) throw new Error(`no top-level fn ${name}`);
+  const end = text.indexOf("\n}", start);
+  if (end < 0) throw new Error(`fn ${name} does not close`);
+  return text.slice(start, end + 2);
+}
+
+/** `rustFn` over a file of the repository. */
+export function repoFn(path, name) {
+  return rustFn(readFileSync(ROOT + path, "utf8"), name);
+}

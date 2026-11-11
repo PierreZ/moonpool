@@ -279,8 +279,9 @@ and under the simulator in its own `#[test]`.
 ### WebAssembly
 
 - `moonpool-sim` with `--no-default-features` compiles for
-  `wasm32-unknown-unknown`. `moonpool-wasm-demo` runs a seeded ping-pong
-  simulation in the browser.
+  `wasm32-unknown-unknown`. `moonpool-wasm-demo` runs a replicated
+  register in the browser, the same run as natively: it is the engine of every
+  live run of the website.
 
 ### Tooling
 
@@ -306,7 +307,7 @@ and under the simulator in its own `#[test]`.
 | `moonpool-journal` | CLSTORE journal: crash vs. corruption | yes |
 | `moonpool-rpc-sim` | RPC simulation campaigns and oracles | no |
 | `moonpool-sim-examples` | Example simulations (maze, dungeon, axum, tonic, journal) | no |
-| `moonpool-wasm-demo` | Browser demo | no |
+| `moonpool-wasm-demo` | Website run engine (wasm) | no |
 | `moonpool-calibrate` | Latency calibration tool | no |
 | `xtask` | Simulation binary runner | no |
 

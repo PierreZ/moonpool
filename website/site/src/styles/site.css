@@ -248,19 +248,51 @@ pre {
 .run-stats div { padding: 8px 12px; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); margin: 0 -1px -1px 0; min-width: 0; }
 .run-stats .k { display: block; color: var(--muted); font-size: 11px; letter-spacing: var(--tracking); text-transform: uppercase; }
 .run-stats .v { font-variant-numeric: tabular-nums; }
-.v.ok { color: var(--accent); }
-.v.fault { color: var(--fault); }
-.v.time { color: var(--info); }
 .run-foot { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 12px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13px; }
-.run-foot .same { color: var(--accent); }
 .run details.log { border-top: 1px solid var(--rule); }
 .run details.log summary { padding: 8px 12px; cursor: pointer; color: var(--muted); }
-.run details.log pre { margin: 0; padding: 0 12px 12px; border: 0; font-size: 12.5px; }
+/* The player (public/player.js): a legend, the controls, the list of events. */
+.run-stage svg[viewBox] { height: auto; }
+.run-stage .halo { paint-order: stroke; stroke: var(--panel); stroke-width: 4px; stroke-linejoin: round; }
+.run-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; padding: 4px 12px 8px; color: var(--muted); font-family: var(--font-mono); font-size: 11.5px; }
+.run-legend i { font-style: normal; margin-right: 3px; }
+.run-legend .m-msg { color: var(--fg); }
+.run-legend .m-fault { color: var(--fault); }
+.run-legend .m-down, .run-legend .m-fail { color: var(--fail); }
+.run-legend .m-ok { color: var(--accent); }
+.run-ctl select { height: 28px; border: 1px solid var(--rule-strong); border-radius: 0; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; }
+.run-ctl .seed-form { display: inline-flex; gap: 6px; align-items: center; }
+.run-foot .bad { color: var(--fail); }
+.run ol.events { list-style: none; margin: 0; padding: 0 0 8px; max-height: 260px; overflow: auto; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; white-space: pre; }
+.run ol.events li { margin: 0; padding: 0 12px; }
+.run ol.events li.later { color: var(--muted); }
+.run ol.events li[aria-current] { background: var(--info-tint); color: var(--fg); }
+.run ol.events li.ev-fault { color: var(--fault); }
+.run ol.events li.ev-fail { color: var(--fail); font-weight: 600; }
+.run ol.events li.ev-fail::before { content: "✗ "; }
+.run ol.events li.later.ev-fault, .run ol.events li.later.ev-fail { color: var(--muted); font-weight: 400; }
+.run ol.events li.ev-diff { outline: 1px dashed var(--fg); outline-offset: -1px; }
+.run ol.events li.ev-diff::before { content: "≠ "; }
 @media (max-width: 760px) { .run-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 620px) {
   .run-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .home .two { grid-template-columns: 1fr; }
+  .run-ctl .sep { display: none; }
 }
+
+/* A technique page: the live run is wider than the text. */
+.breakout { --wide: min(1180px, calc(100vw - 48px)); width: var(--wide); margin: 1.4em 0 1.4em calc((100% - var(--wide)) / 2); }
+.compare-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; margin-bottom: 12px; }
+.compare-ctl label { color: var(--muted); }
+.compare-ctl input { width: 11ch; height: 28px; padding: 0 6px; border: 1px solid var(--rule-strong); border-radius: 0; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; }
+.compare-out { flex-basis: 100%; margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
+.compare-out.same { color: var(--accent); }
+.compare-out.diff { color: var(--fg); }
+.compare-runs { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.compare-runs > * { min-width: 0; }
+.compare .run-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 900px) { .compare-runs { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .compare .run-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* ---- the Guide: a sidebar from SUMMARY.md, the chapter, a search ---- */
 
@@ -316,3 +348,6 @@ pre {
 .crate-list .crate-links { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 6px; font-size: 13px; }
 .prose ul.crate-list { padding-left: 0; }
 .prose ul.crate-list > li::before { content: none; }
+
+/* A page in a frame (Base with `bare`): the run alone. */
+body.bare .main { padding: 0; max-width: none; }

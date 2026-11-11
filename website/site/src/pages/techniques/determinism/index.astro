@@ -1,0 +1,67 @@
+---
+// Determinism (#416 (engine and player)): one seed run twice, side by side,
+// event for event. The recorded runs are src/runs/determinism.json (written
+// by `cargo test -p moonpool-wasm-demo --test site_runs`); public/compare.js
+// runs them again in the engine.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { repoFn } from "../../../lib/source.mjs";
+import runs from "../../../runs/determinism.json";
+
+const main = repoFn("crates/moonpool-wasm-demo/src/bin/sim_register.rs", "main");
+const [first, next] = runs;
+---
+<Technique
+  title="One thread, one clock, one seed"
+  description="Run a seed two times. You get the same run, event for event."
+  guide={[
+    "part2-foundations/01-determinism.md",
+    "part2-foundations/02-single-core.md",
+    "part2-foundations/03-seeds.md",
+    "part2-foundations/11-executor.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>A distributed system fails on a rare order of events: a message that comes late, a crash between two
+    writes. On real machines, the scheduler, the network and the clock make this order. You cannot make it
+    again. A test that failed one time and then passes tells you nothing.</p>
+
+  <h2>The technique</h2>
+  <p>moonpool runs all the processes of a test on one thread, with one executor. The network, the disk and the
+    clock are simulated. One stream of random numbers makes each choice: the order of the tasks, the latency
+    of each message, each fault. A seed starts this stream. Thus one seed gives one run.</p>
+  <p>A sleep does not wait. When all the tasks wait, the clock jumps to the next event. Seconds of simulated
+    time take milliseconds of real time.</p>
+
+  <h2>The live run</h2>
+  <p>The left run and the right run use the same seed. Your browser runs both, and each event on the right is
+    the same as the event on the left at the same step. Give the right run another seed: the first event that
+    is not the same gets the <b>≠</b> mark. The arrow keys step the two runs together.</p>
+  <div class="compare breakout" id="compare">
+    <form class="compare-ctl run" id="compare-form">
+      <label class="label" for="seed-a">left seed</label>
+      <input id="seed-a" inputmode="numeric" pattern="[0-9]*" maxlength="15" autocomplete="off" value={first.config.seed} />
+      <label class="label" for="seed-b">right seed</label>
+      <input id="seed-b" inputmode="numeric" pattern="[0-9]*" maxlength="15" autocomplete="off" value={first.config.seed} />
+      <button class="btn small" type="submit">Run both</button>
+      <button class="btn small" type="button" id="seed-next">Right: next seed</button>
+      <p class="compare-out" id="compare-out" aria-live="polite"></p>
+    </form>
+    <div class="compare-runs">
+      <section class="run" id="run-a" aria-label="The left run"></section>
+      <section class="run" id="run-b" aria-label="The right run"></section>
+    </div>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify([first, next]).replace(/</g, "\\u003c")} />
+
+  <h2>The code</h2>
+  <p>The small system of this page is also an example simulation of the repository
+    (<code>cargo xtask sim run register</code>). <code>check_determinism()</code> runs each seed two times and
+    fails the seed when the two runs do not make the same random draws:</p>
+  <Code theme="css-variables" lang="rust" code={main} />
+  <p>In a test, <code>set_debug_seeds(vec![seed])</code> and <code>set_iterations(1)</code> replay one seed
+    alone.</p>
+  <script is:inline type="module" src={url("compare.js")}></script>
+</Technique>

@@ -49,3 +49,5 @@ You pin that seed with `set_debug_seeds(vec![8839214571])`, run one iteration, a
 This is not aspirational. FoundationDB ran 5 to 10 million simulation iterations per night, each with a different seed. Their physical validation cluster, real servers with programmable power switches, never found a database bug that simulation had missed. Determinism made that possible.
 
 Everything in moonpool builds on this foundation. Chaos, assertion coverage, swarm testing, multiverse exploration: all of it rests on one guarantee. Given the same seed, the simulation produces the same result. The rest of this part explains how moonpool keeps that guarantee.
+
+To see the guarantee hold, open [One thread, one clock, one seed](../techniques/determinism/) on the website. It runs one seed of a small replicated register two times in your browser, side by side, and the two runs match event for event.

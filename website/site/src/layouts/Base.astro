@@ -10,11 +10,14 @@ interface Props {
   description?: string;
   /** The top-bar section this page is in ("guide/", "crates/", ...). */
   section?: string;
+  /** No top bar and no footer: a page that another page embeds in a frame. */
+  bare?: boolean;
 }
 const {
   title,
   description = "moonpool: deterministic simulation testing for Rust. One seed gives one exact run.",
   section = "",
+  bare = false,
 } = Astro.props;
 const full = title ? `${title} · moonpool` : "moonpool";
 ---
@@ -36,7 +39,8 @@ const full = title ? `${title} · moonpool` : "moonpool";
   <link rel="icon" type="image/png" href={url("images/logo.png")} />
   <slot name="head" />
 </head>
-<body>
+<body class={bare ? "bare" : undefined}>
+  {!bare && <>
   <a class="skip" href="#content">Skip to the content</a>
   <header class="topbar">
     <button class="menu-btn" type="button" data-menu-toggle aria-controls="site-menu" aria-expanded="false" aria-label="Menu">
@@ -53,14 +57,15 @@ const full = title ? `${title} · moonpool` : "moonpool";
       <a class="tool" href={REPO}><span class="wide">GitHub&nbsp;</span>→</a>
     </div>
   </header>
+  </>}
   <main id="content" class="main">
     <slot />
   </main>
-  <footer class="footer label">
+  {!bare && <footer class="footer label">
     <span>moonpool is a hobby-grade project under active development.</span>
     <a href={REPO}>Source</a>
     <a href={`${REPO}/issues`}>Issues</a>
-  </footer>
+  </footer>}
   <script is:inline src={url("site.js")}></script>
 </body>
 </html>
