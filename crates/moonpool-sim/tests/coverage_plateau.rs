@@ -205,3 +205,61 @@ fn numeric_sometimes_prevents_early_convergence() {
         "report: {report:?}"
     );
 }
+
+/// A spent wall-clock budget stops the run between seeds, and that stop is
+/// not a convergence timeout.
+#[test]
+fn a_spent_wall_clock_budget_stops_the_run() {
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .until_coverage_stable(2, 5)
+            .wall_clock_budget(std::time::Duration::ZERO)
+            .workload(NeverHitNumericGate),
+    );
+
+    assert_eq!(report.iterations, 1, "report: {report:?}");
+    assert!(report.wall_clock_budget_spent, "report: {report:?}");
+    assert!(!report.convergence_timeout, "report: {report:?}");
+    // The gate that never fired still fails the run.
+    assert_eq!(report.exit_code(), 1);
+}
+
+/// The corpus keeps the seeds that grew coverage, and the next run replays
+/// them first.
+#[test]
+fn the_corpus_file_keeps_the_seeds_that_grew_coverage() {
+    let dir = std::env::temp_dir().join(format!("moonpool-corpus-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("corpus.txt");
+    let _ = std::fs::remove_file(&path);
+
+    let first = run_simulation(
+        SimulationBuilder::new()
+            .set_iterations(20)
+            .base_seed(7)
+            .corpus_file(&path)
+            .workload(RareGateWorkload),
+    );
+    // Seed 1 reaches the two gates; a later seed reaches the rare one.
+    assert!(!first.corpus_seeds.is_empty(), "report: {first:?}");
+    assert_eq!(first.corpus_seeds[0], first.seeds_used[0]);
+    let text = std::fs::read_to_string(&path).expect("corpus written");
+    let written: Vec<u64> = text
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.parse().expect("a seed"))
+        .collect();
+    assert_eq!(written, first.corpus_seeds);
+
+    let second = run_simulation(
+        SimulationBuilder::new()
+            .set_iterations(written.len() + 1)
+            .base_seed(8)
+            .corpus_file(&path)
+            .workload(RareGateWorkload),
+    );
+    assert_eq!(&second.seeds_used[..written.len()], written.as_slice());
+    // Replaying the corpus reaches the same coverage again, seed by seed.
+    assert_eq!(&second.corpus_seeds[..written.len()], written.as_slice());
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -567,18 +567,17 @@ impl StorageEngine {
         self.state.note_damage_changed();
     }
 
-    /// Replace the regions of `ip`'s store `store`, and publish every store
-    /// of `ip` as its layout.
+    /// Replace the regions of `ip`'s store `store` in `ip`'s layout, in
+    /// place: the regions of `ip`'s other stores stay.
     pub(crate) fn publish_store_layout(
         &mut self,
         ip: IpAddr,
         store: &str,
         regions: &[moonpool_core::LayoutRegion],
     ) {
-        let stores = self.state.store_layouts.entry(ip).or_default();
-        stores.insert(store.to_string(), regions.to_vec());
-        let union: Vec<moonpool_core::LayoutRegion> = stores.values().flatten().cloned().collect();
-        self.publish_layout(ip, &union);
+        let layout = self.state.layouts.entry(ip).or_default();
+        std::sync::Arc::make_mut(layout).replace_store(store, regions);
+        self.state.note_damage_changed();
     }
 
     /// Install, replace, or (with `None`) remove `ip`'s fault focus.
@@ -1708,7 +1707,6 @@ impl StorageEngine {
         self.state.busy_until.remove(&ip);
         self.state.focus.remove(&ip);
         self.state.layouts.remove(&ip);
-        self.state.store_layouts.remove(&ip);
         let files = self
             .state
             .files

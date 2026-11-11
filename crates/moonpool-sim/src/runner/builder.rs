@@ -108,7 +108,7 @@ pub(super) enum TimelineCapture {
 /// | Chaos | [`enable_chaos`](Self::enable_chaos), [`chaos_duration`](Self::chaos_duration), [`fault_factory`](Self::fault_factory), [`network_fault_mask`](Self::network_fault_mask), [`storage_fault_mask`](Self::storage_fault_mask), [`replicated_storage_faults`](Self::replicated_storage_faults), [`swarm_operations`](Self::swarm_operations) |
 /// | Deployment shape | [`link_latency`](Self::link_latency), [`tcp_send_window_bytes`](Self::tcp_send_window_bytes), [`accept_backlog_capacity`](Self::accept_backlog_capacity), [`max_spawns`](Self::max_spawns) |
 /// | Checks and observation | [`invariant`](Self::invariant), [`invariant_fn`](Self::invariant_fn), [`trace_level`](Self::trace_level), [`capture_timeline`](Self::capture_timeline), [`metrics_factory`](Self::metrics_factory), [`metric`](Self::metric), [`check_determinism`](Self::check_determinism) |
-/// | Seeds and stopping | [`until_coverage_stable`](Self::until_coverage_stable), [`set_iterations`](Self::set_iterations), [`set_debug_seeds`](Self::set_debug_seeds), [`replay_timeline`](Self::replay_timeline), [`run_time_budget`](Self::run_time_budget), `enable_exploration` (feature `exploration`) |
+/// | Seeds and stopping | [`until_coverage_stable`](Self::until_coverage_stable), [`set_iterations`](Self::set_iterations), [`set_debug_seeds`](Self::set_debug_seeds), [`replay_timeline`](Self::replay_timeline), [`run_time_budget`](Self::run_time_budget), [`wall_clock_budget`](Self::wall_clock_budget), [`corpus_file`](Self::corpus_file), `enable_exploration` (feature `exploration`) |
 ///
 /// The crate-level documentation has a complete example.
 pub struct SimulationBuilder {
@@ -192,6 +192,11 @@ pub struct SimulationBuilder {
     /// Recipe installed for every iteration (set by [`Self::replay_timeline`]).
     pub(super) replay_recipe: Option<Vec<(u64, u64)>>,
     pub(super) run_time_budget: Duration,
+    /// Wall-clock length of the whole campaign ([`Self::wall_clock_budget`]).
+    pub(super) wall_clock_budget: Option<Duration>,
+    /// Seed corpus read before the first seed and written after the last
+    /// ([`Self::corpus_file`]).
+    pub(super) corpus_file: Option<std::path::PathBuf>,
     /// How many processes the workloads may spawn per run.
     pub(super) max_spawns: usize,
     pub(super) shard_faults: crate::runner::shard::ShardFaults,
@@ -260,6 +265,8 @@ impl SimulationBuilder {
             pending_replay: None,
             replay_recipe: None,
             run_time_budget: super::stall::DEFAULT_RUN_TIME_BUDGET,
+            wall_clock_budget: None,
+            corpus_file: None,
             max_spawns: DEFAULT_MAX_SPAWNS,
             shard_faults: crate::runner::shard::ShardFaults::default(),
         }
@@ -1141,6 +1148,44 @@ impl SimulationBuilder {
     #[must_use]
     pub fn base_seed(mut self, base_seed: u64) -> Self {
         self.base_seed = Some(base_seed);
+        self
+    }
+
+    /// Stop the campaign once it has run for `budget` of wall-clock time.
+    ///
+    /// The runner checks the budget between seeds, so the seed in flight
+    /// finishes and the run takes a little longer than `budget`. The other
+    /// stop rules still apply: the first one met stops the run. Use it to
+    /// give parallel CI shards the same length. A run stopped by the budget
+    /// is not a [`convergence_timeout`](crate::SimulationReport::convergence_timeout);
+    /// [`wall_clock_budget_spent`](crate::SimulationReport::wall_clock_budget_spent)
+    /// says so instead. Draws no randomness. On wasm the wall clock does not
+    /// advance, so the budget never stops the run.
+    #[must_use]
+    pub fn wall_clock_budget(mut self, budget: Duration) -> Self {
+        self.wall_clock_budget = Some(budget);
+        self
+    }
+
+    /// Keep a seed corpus in the file at `path`.
+    ///
+    /// Before the first seed, the runner reads the file (one decimal seed
+    /// per line; empty lines and lines that start with `#` are skipped; a
+    /// missing file is an empty corpus) and runs those seeds first, after
+    /// the [`set_debug_seeds`](Self::set_debug_seeds) seeds. After the last
+    /// seed, it writes the seeds of this run that grew coverage (new code
+    /// edges, or a new `sometimes` or `reachable` assertion) back to the
+    /// file: the corpus is also in
+    /// [`corpus_seeds`](crate::SimulationReport::corpus_seeds).
+    ///
+    /// A CI job that restores the corpus of `main` first replays the seeds
+    /// that reached the most coverage, then draws new ones. A corpus seed
+    /// that adds nothing any more drops out of the next file. A read or a
+    /// write error is logged and does not fail the run. Ignored by
+    /// [`replay_timeline`](Self::replay_timeline).
+    #[must_use]
+    pub fn corpus_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.corpus_file = Some(path.into());
         self
     }
 

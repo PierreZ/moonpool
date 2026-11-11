@@ -149,7 +149,10 @@ and under the simulator in its own `#[test]`.
   `spawnable_group` declares a group spawned later, so a gray failure or an
   outage can name it.
 - Iteration control: `set_iterations`, `until_coverage_stable`,
-  `set_debug_seeds`, `run_time_budget`, `replay_timeline`.
+  `set_debug_seeds`, `run_time_budget`, `replay_timeline`,
+  `wall_clock_budget` (stop a campaign after a wall-clock time),
+  `corpus_file` (replay a seed corpus first, keep the seeds that grew
+  coverage).
 - `check_determinism` runs each seed twice and fails it when the draw
   sequences differ.
 - `SimulationReport` with failing seeds, assertion and coverage violations,

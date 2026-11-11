@@ -207,6 +207,8 @@ impl MetricsCollector {
             assertion_details: inputs.assertion_details,
             bucket_summaries: inputs.bucket_summaries,
             convergence_timeout: inputs.convergence_timeout,
+            wall_clock_budget_spent: inputs.wall_clock_budget_spent,
+            corpus_seeds: inputs.corpus_seeds,
             saturation: inputs.saturation,
             app_metrics,
             run_id: self.run_id,
@@ -227,5 +229,7 @@ pub(crate) struct GenerateReportInputs {
     pub(crate) assertion_details: Vec<AssertionDetail>,
     pub(crate) bucket_summaries: Vec<BucketSiteSummary>,
     pub(crate) convergence_timeout: bool,
+    pub(crate) wall_clock_budget_spent: bool,
+    pub(crate) corpus_seeds: Vec<u64>,
     pub(crate) saturation: Option<SaturationReport>,
 }

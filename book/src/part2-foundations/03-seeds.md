@@ -64,6 +64,17 @@ SimulationBuilder::new()
     .set_iterations(100)
 ```
 
+Two options change how a campaign starts and stops, in either mode:
+
+```rust,ignore
+SimulationBuilder::new()
+    .wall_clock_budget(Duration::from_secs(600)) // stop after 10 minutes
+    .corpus_file("sim-corpus.txt")               // replay, then keep, a seed corpus
+```
+
+- **`wall_clock_budget`** stops the run between seeds once it has run this long. Parallel CI shards then take the same time. The other stop rules still apply. A run that the budget stops is not a convergence timeout: the report sets `wall_clock_budget_spent`.
+- **`corpus_file`** reads a list of seeds before the first seed and runs them first. After the last seed, it writes the seeds of this run that grew coverage (new code edges or a new `sometimes`) to the same file, also in `report.corpus_seeds`. A CI job that restores the corpus of `main` replays the seeds that reached the most coverage first. A corpus seed that adds nothing drops out of the next file.
+
 Each seed also draws its own **swarm**: with `ChaosMode::Swarm` a seed enables a random subset of fault families, and `swarm_operations()` enables a random subset of each workload's operations. Two seeds therefore differ in which behaviours are even possible, not only in timing. [Swarm Testing](../part3-building/28-swarm-testing.md) explains why this finds more bugs than every fault on at once.
 
 Seed-driven testing compounds. Run 1,000 seeds in CI on every commit. Run 100,000 overnight. A bug that needs three unlikely events to coincide surfaces within a few thousand seeds, because buggify amplifies the probability of each event.

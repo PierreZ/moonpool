@@ -664,8 +664,14 @@ impl<P: LocalStorageProvider> Journal<P> {
                 shard: None,
             },
         ];
-        for segment in &self.segments {
-            let path = format!("{}/{}", self.dir, segment.name);
+        // One path per segment, formatted once, not once per position.
+        let paths: Vec<String> = self
+            .segments
+            .iter()
+            .map(|segment| format!("{}/{}", self.dir, segment.name))
+            .collect();
+        regions.reserve(paths.len() * 2 + self.index.len() * 2);
+        for path in &paths {
             for copy in 0..2 {
                 regions.push(LayoutRegion {
                     path: path.clone(),
@@ -676,9 +682,23 @@ impl<P: LocalStorageProvider> Journal<P> {
                 });
             }
         }
-        for layout in self.index.keys().filter_map(|&p| self.layout(p)) {
-            regions.push(layout.record);
-            regions.push(layout.entry);
+        for (&position, at) in &self.index {
+            let path = &paths[self.segment_index(at.segment)];
+            let offset = u64::from(at.offset);
+            regions.push(LayoutRegion {
+                path: path.clone(),
+                bytes: at.record_at..at.record_at + u64_of(RECORD_SIZE),
+                kind: Layout::RECORD,
+                stripe: Some(position),
+                shard: None,
+            });
+            regions.push(LayoutRegion {
+                path: path.clone(),
+                bytes: offset..offset + u64_of(RECORD_SIZE) + u64::from(at.len),
+                kind: Layout::ENTRY,
+                stripe: Some(position),
+                shard: None,
+            });
         }
         regions
     }

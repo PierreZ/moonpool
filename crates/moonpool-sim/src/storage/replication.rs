@@ -31,7 +31,7 @@
 //! In each, a record's copies hold damage in at most `tolerance` domains at
 //! once, and so does node-local data: by construction, with no ledger.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::ops::Range;
 use std::sync::Arc;
@@ -340,6 +340,9 @@ struct Region {
     bytes: Range<u64>,
     stripe: Option<u64>,
     shard: Option<Arc<str>>,
+    /// The store that published the region
+    /// ([`LayoutIndex::replace_store`]); `None` for a whole-layout publish.
+    store: Option<Arc<str>>,
 }
 
 /// One region a sector falls in: its stripe and shard.
@@ -350,32 +353,84 @@ pub(crate) type Entry = (Option<u64>, Option<Arc<str>>);
 pub(crate) struct LayoutIndex {
     /// Per path: the regions, sorted by range start.
     by_path: BTreeMap<String, Vec<Region>>,
-    /// The longest range, bounding the backwards scan of a lookup.
+    /// Per store: the paths its regions are on.
+    store_paths: BTreeMap<Arc<str>, BTreeSet<String>>,
+    /// The longest range, bounding the backwards scan of a lookup. It only
+    /// grows: a bound that is too long costs a longer scan, not a wrong
+    /// answer.
     longest: u64,
 }
 
 impl LayoutIndex {
     pub(crate) fn new(regions: &[LayoutRegion]) -> Self {
         let mut index = Self::default();
+        let touched = index.insert(regions, None);
+        index.sort(touched);
+        index
+    }
+
+    /// Replace the regions that `store` published with `regions`, and
+    /// leave the regions of every other store in place.
+    ///
+    /// Only the paths of the old and the new regions of `store` are
+    /// touched: a store that publishes after each commit pays for its own
+    /// regions, not for the union of every store of the process.
+    pub(crate) fn replace_store(&mut self, store: &str, regions: &[LayoutRegion]) {
+        let name: Arc<str> = Arc::from(store);
+        let old = self.store_paths.remove(&name).unwrap_or_default();
+        for path in &old {
+            if let Some(ranges) = self.by_path.get_mut(path) {
+                ranges.retain(|region| region.store.as_deref() != Some(store));
+                if ranges.is_empty() {
+                    self.by_path.remove(path);
+                }
+            }
+        }
+        let touched = self.insert(regions, Some(&name));
+        if !touched.is_empty() {
+            self.store_paths.insert(name, touched.clone());
+        }
+        self.sort(touched);
+    }
+
+    /// Add `regions` for `store`, and return the paths they are on.
+    fn insert(&mut self, regions: &[LayoutRegion], store: Option<&Arc<str>>) -> BTreeSet<String> {
+        let mut touched = BTreeSet::new();
+        // A store lists its regions path by path: normalize each path once.
+        let mut last: Option<(&str, String)> = None;
         for region in regions {
             if region.bytes.start >= region.bytes.end {
                 continue;
             }
-            index.longest = index.longest.max(region.bytes.end - region.bytes.start);
-            index
-                .by_path
-                .entry(super::faults::normalize_path(&region.path))
-                .or_default()
-                .push(Region {
-                    bytes: region.bytes.clone(),
-                    stripe: region.stripe,
-                    shard: region.shard.as_deref().map(Arc::from),
-                });
+            self.longest = self.longest.max(region.bytes.end - region.bytes.start);
+            let cached = last
+                .as_ref()
+                .filter(|(raw, _)| *raw == region.path)
+                .map(|(_, normal)| normal.clone());
+            let path = cached.unwrap_or_else(|| {
+                let normal = super::faults::normalize_path(&region.path);
+                last = Some((region.path.as_str(), normal.clone()));
+                normal
+            });
+            let ranges = self.by_path.entry(path.clone()).or_default();
+            ranges.push(Region {
+                bytes: region.bytes.clone(),
+                stripe: region.stripe,
+                shard: region.shard.as_deref().map(Arc::from),
+                store: store.cloned(),
+            });
+            touched.insert(path);
         }
-        for ranges in index.by_path.values_mut() {
-            ranges.sort_by_key(|region| region.bytes.start);
+        touched
+    }
+
+    /// Sort the regions of each path in `paths` by range start.
+    fn sort(&mut self, paths: BTreeSet<String>) {
+        for path in paths {
+            if let Some(ranges) = self.by_path.get_mut(&path) {
+                ranges.sort_by_key(|region| region.bytes.start);
+            }
         }
-        index
     }
 
     /// Whether any published region shares a byte with `sector`.
@@ -623,5 +678,48 @@ mod tests {
             }
         }
         assert_eq!(plan.window_ids(4), vec!["b".to_string()], "the turn wraps");
+    }
+
+    fn store_region(path: &str, bytes: Range<u64>, stripe: Option<u64>) -> LayoutRegion {
+        LayoutRegion {
+            path: path.to_string(),
+            bytes,
+            kind: "entry",
+            stripe,
+            shard: None,
+        }
+    }
+
+    #[test]
+    fn replacing_a_store_keeps_the_regions_of_the_other_stores() {
+        let mut layout = LayoutIndex::default();
+        layout.replace_store("a", &[store_region("a/seg", 0..512, Some(1))]);
+        layout.replace_store(
+            "b",
+            &[
+                store_region("b/seg", 0..512, Some(2)),
+                store_region("shared", 512..1024, Some(3)),
+            ],
+        );
+        layout.replace_store("a", &[store_region("shared", 0..512, Some(4))]);
+        assert!(!layout.covers("a/seg", 0), "the old region of a is gone");
+        assert_eq!(layout.stripes("b/seg", 0), vec![Some(2)]);
+        assert_eq!(layout.stripes("shared", 0), vec![Some(4)]);
+        assert_eq!(layout.stripes("shared", 1), vec![Some(3)]);
+
+        // The same index rebuilt from the union of both stores agrees.
+        let union = LayoutIndex::new(&[
+            store_region("b/seg", 0..512, Some(2)),
+            store_region("shared", 512..1024, Some(3)),
+            store_region("shared", 0..512, Some(4)),
+        ]);
+        for (path, sector) in [("a/seg", 0), ("b/seg", 0), ("shared", 0), ("shared", 1)] {
+            assert_eq!(layout.entries(path, sector), union.entries(path, sector));
+        }
+
+        layout.replace_store("b", &[]);
+        assert!(!layout.covers("b/seg", 0));
+        assert!(!layout.covers("shared", 1));
+        assert_eq!(layout.stripes("shared", 0), vec![Some(4)]);
     }
 }
