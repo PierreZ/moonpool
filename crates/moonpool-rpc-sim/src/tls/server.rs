@@ -11,6 +11,7 @@ use moonpool_sim::{
     assert_sometimes,
 };
 
+use super::ledger::{Ledger, Receipt, Role};
 use super::{
     IMPOSTOR_REFS_KEY, MEMBER, Mode, Pki, PrivateEcho, Probe, PublicEcho, Refs, SERVER_REFS_KEY,
     Sender,
@@ -31,19 +32,34 @@ fn tls_error(error: impl std::fmt::Display) -> SimulationError {
     SimulationError::InvalidState(format!("tls: {error}"))
 }
 
-/// Which server a handler belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Real,
-    Impostor,
+/// Where a server records what its handlers receive.
+#[derive(Clone)]
+struct Book {
+    ledger: Ledger,
+    role: Role,
+    /// The real server's boot (0 for the impostor).
+    boot: u64,
 }
 
-async fn serve<M>(mut stream: RequestStream<M>, role: Role, private: bool)
+async fn serve<M>(mut stream: RequestStream<M>, book: Book, private: bool)
 where
     M: RpcMethod<Request = Probe, Reply = Probe>,
 {
+    let role = book.role;
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
         let sender = Sender::of(request.sender);
+        book.ledger.receive(
+            request.id,
+            Receipt {
+                role,
+                sender,
+                identity: reply
+                    .peer()
+                    .and_then(|peer| peer.identity())
+                    .map(str::to_string),
+                boot: book.boot,
+            },
+        );
         assert_always!(
             role == Role::Real,
             "a client that trusts the authority never reaches an impostor server",
@@ -81,7 +97,7 @@ async fn run_server(
     tls: TlsServer,
     security: SecurityConfig,
     refs_key: &'static str,
-    role: Role,
+    book: Book,
 ) -> SimulationResult<()> {
     let config = RpcConfig {
         security,
@@ -107,7 +123,10 @@ async fn run_server(
         },
     );
     let serve = async {
-        futures::join!(serve(private, role, true), serve(public, role, false));
+        futures::join!(
+            serve(private, book.clone(), true),
+            serve(public, book, false)
+        );
     };
     let run = driver.run();
     futures::pin_mut!(run, serve);
@@ -129,6 +148,8 @@ impl Process for TlsServerProcess {
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let pki = pki(ctx)?;
+        let ledger = Ledger::of(ctx.state());
+        let boot = ledger.boot();
         let (issued, mode) = pki.with(|inner| (inner.server.clone(), inner.mode));
         let tls = TlsServer::new(issued.chain.clone(), issued.key(), pki.clock())
             .and_then(|tls| tls.with_client_auth(mode.client_auth(pki.client_roots())))
@@ -143,7 +164,11 @@ impl Process for TlsServerProcess {
             tls,
             SecurityConfig::default().admit_authenticated_peers(),
             SERVER_REFS_KEY,
-            Role::Real,
+            Book {
+                ledger,
+                role: Role::Real,
+                boot,
+            },
         )
         .await
     }
@@ -169,7 +194,11 @@ impl Process for ImpostorProcess {
             tls,
             SecurityConfig::trusted_network(),
             IMPOSTOR_REFS_KEY,
-            Role::Impostor,
+            Book {
+                ledger: Ledger::of(ctx.state()),
+                role: Role::Impostor,
+                boot: 0,
+            },
         )
         .await
     }

@@ -1,10 +1,15 @@
 //! Three client runtimes that trust the real authority, calling both
 //! servers' endpoints during the chaos, then checking the member and the
 //! public endpoint recover once the script restored clean certificates.
+//!
+//! Some calls go on a new runtime made for the call alone: its session is
+//! new, so the certificates in force during the call decide it, and
+//! [`refusal`] says when it must not complete.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
+use moonpool_rpc::security::tls::pki::{Flaw, Issued};
 use moonpool_rpc::security::tls::{ServerNames, Tls, TlsClient};
 use moonpool_rpc::{ErrorReason, RpcDriver, RpcError, RpcHandle, RpcMethod, ServiceRef};
 use moonpool_sim::{
@@ -12,11 +17,13 @@ use moonpool_sim::{
     assert_always, assert_reachable, assert_sometimes,
 };
 
+use super::ledger::{Call, Ledger, Presented, Refusal, Session, Target, refusal};
 use super::{
     IMPOSTOR_REFS_KEY, Mode, Pki, PrivateEcho, Probe, PublicEcho, Refs, SCRIPT_DONE_KEY,
     SERVER_REFS_KEY, Sender,
 };
 use crate::foundations::{CALL_TIMEOUT, rpc_config};
+use crate::security::judge::classify;
 use crate::streams::pause;
 
 /// The campaign's workload.
@@ -39,14 +46,6 @@ impl Runtimes {
             Sender::Anonymous => &self.anonymous,
         }
     }
-}
-
-/// Where a call goes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Target {
-    Private,
-    Public,
-    Impostor,
 }
 
 /// Record why a refused call was refused, as far as the error says.
@@ -92,13 +91,15 @@ impl TlsWorkload {
         }
     }
 
-    async fn once(
+    /// Send one probe from `sender` to `target` on `rpc`, recorded in the
+    /// ledger, and judge what comes back.
+    async fn send(
         &mut self,
         ctx: &SimContext,
-        runtimes: &Runtimes,
-        sender: Sender,
-        target: Target,
+        rpc: &RpcHandle<SimProviders>,
+        call_of: Call,
     ) -> Option<Result<Probe, RpcError>> {
+        let Call { sender, target, .. } = call_of;
         let key = if target == Target::Impostor {
             IMPOSTOR_REFS_KEY
         } else {
@@ -106,12 +107,14 @@ impl TlsWorkload {
         };
         let refs = ctx.state().get::<Refs>(key)?;
         let probe = self.probe(sender);
-        let rpc = runtimes.of(sender);
+        let ledger = Ledger::of(ctx.state());
+        ledger.call(probe.id, call_of);
         let outcome = if target == Target::Public {
             call::<PublicEcho>(rpc, &refs.public, &probe).await
         } else {
             call::<PrivateEcho>(rpc, &refs.private, &probe).await
         }?;
+        ledger.outcome(probe.id, classify(&outcome));
         match &outcome {
             Ok(reply) => {
                 assert_always!(reply == &probe, "a reply echoes its own request");
@@ -143,6 +146,94 @@ impl TlsWorkload {
         Some(outcome)
     }
 
+    /// One call on a sender's long-lived runtime.
+    async fn once(
+        &mut self,
+        ctx: &SimContext,
+        runtimes: &Runtimes,
+        sender: Sender,
+        target: Target,
+    ) -> Option<Result<Probe, RpcError>> {
+        let call_of = Call {
+            sender,
+            target,
+            fresh: false,
+        };
+        self.send(ctx, runtimes.of(sender), call_of).await
+    }
+
+    /// One call to the real server on a runtime made for it alone, so on a
+    /// new session. When the server's leaf and client roots did not change
+    /// during the call, the oracle knows what the session met, and a call
+    /// that the certificates must refuse never completes.
+    async fn fresh(
+        &mut self,
+        ctx: &SimContext,
+        pki: &Pki,
+        sender: Sender,
+        target: Target,
+    ) -> SimulationResult<()> {
+        let presented = pki.with(|inner| match sender {
+            Sender::Member => Some(inner.member.clone()),
+            Sender::Stranger => inner.stranger.clone(),
+            Sender::Anonymous => None,
+        });
+        let before = pki.snapshot();
+        let (driver, rpc) = RpcDriver::client_only_with(
+            ctx.providers().clone(),
+            rpc_config(),
+            Tls::client(client(pki, presented.clone())?),
+        )
+        .map_err(|error| SimulationError::InvalidState(format!("rpc config: {error}")))?;
+        let call_of = Call {
+            sender,
+            target,
+            fresh: true,
+        };
+        let outcome = moonpool_sim::select! {
+            _ = driver.run() => None,
+            outcome = self.send(ctx, &rpc, call_of) => outcome,
+        };
+        let Some(outcome) = outcome else {
+            return Ok(());
+        };
+        let (generation, utc_to) = pki.generation_and_utc();
+        let Some(server_ip) = before.server_ip else {
+            return Ok(());
+        };
+        if generation != before.generation {
+            return Ok(());
+        }
+        let presented = match (sender, presented.as_ref()) {
+            (Sender::Member, Some(leaf)) => Presented::Authority(leaf),
+            (Sender::Stranger, Some(leaf)) => Presented::Stray(leaf),
+            _ => Presented::Nothing,
+        };
+        let session = Session {
+            mode: before.mode,
+            server: &before.server,
+            server_ip,
+            roots_swapped: before.roots_swapped,
+            presented,
+            utc_from: before.utc,
+            utc_to,
+        };
+        let verdict = refusal(&session, target);
+        if let Some(reason) = verdict {
+            assert_always!(
+                outcome.is_err(),
+                "a new session never completes a call that its certificates must refuse",
+                { "reason" => format!("{reason:?}"), "sender" => format!("{sender:?}") }
+            );
+            if outcome.is_err() {
+                observe_verdict(reason);
+            }
+        } else if outcome.is_ok() && before.server.flaw == Some(Flaw::NameDropped) {
+            assert_reachable!("rpc tls server leaf without its URI still proves its address");
+        }
+        Ok(())
+    }
+
     async fn drive(
         &mut self,
         ctx: &SimContext,
@@ -159,7 +250,11 @@ impl TlsWorkload {
                 5..=8 => Target::Public,
                 _ => Target::Impostor,
             };
-            let _ = self.once(ctx, runtimes, sender, target).await;
+            if target != Target::Impostor && ctx.random().random_bool(0.3) {
+                self.fresh(ctx, pki, sender, target).await?;
+            } else {
+                let _ = self.once(ctx, runtimes, sender, target).await;
+            }
             if pause(
                 ctx,
                 Duration::from_millis(ctx.random().random_range(10..200)),
@@ -211,10 +306,46 @@ impl TlsWorkload {
     }
 }
 
-fn client(
-    pki: &Pki,
-    certificate: Option<moonpool_rpc::security::tls::pki::Issued>,
-) -> SimulationResult<TlsClient> {
+/// Coverage: which certificate fault turned a new session away.
+fn observe_verdict(reason: Refusal) {
+    match reason {
+        Refusal::ServerExpired => {
+            assert_reachable!("rpc tls new session refused: server leaf expired");
+        }
+        Refusal::ServerNotValidYet => {
+            assert_reachable!("rpc tls new session refused: server leaf not valid yet");
+        }
+        Refusal::ServerWrongUse => {
+            assert_reachable!("rpc tls new session refused: server leaf for the wrong use");
+        }
+        Refusal::ServerNameMissing => {
+            assert_reachable!("rpc tls new session refused: server leaf without the address");
+        }
+        Refusal::ClientUntrusted => {
+            assert_sometimes!(true, "rpc tls new session refused: stray client authority");
+        }
+        Refusal::ClientRootsMoved => {
+            assert_reachable!("rpc tls new session refused: client roots moved away");
+        }
+        Refusal::ClientExpired => {
+            assert_reachable!("rpc tls new session refused: member leaf expired");
+        }
+        Refusal::ClientNotValidYet => {
+            assert_reachable!("rpc tls new session refused: member leaf not valid yet");
+        }
+        Refusal::ClientWrongUse => {
+            assert_reachable!("rpc tls new session refused: member leaf for the wrong use");
+        }
+        Refusal::NoClientCertificate => {
+            assert_reachable!("rpc tls new session refused: no client certificate");
+        }
+        Refusal::NotMember => {
+            assert_sometimes!(true, "rpc tls new session kept out of a private endpoint");
+        }
+    }
+}
+
+fn client(pki: &Pki, certificate: Option<Issued>) -> SimulationResult<TlsClient> {
     let tls = |error| SimulationError::InvalidState(format!("tls client: {error}"));
     // Dialed by address: the server's IP name proves it.
     let client = TlsClient::new([pki.authority_root()], pki.clock())
@@ -266,7 +397,16 @@ impl Workload for TlsWorkload {
         }
     }
 
-    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let Some(pki) = ctx.state().get::<Pki>(super::PKI_KEY) else {
+            return Ok(());
+        };
+        let (mode, stranger_presents) = pki.with(|inner| (inner.mode, inner.stranger.is_some()));
+        let ledger = Ledger::of(ctx.state());
+        ledger.check(mode, stranger_presents);
+        if ledger.boots() > 1 {
+            assert_reachable!("rpc tls server restarted during a run");
+        }
         Ok(())
     }
 }
