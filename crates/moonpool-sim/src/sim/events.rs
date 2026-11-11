@@ -111,6 +111,20 @@ impl Event {
         matches!(self, Event::Network(event) if event.is_infrastructure())
             || matches!(self, Event::ProcessRestart { .. })
     }
+
+    /// Returns whether the event acts on a process's lifecycle: a boot, a
+    /// restart, a spawn, a retirement, a graceful shutdown or a kill.
+    #[must_use]
+    pub fn is_process_lifecycle_event(&self) -> bool {
+        matches!(
+            self,
+            Event::ProcessRestart { .. }
+                | Event::ProcessSpawn { .. }
+                | Event::ProcessRetire { .. }
+                | Event::ProcessGracefulShutdown { .. }
+                | Event::ProcessForceKill { .. }
+        )
+    }
 }
 
 /// Stable identifier assigned to a scheduled item.

@@ -23,12 +23,13 @@ pub enum SimulationError {
     /// that the seed ends, and the seed fails.
     #[error("Stall: {0}")]
     Stall(String),
-    /// The simulation did not settle within the timeout after shutdown.
+    /// The simulation did not settle within the event limit after the run:
+    /// the queue was still busy once every process was aborted.
     #[error("Settle timeout: {pending_events} events still pending after {elapsed:?}")]
     SettleTimeout {
         /// Number of events still pending when timeout was reached.
         pending_events: usize,
-        /// How long the settle phase ran before timing out.
+        /// How much simulated time the settle phase covered before it failed.
         elapsed: std::time::Duration,
     },
 }
