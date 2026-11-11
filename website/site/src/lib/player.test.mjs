@@ -194,3 +194,22 @@ test("coverage: a check no seed reaches stays missing, and the run is not stable
   assert.deepEqual(cov.missing, ["a server drops a damaged frame"]);
   assert.equal(cov.seeds.length, cov.config.max_seeds);
 });
+
+test("the playground config goes to the address and back", () => {
+  const defaults = { scenario: "register", seed: 1, servers: 3, bug: false, wipes: false, swarm: false, chaos: { network: true, storage: false, reboots: true } };
+  assert.deepEqual(model.playConfig("", defaults), defaults);
+  const c = { ...defaults, seed: 42, servers: 5, bug: true, swarm: true, chaos: { network: false, storage: true, reboots: true } };
+  assert.deepEqual(model.playConfig("?" + model.playQuery(c), defaults), c);
+  const bad = model.playConfig("?seed=-3&servers=9&net=yes&bug=1", defaults);
+  assert.equal(bad.seed, 1);
+  assert.equal(bad.servers, 3);
+  assert.equal(bad.chaos.network, true);
+  assert.equal(bad.bug, true);
+});
+
+test("the report marks a broken always assertion, never a sometimes one", () => {
+  const rows = model.assertionRows(debug);
+  const broken = rows.filter((r) => r.failed).map((r) => r.msg);
+  assert.deepEqual(broken, ["a read returns the last committed write"]);
+  assert.ok(model.assertionRows(home).every((r) => !r.failed));
+});

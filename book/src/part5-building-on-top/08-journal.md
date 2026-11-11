@@ -10,6 +10,8 @@ production hands it `TokioStorageProvider`, tests hand it the simulator's
 disk, and the code is the same. It is also the worked example of testing a
 storage engine under `Chaos::Storage`.
 
+[moonpool-journal, byte by byte](../extras/journal/) on the website draws each file, record and header of the format from the code, with the commit protocol and the recovery rules.
+
 ## The Problem It Solves
 
 A log that finds a bad checksum usually truncates there. For a torn write at
