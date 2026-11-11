@@ -40,7 +40,7 @@ fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
                     reboots: true,
                 },
                 storage_faults: Some(vec!["crash_damage".into()]),
-                ..seed(84)
+                ..seed(325)
             }],
         ),
         // Reboots: crashes, a restart, and one wipe.

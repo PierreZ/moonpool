@@ -36,8 +36,8 @@ const write = excerpt(repoFile("crates/moonpool-wasm-demo/src/register.rs"), "if
 
   <h2>The live run</h2>
   <p>Each server writes version <i>v</i> of the register to sector <i>v</i> − 1 of its log, then syncs it.
-    Crash damage is on and the other storage faults are off. Step to 453 ms: server 10.0.1.1 crashes
-    after it wrote sector 3 and before the sync. The crash loses the sector. The server did not
+    Crash damage is on and the other storage faults are off. Step to 305 ms: server 10.0.1.3 crashes
+    after it wrote sector 2 and before the sync. The crash loses the sector. The server did not
     answer that write, so no client counts on it. When a server boots, it reads its log and keeps the newest
     record that passes its check word.</p>
   <div class="breakout">
