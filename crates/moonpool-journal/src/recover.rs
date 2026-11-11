@@ -17,6 +17,13 @@
 //! **Pass 2, verdicts** (the table in the crate docs). Only the **last
 //! batch** and damaged records cost entry reads: the rest of the log is
 //! checked when it is read.
+//!
+//! **What the metainfo proves.** Its high-water mark ([`Known::mark`]) is a
+//! batch known durable: a slot of a batch at or below it whose record and
+//! entry are both damaged is corruption, never a crash. Its open generation
+//! ([`Known::generation`]) is above every batch number written so far: a
+//! batch of a later generation proves the metainfo older than the log
+//! ([`OpenError::MetaRolledBack`]).
 
 use moonpool_core::{AlignedBuf, LocalStorageFile};
 
@@ -86,7 +93,10 @@ pub(crate) struct Scan {
     /// The last batch's persist extent rewritten: `(segment index, offset,
     /// bytes)`. Set when it voids or rebuilds a record, so the next open
     /// finds a durable verdict instead of damage before a later batch.
-    pub rewrite: Option<(usize, u64, AlignedBuf)>,
+    /// Written in order, each durable before the next: when the batch has
+    /// both voids and rebuilt records, the voids land first (see
+    /// [`judge_batch`]).
+    pub rewrite: Option<(usize, u64, Vec<AlignedBuf>)>,
 }
 
 /// An entry checked against what is expected of it.
@@ -145,15 +155,21 @@ fn rebuild(header: &EntryHeader, stored: u32, offset: u64) -> Record {
     }
 }
 
-/// Which batch numbers are garbage: written by an earlier open generation
-/// beyond what the next open found, so already declared absent.
+/// What the metainfo says about the log.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Stale {
+pub(crate) struct Known {
+    /// The open generation of the metainfo: every batch was written by
+    /// this generation or an earlier one.
     pub generation: u32,
+    /// The last batch the last open found. A batch of an earlier
+    /// generation numbered above it is garbage: written beyond what that
+    /// open found, so already declared absent.
     pub last: u64,
+    /// The high-water mark: a batch the metainfo proves durable.
+    pub mark: u64,
 }
 
-impl Stale {
+impl Known {
     fn is_stale(self, batch: u64) -> bool {
         generation_of(batch) < u64::from(self.generation) && batch > self.last
     }
@@ -163,6 +179,55 @@ impl Stale {
     fn is_stale_in(self, first: u64, batch: u64) -> bool {
         batch < first || self.is_stale(batch)
     }
+
+    /// [`check_generation`](Self::check_generation) for every valid record
+    /// of a persist log that is not stale.
+    fn check_log(self, log: &[u8], first: u64) -> Result<(), OpenError> {
+        for bytes in log.as_chunks::<RECORD_SIZE>().0 {
+            if let Slot::Valid(record) = Record::decode(bytes)
+                && !self.is_stale_in(first, record.batch)
+            {
+                self.check_generation(record.batch)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A batch of a later open generation than the metainfo's: every open
+    /// raises the generation durably before it writes, so the metainfo is
+    /// older than the log (two faults lost its newer copies).
+    fn check_generation(self, batch: u64) -> Result<(), OpenError> {
+        if generation_of(batch) > u64::from(self.generation) {
+            return Err(OpenError::MetaRolledBack {
+                generation: self.generation,
+                batch,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The batch whose first entry is at `offset`, from that entry: when
+/// every record of a batch is damaged. `(tag, last)`: the journal's tag and
+/// the last batch before it.
+async fn batch_from_entry<F: LocalStorageFile>(
+    segment: &Segment<F>,
+    offset: u64,
+    (tag, last): (u32, u64),
+    known: Known,
+) -> Result<Option<(u64, u16)>, OpenError> {
+    match read_entry(segment, offset, tag).await? {
+        Some((header, _, _))
+            if header.index == 0
+                && header.batch > last
+                && header.batch >= segment.first_batch
+                && !known.is_stale(header.batch) =>
+        {
+            known.check_generation(header.batch)?;
+            Ok(Some((header.batch, header.count)))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Pass 1 over one segment. `prev` is the last batch before it.
@@ -170,7 +235,7 @@ async fn scan_segment<F: LocalStorageFile>(
     segment: &Segment<F>,
     prev: u64,
     tag: u32,
-    stale: Stale,
+    known: Known,
 ) -> Result<(Vec<BatchScan>, u64, u64), OpenError> {
     let geometry = segment.geometry;
     let log = segment.read_persist_log().await?;
@@ -178,11 +243,12 @@ async fn scan_segment<F: LocalStorageFile>(
     // A stale record reads as damage: it is not evidence of anything. That
     // covers a batch older than the segment, left in a recycled file.
     let slot = |at: usize| match Record::decode(&log[at * RECORD_SIZE..]) {
-        Slot::Valid(record) if stale.is_stale_in(segment.first_batch, record.batch) => {
+        Slot::Valid(record) if known.is_stale_in(segment.first_batch, record.batch) => {
             Slot::Damaged
         }
         slot => slot,
     };
+    known.check_log(&log, segment.first_batch)?;
     let persist_at = |at: usize| Geometry::PERSIST_START + u64_of(at * RECORD_SIZE);
 
     let mut batches = Vec::new();
@@ -208,17 +274,7 @@ async fn scan_segment<F: LocalStorageFile>(
         };
         let shape = match from_record {
             Some(shape) => Some(shape),
-            None => match read_entry(segment, entry_cursor, tag).await? {
-                Some((header, _, _))
-                    if header.index == 0
-                        && header.batch > last
-                        && header.batch >= segment.first_batch
-                        && !stale.is_stale(header.batch) =>
-                {
-                    Some((header.batch, header.count))
-                }
-                _ => None,
-            },
+            None => batch_from_entry(segment, entry_cursor, (tag, last), known).await?,
         };
         // Something valid lies further on, but nothing locates a batch at
         // this boundary: the batch here is gone, not the end of the log.
@@ -284,15 +340,16 @@ async fn scan_segment<F: LocalStorageFile>(
 pub(crate) async fn scan<F: LocalStorageFile>(
     segments: &[Segment<F>],
     tag: u32,
-    stale: Stale,
+    known: Known,
 ) -> Result<Scan, OpenError> {
     let mut per_segment = Vec::with_capacity(segments.len());
     let mut last = segments.first().map_or(0, |s| s.prev_batch);
     for segment in segments {
+        known.check_generation(segment.first_batch)?;
         if segment.prev_batch != last {
             return Err(OpenError::LostBatch { batch: last + 1 });
         }
-        let (batches, persist_next, entry_next) = scan_segment(segment, last, tag, stale).await?;
+        let (batches, persist_next, entry_next) = scan_segment(segment, last, tag, known).await?;
         if let Some(batch) = batches.last() {
             last = batch.seq;
         }
@@ -313,10 +370,39 @@ pub(crate) async fn scan<F: LocalStorageFile>(
         let segment = &segments[s];
         for (b, batch) in batches.into_iter().enumerate() {
             let is_last = last_location == Some((s, b));
-            judge_batch(segment, s, batch, is_last, tag, &mut out).await?;
+            let judge = Judge {
+                is_last,
+                tag,
+                mark: known.mark,
+            };
+            judge_batch(segment, s, batch, judge, &mut out).await?;
         }
     }
     Ok(out)
+}
+
+/// What pass 2 knows of a batch beyond its slots.
+#[derive(Clone, Copy)]
+struct Judge {
+    /// The batch is the last in the log.
+    is_last: bool,
+    tag: u32,
+    /// The metainfo's high-water mark.
+    mark: u64,
+}
+
+impl Judge {
+    /// Whether a crash can explain a slot of `batch` whose record and entry
+    /// are both damaged: only in the last batch, above the mark, and not in
+    /// an `Ordered` batch that kept an intact record (its entries were
+    /// durable before any record was written, so a damaged one is
+    /// corruption).
+    fn crash_explains_lost(self, batch: &BatchScan) -> bool {
+        let ordered_witness = batch.slots.iter().any(
+            |found| matches!(found, Found::Record(record) if record.flags & FLAG_ORDERED != 0),
+        );
+        self.is_last && batch.seq > self.mark && !ordered_witness
+    }
 }
 
 /// Pass 2 for one batch.
@@ -324,25 +410,37 @@ async fn judge_batch<F: LocalStorageFile>(
     segment: &Segment<F>,
     segment_index: usize,
     batch: BatchScan,
-    is_last: bool,
-    tag: u32,
+    judge: Judge,
     out: &mut Scan,
 ) -> Result<(), OpenError> {
+    let Judge { is_last, tag, mark } = judge;
+    let crash_explains_lost = judge.crash_explains_lost(&batch);
     let mut rewrite = false;
+    let mut voided = false;
+    let mut rebuilt = false;
     let mut kept: Vec<Record> = Vec::with_capacity(batch.slots.len());
+    // What the slots held on disk before this open: the voids-first write
+    // keeps a valid record and leaves a rebuilt slot zero.
+    let mut on_disk: Vec<Option<Record>> = Vec::with_capacity(batch.slots.len());
     for (index, found) in (0u16..).zip(batch.slots.iter()) {
         let record = match *found {
-            Found::Record(record) => record,
+            Found::Record(record) => {
+                on_disk.push(Some(record));
+                record
+            }
             Found::Rebuilt(record) => {
                 out.rebuilt += 1;
                 rewrite |= is_last;
+                rebuilt = true;
+                on_disk.push(None);
                 record
             }
-            Found::Lost if is_last => {
+            Found::Lost if crash_explains_lost => {
                 // Torn by a crash: never acknowledged, discarded.
                 out.voided += 1;
                 rewrite = true;
-                kept.push(Record {
+                voided = true;
+                let void = Record {
                     kind: Kind::Void,
                     flags: 0,
                     index,
@@ -353,7 +451,9 @@ async fn judge_batch<F: LocalStorageFile>(
                     offset: 0,
                     len: 0,
                     entry_crc: 0,
-                });
+                };
+                on_disk.push(Some(void));
+                kept.push(void);
                 continue;
             }
             Found::Lost => {
@@ -382,7 +482,10 @@ async fn judge_batch<F: LocalStorageFile>(
                     false
                 };
                 if damaged {
-                    if record.flags & FLAG_ORDERED != 0 {
+                    // Durable before the batch's records (`Ordered`), or
+                    // recorded by the metainfo: the record proves the entry
+                    // was synced.
+                    if record.flags & FLAG_ORDERED != 0 || batch.seq <= mark {
                         out.corrupt.push((record.position, record.id));
                     } else {
                         out.ambiguous.push((record.position, record.id));
@@ -408,12 +511,30 @@ async fn judge_batch<F: LocalStorageFile>(
         }
     }
     if rewrite {
-        let blocks = Record::blocks_for(kept.len());
-        let mut bytes = crate::io::block_buf(usize_of(blocks * BLOCK_U64));
-        for (at, record) in kept.iter().enumerate() {
-            record.encode(&mut bytes[at * RECORD_SIZE..]);
+        // Voids land before rebuilt records. A rebuilt `Ordered` record is
+        // an intact record, which makes a lost slot corruption: if a crash
+        // tore one rewrite, a rebuilt record that landed beside a void that
+        // did not would read as a double fault. Written first and alone,
+        // the voids leave every slot either valid or rebuildable.
+        let mut writes = Vec::with_capacity(2);
+        if voided && rebuilt {
+            writes.push(encode_records(on_disk.iter().map(|slot| slot.as_ref())));
         }
-        out.rewrite = Some((segment_index, batch.persist_at, bytes));
+        writes.push(encode_records(kept.iter().map(Some)));
+        out.rewrite = Some((segment_index, batch.persist_at, writes));
     }
     Ok(())
+}
+
+/// A batch's persist extent: each record encoded in its slot, a `None`
+/// slot left zero (a never-written slot).
+fn encode_records<'a>(slots: impl ExactSizeIterator<Item = Option<&'a Record>>) -> AlignedBuf {
+    let blocks = Record::blocks_for(slots.len());
+    let mut bytes = crate::io::block_buf(usize_of(blocks * BLOCK_U64));
+    for (at, record) in slots.enumerate() {
+        if let Some(record) = record {
+            record.encode(&mut bytes[at * RECORD_SIZE..]);
+        }
+    }
+    bytes
 }

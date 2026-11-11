@@ -272,12 +272,41 @@ to match damaged records with their entries, and judges each one:
 | intact | valid | live |
 | intact | damaged | live; the record is rebuilt from the entry |
 | damaged | valid | `Corrupt`, or `Ambiguous` in a `Batched` last batch |
-| damaged | damaged, last batch | torn by a crash: discarded |
+| damaged | damaged, unwitnessed last batch | torn by a crash: discarded |
+| damaged | damaged, witnessed last batch | `OpenError::DoubleFault`: refuse to open |
 | damaged | damaged, earlier | `OpenError::DoubleFault`: refuse to open |
 
+A slot whose record and entry are both damaged is what a crash in the middle
+of a commit leaves, and it is also what two faults leave on an acknowledged
+batch. The journal tells them apart only with a **witness**, something that
+proves the batch durable:
+
+- **The high-water mark.** The metainfo records the batch of its last update
+  (it is written only once that batch is durable), and every open records
+  the last batch it found. A batch at or below the mark was durable.
+- **An intact `Ordered` record.** An `Ordered` commit syncs every entry
+  before it writes any record, so one valid record proves every entry of
+  its batch was durable.
+
+In a witnessed batch, both parts damaged is `DoubleFault` and a damaged
+entry under a valid record is `Corrupt`, never `Ambiguous`. Only an
+acknowledged last batch that nothing witnesses can still be discarded: a
+`Batched` commit (or an `Ordered` one with no intact record) that changed no
+metainfo, with no open since. Its bytes look exactly like a torn commit. A
+caller that needs a batch witnessed sets its metainfo in that batch.
+
 A batch missing while later ones exist, or a log ending before the batch the
-metainfo proves durable, is `LostBatch`. A missing meta file beside segments,
-or two damaged copies, is `MetaLost`. Opening returns a `Recovery` that says
+metainfo proves durable, is `LostBatch`: that covers every record and the
+first entry of a witnessed last batch damaged, where nothing on disk even
+says the batch was there. A missing meta file beside segments, or two
+damaged copies, is `MetaLost`. Two faults can also roll the metainfo back:
+the device loses both copy writes of one update, or loses one while the
+other rots, and the older value wins. Every batch number carries the open
+generation that wrote it, and every open raises the generation in both
+copies before it writes, so a batch of a later generation than the
+metainfo's proves the metainfo older than the log: `MetaRolledBack`. A
+rollback inside one open generation stays invisible to the journal; the
+caller can check its metainfo against its own entries. Opening returns a `Recovery` that says
 what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`,
 `meta_repaired` (a metainfo copy rewritten from its twin),
 `headers_repaired`, `segments_removed`, `spares_removed` and `spare_kept`. Only the last batch's entries are
@@ -288,8 +317,21 @@ entries that follow each other in one segment with one read, up to 1 MiB, and
 judges each entry as `read` does: under direct I/O, a replay of a few thousand
 entries costs a few reads, not one read per entry.
 
+A persist record is read only at open: `read` and `replay` judge an entry
+against the record held in memory. A record that rots after the open is found
+at the next one, and if its entry rots too before then, that open refuses.
+`verify_records(range)` is the scrub's call: it reads the records of the live
+positions in `range` from disk, changes nothing, and returns the positions
+whose record no longer matches. The caller writes each one again in a new
+batch, as it does for a damaged entry. The superseded record stays damaged on
+disk until the floor frees its segment, and each open rebuilds it from its
+entry while that entry is intact.
+
 Three rules keep recovery's own writes honest, and the crash loops found
-each of them. **What opening keeps, it syncs**, because a process that
+each of them. A fourth keeps them apart from the witness rule: when an open
+discards torn slots of an `Ordered` batch and rebuilds other records of it,
+the discards land first and alone, so a crash inside the rewrite never
+leaves a rebuilt record beside a slot that reads both damaged. **What opening keeps, it syncs**, because a process that
 restarted without a power loss reads its predecessor's unsynced writes from
 the page cache. **A record never reaches the disk before its entry**, so a
 rebuilt record is written only after the entries are synced. **What an open
@@ -338,19 +380,17 @@ The full simulation is `journal.rs` in `moonpool-sim-examples`
 (`cargo xtask sim run journal`). One process owns the journal.
 `Chaos::Attrition` crashes it over and over with `prob_wipe: 0.0`, since a
 wiped disk is data loss no local journal can recover from.
-`Chaos::Storage(ChaosMode::Random)` runs the disk's fault families
-underneath, with a `storage_fault_mask` that removes the ones a lone node has
-no second copy to repair from:
+`Chaos::Storage(ChaosMode::Random)` runs every fault family of the disk
+underneath but a failed disk, which never answers again. Rot, EIO,
+misdirected and phantom writes are on, and a `JournalStrike` fault injector
+adds the double faults the random families almost never reach: it reads the
+`Journal::layout` of the last acknowledged batch, rots one byte of a record
+and one of its entry (or of every record and the first entry), then crashes
+the node:
 
 ```rust,ignore
-.storage_fault_mask(
-    StorageFaultMask::all()
-        .without(StorageFault::Corruption)
-        .without(StorageFault::Eio)
-        .without(StorageFault::Misdirect)
-        .without(StorageFault::PhantomWrite)
-        .without(StorageFault::DiskFailure),
-)
+.storage_fault_mask(StorageFaultMask::all().without(StorageFault::DiskFailure))
+.fault_factory(|| Box::new(JournalStrike))
 ```
 
 Floor raises recycle segments under the crashes, so the run reaches "an
@@ -358,17 +398,27 @@ open found a recycled spare segment" and "a commit rolled onto a recycled
 segment".
 
 The node's memory dies with it, so what it acknowledged lives in a `Ledger`
-published in the iteration's `StateHandle`. Every boot draws a durability
-mode, opens the journal and checks it against that ledger:
+published in the iteration's `StateHandle`. A lone node cannot repair rot, so
+the check is not "nothing is lost". It is a **reporting oracle**: the
+journal never hides damage. For each acknowledged `(position, id)`, after
+every open, the replay returns the exact payload, or `ReadError::Damaged`
+with that position and that id, or the open refuses with an evidence variant
+of `OpenError`. It never returns other bytes, an older id as the current one,
+or nothing. For a write that was not acknowledged, absent, old and new are
+all correct; a mixed payload is not. The one exception is the unwitnessed
+last batch, which may read as before it:
 
 ```rust,ignore
-assert_always!(written, "a position holds only a value written there");
-assert_always!(
-    pending.batched && pending.touches(position),
-    "only the Batched batch in flight comes back damaged"
-);
-assert_always!(present, "no acknowledged write is lost");
+assert_always!(written, "a position returns only its acknowledged value or one in flight");
+assert_always!(at == position && named, "damage names the position and an id written there");
+assert_always!(kept, "an acknowledged entry is returned or reported damaged, never forgotten");
 ```
+
+The node then plays a replication layer from the ledger, as a peer would: it
+writes a damaged acknowledged entry again, clears a damaged entry nothing
+acknowledged, and rebuilds the whole journal when an open refuses. On the
+code before the witness rule, the oracle failed in a few seeds of every 50:
+two faults on a recorded last batch were discarded as a torn commit.
 
 A failed sync is an operating error, not a verdict: `CommitError::Io` says
 whether the batch may be durable anyway (`Durable::Unknown`), the journal is

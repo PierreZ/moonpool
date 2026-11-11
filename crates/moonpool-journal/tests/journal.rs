@@ -737,10 +737,14 @@ fn a_batch_with_no_surviving_identity_before_the_last_is_lost() {
     });
 }
 
+/// A `Batched` last batch the metainfo does not record: a crash explains a
+/// slot whose record and entry are both damaged (an `Ordered` batch with an
+/// intact record does not, see
+/// `two_faults_on_a_witnessed_last_batch_refuse_to_open`).
 #[test]
 fn a_torn_last_record_is_discarded_durably() {
     runtime().block_on(async {
-        for durability in BOTH {
+        for durability in [Durability::Batched] {
             let mut sim = sim(9);
             let journal = five(&mut sim, durability).await;
             let journal = put(&mut sim, journal, &[(6, 1, 300), (7, 1, 300)]).await;
@@ -1047,5 +1051,174 @@ fn a_roll_on_a_full_disk_fails_as_storage_full_and_leaves_no_segment_behind() {
         let journal = put(&mut sim, journal, &[(8, 1, 100)]).await;
         let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
         assert_eq!(live, (0..9).collect::<Vec<_>>());
+    });
+}
+
+/// Read every byte of `path`.
+async fn file_bytes(sim: &mut SimWorld, path: String) -> Vec<u8> {
+    run(sim, move |provider| async move {
+        let file = provider.open(&path, OpenOptions::read_only()).await?;
+        let len = usize::try_from(file.size().await?).expect("small");
+        let mut bytes = vec![0; len];
+        file.read_at(0, &mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    })
+    .await
+    .expect("read a file")
+}
+
+/// Write `bytes` over `path` from its start, durably.
+async fn put_bytes(sim: &mut SimWorld, path: String, bytes: Vec<u8>) {
+    run(sim, move |provider| async move {
+        let file = provider.open(&path, OpenOptions::read_write()).await?;
+        file.write_at(0, &bytes).await?;
+        file.sync_all().await
+    })
+    .await
+    .expect("write a file");
+}
+
+/// Five batches, then one last batch of two entries at 6 and 7, with new
+/// metainfo when `witnessed`: the metainfo then records the batch.
+async fn five_then_two(sim: &mut SimWorld, durability: Durability, witnessed: bool) -> J {
+    let journal = five(sim, durability).await;
+    let mut batch = Batch::new();
+    batch
+        .put(6, id(6, 1), payload(6, 1, 300))
+        .put(7, id(7, 1), payload(7, 1, 300));
+    if witnessed {
+        batch.set_meta("after seven");
+    }
+    commit(sim, journal, batch).await.expect("commit")
+}
+
+/// The acknowledged last batch, a record and its entry both rotted: a
+/// crash cannot explain it once the metainfo recorded the batch, or once
+/// an `Ordered` batch shows one intact record (its entries were durable
+/// before any record was written). The open refuses; it never forgets the
+/// entry.
+#[test]
+fn two_faults_on_a_witnessed_last_batch_refuse_to_open() {
+    runtime().block_on(async {
+        for (durability, witnessed) in [
+            (Durability::Ordered, false),
+            (Durability::Ordered, true),
+            (Durability::Batched, true),
+        ] {
+            let mut sim = sim(9);
+            let journal = five_then_two(&mut sim, durability, witnessed).await;
+            let (record, entry) = spots(&journal, 7);
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, entry.0, entry.1).await;
+            let refused = reopen(&mut sim, durability).await.map(drop);
+            assert!(
+                matches!(refused, Err(OpenError::DoubleFault { index: 1, .. })),
+                "{durability:?}, witnessed {witnessed}: {refused:?}"
+            );
+        }
+    });
+}
+
+/// Every record and the first entry of an acknowledged last batch rotted:
+/// nothing on disk says the batch was there, but the metainfo recorded it,
+/// so the log ending before it is a lost batch, not the end.
+#[test]
+fn a_witnessed_last_batch_with_no_surviving_identity_is_lost_not_the_end() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(9);
+            let journal = five_then_two(&mut sim, durability, true).await;
+            let (record_6, entry_6) = spots(&journal, 6);
+            let (record_7, _) = spots(&journal, 7);
+            drop(journal);
+            flip(&mut sim, record_6.0, record_6.1).await;
+            flip(&mut sim, record_7.0, record_7.1).await;
+            flip(&mut sim, entry_6.0, entry_6.1).await;
+            let refused = reopen(&mut sim, durability).await.map(drop);
+            assert!(
+                matches!(refused, Err(OpenError::LostBatch { .. })),
+                "{durability:?}: {refused:?}"
+            );
+        }
+    });
+}
+
+/// The metainfo of an earlier open restored in both copies (two lost copy
+/// writes): the log holds a batch of a later open generation, which proves
+/// the metainfo older than the log.
+#[test]
+fn a_metainfo_older_than_the_log_is_refused() {
+    runtime().block_on(async {
+        let mut sim = sim(17);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let mut batch = Batch::new();
+        batch.set_meta("promise 3");
+        drop(commit(&mut sim, journal, batch).await.expect("meta"));
+        let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        let older = file_bytes(&mut sim, format!("{DIR}/meta")).await;
+        let journal = put(&mut sim, journal, &[(6, 1, 10)]).await;
+        drop(journal);
+        let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        let mut batch = Batch::new();
+        batch.set_meta("promise 4");
+        let journal = commit(&mut sim, journal, batch).await.expect("meta");
+        let journal = put(&mut sim, journal, &[(7, 1, 10)]).await;
+        drop(journal);
+        put_bytes(&mut sim, format!("{DIR}/meta"), older).await;
+        let refused = reopen(&mut sim, Durability::Ordered).await.map(drop);
+        assert!(
+            matches!(refused, Err(OpenError::MetaRolledBack { .. })),
+            "{refused:?}"
+        );
+    });
+}
+
+/// A persist record rotted after the open: nothing reads it again until
+/// the next open, so a caller's scrub asks for it. A new put of the
+/// position repairs it.
+#[test]
+fn a_scrub_finds_a_rotted_record_and_a_new_put_repairs_it() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(18);
+            let journal = five(&mut sim, durability).await;
+            let (record, _) = spots(&journal, 3);
+            let (journal, clean) = run(&mut sim, move |_| async move {
+                let found = journal.verify_records(..).await;
+                (journal, found)
+            })
+            .await;
+            assert_eq!(clean.expect("verify"), Vec::<u64>::new());
+            flip(&mut sim, record.0, record.1).await;
+            let (journal, found) = run(&mut sim, move |_| async move {
+                let found = journal.verify_records(2..5).await;
+                (journal, found)
+            })
+            .await;
+            assert_eq!(found.expect("verify"), vec![3], "{durability:?}");
+            let (journal, outside) = run(&mut sim, move |_| async move {
+                let found = journal.verify_records(4..).await;
+                (journal, found)
+            })
+            .await;
+            assert_eq!(outside.expect("verify"), Vec::<u64>::new());
+            let journal = put(&mut sim, journal, &[(3, 2, 300)]).await;
+            let journal = put(&mut sim, journal, &[(8, 1, 10)]).await;
+            drop(journal);
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("reopen");
+            // The superseded record is still damaged on disk: the open
+            // rebuilds it from its entry, and the position lives on in its
+            // new record.
+            assert_eq!(recovery.rebuilt, 1, "{durability:?}");
+            let (journal, found) = run(&mut sim, move |_| async move {
+                let found = journal.verify_records(..).await;
+                (journal, found)
+            })
+            .await;
+            assert_eq!(found.expect("verify"), Vec::<u64>::new());
+            let (_, bytes) = read(&mut sim, journal, 3).await;
+            assert_eq!(bytes.expect("intact"), payload(3, 2, 300));
+        }
     });
 }

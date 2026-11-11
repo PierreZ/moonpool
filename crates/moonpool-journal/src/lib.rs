@@ -87,6 +87,10 @@
 //!   damage with the identity of the lost entry. [`Recovery`] lists what
 //!   opening found and repaired: rebuilt records, a repaired metainfo copy,
 //!   repaired segment headers, torn records.
+//! - **A scrub of the persist records.** [`Journal::verify_records`] reads
+//!   the records of a range from disk and names the positions whose record
+//!   rotted since the open, so a caller's scrub can write them again before
+//!   a second fault makes the next open refuse.
 //! - **Fault aiming.** [`Journal::layout`] and [`Journal::regions`] return the
 //!   byte ranges of each record, entry, metainfo copy and segment header as
 //!   [`LayoutRegion`](moonpool_core::LayoutRegion) values. A simulation uses them to aim
@@ -192,11 +196,28 @@
 //! | intact | valid | live |
 //! | intact | damaged | live; the record is rebuilt from the entry |
 //! | damaged | valid | [`State::Corrupt`], or [`State::Ambiguous`] in a `Batched` last batch |
-//! | damaged | damaged, in `last` | torn by a crash: discarded |
+//! | damaged | damaged, in an unwitnessed `last` | torn by a crash: discarded |
+//! | damaged | damaged, in a witnessed `last` | [`OpenError::DoubleFault`]: refuse to open |
 //! | damaged | damaged, before `last` | [`OpenError::DoubleFault`]: refuse to open |
 //!
+//! A batch is **witnessed** when something other than its own two damaged
+//! parts proves it durable: the metainfo's high-water mark records it (a
+//! commit that changed the metainfo records its own batch, and every open
+//! records the last batch it found), or it is an [`Ordered`](Durability::Ordered)
+//! batch with an intact record, whose entries were durable before any
+//! record was written. A crash in the middle of a commit cannot leave a
+//! witnessed batch with a slot whose record and entry are both damaged, so
+//! there that is corruption, not a crash. In a witnessed batch, an entry
+//! that is damaged while its record is valid is [`State::Corrupt`] too.
+//! The one batch that may still be discarded is an acknowledged last batch
+//! that nothing witnesses: its bytes look exactly like a torn commit.
+//!
 //! A batch missing while later ones exist, or a log that ends before the
-//! batch the metainfo proves durable, is [`OpenError::LostBatch`]. A medium
+//! batch the metainfo proves durable, is [`OpenError::LostBatch`]. A batch of
+//! a later open generation than the metainfo's proves the metainfo older
+//! than the log (both copies lost an update): [`OpenError::MetaRolledBack`].
+//! A rollback inside one open generation stays invisible to the journal;
+//! the caller can check its metainfo against its own entries. A medium
 //! error reads as damaged bytes (CLSTORE's treatment of EIO). A damaged or
 //! missing file is a crash ([`OpenError::BadSegment`],
 //! [`OpenError::MetaLost`]). Opening reads only the last batch's entries; the
