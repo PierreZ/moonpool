@@ -412,6 +412,13 @@ impl SimWorld {
         self.network_transition_waking(|inner, now| inner.network.close_graceful(id, now));
     }
 
+    /// The application dropped its stream on `id`; the pair leaves the
+    /// table once both sides are closed, released and drained.
+    pub(crate) fn release_connection(&self, id: ConnectionId) {
+        let wakes = self.inner.write().network.release_endpoint(id);
+        self.release_wakes(wakes);
+    }
+
     /// Shuts down the send direction of a connection (`shutdown(SHUT_WR)`):
     /// a FIN behind the queued bytes, the receive direction left open.
     #[instrument(level = "debug", skip(self))]

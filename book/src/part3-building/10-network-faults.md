@@ -86,7 +86,7 @@ if ctx.time().sleep(Duration::from_secs(2)).await.is_err() {
 ctx.heal_partition(&leader, &follower)?;
 ```
 
-`FaultContext::partition` cuts both directions. `FaultContext::heal_partition` and `is_partitioned` complete the set. On `SimWorld`, `partition_pair(from, to, duration)` adds one directed entry, `restore_partition(from, to)` removes both, and `partition_send_from(ip, duration)` / `partition_recv_to(ip, duration)` are the one-way cuts.
+`FaultContext::partition` cuts both directions. `FaultContext::heal_partition` and `is_partitioned` complete the set. On `SimWorld`, `partition_pair(from, to, duration)` adds one directed entry, `restore_partition(from, to)` removes both, and `partition_send_from(ip, duration)` / `partition_recv_to(ip, duration)` are the one-way cuts. A new cut on a pair, a sender or a receiver that is already cut keeps the later of the two deadlines, as clogs do: a short random partition never shortens a long scripted one.
 
 ## Black Holes
 
