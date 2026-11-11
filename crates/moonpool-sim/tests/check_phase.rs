@@ -80,6 +80,62 @@ fn check_error_fails_the_iteration() {
     assert_eq!(report.seeds_failing, vec![1]);
 }
 
+/// `run()` fails with an error of its own.
+struct RunRejects;
+
+#[async_trait]
+impl Workload for RunRejects {
+    fn name(&self) -> &'static str {
+        "run_rejects"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        Err(SimulationError::InvalidState(
+            "run() gave up on key 3".to_string(),
+        ))
+    }
+}
+
+/// The report keeps the cause of a failed seed and prints it next to the
+/// seed (#458).
+#[test]
+fn the_report_keeps_the_cause_of_a_failed_seed() {
+    let report = SimulationBuilder::new()
+        .workload(CheckRejects)
+        .workload(RunRejects)
+        .set_debug_seeds(vec![1])
+        .set_iterations(1)
+        .run()
+        .expect("simulation configuration is valid");
+
+    let cause = report
+        .failure_causes
+        .get(&1)
+        .unwrap_or_else(|| panic!("no cause for seed 1: {report:?}"));
+    assert!(
+        cause.contains("final state rejected by check"),
+        "the check error is the cause: {cause}"
+    );
+    assert!(
+        cause.contains("run() gave up on key 3"),
+        "the run error is the cause too: {cause}"
+    );
+    let individual = report.individual_metrics[0]
+        .as_ref()
+        .expect_err("the seed failed");
+    assert!(
+        individual
+            .to_string()
+            .contains("final state rejected by check"),
+        "the iteration result keeps the cause: {individual}"
+    );
+    let text = report.to_string();
+    assert!(
+        text.contains("Seed 1: ") && text.contains("final state rejected by check"),
+        "the report prints the cause next to the seed: {text}"
+    );
+}
+
 #[test]
 fn check_panic_fails_the_iteration() {
     let report = SimulationBuilder::new()

@@ -278,3 +278,66 @@ fn a_query_matching_nothing_reports_no_runs() {
     assert!(nope.rows.is_empty());
     assert!(nope.windows.is_empty());
 }
+
+/// Fails on its second run only: the determinism replay of the first seed.
+struct FailsOnTheFirstReplay {
+    runs: &'static std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Workload for FailsOnTheFirstReplay {
+    fn name(&self) -> &'static str {
+        "metered"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        MeteredWorkload { requests: 3 }.run(ctx).await?;
+        if self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            return Err(moonpool_sim::SimulationError::InvalidState(
+                "the replay failed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A seed that a second pass reclassifies as failed (here the determinism
+/// replay) contributes no samples and no query rows (#460).
+#[test]
+fn a_reclassified_seed_keeps_no_metric_samples() {
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let report = SimulationBuilder::new()
+        .set_debug_seeds(vec![1, 2])
+        .set_iterations(2)
+        .check_determinism()
+        .metrics_factory(|_ip| Arc::new(Counters::new()))
+        .metric(
+            MetricQuery::select("requests_total")
+                .reduce(Max)
+                .named("requests"),
+        )
+        .workload_factory(|| Box::new(FailsOnTheFirstReplay { runs: &RUNS }))
+        .run()
+        .expect("simulation configuration is valid");
+
+    assert_eq!(report.seeds_failing, vec![1], "report: {report:?}");
+    assert!(
+        report.failure_causes[&1].contains("replay"),
+        "report: {report:?}"
+    );
+    let series = report
+        .app_metrics
+        .iter()
+        .find(|aggregate| aggregate.name == "requests_total")
+        .expect("the successful seed reported the counter");
+    assert_eq!(series.seeds, 1, "only seed 2 contributes: {series:?}");
+    let seeds: Vec<u64> = query(&report, "requests")
+        .rows
+        .iter()
+        .map(|row| row.seed)
+        .collect();
+    assert!(
+        !seeds.is_empty() && seeds.iter().all(|&seed| seed == 2),
+        "only seed 2 has query rows: {seeds:?}"
+    );
+}

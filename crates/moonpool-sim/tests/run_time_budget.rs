@@ -149,13 +149,14 @@ impl Workload for DeadlocksOnSecondSeed {
     }
 }
 
-/// A deadlock aborts the campaign, but the report must still carry what the
-/// earlier seeds gathered, and the next run on the thread must start clean.
+/// A deadlock that loses an instance workload aborts the campaign, but the
+/// report must still carry what the earlier seeds gathered, and the next run
+/// on the thread must start clean.
 #[test]
 fn deadlock_report_keeps_the_accumulated_state() {
     static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let report = SimulationBuilder::new()
-        .workload_factory(|| Box::new(DeadlocksOnSecondSeed { runs: &RUNS }))
+        .workload(DeadlocksOnSecondSeed { runs: &RUNS })
         .run_time_budget(Duration::from_mins(1))
         .until_coverage_stable(5, 10)
         .set_debug_seeds(vec![1, 2, 3, 4])
@@ -164,6 +165,16 @@ fn deadlock_report_keeps_the_accumulated_state() {
 
     assert_eq!(report.iterations, 2, "the deadlock stops the campaign");
     assert_eq!(report.seeds_failing, vec![2]);
+    assert_eq!(report.failed_runs, 1);
+    assert!(
+        report.failure_causes[&2].contains("lost"),
+        "report: {report:?}"
+    );
+    assert_eq!(
+        report.individual_metrics.len(),
+        report.seeds_used.len(),
+        "one result per seed"
+    );
     assert!(
         !report.convergence_timeout,
         "a deadlock is not a saturation timeout"
@@ -194,6 +205,30 @@ fn deadlock_report_keeps_the_accumulated_state() {
             .all(|detail| detail.msg != "gate reached before the deadlock"),
         "the next run inherited the deadlocked run's assertions: {fresh:?}"
     );
+}
+
+/// A deadlocked seed does not stop the campaign when every workload comes
+/// from a factory: the next seed builds new workloads (#460).
+#[test]
+fn a_deadlocked_seed_with_factory_workloads_does_not_stop_the_campaign() {
+    static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let report = SimulationBuilder::new()
+        .workload_factory(|| Box::new(DeadlocksOnSecondSeed { runs: &RUNS }))
+        .run_time_budget(Duration::from_mins(1))
+        .set_debug_seeds(vec![1, 2, 3, 4])
+        .set_iterations(4)
+        .run()
+        .expect("simulation configuration is valid");
+
+    assert_eq!(report.iterations, 4, "the campaign goes on: {report:?}");
+    assert_eq!(report.seeds_failing, vec![2]);
+    assert_eq!(report.failed_runs, 1);
+    assert_eq!(report.successful_runs, 3);
+    assert!(
+        report.failure_causes[&2].contains("lost"),
+        "report: {report:?}"
+    );
+    assert_eq!(report.individual_metrics.len(), 4, "one result per seed");
 }
 
 /// A workload that obeys `ctx.shutdown()` behind a detached keepalive

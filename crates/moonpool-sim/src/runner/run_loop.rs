@@ -59,7 +59,9 @@ pub(super) type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usiz
 enum IterationOutcome {
     /// The seed ran to completion (successfully or not).
     Completed,
-    /// The seed deadlocked: the campaign stops and reports what it gathered.
+    /// The seed deadlocked and lost an instance workload: the campaign stops
+    /// and reports what it gathered. A deadlocked seed whose workloads all
+    /// come from factories is [`Self::Completed`] (a failed seed).
     Deadlocked,
 }
 
@@ -620,6 +622,14 @@ impl SimulationBuilder {
         )))
     }
 
+    /// Whether every workload comes from a factory, so that a seed whose
+    /// workload task was lost does not stop the campaign.
+    fn workloads_rebuilt_each_seed(&self) -> bool {
+        self.entries
+            .iter()
+            .all(|entry| matches!(entry, WorkloadEntry::Factory { .. }))
+    }
+
     /// Enforce the fresh-state boundary required by exploration recipes.
     ///
     /// Factory entries are reconstructed by `resolve_entries` for every root
@@ -915,6 +925,7 @@ impl SimulationBuilder {
             seeds_used: Vec::new(),
             seeds_failing: Vec::new(),
             seeds_stalled: Vec::new(),
+            failure_causes: BTreeMap::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             dropped_assertion_allocations: 0,
@@ -1023,8 +1034,9 @@ impl SimulationBuilder {
             state.explorer = explorer;
         }
 
-        // A deadlocked seed aborts the campaign, but the report still carries
-        // everything gathered so far (exploration, assertions, saturation).
+        // A deadlocked seed that lost an instance workload aborts the
+        // campaign, but the report still carries everything gathered so far
+        // (exploration, assertions, saturation).
         let mut deadlocked = false;
         let mut budget_spent = false;
         let campaign_start = Instant::now();
@@ -1128,6 +1140,12 @@ impl SimulationBuilder {
                     .accumulate(state.explorer.as_ref(), seed);
             }
             crate::chaos::buggify_reset();
+            // A lost instance workload cannot run the next seed. Workloads
+            // built by a factory are built again, so the campaign goes on and
+            // the seed counts as failed.
+            if self.workloads_rebuilt_each_seed() {
+                return IterationOutcome::Completed;
+            }
             return IterationOutcome::Deadlocked;
         }
 
@@ -1481,11 +1499,10 @@ impl SimulationBuilder {
                 );
                 IterationOutcome::Completed
             }
-            Err((faulty_seeds_from_deadlock, failed_count)) => {
-                state
-                    .metrics_collector
-                    .add_faulty_seeds(faulty_seeds_from_deadlock);
-                state.metrics_collector.add_failed_runs(failed_count);
+            Err((deadlocked_seeds, _)) => {
+                for seed in deadlocked_seeds {
+                    state.metrics_collector.record_lost_workload(seed);
+                }
                 IterationOutcome::Deadlocked
             }
         }
