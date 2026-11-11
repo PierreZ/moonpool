@@ -19,6 +19,7 @@ The site presents moonpool as an engineering tool. The book is its manual.
 | `/` | `src/pages/index.astro`, `public/home.js` | sells the tool: a hero with a live run, what you get, a test, your code and the providers, the techniques, used by paros |
 | `/techniques/` | `src/pages/techniques/`, `src/lib/techniques.mjs`, `src/layouts/Technique.astro` | one page per technique: the problem, the technique, the live run, the code, the Guide chapters |
 | `/playground/` | `src/pages/playground/index.astro`, `public/playground.js` | the full config in the address (`playConfig` / `playQuery` of `public/run-model.js`), Run, Hunt (seeds one after the other in the worker, stoppable), Replay, the report |
+| `/extras/` | `src/pages/extras/`, `src/lib/extras.mjs`, `src/layouts/Extra.astro` | one page per crate, in depth: its module docs, its byte layouts and its code, read with `src/lib/rustdoc.mjs` (`moduleDoc`, `docSection`, `unlink`, `encodeLayout`, `constValue`, `itemDoc`, `fieldDocs`) and drawn by `src/components/ByteLayout.astro` |
 | `/crates/` | `src/pages/crates/index.astro`, `src/lib/crates.mjs` | one entry per crate of the README table: what it is for, when to depend on it, docs.rs, its chapter |
 | `/guide/` | `src/pages/guide/index.astro` | `book/src/welcome.md`, then the map of `book/src/index.md` |
 | `/guide/quick-start/` | `src/pages/guide/quick-start/index.astro` | install, the first test, run it, read the report, replay a seed |
