@@ -110,6 +110,53 @@ fn stream_io_shares_one_cursor() {
     });
 }
 
+/// A stream write whose future is dropped while it is in flight still lands,
+/// and the next write writes its own bytes and reports its own count. The
+/// defect this pins: the next write resumed the dropped one, so it returned
+/// the count of the dropped write and its own bytes were never written.
+#[test]
+fn a_dropped_stream_write_does_not_answer_the_next_write() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = scratch(&dir, "dropped.bin");
+    run(async {
+        let storage = CompioStorageProvider::new();
+        let mut file = storage
+            .open(&path, OpenOptions::create_write().read(true))
+            .await
+            .expect("open");
+        {
+            let dropped = file.write(&[b'A'; 8]);
+            futures::pin_mut!(dropped);
+            assert!(
+                futures::poll!(dropped.as_mut()).is_pending(),
+                "the write must be in flight when it is dropped"
+            );
+        }
+        let written = file.write(b"BB").await.expect("write");
+        assert!(
+            written <= 2,
+            "a write reported {written} bytes of a 2-byte buffer"
+        );
+        file.write_all(&b"BB"[written..]).await.expect("write_all");
+        file.flush().await.expect("flush");
+        let mut all = vec![0_u8; 16];
+        let read = file.read_at(0, &mut all).await.expect("read");
+        assert_eq!(&all[..read], b"AAAAAAAABB");
+
+        // The same future polled again resumes its write: the bytes land
+        // one time.
+        {
+            let resumed = file.write(b"CCC");
+            futures::pin_mut!(resumed);
+            let _ = futures::poll!(resumed.as_mut());
+            assert_eq!(resumed.await.expect("resumed write"), 3);
+        }
+        file.flush().await.expect("flush");
+        let read = file.read_at(0, &mut all).await.expect("read");
+        assert_eq!(&all[..read], b"AAAAAAAABBCCC");
+    });
+}
+
 #[test]
 fn append_streams_to_the_end_and_positions_stay_exact() {
     let dir = tempfile::tempdir().expect("tempdir");
