@@ -440,8 +440,9 @@ impl SimulationBuilder {
     pub(super) fn build_sim_for_iteration(&self, seed: u64) -> crate::sim::SimWorld {
         let network_chaos = self.network_chaos;
         let storage_chaos = self.storage_chaos;
-        // Network before storage, both before the world resets the stream
-        // (the draw-order contract on `ChaosMode::resolve`).
+        // Network before storage, both on the configuration stream, before
+        // the world reseeds the stream for the run (the draw-order contract
+        // on `ChaosMode::resolve`).
         let mut network_config = ChaosMode::resolve(
             network_chaos,
             crate::NetworkConfiguration::without_chaos,
@@ -814,7 +815,10 @@ impl SimulationBuilder {
     fn reset_per_iteration_state(seed: u64, obs_handle: &SimulationLayerHandle) {
         obs_handle.reset_for_seed();
         crate::sim::reset_sim_rng();
-        crate::sim::set_sim_seed(seed);
+        // The configuration draws (process counts, network and storage
+        // profiles) read their own stream; `SimWorld` construction reseeds
+        // the stream with `seed` for the run (#452).
+        crate::sim::rng::set_sim_config_seed(seed);
         // Route moonpool_core::select!'s branch offsets through the simulation
         // stream for this iteration.
         crate::sim::install_select_offset();

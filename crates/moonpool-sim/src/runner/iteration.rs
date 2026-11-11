@@ -1,10 +1,18 @@
 //! Iteration control and deterministic seed generation.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 use super::builder::IterationControl;
 use super::wall_clock;
+
+/// The `SplitMix64` increment (the golden ratio in 64 bits).
+const SPLITMIX64_GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// The seed of iteration `index` (0-based) of a run with `base_seed`: output
+/// `index` of a `SplitMix64` generator seeded with `base_seed`. A fixed
+/// function, so a pinned base seed gives the same seeds on every toolchain.
+fn iteration_seed(base_seed: u64, index: usize) -> u64 {
+    let step = (index as u64).wrapping_add(1);
+    crate::sim::rng::mix64(base_seed.wrapping_add(step.wrapping_mul(SPLITMIX64_GAMMA)))
+}
 
 /// Tracks iteration limits and produces deterministic seeds.
 pub(crate) struct IterationManager {
@@ -38,10 +46,7 @@ impl IterationManager {
             .get(self.iteration_count)
             .copied()
             .unwrap_or_else(|| {
-                let mut hasher = DefaultHasher::new();
-                self.base_seed.hash(&mut hasher);
-                self.iteration_count.hash(&mut hasher);
-                let seed = hasher.finish();
+                let seed = iteration_seed(self.base_seed, self.iteration_count);
                 self.seeds.push(seed);
                 seed
             });
@@ -88,5 +93,32 @@ impl IterationManager {
     /// Return the seeds used by completed and active iterations.
     pub(crate) fn seeds_used(&self) -> &[u64] {
         &self.seeds[..self.iteration_count]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The seed sequence is `SplitMix64` of the base seed: pinned values, so a
+    /// toolchain update cannot change them (#460).
+    #[test]
+    fn iteration_seeds_are_splitmix64_of_the_base_seed() {
+        // Reference outputs of `SplitMix64` seeded with 0.
+        assert_eq!(iteration_seed(0, 0), 0xe220_a839_7b1d_cdaf);
+        assert_eq!(iteration_seed(0, 1), 0x6e78_9e6a_a1b9_65f4);
+        assert_eq!(iteration_seed(0, 2), 0x06c4_5d18_8009_454f);
+
+        let mut manager =
+            IterationManager::new(IterationControl::FixedCount(3), Vec::new(), Some(0));
+        let seeds: Vec<u64> = (0..3).map(|_| manager.next_iteration()).collect();
+        assert_eq!(
+            seeds,
+            vec![
+                0xe220_a839_7b1d_cdaf,
+                0x6e78_9e6a_a1b9_65f4,
+                0x06c4_5d18_8009_454f
+            ]
+        );
     }
 }

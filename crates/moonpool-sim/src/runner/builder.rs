@@ -1151,6 +1151,9 @@ impl SimulationBuilder {
     /// The report prints the base seed of each run (it is also
     /// [`run_id`](crate::SimulationReport::run_id)). Pass it here to run the
     /// same sequence of seeds again, for example to replay a whole CI job.
+    /// Seed *i* is output *i* of a `SplitMix64` generator seeded with
+    /// `base_seed`, a fixed function: the sequence does not change with the
+    /// Rust toolchain.
     #[must_use]
     pub fn base_seed(mut self, base_seed: u64) -> Self {
         self.base_seed = Some(base_seed);
@@ -1562,7 +1565,7 @@ mod tests {
         seed: u64,
     ) -> (crate::sim::SimWorld, u64) {
         crate::sim::reset_sim_rng();
-        crate::sim::set_sim_seed(seed);
+        crate::sim::rng::set_sim_config_seed(seed);
         let mut builder = SimulationBuilder::new()
             .enable_chaos([Chaos::Storage(ChaosMode::Swarm), Chaos::BuggifyKnobs]);
         if let Some(mask) = mask {
@@ -1663,7 +1666,7 @@ mod tests {
         seed: u64,
     ) -> (crate::NetworkConfiguration, u64) {
         crate::sim::reset_sim_rng();
-        crate::sim::set_sim_seed(seed);
+        crate::sim::rng::set_sim_config_seed(seed);
         let sim = SimulationBuilder::new()
             .enable_chaos([Chaos::Network(mode)])
             .network_fault_mask(mask)
