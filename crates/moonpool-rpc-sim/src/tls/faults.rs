@@ -10,8 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use moonpool_rpc::security::tls::pki::{Issued, SubjectName, Usage};
 use moonpool_sim::{
-    FaultContext, FaultInjector, RandomProvider, SimulationError, SimulationResult, TimeProvider,
-    assert_reachable,
+    FaultContext, FaultInjector, RandomProvider, SimulationResult, assert_reachable,
 };
 
 use super::{LEAF_LIFETIME, MEMBER, Pki, SCRIPT_DONE_KEY, SERVER, invalid, ip_name, issue};
@@ -21,10 +20,7 @@ use super::{LEAF_LIFETIME, MEMBER, Pki, SCRIPT_DONE_KEY, SERVER, invalid, ip_nam
 pub struct TlsFaults;
 
 async fn pause(ctx: &FaultContext, millis: u64) -> SimulationResult<()> {
-    ctx.time()
-        .sleep(Duration::from_millis(millis))
-        .await
-        .map_err(|error| SimulationError::InvalidState(format!("sleep failed: {error}")))
+    ctx.sleep(Duration::from_millis(millis)).await
 }
 
 fn server_leaf(pki: &Pki, ctx: &FaultContext) -> SimulationResult<Issued> {

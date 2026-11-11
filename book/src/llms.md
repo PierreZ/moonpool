@@ -199,11 +199,14 @@ Every default and range: [Configuration Reference](./appendix/03-configuration.m
 #[async_trait]
 impl FaultInjector for Partitioner {
     fn name(&self) -> &str { "partitioner" }
-    async fn inject(&mut self, ctx: &FaultContext) {
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
         while !ctx.chaos_shutdown().is_cancelled() {
-            if let Some(ip) = ctx.reboot_random(RebootKind::Crash).ok().flatten() { .. }
-            ctx.time().sleep(Duration::from_secs(5)).await.ok();
+            if let Some(ip) = ctx.reboot_random(RebootKind::Crash)? { .. }
+            // A sleep the end of the run cuts returns SimulationShutdown:
+            // `?` stops the injector, and the seed does not fail.
+            ctx.sleep(Duration::from_secs(5)).await?;
         }
+        Ok(())
     }
 }
 ```
@@ -215,7 +218,9 @@ impl FaultInjector for Partitioner {
 | Storage | `durable_bytes(ip, path)`, `corrupt_bytes(..)`, `fail_file_with_eio(..)`, `clear_file_eio(..)`, `set_disk_capacity(ip, Option<DiskCapacity>)`, `disk_space(ip)` |
 | Slowness | `set_slowness(ip, Slowness)`, `slowness(ip)`, `cpu_model()` |
 | Topology | `process_ips()`, `group_registry()`, `ips_in_group(name)`, `machine_registry()` (live, owned copies), `membership()`, `membership_version()` |
-| Misc | `state()`, `random()`, `time()`, `chaos_shutdown()` |
+| Misc | `state()`, `random()`, `time()`, `sleep(d)`, `chaos_shutdown()` |
+
+Any `Err` from `inject()` other than `SimulationShutdown` fails the seed.
 
 ## Exploration
 

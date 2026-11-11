@@ -9,7 +9,7 @@ Attrition, outages, network and storage chaos are sampled per seed. They are the
 ```rust
 use std::time::Duration;
 use async_trait::async_trait;
-use moonpool_sim::{FaultContext, FaultInjector, RebootKind, SimulationError, SimulationResult, TimeProvider};
+use moonpool_sim::{FaultContext, FaultInjector, RebootKind, SimulationResult};
 
 struct RollingRestart;
 
@@ -21,8 +21,7 @@ impl FaultInjector for RollingRestart {
         // Restart each process in order, with time to recover between each.
         for ip in ctx.process_ips() {
             ctx.reboot(&ip, RebootKind::Graceful)?;
-            ctx.time().sleep(Duration::from_secs(15)).await
-                .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
+            ctx.sleep(Duration::from_secs(15)).await?;
             if ctx.chaos_shutdown().is_cancelled() {
                 break;
             }
@@ -33,6 +32,16 @@ impl FaultInjector for RollingRestart {
 ```
 
 `name()` labels the injector in the report. `inject()` runs as one task for the chaos window. It must watch `ctx.chaos_shutdown()` and return once the token is cancelled.
+
+## What the Runner Does With the Result
+
+The result of `inject()` is part of the seed's verdict:
+
+- `Ok(())`: the injector is done.
+- `Err(SimulationError::SimulationShutdown)`: the run ends. `ctx.sleep(d)` returns this error when the runner's `Shutdown` event cuts the sleep, so `ctx.sleep(d).await?` stops the injector cleanly. The seed does not fail.
+- Any other `Err`: the seed fails, with the injector's name in the error. An injector that stops with an error ran less chaos than its author asked for, for example when it crashes an IP that does not exist.
+
+The runner sends the `Shutdown` event when the first workload returns (unless [`chaos_until_run_ends`](07-chaos.md) is set) or when a stall guard fires. The event cuts every pending sleep, also the sleeps of the injectors and of the built-in attrition, outage and gray-failure injectors. So chaos stops when the run starts to end, even if other workloads still run; the built-in injectors then return `Ok(())`.
 
 ## Registering a Factory
 
@@ -59,6 +68,7 @@ A fault factory requires `chaos_duration`. `run()` returns `SimulationError::Inv
 | `process_ips()` | Every live server process IP, read now (spawned included, retired excluded). `ips_in_group(name)` narrows to one group, ascending. |
 | `group_registry()`, `machine_registry()` | Copies of the live group and failure-domain registries. `membership()` and `membership_version()` read the live set itself. |
 | `time()`, `random()` | The simulated time and the seeded random provider. |
+| `sleep(duration)` | Sleep in simulated time. Returns `Err(SimulationError::SimulationShutdown)` when the end of the run cuts the sleep; propagate it with `?`. |
 | `state()` | The per-iteration `StateHandle` workloads and processes share. |
 | `chaos_shutdown()` | The token cancelled when the chaos window closes. |
 | `reboot(ip, kind)` | Kill and restart after a drawn delay. `reboot_with_delays` takes the delay ranges. `reboot_random`, `reboot_tagged`, `reboot_machine` and `reboot_domain` pick the victims. |
@@ -86,8 +96,7 @@ async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
 
     // Wait until the workload has executed 100 operations.
     while ctx.state().get::<u64>("ops").unwrap_or(0) < 100 {
-        ctx.time().sleep(Duration::from_millis(20)).await
-            .map_err(|e| SimulationError::InvalidState(e.to_string()))?;
+        ctx.sleep(Duration::from_millis(20)).await?;
         if ctx.chaos_shutdown().is_cancelled() { return Ok(()); }
     }
 
@@ -107,7 +116,7 @@ An injector is the natural home for the harness's budgets. At the start of the w
 ## Rules for an Injector
 
 1. Draw randomness only from `ctx.random()` or the `sim_random_*` functions. Never from `rand::thread_rng()` or the wall clock.
-2. Sleep only through `ctx.time()`. A real sleep stalls the executor.
+2. Sleep only through `ctx.sleep()` (or `ctx.time()`). A real sleep stalls the executor.
 3. Check `ctx.chaos_shutdown()` in every loop and after every sleep, then return. An injector that keeps injecting after the window keeps the quiet tail from being quiet.
 4. Keep the draw count independent of the outcome. A resample loop makes the schedule depend on what it found, and an exploration recipe keyed on the draw count stops replaying.
 5. Do not keep state across seeds. The factory builds a fresh injector for each one. Share observations through an `Arc` the factory captures.

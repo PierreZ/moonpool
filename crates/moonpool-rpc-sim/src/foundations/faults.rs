@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, RandomProvider, SimulationError, SimulationResult, TimeProvider,
-    assert_reachable,
+    FaultContext, FaultInjector, RandomProvider, SimulationResult, assert_reachable,
 };
 
 use super::state::CRASH_REQUESTS_KEY;
@@ -19,10 +18,7 @@ pub struct CrashAfterReceiptInjector {
 
 impl CrashAfterReceiptInjector {
     async fn pause(ctx: &FaultContext, duration: Duration) -> SimulationResult<()> {
-        ctx.time()
-            .sleep(duration)
-            .await
-            .map_err(|error| SimulationError::InvalidState(format!("sleep failed: {error}")))
+        ctx.sleep(duration).await
     }
 }
 
