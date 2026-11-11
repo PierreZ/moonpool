@@ -468,11 +468,11 @@ impl NetworkSimulation {
                 });
             }
         }
-        let base_delay = if connection.send_buffer.is_empty() {
-            crate::network::sample_latency(&write_latency)
-        } else {
-            Duration::from_nanos(1)
-        };
+        // Every chunk samples its own write latency: the chunks of a burst,
+        // the two parts of a partial write and the slices of a vectored
+        // write each cross the link. The FIFO floor in `put_in_flight` keeps
+        // a chunk with a shorter sample behind the one before it.
+        let base_delay = crate::network::sample_latency(&write_latency);
         // A gray failure slows every chunk to or from a slow process.
         let at = now.max(ready_at).saturating_add(
             base_delay

@@ -868,7 +868,10 @@ pub struct NetworkConfiguration {
     pub accept_latency: LatencyDistribution,
     /// Latency distribution for connect operations
     pub connect_latency: LatencyDistribution,
-    /// Latency distribution for write operations
+    /// One-way latency of each chunk a stream puts on the wire. Every chunk
+    /// samples its own: each write, each part of a partial write and each
+    /// slice of a vectored write, so a burst of writes does not cross the
+    /// link faster than one write does.
     pub write_latency: LatencyDistribution,
 
     /// Distance-based per-pair latency, resolved through the locality topology.
