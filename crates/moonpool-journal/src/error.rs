@@ -43,6 +43,20 @@ pub enum OpenError {
     #[error("both metainfo copies are lost")]
     MetaLost,
 
+    /// The metainfo is older than the log: a valid batch carries a later
+    /// open generation than the metainfo's. Every open raises the
+    /// generation in both copies before it writes anything, so two faults
+    /// lost the newer copies (both copy writes of one update lost, or one
+    /// lost and the other rotted). The caller's node-unique state went back
+    /// with them, so the journal refuses rather than hand it out.
+    #[error("the metainfo (open generation {generation}) is older than batch {batch:#x}")]
+    MetaRolledBack {
+        /// The open generation the metainfo holds.
+        generation: u32,
+        /// A batch of a later generation found in the log.
+        batch: u64,
+    },
+
     /// A segment file is unusable at file granularity: wrong size, no valid
     /// header copy, or a header naming another journal or another batch.
     /// CLSTORE crashes on file-system metadata faults.

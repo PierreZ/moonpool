@@ -8,12 +8,12 @@ use moonpool_core::{AlignedBuf, DirectIo, LayoutRegion, LocalStorageFile, LocalS
 use crate::batch::{Batch, Write};
 use crate::format::{
     BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, META_COPY_B_AT, META_MAX,
-    Meta, RECORD_SIZE, Record, SegmentHeader, align_up, clear_id, entry_crc, first_batch_of,
+    Meta, RECORD_SIZE, Record, SegmentHeader, Slot, align_up, clear_id, entry_crc, first_batch_of,
     generation_of, journal_tag, u64_of, usize_of,
 };
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
-use crate::recover::{Located, Op, Stale, entry_matches, scan};
+use crate::recover::{Known, Located, Op, entry_matches, scan};
 use crate::segment::{Segment, is_segment_leftover, named_batches, parse_segment_name};
 use crate::spare::{is_spare, spare_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
@@ -333,6 +333,25 @@ async fn delete_if_present<P: LocalStorageProvider>(
     }
 }
 
+/// Write the last batch's verdicts down: the persist extent `writes`, in
+/// order, each durable before the next.
+async fn rewrite_last_batch<F: moonpool_core::LocalStorageFile>(
+    segment: &Segment<F>,
+    offset: u64,
+    writes: Vec<AlignedBuf>,
+) -> std::io::Result<()> {
+    // A rebuilt record says its entry was persisted, and the entry it was
+    // rebuilt from may be a predecessor's unsynced write still in the page
+    // cache: the entry reaches the disk first, as in a commit. (A crash
+    // between a rewrite and the entries' sync left records naming entries
+    // that never landed: corruption from a crash alone.)
+    segment.sync().await?;
+    for bytes in writes {
+        segment.write_durable(offset, bytes).await?;
+    }
+    Ok(())
+}
+
 /// Make what this open found the log from now on: a new generation, durable
 /// in both metainfo copies before any write, so whatever lies beyond the end
 /// and was invisible here can never come back as evidence.
@@ -472,11 +491,12 @@ impl<P: LocalStorageProvider> Journal<P> {
         }
 
         let tag = journal_tag(id);
-        let stale = Stale {
+        let known = Known {
             generation: meta.open_generation,
             last: meta.open_last,
+            mark: meta.last_batch,
         };
-        let mut scanned = scan(&segments, tag, stale).await?;
+        let mut scanned = scan(&segments, tag, known).await?;
         if scanned.last_batch < meta.last_batch {
             return Err(OpenError::LostBatch {
                 batch: meta.last_batch,
@@ -486,15 +506,8 @@ impl<P: LocalStorageProvider> Journal<P> {
             segment.persist_next = *persist_next;
             segment.entry_next = *entry_next;
         }
-        if let Some((at, offset, bytes)) = scanned.rewrite.take() {
-            // A rebuilt record says its entry was persisted, and the entry it
-            // was rebuilt from may be a predecessor's unsynced write still in
-            // the page cache: the entry reaches the disk first, as in a
-            // commit. (A crash between a rewrite and the entries' sync left
-            // records naming entries that never landed: corruption from a
-            // crash alone.)
-            segments[at].sync().await?;
-            segments[at].write(offset, bytes).await?;
+        if let Some((at, offset, writes)) = scanned.rewrite.take() {
+            rewrite_last_batch(&segments[at], offset, writes).await?;
         }
         // Whatever opening keeps must survive the next power loss.
         for segment in &segments {
@@ -821,6 +834,40 @@ impl<P: LocalStorageProvider> Journal<P> {
         })
     }
 
+    /// The live positions in `range` whose persist record on disk no longer
+    /// matches the record this open holds: read from disk, one record each,
+    /// and changes nothing.
+    ///
+    /// After an open, nothing reads a persist record again: [`read`](Self::read)
+    /// and [`replay`](Self::replay) judge an entry against the record held
+    /// in memory. A record that rots is found only at the next open, and if
+    /// its entry rots too before then, that open refuses the whole journal
+    /// ([`OpenError::DoubleFault`]). A caller's scrub calls this to find
+    /// such a record first, and repairs the position by writing it again in
+    /// a new batch, as for a damaged entry. A medium error reads as a
+    /// mismatch.
+    ///
+    /// # Errors
+    /// Only a provider failure that is not the medium's.
+    pub async fn verify_records(
+        &self,
+        range: impl RangeBounds<u64>,
+    ) -> Result<Vec<u64>, std::io::Error> {
+        let mut mismatched = Vec::new();
+        for (&position, at) in self.index.range(range) {
+            let segment = &self.segments[self.segment_index(at.segment)];
+            let bytes = segment.read_at(at.record_at, RECORD_SIZE).await?;
+            let intact = matches!(
+                Record::decode(&bytes),
+                Slot::Valid(on_disk) if on_disk == record_of(position, at)
+            );
+            if !intact {
+                mismatched.push(position);
+            }
+        }
+        Ok(mismatched)
+    }
+
     /// Read every non-empty position in `range`, in order: a damaged entry
     /// is reported in place and the replay goes on. Entries that follow each
     /// other in one segment are read together, at most `REPLAY_READ` bytes
@@ -922,7 +969,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             return Err(CommitError::BatchTooLarge);
         }
         let meta_changes = batch.meta.is_some() || floor != self.meta.floor;
-        let next_meta = Meta {
+        let mut next_meta = Meta {
             seq: self.meta.seq + 1,
             floor,
             last_batch: self.last_batch,
@@ -941,6 +988,9 @@ impl<P: LocalStorageProvider> Journal<P> {
             return Ok(());
         }
         let mut prepared = self.prepare(&batch)?;
+        // The metainfo lands only once the batch is durable, so it records
+        // the batch itself as the high-water mark.
+        next_meta.last_batch = prepared.seq;
         let at = self.segment_for(&prepared).await?;
         let segment = &self.segments[at];
         prepared.place(segment.persist_next, segment.entry_next);

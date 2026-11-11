@@ -1,9 +1,10 @@
-//! Binary target for the crash-aware journal simulation.
+//! Binary target for the journal simulation.
 //!
 //! One node owns a `moonpool-journal` CLSTORE journal and is crashed over and
-//! over by attrition, on a disk running `Chaos::Storage(Random)`; every boot
-//! recovers the journal and checks that no acknowledged write was lost,
-//! changed, or mistaken for corruption.
+//! over by attrition, on a disk running `Chaos::Storage(Random)` with every
+//! family but a failed disk, plus aimed double faults; every boot checks
+//! that the journal returned each acknowledged write or reported it
+//! damaged, never forgot or changed it.
 
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, SimulationBuilder, StorageFault,
     StorageFaultMask,
 };
-use moonpool_sim_examples::journal::{JournalNode, JournalWorkload};
+use moonpool_sim_examples::journal::{JournalNode, JournalStrike, JournalWorkload};
 use moonpool_sim_examples::support::finish_or_exit_on_failure;
 
 fn main() {
@@ -39,20 +40,12 @@ fn main() {
             },
             Chaos::Storage(ChaosMode::Random),
         ])
-        // The disk's crash physics (lost, latent, shorn sectors), lost
-        // directory entries, failed syncs, short transfers and slow-disk
-        // episodes are all in a lone journal's contract. Rot, EIO,
-        // misdirected and phantom writes damage data a lone node has no
-        // second copy of, and a failed disk never answers again: those need
-        // replication, so this single node runs without them.
-        .storage_fault_mask(
-            StorageFaultMask::all()
-                .without(StorageFault::Corruption)
-                .without(StorageFault::Eio)
-                .without(StorageFault::Misdirect)
-                .without(StorageFault::PhantomWrite)
-                .without(StorageFault::DiskFailure),
-        )
+        // Every family but a failed disk: one never answers again, so a
+        // lone node can only stop. Rot, EIO, misdirected and phantom writes
+        // damage data the node has no second copy of; the node checks that
+        // the journal reports that damage (the reporting oracle).
+        .storage_fault_mask(StorageFaultMask::all().without(StorageFault::DiskFailure))
+        .fault_factory(|| Box::new(JournalStrike))
         .chaos_duration(Duration::from_secs(30))
         .set_iterations(50)
         .run()

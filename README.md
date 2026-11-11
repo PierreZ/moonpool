@@ -259,7 +259,9 @@ and under the simulator in its own `#[test]`.
 - `moonpool-journal`: a position-keyed CLSTORE journal that tells a crash
   from corruption and names the damaged entry. Positions in any order,
   `Batch::fits` / `fits_another`, `Journal::peek_meta`, metadata repair,
-  ambiguous tails, layout regions for aimed faults, `hint!` points inside
+  ambiguous tails, two faults on a witnessed batch or a rolled-back
+  metainfo refused as evidence, `Journal::verify_records` for a caller's
+  scrub of the persist records, layout regions for aimed faults, `hint!` points inside
   each commit, and recycled segments: a dead segment's file becomes the
   next one with a header write and a rename, and a new segment is
   allocated (`StorageFile::allocate`), never zero-filled. It is written against the local provider

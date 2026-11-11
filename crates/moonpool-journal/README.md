@@ -52,6 +52,7 @@ journal.commit(batch).await?;
 | `JournalConfig` / `Durability` / `Geometry` | One or two syncs per commit; the segment shape; direct I/O |
 | `Id` / `JournalId` | The caller's 24-byte identity per entry; the journal's own identity |
 | `State` / `Recovery` | What a position holds (`Live`, `Corrupt`, `Ambiguous`); what opening found and repaired |
+| `Journal::verify_records` | Read a range's persist records from disk and name the positions whose record rotted since the open, for a caller's scrub |
 | `Journal::layout` / `Journal::regions` / `Layout` | Byte ranges of records, entries, metainfo and headers, for aiming faults |
 | `OpenError` / `CommitError` / `ReadError` / `Durable` | Operating errors versus evidence of damage |
 
@@ -64,6 +65,13 @@ journal.commit(batch).await?;
 - **Metainfo.** The caller's node-unique state (a promise, a vote) is up to
   4 KiB, in two copies. A crash can leave a batch durable without its
   metainfo, never the metainfo without its batch.
+- **Two faults are evidence, not a crash.** The metainfo records a
+  high-water mark (the batch of its last update, and the last batch every
+  open found) and an open generation. A record and its entry both damaged
+  in a batch the mark records, or in an `Ordered` batch with an intact
+  record, refuse the open (`DoubleFault`) instead of discarding an
+  acknowledged entry. A batch of a later generation than the metainfo's
+  refuses it too (`MetaRolledBack`): the metainfo lost an update.
 - **Two protocols.** `Durability::Batched` is the paper's protocol (`write
   entries; write records; fsync`): one sync, and the last batch's damaged
   entries are `Ambiguous`. `Durability::Ordered` syncs in between: two syncs,
@@ -124,7 +132,11 @@ filesystem.
 `tests/journal.rs` runs the journal on the simulator's storage:
 
 - positions in any order, the floor and tombstones, the metainfo copies;
-- one test per row of the recovery table, aimed with `Journal::layout`;
+- one test per row of the recovery table, aimed with `Journal::layout`,
+  with the two-fault cases: a record and its entry both damaged in a
+  witnessed last batch (`DoubleFault`), every record and the first entry of
+  a witnessed last batch damaged (`LostBatch`), a metainfo older than the
+  log (`MetaRolledBack`), and a rotted record found by `verify_records`;
 - lost batches and lost segments;
 - crash loops under two fault models (the paper's sector-atomic model, and
   moonpool's full model with lost, latent and shorn sectors), for each
