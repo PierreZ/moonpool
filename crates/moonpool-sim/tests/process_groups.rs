@@ -282,6 +282,94 @@ fn tag_victim_filter_never_reboots_outside_the_tag() {
     assert_only_pool_rebooted(&booted, seeds.len());
 }
 
+/// Build a campaign over 3 acceptors (tagged `role=voter`) with one
+/// attrition regime, and return the configuration error, if any.
+fn attrition_config_error(config: Attrition, cluster: bool) -> Option<String> {
+    let boots = boot_log();
+    let builder = SimulationBuilder::new();
+    let builder = if cluster {
+        // 1 dc × 2 zones × 2 machines × 2 processes per machine.
+        builder.cluster(
+            moonpool_sim::LocalityConfig::new(1, 2, 2, 2),
+            RoleProcess::factory("acceptor", &boots),
+        )
+    } else {
+        builder.processes(3, RoleProcess::factory("acceptor", &boots))
+    };
+    let result = builder
+        .tags(&[("role", &["voter"])])
+        .expect("tags follow a group")
+        .workload(TimedWorkload(Duration::from_secs(1)))
+        .enable_chaos([Chaos::Attrition {
+            config,
+            mode: ChaosMode::Random,
+        }])
+        .chaos_duration(Duration::from_millis(500))
+        .set_iterations(1)
+        .set_debug_seeds(vec![1])
+        .run();
+    match result {
+        Err(SimulationError::InvalidConfiguration(message)) => Some(message),
+        Err(other) => panic!("unexpected error: {other:?}"),
+        Ok(_) => None,
+    }
+}
+
+/// An attrition regime whose victims can never match a process is refused,
+/// as an outage or a gray failure is (#459).
+#[test]
+fn attrition_victims_that_never_match_are_refused() {
+    let unknown_group =
+        attrition_config_error(regime(1, AttritionVictims::group("learner")), false);
+    assert!(
+        unknown_group
+            .as_deref()
+            .is_some_and(|m| m.contains("unregistered group 'learner'")),
+        "{unknown_group:?}"
+    );
+    let unknown_tag =
+        attrition_config_error(regime(1, AttritionVictims::tagged("role", "spare")), false);
+    assert!(
+        unknown_tag
+            .as_deref()
+            .is_some_and(|m| m.contains("role=spare")),
+        "{unknown_tag:?}"
+    );
+    let known = attrition_config_error(regime(1, AttritionVictims::tagged("role", "voter")), false);
+    assert_eq!(known, None);
+}
+
+/// A failure-domain scope with no cluster, or whose smallest domain is
+/// larger than `max_dead`, can never reboot and is refused (#459).
+#[test]
+fn a_domain_scope_that_can_never_reboot_is_refused() {
+    let per = |scope, max_dead| Attrition {
+        scope,
+        ..regime(max_dead, AttritionVictims::Any)
+    };
+    let no_cluster = attrition_config_error(per(AttritionScope::PerMachine, 2), false);
+    assert!(
+        no_cluster.as_deref().is_some_and(|m| m.contains("cluster")),
+        "{no_cluster:?}"
+    );
+    // A zone holds 2 machines × 2 processes = 4 processes.
+    let too_big = attrition_config_error(per(AttritionScope::PerZone, 3), true);
+    assert!(
+        too_big
+            .as_deref()
+            .is_some_and(|m| m.contains("holds 4 processes, more than max_dead 3")),
+        "{too_big:?}"
+    );
+    assert_eq!(
+        attrition_config_error(per(AttritionScope::PerZone, 4), true),
+        None
+    );
+    assert_eq!(
+        attrition_config_error(per(AttritionScope::PerMachine, 2), true),
+        None
+    );
+}
+
 #[test]
 fn filtered_attrition_replays_identically_for_one_seed() {
     let first = filtered_attrition(AttritionVictims::group("acceptor"), vec![42]);

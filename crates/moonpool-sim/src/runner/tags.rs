@@ -68,6 +68,14 @@ impl TagDistribution {
         });
     }
 
+    /// Whether a process of this distribution can carry `key=value`.
+    #[must_use]
+    pub(crate) fn offers(&self, key: &str, value: &str) -> bool {
+        self.dimensions
+            .iter()
+            .any(|dimension| dimension.key == key && dimension.values.iter().any(|v| v == value))
+    }
+
     /// Check if this distribution has any dimensions.
     #[must_use]
     pub fn is_empty(&self) -> bool {

@@ -59,6 +59,14 @@ pub enum ProcessCount {
 }
 
 impl ProcessCount {
+    /// The smallest count any seed can draw.
+    pub(crate) fn min(&self) -> usize {
+        match self {
+            Self::Fixed(count) => *count,
+            Self::Range(range) => *range.start(),
+        }
+    }
+
     pub(crate) fn resolve(&self) -> usize {
         match self {
             Self::Fixed(count) => *count,
