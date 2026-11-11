@@ -3,7 +3,8 @@
 //! A write past the end of a file, or a `set_len` that grows one, fails with
 //! `ENOSPC` (`io::ErrorKind::StorageFull`) when its growth does not fit, and
 //! none of its bytes land. A write inside a file's length needs no space.
-//! Deleting or shrinking a file frees space at once. Recovery mode lifts
+//! Deleting or shrinking a file frees space at once, also before the
+//! directory sync that makes a delete durable. Recovery mode lifts
 //! every capacity, and nothing here draws from the random stream.
 
 use std::{
@@ -218,4 +219,71 @@ fn allocate_reserves_space_and_a_set_len_hole_does_not() {
     settle(&mut sim, other.write_at(0, &[3; 200])).expect("the rest fits");
     settle(&mut sim, reserved.write_at(0, &[4; 800])).expect("a reserved range needs no space");
     assert_eq!(sim.disk_space(ip(1)).map(|space| space.free_bytes), Some(0));
+}
+
+/// A deleted file frees its space at once, also when its name was durable
+/// (the directory was synced before the delete). A crash before the next
+/// directory sync brings the file back, with its space.
+#[test]
+fn deleting_a_file_with_a_durable_name_frees_its_space() {
+    let mut sim = world();
+    sim.set_disk_capacity(ip(1), Some(DiskCapacity::new(8_192)));
+    let provider = sim.storage_provider(ip(1));
+    let old = open(&mut sim, ip(1), "a");
+    settle(&mut sim, old.write_at(0, &[1; 8_192])).expect("fits");
+    settle(&mut sim, old.sync_all()).expect("sync");
+    settle(&mut sim, provider.sync_dir(".")).expect("durable name");
+    drop(old);
+    assert_eq!(sim.disk_space(ip(1)).map(|space| space.free_bytes), Some(0));
+
+    settle(&mut sim, provider.delete("a")).expect("delete");
+    assert_eq!(
+        sim.disk_space(ip(1)).map(|space| space.free_bytes),
+        Some(8_192),
+        "the delete frees the space before the directory sync"
+    );
+    let new = open(&mut sim, ip(1), "b");
+    settle(&mut sim, new.write_at(0, &[2; 4_096])).expect("the freed space is usable");
+
+    settle(&mut sim, provider.sync_dir(".")).expect("sync the delete");
+    assert_eq!(
+        sim.disk_space(ip(1)).map(|space| space.free_bytes),
+        Some(4_096),
+        "the directory sync keeps the space free"
+    );
+    settle(&mut sim, new.write_at(4_096, &[2; 4_096])).expect("the rest fits");
+}
+
+/// Before the directory sync, a crash may bring a deleted file back: its
+/// space is used again.
+#[test]
+fn a_crash_that_brings_a_deleted_file_back_uses_its_space_again() {
+    let mut sim = world();
+    sim.set_disk_capacity(ip(1), Some(DiskCapacity::new(8_192)));
+    let provider = sim.storage_provider(ip(1));
+    let old = open(&mut sim, ip(1), "a");
+    settle(&mut sim, old.write_at(0, &[1; 4_096])).expect("fits");
+    settle(&mut sim, old.sync_all()).expect("sync");
+    settle(&mut sim, provider.sync_dir(".")).expect("durable name");
+    drop(old);
+    settle(&mut sim, provider.delete("a")).expect("delete");
+    assert_eq!(
+        sim.disk_space(ip(1)).map(|space| space.free_bytes),
+        Some(8_192)
+    );
+
+    sim.simulate_crash_for_process(ip(1), true);
+    let provider = sim.storage_provider(ip(1));
+    if settle(&mut sim, provider.exists("a")).expect("exists") {
+        assert_eq!(
+            sim.disk_space(ip(1)).map(|space| space.free_bytes),
+            Some(4_096),
+            "the file came back with its space"
+        );
+    } else {
+        assert_eq!(
+            sim.disk_space(ip(1)).map(|space| space.free_bytes),
+            Some(8_192)
+        );
+    }
 }
