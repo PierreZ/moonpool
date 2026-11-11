@@ -102,7 +102,12 @@ it must outlive every segment. Its two copies are written one after the
 other, each a durable write (`write_at_durable`), so at most one is in flight and a single
 rotted copy never rolls the metainfo back. `Journal::peek_meta(&provider,
 dir, id)` reads it without opening the journal: no recovery, no repair, no
-sync, so a probe never changes what the next open finds.
+sync, so a probe never changes what the next open finds. A directory with
+segments and no meta file is a journal that lost its metainfo, not an empty
+one: `open`, `peek_meta` and `create` all return `MetaLost` there. Only a
+directory with no meta file and no segment is empty. `create` deletes a
+spare or a file that a crashed creation left, because none of them is a
+journal.
 
 ## Committing: One Sync or Two
 

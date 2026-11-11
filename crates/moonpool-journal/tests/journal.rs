@@ -911,6 +911,65 @@ fn segments_without_metainfo_are_a_lost_journal_not_an_empty_one() {
         .expect("delete");
         let refused = reopen(&mut sim, Durability::Ordered).await.map(drop);
         assert!(matches!(refused, Err(OpenError::MetaLost)), "{refused:?}");
+        let before = names(&mut sim).await;
+        // A peek and a create give the verdict of the open (#488). A create
+        // that succeeded here would read the old segments as its own log.
+        let peeked = run(&mut sim, |provider| async move {
+            Journal::peek_meta(&provider, DIR, JOURNAL).await
+        })
+        .await;
+        assert!(matches!(peeked, Err(OpenError::MetaLost)), "{peeked:?}");
+        let created = run(&mut sim, |provider| async move {
+            Journal::create(provider, DIR, JOURNAL, config(Durability::Ordered), b"new")
+                .await
+                .map(drop)
+        })
+        .await;
+        assert!(matches!(created, Err(OpenError::MetaLost)), "{created:?}");
+        assert_eq!(names(&mut sim).await, before, "nothing deleted");
+        let refused = reopen(&mut sim, Durability::Ordered).await.map(drop);
+        assert!(matches!(refused, Err(OpenError::MetaLost)), "{refused:?}");
+    });
+}
+
+/// A spare, or a file that a crashed creation left, is not a journal:
+/// `create` deletes it and succeeds, and the new journal reads empty.
+#[test]
+fn create_deletes_a_spare_or_a_leftover_and_succeeds() {
+    runtime().block_on(async {
+        for leftover in [
+            "spare-0000000009-0000000000.wal",
+            "seg-00000000000000000001.wal.tmp",
+            "meta.tmp",
+        ] {
+            let mut sim = sim(19);
+            run(&mut sim, move |provider| async move {
+                provider.create_dir_all(DIR).await?;
+                let file = provider
+                    .open(&format!("{DIR}/{leftover}"), OpenOptions::create_write())
+                    .await?;
+                file.write_at(0, &[0xAB; 4096]).await?;
+                file.sync_all().await
+            })
+            .await
+            .expect("write a leftover");
+            let peeked = run(&mut sim, |provider| async move {
+                Journal::peek_meta(&provider, DIR, JOURNAL).await
+            })
+            .await
+            .expect("peek");
+            assert_eq!(peeked, None, "{leftover}");
+            let journal = create(&mut sim, Durability::Ordered).await;
+            assert_eq!(journal.positions().count(), 0, "{leftover}");
+            drop(journal);
+            assert_eq!(
+                names(&mut sim).await,
+                vec!["meta".to_string()],
+                "{leftover}"
+            );
+            let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+            assert_eq!(journal.positions().count(), 0, "{leftover}");
+        }
     });
 }
 
