@@ -124,6 +124,7 @@ impl ConnectionFlags {
     const SEND_BLACK_HOLED: u16 = 1 << 10;
     const RESET_ON_ARRIVAL: u16 = 1 << 11;
     const APP_RELEASED: u16 = 1 << 12;
+    const FIN_QUEUED: u16 = 1 << 13;
 
     fn get(self, mask: u16) -> bool {
         (self.0 & mask) != 0
@@ -228,6 +229,18 @@ impl ConnectionFlags {
 
     pub(crate) fn set_app_released(&mut self, value: bool) {
         self.set_bit(Self::APP_RELEASED, value);
+    }
+
+    /// This side's FIN is on the wire, or pending behind its send queue
+    /// (`shutdown_send` or a graceful close put it there). A send side shut
+    /// by a random close has no FIN: `send_closed` alone does not say one
+    /// was sent.
+    pub(crate) fn fin_queued(self) -> bool {
+        self.get(Self::FIN_QUEUED)
+    }
+
+    pub(crate) fn set_fin_queued(&mut self, value: bool) {
+        self.set_bit(Self::FIN_QUEUED, value);
     }
 }
 

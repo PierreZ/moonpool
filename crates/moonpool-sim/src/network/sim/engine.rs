@@ -1337,6 +1337,7 @@ impl NetworkSimulation {
         }
         if let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_send_closed(true);
+            c.flags.set_fin_queued(true);
             if send_in_progress || !queue_empty {
                 c.flags.set_graceful_close_pending(true);
             }
@@ -1376,15 +1377,22 @@ impl NetworkSimulation {
         if is_closed {
             return (actions, wakes);
         }
-        // A send side already shut (`shutdown_send`) has its FIN on the wire
-        // or pending behind the queue; the close adds the receive half and
-        // must not send a second FIN.
-        let fin_sent = send_closed;
+        // A send side already shut by `shutdown_send` has its FIN on the
+        // wire or pending behind the queue; the close adds the receive half
+        // and must not send a second FIN. A send side that a random close
+        // cut has no FIN, and the bytes it discarded are lost: a FIN now
+        // would let the peer take a cut stream as complete, so the close
+        // sends an RST instead, as a kernel does for a socket that lost data.
+        let fin_sent = self.connection(id).is_some_and(|c| c.flags.fin_queued());
+        let cut = send_closed && !fin_sent;
         if let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_is_closed(true);
             c.flags.set_send_closed(true);
             c.close_reason = CloseReason::Graceful;
-            if !fin_sent && (send_in_progress || !queue_empty) {
+            if !cut {
+                c.flags.set_fin_queued(true);
+            }
+            if !fin_sent && !cut && (send_in_progress || !queue_empty) {
                 c.flags.set_graceful_close_pending(true);
             }
         }
@@ -1394,7 +1402,10 @@ impl NetworkSimulation {
         self.discard_receive_buffer(id, &mut wakes);
         // The FIN goes on the wire behind whatever is already in flight; it
         // can never overtake the stream's last bytes.
-        if !fin_sent && !send_in_progress && queue_empty {
+        if cut {
+            crate::assert_reachable!("network: a close after a send-side cut sends an RST");
+            self.put_rst_in_flight(id, now, &mut actions);
+        } else if !fin_sent && !send_in_progress && queue_empty {
             self.put_fin_in_flight(id, now, &mut actions);
         }
         (actions, wakes)
@@ -1467,7 +1478,9 @@ impl NetworkSimulation {
     /// - the bytes it had on the wire still land, so the last reply that it
     ///   wrote before it died can still arrive;
     /// - what it had queued but not sent, and what it had received but not
-    ///   read, is gone;
+    ///   read, is gone, except on an endpoint the application had closed
+    ///   already: under [`DeathNotice::Reset`] the host's kernel still owns
+    ///   that one, and its queued bytes and FIN still go out;
     /// - [`DeathNotice::Reset`] puts an RST on the wire behind those bytes,
     ///   which honors the link latency and partitions;
     ///   [`DeathNotice::Silent`] sends nothing, and the endpoint answers the
@@ -1503,13 +1516,15 @@ impl NetworkSimulation {
             if c.close_reason == CloseReason::Aborted {
                 continue;
             }
-            // A side that the application closed already sent its FIN (or
-            // queued it): the host has nothing more to say on it.
-            let notify = !c.flags.is_closed();
+            // A side that the application closed belongs to the kernel now:
+            // a host that lives on still sends its queued bytes and the FIN
+            // (or RST) behind them, so the death changes nothing on it.
+            if notice == DeathNotice::Reset && c.flags.is_closed() {
+                continue;
+            }
             self.close_endpoint_locally(id, &mut wakes);
             match notice {
-                DeathNotice::Reset if notify => self.put_rst_in_flight(id, now, &mut actions),
-                DeathNotice::Reset => {}
+                DeathNotice::Reset => self.put_rst_in_flight(id, now, &mut actions),
                 DeathNotice::Silent => {
                     if let Some(c) = self.state.connections.get_mut(&id) {
                         c.flags.set_reset_on_arrival(true);

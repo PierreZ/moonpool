@@ -297,3 +297,73 @@ fn a_scripted_abort_lets_the_bytes_on_the_wire_land_first() {
     assert_eq!(received, LAST);
     assert!(time_of_reset(&mut sim, &mut server) > aborted_at);
 }
+
+/// A random close that cut only the send side put nothing on the wire, and
+/// the bytes it discarded are lost. When the application then drops the
+/// stream, the peer must still learn of it: the close sends an RST (a FIN
+/// would let the peer take the cut stream as complete), and the RST takes
+/// the link latency like data.
+#[test]
+fn a_drop_after_a_send_side_cut_resets_the_peer() {
+    let (mut sim, client, mut server) = connected();
+    sim.close_connection_asymmetric(client.connection_id(), true, false);
+    let dropped_at = sim.now();
+    drop(client);
+    let mut byte = [0_u8; 1];
+    assert!(
+        poll_read_once(&mut server, &mut byte).is_pending(),
+        "the peer cannot know of the drop yet"
+    );
+    assert_eq!(time_of_reset(&mut sim, &mut server), dropped_at + LATENCY);
+    assert!(
+        matches!(poll_write_once(&mut server, b"late"), Poll::Ready(Err(_))),
+        "a write after the reset fails"
+    );
+}
+
+/// A process that closed a stream with bytes still queued (a partition
+/// stalls them) and then dies with its host alive: the kernel owns the
+/// closed socket, so the queued bytes and the FIN still go out after the
+/// heal. The peer reads them, then EOF, and never waits forever.
+#[test]
+fn a_kill_after_a_close_still_delivers_the_queued_bytes_and_the_fin() {
+    let (mut sim, mut client, mut server) = connected();
+    sim.partition_pair(client_ip(), server_ip(), CUT);
+    assert_eq!(
+        poll_write_once(&mut client, b"abc").map(|result| result.expect("write is accepted")),
+        Poll::Ready(3)
+    );
+    assert!(sim.step(), "the queued send stalls under the cut");
+    assert_eq!(sim.queued_send_bytes(client.connection_id()), 3);
+    drop(client);
+    sim.kill_connections_for_ip(client_ip(), DeathNotice::Reset);
+
+    let mut received = [0_u8; 3];
+    drive(&mut sim, server.read_exact(&mut received)).expect("the queued bytes land");
+    assert_eq!(&received, b"abc");
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        drive(&mut sim, server.read(&mut byte)).expect("then the FIN"),
+        0
+    );
+}
+
+/// A host that lost power takes the closed socket with it: the queued bytes
+/// and the FIN are gone, and the peer learns of the death only when its own
+/// segment draws the RST.
+#[test]
+fn a_power_loss_after_a_close_drops_the_queued_bytes() {
+    let (mut sim, mut client, mut server) = connected();
+    sim.partition_pair(client_ip(), server_ip(), CUT);
+    assert_eq!(
+        poll_write_once(&mut client, b"abc").map(|result| result.expect("write is accepted")),
+        Poll::Ready(3)
+    );
+    assert!(sim.step(), "the queued send stalls under the cut");
+    drop(client);
+    sim.kill_connections_for_ip(client_ip(), DeathNotice::Silent);
+    sim.run_until_empty();
+    assert_eq!(sim.unread_bytes(server.connection_id()), 0);
+    let mut byte = [0_u8; 1];
+    assert!(poll_read_once(&mut server, &mut byte).is_pending());
+}
