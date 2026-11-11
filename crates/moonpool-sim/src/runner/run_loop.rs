@@ -1063,7 +1063,7 @@ impl SimulationBuilder {
             tracing::info!(declared, "assertion sites declared at link time");
         }
 
-        self.load_corpus();
+        let loaded_corpus = self.load_corpus();
         let mut state = RunState::new(&self);
         #[cfg(feature = "exploration")]
         {
@@ -1095,7 +1095,11 @@ impl SimulationBuilder {
                 break;
             }
         }
-        self.store_corpus(&state.corpus_seeds);
+        self.store_corpus(
+            &loaded_corpus,
+            state.iteration_manager.seeds_used(),
+            &state.corpus_seeds,
+        );
 
         // Read the sancov totals while the controller (which owns the sancov
         // shared memory) is still alive, then drop it — freeing the worker
@@ -1671,8 +1675,9 @@ fn parse_corpus(text: &str) -> Vec<u64> {
 
 /// Render a corpus file that [`parse_corpus`] reads back.
 fn render_corpus(seeds: &[u64]) -> String {
-    let mut text =
-        String::from("# moonpool seed corpus: the seeds that grew coverage, in run order.\n");
+    let mut text = String::from(
+        "# moonpool seed corpus: the seeds that grew coverage, and the corpus seeds not replayed yet.\n",
+    );
     for seed in seeds {
         text.push_str(&seed.to_string());
         text.push('\n');
@@ -1680,14 +1685,45 @@ fn render_corpus(seeds: &[u64]) -> String {
     text
 }
 
+/// The next corpus: each loaded seed that this run did not replay, or that
+/// grew coverage again, in file order; then the other seeds of this run that
+/// grew coverage, in run order. A loaded seed drops out only when this run
+/// replayed it and it added nothing.
+fn merge_corpus(loaded: &[u64], replayed: &[u64], grew: &[u64]) -> Vec<u64> {
+    let mut next: Vec<u64> = loaded
+        .iter()
+        .copied()
+        .filter(|seed| grew.contains(seed) || !replayed.contains(seed))
+        .collect();
+    for &seed in grew {
+        if !next.contains(&seed) {
+            next.push(seed);
+        }
+    }
+    next
+}
+
+/// Replace the file at `path` with `text` through a temporary file and a
+/// rename, so that an interrupted write never leaves a partial file.
+fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 impl SimulationBuilder {
     /// Append the seeds of the corpus file, if any, after the pinned seeds.
-    fn load_corpus(&mut self) {
+    /// Returns the seeds read from the file.
+    fn load_corpus(&mut self) -> Vec<u64> {
         let Some(path) = &self.corpus_file else {
-            return;
+            return Vec::new();
         };
         if self.replay_recipe.is_some() {
-            return;
+            return Vec::new();
         }
         let seeds = match std::fs::read_to_string(path) {
             Ok(text) => parse_corpus(&text),
@@ -1698,22 +1734,24 @@ impl SimulationBuilder {
             }
         };
         tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: loaded");
-        for seed in seeds {
+        for &seed in &seeds {
             if !self.seeds.contains(&seed) {
                 self.seeds.push(seed);
             }
         }
+        seeds
     }
 
-    /// Write the seeds that grew coverage to the corpus file, if any.
-    fn store_corpus(&self, seeds: &[u64]) {
+    /// Write the next corpus ([`merge_corpus`]) to the corpus file, if any.
+    fn store_corpus(&self, loaded: &[u64], replayed: &[u64], grew: &[u64]) {
         let Some(path) = &self.corpus_file else {
             return;
         };
         if self.replay_recipe.is_some() {
             return;
         }
-        match std::fs::write(path, render_corpus(seeds)) {
+        let seeds = merge_corpus(loaded, replayed, grew);
+        match write_atomically(path, &render_corpus(&seeds)) {
             Ok(()) => {
                 tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: written");
             }
