@@ -499,9 +499,9 @@ impl SimWorld {
         self.inner.write().storage.take_crash_reports()
     }
 
-    /// Plant a latent read fault on `sectors` of `path`: reads return
-    /// deterministically corrupted bytes, identically on every retry, until
-    /// the sectors are rewritten.
+    /// Plant a latent read fault on `sectors` of `path`: each sector reads
+    /// back with one flipped bit at a fixed position, identically on every
+    /// retry and whatever the range of the read, until it is rewritten.
     ///
     /// Path-global: it reaches every process's file at `path`. To damage one
     /// replica, use

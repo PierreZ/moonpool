@@ -1651,7 +1651,7 @@ impl StorageEngine {
                 continue;
             };
             let report = if keep_cache {
-                file.image.keep_cache(&path, armed)
+                file.image.keep_cache(&path, armed, &weigh)
             } else {
                 file.image.crash(&path, &config, armed, &weigh)
             };
