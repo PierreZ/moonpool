@@ -197,6 +197,8 @@ struct RunPhaseInputs<'a> {
     workload_collected: &'a mut [Option<WorkloadResult>],
     workload_ips: &'a [String],
     injector_handles: &'a mut InjectorHandleSlots,
+    /// The errors of the injectors that returned `Err` during the run.
+    injector_errors: &'a mut Vec<SimulationResult<()>>,
 }
 
 /// Inputs to [`WorkloadOrchestrator::orchestrate_workloads`].
@@ -397,7 +399,7 @@ impl WorkloadOrchestrator {
                 }
             };
 
-        let ((returned_workloads, results), injectors) = Self::do_chaos_and_run_phase(
+        let ((returned_workloads, mut results), injectors) = Self::do_chaos_and_run_phase(
             sim,
             &mut process_manager,
             env,
@@ -417,7 +419,7 @@ impl WorkloadOrchestrator {
             )
             .await;
         }
-        Self::abort_running_injectors(injectors);
+        results.extend(Self::stop_injectors(injectors).await);
         Self::finalize_orchestration(sim, &mut process_manager, env, returned_workloads, results)
             .await
     }
@@ -441,7 +443,7 @@ impl WorkloadOrchestrator {
                 .map_err(|()| env.deadlock())?;
         results.extend(check_results);
         Self::trigger_shutdown(sim, env.shutdown_signal);
-        Self::abort_running_injectors(injectors);
+        results.extend(Self::stop_injectors(injectors).await);
         process_manager.abort_all();
         for panic in process_manager.take_panics() {
             results.push(Err(crate::SimulationError::InvalidState(format!(
@@ -560,6 +562,7 @@ impl WorkloadOrchestrator {
         let mut workload_handles: WorkloadHandleSlots = handles.into_iter().map(Some).collect();
         let mut workload_collected: Vec<Option<WorkloadResult>> =
             (0..total_workloads).map(|_| None).collect();
+        let mut injector_errors = Vec::new();
         Self::drive_run_phase(
             sim,
             process_manager,
@@ -572,14 +575,18 @@ impl WorkloadOrchestrator {
                 workload_collected: &mut workload_collected,
                 workload_ips: &workload_ips,
                 injector_handles: &mut injector_handles,
+                injector_errors: &mut injector_errors,
             },
         )
         .await?;
 
-        let completed =
+        let (returned, mut results) =
             Self::collect_workload_results(workload_collected, total_workloads, &workload_ips)
                 .map_err(|()| env.deadlock())?;
-        Ok((completed, injector_handles))
+        // An injector that failed ran less chaos than its author asked for:
+        // the seed fails.
+        results.extend(injector_errors);
+        Ok(((returned, results), injector_handles))
     }
 
     /// Abort every process, settle the world, and run the check phase.
@@ -762,6 +769,7 @@ impl WorkloadOrchestrator {
             workload_collected,
             workload_ips,
             injector_handles,
+            injector_errors,
         } = inputs;
 
         let chaos_start = sim.current_time();
@@ -793,7 +801,7 @@ impl WorkloadOrchestrator {
                 stall.shutdown_triggered = true;
             }
 
-            Self::reap_finished_injectors(injector_handles).await;
+            Self::reap_finished_injectors(injector_handles, injector_errors).await;
 
             let active_workloads = workload_handles.iter().filter(|h| h.is_some()).count();
             if active_workloads == 0 {
@@ -974,11 +982,21 @@ impl WorkloadOrchestrator {
             let fault_ctx = new_fault_ctx();
             let reporter = env.task_panics.reporter("fault-injector");
             let handle = crate::executor::spawn("fault-injector", async move {
-                match AssertUnwindSafe(injector.inject(&fault_ctx))
+                let outcome = AssertUnwindSafe(injector.inject(&fault_ctx))
                     .catch_unwind()
-                    .await
-                {
-                    Ok(result) => result,
+                    .await;
+                match outcome {
+                    // The run ends (see `FaultContext::sleep`): kept as is,
+                    // so the reaper does not take it for a failure.
+                    Ok(Err(crate::SimulationError::SimulationShutdown)) => {
+                        Err(crate::SimulationError::SimulationShutdown)
+                    }
+                    Ok(result) => result.map_err(|error| {
+                        crate::SimulationError::InvalidState(format!(
+                            "fault injector '{}' failed: {error}",
+                            injector.name()
+                        ))
+                    }),
                     Err(payload) => {
                         reporter.record("root", payload.as_ref());
                         Ok(())
@@ -1103,8 +1121,12 @@ impl WorkloadOrchestrator {
     }
 
     /// Reap any fault-injector handles that have finished, dropping the
-    /// injectors with them. The remaining live handles stay in place.
-    async fn reap_finished_injectors(injector_handles: &mut InjectorHandleSlots) {
+    /// injectors with them, and keep the `Err` of each one that failed in
+    /// `errors`. The remaining live handles stay in place.
+    async fn reap_finished_injectors(
+        injector_handles: &mut InjectorHandleSlots,
+        errors: &mut Vec<SimulationResult<()>>,
+    ) {
         for handle_opt in injector_handles {
             let finished = handle_opt
                 .as_ref()
@@ -1112,23 +1134,33 @@ impl WorkloadOrchestrator {
             if finished {
                 let handle = handle_opt.take().expect("injector handle is finished");
                 match handle.await {
-                    Ok(_result) => {
-                        tracing::debug!("Fault injector completed");
+                    Ok(Ok(())) => tracing::debug!("Fault injector completed"),
+                    // A sleep the `Shutdown` event cut: the run ends.
+                    Ok(Err(crate::SimulationError::SimulationShutdown)) => {
+                        tracing::debug!("Fault injector stopped: the run ends");
                     }
-                    Err(_) => {
-                        tracing::error!("Fault injector task panicked");
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "fault injector failed");
+                        errors.push(Err(error));
                     }
+                    // The task's panic reporter recorded the panic.
+                    Err(_) => tracing::error!("Fault injector task panicked"),
                 }
             }
         }
     }
 
-    /// Abort every fault-injector task still running once the run phase is
-    /// over; finished ones were reaped on the loop.
-    fn abort_running_injectors(injector_handles: InjectorHandleSlots) {
+    /// Stop the fault injectors once the run phase is over: reap the ones
+    /// that finished (their errors are returned) and abort the others.
+    async fn stop_injectors(
+        mut injector_handles: InjectorHandleSlots,
+    ) -> Vec<SimulationResult<()>> {
+        let mut errors = Vec::new();
+        Self::reap_finished_injectors(&mut injector_handles, &mut errors).await;
         for handle in injector_handles.into_iter().flatten() {
             handle.abort();
         }
+        errors
     }
 
     /// Build the final workload return list when every task returned its

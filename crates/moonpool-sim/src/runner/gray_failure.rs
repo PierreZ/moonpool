@@ -298,9 +298,7 @@ impl FaultInjector for GrayFailureInjector {
         let origin = ctx.time().now();
         for (at, index, starts) in changes {
             let wait = origin.saturating_add(at).saturating_sub(ctx.time().now());
-            ctx.time().sleep(wait).await.map_err(|error| {
-                crate::SimulationError::InvalidState(format!("sleep failed: {error}"))
-            })?;
+            ctx.sleep(wait).await?;
             if ctx.chaos_shutdown().is_cancelled() {
                 // Recovery mode made every machine healthy already.
                 return Ok(());

@@ -48,10 +48,12 @@
 //!         while !ctx.chaos_shutdown().is_cancelled() && ips.len() >= 2 {
 //!             if ctx.random().random_bool(self.probability) {
 //!                 ctx.partition(&ips[0], &ips[1])?;
-//!                 let _ = ctx.time().sleep(Duration::from_secs(5)).await;
+//!                 // A cut sleep (the run ends) returns an error that `?`
+//!                 // hands to the runner, which does not fail the seed.
+//!                 ctx.sleep(Duration::from_secs(5)).await?;
 //!                 ctx.heal_partition(&ips[0], &ips[1])?;
 //!             }
-//!             let _ = ctx.time().sleep(Duration::from_secs(1)).await;
+//!             ctx.sleep(Duration::from_secs(1)).await?;
 //!         }
 //!         Ok(())
 //!     }
@@ -396,6 +398,22 @@ impl FaultContext {
     #[must_use]
     pub fn time(&self) -> &SimTimeProvider {
         &self.time
+    }
+
+    /// Sleep for `duration`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimulationError::SimulationShutdown`](crate::SimulationError::SimulationShutdown)
+    /// when the run ends first: the runner's `Shutdown` event cut the sleep,
+    /// because a workload returned or a stall guard fired. Propagate it with
+    /// `?`: the runner takes an injector that stops with this error as one
+    /// that stopped because the run ends, not as a failure.
+    pub async fn sleep(&self, duration: Duration) -> SimulationResult<()> {
+        self.time
+            .sleep(duration)
+            .await
+            .map_err(|_| crate::SimulationError::SimulationShutdown)
     }
 
     /// Get the chaos-phase shutdown token.
@@ -1356,11 +1374,7 @@ impl FaultInjector for AttritionInjector {
                 }
                 _ => delay,
             };
-            ctx.time()
-                .sleep(delay)
-                .await
-                .map_err(|e| crate::SimulationError::InvalidState(format!("sleep failed: {e}")))?;
-
+            ctx.sleep(delay).await?;
             if ctx.chaos_shutdown().is_cancelled() {
                 break;
             }
