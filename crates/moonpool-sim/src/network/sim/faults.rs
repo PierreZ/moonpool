@@ -23,6 +23,17 @@ fn draw_fault_direction() -> (bool, bool) {
     (a > 0.33, a < 0.66)
 }
 
+/// Keep the later of the deadline in `slot` and `deadline`. Returns whether
+/// `deadline` is the one in force, so its clear event must be scheduled; a
+/// slot that already holds a later deadline keeps it and its own event.
+fn keep_later_deadline(slot: &mut Duration, deadline: Duration) -> bool {
+    if *slot > deadline {
+        return false;
+    }
+    *slot = deadline;
+    true
+}
+
 /// Draw the gap to the next arrival of a Poisson process with `rate`
 /// arrivals per simulated second (FDB's `poisson()`): exponential with mean
 /// `1 / rate`. One draw; an infinite rate gives a zero gap.
@@ -344,6 +355,9 @@ impl NetworkSimulation {
         )
     }
 
+    /// Cut `from -> to` for `duration`. A cut already in force on the pair
+    /// keeps the later deadline: a short partition never shortens a long one
+    /// (FDB `clogPairFor`: `u = max(u, now + t)`).
     pub(crate) fn partition_pair(
         &mut self,
         from: IpAddr,
@@ -352,19 +366,23 @@ impl NetworkSimulation {
         now: Duration,
     ) -> NetworkActions {
         let deadline = now.saturating_add(duration);
-        self.state.ip_partitions.insert(
-            (from, to),
-            PartitionState {
+        let state = self
+            .state
+            .ip_partitions
+            .entry((from, to))
+            .or_insert(PartitionState {
                 expires_at: deadline,
-            },
-        );
+            });
+        let extended = keep_later_deadline(&mut state.expires_at, deadline);
         let mut actions = NetworkActions::default();
-        actions.schedule_at(
-            deadline,
-            NetworkEvent::PartitionRestore {
-                expected_deadline: deadline,
-            },
-        );
+        if extended {
+            actions.schedule_at(
+                deadline,
+                NetworkEvent::PartitionRestore {
+                    expected_deadline: deadline,
+                },
+            );
+        }
         actions.record(SimFaultEvent::PartitionCreated {
             from: from.to_string(),
             to: to.to_string(),
@@ -373,6 +391,8 @@ impl NetworkSimulation {
         actions
     }
 
+    /// Block every send from `ip` for `duration`, keeping a later deadline
+    /// already in force.
     pub(crate) fn insert_send_partition(
         &mut self,
         ip: IpAddr,
@@ -380,19 +400,24 @@ impl NetworkSimulation {
         now: Duration,
     ) -> NetworkActions {
         let deadline = now.saturating_add(duration);
-        self.state.send_partitions.insert(ip, deadline);
+        let slot = self.state.send_partitions.entry(ip).or_insert(deadline);
+        let extended = keep_later_deadline(slot, deadline);
         let mut actions = NetworkActions::default();
-        actions.schedule_at(
-            deadline,
-            NetworkEvent::SendPartitionClear {
-                expected_deadline: deadline,
-            },
-        );
+        if extended {
+            actions.schedule_at(
+                deadline,
+                NetworkEvent::SendPartitionClear {
+                    expected_deadline: deadline,
+                },
+            );
+        }
         actions.record(SimFaultEvent::SendPartitionCreated { ip: ip.to_string() });
         self.hold_partitioned_in_flight(now);
         actions
     }
 
+    /// Block every receive to `ip` for `duration`, keeping a later deadline
+    /// already in force.
     pub(crate) fn insert_recv_partition(
         &mut self,
         ip: IpAddr,
@@ -400,14 +425,17 @@ impl NetworkSimulation {
         now: Duration,
     ) -> NetworkActions {
         let deadline = now.saturating_add(duration);
-        self.state.recv_partitions.insert(ip, deadline);
+        let slot = self.state.recv_partitions.entry(ip).or_insert(deadline);
+        let extended = keep_later_deadline(slot, deadline);
         let mut actions = NetworkActions::default();
-        actions.schedule_at(
-            deadline,
-            NetworkEvent::RecvPartitionClear {
-                expected_deadline: deadline,
-            },
-        );
+        if extended {
+            actions.schedule_at(
+                deadline,
+                NetworkEvent::RecvPartitionClear {
+                    expected_deadline: deadline,
+                },
+            );
+        }
         actions.record(SimFaultEvent::RecvPartitionCreated { ip: ip.to_string() });
         self.hold_partitioned_in_flight(now);
         actions

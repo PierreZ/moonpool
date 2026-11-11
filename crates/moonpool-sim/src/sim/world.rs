@@ -1307,4 +1307,115 @@ mod tests {
             assert_eq!(&received, b"ok");
         });
     }
+
+    /// A pair leaves the connection table once both streams are dropped and
+    /// the last FIN has landed: closed connections must not pile up over a
+    /// long run, because every partition, clog, heal and kill scans the table.
+    #[test]
+    fn finished_connections_leave_the_table() {
+        crate::executor::Executor::new(0).block_on(async {
+            let mut sim = SimWorld::new();
+            let provider = sim.network_provider(IpAddr::from([127, 0, 0, 1]));
+            let listener = drive(&mut sim, provider.bind("reaped"))
+                .await
+                .expect("bind");
+            for round in 0..3 {
+                let mut client = drive(&mut sim, provider.connect("reaped"))
+                    .await
+                    .expect("connect");
+                let (mut server, _) = drive(&mut sim, listener.accept()).await.expect("accept");
+                assert_eq!(sim.inner.read().network.connection_count(), 2);
+                client.write_all(b"hi").await.expect("write");
+                let mut received = [0; 2];
+                drive(&mut sim, server.read_exact(&mut received))
+                    .await
+                    .expect("read");
+                // One side leaves while the other still holds its stream:
+                // the pair stays, so the survivor can still read the FIN.
+                drop(client);
+                sim.run_until_empty();
+                assert_eq!(
+                    sim.inner.read().network.connection_count(),
+                    2,
+                    "round {round}: the server still holds its stream"
+                );
+                let mut byte = [0; 1];
+                assert_eq!(
+                    drive(&mut sim, server.read(&mut byte)).await.expect("EOF"),
+                    0
+                );
+                drop(server);
+                sim.run_until_empty();
+                assert_eq!(
+                    sim.inner.read().network.connection_count(),
+                    0,
+                    "round {round}: both sides are gone, so is the pair"
+                );
+            }
+        });
+    }
+
+    /// A pair with bytes still in flight when both streams drop leaves the
+    /// table only once those bytes land.
+    #[test]
+    fn a_pair_with_bytes_in_flight_stays_until_they_land() {
+        crate::executor::Executor::new(0).block_on(async {
+            let mut sim = SimWorld::new();
+            let provider = sim.network_provider(IpAddr::from([127, 0, 0, 1]));
+            let listener = drive(&mut sim, provider.bind("in-flight"))
+                .await
+                .expect("bind");
+            let mut client = drive(&mut sim, provider.connect("in-flight"))
+                .await
+                .expect("connect");
+            let (server, _) = drive(&mut sim, listener.accept()).await.expect("accept");
+            sim.run_until_empty();
+            client.write_all(b"late").await.expect("write");
+            drop(server);
+            drop(client);
+            assert_eq!(
+                sim.inner.read().network.connection_count(),
+                2,
+                "the queued bytes and the FIN are not delivered yet"
+            );
+            sim.run_until_empty();
+            assert_eq!(sim.inner.read().network.connection_count(), 0);
+        });
+    }
+
+    fn rejected(edit: impl FnOnce(&mut NetworkConfiguration)) {
+        let mut config = NetworkConfiguration::fast_local();
+        edit(&mut config);
+        let _ = SimWorld::new_with_network_config(config);
+    }
+
+    #[test]
+    #[should_panic(expected = "partial_write_max_bytes must be positive")]
+    fn a_zero_partial_write_max_is_rejected() {
+        rejected(|config| config.chaos.partial_write_max_bytes = 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "bit_flip_min_bits must not exceed bit_flip_max_bits")]
+    fn inverted_bit_flip_bounds_are_rejected() {
+        rejected(|config| {
+            config.chaos.bit_flip_min_bits = 8;
+            config.chaos.bit_flip_max_bits = 4;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "tcp_send_window_bytes must be positive")]
+    fn a_zero_send_window_is_rejected() {
+        rejected(|config| config.tcp_send_window_bytes = 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "tcp_send_window_bytes must be positive")]
+    fn a_zero_send_window_is_rejected_on_reconfiguration() {
+        let mut sim = SimWorld::new();
+        let mut config = NetworkConfiguration::fast_local();
+        config.tcp_send_window_bytes = 0;
+        sim.set_network_config(config);
+    }
 }

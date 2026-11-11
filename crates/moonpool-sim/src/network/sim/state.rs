@@ -123,6 +123,7 @@ impl ConnectionFlags {
     const SEND_STALLED: u16 = 1 << 9;
     const SEND_BLACK_HOLED: u16 = 1 << 10;
     const RESET_ON_ARRIVAL: u16 = 1 << 11;
+    const APP_RELEASED: u16 = 1 << 12;
 
     fn get(self, mask: u16) -> bool {
         (self.0 & mask) != 0
@@ -217,6 +218,16 @@ impl ConnectionFlags {
 
     pub(crate) fn set_reset_on_arrival(&mut self, value: bool) {
         self.set_bit(Self::RESET_ON_ARRIVAL, value);
+    }
+
+    /// The application dropped its stream: no handle will ever ask about
+    /// this endpoint again.
+    pub(crate) fn app_released(self) -> bool {
+        self.get(Self::APP_RELEASED)
+    }
+
+    pub(crate) fn set_app_released(&mut self, value: bool) {
+        self.set_bit(Self::APP_RELEASED, value);
     }
 }
 

@@ -164,9 +164,11 @@ pub enum ConnectFailureMode {
     Disabled,
     /// Always fail with `ConnectionRefused` when buggified
     AlwaysFail,
-    /// Probabilistic: a buggified connect fails with `ConnectionRefused` with
-    /// probability [`ChaosConfiguration::connect_failure_probability`] and hangs
-    /// forever otherwise
+    /// Probabilistic: a buggified connect is refused with probability
+    /// [`ChaosConfiguration::connect_failure_probability`] (`ConnectionRefused`,
+    /// or sometimes `HostUnreachable`). A small share of the other buggified
+    /// connects hangs like an unanswered SYN and fails with `TimedOut` after
+    /// 127 simulated seconds; the rest connect normally.
     Probabilistic,
 }
 
@@ -327,13 +329,15 @@ impl ConnectFailureMode {
 /// following `FoundationDB`'s BUGGIFY patterns for deterministic testing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChaosConfiguration {
-    /// Clogs started per connection direction per simulated second.
+    /// Interface clogs started per simulated second, for the whole network.
     ///
-    /// A rate, not a per-write coin: the chance that an I/O finds a new clog
-    /// is `1 - exp(-rate * elapsed)`, where `elapsed` is the time since the
-    /// direction was last checked or last unclogged. A chatty connection
-    /// therefore sees the same clog rate as a quiet one. `f64::INFINITY`
-    /// clogs every I/O that is not already clogged.
+    /// A rate, not a per-write coin: arrivals are a Poisson process in
+    /// simulated time (FDB's `RandomClogging` workload), so traffic volume
+    /// does not raise it. Each arrival picks one IP that has an open
+    /// connection and clogs the sends, the receives, or both of every open
+    /// connection on it for one [`clog_duration`](Self::clog_duration) draw.
+    /// A clog only delays; an overlapping clog keeps the later deadline.
+    /// `f64::INFINITY` starts a clog before every simulation event.
     pub clog_rate: f64,
     /// Duration range for clog delays
     pub clog_duration: Range<Duration>,
@@ -358,15 +362,18 @@ pub struct ChaosConfiguration {
     /// it (or a Random / Swarm network chaos profile) to test such a
     /// checksum; mask it with [`NetworkFaultMask`] for protocols without one.
     pub bit_flip_probability: f64,
-    /// Minimum number of bits to flip (power-law distribution lower bound)
+    /// Minimum number of bits to flip (power-law distribution lower bound).
+    /// Must not exceed [`bit_flip_max_bits`](Self::bit_flip_max_bits).
     pub bit_flip_min_bits: u32,
     /// Maximum number of bits to flip (power-law distribution upper bound)
     pub bit_flip_max_bits: u32,
     /// Cooldown duration after bit flip to prevent excessive corruption
     pub bit_flip_cooldown: Duration,
 
-    /// Maximum bytes for partial write simulation (BUGGIFY truncates writes to 0-max_bytes)
-    /// Following FDB's approach of truncating writes to test TCP backpressure handling
+    /// Maximum bytes for partial write simulation: BUGGIFY sends a queued
+    /// chunk in two parts, the first of 1 to `max_bytes` bytes. Follows FDB's
+    /// approach of truncating writes to test TCP backpressure handling.
+    /// Must be greater than zero.
     pub partial_write_max_bytes: usize,
 
     /// Maximum bytes for partial read simulation (BUGGIFY truncates reads to 1-max_bytes)
@@ -446,9 +453,10 @@ pub struct ChaosConfiguration {
     /// FDB ref: sim2.actor.cpp:1243-1250 (`SIM_CONNECT_ERROR_MODE`)
     pub connect_failure_mode: ConnectFailureMode,
 
-    /// Probability that a buggified connect is refused with `ConnectionRefused`
-    /// when Probabilistic mode is enabled; the remainder hang forever (default 50%).
-    /// `1.0` always refuses, `0.0` always hangs.
+    /// Probability that a buggified connect is refused when Probabilistic
+    /// mode is enabled (default 50%). Of the remainder, a small share hangs
+    /// and fails with `TimedOut` after 127 simulated seconds, and the rest
+    /// connect normally. `1.0` always refuses; `0.0` never refuses.
     pub connect_failure_probability: f64,
 
     /// Permanent per-IP-pair latency range (FDB `SimClogging::MAX_CLOGGING_LATENCY`).
@@ -811,7 +819,8 @@ pub struct NetworkConfiguration {
     /// applies to new connections only. Default 64 KiB
     /// ([`DEFAULT_TCP_SEND_WINDOW_BYTES`]); `fast_local` and the per-seed
     /// configurations keep the default, a smaller window is a deliberate
-    /// choice for a test that wants backpressure to bite early.
+    /// choice for a test that wants backpressure to bite early. Must be
+    /// greater than zero.
     pub tcp_send_window_bytes: usize,
 
     /// Maximum handshaked but unaccepted connections per listener.

@@ -13,7 +13,8 @@ use crate::sync_drive::drive;
 use futures::io::AsyncReadExt;
 use moonpool_sim::{
     DeathNotice, LatencyDistribution, NetworkConfiguration, NetworkProvider, SimWorld,
-    TcpListenerTrait, buggify_reset, network::sim::SimTcpStream,
+    TcpListenerTrait, buggify_init, buggify_reset, network::sim::SimTcpStream,
+    reset_rng_call_count, rng_call_count,
 };
 use std::{io, net::IpAddr, task::Poll, time::Duration};
 
@@ -207,4 +208,33 @@ fn no_idle_drop_without_black_holes() {
     let timer = sim.sleep(Duration::from_secs(1));
     drive(&mut sim, timer).expect("the timer fires");
     assert!(!sim.is_send_black_holed(client.connection_id()));
+}
+
+/// A write parked on a write clog is a no-progress poll: polling it again
+/// and again (a `select!` loop) draws nothing from the simulation stream,
+/// as a parked read already does. The chaos rolls run only once the write
+/// can make progress.
+#[test]
+fn a_clogged_write_draws_nothing_however_often_it_is_polled() {
+    let (sim, mut client, _server) = connected();
+    let mut config = NetworkConfiguration::fast_local();
+    config.chaos.random_close_probability = 1e-9;
+    config.chaos.random_close_cooldown = Duration::ZERO;
+    config.chaos.black_hole_probability = 1e-9;
+    config.chaos.black_hole_cooldown = Duration::ZERO;
+    config.chaos.idle_drop_rate = 0.0;
+    config.chaos.clog_duration = Duration::from_secs(1)..Duration::from_secs(2);
+    let mut sim = sim;
+    sim.set_network_config(config);
+    buggify_init(1.0);
+
+    sim.clog_write(client.connection_id());
+    assert!(sim.is_write_clogged(client.connection_id()));
+    reset_rng_call_count();
+    for _ in 0..10 {
+        assert!(poll_write_once(&mut client, b"parked").is_pending());
+    }
+    let draws = rng_call_count();
+    buggify_reset();
+    assert_eq!(draws, 0, "a clogged write is not an I/O operation yet");
 }

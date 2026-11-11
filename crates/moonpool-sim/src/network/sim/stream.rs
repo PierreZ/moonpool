@@ -181,7 +181,9 @@ impl SimTcpStream {
         None
     }
 
-    /// Run the write-clog checks after the backpressure decision.
+    /// Run the write-clog checks after the backpressure decision and before
+    /// any chaos roll: a clogged write is a no-progress poll and draws
+    /// nothing.
     ///
     /// Returns `Some(poll)` to short-circuit, `None` to proceed.
     fn write_guard_clog(
@@ -189,7 +191,6 @@ impl SimTcpStream {
         sim: &crate::sim::SimWorld,
         cx: &mut Context<'_>,
     ) -> Option<Poll<Result<usize, io::Error>>> {
-        // Phase 7: Check for write clogging
         if sim.is_write_clogged(self.connection_id) {
             // Already clogged, register waker and return Pending
             if !sim.register_clog_waker(self.connection_id, cx.waker()) {
@@ -216,6 +217,7 @@ impl Drop for SimTcpStream {
             } else {
                 sim.close_connection(self.connection_id);
             }
+            sim.release_connection(self.connection_id);
         }
     }
 }
@@ -433,9 +435,13 @@ impl AsyncWrite for SimTcpStream {
             return Poll::Pending;
         }
 
-        // A full window makes this a no-progress poll, not a fresh I/O
-        // operation. Roll random-close chaos only after capacity is available
-        // so backpressure repolls cannot perturb deterministic replay.
+        // A full window or a write clog makes this a no-progress poll, not
+        // a fresh I/O operation. Roll random-close chaos only once the write
+        // can make progress, so repolls (a `select!` loop, a parked writer)
+        // cannot perturb deterministic replay.
+        if let Some(poll) = self.write_guard_clog(&sim, cx) {
+            return poll;
+        }
         if let Some(true) = sim.roll_random_close(self.connection_id) {
             return Poll::Ready(Err(random_connection_failure_error()));
         }
@@ -443,10 +449,6 @@ impl AsyncWrite for SimTcpStream {
         // rule, on its own coin. It changes nothing about this operation.
         sim.roll_black_hole(self.connection_id);
         if let Some(poll) = self.write_guard_pre_backpressure(&sim) {
-            return poll;
-        }
-
-        if let Some(poll) = self.write_guard_clog(&sim, cx) {
             return poll;
         }
 
@@ -493,6 +495,10 @@ impl AsyncWrite for SimTcpStream {
             return Poll::Pending;
         }
 
+        // Same progress rule as `poll_write`: a clogged write draws nothing.
+        if let Some(poll) = self.write_guard_clog(&sim, cx) {
+            return poll;
+        }
         if let Some(true) = sim.roll_random_close(self.connection_id) {
             return Poll::Ready(Err(random_connection_failure_error()));
         }
@@ -500,10 +506,6 @@ impl AsyncWrite for SimTcpStream {
         // rule, on its own coin. It changes nothing about this operation.
         sim.roll_black_hole(self.connection_id);
         if let Some(poll) = self.write_guard_pre_backpressure(&sim) {
-            return poll;
-        }
-
-        if let Some(poll) = self.write_guard_clog(&sim, cx) {
             return poll;
         }
 

@@ -135,12 +135,34 @@ impl std::fmt::Debug for GuardSlot {
     }
 }
 
+/// Reject a configuration the engine cannot run: a value that would panic
+/// deep inside a send or a delivery, or park every writer for good.
+///
+/// # Panics
+///
+/// Panics with the name of the first invalid field.
+fn validate_config(config: &NetworkConfiguration) {
+    assert!(
+        config.accept_backlog_capacity > 0,
+        "accept backlog capacity must be positive"
+    );
+    assert!(
+        config.tcp_send_window_bytes > 0,
+        "tcp_send_window_bytes must be positive: a zero window parks every write"
+    );
+    assert!(
+        config.chaos.partial_write_max_bytes > 0,
+        "partial_write_max_bytes must be positive: a partial write sends at least one byte"
+    );
+    assert!(
+        config.chaos.bit_flip_min_bits <= config.chaos.bit_flip_max_bits,
+        "bit_flip_min_bits must not exceed bit_flip_max_bits"
+    );
+}
+
 impl NetworkSimulation {
     pub(crate) fn new(config: NetworkConfiguration) -> Self {
-        assert!(
-            config.accept_backlog_capacity > 0,
-            "accept backlog capacity must be positive"
-        );
+        validate_config(&config);
         Self {
             state: NetworkState::new(config),
             waiters: NetworkWaiters::default(),
@@ -164,6 +186,7 @@ impl NetworkSimulation {
         &self.state.config
     }
 
+    /// Endpoints the table still holds (two per pair).
     #[cfg(test)]
     pub(crate) fn connection_count(&self) -> usize {
         self.state.connections.len()
@@ -174,10 +197,7 @@ impl NetworkSimulation {
         config: NetworkConfiguration,
         now: Duration,
     ) -> (NetworkActions, WakeBatch) {
-        assert!(
-            config.accept_backlog_capacity > 0,
-            "accept backlog capacity must be positive"
-        );
+        validate_config(&config);
         let schedule_maintenance =
             config.chaos.partition_rate > 0.0 || config.chaos.clog_rate > 0.0;
         let backlog_grew =
@@ -577,6 +597,46 @@ impl NetworkSimulation {
             .pending_connections
             .retain(|_, queue| !queue.is_empty());
         wakes
+    }
+
+    /// The application dropped its stream on `id` (after the close that the
+    /// drop makes). Remove the pair once nothing can use it any more.
+    pub(crate) fn release_endpoint(&mut self, id: ConnectionId) -> WakeBatch {
+        if let Some(connection) = self.state.connections.get_mut(&id) {
+            connection.flags.set_app_released(true);
+        }
+        self.reap_if_finished(id)
+    }
+
+    /// Remove `id` and its peer from the table once the pair is finished:
+    /// both endpoints closed and released by their application, and nothing
+    /// queued, pending or in flight in either direction. Without this, every
+    /// closed pair stays for the whole run, and each scan of the table
+    /// (partition, clog, idle drop, heal, kill) grows with the total number
+    /// of connections ever made.
+    ///
+    /// Draws nothing and changes no behavior: every scan already skips a
+    /// closed endpoint with an empty flight, and the events still scheduled
+    /// for the pair find no connection and do nothing. An endpoint that no
+    /// application ever accepted is never released, so it stays.
+    pub(super) fn reap_if_finished(&mut self, id: ConnectionId) -> WakeBatch {
+        let finished = |connection: &ConnectionState| {
+            connection.flags.is_closed()
+                && connection.flags.app_released()
+                && !connection.flags.graceful_close_pending()
+                && connection.send_buffer.is_empty()
+                && connection.in_flight.is_empty()
+        };
+        let Some(peer) = self.paired(id) else {
+            return WakeBatch::default();
+        };
+        if [id, peer]
+            .iter()
+            .all(|endpoint| self.connection(*endpoint).is_some_and(finished))
+        {
+            return self.discard_connection_pair(id);
+        }
+        WakeBatch::default()
     }
 
     pub(crate) fn register_read(&mut self, id: ConnectionId, waker: &Waker) -> bool {
@@ -1002,9 +1062,11 @@ impl NetworkSimulation {
             }
             NetworkEvent::Delivery { connection_id, seq } => {
                 self.handle_delivery(connection_id, seq, now, &mut actions, &mut wakes);
+                wakes.append(self.reap_if_finished(connection_id));
             }
             NetworkEvent::ProcessSendBuffer { connection_id } => {
                 self.handle_process_send_buffer(connection_id, now, &mut actions, &mut wakes);
+                wakes.append(self.reap_if_finished(connection_id));
             }
         }
         (actions, wakes)
