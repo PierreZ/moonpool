@@ -475,3 +475,20 @@ body.bare .main { padding: 0; max-width: none; }
 .byte.f2 { background: var(--panel); }
 .byte.f3 { background: var(--bg); }
 .byte-table td:nth-child(-n+2) { white-space: nowrap; }
+/* A frame of the wire: its real bytes, a block per field. */
+.hex-strip { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 8px; font-family: var(--font-mono); font-size: 12px; }
+.hx { display: inline-flex; flex-direction: column; padding: 3px 6px; border: 1px solid var(--rule-strong); word-break: break-all; }
+.hx-name { font-size: 10.5px; color: var(--muted); }
+.hx.f0 { background: var(--accent-tint); }
+.hx.f1 { background: var(--info-tint); }
+.hx.f2 { background: var(--panel); }
+.hx.f3 { background: var(--bg); }
+.hx-value { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
+.prose ol.admission li { margin: 2px 0; }
+.prose ol.admission .label { color: var(--muted); margin-left: 6px; }
+/* On a phone, a frame's table puts the doc of a field under its numbers. */
+@media (max-width: 640px) {
+  .frame-table tr { display: grid; grid-template-columns: 2.6em 2.6em minmax(0, 1fr) minmax(0, 1fr); }
+  .frame-table th:last-child, .frame-table td:last-child { grid-column: 1 / -1; padding-top: 0; }
+  .frame-table th:last-child { display: none; }
+}
