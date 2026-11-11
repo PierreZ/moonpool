@@ -1,14 +1,27 @@
 # moonpool-wasm-demo
 
-Browser/wasm demo: the live run of the site's home page and the demo page
-embedded in the chapter "Simulation in the Browser". Built and staged in
-`website/site/public/wasm-demo/` by `website/site/scripts/build-wasm-demo.sh`:
-`cargo build --target wasm32-unknown-unknown` then `wasm-bindgen` to generate
-the JS glue.
+The run engine of the website: `run(config)` runs one seed of the small
+system of the site (a replicated register, `src/register.rs`) and returns the
+run as JSON (`Run` in `src/engine.rs`, versioned by `MODEL`). Every live run of
+the site is this engine, compiled to wasm and loaded in a Web Worker. Built and
+staged in `website/site/public/wasm-demo/pkg/` by
+`website/site/scripts/build-wasm-demo.sh`: `cargo build --target
+wasm32-unknown-unknown` then `wasm-bindgen` to generate the JS glue.
 
-`tests/site_runs.rs` records the home page runs (five seeds) in
-`website/site/src/runs/home.json`. A change to what a run does makes that test
-fail once and write the file again: commit the new file.
+- `tests/site_runs.rs` records the runs of each page in
+  `website/site/src/runs/`. A change to what a run does makes that test fail
+  once and write the files again: commit them.
+- `scripts/check-site-wasm.sh <seed>...` (repository root) proves that one
+  config gives the same JSON natively (`--bin site-run`) and on wasm32 under
+  node.
+- `--bin sim-register` is the same system as an example simulation
+  (`cargo xtask sim run register`, with `check_determinism`).
+- The planted bug (`bug: true`) breaks the invariant on about 14% of seeds
+  with the default chaos, and no seed fails with it off. Measure again with
+  `SEEDS=2000 cargo test -p moonpool-wasm-demo --test engine -- --ignored`
+  after a change to the scenario, and keep it between 5% and 20%.
+- A change to a field of `Run` that the player reads
+  (`website/site/public/run-model.js`) bumps `MODEL` and updates the player.
 
 ## The wasm-bindgen version coupling
 
@@ -28,7 +41,7 @@ The two versions come from two different places:
 To stop them drifting:
 - dependabot is told to `ignore: wasm-bindgen*` (`.github/dependabot.yml`) so it
   can't bump the crate past the flake's CLI.
-- The `book` job in `.github/workflows/rust.yml` builds the demo on every PR, so
+- The `website` job in `.github/workflows/rust.yml` builds the demo on every PR, so
   a mismatch is caught before merge (not only on the `pages.yml` deploy).
 
 ## How to bump wasm-bindgen

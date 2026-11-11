@@ -17,12 +17,13 @@ The site presents moonpool as an engineering tool. The book is its manual.
 | Path | Source | Job |
 |---|---|---|
 | `/` | `src/pages/index.astro`, `public/home.js` | sells the tool: a hero with a live run, what you get, a test, your code and the providers, the techniques, used by paros |
+| `/techniques/` | `src/pages/techniques/`, `src/lib/techniques.mjs`, `src/layouts/Technique.astro` | one page per technique: the problem, the technique, the live run, the code, the Guide chapters |
 | `/crates/` | `src/pages/crates/index.astro`, `src/lib/crates.mjs` | one entry per crate of the README table: what it is for, when to depend on it, docs.rs, its chapter |
 | `/guide/` | `src/pages/guide/index.astro` | `book/src/welcome.md`, then the map of `book/src/index.md` |
 | `/guide/quick-start/` | `src/pages/guide/quick-start/index.astro` | install, the first test, run it, read the report, replay a seed |
 | `/<part>/<chapter>.html`, `/llms.html` | `src/pages/[...slug].astro` | each chapter of `book/src/SUMMARY.md`, at its mdbook address |
 
-Later issues add `/techniques/` (#417, #418) and `/playground/` (#419). Add a
+Later issues add the other technique pages (#417, #418) and `/playground/` (#419). Add a
 section to the top bar (`src/nav.ts`) in the issue that adds its page.
 
 ## The Guide
@@ -64,8 +65,23 @@ simulation logic is in JavaScript. A page shows a recorded run as JSON first
 loads and when it does not load. The address holds the seed (`?seed=256`).
 With "reduce motion" on, nothing plays alone.
 
-The home run is the ping-pong demo (`crates/moonpool-wasm-demo`):
-`tests/site_runs.rs` writes `src/runs/home.json` and fails when it was stale.
+The engine is `crates/moonpool-wasm-demo`: `run(config)` runs one seed of the
+small system of the site (a replicated register) and returns the run as JSON
+(`Run` in its `src/engine.rs`). The page side:
+
+- `public/engine.js` and `public/engine-worker.js`: the wasm in a Web Worker,
+  made when a run is near the screen or at the first click.
+- `public/player.js`: the one player (lanes, messages, faults, down spans,
+  checks, controls, the list of events); `public/run-model.js` reads a run
+  for it and `src/lib/player.test.mjs` tests that part.
+- `tests/site_runs.rs` writes the recorded runs of each page in `src/runs/`
+  (`home.json`, `determinism.json`) and fails when a file was stale: commit it.
+- `scripts/check-site-wasm.sh` (repository root) proves that one config gives
+  the same JSON natively and on wasm32. CI runs it.
+
+Pages: the home hero (`public/home.js`), `/techniques/determinism/`
+(`public/compare.js`), and `/embed/register.html`, the run alone in the frame
+of the chapter "Simulation in the Browser".
 
 ## One style
 

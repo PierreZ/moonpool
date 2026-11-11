@@ -99,3 +99,5 @@ The explorer forks only between complete timelines, after the executor and all o
 ## Verifying It Yourself
 
 `crates/moonpool-sim/tests/executor.rs` enforces the contracts: join, abort, detach, panic isolation, kill-on-drop, same-seed replay and cross-seed diversity. `crates/moonpool-sim/tests/determinism.rs` is the end-to-end tripwire: two full `SimulationBuilder` runs of racing workloads on the same seed must produce byte-identical traces. If any component, the executor, `select!` or a provider, ever consults an unseeded source, that test fails.
+
+[One thread, one clock, one seed](../techniques/determinism/) shows the result live: the executor runs a small replicated register in your browser, simulates seconds in milliseconds of real time, and replays the same events for the same seed.

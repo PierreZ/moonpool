@@ -59,7 +59,7 @@ export const CRATE_NOTES = {
     chapter: "appendix/08-xtask.md",
   },
   "moonpool-wasm-demo": {
-    when: "Not published. The ping-pong run that this site plays, compiled to wasm.",
+    when: "Not published. The engine of the live runs of this site: a replicated register, compiled to wasm. Copy it to put your own simulation in a browser.",
     chapter: "part4-integration/07-wasm.md",
   },
   "moonpool-calibrate": {

@@ -79,68 +79,69 @@ never drags the explorer into the bundle.
 
 The repository ships one:
 [`crates/moonpool-wasm-demo`](https://github.com/PierreZ/moonpool/tree/main/crates/moonpool-wasm-demo).
-It runs one seed of two nodes trading integrity-checked ping and pong frames
-over raw simulated TCP, and animates the result. The server and client are
-ordinary `Process` and `Workload` code with no browser awareness:
+It is the engine behind every live run of this site. The system is a small
+replicated register: three server `Process`es keep one value on disk with
+`sync_all`, and one client `Workload` writes it to a quorum and reads it back.
+It is ordinary moonpool code with no browser awareness, and the builder is the
+one any test would write:
 
 ```rust
-pub fn run_seed(seed: u64) -> RunResult {
-    let (data, recorder) = timeline::recorder();
-    let _report = SimulationBuilder::new()
-        .processes(ProcessCount::Fixed(1), || Box::new(actors::PongServer))
-        .workloads(WorkloadCount::Fixed(1), |_| Box::new(actors::PingClient))
-        // The recorder is an Invariant: it reads the same trace timeline
-        // your correctness invariants read, and turns it into the picture.
-        .invariant(recorder)
-        .chaos_duration(actors::CHAOS_DURATION)
-        .enable_chaos([Chaos::Network(ChaosMode::Random)])
-        .set_iterations(1)
-        .set_debug_seeds(vec![seed])
-        .run()
-        .expect("simulation configuration is valid");
-
-    timeline::finish(seed, &data)
+pub fn simulation(config: &RunConfig) -> SimulationBuilder {
+    let bug = config.bug;
+    let builder = SimulationBuilder::new()
+        .processes(ProcessCount::Fixed(config.servers), || {
+            Box::new(RegisterServer)
+        })
+        .workloads(WorkloadCount::Fixed(1), move |_| {
+            Box::new(RegisterClient::new(bug))
+        })
+        // "A read returns the last committed write", checked across the
+        // processes from their trace events alone.
+        .invariant(RegisterInvariant::default())
+        .chaos_duration(Duration::from_secs(4));
+    // ... network faults and reboots, from the config
 }
 ```
 
-`Chaos::Network(ChaosMode::Random)` injects seeded latency, clogs and
-connection drops, so some round trips come back slow and some never come back.
-The workload asserts it: `assert_sometimes!(rtt_ms >= SLOW_RTT_MS, …)` and
-`assert_reachable!("chaos drops a request before any pong returns")`. A
-`#[wasm_bindgen]` wrapper exports `run_seed_json` to JavaScript as
-`runSeed(seed)`, and that is the whole browser surface.
+`run(config)` adds one seed and a recorder. The recorder is an `Invariant`
+too: it reads the same trace timeline your correctness invariants read, with
+the injected faults under `SIM_FAULT_EVENT_NAME`, and returns the run as JSON.
+A `#[wasm_bindgen]` wrapper exports `run_json` to JavaScript as `run(config)`,
+and that is the whole browser surface. The config holds the seed, the chaos
+surfaces and a planted bug: the client reads from one server in place of a
+quorum, and about one seed in seven breaks the invariant.
 
-It is running right here, compiled to wasm and served as a page asset. Press
-**Run**, type a seed, or pick a preset. `42` is calm, `123` has some drops,
-`256` is chaotic, `7` is a storm. The same seed always replays the same
-history.
+It is running right here, compiled to wasm in a Web Worker. Press **Play**,
+step with the arrow keys, or type a seed. The same seed always replays the
+same history, and the print under the run proves it.
 
 <iframe
   class="demo-frame"
-  src="../wasm-demo/index.html?embed=1&amp;seed=256"
-  title="moonpool ping-pong wasm demo"
+  src="../embed/register.html?seed=256"
+  title="moonpool replicated register, live in wasm"
   loading="lazy">
 </iframe>
 
-To run it outside the book:
+To build it outside the site:
 
 1. Build the library for wasm:
    `cargo build --release --target wasm32-unknown-unknown -p moonpool-wasm-demo --lib`
 2. Generate the JavaScript glue:
-   `wasm-bindgen --target web --out-dir crates/moonpool-wasm-demo/web/pkg target/wasm32-unknown-unknown/release/moonpool_wasm_demo.wasm`
-3. Serve `crates/moonpool-wasm-demo/web/` with any static file server and
-   press **Run**.
+   `wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/moonpool_wasm_demo.wasm`
+3. Import `pkg/moonpool_wasm_demo.js`, await its default `init()`, and call
+   `run('{"seed": 42}')`.
 
 `website/site/scripts/build-wasm-demo.sh` runs those steps and stages the
-result in `website/site/public/wasm-demo/`, which is where the iframe above
-loads from. Run it before `npm run build` in `website/site/`. The `wasm-bindgen` crate version must match the CLI
-exactly (`0.2.129` in the Nix flake), or bindgen fails with an opaque schema
-error.
+bundle in `website/site/public/wasm-demo/pkg/`, where the site's engine worker
+loads it. Run it before `npm run build` in `website/site/`. The `wasm-bindgen`
+crate version must match the CLI exactly (`0.2.129` in the Nix flake), or
+bindgen fails with an opaque schema error.
 
-Run a seed natively with `cargo run -p moonpool-wasm-demo 42`, then run the
-same seed in the browser. You get the **byte-identical** history: the native
-binary prints the same JSON `runSeed` returns. Same seed, same run, on your
-laptop and in a stranger's tab.
+Run a config natively with
+`cargo run -p moonpool-wasm-demo --bin site-run -- '{"seed": 42}'`, then run
+the same config in the browser. You get the **byte-identical** JSON.
+`scripts/check-site-wasm.sh` proves it in CI for a few seeds, with the bug off
+and on. Same seed, same run, on your laptop and in a stranger's tab.
 
 ## What stays behind
 

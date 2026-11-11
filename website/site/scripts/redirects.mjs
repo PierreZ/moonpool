@@ -33,6 +33,14 @@ export function brokenLinks(html, exists) {
   return out;
 }
 
+/**
+ * The code blocks of one page that carry a colour theme of their own: a
+ * `<Code>` without `theme="css-variables"` ignores the tokens of the site.
+ */
+export function foreignThemes(html) {
+  return [...html.matchAll(/<pre class="astro-code ([\w-]+)"/g)].map((m) => m[1]).filter((t) => t !== "css-variables");
+}
+
 function walk(dir) {
   return readdirSync(dir).flatMap((n) => {
     const p = join(dir, n);
@@ -50,9 +58,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     // pagefind/ is written after this check; the search script loads it.
     const links = brokenLinks(readFileSync(file, "utf8"), (p) => p.startsWith("pagefind/") || existsSync(join(dist, p)));
     for (const l of links) bad.push(`${file.slice(dist.length)} -> ${l}`);
+    for (const t of foreignThemes(readFileSync(file, "utf8"))) bad.push(`${file.slice(dist.length)}: a code block in theme ${t}, not css-variables`);
   }
   if (bad.length) {
-    console.error(`broken links inside the site:\n  ${bad.join("\n  ")}`);
+    console.error(`broken links or code themes inside the site:\n  ${bad.join("\n  ")}`);
     process.exit(1);
   }
   console.log(`redirects written; every link inside the site has its target`);

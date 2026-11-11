@@ -12,3 +12,9 @@ test("brokenLinks checks only the links inside the site", () => {
   const have = new Set(["a.html", "guide/index.html"]);
   assert.deepEqual(brokenLinks(html, (p) => have.has(p)), ["/moonpool/nope.png"]);
 });
+
+test("a code block in a theme other than css-variables is reported", async () => {
+  const { foreignThemes } = await import("./redirects.mjs");
+  assert.deepEqual(foreignThemes('<pre class="astro-code css-variables" style="">'), []);
+  assert.deepEqual(foreignThemes('<pre class="astro-code github-dark" style="">'), ["github-dark"]);
+});

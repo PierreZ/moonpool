@@ -1,49 +1,67 @@
-//! The recorded runs of the website's home page (#415 (new site with the
-//! book)).
+//! The recorded runs of the website's pages (#416 (engine and player)).
 //!
-//! The home page shows these runs first, so it is complete before the wasm
-//! bundle loads and when it does not load. Then the browser runs the same
-//! seeds with `runSeed` and gets the same bytes. The file is written by this
-//! test, never by hand: the test writes it and fails when what it wrote
-//! differs from what was there, so CI fails on a stale file. Run the test
-//! again locally to accept the new runs.
+//! Each live page shows its recorded runs first, so the page is complete
+//! before the wasm engine loads and when it does not load. Then the browser
+//! runs the same configs and gets the same runs. These files are written by
+//! this test, never by hand: the test writes a file and fails when what it
+//! wrote differs from what was there, so CI fails on a stale file. Run the
+//! test again locally to accept the new runs, and commit them.
 
 use std::fs;
 use std::path::PathBuf;
 
-use moonpool_wasm_demo::run_seed;
+use moonpool_wasm_demo::{RunConfig, run};
 
-/// The seeds of the home page, in the order of its buttons.
-const HOME_SEEDS: [u64; 5] = [42, 7, 123, 256, 1000];
-
-fn home_runs_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../website/site/src/runs/home.json")
+/// The runs of each page, by file name under `website/site/src/runs/`.
+fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
+    let seed = |seed| RunConfig {
+        seed,
+        ..RunConfig::default()
+    };
+    vec![
+        // The hero of the home page and the demo of the chapter
+        // "Simulation in the Browser".
+        ("home", vec![seed(256)]),
+        // Determinism: the seed of the page, and the next seed to compare.
+        ("determinism", vec![seed(256), seed(257)]),
+    ]
 }
 
-fn home_runs_json() -> String {
-    let runs: Vec<_> = HOME_SEEDS.iter().map(|&seed| run_seed(seed)).collect();
-    let mut json = serde_json::to_string_pretty(&runs).expect("run results serialize to JSON");
-    json.push('\n');
-    json
+fn page_json(configs: &[RunConfig]) -> String {
+    let runs: Vec<String> = configs
+        .iter()
+        .map(|c| {
+            let run = run(c).expect("the configs of the site are valid");
+            serde_json::to_string(&run).expect("a run serializes to JSON")
+        })
+        .collect();
+    // One run per line keeps a diff readable.
+    format!("[\n{}\n]\n", runs.join(",\n"))
 }
 
 #[test]
-fn home_page_runs_are_recorded() {
-    let path = home_runs_path();
-    let fresh = home_runs_json();
-    let recorded = fs::read_to_string(&path).unwrap_or_default();
-    if recorded != fresh {
-        fs::write(&path, &fresh).expect("write website/site/src/runs/home.json");
-        panic!(
-            "{} was stale and is now written again: commit it",
-            path.display()
-        );
+fn page_runs_are_recorded() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../website/site/src/runs");
+    let mut stale = Vec::new();
+    for (name, configs) in pages() {
+        let path = dir.join(format!("{name}.json"));
+        let fresh = page_json(&configs);
+        if fs::read_to_string(&path).unwrap_or_default() != fresh {
+            fs::write(&path, &fresh).expect("write a recorded run of the site");
+            stale.push(path.display().to_string());
+        }
     }
+    assert!(
+        stale.is_empty(),
+        "stale recorded runs, now written again (commit them): {stale:?}"
+    );
 }
 
 #[test]
-fn home_page_runs_replay_the_same_bytes() {
-    // The page compares a live run with the recorded one by a fingerprint of
-    // its JSON: that only holds if one seed always gives the same bytes.
-    assert_eq!(home_runs_json(), home_runs_json());
+fn one_config_records_the_same_bytes() {
+    // The page compares a live run with the recorded one by its fingerprint:
+    // that only holds if one config always gives the same bytes.
+    for (_, configs) in pages() {
+        assert_eq!(page_json(&configs), page_json(&configs));
+    }
 }

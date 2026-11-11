@@ -2,6 +2,7 @@
 // makeover)): Techniques, Playground, Guide, Crates. A section that has no
 // page yet has no link; the issue that adds the page adds its link.
 export const NAV = [
+  { name: "Techniques", path: "techniques/" },
   { name: "Guide", path: "guide/" },
   { name: "Crates", path: "crates/" },
 ] as const;

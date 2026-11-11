@@ -139,3 +139,11 @@ test("the home figures are counted in the code", async () => {
   assert.ok(f.assertions.includes("assert_sometimes"));
   assert.deepEqual(enumVariants("pub enum E {\n    /// doc\n    A(u8),\n    B {\n        x: u8,\n    },\n}\n", "E"), ["A", "B"]);
 });
+
+test("rustFn takes one top-level function, and the pages' functions exist", async () => {
+  const { rustFn, repoFn } = await import("./source.mjs");
+  const src = "use x;\n\nfn main() {\n    if a {\n    }\n}\n\nfn other() {}\n";
+  assert.equal(rustFn(src, "main"), "fn main() {\n    if a {\n    }\n}");
+  assert.throws(() => rustFn(src, "nope"));
+  assert.match(repoFn("crates/moonpool-wasm-demo/src/bin/sim_register.rs", "main"), /check_determinism\(\)/);
+});

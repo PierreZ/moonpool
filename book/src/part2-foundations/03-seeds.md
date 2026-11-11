@@ -99,3 +99,5 @@ SimulationBuilder::new()
 ```
 
 The simulation replays the exact same execution. `trace_level` changes what the timeline captures and never changes scheduling or randomness, so the seed replays identically at any level. Set a breakpoint. Step through. The bug is deterministic now. [Debugging a Failing Seed](../part3-building/20-debugging.md) walks through the full procedure.
+
+[One thread, one clock, one seed](../techniques/determinism/) runs this in your browser: one seed twice gives the same run, and the next seed marks the first event that differs.

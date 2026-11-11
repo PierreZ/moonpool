@@ -38,17 +38,17 @@ const base = url();
   <h2 id="install">1. Add moonpool</h2>
   <p>Add the two crates to the <code>[dev-dependencies]</code> of your crate. The default features of
     <code>moonpool</code> give the simulator and the Tokio providers.</p>
-  <Code lang="toml" code={`[dev-dependencies]\nmoonpool = "${version}"\nasync-trait = "0.1"`} />
+  <Code theme="css-variables" lang="toml" code={`[dev-dependencies]\nmoonpool = "${version}"\nasync-trait = "0.1"`} />
 
   <h2 id="the-first-test">2. Write the first test</h2>
   <p>Put this file in <code>tests/chaos.rs</code>. <code>Server</code> is the system under test: a
     <code>Process</code> that the simulator boots again after each reboot. <code>Client</code> is the test driver: a
     <code>Workload</code> that survives the reboots and judges the run. The builder runs ten seeds with network
     faults on.</p>
-  <Code lang="rust" code={testFile} />
+  <Code theme="css-variables" lang="rust" code={testFile} />
 
   <h2 id="run-it">3. Run it</h2>
-  <Code lang="sh" code="cargo test --test chaos -- --nocapture" />
+  <Code theme="css-variables" lang="sh" code="cargo test --test chaos -- --nocapture" />
   <p>Ten seeds run in milliseconds of wall time. Each seed simulates a few seconds: the clock jumps to the
     next event, so no test waits.</p>
 
@@ -67,7 +67,7 @@ const base = url();
   <h2 id="replay-a-seed">5. Replay a failing seed</h2>
   <p>When a seed fails, the report names it under <strong>Faulty seeds</strong> and prints the line to replay
     it. Run that seed alone:</p>
-  <Code lang="rust" code={`SimulationBuilder::new()\n    .processes(1, || Box::new(Server))\n    .workload(Client)\n    .enable_chaos([Chaos::Network(ChaosMode::Swarm)])\n    .set_debug_seeds(vec![7891])\n    .set_iterations(1)\n    .run()?;`} />
+  <Code theme="css-variables" lang="rust" code={`SimulationBuilder::new()\n    .processes(1, || Box::new(Server))\n    .workload(Client)\n    .enable_chaos([Chaos::Network(ChaosMode::Swarm)])\n    .set_debug_seeds(vec![7891])\n    .set_iterations(1)\n    .run()?;`} />
   <p>The same seed gives the same run: the same order of the tasks, the same latency for each message, the
     same faults. Raise the log level and read the trace back from the first wrong event.</p>
 

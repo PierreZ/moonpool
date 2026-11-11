@@ -1,0 +1,17 @@
+---
+// The live run alone, for a frame in a chapter of the Guide (#416 (engine and
+// player)): the chapter "Simulation in the Browser" embeds it. The recorded
+// run is the one of the home page (src/runs/home.json).
+import Base from "../../layouts/Base.astro";
+import { url } from "../../nav";
+import runs from "../../runs/home.json";
+---
+<Base title="The replicated register, live" bare>
+  <section class="run" id="run" aria-label="A live run">
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </section>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+  <script is:inline type="module" set:html={`import { mount } from "${url("player.js")}";
+const runs = JSON.parse(document.getElementById("runs").textContent);
+mount(document.getElementById("run"), runs[0], { label: "replicated register" });`} />
+</Base>

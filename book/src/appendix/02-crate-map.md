@@ -54,7 +54,7 @@ Production builds keep the simulation out: `moonpool = { default-features = fals
 | `moonpool-explorer` | Also ships the explorer's own ladder scenario. | `sim-frontier-explore` |
 | `moonpool-rpc-sim` | Simulation harness, oracles and campaigns for `moonpool-rpc`. Unpublished. | `sim-rpc-foundations`, `sim-rpc-delivery`, `sim-rpc-interfaces`, `sim-rpc-balance`, `sim-rpc-streams`, `sim-rpc-security`, `sim-rpc-qualification` |
 | `moonpool-calibrate` | Measures real storage and network latency on the host and prints `LatencyDistribution` constants as Rust. Depends on no moonpool crate. | `moonpool-calibrate` |
-| `moonpool-wasm-demo` | Browser demo embedded in the book. `run_seed(seed)`, `run_seed_json(seed)`. | wasm library |
+| `moonpool-wasm-demo` | The run engine of the website: a replicated register, run natively or in the browser. `run(config)`, `run_json(config)`, `RunConfig`, `Run`. | wasm library, bins `sim-register` and `site-run` |
 | `xtask` | Cargo automation: the simulation binary runner. See [Running Simulation Binaries with xtask](./08-xtask.md). | `cargo xtask` |
 
 The `moonpool` facade also carries examples: `retrying_worker` and `metastable_grpc_retry_storm`. `moonpool-rpc` carries `recruitment`, `balanced_mutation` and `stream_saturation`.
