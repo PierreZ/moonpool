@@ -728,3 +728,54 @@ async fn allocate_grows_never_shrinks_and_reads_zeros() {
         assert!(back.as_slice().iter().all(|&b| b == 0), "{direct_io:?}");
     }
 }
+
+/// Every contradictory flag set is refused with `InvalidInput` under every
+/// direct-I/O policy, as the simulator refuses it, and the file does not
+/// change. The defect this pins: a `Required` open used the access flags
+/// only, so `std` did not see the contradiction, and `append + truncate`
+/// then truncated the file.
+#[tokio::test]
+async fn every_policy_refuses_contradictory_open_options() {
+    let dir = TempDir::new().expect("temp dir");
+    let provider = TokioStorageProvider::new();
+    let path = &scratch_file(&dir, "contradiction.db");
+    bootstrap(&provider, &dir, path).await;
+    let seeded = provider
+        .open(path, OpenOptions::read_write())
+        .await
+        .expect("open failed");
+    seeded.write_at(0, b"contents").await.expect("write failed");
+    seeded.sync_all().await.expect("sync failed");
+    drop(seeded);
+
+    for options in [
+        OpenOptions::new(),
+        OpenOptions::new().truncate(true),
+        OpenOptions::read_only().truncate(true),
+        OpenOptions::read_only().create(true),
+        OpenOptions::read_only().create_new(true),
+        OpenOptions::new().append(true).truncate(true),
+        OpenOptions::new().write(true).append(true).truncate(true),
+    ] {
+        for policy in [DirectIo::Disabled, DirectIo::Optional, DirectIo::Required] {
+            let options = options.clone().direct_io(policy);
+            let kind = provider
+                .open(path, options.clone())
+                .await
+                .err()
+                .map(|error| error.kind());
+            assert_eq!(
+                kind,
+                Some(std::io::ErrorKind::InvalidInput),
+                "{options:?} must be refused"
+            );
+            let file = provider
+                .open(path, OpenOptions::read_only())
+                .await
+                .expect("open failed");
+            let mut buf = [0u8; 8];
+            assert_eq!(file.read_at(0, &mut buf).await.expect("read failed"), 8);
+            assert_eq!(&buf, b"contents", "{options:?} changed the file");
+        }
+    }
+}
