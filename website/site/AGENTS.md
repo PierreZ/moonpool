@@ -18,12 +18,13 @@ The site presents moonpool as an engineering tool. The book is its manual.
 |---|---|---|
 | `/` | `src/pages/index.astro`, `public/home.js` | sells the tool: a hero with a live run, what you get, a test, your code and the providers, the techniques, used by paros |
 | `/techniques/` | `src/pages/techniques/`, `src/lib/techniques.mjs`, `src/layouts/Technique.astro` | one page per technique: the problem, the technique, the live run, the code, the Guide chapters |
+| `/playground/` | `src/pages/playground/index.astro`, `public/playground.js` | the full config in the address (`playConfig` / `playQuery` of `public/run-model.js`), Run, Hunt (seeds one after the other in the worker, stoppable), Replay, the report |
 | `/crates/` | `src/pages/crates/index.astro`, `src/lib/crates.mjs` | one entry per crate of the README table: what it is for, when to depend on it, docs.rs, its chapter |
 | `/guide/` | `src/pages/guide/index.astro` | `book/src/welcome.md`, then the map of `book/src/index.md` |
 | `/guide/quick-start/` | `src/pages/guide/quick-start/index.astro` | install, the first test, run it, read the report, replay a seed |
 | `/<part>/<chapter>.html`, `/llms.html` | `src/pages/[...slug].astro` | each chapter of `book/src/SUMMARY.md`, at its mdbook address |
 
-A later issue adds `/playground/` (#419). Add a
+Add a
 section to the top bar (`src/nav.ts`) in the issue that adds its page.
 
 ## The Guide

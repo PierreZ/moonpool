@@ -350,6 +350,26 @@ pre {
 .bar-fill { height: 100%; width: 0; background: var(--accent); }
 .bar-fill.bad { background: var(--fail); }
 .bar-text { margin: 0; padding: 0 12px 8px; color: var(--muted); }
+
+/* The playground: the config, the player, the report. */
+.play fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.play legend { padding: 0; margin-bottom: 4px; color: var(--muted); }
+.play-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 16px; padding: 10px 12px 0; }
+.play-grid .switches { padding: 0; }
+.play-seed { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.play-seed label { width: 100%; color: var(--muted); }
+.play-seed input { width: 16ch; height: 28px; padding: 0 6px; border: 1px solid var(--rule-strong); border-radius: 0; background: var(--bg); color: var(--fg); font: inherit; font-size: 12.5px; }
+.play-actions { border-top: 1px solid var(--rule); margin-top: 10px; }
+.play-actions .btn { min-height: 36px; }
+.report-cols { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0; border-top: 1px solid var(--rule); }
+.report-cols .table-wrap + .table-wrap { border-left: 1px solid var(--rule); }
+.report-cols td.bad { color: var(--fail); font-weight: 600; }
+.report-cols td { overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .report-cols { grid-template-columns: minmax(0, 1fr); }
+  #report-assertions th:nth-child(2), #report-assertions td:nth-child(2) { display: none; }
+  .report-cols .table-wrap + .table-wrap { border-left: 0; border-top: 1px solid var(--rule); }
+}
 .tree-wrap { overflow-x: auto; padding: 8px 0; border-bottom: 1px solid var(--rule); }
 .tree { display: block; font-family: var(--font-mono); font-size: 11px; }
 .tree-rule { stroke: var(--rule); stroke-dasharray: 2 4; }

@@ -337,3 +337,52 @@ export function treeRows(nodes) {
   for (const r of children.get(-1) || []) visit(r, 0);
   return out;
 }
+
+/**
+ * The playground's config from the address (#419 (playground)): `seed`,
+ * `servers` (1 to 5), and the switches `net`, `disk`, `reboots`, `wipes`,
+ * `swarm` and `bug` as 1 or 0. A missing or bad value keeps the default.
+ */
+export function playConfig(search, defaults) {
+  const p = new URLSearchParams(search);
+  const flag = (name, value) => (p.get(name) === "1" ? true : p.get(name) === "0" ? false : value);
+  const seed = seedFrom(search);
+  const servers = Number(p.get("servers"));
+  return {
+    ...defaults,
+    seed: seed === null ? defaults.seed : seed,
+    servers: Number.isInteger(servers) && servers >= 1 && servers <= 5 ? servers : defaults.servers,
+    chaos: {
+      network: flag("net", defaults.chaos.network),
+      storage: flag("disk", defaults.chaos.storage),
+      reboots: flag("reboots", defaults.chaos.reboots),
+    },
+    wipes: flag("wipes", defaults.wipes),
+    swarm: flag("swarm", defaults.swarm),
+    bug: flag("bug", defaults.bug),
+  };
+}
+
+/** The address query of a playground config: the inverse of `playConfig`. */
+export function playQuery(config) {
+  const b = (v) => (v ? "1" : "0");
+  return new URLSearchParams({
+    seed: String(config.seed),
+    servers: String(config.servers),
+    net: b(config.chaos.network),
+    disk: b(config.chaos.storage),
+    reboots: b(config.chaos.reboots),
+    wipes: b(config.wipes),
+    swarm: b(config.swarm),
+    bug: b(config.bug),
+  }).toString();
+}
+
+/**
+ * The assertions of a run for the report, in the run's order: each with its
+ * kind, its counts and whether it failed.
+ */
+export function assertionRows(run) {
+  const must = (k) => k.endsWith("always") || k === "unreachable";
+  return run.assertions.map((a) => ({ ...a, failed: a.fails > 0 && must(a.kind) }));
+}
