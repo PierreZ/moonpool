@@ -65,6 +65,7 @@ fn bounded_campaign_hits_every_required_scenario() {
     for required in [
         // Delivery modes and what their outcomes prove.
         "rpc one-way request queued",
+        "rpc one-way request executed exactly once",
         "rpc timeout after sending is ambiguous",
         "rpc explicit no-reply left the caller to its deadline",
         "rpc broken promise reported to the caller",

@@ -87,6 +87,7 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc security local call refused like a remote one",
         "rpc security unauthorized stream refused before any item",
         "rpc security invalid one-way request sent",
+        "rpc security one-way request executed exactly once",
         // Key and time transitions.
         "rpc security UTC jumped forward",
         "rpc security key set rotated",

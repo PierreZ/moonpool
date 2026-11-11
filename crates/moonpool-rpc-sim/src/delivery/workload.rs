@@ -738,6 +738,7 @@ impl Workload for DeliveryWorkload {
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let ledger = Ledger::of(ctx.state());
         let mut duplicates = 0u32;
+        let mut one_way_executed = false;
         for call in &self.calls {
             let receipts = ledger.receipts(call.id);
             if call.op.single_attempt() {
@@ -768,8 +769,18 @@ impl Workload for DeliveryWorkload {
                 }
                 Class::Maybe => {}
             }
+            // A one-way request is a single attempt: the check above keeps
+            // it to one run. A transport that drops every one-way request
+            // must not pass either.
+            if call.op == DeliveryOp::OneWay && call.class == Class::Maybe && receipts == 1 {
+                one_way_executed = true;
+            }
             tracing::debug!(id = call.id, op = ?call.op, class = ?call.class, receipts, "rpc delivery call judged");
         }
+        assert_sometimes!(
+            one_way_executed,
+            "rpc one-way request executed exactly once"
+        );
         // Permitted duplicates: reliable delivery may execute twice, and the
         // campaign must show that it does.
         assert_sometimes!(
