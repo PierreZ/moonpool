@@ -126,3 +126,4 @@ cargo run --release -p moonpool-rpc --example stream_saturation
 
 - [API documentation](https://docs.rs/moonpool-rpc)
 - [Typed RPC with moonpool-rpc](https://pierrez.github.io/moonpool/part4-networking/02-rpc.html), [What moonpool-rpc Promises](https://pierrez.github.io/moonpool/part4-networking/03-rpc-guarantees.html) and [Admission, Security and Derive](https://pierrez.github.io/moonpool/part4-networking/04-rpc-operations.html) in the Sim Book
+- [moonpool-rpc, call by call](https://pierrez.github.io/moonpool/extras/rpc/) on the website: each frame byte by byte, the reply statuses, admission

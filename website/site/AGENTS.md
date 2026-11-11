@@ -128,6 +128,21 @@ back to the page.
   1280 px, light and dark, with no horizontal scroll of the page, and put the
   screenshots in the pull request.
 
+## The mark and the links
+
+- The mark is "M1 · the module" (Pierre chose it in #420 (finish)): a module
+  on two legs on the sea floor, the sea above it, the pool in its floor.
+  `src/components/Mark.astro` draws it in the top bar. `scripts/icons.mjs`
+  makes `public/favicon.svg`, `favicon.ico`, `apple-touch-icon.png`,
+  `icon-192.png`, `icon-512.png` and `social-card.png` (1200 by 630, with the
+  astronaut of `book/src/images/logo.png`) from the mark and the tokens: run
+  it by hand and commit the files. `Base.astro` holds the icon links and the
+  `og:` tags.
+- `scripts/redirects.mjs` checks, after each build: each link inside the
+  site, each old book address (each chapter of `SUMMARY.md` at its `.html`,
+  each redirect), and each link to the site in the READMEs and the
+  `Cargo.toml` files of the repository.
+
 ## Writing
 
 ASD-STE100 Simplified Technical English for the new pages. Name a symbol only

@@ -92,3 +92,4 @@ builds for `wasm32-unknown-unknown`.
 - [Simulation in the Browser](https://pierrez.github.io/moonpool/part4-integration/07-wasm.html) in the Sim Book
 - [One thread, one clock, one seed](https://pierrez.github.io/moonpool/techniques/determinism/) on the website
 - [Multiverse exploration](https://pierrez.github.io/moonpool/techniques/exploration/): its tree is recorded natively by `tests/exploration_tree.rs`
+- [The playground](https://pierrez.github.io/moonpool/playground/): every field of the config, any seed, a hunt for a failing seed

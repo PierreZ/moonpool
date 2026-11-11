@@ -177,7 +177,8 @@ surface and the assertion accounting still work.
 
 ## Documentation
 
-- [The Sim Book](https://pierrez.github.io/moonpool/): the user guide
+- [The Sim Book](https://pierrez.github.io/moonpool/guide/): the user guide
+- [The techniques](https://pierrez.github.io/moonpool/techniques/) on the website: network and storage faults, reboots, swarm testing, each with a live run
 - [API documentation](https://docs.rs/moonpool-sim)
 - [Repository](https://github.com/PierreZ/moonpool)
 
