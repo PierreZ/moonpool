@@ -23,7 +23,7 @@ The site presents moonpool as an engineering tool. The book is its manual.
 | `/guide/quick-start/` | `src/pages/guide/quick-start/index.astro` | install, the first test, run it, read the report, replay a seed |
 | `/<part>/<chapter>.html`, `/llms.html` | `src/pages/[...slug].astro` | each chapter of `book/src/SUMMARY.md`, at its mdbook address |
 
-Later issues add the other technique pages (#417, #418) and `/playground/` (#419). Add a
+Later issues add the other technique pages (#418) and `/playground/` (#419). Add a
 section to the top bar (`src/nav.ts`) in the issue that adds its page.
 
 ## The Guide
@@ -75,13 +75,27 @@ small system of the site (a replicated register) and returns the run as JSON
   checks, controls, the list of events); `public/run-model.js` reads a run
   for it and `src/lib/player.test.mjs` tests that part.
 - `tests/site_runs.rs` writes the recorded runs of each page in `src/runs/`
-  (`home.json`, `determinism.json`) and fails when a file was stale: commit it.
+  (one file per page) and fails when a file was stale: commit it.
 - `scripts/check-site-wasm.sh` (repository root) proves that one config gives
   the same JSON natively and on wasm32. CI runs it.
 
-Pages: the home hero (`public/home.js`), `/techniques/determinism/`
-(`public/compare.js`), and `/embed/register.html`, the run alone in the frame
-of the chapter "Simulation in the Browser".
+Pages: the home hero (`public/home.js`), `/embed/register.html` (the run
+alone in the frame of the chapter "Simulation in the Browser"), and one script
+per technique page:
+
+| Page | Script | What it adds under the player |
+|---|---|---|
+| `/techniques/determinism/` | `public/compare.js` | a second run of a seed, side by side |
+| `/techniques/same-code/` | `public/same-code.js` | the server's lines and the events of each; a search for a seed that strikes at a hint |
+| `/techniques/network/` | `public/network.js` | a switch per network fault family (`NETWORK_FAULTS` of the engine) and the faults of each kind |
+| `/techniques/storage/` | `public/storage.js` | the log of each server as a row of sectors (`log_written`, `log_synced`, `storage_crash_sectors`) |
+| `/techniques/reboots/` | `public/reboots.js` | each reboot: kind, down, back, the version on its disk |
+
+A technique page reads its code samples and names from the files
+(`excerpt`, `lineWith`, `constNames`, `constStr`, `hintLabels` in
+`src/lib/source.mjs`), so a sample never goes stale: a marker that is gone
+fails the build. Each page links to its Guide chapters, and each chapter links
+back to the page.
 
 ## One style
 

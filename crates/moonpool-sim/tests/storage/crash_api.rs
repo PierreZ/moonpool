@@ -7,7 +7,7 @@
 use crate::{fast_sim, local_runtime, step_until_done, test_ip};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_sim::{Event, SimWorld, StorageConfiguration};
+use moonpool_sim::{Event, SimFaultEvent, SimWorld, StorageConfiguration};
 use std::time::Duration;
 
 /// Test the basic `simulate_crash` API call
@@ -662,5 +662,138 @@ fn shutdown_overrides_unconsumed_read_write_and_sync_results() {
             .await
             .expect("post-shutdown task panicked")
             .expect("new handle should work");
+    });
+}
+
+/// A crash reports the fate of each sector written after the last sync, in a
+/// read-only `StorageCrashSectors` event: every dirty sector appears in
+/// exactly one list.
+#[test]
+fn a_crash_reports_the_fate_of_each_unsynced_sector() {
+    local_runtime().block_on(async {
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+
+        // Three durable sectors, then all three written again and not synced.
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut file = provider
+                .open("fates.bin", OpenOptions::create_write())
+                .await?;
+            file.write_all(&[1u8; 3 * 512]).await?;
+            file.sync_all().await?;
+            let written = file.write_at(0, &[7u8; 3 * 512]).await?;
+            assert_eq!(written, 3 * 512);
+            drop(file);
+            Ok::<_, std::io::Error>(())
+        });
+        step_until_done(&mut sim, handle).await.expect("io error");
+        let _ = sim.take_faults();
+
+        sim.simulate_crash_for_process(test_ip(), true);
+
+        let faults: Vec<_> = sim.take_faults().into_iter().map(|f| f.event).collect();
+        assert!(matches!(
+            faults.first(),
+            Some(SimFaultEvent::StorageCrash { .. })
+        ));
+        let fates = faults
+            .iter()
+            .find_map(|e| match e {
+                SimFaultEvent::StorageCrashSectors {
+                    path,
+                    kept_old,
+                    kept_new,
+                    lost,
+                    latent,
+                    shorn,
+                    lost_synced,
+                    ..
+                } if path.ends_with("fates.bin") => Some((
+                    [kept_old, kept_new, lost, latent, shorn],
+                    lost_synced.clone(),
+                )),
+                _ => None,
+            })
+            .expect("the crash reports the sectors of fates.bin");
+        let mut sectors: Vec<u64> = fates
+            .0
+            .iter()
+            .flat_map(|list| list.split(',').filter(|s| !s.is_empty()))
+            .map(|s| s.parse().expect("a sector index"))
+            .collect();
+        sectors.sort_unstable();
+        assert_eq!(sectors, vec![0, 1, 2], "each dirty sector has one fate");
+        assert_eq!(
+            fates.1, "",
+            "nothing was synced, so no synced write is lost"
+        );
+    });
+}
+
+/// A crash with nothing unsynced reports no sector fate.
+#[test]
+fn a_crash_after_a_sync_reports_no_sector() {
+    local_runtime().block_on(async {
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut file = provider
+                .open("synced.bin", OpenOptions::create_write())
+                .await?;
+            file.write_all(&[1u8; 512]).await?;
+            file.sync_all().await?;
+            drop(file);
+            Ok::<_, std::io::Error>(())
+        });
+        step_until_done(&mut sim, handle).await.expect("io error");
+        let _ = sim.take_faults();
+        sim.simulate_crash_for_process(test_ip(), true);
+        assert!(
+            sim.take_faults()
+                .iter()
+                .all(|f| !matches!(f.event, SimFaultEvent::StorageCrashSectors { .. }))
+        );
+    });
+}
+
+#[test]
+fn a_clean_crash_reports_each_unsynced_sector_as_kept() {
+    local_runtime().block_on(async {
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration {
+            clean_crash_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        });
+        let provider = sim.storage_provider(test_ip());
+        let handle = tokio::spawn(async move {
+            let mut file = provider
+                .open("clean.bin", OpenOptions::create_write())
+                .await?;
+            file.write_all(&[1u8; 2 * 512]).await?;
+            file.sync_all().await?;
+            let written = file.write_at(512, &[7u8; 512]).await?;
+            assert_eq!(written, 512);
+            drop(file);
+            Ok::<_, std::io::Error>(())
+        });
+        step_until_done(&mut sim, handle).await.expect("io error");
+        let _ = sim.take_faults();
+        sim.simulate_crash_for_process(test_ip(), true);
+        let kept = sim
+            .take_faults()
+            .into_iter()
+            .find_map(|f| match f.event {
+                SimFaultEvent::StorageCrashSectors {
+                    path,
+                    kept_new,
+                    clean,
+                    ..
+                } if path.ends_with("clean.bin") => Some((kept_new, clean)),
+                _ => None,
+            })
+            .expect("a clean crash reports the sector it kept");
+        assert_eq!(kept, ("1".to_string(), true));
     });
 }

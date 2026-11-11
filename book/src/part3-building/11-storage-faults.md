@@ -6,6 +6,8 @@
 
 `write()` returns success and the bytes never reach the platter. `fsync()` completes and the firmware never flushed its cache. A firmware bug sends a write to the wrong sector. TigerBeetle's documentation lists these with real incidents behind them, including studies where 8.5% of SATA drives developed silent corruption. Moonpool's storage faults follow TigerBeetle's taxonomy and FoundationDB's crash model, so your integrity code meets these failures in simulation, deterministically.
 
+[Storage faults](../techniques/storage/) shows the crash model on the website: the log of each server as a row of sectors, and the fate a crash gives each one written after the last sync.
+
 ## The Storage Layering Rules
 
 Before the faults, the API they land on. Moonpool has **one provider, one file abstraction, one simulated file image**. Every API (stream, positioned, block) reads and writes the same bytes.

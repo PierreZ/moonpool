@@ -106,6 +106,9 @@ pub struct FileCrashReport {
     pub path: String,
     /// The crash was fully clean: every unsynced write survived.
     pub clean: bool,
+    /// The sectors a clean crash kept: each one dirty at crash time, now
+    /// durable with its new bytes. Empty when the crash was not clean.
+    pub clean_kept: Vec<u64>,
     /// Per-sector resolutions of the sectors dirty at crash time.
     pub resolutions: Vec<SectorResolution>,
     /// The file's unsynced length change was reverted, in whole or in part

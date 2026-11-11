@@ -26,7 +26,7 @@ use crate::{
         wakers::{WakeBatch, WakerRegistry},
     },
     storage::{
-        DiskCapacity, EioTarget, FileCrashReport, FileImage, StorageConfiguration,
+        CrashOutcome, DiskCapacity, EioTarget, FileCrashReport, FileImage, StorageConfiguration,
         StorageEligibilityMask, StorageError, StorageFaultKind, StorageFaultRecord,
         StorageOperation, faults::FaultFocus,
     },
@@ -1634,6 +1634,7 @@ impl StorageEngine {
         let config = self.state.config_for(ip).clone();
         let armed = self.state.barrier_violation_armed;
         let file_ids = self.files_owned_by(ip);
+        let mut sector_events = Vec::new();
         self.state.settle_turns(ip);
         // First decide which names survive so the same crash's fault mask and
         // reports use the name that actually remains on this process's disk.
@@ -1666,6 +1667,9 @@ impl StorageEngine {
                     sectors: Some(*sector..*sector + 1),
                 });
             }
+            if let Some(event) = crash_sectors_event(ip, &report) {
+                sector_events.push(event);
+            }
             self.state.crash_reports.push(report);
         }
 
@@ -1692,6 +1696,9 @@ impl StorageEngine {
             }
         }
         actions.fault(SimFaultEvent::StorageCrash { ip: ip.to_string() });
+        for event in sector_events {
+            actions.fault(event);
+        }
         actions
     }
 
@@ -2007,6 +2014,50 @@ impl Default for StorageEngine {
     fn default() -> Self {
         Self::new(StorageConfiguration::default())
     }
+}
+
+/// The read-only [`SimFaultEvent::StorageCrashSectors`] of one file's crash
+/// report, or `None` when the crash touched no sector and no length.
+fn crash_sectors_event(ip: IpAddr, report: &FileCrashReport) -> Option<SimFaultEvent> {
+    if report.resolutions.is_empty()
+        && report.clean_kept.is_empty()
+        && report.lost_synced.is_empty()
+        && !report.length_reverted
+    {
+        return None;
+    }
+    let list = |sectors: &mut dyn Iterator<Item = u64>| {
+        sectors.map(|s| s.to_string()).collect::<Vec<_>>().join(",")
+    };
+    let of = |outcome: CrashOutcome| {
+        list(
+            &mut report
+                .resolutions
+                .iter()
+                .filter(move |r| r.outcome == outcome)
+                .map(|r| r.sector),
+        )
+    };
+    Some(SimFaultEvent::StorageCrashSectors {
+        ip: ip.to_string(),
+        path: report.path.clone(),
+        kept_old: of(CrashOutcome::KeptOld),
+        // A clean crash keeps every unsynced write: each one is kept new.
+        kept_new: list(
+            &mut report
+                .resolutions
+                .iter()
+                .filter(|r| r.outcome == CrashOutcome::KeptNew)
+                .map(|r| r.sector)
+                .chain(report.clean_kept.iter().copied()),
+        ),
+        clean: report.clean,
+        lost: of(CrashOutcome::Lost),
+        latent: of(CrashOutcome::LatentFault),
+        shorn: of(CrashOutcome::Shorn),
+        lost_synced: list(&mut report.lost_synced.iter().copied()),
+        length_reverted: report.length_reverted,
+    })
 }
 
 /// The error for a path no file answers to.

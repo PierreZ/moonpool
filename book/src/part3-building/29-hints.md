@@ -18,6 +18,8 @@ send(messages).await;
 
 The label is a human string and a coverage bucket. It carries no semantics the simulator acts on. The simulator strikes the **calling process** if the seed's chaos allows it. Today every strike is a reboot, the one fault that tests a storage moment and a network moment alike: it loses the unsynced bytes and the unsent messages at once.
 
+[Same code in production and simulation](../techniques/same-code/) shows a hint strike live: the run reboots a server between its write and its sync, and a button finds the next seed that strikes at the hint you pick.
+
 ## A No-Op in Production
 
 `hint!` expands to a disruptive buggify site (`buggify_fault_internal`) with a label. Outside a simulation, buggify is disabled, so the site draws nothing, asks no one, and the returned future is ready at once. The cost is one thread-local read. `moonpool-buggify` has zero dependencies, so the same code ships to production and to `wasm32`. This is the rule from [Same Code in Production and Simulation](../part2-foundations/12-same-code.md): no `SimMachine`, no test-only hook, one binary.

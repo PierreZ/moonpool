@@ -14,7 +14,8 @@ use std::time::Duration;
 use moonpool_sim::runner::builder::{ProcessCount, WorkloadCount};
 use moonpool_sim::{
     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, FieldValue, Invariant,
-    SIM_FAULT_EVENT_NAME, SimulationBuilder, TraceEvent, TraceQuery, rng_call_count,
+    NetworkFault, NetworkFaultMask, SIM_FAULT_EVENT_NAME, SimulationBuilder, StorageFault,
+    StorageFaultMask, TraceEvent, TraceQuery, WipeBudget, WipeHeal, rng_call_count,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,7 +25,11 @@ use crate::register::{
 };
 
 /// The version of the [`Run`] model. Bump it when a field changes meaning.
-pub const MODEL: u32 = 1;
+pub const MODEL: u32 = 2;
+
+/// The event that the simulator emits, in the process, when attrition reboots
+/// it at its own `hint!` (fields `ip` and `label`).
+pub const HINT_STRUCK: &str = "hint: rebooting the process at its own hint";
 
 /// The chaos surfaces of a run. Each one that is on uses `ChaosMode::Random`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +68,60 @@ pub struct RunConfig {
     pub servers: usize,
     /// The planted bug: the client reads from one server, not from a quorum.
     pub bug: bool,
+    /// The network fault families that stay on, by name ([`NETWORK_FAULTS`]);
+    /// `None` keeps them all.
+    pub network_faults: Option<Vec<String>>,
+    /// The storage fault families that stay on, by name ([`STORAGE_FAULTS`]);
+    /// `None` keeps them all.
+    pub storage_faults: Option<Vec<String>>,
+    /// Reboots can also wipe a server's disk, one server per run.
+    pub wipes: bool,
+}
+
+/// The network fault families a config can name, and their mask bits.
+pub const NETWORK_FAULTS: &[(&str, NetworkFault)] = &[
+    ("clog", NetworkFault::Clog),
+    ("partition", NetworkFault::Partition),
+    ("bit_flip", NetworkFault::BitFlip),
+    ("random_close", NetworkFault::RandomClose),
+    ("connect_failure", NetworkFault::ConnectFailure),
+    ("clock_drift", NetworkFault::ClockDrift),
+    ("buggified_delay", NetworkFault::BuggifiedDelay),
+    ("pair_latency", NetworkFault::PairLatency),
+    ("black_hole", NetworkFault::BlackHole),
+];
+
+/// The storage fault families a config can name, and their mask bits.
+pub const STORAGE_FAULTS: &[(&str, StorageFault)] = &[
+    ("corruption", StorageFault::Corruption),
+    ("eio", StorageFault::Eio),
+    ("misdirect", StorageFault::Misdirect),
+    ("phantom_write", StorageFault::PhantomWrite),
+    ("sync_failure", StorageFault::SyncFailure),
+    ("short_transfer", StorageFault::ShortTransfer),
+    ("dir_entry_loss", StorageFault::DirEntryLoss),
+    ("crash_damage", StorageFault::CrashDamage),
+    ("degradation", StorageFault::Degradation),
+    ("disk_failure", StorageFault::DiskFailure),
+    (
+        "dropped_mutation_discard",
+        StorageFault::DroppedMutationDiscard,
+    ),
+    ("writeback_error", StorageFault::WritebackError),
+];
+
+/// The families of `names` in `table`, or the first name it does not know.
+fn families<T: Copy>(table: &[(&str, T)], names: &[String]) -> Result<Vec<T>, String> {
+    names
+        .iter()
+        .map(|n| {
+            table
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, f)| *f)
+                .ok_or_else(|| n.clone())
+        })
+        .collect()
 }
 
 impl Default for RunConfig {
@@ -73,6 +132,9 @@ impl Default for RunConfig {
             chaos: ChaosSet::default(),
             servers: 3,
             bug: false,
+            network_faults: None,
+            storage_faults: None,
+            wipes: false,
         }
     }
 }
@@ -282,7 +344,7 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-fn chaos_surfaces(chaos: ChaosSet, servers: usize) -> Vec<Chaos> {
+fn chaos_surfaces(chaos: ChaosSet, servers: usize, wipes: bool) -> Vec<Chaos> {
     let mut out = Vec::new();
     if chaos.network {
         out.push(Chaos::Network(ChaosMode::Random));
@@ -296,13 +358,21 @@ fn chaos_surfaces(chaos: ChaosSet, servers: usize) -> Vec<Chaos> {
                 // A minority at a time, so a quorum can stay up.
                 max_dead: (servers - 1) / 2,
                 prob_graceful: 0.3,
-                prob_crash: 0.7,
-                prob_wipe: 0.0,
-                recovery_delay_ms: None,
+                prob_crash: if wipes { 0.5 } else { 0.7 },
+                prob_wipe: if wipes { 0.2 } else { 0.0 },
+                // With wipes, a server comes back within the run, so the
+                // page can show a wiped server boot on an empty disk.
+                recovery_delay_ms: wipes.then_some(500..2000),
                 grace_period_ms: None,
                 scope: AttritionScope::PerProcess,
                 victims: AttritionVictims::group(SERVER),
-                wipe_budget: None,
+                // A wiped server lost its log and has no repair: one wipe
+                // per run, never healed, so the others keep each committed
+                // write and every later wipe becomes a crash.
+                wipe_budget: wipes.then_some(WipeBudget {
+                    max_unhealed: 1,
+                    heal: WipeHeal::Signal,
+                }),
             },
             mode: ChaosMode::Random,
         });
@@ -327,7 +397,27 @@ pub fn simulation(config: &RunConfig) -> SimulationBuilder {
         })
         .invariant(RegisterInvariant::default())
         .chaos_duration(Duration::from_secs(4));
-    let surfaces = chaos_surfaces(config.chaos, config.servers);
+    // check() refused unknown names, so these fall back only for a config
+    // that skipped it.
+    let builder = match &config.network_faults {
+        Some(names) => builder.network_fault_mask(
+            families(NETWORK_FAULTS, names)
+                .unwrap_or_default()
+                .into_iter()
+                .fold(NetworkFaultMask::none(), NetworkFaultMask::with),
+        ),
+        None => builder,
+    };
+    let builder = match &config.storage_faults {
+        Some(names) => builder.storage_fault_mask(
+            families(STORAGE_FAULTS, names)
+                .unwrap_or_default()
+                .into_iter()
+                .fold(StorageFaultMask::none(), StorageFaultMask::with),
+        ),
+        None => builder,
+    };
+    let surfaces = chaos_surfaces(config.chaos, config.servers, config.wipes);
     if surfaces.is_empty() {
         builder
     } else {
@@ -353,6 +443,14 @@ pub fn check(config: &RunConfig) -> Result<(), ConfigError> {
             config.servers
         )));
     }
+    if let Some(names) = &config.network_faults {
+        families(NETWORK_FAULTS, names)
+            .map_err(|n| ConfigError(format!("unknown network fault family {n:?}")))?;
+    }
+    if let Some(names) = &config.storage_faults {
+        families(STORAGE_FAULTS, names)
+            .map_err(|n| ConfigError(format!("unknown storage fault family {n:?}")))?;
+    }
     Ok(())
 }
 
@@ -370,6 +468,7 @@ pub fn run(config: &RunConfig) -> Result<Run, ConfigError> {
     let out = Arc::new(Mutex::new(Captured::default()));
     let mut names: Vec<&'static str> = register::EVENTS.to_vec();
     names.push(SIM_FAULT_EVENT_NAME);
+    names.push(HINT_STRUCK);
     let recorder = Recorder {
         cursors: names.iter().map(|_| Cell::new(0)).collect(),
         names,

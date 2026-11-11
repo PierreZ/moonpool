@@ -1,0 +1,94 @@
+---
+// Same code in production and simulation (#417 (technique pages, part 1)):
+// the lines of the register's server, what each one does with the Tokio
+// providers, and what it did in this simulated run. The recorded run is
+// src/runs/same-code.json; public/same-code.js counts the events of each
+// line.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { constStr, excerpt, hintLabels, lineWith, repoFile } from "../../../lib/source.mjs";
+import runs from "../../../runs/same-code.json";
+
+const register = repoFile("crates/moonpool-wasm-demo/src/register.rs");
+const struck = constStr(repoFile("crates/moonpool-wasm-demo/src/engine.rs"), "HINT_STRUCK");
+const [beforeSync, beforeAck] = hintLabels(register);
+const ROWS = [
+  { line: lineWith(register, ".open(FILE,"), prod: "TokioStorageProvider opens a file on the real disk.", event: "server_boot" },
+  { line: lineWith(register, "listener.accept()"), prod: "TokioNetworkProvider accepts a TCP connection.", event: "msg_recv", role: "process" },
+  { line: lineWith(register, ".write_at("), prod: "The kernel copies the record to its page cache.", event: "log_written" },
+  { line: lineWith(register, `hint!("${beforeSync}")`), prod: "Resolves at once. It draws nothing and asks no one.", event: struck, label: beforeSync },
+  { line: lineWith(register, "file.sync_all()"), prod: "fsync: the record is on the disk.", event: "log_synced" },
+  { line: lineWith(register, `hint!("${beforeAck}")`), prod: "Resolves at once.", event: struck, label: beforeAck },
+  { line: lineWith(register, "if buggify!()"), prod: "Always false. No draw.", event: "reply_dropped" },
+  { line: lineWith(register, "stream.write_all(&reply.encode())"), prod: "TokioNetworkProvider sends the reply.", event: "msg_send", role: "process" },
+];
+const boot = excerpt(register, "async fn run(&mut self, ctx: &SimContext)", "let listener = ctx.network().bind(ctx.my_ip()).await?;");
+---
+<Technique
+  title="Same code in production and simulation"
+  description="One server, two sets of providers. The simulator runs the code you ship."
+  guide={[
+    "part2-foundations/12-same-code.md",
+    "part2-foundations/04-provider-pattern.md",
+    "part3-building/08-buggify.md",
+    "part3-building/29-hints.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>A simulator that tests a model of your system finds the bugs of the model. When the test runs a copy of
+    the code, or the code with test-only hooks, the copy and the shipped code go apart. After some time, the
+    test tests itself.</p>
+
+  <h2>The technique</h2>
+  <p>The code does all its I/O through <b>providers</b>: the time, the tasks, the network, the disk and the
+    random numbers. In production, the Tokio providers do real I/O. In a simulation, the simulated providers
+    do it on one thread, and a seed decides each delay and each fault. The code above the providers is the
+    same compiled code.</p>
+  <p>Two marks let the code help the simulator. <code>buggify!()</code> is a rare choice that is legal, for
+    example "drop this reply". <code>hint!("…")</code> names a moment where a reboot hurts most, and attrition
+    can reboot the process there. In production both are inert: <code>buggify!()</code> is false and <code>hint!</code> resolves at once.</p>
+
+  <h2>The live run</h2>
+  <p>Each row is one line of the register's server. The middle column is what it does in production. The
+    right column counts what it did in this run, up to the cursor. At 364 ms the simulator reboots
+    10.0.1.1 at its first hint, between the write and the sync. Select a hint and find the next seed that
+    strikes there.</p>
+  <div class="breakout">
+    <section class="run" id="run" aria-label="A live run"></section>
+    <div class="run run-under">
+      <div class="run-head label"><span>the server's code, line by line</span></div>
+      <div class="table-wrap">
+        <table class="run-table" id="code-table">
+          <tr><th>line of register.rs</th><th>in production</th><th>in this simulation</th></tr>
+          {ROWS.map((r) => (
+            <tr data-event={r.event} data-label={r.label} data-role={r.role}>
+              <td><code>{r.line}</code></td>
+              <td>{r.prod}</td>
+              <td class="sim later">not yet</td>
+            </tr>
+          ))}
+        </table>
+      </div>
+      <form class="switches" id="strike-form">
+        <label for="strike-label" class="label">hint</label>
+        <select id="strike-label" name="label">
+          {[beforeSync, beforeAck].map((l) => <option value={l}>{l}</option>)}
+        </select>
+        <button class="btn small" type="submit">Find the next seed that strikes</button>
+      </form>
+      <p class="run-out" id="strike-out" aria-live="polite"></p>
+    </div>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+  <script is:inline type="application/json" id="same-code-data" set:html={JSON.stringify({ struck, tries: 200 })} />
+
+  <h2>The code</h2>
+  <p>The server gets its providers from its context. It does not know if they are real or simulated:</p>
+  <Code theme="css-variables" lang="rust" code={boot} />
+  <p>The register runs only in the simulator, so it gets its providers from <code>SimContext</code>. A library
+    that ships takes <code>P: Providers</code> and gets <code>TokioProviders</code> in production. The
+    Guide chapter shows how a crate keeps the simulator out of its release build.</p>
+  <script is:inline type="module" src={url("same-code.js")}></script>
+</Technique>

@@ -622,6 +622,7 @@ impl FileImage {
             for sector in dirty {
                 if !self.stranded.is_set(as_index(sector)) {
                     self.commit_sector(sector);
+                    report.clean_kept.push(sector);
                 }
             }
         } else {
@@ -710,6 +711,7 @@ impl FileImage {
         for sector in dirty {
             if !self.stranded.is_set(as_index(sector)) {
                 self.commit_sector(sector);
+                report.clean_kept.push(sector);
             }
         }
         self.visible.clear();

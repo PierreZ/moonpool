@@ -77,3 +77,62 @@ test("the address gives a seed only when it is a whole number", () => {
   assert.equal(model.seedFrom("?seed=2.5"), null);
   assert.equal(model.seedFrom(""), null);
 });
+
+const [storage] = load("storage");
+const [reboot] = load("reboots");
+const [same] = load("same-code");
+const [net] = load("network");
+
+test("the sectors of a log: written, then durable, then the fate a crash gave them", () => {
+  const ev = (name, source, fields) => ({ seq: 0, time_ms: 0, source, name, fields });
+  const run = {
+    events: [
+      ev("log_written", "a", { sector: 0 }),
+      ev("log_synced", "a", { sector: 0 }),
+      ev("log_written", "a", { sector: 1 }),
+      ev("sim_fault", "sim", { kind: "storage_crash_sectors", ip: "a", lost: "1", kept_old: "", kept_new: "", latent: "", shorn: "", lost_synced: "" }),
+      ev("sim_fault", "sim", { kind: "storage_wipe", ip: "a" }),
+    ],
+  };
+  assert.deepEqual([...model.sectorStates(run, 0).get("a")], [[0, "written"]]);
+  assert.deepEqual([...model.sectorStates(run, 2).get("a")], [[0, "durable"], [1, "written"]]);
+  assert.deepEqual([...model.sectorStates(run, 3).get("a")], [[0, "durable"], [1, "lost"]]);
+  assert.equal(model.sectorStates(run, 4).get("a").size, 0, "a wipe empties the disk");
+});
+
+test("the storage page's run loses an unsynced sector, and no synced one", () => {
+  const end = model.sectorStates(storage, storage.events.length - 1);
+  assert.ok([...end.values()].some((d) => [...d.values()].includes("lost")));
+  assert.deepEqual(model.lostSynced(storage), []);
+});
+
+test("reboots name their kind, and the reboots page's run has a crash and a wipe", () => {
+  const kinds = model.reboots(reboot).map((r) => r.kind);
+  assert.ok(kinds.includes("crash"));
+  assert.ok(kinds.includes("wipe"));
+  const wiped = model.reboots(reboot).find((r) => r.kind === "wipe" && r.back !== null);
+  assert.ok(wiped, "the wiped server boots again within the run");
+  assert.equal(wiped.version, 0, "a wiped server boots on an empty disk");
+  const crashed = model.reboots(reboot).find((r) => r.kind === "crash" && r.back !== null);
+  assert.ok(crashed && crashed.version > 0, "a crashed server boots on what it synced");
+  assert.ok(crashed.backIndex > crashed.index);
+  assert.ok(model.mostDown(reboot) <= 1, "attrition keeps a quorum up");
+});
+
+test("the same-code page's run strikes at the hint before the sync", () => {
+  const strikes = model.hintStrikes(same, "hint: rebooting the process at its own hint");
+  assert.ok(strikes.some((s) => s.label === "register: record written, not synced"));
+});
+
+test("the network page's run has a partition, a clog and a black hole", () => {
+  const c = model.faultCounts(net);
+  for (const k of ["partition_created", "interface_clogged", "black_hole"]) assert.ok(c[k] > 0, k);
+});
+
+test("the committed version at an event is the newest write_committed so far", () => {
+  const ev = (name, version) => ({ seq: 0, time_ms: 0, source: "c", name, fields: { version } });
+  const run = { events: [ev("write_committed", 1), ev("write_applied", 9), ev("write_committed", 3)] };
+  assert.equal(model.committedAt(run, -1), 0);
+  assert.equal(model.committedAt(run, 1), 1);
+  assert.equal(model.committedAt(run, 5), 3);
+});

@@ -1,8 +1,10 @@
 //! The small system of the website: a replicated register (#416 (engine and
-//! player)).
+//! player), #417 (technique pages, part 1)).
 //!
-//! Three [`RegisterServer`] processes each keep one `(version, value)` pair in
-//! a file, and write it with `sync_all` before they answer. One
+//! Three [`RegisterServer`] processes each keep a log of `(version, value)`
+//! records in a file, one sector per version, and `sync_all` each record
+//! before they answer. At boot a server keeps the newest record that passes
+//! its check word. One
 //! [`RegisterClient`] workload writes versions 1, 2, 3 … to all servers and
 //! calls a write committed when a quorum (two of three) answered. After each
 //! write it reads from the servers and keeps the highest version that a
@@ -15,8 +17,9 @@
 //! last write can answer first, and the read goes back in time.
 //!
 //! Each fact that a picture of the site needs is an ordinary `tracing` event:
-//! `msg_send` and `msg_recv` for each message, `write_applied`, `read_served`,
-//! `server_boot` and `server_stop` on a server, `write_committed`, `write_failed`,
+//! `msg_send` and `msg_recv` for each message, `log_written`, `log_synced`,
+//! `write_applied`, `read_served`, `reply_dropped`, `server_boot` and
+//! `server_stop` on a server, `write_committed`, `write_failed`,
 //! `read_returned` and `read_failed` on the client. The code has no drawing
 //! code.
 
@@ -38,8 +41,10 @@ pub const SERVER: &str = "register";
 pub const CLIENT: &str = "client";
 /// How many writes the client makes in one run.
 pub const WRITES: u64 = 8;
-/// The file that holds the register on each server.
-const FILE: &str = "register";
+/// The log of the register on each server: version `v` is sector `v - 1`.
+const FILE: &str = "register.log";
+/// One record of the log fills one sector, so a crash decides its fate whole.
+const SECTOR: usize = 512;
 /// How long the client waits for one answer.
 const TIMEOUT: Duration = Duration::from_millis(400);
 /// How long the client waits between two operations.
@@ -147,17 +152,22 @@ fn decode_state(bytes: &[u8; 24]) -> Option<(u64, u64)> {
 pub struct RegisterServer;
 
 impl RegisterServer {
-    /// Read the register from disk; an empty or damaged file is version 0.
+    /// Read the log and keep its newest valid record. A sector that a crash
+    /// lost or damaged fails its check word and does not count.
     async fn load<F: StorageFile>(file: &F) -> SimulationResult<(u64, u64)> {
-        let mut bytes = [0; 24];
         let size = file.size().await.map_err(|e| io_error(&e))?;
-        if size < 24 {
-            return Ok((0, 0));
+        let mut newest = (0, 0);
+        let sectors = usize::try_from(size).unwrap_or(usize::MAX) / SECTOR;
+        for sector in 0..sectors {
+            let mut bytes = [0; 24];
+            file.read_at((sector * SECTOR) as u64, &mut bytes)
+                .await
+                .map_err(|e| io_error(&e))?;
+            if let Some(record) = decode_state(&bytes) {
+                newest = newest.max(record);
+            }
         }
-        file.read_at(0, &mut bytes)
-            .await
-            .map_err(|e| io_error(&e))?;
-        Ok(decode_state(&bytes).unwrap_or((0, 0)))
+        Ok(newest)
     }
 }
 
@@ -206,10 +216,23 @@ impl Process for RegisterServer {
             let reply = match request.op {
                 Op::Write => {
                     if request.version > version {
-                        file.write_at(0, &encode_state(request.version, request.value))
+                        let sector = request.version - 1;
+                        let mut record = [0; SECTOR];
+                        record[..24].copy_from_slice(&encode_state(request.version, request.value));
+                        let written = file
+                            .write_at(sector * SECTOR as u64, &record)
                             .await
                             .map_err(|e| io_error(&e))?;
+                        if written < SECTOR {
+                            return Err(SimulationError::InvalidState(format!(
+                                "register file: short write of {written} bytes"
+                            )));
+                        }
+                        tracing::info!(sector, "log_written");
+                        // The record is in the page cache, not on the disk.
+                        hint!("register: record written, not synced").await;
                         file.sync_all().await.map_err(|e| io_error(&e))?;
+                        tracing::info!(sector, "log_synced");
                         (version, value) = (request.version, request.value);
                     }
                     tracing::info!(version, "write_applied");
@@ -235,6 +258,7 @@ impl Process for RegisterServer {
             };
             // A lost answer: the client must live with a silent server.
             if buggify!() {
+                tracing::info!(msg = reply_id(request.rid), "reply_dropped");
                 continue;
             }
             tracing::info!(msg = reply_id(request.rid), to = %peer, kind = reply.op.label(), "msg_send");
@@ -410,6 +434,9 @@ impl Invariant for RegisterInvariant {
 pub const EVENTS: &[&str] = &[
     "server_boot",
     "server_stop",
+    "log_written",
+    "log_synced",
+    "reply_dropped",
     "msg_send",
     "msg_recv",
     "write_applied",

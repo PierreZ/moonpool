@@ -1,0 +1,61 @@
+---
+// Storage faults (#417 (technique pages, part 1)): the log of each server as
+// a row of sectors, and what a crash does to the sectors written after the
+// last sync. The recorded run is src/runs/storage.json; public/storage.js
+// draws the sectors from the run's events.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { excerpt, repoFile } from "../../../lib/source.mjs";
+import runs from "../../../runs/storage.json";
+
+const write = excerpt(repoFile("crates/moonpool-wasm-demo/src/register.rs"), "if request.version > version {", "(version, value) = (request.version, request.value);");
+---
+<Technique
+  title="Storage faults"
+  description="A crash decides the fate of each sector written after the last sync."
+  guide={[
+    "part3-building/11-storage-faults.md",
+    "part3-building/33-aimed-faults.md",
+    "part5-building-on-top/08-journal.md",
+    "appendix/04-fault-reference.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>A write goes to the page cache first. Only a sync puts it on the disk. When the power goes off between
+    the two, a real disk can keep the new bytes, keep the old bytes, lose the sector, or keep a half-written
+    sector. Code that trusts a write before its sync loses data, but only on the day of a crash.</p>
+
+  <h2>The technique</h2>
+  <p>The simulated disk keeps each sector that was written and not synced. At a crash, it decides the fate of
+    each one: <b>kept old</b>, <b>kept new</b>, <b>lost</b>, <b>latent</b> (corrupt bytes on each read) or <b>shorn</b> (half old, half new). A sector that a sync reported durable must not change. The simulator
+    checks this after each crash: this is the <b>lost-synced-write oracle</b>. If a synced sector changed, the
+    run fails as a bug of the disk model, unless the test armed the family of disks that lie about a sync.</p>
+  <p>The simulator reports each fate in a <code>storage_crash_sectors</code> event. It is read-only: it draws
+    nothing and does not change the run.</p>
+
+  <h2>The live run</h2>
+  <p>Each server writes version <i>v</i> of the register to sector <i>v</i> − 1 of its log, then syncs it.
+    Crash damage is on and the other storage faults are off. Step to 453 ms: server 10.0.1.1 crashes
+    after it wrote sector 3 and before the sync. The crash loses the sector. The server did not
+    answer that write, so no client counts on it. When a server boots, it reads its log and keeps the newest
+    record that passes its check word.</p>
+  <div class="breakout">
+    <section class="run" id="run" aria-label="A live run"></section>
+    <div class="sector-view run">
+      <div class="run-head label"><span>the log of each server, one sector per version</span></div>
+      <div id="sectors" class="disks" aria-live="off"></div>
+      <div id="sector-legend" class="run-legend"></div>
+      <p id="oracle" class="oracle"></p>
+    </div>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+
+  <h2>The code</h2>
+  <p>The write path of a server. The record is in the page cache after <code>write_at</code> and on the disk
+    after <code>sync_all</code>. The <code>hint!</code> between them names the moment where a reboot hurts
+    most, and attrition can strike there.</p>
+  <Code theme="css-variables" lang="rust" code={write} />
+  <script is:inline type="module" src={url("storage.js")}></script>
+</Technique>

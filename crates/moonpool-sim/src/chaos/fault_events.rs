@@ -192,6 +192,34 @@ pub enum SimFaultEvent {
         /// IP of the crashed process.
         ip: String,
     },
+    /// What one storage crash did to one file: the fate of each sector that
+    /// was written and not synced. Read-only: it reports the crash model's
+    /// resolution and draws nothing. Each list is the sector indexes, comma
+    /// separated, empty when none.
+    StorageCrashSectors {
+        /// IP of the crashed process.
+        ip: String,
+        /// Path of the file.
+        path: String,
+        /// Sectors that went back to their last durable contents.
+        kept_old: String,
+        /// Sectors whose unsynced write survived, those of a clean crash
+        /// included.
+        kept_new: String,
+        /// The crash was clean: every unsynced write survived.
+        clean: bool,
+        /// Sectors that went back to never-written (the fill pattern).
+        lost: String,
+        /// Sectors that read corrupt bytes after the crash.
+        latent: String,
+        /// Sectors with a mix of old and new bytes.
+        shorn: String,
+        /// Sectors that a sync reported durable and the crash lost anyway
+        /// (only with the barrier-violation family armed).
+        lost_synced: String,
+        /// The unsynced length change of the file went back.
+        length_reverted: bool,
+    },
     /// All storage wiped for a process (`CrashAndWipe` reboot).
     StorageWipe {
         /// IP of the wiped process.
@@ -225,6 +253,7 @@ impl SimFaultEvent {
             Self::StorageSyncFault { .. } => "storage_sync_fault",
             Self::StorageDiskFailure { .. } => "storage_disk_failure",
             Self::StorageCrash { .. } => "storage_crash",
+            Self::StorageCrashSectors { .. } => "storage_crash_sectors",
             Self::StorageWipe { .. } => "storage_wipe",
         }
     }

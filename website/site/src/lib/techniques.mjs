@@ -3,10 +3,10 @@
 // home page and the top bar link only to a page that exists.
 export const TECHNIQUES = [
   { name: "One thread, one clock, one seed", path: "techniques/determinism/", line: "Run a seed twice and compare the two runs." },
-  { name: "Same code in production and simulation", line: "One function, two sets of providers." },
-  { name: "Network faults", line: "Cut a link, clog it, close a connection." },
-  { name: "Storage faults", line: "What a crash does to each sector after the last sync." },
-  { name: "Reboots", line: "A process starts again with fresh memory." },
+  { name: "Same code in production and simulation", path: "techniques/same-code/", line: "One function, two sets of providers." },
+  { name: "Network faults", path: "techniques/network/", line: "Cut a link, clog it, close a connection." },
+  { name: "Storage faults", path: "techniques/storage/", line: "What a crash does to each sector after the last sync." },
+  { name: "Reboots", path: "techniques/reboots/", line: "A process starts again with fresh memory." },
   { name: "Swarm testing", line: "Each seed draws its own set of faults." },
   { name: "Assertions that must fire", line: "The coverage fills seed after seed." },
   { name: "Multiverse exploration", line: "The run forks at each discovery." },

@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use moonpool_wasm_demo::{RunConfig, run};
+use moonpool_wasm_demo::{ChaosSet, RunConfig, run};
 
 /// The runs of each page, by file name under `website/site/src/runs/`.
 fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
@@ -24,6 +24,33 @@ fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
         ("home", vec![seed(256)]),
         // Determinism: the seed of the page, and the next seed to compare.
         ("determinism", vec![seed(256), seed(257)]),
+        // Same code: a seed where a reboot strikes at the hint before the
+        // sync, and buggify drops replies.
+        ("same-code", vec![seed(9)]),
+        // Network faults: a partition, clogs and a black hole.
+        ("network", vec![seed(18)]),
+        // Storage faults: crash damage only, so each crash decides the fate
+        // of the unsynced sectors; this seed loses one.
+        (
+            "storage",
+            vec![RunConfig {
+                chaos: ChaosSet {
+                    network: false,
+                    storage: true,
+                    reboots: true,
+                },
+                storage_faults: Some(vec!["crash_damage".into()]),
+                ..seed(84)
+            }],
+        ),
+        // Reboots: crashes, a restart, and one wipe.
+        (
+            "reboots",
+            vec![RunConfig {
+                wipes: true,
+                ..seed(56)
+            }],
+        ),
     ]
 }
 

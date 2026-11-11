@@ -1,0 +1,74 @@
+---
+// Network faults (#417 (technique pages, part 1)): one seed with every
+// network fault family on, then the same seed with the families you keep.
+// The recorded run is src/runs/network.json; public/network.js runs the
+// seed again in the engine.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { constNames, excerpt, repoFile } from "../../../lib/source.mjs";
+import runs from "../../../runs/network.json";
+
+const engine = repoFile("crates/moonpool-wasm-demo/src/engine.rs");
+const families = constNames(engine, "NETWORK_FAULTS");
+const chaos = excerpt(engine, "if chaos.network {", "}");
+const mask = excerpt(engine, "let builder = match &config.network_faults {", "};");
+---
+<Technique
+  title="Network faults"
+  description="Cut a link, clog it, close a connection: the faults that TCP code sees."
+  guide={[
+    "part3-building/10-network-faults.md",
+    "part3-building/07-chaos.md",
+    "part3-building/28-swarm-testing.md",
+    "appendix/04-fault-reference.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>On a real network, a link stops for some seconds, a connection closes in the middle of a request, a peer
+    accepts bytes and never answers. Each of these is rare on one machine and frequent on a thousand. A test
+    on a laptop network almost never sees them, so the code that handles them is the code with no test.</p>
+
+  <h2>The technique</h2>
+  <p>moonpool simulates the network at the level of TCP connections, as FoundationDB does: the faults are
+    the ones that application code sees. There are {families.length} families. Each family is one <code>NetworkFault</code> variant and one bit of the fault mask. A seed draws when each fault starts and
+    how long it stays. With <code>ChaosMode::Swarm</code>, each seed also switches off a random set of
+    families, because a lot of a few faults finds more bugs than a little of each.</p>
+  <p>Each fault the simulator injects is an event of the run (<code>sim_fault</code>, with its kind). The
+    workload does not know about it. It sees only late, lost or refused messages.</p>
+
+  <h2>The live run</h2>
+  <p>This seed has every network family on: two partitions, clogs and a black hole. Switch some families
+    off, then run the same seed again. The table counts the faults of each kind in the two runs. With other
+    families, the same seed makes other choices, so it is another run. It is still one run per seed and per
+    set of families: run it again and you get the same events.</p>
+  <div class="breakout">
+    <section class="run" id="run" aria-label="A live run"></section>
+    <form class="run run-under" id="families">
+      <div class="run-head label"><span>network fault families of this run</span></div>
+      <div class="switches">
+        {families.map((f) => (
+          <label><input type="checkbox" name="family" value={f} checked /> {f}</label>
+        ))}
+      </div>
+      <div class="switches">
+        <button class="btn small" type="submit">Run the same seed</button>
+        <button class="btn small" type="button" id="families-all">All on</button>
+        <button class="btn small" type="button" id="families-none">All off</button>
+      </div>
+      <div class="table-wrap"><table class="run-table" id="fault-table"></table></div>
+      <p class="run-out" id="families-out" aria-live="polite"></p>
+    </form>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+
+  <h2>The code</h2>
+  <p>The site's engine turns on network chaos with one entry of the builder:</p>
+  <Code theme="css-variables" lang="rust" code={chaos} />
+  <p>The switches above set a mask. A family that is not in the mask never fires, whatever the seed draws:</p>
+  <Code theme="css-variables" lang="rust" code={mask} />
+  <p>The server and the client of the register do not change. They use <code>ctx.network()</code>, and the
+    simulated network decides what each connection does.</p>
+  <script is:inline type="module" src={url("network.js")}></script>
+</Technique>
