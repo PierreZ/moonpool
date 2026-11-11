@@ -409,10 +409,11 @@ impl StorageEngine {
 
     /// Forget a file's contents once nothing reaches it any more: no name,
     /// visible or durable, and no open handle. A file whose only remaining
-    /// link is the durable one is still on the disk: a crash before the
-    /// directory sync brings it back. A file whose only remaining link is an
-    /// open handle is an unlinked-but-open file, freed when that handle
-    /// closes.
+    /// link is the durable one is still in memory: a crash before the
+    /// directory sync brings it back. Its disk space is free already
+    /// ([`StorageState::file_bytes`] counts only a file with a visible name
+    /// or an open handle). A file whose only remaining link is an open
+    /// handle is an unlinked-but-open file, freed when that handle closes.
     fn drop_file_if_unlinked(&mut self, file_id: FileId) {
         let named = self
             .state
@@ -420,11 +421,7 @@ impl StorageEngine {
             .values()
             .chain(self.state.durable_paths.values())
             .any(|id| *id == file_id);
-        // A closed handle whose dropped mutations are still landing keeps
-        // reaching the bytes until the last one lands.
-        let open = self.state.handles.values().any(|handle| {
-            handle.file_id == file_id && (!handle.is_closed || !handle.pending_ops.is_empty())
-        });
+        let open = self.state.open_files().any(|id| id == file_id);
         if !named && !open {
             self.state.files.remove(&file_id);
         }
@@ -882,6 +879,11 @@ impl StorageEngine {
                 .map(|(name, file_id)| (name.clone(), *file_id))
                 .collect();
             self.state.durable_paths.extend(visible);
+            // A file that lost its last durable name here, with no visible
+            // name and no open handle, is gone.
+            for file_id in touched {
+                self.drop_file_if_unlinked(file_id);
+            }
         }
         self.state
             .durable_directories
