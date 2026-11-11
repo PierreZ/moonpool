@@ -1,0 +1,29 @@
+---
+// An extra page (#428 (journal page), #427 (rpc page)): how one crate works,
+// in depth, from its own code and docs; then the Guide chapters that teach
+// its use. The chapters are named by their file in book/src/.
+import Doc from "./Doc.astro";
+import { url } from "../nav";
+import { chapters, pathOf } from "../lib/book.mjs";
+
+interface Props {
+  title: string;
+  description: string;
+  guide: string[];
+}
+const { title, description, guide } = Astro.props;
+const all = chapters();
+const links = guide.map((file) => {
+  const c = all.find((x) => x.file === file);
+  if (!c) throw new Error(`${title}: ${file} is not a chapter of SUMMARY.md`);
+  return { title: c.title, href: url(pathOf(file)) };
+});
+---
+<Doc title={title} description={description} kicker="extras" section="extras/">
+  <slot />
+  <h2>In the Guide</h2>
+  <ul>
+    {links.map((l) => <li><a href={l.href}>{l.title}</a></li>)}
+  </ul>
+  <p><a href={url("extras/")}>All the extras</a></p>
+</Doc>

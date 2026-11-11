@@ -4,6 +4,7 @@
 export const NAV = [
   { name: "Techniques", path: "techniques/" },
   { name: "Playground", path: "playground/" },
+  { name: "Extras", path: "extras/" },
   { name: "Guide", path: "guide/" },
   { name: "Crates", path: "crates/" },
 ] as const;

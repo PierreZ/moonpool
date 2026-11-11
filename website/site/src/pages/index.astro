@@ -15,6 +15,7 @@ import { url } from "../nav";
 import { builderCall, homeFigures, moonpoolDocTest } from "../lib/source.mjs";
 import runs from "../runs/home.json";
 import { TECHNIQUES } from "../lib/techniques.mjs";
+import { EXTRAS } from "../lib/extras.mjs";
 
 const call = builderCall(moonpoolDocTest());
 const test = `#[test]
@@ -95,7 +96,8 @@ const figures = homeFigures();
       <ol class="index-list">
         {TECHNIQUES.map((t) => <li>{t.path ? <a class="n" href={url(t.path)}>{t.name}</a> : <span class="n">{t.name}</span>}<span class="desc">{t.line}</span></li>)}
       </ol>
-      <p class="aside">Until each page is up, the <a href={url("guide/")}>Guide</a> explains each technique in full. <a href={url("techniques/")}>All the techniques</a>.</p>
+      <p class="aside">The <a href={url("guide/")}>Guide</a> explains each technique in full. <a href={url("techniques/")}>All the techniques</a>.</p>
+      <p class="aside">In depth: {EXTRAS.filter((e) => e.path).map((e, i) => <>{i > 0 && ", "}<a href={url(e.path)}>{e.name}</a></>)}. <a href={url("extras/")}>All the extras</a>.</p>
     </Panel>
 
     <Panel num="05" title="Used by paros">
