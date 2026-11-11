@@ -1,0 +1,616 @@
+/* paros shared components (#804 (flat engineering redesign)).
+ *
+ * The top bar, labels, chips, buttons, callouts and key-value tables that the
+ * book, paros play and the sandbox share. Colours come only from tokens.css.
+ *
+ * Rules: flat (no soft shadow, no gradient, no blur); 1px rules; radius 0;
+ * monospace by default; one accent colour; status colours only for status.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 var(--text) / 1.6 var(--font-mono);
+  font-variant-ligatures: none;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---- labels: mono, uppercase, small, muted ---- */
+
+.label {
+  font-family: var(--font-mono);
+  font-size: var(--label);
+  font-weight: 400;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- the top bar ---- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: var(--bar);
+  padding: 0 16px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg);
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 15px;
+  white-space: nowrap;
+}
+
+.brand:hover {
+  background: none;
+  color: var(--fg);
+}
+
+.brand svg {
+  width: 26px;
+  height: 26px;
+  flex: none;
+}
+
+.brand .tilde {
+  color: var(--accent);
+}
+
+.topnav {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  margin-left: 8px;
+}
+
+.topnav a,
+.topbar .tool {
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 12px;
+  font-size: var(--label);
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+
+.topnav a:hover,
+.topbar .tool:hover {
+  background: none;
+  color: var(--fg);
+}
+
+.topnav a[aria-current] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.topbar .tools {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  margin-left: auto;
+}
+
+.topbar button.tool {
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: var(--font-mono);
+}
+
+.topbar .tool kbd {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid var(--rule);
+  font: inherit;
+  font-size: 11px;
+}
+
+.menu-btn {
+  display: none;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  padding: 0;
+  border: 1px solid var(--rule-strong);
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.menu-btn svg {
+  display: block;
+  margin: auto;
+}
+
+.announce {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 6px 16px;
+  background: var(--accent-tint);
+  border-bottom: 1px solid var(--rule);
+  color: var(--fg);
+  font-size: var(--label);
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+}
+
+.announce .tag {
+  color: var(--accent);
+}
+
+.announce a {
+  padding: 0 6px;
+  background: var(--fg);
+  color: var(--bg);
+  text-decoration: none;
+}
+
+.announce a:hover {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+@media (max-width: 900px) {
+  .topnav {
+    display: none;
+  }
+
+  .menu-btn {
+    display: block;
+  }
+
+  .topbar .tool .wide {
+    display: none;
+  }
+}
+
+/* ---- status chips: CHOSEN, OPEN, GAP, LEADER, UP, CRASHED ... ---- */
+
+.chip-status {
+  display: inline-block;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--open);
+  border: 1px solid var(--open);
+  background: var(--open-tint);
+}
+
+.chip-status.done {
+  color: var(--done);
+  border-color: var(--done);
+  background: var(--done-tint);
+}
+
+.chip-status.gap {
+  color: var(--gap);
+  border-color: var(--gap);
+  background: var(--gap-tint);
+}
+
+.chip-status.shared {
+  color: var(--shared);
+  border-color: var(--shared);
+  background: var(--shared-tint);
+}
+
+.chip-status.accent {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-tint);
+}
+
+/* ---- buttons: rectangles, solid fill, hard 2px offset shadow ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 14px;
+  font-family: var(--font-mono);
+  font-size: var(--label);
+  font-weight: 600;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--fg);
+  background: var(--button);
+  border: 1px solid var(--fg);
+  border-radius: 0;
+  box-shadow: 2px 2px 0 var(--shadow);
+  cursor: pointer;
+}
+
+.btn:hover {
+  color: var(--fg);
+  background: var(--button);
+  border-color: var(--accent);
+}
+
+.btn:active {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+.btn.primary {
+  color: var(--accent-fg);
+  background: var(--accent);
+  border-color: var(--fg);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+  box-shadow: 2px 2px 0 var(--shadow);
+}
+
+/* ---- callouts: a box and a mono tag, no icon, no fill ---- */
+
+.callout {
+  position: relative;
+  margin: 1.5em 0;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--rule-strong);
+}
+
+.callout > .tag,
+.callout::before {
+  position: absolute;
+  top: -9px;
+  left: 10px;
+  padding: 0 6px;
+  background: var(--bg);
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+}
+
+.callout::before {
+  content: attr(data-tag);
+}
+
+.callout > :first-child {
+  margin-top: 0;
+}
+
+.callout > :last-child {
+  margin-bottom: 0;
+}
+
+/* ---- key-value tables ---- */
+
+.kv {
+  display: grid;
+  grid-template-columns: minmax(8ch, max-content) 1fr;
+  border-top: 1px solid var(--rule);
+}
+
+.kv > dt,
+.kv > dd {
+  margin: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.kv > dt {
+  padding-right: 16px;
+  color: var(--muted);
+  font-size: var(--label);
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+}
+
+.kv > dd {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- link glyphs ---- */
+
+.act-link::before {
+  content: "▶";
+  display: inline-block;
+  margin-right: 8px;
+  padding: 0 3px;
+  border: 1px solid currentColor;
+  font-size: 0.7em;
+  line-height: 1.4;
+  vertical-align: 0.15em;
+}
+
+.out::after {
+  content: " →";
+}
+
+/* The phone menu of play and the sandbox: the top bar's section list opens as
+   a full-width panel under the bar. (The book opens its section tree.) */
+@media (max-width: 900px) {
+  .topnav.open {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: var(--bar);
+    left: 0;
+    right: 0;
+    height: auto;
+    margin: 0;
+    padding: 8px 0;
+    background: var(--bg);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .topnav.open a {
+    padding: 10px 16px;
+    border-bottom: 0;
+  }
+}
+
+.brand svg .leader {
+  fill: var(--accent);
+}
+
+/* ---- panel (#810 (website redo 1/4)): a numbered box with a mono header,
+   after a flat HUD. Every page and the playground use it. ---- */
+
+.panel {
+  border: 1px solid var(--rule);
+  background: var(--bg);
+  margin: 0 0 24px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 11px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+}
+
+.panel-head::before {
+  content: "";
+  width: 3px;
+  height: 12px;
+  background: var(--accent);
+}
+
+.panel-head .title {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.panel-head .meta {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.panel-body {
+  padding: 14px 12px;
+}
+
+.panel-body > :first-child { margin-top: 0; }
+.panel-body > :last-child { margin-bottom: 0; }
+
+/* A strip of key figures: label above value, split by rules. */
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--rule);
+  margin: 0 0 24px;
+}
+
+.strip > div {
+  flex: 1 1 120px;
+  padding: 8px 12px;
+  border-right: 1px solid var(--rule);
+}
+
+.strip > div:last-child { border-right: 0; }
+
+.strip .k {
+  display: block;
+  font-size: 10px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.strip .v {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 600px) {
+  .strip > div {
+    flex-basis: 50%;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+}
+
+/* ---- operator blocks (#844 (playground action blocks)) ----
+   One block is one action: a rounded bar in its group's colour that reads
+   as a sentence, with its values inline as pill fields. A click on the bar
+   runs it; a click on a field opens the field. The group's colour comes
+   from `--block` (set by `.block-group[data-group]`). */
+
+.block-group {
+  --block: var(--rule-strong);
+  border-top: 1px solid var(--rule);
+}
+
+.block-group[data-group="bootstrap"] { --block: var(--block-bootstrap); }
+.block-group[data-group="resources"] { --block: var(--block-resources); }
+.block-group[data-group="workloads"] { --block: var(--block-workloads); }
+.block-group[data-group="machines"] { --block: var(--block-machines); }
+.block-group[data-group="faults"] { --block: var(--block-faults); }
+
+.block-group > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: var(--tracking);
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.block-group > summary::-webkit-details-marker { display: none; }
+
+.block-group > summary::before {
+  content: "▸";
+  width: 1em;
+  color: var(--block);
+}
+
+.block-group[open] > summary::before { content: "▾"; }
+
+.block-group > summary .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--block);
+}
+
+.blocks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 0 12px;
+}
+
+.block {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 4px 12px;
+  border-radius: 8px;
+  background: var(--block);
+  color: var(--block-fg);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.3;
+  cursor: pointer;
+  user-select: none;
+}
+
+.block:hover { box-shadow: inset 0 0 0 2px var(--fg); }
+.block:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.block:active { transform: translate(1px, 1px); }
+
+.block.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.block .word { white-space: nowrap; }
+
+.block .field {
+  min-height: 32px;
+  max-width: 100%;
+  padding: 2px 10px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px var(--font-mono);
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+
+.block .field:focus-visible { outline: 2px solid var(--fg); outline-offset: 1px; }
+.block input.field { cursor: text; }
+.block input[type="number"].field { width: 4.5em; }
+.block input[type="text"].field { width: 7.5em; }
+.block.disabled .field { cursor: not-allowed; }

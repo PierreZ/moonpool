@@ -24,7 +24,38 @@ env:
     download-attempts = 10
 
 jobs:
+  # Which jobs a pull request needs. `rust` is false when every changed path is
+  # on the site side: website/, book/ or Markdown. Then only the `website` job
+  # runs. A push to main always runs everything.
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          other=$(git diff --name-only "$BASE"...HEAD \
+            | grep -vE '^(website/|book/)|\.md$' || true)
+          if [ -n "$other" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
   clippy:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -34,6 +65,8 @@ jobs:
         run: nix develop --command cargo clippy -- --deny warnings
 
   fmt:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -43,6 +76,8 @@ jobs:
         run: nix develop --command cargo fmt --all -- --check
 
   test:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -80,6 +115,8 @@ jobs:
   # not latency (the full run's numbers are recorded in
   # docs/plans/moonpool-rpc/qualification.md).
   rpc-soak:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -92,6 +129,8 @@ jobs:
   # The simulation must stay buildable without the fork-based explorer (libc) so
   # it can compile to wasm. Guards the explorer-optional path + the wasm target.
   portability:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -248,6 +287,8 @@ jobs:
   # binary (frontier-explore instruments moonpool_explorer itself, so it also
   # covers the sancov wrapper pipeline on darwin).
   macos:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -284,6 +325,8 @@ jobs:
           retention-days: 14
 
   sim:
+    needs: scope
+    if: ${{ needs.scope.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -326,17 +369,25 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Build the full book (wasm demo + mdbook) on every PR/push. pages.yml only
-  # deploys from main, so without this a wasm-bindgen drift or a broken demo/doc
-  # lands on main before anyone notices. Mirrors pages.yml's build steps minus
-  # the deploy.
-  book:
+  # Build the site (website/site/) on each pull request and push: the wasm
+  # demo, the recorded runs, the unit tests of the site, the Astro build with
+  # the Guide, the link check and the search index. pages.yml only deploys
+  # from main, so without this a broken page lands on main before anyone
+  # sees it. It runs also when the Rust jobs are skipped.
+  website:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build and stage the wasm demo embedded in the book
-        run: nix develop --command book/build-wasm-demo.sh
-      - name: Build book
-        run: nix develop --command mdbook build
+      - name: Build the wasm demo and stage it in the site
+        run: nix develop --command website/site/scripts/build-wasm-demo.sh
+      # The test writes src/runs/home.json and fails when it was stale.
+      - name: Check the recorded runs of the home page
+        run: nix develop --command cargo test -p moonpool-wasm-demo --test site_runs
+      - name: Install the site
+        run: nix develop --command bash -c 'cd website/site && npm ci --no-audit --no-fund'
+      - name: Unit tests of the site
+        run: nix develop --command bash -c 'cd website/site && npm test'
+      - name: Build the site
+        run: nix develop --command bash -c 'cd website/site && npm run build'

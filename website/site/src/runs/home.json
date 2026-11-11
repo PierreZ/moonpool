@@ -1,0 +1,1047 @@
+[
+  {
+    "seed": 42,
+    "requests": 12,
+    "shots": [
+      {
+        "seq": 0,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 0,
+        "arrive_ms": 17,
+        "latency_ms": 17,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 0,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 17,
+        "arrive_ms": 34,
+        "latency_ms": 17,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 34,
+        "arrive_ms": 52,
+        "latency_ms": 18,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 52,
+        "arrive_ms": 71,
+        "latency_ms": 19,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 71,
+        "arrive_ms": 87,
+        "latency_ms": 16,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 87,
+        "arrive_ms": 104,
+        "latency_ms": 17,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 104,
+        "arrive_ms": 124,
+        "latency_ms": 20,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 124,
+        "arrive_ms": 144,
+        "latency_ms": 20,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 144,
+        "arrive_ms": 161,
+        "latency_ms": 17,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 161,
+        "arrive_ms": 179,
+        "latency_ms": 18,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 179,
+        "arrive_ms": 879,
+        "latency_ms": 700,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 6,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 879,
+        "arrive_ms": 929,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 7,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 879,
+        "arrive_ms": 929,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 8,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 879,
+        "arrive_ms": 897,
+        "latency_ms": 18,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 897,
+        "arrive_ms": 916,
+        "latency_ms": 19,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 916,
+        "arrive_ms": 966,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 10,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 916,
+        "arrive_ms": 939,
+        "latency_ms": 23,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 939,
+        "arrive_ms": 963,
+        "latency_ms": 24,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 963,
+        "arrive_ms": 984,
+        "latency_ms": 21,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 984,
+        "arrive_ms": 1005,
+        "latency_ms": 21,
+        "outcome": "delivered"
+      }
+    ],
+    "delivered": 8,
+    "dropped": 4,
+    "faults": 0,
+    "longest_rtt_ms": 47,
+    "sim_duration_ms": 1005
+  },
+  {
+    "seed": 7,
+    "requests": 12,
+    "shots": [
+      {
+        "seq": 0,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 0,
+        "arrive_ms": 50,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 1,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 0,
+        "arrive_ms": 25,
+        "latency_ms": 25,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 25,
+        "arrive_ms": 50,
+        "latency_ms": 25,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 50,
+        "arrive_ms": 76,
+        "latency_ms": 26,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 76,
+        "arrive_ms": 103,
+        "latency_ms": 27,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 103,
+        "arrive_ms": 153,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 4,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 103,
+        "arrive_ms": 222,
+        "latency_ms": 119,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 222,
+        "arrive_ms": 342,
+        "latency_ms": 120,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 342,
+        "arrive_ms": 369,
+        "latency_ms": 27,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 369,
+        "arrive_ms": 397,
+        "latency_ms": 28,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 6,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 397,
+        "arrive_ms": 447,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 7,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 397,
+        "arrive_ms": 424,
+        "latency_ms": 27,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 7,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 424,
+        "arrive_ms": 452,
+        "latency_ms": 28,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 452,
+        "arrive_ms": 478,
+        "latency_ms": 26,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 478,
+        "arrive_ms": 505,
+        "latency_ms": 27,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 505,
+        "arrive_ms": 533,
+        "latency_ms": 28,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 533,
+        "arrive_ms": 561,
+        "latency_ms": 28,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 561,
+        "arrive_ms": 587,
+        "latency_ms": 26,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 587,
+        "arrive_ms": 613,
+        "latency_ms": 26,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 613,
+        "arrive_ms": 641,
+        "latency_ms": 28,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 641,
+        "arrive_ms": 669,
+        "latency_ms": 28,
+        "outcome": "delivered"
+      }
+    ],
+    "delivered": 9,
+    "dropped": 3,
+    "faults": 1,
+    "longest_rtt_ms": 239,
+    "sim_duration_ms": 669
+  },
+  {
+    "seed": 123,
+    "requests": 12,
+    "shots": [
+      {
+        "seq": 0,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 0,
+        "arrive_ms": 31,
+        "latency_ms": 31,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 0,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 31,
+        "arrive_ms": 63,
+        "latency_ms": 32,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 63,
+        "arrive_ms": 91,
+        "latency_ms": 28,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 91,
+        "arrive_ms": 120,
+        "latency_ms": 29,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 120,
+        "arrive_ms": 156,
+        "latency_ms": 36,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 156,
+        "arrive_ms": 192,
+        "latency_ms": 36,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 192,
+        "arrive_ms": 214,
+        "latency_ms": 22,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 214,
+        "arrive_ms": 237,
+        "latency_ms": 23,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 237,
+        "arrive_ms": 257,
+        "latency_ms": 20,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 257,
+        "arrive_ms": 278,
+        "latency_ms": 21,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 278,
+        "arrive_ms": 310,
+        "latency_ms": 32,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 310,
+        "arrive_ms": 342,
+        "latency_ms": 32,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 6,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 342,
+        "arrive_ms": 373,
+        "latency_ms": 31,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 6,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 373,
+        "arrive_ms": 405,
+        "latency_ms": 32,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 7,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 405,
+        "arrive_ms": 427,
+        "latency_ms": 22,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 7,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 427,
+        "arrive_ms": 449,
+        "latency_ms": 22,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 449,
+        "arrive_ms": 481,
+        "latency_ms": 32,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 481,
+        "arrive_ms": 514,
+        "latency_ms": 33,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 514,
+        "arrive_ms": 537,
+        "latency_ms": 23,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 537,
+        "arrive_ms": 560,
+        "latency_ms": 23,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 560,
+        "arrive_ms": 593,
+        "latency_ms": 33,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 593,
+        "arrive_ms": 626,
+        "latency_ms": 33,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 626,
+        "arrive_ms": 661,
+        "latency_ms": 35,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 661,
+        "arrive_ms": 696,
+        "latency_ms": 35,
+        "outcome": "delivered"
+      }
+    ],
+    "delivered": 12,
+    "dropped": 0,
+    "faults": 0,
+    "longest_rtt_ms": 72,
+    "sim_duration_ms": 696
+  },
+  {
+    "seed": 256,
+    "requests": 12,
+    "shots": [
+      {
+        "seq": 0,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 0,
+        "arrive_ms": 46,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 0,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 46,
+        "arrive_ms": 92,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 92,
+        "arrive_ms": 132,
+        "latency_ms": 40,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 132,
+        "arrive_ms": 172,
+        "latency_ms": 40,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 172,
+        "arrive_ms": 214,
+        "latency_ms": 42,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 214,
+        "arrive_ms": 257,
+        "latency_ms": 43,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 257,
+        "arrive_ms": 298,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 298,
+        "arrive_ms": 339,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 339,
+        "arrive_ms": 385,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 385,
+        "arrive_ms": 431,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 431,
+        "arrive_ms": 472,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 472,
+        "arrive_ms": 513,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 6,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 513,
+        "arrive_ms": 554,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 6,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 554,
+        "arrive_ms": 596,
+        "latency_ms": 42,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 7,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 596,
+        "arrive_ms": 637,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 7,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 637,
+        "arrive_ms": 678,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 678,
+        "arrive_ms": 1378,
+        "latency_ms": 700,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 9,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 1378,
+        "arrive_ms": 1453,
+        "latency_ms": 75,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 1453,
+        "arrive_ms": 1528,
+        "latency_ms": 75,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 1528,
+        "arrive_ms": 1569,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 1569,
+        "arrive_ms": 1610,
+        "latency_ms": 41,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 1610,
+        "arrive_ms": 1655,
+        "latency_ms": 45,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 1655,
+        "arrive_ms": 1701,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      }
+    ],
+    "delivered": 11,
+    "dropped": 1,
+    "faults": 2,
+    "longest_rtt_ms": 150,
+    "sim_duration_ms": 1701
+  },
+  {
+    "seed": 1000,
+    "requests": 12,
+    "shots": [
+      {
+        "seq": 0,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 0,
+        "arrive_ms": 44,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 0,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 44,
+        "arrive_ms": 89,
+        "latency_ms": 45,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 89,
+        "arrive_ms": 138,
+        "latency_ms": 49,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 1,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 138,
+        "arrive_ms": 188,
+        "latency_ms": 50,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 188,
+        "arrive_ms": 232,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 2,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 232,
+        "arrive_ms": 276,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 3,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 276,
+        "arrive_ms": 326,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 4,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 276,
+        "arrive_ms": 320,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 4,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 320,
+        "arrive_ms": 365,
+        "latency_ms": 45,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 365,
+        "arrive_ms": 409,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 5,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 409,
+        "arrive_ms": 453,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 6,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 453,
+        "arrive_ms": 503,
+        "latency_ms": 50,
+        "outcome": "dropped"
+      },
+      {
+        "seq": 7,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 453,
+        "arrive_ms": 497,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 7,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 497,
+        "arrive_ms": 541,
+        "latency_ms": 44,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 541,
+        "arrive_ms": 587,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 8,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 587,
+        "arrive_ms": 633,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 633,
+        "arrive_ms": 679,
+        "latency_ms": 46,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 9,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 679,
+        "arrive_ms": 726,
+        "latency_ms": 47,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 726,
+        "arrive_ms": 771,
+        "latency_ms": 45,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 10,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 771,
+        "arrive_ms": 816,
+        "latency_ms": 45,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 0,
+        "to": 1,
+        "depart_ms": 816,
+        "arrive_ms": 863,
+        "latency_ms": 47,
+        "outcome": "delivered"
+      },
+      {
+        "seq": 11,
+        "from": 1,
+        "to": 0,
+        "depart_ms": 863,
+        "arrive_ms": 911,
+        "latency_ms": 48,
+        "outcome": "delivered"
+      }
+    ],
+    "delivered": 10,
+    "dropped": 2,
+    "faults": 0,
+    "longest_rtt_ms": 99,
+    "sim_duration_ms": 911
+  }
+]

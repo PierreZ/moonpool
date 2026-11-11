@@ -1,0 +1,66 @@
+---
+// The one page skeleton of the site (#415 (new site with the book)), after
+// the paros Base layout: same top bar, same tokens, same components.
+import Mark from "../components/Mark.astro";
+import { NAV, REPO, url } from "../nav";
+import "../styles/site.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+  /** The top-bar section this page is in ("guide/", "crates/", ...). */
+  section?: string;
+}
+const {
+  title,
+  description = "moonpool: deterministic simulation testing for Rust. One seed gives one exact run.",
+  section = "",
+} = Astro.props;
+const full = title ? `${title} · moonpool` : "moonpool";
+---
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{full}</title>
+  <meta name="description" content={description} />
+  <meta property="og:site_name" content="moonpool" />
+  <meta property="og:title" content={full} />
+  <meta property="og:description" content={description} />
+  <meta property="og:image" content={new URL(url("images/logo.png"), Astro.site).href} />
+  <script is:inline src={url("shared/theme.js")}></script>
+  <link rel="stylesheet" href={url("shared/tokens.css")} />
+  <link rel="stylesheet" href={url("shared/base.css")} />
+  <link rel="preload" href={url("shared/fonts/jetbrains-mono-latin-400-normal.woff2")} as="font" type="font/woff2" crossorigin />
+  <link rel="icon" type="image/png" href={url("images/logo.png")} />
+  <slot name="head" />
+</head>
+<body>
+  <a class="skip" href="#content">Skip to the content</a>
+  <header class="topbar">
+    <button class="menu-btn" type="button" data-menu-toggle aria-controls="site-menu" aria-expanded="false" aria-label="Menu">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M1 3.5h14M1 8h14M1 12.5h14" stroke="currentColor" stroke-width="1.5"/></svg>
+    </button>
+    <a class="brand" href={url()}><Mark /><span>moonpool <span class="tilde">~</span></span></a>
+    <nav class="topnav" id="site-menu" aria-label="Sections">
+      {NAV.map((n) => <a href={url(n.path)} aria-current={section === n.path ? "true" : undefined}>{n.name}</a>)}
+    </nav>
+    <div class="tools">
+      <button class="tool" type="button" data-theme-toggle aria-label="Switch light or dark">
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6" fill="none" stroke="currentColor"/><path d="M7 1a6 6 0 0 1 0 12Z" fill="currentColor"/></svg>
+      </button>
+      <a class="tool" href={REPO}><span class="wide">GitHub&nbsp;</span>→</a>
+    </div>
+  </header>
+  <main id="content" class="main">
+    <slot />
+  </main>
+  <footer class="footer label">
+    <span>moonpool is a hobby-grade project under active development.</span>
+    <a href={REPO}>Source</a>
+    <a href={`${REPO}/issues`}>Issues</a>
+  </footer>
+  <script is:inline src={url("site.js")}></script>
+</body>
+</html>

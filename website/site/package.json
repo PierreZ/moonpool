@@ -1,0 +1,16 @@
+{
+  "name": "moonpool-site",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync": "node scripts/sync-shared.mjs",
+    "dev": "npm run sync && astro dev",
+    "build": "npm run sync && astro build && node scripts/redirects.mjs && pagefind --site dist --output-subdir pagefind",
+    "test": "node --test scripts/*.test.mjs src/lib/*.test.mjs"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.7",
+    "astro": "7.4.0",
+    "pagefind": "1.6.0"
+  }
+}

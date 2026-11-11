@@ -1,0 +1,137 @@
+---
+// The home page (#415 (new site with the book)): the mockup that Pierre
+// approved (project file design/moonpool-makeover/home-mockup.html), in its
+// order of panels. It sells the tool: a hero, a live run of a seed, what you
+// get, a test, your code and the providers, the techniques, used by paros.
+//
+// The run is the ping-pong demo (crates/moonpool-wasm-demo). The page shows
+// the runs that `cargo test -p moonpool-wasm-demo --test site_runs` recorded
+// in src/runs/home.json, then public/home.js loads the demo compiled to wasm
+// and runs any seed in the browser.
+import { Code } from "astro:components";
+import Base from "../layouts/Base.astro";
+import Panel from "../components/Panel.astro";
+import { url } from "../nav";
+import { builderCall, homeFigures, moonpoolDocTest } from "../lib/source.mjs";
+import runs from "../runs/home.json";
+
+const call = builderCall(moonpoolDocTest());
+const test = `#[test]
+fn server_accepts_under_chaos() -> Result<(), moonpool::SimulationError> {
+${call.split("\n").map((l) => "    " + l).join("\n")}
+    Ok(())
+}`;
+const figures = homeFigures();
+const seeds = runs.map((r) => r.seed);
+const TECHNIQUES = [
+  ["One thread, one clock, one seed", "Run a seed twice and compare the two runs."],
+  ["Same code", "One function, two sets of providers."],
+  ["Network faults", "Cut a link, clog it, close a connection."],
+  ["Storage faults", "What a crash does to each sector after the last sync."],
+  ["Reboots", "A process starts again with fresh memory."],
+  ["Swarm testing", "Each seed draws its own set of faults."],
+  ["Assertions that must fire", "The coverage fills seed after seed."],
+  ["Multiverse exploration", "The run forks at each discovery."],
+  ["From a red seed to the bug", "Replay, then walk back to the first wrong event."],
+];
+---
+<Base>
+  <div class="home">
+    <section class="hero">
+      <div class="kicker label"><span class="prompt">$</span> moonpool · deterministic simulation testing for Rust</div>
+      <h1>One seed, one exact run<span class="cursor" aria-hidden="true"></span></h1>
+      <p class="lede">Write your system once against provider traits. In tests, moonpool runs it in one thread on
+        a simulated network, disk and clock, and injects faults. In production, the same code runs on Tokio.
+        A failure gives you a seed, and the seed replays the failure.</p>
+      <div class="actions">
+        <button class="btn primary" type="button" id="hero-run">▶ Run a seed</button>
+        <a class="btn" href={url("guide/quick-start/")}>Quick start</a>
+        <a class="btn" href={url("guide/")}>The Sim Book</a>
+      </div>
+    </section>
+
+    <section class="run" aria-label="A live run" id="run">
+      <div class="run-head label">
+        <span>seed <b id="r-seed">256</b> · run <span id="r-n">1</span> · <span id="r-src">recorded</span></span>
+        <span>2 processes · Chaos::Network(ChaosMode::Random)</span>
+      </div>
+      <div class="run-stage"><svg id="stage" role="img" aria-label="The timeline of the run. The list of events under it holds the same facts."></svg></div>
+      <div class="run-ctl">
+        <span class="cap label">seed</span>
+        {seeds.map((s) => <button class="btn small" type="button" data-seed={s}>{s}</button>)}
+        <form id="seed-form" hidden>
+          <label class="label" for="seed-input" hidden>Any seed</label>
+          <input id="seed-input" inputmode="numeric" pattern="[0-9]*" placeholder="any seed" />
+        </form>
+        <span class="sep" aria-hidden="true"></span>
+        <button class="btn small" type="button" id="play">Play</button>
+        <button class="btn small" type="button" id="step">Step</button>
+        <button class="btn small" type="button" id="again">Run again</button>
+      </div>
+      <div class="run-stats" id="stats"></div>
+      <div class="run-foot" id="foot"></div>
+      <details class="log"><summary class="label">The events of this run</summary><pre id="log"></pre></details>
+    </section>
+    <p class="aside">The ping-pong demo of the repository (<a href={url("crates/#moonpool-wasm-demo")}><code>moonpool-wasm-demo</code></a>):
+      a client sends 12 requests to a server over a simulated network with faults. The page first shows the
+      recorded runs. Then it loads the simulator, compiled to wasm, and runs each seed in your browser.
+      The network and the clock are simulated.</p>
+    <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+
+    <div class="strip" aria-label="moonpool in figures">
+      <div><span class="k">Provider traits</span><span class="v">{figures.providers.length}</span></div>
+      <div><span class="k">Chaos surfaces</span><span class="v">{figures.chaos.length}</span></div>
+      <div><span class="k">Assertion macros</span><span class="v">{figures.assertions.length}</span></div>
+      <div><span class="k">Mocks</span><span class="v">none</span></div>
+    </div>
+
+    <Panel num="01" title="What you get">
+      <ul class="caps">
+        <li><b>A run you can replay</b><span>One seed feeds each random draw: the order of the tasks, the latency of each message, each fault. The same seed gives the same run.</span></li>
+        <li><b>The same code</b><span><code>TokioProviders</code> in production, <code>SimProviders</code> in tests. No <code>Sim*</code> copy of your types, no test-only hook in the product.</span></li>
+        <li><b>Faults by default</b><span>Partitions, clogs, torn writes, lost directory entries, reboots, slow machines, clocks that drift. Each seed draws its own set.</span></li>
+        <li><b>Faults inside your code</b><span><code>hint!("batch durable, not sent")</code> names a moment. The simulator decides to strike there. <code>buggify!</code> forces a rare branch. Both do nothing in production.</span></li>
+        <li><b>Assertions that must fire</b><span><code>assert_sometimes!</code> names a rare path. If no seed reaches it, the run fails: a fault that never fires tests nothing.</span></li>
+        <li><b>Exploration</b><span>The explorer forks a run at each discovery and searches the timelines near it.</span></li>
+        <li><b>Runs in a browser</b><span>The simulator has no syscall on its path, so it compiles to wasm. The run above is one.</span></li>
+      </ul>
+    </Panel>
+
+    <Panel num="02" title="A test" meta="from the crate-level doc test">
+      <div class="term">
+        <div class="term-head label"><span>rust</span><span>ten seeds, network faults on</span></div>
+        <Code lang="rust" code={test} />
+      </div>
+      <div class="term">
+        <div class="term-head label"><span>rust</span><span>a seed failed: replay it alone</span></div>
+        <Code lang="rust" code={"SimulationBuilder::new()\n    .set_debug_seeds(vec![failing_seed])\n    .set_iterations(1)"} />
+      </div>
+      <p class="aside"><a href={url("guide/quick-start/")}>Quick start</a>: the whole file, how to run it and how to read the report.</p>
+    </Panel>
+
+    <Panel num="03" title="Your code and the providers">
+      <div class="arch" role="img" aria-label="Your code is generic over the provider traits. In production the traits are TokioProviders: real TCP, a real disk, a real clock. In tests they are SimProviders: a simulated network, disk and clock, all driven by one seed.">
+        <div class="box">your code <small>generic over <code>P: Providers</code></small></div>
+        <div class="arrow">▼ {figures.providers.map((p) => p.replace("Provider", "").toLowerCase()).join(" · ")}</div>
+        <div class="two">
+          <div class="box">TokioProviders <small>production: real TCP, disk and clock</small></div>
+          <div class="box sim">SimProviders <small>tests: one thread, one seed, faults on</small></div>
+        </div>
+      </div>
+    </Panel>
+
+    <Panel num="04" title="See each technique work" meta="pages to come">
+      <ol class="index-list">
+        {TECHNIQUES.map(([n, d]) => <li><span class="n">{n}</span><span class="desc">{d}</span></li>)}
+      </ol>
+      <p class="aside">Until each page is up, the <a href={url("guide/")}>Guide</a> explains each technique in full.</p>
+    </Panel>
+
+    <Panel num="05" title="Used by paros">
+      <p><a href="https://pierrez.github.io/paros/">paros</a>, a journal service on Paxos, runs whole cells of
+        machines on moonpool: the shipped daemon, on the simulated disk and network, with each fault family on.
+        Its CI runs a sweep of seeds on each pull request.</p>
+    </Panel>
+  </div>
+  <script is:inline src={url("home.js")} data-wasm={url("wasm-demo/pkg/moonpool_wasm_demo.js")}></script>
+</Base>

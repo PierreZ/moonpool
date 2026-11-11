@@ -2,15 +2,21 @@
   description = "Moonpool - deterministic simulation testing for distributed systems";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
+    # Every input is fetched over git, not as a GitHub tarball (`github:`): the cloud
+    # session proxy refuses GitHub tarballs, so `github:` inputs cannot lock there.
+    nixpkgs.url = "git+https://github.com/NixOS/nixpkgs?ref=nixos-unstable&shallow=1";
+    systems.url = "git+https://github.com/nix-systems/default?shallow=1";
+    flake-utils = {
+      url = "git+https://github.com/numtide/flake-utils?shallow=1";
+      inputs.systems.follows = "systems";
+    };
     rust-overlay = {
-      url = "github:oxalica/rust-overlay";
+      url = "git+https://github.com/oxalica/rust-overlay?shallow=1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay }:
+  outputs = { self, nixpkgs, systems, flake-utils, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -53,9 +59,8 @@
             # moves this, re-pin the crate to `wasm-bindgen --version`.
             wasm-bindgen-cli
 
-            # mdbook
-            mdbook
-            mdbook-toc
+            # website/site (Astro)
+            nodejs
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # C toolchain for linking. Linux-only: darwin's stdenv already
             # provides clang, and GNU gcc is a heavy, fragile build there.

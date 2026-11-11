@@ -1,0 +1,81 @@
+---
+// A page of the Guide (#415 (new site with the book)): the sidebar from
+// book/src/SUMMARY.md, a search over the Guide (Pagefind), the chapter, and
+// the pager in SUMMARY order. On a phone the sidebar is a menu.
+import Base from "./Base.astro";
+import { url } from "../nav";
+import { chapters, GUIDE_INDEX, pathOf } from "../lib/book.mjs";
+
+interface Link { title: string; path: string }
+interface Props {
+  title: string;
+  description?: string;
+  /** The address of this page, relative to the base ("part3-building/08-buggify.html"). */
+  here: string;
+  prev?: Link;
+  next?: Link;
+}
+const { title, description, here, prev, next } = Astro.props;
+
+// The sidebar: the Guide's own pages, then SUMMARY.md, grouped by part, nested by depth.
+type Node = { title: string; path: string; children: Node[] };
+type Group = { part: string; items: Node[] };
+const groups: Group[] = [{ part: "", items: [
+  { title: "The Sim Book", path: "guide/", children: [] },
+  { title: "Quick start", path: "guide/quick-start/", children: [] },
+] }];
+for (const c of chapters()) {
+  if (GUIDE_INDEX.includes(c.file)) continue;
+  let g = groups[groups.length - 1];
+  if (c.part !== g.part) { g = { part: c.part, items: [] }; groups.push(g); }
+  const node = { title: c.title, path: pathOf(c.file), children: [] };
+  let list = g.items;
+  for (let d = 0; d < c.depth && list.length; d++) list = list[list.length - 1].children;
+  list.push(node);
+}
+---
+<Base title={title} description={description} section="guide/">
+  <div class="guide">
+    <details class="sidebar" open data-sidebar>
+      <summary class="label">Chapters</summary>
+      <div class="sidebar-body">
+        <form class="search" role="search" data-search={url("pagefind/pagefind.js")} onsubmit="return false">
+          <label class="label" for="guide-search" hidden>Search the Guide</label>
+          <input id="guide-search" type="search" placeholder="Search the Guide" autocomplete="off" />
+          <ul class="search-results" aria-live="polite"></ul>
+        </form>
+        {groups.map((g) => (
+          <nav aria-label={g.part || "The Guide"}>
+            {g.part && <div class="part label">{g.part}</div>}
+            <ol>
+              {g.items.map(function item(n: Node): any {
+                return (
+                  <li>
+                    <a href={url(n.path)} aria-current={n.path === here ? "page" : undefined}>{n.title}</a>
+                    {n.children.length > 0 && <ol>{n.children.map(item)}</ol>}
+                  </li>
+                );
+              })}
+            </ol>
+          </nav>
+        ))}
+      </div>
+    </details>
+    <div class="page">
+      <div class="titleblock">
+        <div class="kicker label"><span class="prompt">$</span> the sim book</div>
+        <h1>{title}</h1>
+        {description && <p class="lede">{description}</p>}
+      </div>
+      <article class="prose" data-pagefind-body>
+        <slot />
+      </article>
+      {(prev || next) && (
+        <nav class="pager label" aria-label="Next and previous pages">
+          {prev ? <a href={url(prev.path)}>← {prev.title}</a> : <span />}
+          {next ? <a href={url(next.path)}>{next.title} →</a> : <span />}
+        </nav>
+      )}
+    </div>
+  </div>
+</Base>

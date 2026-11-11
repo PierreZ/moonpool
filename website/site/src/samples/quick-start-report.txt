@@ -1,0 +1,20 @@
+━━━ Simulation Report ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  10 iterations   10 passed   0 failed   ✓ 100.0%
+  Base seed    1794411774351454324 (replay the run with .base_seed(1794411774351454324))
+
+  Wall Time    3ms avg        35ms total
+  Sim Time     2.01s avg
+  Events       100 avg
+
+━━━ Assertions (5) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ✓  always       "one server process per seed"             10 pass  0 fail
+  ✓  sometimes    "client connects"                         193 / 200  (96.5%)
+  ✓  reachable    "network: a connect is refused"           1 / 1  (100.0%)
+  ✓  reachable    "network: an asymmetric receive partit..." 1 / 1  (100.0%)
+  ✓  reachable    "network: interface clogged"              4 / 4  (100.0%)
+
+━━━ Seeds ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  #1    seed=16680885789437997585  4ms   2.38s sim   104 events
+  #2    seed=12518977033248852711  3ms   1.50s sim   102 events
+  #3    seed=15604186992324754263  3ms   2.33s sim   103 events
+  …

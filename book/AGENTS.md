@@ -9,7 +9,7 @@
 - **Concrete over abstract**: Use specific numbers ("5-10 million simulation runs per night", "2,000-machine service with 10+ crashes per day"). Name real systems (FoundationDB, TigerBeetle, Antithesis).
 - **Named concepts stick**: "The Sequential Luck Problem", "The Provider Pattern", "Fork at Discovery"
 - **Code examples**: Context → Code → Explanation. Comments explain WHY, not WHAT.
-- **Keep `<!-- toc -->`** marker after the `# Title` in every chapter (mdbook-toc preprocessor is configured).
+- **Keep `<!-- toc -->`** marker after the `# Title` in every chapter: the site build puts the table of contents of the page there.
 - **Chapter length**: 400-1200 words depending on topic density. Sub-sections can be shorter (300-600 words). Appendix chapters use structured reference format (tables, lists).
 - **No standard footer or sign-off** (this is a book, not blog posts).
 - **References**: Link to external resources inline as part of the argument, not in a list at the end. Link to moonpool source code where helpful.
@@ -40,13 +40,21 @@ When adding, removing, or renaming chapters, update **all** of these:
 
 ## Commands
 
+The book is the Guide of the site: one Astro app in `website/site/` reads the
+chapters from `book/src/` and keeps the old address of each one
+(`part3-building/08-buggify.html`). Read `website/site/AGENTS.md`.
+
 ```bash
-# Build the book
-nix develop --command mdbook build book/
+# Build the site with the book (links between chapters are checked)
+nix develop --command bash -c 'cd website/site && npm ci && npm run build'
 
 # Serve locally with hot reload
-nix develop --command mdbook serve book/
+nix develop --command bash -c 'cd website/site && npm run dev'
 ```
+
+Only plain Markdown works in a chapter: no mdbook preprocessor syntax. Link to
+another chapter by its relative `.md` path. A link to a missing chapter fails
+the build.
 
 ## Context Sources
 

@@ -1,6 +1,6 @@
 ---
 name: update-the-book
-description: Keep the moonpool mdbook in step with the code - find the chapter that documents a changed API or behavior, edit it in the book's voice, and maintain SUMMARY.md, index.md and cross-references when adding or renaming a chapter. Use after changing any public API, builder method, macro, feature flag or default in a moonpool crate, when adding a new capability, or when asked to document something for readers or for AI agents (book/src/llms.md).
+description: Keep the moonpool book (the Guide of the site) in step with the code - find the chapter that documents a changed API or behavior, edit it in the book's voice, and maintain SUMMARY.md, index.md and cross-references when adding or renaming a chapter. Use after changing any public API, builder method, macro, feature flag or default in a moonpool crate, when adding a new capability, or when asked to document something for readers or for AI agents (book/src/llms.md).
 ---
 
 # Update the book
@@ -50,9 +50,15 @@ Chapters run 400 to 1200 words. Full rules: `book/AGENTS.md`.
 ## Verify
 
 ```bash
-nix develop --command mdbook build book/
+nix develop --command bash -c 'cd website/site && npm ci && npm run build'
 ```
 
-The wasm demo embedded in the book is built by `book/build-wasm-demo.sh` and
+The book is the Guide of the site (`website/site/`, an Astro app; read
+`website/site/AGENTS.md`). The build renders each chapter at its old address,
+fails on a link to a chapter that does not exist, and indexes the Guide for
+the search. `npm run dev` in `website/site/` serves it with reload.
+
+The wasm demo embedded in the book is built by
+`website/site/scripts/build-wasm-demo.sh` and
 pins `wasm-bindgen` to the CLI version the flake ships; see
 `crates/moonpool-wasm-demo/AGENTS.md` before touching it.

@@ -1,5 +1,8 @@
-name: Deploy mdBook to GitHub Pages
+name: Deploy the site to GitHub Pages
 
+# The site (website/site/, an Astro app with The Sim Book in it as the Guide).
+# The `website` job of rust.yml builds it on each pull request; this workflow
+# publishes the build output from main.
 on:
   push:
     branches: ["main"]
@@ -14,6 +17,11 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  NIX_CONFIG: |
+    connect-timeout = 60
+    download-attempts = 10
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,13 +29,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
-      - name: Build and stage the wasm demo embedded in the book
-        run: nix develop --command book/build-wasm-demo.sh
-      - name: Build book
-        run: nix develop --command mdbook build
+      - name: Build the wasm demo and stage it in the site
+        run: nix develop --command website/site/scripts/build-wasm-demo.sh
+      - name: Build the site
+        run: nix develop --command bash -c 'cd website/site && npm ci --no-audit --no-fund && npm run build'
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: ./book/output
+          path: ./website/site/dist
 
   deploy:
     runs-on: ubuntu-latest

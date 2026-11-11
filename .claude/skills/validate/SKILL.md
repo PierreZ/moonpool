@@ -1,6 +1,6 @@
 ---
 name: validate
-description: Run moonpool's full local validation gate (cargo fmt, clippy pedantic with -D warnings, nextest, the no-default-features and wasm32 portability checks, mdbook when the book changed) inside the Nix shell and fix what fails. Use before declaring any change done, before committing, when asked "does it pass CI", and after touching crate features or Cargo.toml.
+description: Run moonpool's full local validation gate (cargo fmt, clippy pedantic with -D warnings, nextest, the no-default-features and wasm32 portability checks, the site build when the book or the site changed) inside the Nix shell and fix what fails. Use before declaring any change done, before committing, when asked "does it pass CI", and after touching crate features or Cargo.toml.
 ---
 
 # Validate
@@ -47,10 +47,11 @@ nix develop --command cargo xtask sim run <name>     # one of the registered bin
 nix develop --command cargo xtask sim run-all
 ```
 
-The book, when a public API or documented behavior changed:
+The site, which holds the book, when a public API, a chapter or the site changed:
 
 ```bash
-nix develop --command mdbook build book/
+nix develop --command bash -c 'cd website/site && npm ci && npm run build'
+nix develop --command bash -c 'cd website/site && npm test'
 ```
 
 ## Rules that decide how to fix a failure

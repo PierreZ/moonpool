@@ -144,7 +144,7 @@ crates/
 ├── moonpool-calibrate/    - Measures real storage and network latency and emits
 │                            LatencyDistribution constants (not published).
 ├── moonpool-sim-examples/ - Runnable simulation workloads discovered by xtask.
-├── moonpool-wasm-demo/    - Browser demo embedded in the book.
+├── moonpool-wasm-demo/    - Browser demo: the live run of the site's home page.
 └── xtask/                 - Cargo xtask automation (simulation runner)
 ```
 
@@ -273,7 +273,7 @@ Strategic placement: error handling, timeouts, retries, resource limits
 - No deprecation needed — delete old APIs when replacing them
 
 ## Documentation
-**Keep the book and the README up to date**: When you add a feature, change a public API, or modify behavior in any moonpool crate, update the corresponding chapters in `book/src/` (and `book/src/llms.md`) and the root `README.md` (feature list, examples) in the same PR. A feature PR without its book and README changes is not done. Build with `nix develop --command mdbook build book/` to verify.
+**Keep the book and the README up to date**: When you add a feature, change a public API, or modify behavior in any moonpool crate, update the corresponding chapters in `book/src/` (and `book/src/llms.md`) and the root `README.md` (feature list, examples) in the same PR. A feature PR without its book and README changes is not done. Build the site, which holds the book, to verify: `nix develop --command bash -c 'cd website/site && npm ci && npm run build'` (`website/site/AGENTS.md`).
 
 ## API Design Principles
 **Keep APIs familiar**: APIs should match what developers expect from tokio objects
