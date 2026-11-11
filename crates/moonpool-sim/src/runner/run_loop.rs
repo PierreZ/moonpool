@@ -610,7 +610,9 @@ impl SimulationBuilder {
     /// factories, attrition regimes and outages) only run inside the chaos
     /// window, so without [`Self::chaos_duration`] they would be dropped
     /// unrun while the campaign reports success. Also refuse an outage that
-    /// names no registered group or carries a malformed range.
+    /// names no registered group or carries a malformed range, and an
+    /// attrition regime that can never reboot a process
+    /// ([`Self::attrition_invalid`]).
     pub(super) fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
         // A group spawned mid-run counts once it is declared.
         let registered: Vec<&str> = self
@@ -630,6 +632,13 @@ impl SimulationBuilder {
             .gray_failures
             .iter()
             .find_map(|(gray, _)| gray.invalid(&registered))
+        {
+            return Err(SimulationError::InvalidConfiguration(reason));
+        }
+        if let Some(reason) = self
+            .attritions
+            .iter()
+            .find_map(|(attrition, mode)| self.attrition_invalid(attrition, *mode, &registered))
         {
             return Err(SimulationError::InvalidConfiguration(reason));
         }
@@ -681,6 +690,83 @@ impl SimulationBuilder {
         self.entries
             .iter()
             .all(|entry| matches!(entry, WorkloadEntry::Factory { .. }))
+    }
+
+    /// Why an attrition regime can never reboot a process, if it cannot: its
+    /// victims name a group or a tag that no process has, its failure-domain
+    /// scope has no `.cluster()` topology among its victims, or (with
+    /// [`ChaosMode::Random`], which keeps `max_dead` as written) the smallest
+    /// domain any seed can draw holds more victims than `max_dead`. `Swarm`
+    /// draws its own budget and only picks a scope that fits it.
+    fn attrition_invalid(
+        &self,
+        attrition: &Attrition,
+        mode: ChaosMode,
+        registered: &[&str],
+    ) -> Option<String> {
+        use crate::locality::DomainLevel;
+        use crate::runner::process::{AttritionScope, AttritionVictims};
+        match &attrition.victims {
+            AttritionVictims::Group(group) if !registered.contains(&group.as_str()) => {
+                return Some(format!(
+                    "a Chaos::Attrition names the unregistered group '{group}' \
+                     (declare a group spawned mid-run with SimulationBuilder::spawnable_group)"
+                ));
+            }
+            AttritionVictims::Tagged { key, value }
+                if !self
+                    .process_entries
+                    .iter()
+                    .any(|entry| entry.tags.offers(key, value)) =>
+            {
+                return Some(format!(
+                    "a Chaos::Attrition names the tag '{key}={value}', which no process group \
+                     carries (give it to a group with SimulationBuilder::tags)"
+                ));
+            }
+            _ => {}
+        }
+        let level = match attrition.scope {
+            AttritionScope::PerProcess => return None,
+            AttritionScope::PerMachine => DomainLevel::Machine,
+            AttritionScope::PerZone => DomainLevel::Zone,
+            AttritionScope::PerDatacenter => DomainLevel::Datacenter,
+        };
+        let clusters: Vec<&crate::LocalityConfig> = self
+            .process_entries
+            .iter()
+            .filter(|entry| match &attrition.victims {
+                AttritionVictims::Group(group) => entry.name == *group,
+                AttritionVictims::Any | AttritionVictims::Tagged { .. } => true,
+            })
+            .filter_map(|entry| entry.locality.as_ref())
+            .collect();
+        let scope = attrition.scope;
+        if clusters.is_empty() {
+            return Some(format!(
+                "a Chaos::Attrition with scope {scope:?} reboots whole failure domains, but no \
+                 victim has a SimulationBuilder::cluster topology: it would never reboot"
+            ));
+        }
+        // A tag filter can leave fewer victims in a domain than it holds, so
+        // only the other filters have a known domain size.
+        if mode != ChaosMode::Random || matches!(attrition.victims, AttritionVictims::Tagged { .. })
+        {
+            return None;
+        }
+        let smallest = clusters
+            .iter()
+            .map(|cluster| cluster.smallest_domain(level))
+            .min()
+            .unwrap_or_default();
+        (smallest > attrition.max_dead).then(|| {
+            format!(
+                "a Chaos::Attrition with scope {scope:?} can never reboot: the smallest domain \
+                 holds {smallest} processes, more than max_dead {} (raise max_dead, or use \
+                 ChaosMode::Swarm, which picks a scope that fits)",
+                attrition.max_dead
+            )
+        })
     }
 
     /// Enforce the fresh-state boundary required by exploration recipes.

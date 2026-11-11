@@ -79,7 +79,7 @@ SimulationBuilder::new()
     .run()?;
 ```
 
-`chaos_duration` is required. `run()` returns `SimulationError::InvalidConfiguration` for a builder that registers attrition without it, instead of dropping the injector unrun. When the window closes, no new reboot is scheduled. A reboot already decided still completes: its restart is a scheduled event, so no victim is stranded down into the recovery tail. The tail is where the rebooted process rejoins and the cluster reconverges, so give the workload enough time there.
+`chaos_duration` is required. `run()` returns `SimulationError::InvalidConfiguration` for a builder that registers attrition without it, instead of dropping the injector unrun. It also refuses a regime that can never reboot a process: victims that name an unregistered group or a tag that no group carries, a correlated scope with no `.cluster()` topology among its victims, or (in `ChaosMode::Random`) a correlated scope whose smallest domain holds more processes than `max_dead`. Each of these would leave the seed green while no reboot happens. When the window closes, no new reboot is scheduled. A reboot already decided still completes: its restart is a scheduled event, so no victim is stranded down into the recovery tail. The tail is where the rebooted process rejoins and the cluster reconverges, so give the workload enough time there.
 
 ## Random or Swarm
 
@@ -179,6 +179,6 @@ Flat IPs cannot express this, so moonpool uses FoundationDB's hierarchy: datacen
 }])
 ```
 
-`PerMachine` picks a machine and reboots **every process on it in the same instant**, as a host kernel panic would. `PerZone` does the same one level up, and `PerDatacenter` takes a region. `max_dead` still counts processes, and a group reboot is atomic against it: the injector only kills a domain when the whole group fits the remaining budget. With two processes per machine, `max_dead: 2` lets exactly one machine be down and never leaves a machine half-dead. A domain with no live eligible process is never drawn. Without a topology the correlated scopes do nothing.
+`PerMachine` picks a machine and reboots **every process on it in the same instant**, as a host kernel panic would. `PerZone` does the same one level up, and `PerDatacenter` takes a region. `max_dead` still counts processes, and a group reboot is atomic against it: the injector only kills a domain when the whole group fits the remaining budget. With two processes per machine, `max_dead: 2` lets exactly one machine be down and never leaves a machine half-dead. A domain with no live eligible process is never drawn.
 
 A machine reboot and a rack power loss look alike but differ in one way: attrition stays under `max_dead`, so a quorum always survives. A fault that takes a **whole group** at once, past any budget, is `Chaos::Outage`, in [Correlated Outages and Self-Crashes](30-outages.md). A scripted sequence ("crash node X, wait for the workload, bring X back") is a custom injector, in [Custom Fault Injectors](31-custom-faults.md).

@@ -77,6 +77,21 @@ impl LocalityConfig {
         }
     }
 
+    /// The fewest processes that a non-empty domain at `level` holds in any
+    /// seed. A dimension that can draw zero leaves no domain, so it counts
+    /// as one here.
+    pub(crate) fn smallest_domain(&self, level: crate::locality::DomainLevel) -> usize {
+        use crate::locality::DomainLevel;
+        let at_least_one = |count: &ProcessCount| count.min().max(1);
+        let machine = at_least_one(&self.processes_per_machine);
+        let zone = machine * at_least_one(&self.machines_per_zone);
+        match level {
+            DomainLevel::Machine => machine,
+            DomainLevel::Zone => zone,
+            DomainLevel::Datacenter => zone * at_least_one(&self.zones_per_datacenter),
+        }
+    }
+
     /// Sample the topology for the current seed and assign one [`LocalityInfo`]
     /// per process index via contiguous hierarchical slicing.
     ///
