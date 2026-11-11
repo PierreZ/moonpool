@@ -312,8 +312,29 @@ pub fn sim_random_bool(p: f64) -> bool {
 ///
 /// The same seed always produces the same sequence of draws.
 pub fn set_sim_seed(seed: u64) {
+    seed_stream(seed, seed);
+}
+
+/// Mixed into a seed to get the seed of its configuration stream: the
+/// bytes of `"cfg_draw"`.
+const CONFIG_STREAM_DOMAIN: u64 = 0x6366_675f_6472_6177;
+
+/// Seed the stream for the per-seed configuration draws of `seed` (process
+/// counts, network and storage profiles), which the runner takes before it
+/// builds the world.
+///
+/// The world then reseeds the stream with `seed` itself for the run. The
+/// two streams are independent: a configuration draw never shares its value
+/// with a run draw, so (for example) the process count of a group does not
+/// decide the operation swarm mask. [`current_sim_seed`] still answers
+/// `seed`.
+pub(crate) fn set_sim_config_seed(seed: u64) {
+    seed_stream(mix64(seed ^ CONFIG_STREAM_DOMAIN), seed);
+}
+
+fn seed_stream(stream_seed: u64, seed: u64) {
     SIM_RNG.with(|rng| {
-        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(seed);
+        *rng.borrow_mut() = ChaCha8Rng::seed_from_u64(stream_seed);
     });
     CURRENT_SEED.with(|current| {
         *current.borrow_mut() = seed;
