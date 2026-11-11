@@ -68,6 +68,10 @@ struct FinalReportInputs {
     converged: bool,
     /// The run stopped on a deadlocked seed rather than its iteration cap.
     deadlocked: bool,
+    /// The wall-clock budget stopped the run.
+    budget_spent: bool,
+    /// The seeds that grew coverage, in run order.
+    corpus_seeds: Vec<u64>,
     /// Saturation outcome captured during the last scan (`UntilCoverageStable`).
     saturation: Option<super::report::SaturationReport>,
     /// The exploration summary, when exploration was configured.
@@ -178,6 +182,8 @@ impl RunState {
             converged: false,
             plateau_count: 0,
             saturation: None,
+            corpus_progress: (0, 0),
+            corpus_seeds: Vec::new(),
         }
     }
 }
@@ -208,6 +214,10 @@ struct RunState {
     plateau_count: usize,
     /// Saturation outcome captured during the last scan, surfaced in the report.
     saturation: Option<super::report::SaturationReport>,
+    /// Coverage after the last seed: `(code edges, reached assertions)`.
+    corpus_progress: (usize, usize),
+    /// The seeds that grew coverage, in run order.
+    corpus_seeds: Vec<u64>,
 }
 
 /// Resolved workload entries for a single iteration.
@@ -913,6 +923,8 @@ impl SimulationBuilder {
             assertion_details: Vec::new(),
             bucket_summaries: Vec::new(),
             convergence_timeout: false,
+            wall_clock_budget_spent: false,
+            corpus_seeds: Vec::new(),
             saturation: None,
             app_metrics: Vec::new(),
             run_id: 0,
@@ -1004,6 +1016,7 @@ impl SimulationBuilder {
             tracing::info!(declared, "assertion sites declared at link time");
         }
 
+        self.load_corpus();
         let mut state = RunState::new(&self);
         #[cfg(feature = "exploration")]
         {
@@ -1013,6 +1026,8 @@ impl SimulationBuilder {
         // A deadlocked seed aborts the campaign, but the report still carries
         // everything gathered so far (exploration, assertions, saturation).
         let mut deadlocked = false;
+        let mut budget_spent = false;
+        let campaign_start = Instant::now();
         while state.iteration_manager.should_continue() {
             if self.execute_iteration(&mut state, &obs_handle) == IterationOutcome::Deadlocked {
                 deadlocked = true;
@@ -1021,7 +1036,19 @@ impl SimulationBuilder {
             if state.converged {
                 break;
             }
+            if self
+                .wall_clock_budget
+                .is_some_and(|budget| campaign_start.elapsed() >= budget)
+            {
+                tracing::warn!(
+                    seeds = state.iteration_manager.current_iteration(),
+                    "the wall-clock budget is spent: the run stops"
+                );
+                budget_spent = true;
+                break;
+            }
         }
+        self.store_corpus(&state.corpus_seeds);
 
         // Read the sancov totals while the controller (which owns the sancov
         // shared memory) is still alive, then drop it — freeing the worker
@@ -1050,6 +1077,8 @@ impl SimulationBuilder {
             FinalReportInputs {
                 converged: state.converged,
                 deadlocked,
+                budget_spent,
+                corpus_seeds: state.corpus_seeds,
                 saturation: state.saturation,
                 exploration,
             },
@@ -1465,9 +1494,6 @@ impl SimulationBuilder {
     /// Run all per-iteration cleanup steps after the orchestrator finished:
     /// accumulate exploration stats, run the convergence scan, reset buggify.
     fn finish_iteration(&self, state: &mut RunState, seed: u64, iteration_count: usize) {
-        // `seed` is only consumed by the exploration stats accumulation below.
-        #[cfg(not(feature = "exploration"))]
-        let _ = seed;
         #[cfg(feature = "exploration")]
         if self.exploration_config.is_some() {
             state
@@ -1479,8 +1505,22 @@ impl SimulationBuilder {
             self.iteration_control,
             IterationControl::UntilCoverageStable { .. }
         );
+        let mut all_sometimes_count = 0;
+        if needs_assertion_scan || self.corpus_file.is_some() {
+            all_sometimes_count = Self::scan_assertion_slots(&mut state.reached_sometimes);
+            let progress = (
+                crate::chaos::exploration_glue::code_coverage_edges(
+                    self.exploration_config.is_some(),
+                )
+                .unwrap_or_default(),
+                state.reached_sometimes.len(),
+            );
+            if grew(state.corpus_progress, progress) {
+                state.corpus_seeds.push(seed);
+            }
+            state.corpus_progress = progress;
+        }
         if needs_assertion_scan {
-            let all_sometimes_count = Self::scan_assertion_slots(&mut state.reached_sometimes);
             state.converged = Self::check_convergence_or_plateau(ConvergenceState {
                 iteration_control: &self.iteration_control,
                 iteration_count,
@@ -1507,6 +1547,8 @@ impl SimulationBuilder {
         let FinalReportInputs {
             converged,
             deadlocked,
+            budget_spent,
+            corpus_seeds,
             saturation,
             exploration,
         } = inputs;
@@ -1534,7 +1576,8 @@ impl SimulationBuilder {
             iteration_control,
             IterationControl::UntilCoverageStable { .. }
         ) && !converged
-            && !deadlocked;
+            && !deadlocked
+            && !budget_spent;
 
         crate::chaos::buggify_reset();
 
@@ -1549,8 +1592,88 @@ impl SimulationBuilder {
             assertion_details,
             bucket_summaries,
             convergence_timeout,
+            wall_clock_budget_spent: budget_spent,
+            corpus_seeds,
             saturation,
         })
+    }
+}
+
+/// Whether coverage grew from `before` to `after`: more code edges, or more
+/// reached assertions. Both counts never shrink within a run.
+fn grew(before: (usize, usize), after: (usize, usize)) -> bool {
+    after.0 > before.0 || after.1 > before.1
+}
+
+/// Parse a corpus file: one decimal seed per line; empty lines and lines
+/// that start with `#` are skipped. A line that is not a seed is logged and
+/// skipped.
+fn parse_corpus(text: &str) -> Vec<u64> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| match line.parse::<u64>() {
+            Ok(seed) => Some(seed),
+            Err(error) => {
+                tracing::warn!(line, %error, "corpus: skipped a line that is not a seed");
+                None
+            }
+        })
+        .collect()
+}
+
+/// Render a corpus file that [`parse_corpus`] reads back.
+fn render_corpus(seeds: &[u64]) -> String {
+    let mut text =
+        String::from("# moonpool seed corpus: the seeds that grew coverage, in run order.\n");
+    for seed in seeds {
+        text.push_str(&seed.to_string());
+        text.push('\n');
+    }
+    text
+}
+
+impl SimulationBuilder {
+    /// Append the seeds of the corpus file, if any, after the pinned seeds.
+    fn load_corpus(&mut self) {
+        let Some(path) = &self.corpus_file else {
+            return;
+        };
+        if self.replay_recipe.is_some() {
+            return;
+        }
+        let seeds = match std::fs::read_to_string(path) {
+            Ok(text) => parse_corpus(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "corpus: cannot read the file");
+                Vec::new()
+            }
+        };
+        tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: loaded");
+        for seed in seeds {
+            if !self.seeds.contains(&seed) {
+                self.seeds.push(seed);
+            }
+        }
+    }
+
+    /// Write the seeds that grew coverage to the corpus file, if any.
+    fn store_corpus(&self, seeds: &[u64]) {
+        let Some(path) = &self.corpus_file else {
+            return;
+        };
+        if self.replay_recipe.is_some() {
+            return;
+        }
+        match std::fs::write(path, render_corpus(seeds)) {
+            Ok(()) => {
+                tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: written")
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "corpus: cannot write the file");
+            }
+        }
     }
 }
 

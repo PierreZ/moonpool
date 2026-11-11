@@ -363,6 +363,15 @@ pub struct SimulationReport {
     pub bucket_summaries: Vec<BucketSiteSummary>,
     /// True when `UntilCoverageStable` hit its iteration cap without saturating.
     pub convergence_timeout: bool,
+    /// True when the [`wall_clock_budget`](super::builder::SimulationBuilder::wall_clock_budget)
+    /// stopped the run.
+    pub wall_clock_budget_spent: bool,
+    /// The seeds of this run that grew coverage (new code edges, or a new
+    /// `sometimes` or `reachable` assertion), in run order: the corpus that
+    /// [`corpus_file`](super::builder::SimulationBuilder::corpus_file)
+    /// writes. Tracked only when the run checks coverage
+    /// (`UntilCoverageStable`) or keeps a corpus file; empty otherwise.
+    pub corpus_seeds: Vec<u64>,
     /// Saturation outcome for an `UntilCoverageStable` run (signal + coverage
     /// numbers); `None` for other iteration-control modes.
     pub saturation: Option<SaturationReport>,
@@ -594,6 +603,8 @@ mod tests {
             assertion_details: Vec::new(),
             bucket_summaries: Vec::new(),
             convergence_timeout: false,
+            wall_clock_budget_spent: false,
+            corpus_seeds: Vec::new(),
             saturation: None,
             app_metrics: Vec::new(),
             run_id: 0,

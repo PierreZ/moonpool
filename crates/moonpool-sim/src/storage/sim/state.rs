@@ -319,11 +319,10 @@ pub(crate) struct StorageState {
     pub(crate) focus: BTreeMap<IpAddr, Arc<FaultFocus>>,
     /// The seed's replicated fault patterns, one per covered group.
     pub(crate) replication: Vec<ReplicationSlot>,
-    /// Per-process published layouts, which the pattern reads.
+    /// Per-process published layouts, which the pattern reads: a whole
+    /// layout (`publish_layout`) and the regions of each store
+    /// (`publish_store_layout`), updated in place.
     pub(crate) layouts: BTreeMap<IpAddr, Arc<LayoutIndex>>,
-    /// Per process, per store: the regions each store published
-    /// (`publish_store_layout`); `layouts` holds their union.
-    pub(crate) store_layouts: BTreeMap<IpAddr, BTreeMap<String, Vec<moonpool_core::LayoutRegion>>>,
     /// The run's shard book: damage to a region inside a shard lands only
     /// while the shard stays durable (see `shards.rs`).
     pub(crate) shards: Option<crate::runner::shard::ShardBook>,
@@ -373,7 +372,6 @@ impl StorageState {
             focus: BTreeMap::new(),
             replication: Vec::new(),
             layouts: BTreeMap::new(),
-            store_layouts: BTreeMap::new(),
             shards: None,
             fault_records: Vec::new(),
             crash_reports: Vec::new(),

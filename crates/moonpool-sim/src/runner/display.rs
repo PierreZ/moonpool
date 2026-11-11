@@ -338,6 +338,8 @@ pub(crate) fn write_report(w: &mut impl Write, report: &SimulationReport, color:
     if let Some(sat) = &report.saturation {
         let (title, style) = if report.convergence_timeout {
             ("Saturation FAILED", ansi::BOLD_RED)
+        } else if report.wall_clock_budget_spent {
+            ("Wall-clock budget spent", ansi::BOLD)
         } else {
             ("Saturated", ansi::BOLD)
         };
@@ -373,6 +375,14 @@ pub(crate) fn write_report(w: &mut impl Write, report: &SimulationReport, color:
         let _ = writeln!(
             w,
             "  UntilCoverageStable hit the iteration cap without saturating.",
+        );
+    }
+
+    if !report.corpus_seeds.is_empty() {
+        let _ = writeln!(
+            w,
+            "  {} seeds grew coverage (the corpus)",
+            report.corpus_seeds.len()
         );
     }
 
