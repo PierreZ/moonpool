@@ -8,6 +8,8 @@ Moonpool injects network faults at the **TCP connection level**. FoundationDB ma
 
 TigerBeetle simulates packets, which is the right tool for testing a network stack. For an application on top of TCP, connection faults reach the code paths that fail in production.
 
+[Network faults](../techniques/network/) runs one seed with every family on in your browser, then the same seed with the families you keep, and counts the faults of each kind.
+
 ## Turning Faults On
 
 Every network fault lives in `NetworkConfiguration`, under its `chaos` field (a `ChaosConfiguration`). The builder picks a configuration per seed from the `Chaos::Network` entry:

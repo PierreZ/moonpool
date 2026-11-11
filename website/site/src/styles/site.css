@@ -294,6 +294,44 @@ pre {
 @media (max-width: 900px) { .compare-runs { grid-template-columns: 1fr; } }
 @media (max-width: 620px) { .compare .run-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
+/* The Storage page: the log of each server, one cell per sector. */
+.sector-view { margin-top: 12px; }
+.disks { display: grid; gap: 6px; padding: 10px 12px; font-family: var(--font-mono); font-size: 12px; }
+.disk { display: grid; grid-template-columns: 22ch minmax(0, 1fr); gap: 4px 12px; align-items: center; }
+.disk-name { color: var(--muted); }
+.cells { display: flex; flex-wrap: wrap; gap: 3px; }
+.cell { display: inline-grid; place-items: center; width: 22px; height: 22px; border: 1px dashed var(--rule-strong); color: var(--muted); font-family: var(--font-mono); font-size: 12px; line-height: 1; }
+.cell.s-written { border: 1px solid var(--fg); color: var(--fg); }
+.cell.s-durable, .cell.s-kept_new { border: 1px solid var(--accent); background: var(--accent-tint); color: var(--accent); }
+.cell.s-kept_old { border: 1px solid var(--muted); color: var(--muted); }
+.cell.s-lost, .cell.s-latent, .cell.s-shorn, .cell.s-lost_synced { border: 1px solid var(--fail); background: var(--fail-tint); color: var(--fail); font-weight: 600; }
+.run-legend .cell { width: 16px; height: 16px; font-size: 10px; vertical-align: -3px; }
+.oracle { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); font-size: 13.5px; }
+.oracle.ok { color: var(--accent); }
+.oracle.bad { color: var(--fail); font-weight: 600; }
+@media (max-width: 620px) { .disk { grid-template-columns: minmax(0, 1fr); } }
+
+/* A table under a live run: the reboots, the code lines of Same code. */
+.run-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 12px; }
+.run-table th, .run-table td { padding: 5px 12px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+.run-table th { color: var(--muted); font-weight: 400; text-transform: uppercase; letter-spacing: var(--tracking); font-size: 11px; }
+.run-table tr:last-child td { border-bottom: 0; }
+.run-table .later { color: var(--muted); }
+.run-table .on { color: var(--accent); }
+.run-table .hit { color: var(--fault); font-weight: 600; }
+.run-table .bad { color: var(--fail); font-weight: 600; }
+.table-wrap { overflow-x: auto; }
+.switches { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 10px 12px; font-family: var(--font-mono); font-size: 12.5px; }
+.switches label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.switches input { accent-color: var(--accent); }
+.switches select { max-width: 100%; height: 28px; border: 1px solid var(--rule-strong); border-radius: 0; background: var(--bg); color: var(--fg); font: inherit; font-size: 12.5px; }
+.run-out:empty { display: none; }
+.run-out { margin: 0; padding: 8px 12px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 13.5px; }
+.run-out.diff { color: var(--fg); }
+.run-out.same { color: var(--accent); }
+.run-out.bad { color: var(--fail); }
+.run-under { margin-top: 12px; }
+
 /* ---- the Guide: a sidebar from SUMMARY.md, the chapter, a search ---- */
 
 .guide { display: grid; grid-template-columns: 17rem minmax(0, 1fr); gap: 40px; max-width: calc(var(--measure) + 8ch + 17rem + 40px); margin: 0 auto; }

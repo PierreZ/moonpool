@@ -72,7 +72,7 @@ A crash (any `RebootKind::Crash`, `CrashAndWipe`, `crash_self`, or a disk crash 
 | `LatentFault` | The sector reads back with an error until rewritten. |
 | `Shorn` | Part of the sector is old, part new. |
 
-`clean_crash_probability` makes some crashes lose nothing. `correlated_rollback_probability` and `correlated_rollback_max_run` roll back a run of adjacent sectors together. `length_survives_crash_probability` decides whether an unsynced `set_len` survives. `FileCrashReport` lists the outcome per sector; `SimWorld::take_storage_crash_reports()` drains them.
+`clean_crash_probability` makes some crashes lose nothing. `correlated_rollback_probability` and `correlated_rollback_max_run` roll back a run of adjacent sectors together. `length_survives_crash_probability` decides whether an unsynced `set_len` survives. `FileCrashReport` lists the outcome per sector (`clean_kept` lists the sectors a clean crash kept); `SimWorld::take_storage_crash_reports()` drains them.
 
 ### Targeted injection
 
@@ -167,6 +167,7 @@ The engine records `SimFaultEvent`s. The runner merges them into the trace under
 | `random_close`, `black_hole`, `bit_flip` | connection faults |
 | `storage_read_fault`, `storage_write_fault`, `storage_sync_fault` | storage I/O faults |
 | `storage_disk_failure`, `storage_crash`, `storage_wipe` | disk and crash |
+| `storage_crash_sectors` | the fate of each unsynced sector of one file at a crash (read-only) |
 
 `SimWorld::take_faults()` drains them in a low-level test.
 

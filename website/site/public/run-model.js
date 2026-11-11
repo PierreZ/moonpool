@@ -121,3 +121,112 @@ export function seedFrom(search) {
   const s = p.get("seed").trim();
   return /^[0-9]{1,15}$/.test(s) ? Number(s) : null;
 }
+
+/** The fates of a crash, in the order of the storage page's legend. */
+export const FATES = ["kept_old", "kept_new", "lost", "latent", "shorn", "lost_synced"];
+
+/**
+ * The sectors of each server's log after the event at `cursor`: `written`
+ * after `log_written`, `durable` after `log_synced` (a `sync_all` makes every
+ * written sector durable), then the fate a `storage_crash_sectors` fault
+ * gave it, and nothing after a `storage_wipe`. A Map from ip to a Map from
+ * sector to state.
+ */
+export function sectorStates(run, cursor) {
+  const out = new Map();
+  const disk = (ip) => {
+    if (!out.has(ip)) out.set(ip, new Map());
+    return out.get(ip);
+  };
+  for (let i = 0; i <= cursor && i < run.events.length; i++) {
+    const e = run.events[i];
+    const f = e.fields;
+    if (e.name === "log_written") disk(e.source).set(f.sector, "written");
+    else if (e.name === "log_synced") {
+      const d = disk(e.source);
+      for (const [s, state] of d) if (state === "written") d.set(s, "durable");
+      d.set(f.sector, "durable");
+    } else if (e.name === "sim_fault" && f.kind === "storage_wipe") disk(f.ip).clear();
+    else if (e.name === "sim_fault" && f.kind === "storage_crash_sectors") {
+      const d = disk(f.ip);
+      for (const fate of FATES) {
+        for (const s of String(f[fate] || "").split(",").filter(Boolean)) d.set(Number(s), fate);
+      }
+    }
+  }
+  return out;
+}
+
+/** The sectors that a sync reported durable and a crash lost (the oracle). */
+export function lostSynced(run) {
+  return run.faults
+    .filter((f) => f.kind === "storage_crash_sectors" && f.fields.lost_synced)
+    .map((f) => ({ ip: f.fields.ip, sectors: f.fields.lost_synced, time_ms: f.time_ms }));
+}
+
+/** How many faults of each kind a run recorded. */
+export function faultCounts(run) {
+  const out = {};
+  for (const f of run.faults) out[f.kind] = (out[f.kind] || 0) + 1;
+  return out;
+}
+
+/**
+ * Each reboot of a server: when it went down, its kind (`graceful`, `crash`,
+ * `wipe`), when it booted again (`back`, at event `backIndex`) and the
+ * version it read from its disk.
+ */
+export function reboots(run) {
+  const out = [];
+  const open = new Map();
+  run.events.forEach((e, i) => {
+    const f = e.fields;
+    if (e.name === "sim_fault" && f.kind === "process_graceful_shutdown" && !open.has(f.ip)) {
+      open.set(f.ip, { ip: f.ip, kind: "graceful", at: e.time_ms, index: i, back: null, backIndex: -1, version: null });
+    } else if (e.name === "sim_fault" && f.kind === "process_force_kill") {
+      if (!open.has(f.ip)) open.set(f.ip, { ip: f.ip, kind: "crash", at: e.time_ms, index: i, back: null, backIndex: -1, version: null });
+    } else if (e.name === "sim_fault" && f.kind === "storage_wipe" && open.has(f.ip)) {
+      open.get(f.ip).kind = "wipe";
+    } else if (e.name === "server_boot" && open.has(e.source)) {
+      const r = open.get(e.source);
+      r.back = e.time_ms;
+      r.backIndex = i;
+      r.version = f.version;
+      out.push(r);
+      open.delete(e.source);
+    }
+  });
+  return out.concat([...open.values()]).sort((a, b) => a.index - b.index);
+}
+
+/** The most servers down at the same time, from the down spans. */
+export function mostDown(run) {
+  const edges = [];
+  for (const s of downSpans(run)) {
+    edges.push([s.start, 1]);
+    edges.push([s.end >= 0 ? s.end : run.events.length, -1]);
+  }
+  edges.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let now = 0;
+  let most = 0;
+  for (const [, d] of edges) {
+    now += d;
+    most = Math.max(most, now);
+  }
+  return most;
+}
+
+/** The `hint!` labels where the simulator rebooted a process, in order. */
+export function hintStrikes(run, name) {
+  return run.events.filter((e) => e.name === name).map((e) => ({ ip: e.source, label: e.fields.label, time_ms: e.time_ms }));
+}
+
+/** The newest version the workload saw committed at or before event `index`, or 0. */
+export function committedAt(run, index) {
+  let v = 0;
+  for (let i = 0; i <= index && i < run.events.length; i++) {
+    const e = run.events[i];
+    if (e.name === "write_committed") v = Math.max(v, e.fields.version);
+  }
+  return v;
+}

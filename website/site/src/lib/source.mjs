@@ -110,3 +110,50 @@ export function rustFn(text, name) {
 export function repoFn(path, name) {
   return rustFn(readFileSync(ROOT + path, "utf8"), name);
 }
+
+/** The names of a `pub const NAME: &[(&str, _)] = &[("name", …), …];` table. */
+export function constNames(text, name) {
+  const m = new RegExp("pub const " + name + ":[^=]*= &\\[([\\s\\S]*?)\\];").exec(text);
+  if (!m) throw new Error(`no const ${name}`);
+  return [...m[1].matchAll(/\("([a-z_]+)",/g)].map((x) => x[1]);
+}
+
+/** The value of a `pub const NAME: &str = "…";`. */
+export function constStr(text, name) {
+  const m = new RegExp("pub const " + name + ': &str = "([^"]*)";').exec(text);
+  if (!m) throw new Error(`no const ${name}`);
+  return m[1];
+}
+
+/** The labels of the `hint!("…")` sites of a Rust file, in order. */
+export function hintLabels(text) {
+  return [...text.matchAll(/hint!\("([^"]+)"\)/g)].map((m) => m[1]);
+}
+
+/** The first line of a file that contains `needle`, trimmed; throws when none does. */
+export function lineWith(text, needle) {
+  const line = text.split("\n").find((l) => l.includes(needle));
+  if (!line) throw new Error(`no line with ${needle}`);
+  return line.trim();
+}
+
+/** A file of the repository, as text. */
+export function repoFile(path) {
+  return readFileSync(ROOT + path, "utf8");
+}
+
+/**
+ * The lines of `text` from the first line with `from` to the next line with
+ * `to`, both included, with their common indent taken off. Throws when one
+ * is missing, so a page never shows code that is gone.
+ */
+export function excerpt(text, from, to) {
+  const lines = text.split("\n");
+  const a = lines.findIndex((l) => l.includes(from));
+  if (a < 0) throw new Error(`no line with ${from}`);
+  const b = lines.findIndex((l, i) => i >= a && l.includes(to));
+  if (b < 0) throw new Error(`no line with ${to} after ${from}`);
+  const part = lines.slice(a, b + 1);
+  const indent = Math.min(...part.filter((l) => l.trim()).map((l) => l.match(/^ */)[0].length));
+  return part.map((l) => l.slice(indent)).join("\n");
+}

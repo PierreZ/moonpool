@@ -16,7 +16,15 @@ wasm32-unknown-unknown` then `wasm-bindgen` to generate the JS glue.
   node.
 - `--bin sim-register` is the same system as an example simulation
   (`cargo xtask sim run register`, with `check_determinism`).
-- The planted bug (`bug: true`) breaks the invariant on about 14% of seeds
+- A config can narrow the chaos: `network_faults` and `storage_faults` keep
+  only the named families (`NETWORK_FAULTS`, `STORAGE_FAULTS` in
+  `src/engine.rs`; an unknown name is refused), and `wipes` lets attrition
+  wipe a server's disk (one unhealed wipe, restarts within 0.5 to 2 s).
+- Each server keeps its register in `register.log`, one 512-byte sector per
+  version, and emits `log_written` and `log_synced` per sector. Its two
+  `hint!` sites are between the write and the sync, and between the sync and
+  the reply. The site's storage and same-code pages read these events.
+- The planted bug (`bug: true`) breaks the invariant on about 12% of seeds
   with the default chaos, and no seed fails with it off. Measure again with
   `SEEDS=2000 cargo test -p moonpool-wasm-demo --test engine -- --ignored`
   after a change to the scenario, and keep it between 5% and 20%.

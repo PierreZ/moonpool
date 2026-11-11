@@ -12,6 +12,8 @@ Moonpool has none of these in shipped code. There is no `SimMachine`, no `SimDis
 
 The same rule applies to your code. A process in a simulation is your server, built by a factory, not a simplified model of it. moonpool-journal is a worked example: one `Journal<P: LocalStorageProvider>` runs as `Journal<TokioStorageProvider>` in its `accept_log` example, as `Journal<CompioStorageProvider>` on a thread-per-core runtime, and as `Journal<SimStorageProvider>` in its tests, and the crash tests exercise the exact commit path production uses.
 
+[Same code in production and simulation](../techniques/same-code/) shows it on the website: each line of a small server, what it does with the Tokio providers, and what it did in a simulated run in your browser, with the reboots at its `hint!` sites.
+
 ## Three Mechanisms
 
 Three things let one implementation serve both worlds.

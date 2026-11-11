@@ -8,6 +8,8 @@ A distributed system that only works while every node is healthy is a single poi
 
 Attrition is moonpool's built-in injector for that drizzle of failures. During the chaos window it waits 1 to 5 simulated seconds, picks a live victim, kills it in one of three ways, and restarts it after a recovery delay. Then it waits again. The goal is to prove the system tolerates node loss without anyone writing a test per failure.
 
+[Reboots](../techniques/reboots/) shows attrition live: a server crashed and wiped at its own hint boots again on an empty disk, another boots on what it synced, and the client goes on.
+
 ## Three Kinds of Reboot
 
 `RebootKind` models three real failures.

@@ -9,17 +9,20 @@ crate is not published.
 
 A replicated register (`src/register.rs`):
 
-- three server `Process`es keep one `(version, value)` pair in a file, and
-  `sync_all` it before they answer;
+- three server `Process`es keep each `(version, value)` record in a log
+  file, one 512-byte sector per version, and `sync_all` it before they answer.
+  At boot a server reads the log and keeps the newest record that passes its
+  check word;
 - one client `Workload` writes versions 1 to 8 to all servers and calls a
   write committed when a quorum answered, then reads from a quorum;
 - `RegisterInvariant` checks across the processes, from the trace events
   alone, that a read returns the last committed write.
 
 The code has `assert_sometimes!` on its rare paths, a `hint!` between the
-durable write and the answer, and a `buggify!` that drops an answer. A planted
+write and its sync, a `hint!` between the durable write and the answer, and a
+`buggify!` that drops an answer. A planted
 bug, off by default, makes the client read from one server in place of a
-quorum: with the default chaos (network faults and reboots), about 14% of
+quorum: with the default chaos (network faults and reboots), about 12% of
 seeds break the invariant. With the bug off, no seed of a 2,000-seed run
 fails.
 
@@ -34,10 +37,14 @@ The config:
 
 ```json
 { "scenario": "register", "seed": 256, "servers": 3, "bug": false,
-  "chaos": { "network": true, "storage": false, "reboots": true } }
+  "chaos": { "network": true, "storage": false, "reboots": true },
+  "network_faults": null, "storage_faults": null, "wipes": false }
 ```
 
-Each field is optional. The run (`Run` in `src/engine.rs`, versioned by
+Each field is optional. `network_faults` and `storage_faults` keep only the
+named fault families (`NETWORK_FAULTS` and `STORAGE_FAULTS` in
+`src/engine.rs`); `null` keeps them all. `wipes` lets attrition wipe the disk
+of one server, which comes back within the run on an empty log. The run (`Run` in `src/engine.rs`, versioned by
 `MODEL`) holds the processes, the trace events, the faults, the messages, the
 assertion counts, the summary of the report with the first event that broke
 the invariant, and a fingerprint: a hash of the events and the count of random

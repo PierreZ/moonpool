@@ -1,0 +1,64 @@
+---
+// Reboots (#417 (technique pages, part 1)): attrition kills and restarts the
+// servers, one of them on an empty disk. The recorded run is
+// src/runs/reboots.json; public/reboots.js draws the table of reboots from
+// the run's events.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { excerpt, repoFile } from "../../../lib/source.mjs";
+import runs from "../../../runs/reboots.json";
+
+const attrition = excerpt(repoFile("crates/moonpool-wasm-demo/src/engine.rs"), "out.push(Chaos::Attrition {", "mode: ChaosMode::Random,");
+const boot = excerpt(repoFile("crates/moonpool-wasm-demo/src/register.rs"), "let storage = ctx.storage();", "tracing::info!(version, \"server_boot\");");
+---
+<Technique
+  title="Reboots"
+  description="A process starts again with fresh memory and reads its disk. The test goes on."
+  guide={[
+    "part3-building/09-attrition.md",
+    "part3-building/30-outages.md",
+    "part2-foundations/09-process.md",
+    "part2-foundations/10-workload.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>A server restarts after a deploy, a crash or a new disk. All that it had in memory is gone. It must read
+    its state from its disk, and that disk can be older than its last answer, or empty. The bugs are in this
+    gap: a server that forgets a write it acknowledged, or a cluster that loses a write when one server comes
+    back with nothing.</p>
+
+  <h2>The technique</h2>
+  <p>A <b>process</b> is the system under test. Each boot makes a new instance from its factory, so nothing in
+    memory survives a reboot. The disk survives, with the crash model of the <a href={url("techniques/storage/")}>storage page</a>. A <b>workload</b> is the test driver. It survives
+    each reboot, keeps its requests going and checks the answers.</p>
+  <p><b>Attrition</b> reboots the processes during the chaos time. Each reboot is <b>graceful</b> (a signal,
+    a grace period, then a kill), a <b>crash</b> (a kill at once), or a <b>crash and wipe</b> (a kill, then an
+    empty disk). <code>max_dead</code> is the most processes that are down at the same time, so a quorum can
+    stay up. A process can also be rebooted at a moment its code names with <code>hint!</code>.</p>
+
+  <h2>The live run</h2>
+  <p>Three servers and one client. At 437 ms a server is crashed and wiped at its own hint, after it wrote a
+    record and before the sync. It boots again with version 0: its disk is empty. Later a crash hits another
+    server, and it boots with the version it synced. The client did not stop, and each read returned the last
+    committed write.</p>
+  <div class="breakout">
+    <section class="run" id="run" aria-label="A live run"></section>
+    <div class="run run-under">
+      <div class="run-head label"><span>each reboot of a server</span></div>
+      <div class="table-wrap"><table class="run-table" id="reboot-table"></table></div>
+      <p class="run-out" id="reboot-out" aria-live="polite"></p>
+    </div>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+
+  <h2>The code</h2>
+  <p>The attrition of the site's engine. A wipe needs a budget: a wiped server of the register has no repair,
+    so one wipe at a time can stay unhealed, and each later wipe becomes a crash:</p>
+  <Code theme="css-variables" lang="rust" code={attrition} />
+  <p>Each boot of a server starts here, with empty memory. It opens its log, reads it and keeps the newest
+    record that passes its check word:</p>
+  <Code theme="css-variables" lang="rust" code={boot} />
+  <script is:inline type="module" src={url("reboots.js")}></script>
+</Technique>
