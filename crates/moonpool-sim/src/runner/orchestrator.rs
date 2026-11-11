@@ -30,6 +30,13 @@ use super::process_manager::{ProcessConfig, ProcessEnv, ProcessManager};
 use super::report::SimulationMetrics;
 use super::stall::{RunStallGuard, StallOutcome};
 
+/// How many events the settle phase may step before it fails the seed with
+/// [`SettleTimeout`](crate::SimulationError::SettleTimeout). With every
+/// process aborted and no task polled, only the engines' own chains of
+/// events (deliveries, buffered sends, storage completions) remain, and they
+/// end; a queue that is still busy after this many steps leaks work.
+const SETTLE_EVENT_LIMIT: u64 = 1_000_000;
+
 /// Orchestrates workload execution and event processing.
 pub(crate) struct WorkloadOrchestrator;
 
@@ -763,31 +770,10 @@ impl WorkloadOrchestrator {
         let mut loop_count: u64 = 0;
 
         loop {
-            let active_workloads = workload_handles.iter().filter(|h| h.is_some()).count();
-            if active_workloads == 0 {
-                break;
-            }
-
-            loop_count += 1;
-            if loop_count.is_multiple_of(100) {
-                tracing::debug!(
-                    "Cooperative loop iteration {}, {} handles active, {} pending events",
-                    loop_count,
-                    active_workloads,
-                    sim.pending_event_count()
-                );
-            }
-
-            let initial_handle_count = active_workloads;
-            let initial_event_count = sim.pending_event_count();
-
-            if !chaos_ended && Self::should_end_chaos(sim, chaos_start, chaos_duration) {
-                Self::end_chaos(sim, chaos_shutdown, process_manager, env.state);
-                chaos_ended = true;
-            }
-
-            Self::step_and_pump(sim, Some(&mut *process_manager), &env);
-
+            // Collect first: a workload that returned in the last executor
+            // pass ends the loop now, before the next step can move time to
+            // a far event (a scheduled restart, a kill) after the run ended.
+            let initial_handle_count = workload_handles.iter().filter(|h| h.is_some()).count();
             let any_finished = Self::collect_finished_workloads(
                 workload_handles,
                 workload_collected,
@@ -805,20 +791,41 @@ impl WorkloadOrchestrator {
 
             Self::reap_finished_injectors(injector_handles).await;
 
-            let current_active = workload_handles.iter().filter(|h| h.is_some()).count();
+            let active_workloads = workload_handles.iter().filter(|h| h.is_some()).count();
+            if active_workloads == 0 {
+                break;
+            }
+
+            loop_count += 1;
+            if loop_count.is_multiple_of(100) {
+                tracing::debug!(
+                    "Cooperative loop iteration {}, {} handles active, {} pending events",
+                    loop_count,
+                    active_workloads,
+                    sim.pending_event_count()
+                );
+            }
+
+            let initial_event_count = sim.pending_event_count();
+
+            if !chaos_ended && Self::should_end_chaos(sim, chaos_start, chaos_duration) {
+                Self::end_chaos(sim, chaos_shutdown, process_manager, env.state);
+                chaos_ended = true;
+            }
+
+            Self::step_and_pump(sim, Some(&mut *process_manager), &env);
+
             if stall.deadlocked(
                 sim,
                 &env,
-                current_active,
+                active_workloads,
                 initial_handle_count,
                 initial_event_count,
             ) {
                 return Err(env.deadlock());
             }
 
-            if current_active > 0 {
-                crate::executor::until_stalled().await;
-            }
+            crate::executor::until_stalled().await;
         }
         // Chaos ends before `check()` in every mode: with the run when it
         // lasts until the run ends, and also when every workload returned
@@ -1267,21 +1274,36 @@ impl WorkloadOrchestrator {
     /// is the quiet tail between the `chaos_duration` cutoff and workload
     /// completion, while the processes are still alive.
     ///
+    /// The pending process lifecycle events (a scheduled restart, a
+    /// grace-period kill) are cancelled first: no process is left for them
+    /// to act on. The drain stops when only infrastructure events remain
+    /// (partition heals with no bytes held), because stepping them only
+    /// moves time. The limit counts events, not simulated time, so a single
+    /// far event does not fail a healthy seed.
+    ///
     /// Returns `Some(SettleTimeout)` if the queue does not converge within
-    /// the timeout, otherwise `None` on a clean drain.
+    /// [`SETTLE_EVENT_LIMIT`] events, otherwise `None` on a clean drain.
     fn settle_phase(sim: &mut SimWorld) -> Option<crate::SimulationError> {
         // Synchronous drain: process all remaining events without yielding.
         // No yield means no tasks can schedule new events, so the queue
         // converges to empty.
         let settle_start = sim.current_time();
-        let settle_timeout = Duration::from_mins(5);
+        let cancelled = sim.cancel_process_lifecycle_events();
+        if cancelled > 0 {
+            tracing::debug!(
+                cancelled,
+                "settle: dropped pending process lifecycle events"
+            );
+        }
 
-        while sim.pending_event_count() > 0 {
-            let elapsed = sim.current_time().saturating_sub(settle_start);
-            if elapsed > settle_timeout {
+        let mut steps: u64 = 0;
+        while sim.has_pending_events() && !sim.only_infrastructure_events_remain() {
+            if steps >= SETTLE_EVENT_LIMIT {
+                let elapsed = sim.current_time().saturating_sub(settle_start);
                 tracing::error!(
-                    "Settle timeout: {} events still pending after {:?}",
+                    "Settle timeout: {} events still pending after {} settle steps ({:?})",
                     sim.pending_event_count(),
+                    steps,
                     elapsed
                 );
                 return Some(crate::SimulationError::SettleTimeout {
@@ -1290,6 +1312,7 @@ impl WorkloadOrchestrator {
                 });
             }
             sim.step();
+            steps += 1;
         }
         None
     }

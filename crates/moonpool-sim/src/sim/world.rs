@@ -407,17 +407,41 @@ impl SimWorld {
     #[instrument(level = "debug", skip(self))]
     pub fn run_until_empty(&mut self) {
         while self.step() {
-            let inner = self.inner.read();
-            if inner.events_processed.is_multiple_of(50)
-                && !inner.network.has_held_in_flight()
-                && inner
-                    .scheduler
-                    .iter()
-                    .all(|event| event.value().is_infrastructure_event())
-            {
+            let checkpoint = self.inner.read().events_processed.is_multiple_of(50);
+            if checkpoint && self.only_infrastructure_events_remain() {
                 break;
             }
         }
+    }
+
+    /// Whether every pending event only maintains infrastructure (partition
+    /// heals, restarts) and no partition holds bytes in flight: stepping
+    /// the rest moves time, but releases no work.
+    pub(crate) fn only_infrastructure_events_remain(&self) -> bool {
+        let inner = self.inner.read();
+        !inner.network.has_held_in_flight()
+            && inner
+                .scheduler
+                .iter()
+                .all(|event| event.value().is_infrastructure_event())
+    }
+
+    /// Cancel every pending process lifecycle event (see
+    /// [`Event::is_process_lifecycle_event`]) and return how many there
+    /// were. The runner calls it once every process is aborted: no process
+    /// is left for these events to act on.
+    pub(crate) fn cancel_process_lifecycle_events(&self) -> usize {
+        let mut inner = self.inner.write();
+        let ids: Vec<_> = inner
+            .scheduler
+            .iter()
+            .filter(|event| event.value().is_process_lifecycle_event())
+            .map(super::events::Scheduled::id)
+            .collect();
+        for id in &ids {
+            inner.scheduler.cancel(*id);
+        }
+        ids.len()
     }
 
     /// Returns current logical time.
