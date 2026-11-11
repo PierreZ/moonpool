@@ -156,3 +156,224 @@ export function fieldDocs(text, struct) {
   }
   return out;
 }
+
+/**
+ * Rustdoc code blocks as a reader sees them: the hidden lines (`# …`) of a
+ * Rust block are left out, and `compile_fail`, `no_run` and `ignore` blocks
+ * are plain Rust.
+ */
+export function readerCode(md) {
+  let rust = false;
+  let fence = false;
+  const out = [];
+  for (const line of md.split("\n")) {
+    const f = /^(\s*)```(.*)$/.exec(line);
+    if (f) {
+      if (!fence) {
+        fence = true;
+        const lang = f[2].trim();
+        rust = lang === "" || /^rust\b|^compile_fail|^no_run|^ignore/.test(lang);
+        out.push(rust ? `${f[1]}\`\`\`rust` : line);
+      } else {
+        fence = false;
+        out.push(line);
+      }
+      continue;
+    }
+    if (fence && rust && /^\s*#(?: |$)/.test(line)) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/** Each heading of a markdown text `by` levels lower (`#` becomes `###` with 2). */
+export function shiftHeadings(md, by) {
+  let fence = false;
+  return md
+    .split("\n")
+    .map((l) => {
+      if (/^\s*```/.test(l)) fence = !fence;
+      return !fence && /^#+ /.test(l) ? "#".repeat(by) + l : l;
+    })
+    .join("\n");
+}
+
+/** The index of the brace that closes the one at `open`. */
+function closing(text, open) {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    if (text[i] === "}" && --depth === 0) return i;
+  }
+  throw new Error("a block does not close");
+}
+
+/** The body of the first `fn name(` of a file (any indent, any receiver). */
+export function fnBody(text, name) {
+  const start = text.search(new RegExp(`\\bfn ${name}\\(`));
+  if (start < 0) throw new Error(`no fn ${name}`);
+  const open = text.indexOf("{", text.indexOf(")", start));
+  return text.slice(open + 1, closing(text, open));
+}
+
+/** The body of the match arm that starts with `pattern` (up to its `=> { … }`). */
+function armBody(text, pattern) {
+  const at = text.indexOf(pattern);
+  if (at < 0) throw new Error(`no arm ${pattern}`);
+  const arrow = text.indexOf("=> {", at);
+  return text.slice(arrow + 4, closing(text, arrow + 3));
+}
+
+/** The argument of the call whose `(` is at `open`. */
+function callArg(text, open) {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    if (text[i] === ")" && --depth === 0) return text.slice(open + 1, i);
+  }
+  throw new Error("a call does not close");
+}
+
+const WIDTH = { u8: 1, u16: 2, u32: 4, u64: 8, u128: 16 };
+
+function writtenName(arg) {
+  const a = arg.trim();
+  if (/^KIND_/.test(a)) return "kind";
+  const len = /(\w+)\.len\(\)/.exec(a);
+  if (len) return `${len[1]}_len`;
+  const call = /^\*?(\w+)\.(\w+)\(\)$/.exec(a);
+  if (call) return call[2] === "get" ? call[1] : `${call[1]}.${call[2]}`;
+  const plain = /^\*?(\w+)$/.exec(a);
+  if (plain) return plain[1];
+  throw new Error(`cannot name the field written from ${a}`);
+}
+
+/**
+ * The fields that a `Writer` chain writes in one arm of an encoder, in order:
+ * `{ name, size, when }`. `size` is null for bytes of any length (a `bytes`
+ * call, or a nested `match` that writes one of several shapes, named after
+ * what it matches). A field written inside an `if` carries its condition in
+ * `when`. `branch` picks one arm of a nested `match` (such as
+ * `WireOutcome::Ok`), and `literals` names the fields written from a number.
+ */
+export function writerLayout(text, fn, arm, { branch, literals = [] } = {}) {
+  const body = armBody(fnBody(text, fn), arm);
+  const rows = [];
+  let lit = 0;
+  const skipTo = (re, from) => {
+    re.lastIndex = from;
+    return re.exec(body);
+  };
+  const scan = (from, to, when) => {
+    const re = /(\bmatch (\w+) \{|\bif ([^{]+)\{|\.(u8|u16|u32|u64|u128|bytes|socket_addr)\()/g;
+    let pos = from;
+    for (;;) {
+      const m = skipTo(re, pos);
+      if (!m || m.index >= to) return;
+      if (m[2]) {
+        const open = m.index + m[0].length - 1;
+        const end = closing(body, open);
+        const at = branch ? body.indexOf(branch, open) : -1;
+        if (at >= 0 && at < end) {
+          const arrow = body.indexOf("=> {", at);
+          scan(arrow + 4, closing(body, arrow + 3), when);
+        } else rows.push({ name: m[2], size: null, when });
+        pos = end + 1;
+      } else if (m[3]) {
+        const open = m.index + m[0].length - 1;
+        const end = closing(body, open);
+        scan(open + 1, end, m[3].trim());
+        pos = end + 1;
+      } else {
+        const open = m.index + m[0].length - 1;
+        const arg = callArg(body, open);
+        const name = /^\s*\d+\s*$/.test(arg) ? (literals[lit++] ?? arg.trim()) : writtenName(arg);
+        rows.push({ name, size: WIDTH[m[4]] ?? null, when });
+        pos = open + arg.length + 2;
+      }
+    }
+  };
+  scan(0, body.length, undefined);
+  if (!rows.length) throw new Error(`${arm} writes no field`);
+  return rows;
+}
+
+/** The golden vectors of a fixture file: `name hex` lines, `#` comments left out. */
+export function fixtures(text) {
+  const out = {};
+  for (const line of text.split("\n")) {
+    const m = /^([\w-]+) ([0-9a-f]+)$/.exec(line.trim());
+    if (m) out[m[1]] = m[2];
+  }
+  return out;
+}
+
+/** A little-endian unsigned integer of hex bytes, as a decimal string. */
+export function leValue(hex) {
+  let v = 0n;
+  for (let i = hex.length - 2; i >= 0; i -= 2) v = (v << 8n) | BigInt(parseInt(hex.slice(i, i + 2), 16));
+  return v.toString();
+}
+
+/**
+ * A layout (`writerLayout`) laid over one golden vector: each field with its
+ * offset, its size and its bytes. A field of any length takes the value of
+ * the field `<name>_len` before it, or else all the bytes that are left. A
+ * field with a condition is kept only when `when` is true. The vector must
+ * end where the last field ends.
+ */
+export function fillBytes(rows, hex, { when = false } = {}) {
+  const out = [];
+  let at = 0;
+  const total = hex.length / 2;
+  rows.filter((r) => !r.when || when).forEach((r, k, all) => {
+    let size = r.size;
+    if (size === null) {
+      const len = out.find((o) => o.name === `${r.name}_len`);
+      if (len) size = Number(len.value);
+      else if (all.slice(k + 1).some((x) => x.size === null)) throw new Error(`${r.name}: two fields of any length`);
+      else size = total - at - all.slice(k + 1).reduce((s, x) => s + x.size, 0);
+    }
+    const bytes = hex.slice(at * 2, (at + size) * 2);
+    if (bytes.length !== size * 2) throw new Error(`${r.name}: the vector ends inside the field`);
+    out.push({ name: r.name, at, size, bytes, value: r.size !== null ? leValue(bytes) : undefined, when: r.when });
+    at += size;
+  });
+  if (at !== total) throw new Error(`the vector has ${total - at} bytes after the last field`);
+  return out;
+}
+
+/**
+ * The variants of `enum Name` with their doc comments, in order:
+ * `{ name, doc, fields }`, where `fields` holds the doc of each named field.
+ */
+export function variantDocs(text, name) {
+  const at = text.search(new RegExp(`enum ${name} \\{`));
+  if (at < 0) throw new Error(`no enum ${name}`);
+  const open = text.indexOf("{", at);
+  const body = text.slice(open + 1, closing(text, open));
+  const out = [];
+  let doc = [];
+  let depth = 0;
+  let current;
+  for (const line of body.split("\n")) {
+    const d = /^\s*\/\/\/ ?(.*)$/.exec(line);
+    if (d) {
+      doc.push(d[1]);
+      continue;
+    }
+    if (depth === 0) {
+      const v = /^\s*([A-Z]\w*)\b/.exec(line);
+      if (v) {
+        current = { name: v[1], doc: doc.join("\n").trim(), fields: {} };
+        out.push(current);
+      }
+    } else {
+      const f = /^\s*(\w+):/.exec(line);
+      if (f && current && doc.length) current.fields[f[1]] = doc.join(" ").trim();
+    }
+    depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
+    if (!/^\s*#\[/.test(line)) doc = [];
+  }
+  return out;
+}

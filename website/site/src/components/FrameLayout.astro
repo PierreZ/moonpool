@@ -1,0 +1,34 @@
+---
+// One frame of moonpool-rpc, byte by byte (#427 (rpc page)): the fields that
+// its encoder writes (src/lib/rustdoc.mjs writerLayout), laid over a golden
+// vector of the crate's tests (fillBytes). The strip shows the real bytes;
+// the table names each field, its value and its doc comment.
+interface Field { name: string; at: number; size: number; bytes: string; value?: string; when?: string }
+interface Props { title: string; fields: Field[]; docs: Record<string, string>; vector: string; note?: string }
+const { title, fields, docs, vector, note } = Astro.props;
+const total = fields.reduce((s, f) => s + f.size, 0);
+const spaced = (hex: string) => hex.match(/../g)?.join(" ") ?? "";
+// A number wider than 8 bytes reads better in hex, most significant first.
+const shown = (f: Field) => (f.size === 0 ? "none" : f.value === undefined ? spaced(f.bytes) : f.size > 8 ? "0x" + (f.bytes.match(/../g) ?? []).reverse().join("") : f.value);
+---
+<figure class="bytes">
+  <figcaption class="label">{title} · {total} bytes · golden vector <code>{vector}</code></figcaption>
+  <div class="hex-strip" aria-hidden="true">
+    {fields.filter((f) => f.size > 0).map((f, k) => (
+      <span class={`hx f${k % 4}`} title={f.name}><span class="hx-name">{f.name}</span>{spaced(f.bytes)}</span>
+    ))}
+  </div>
+  <div class="table-wrap">
+    <table class="run-table byte-table frame-table">
+      <tr><th>at</th><th>bytes</th><th>field</th><th>value</th><th>what it holds</th></tr>
+      {fields.map((f) => (
+        <tr>
+          <td>{f.at}</td><td>{f.size}</td><td><code>{f.name}</code></td>
+          <td class="hx-value">{shown(f)}</td>
+          <td>{docs[f.name] ?? ""}{f.when && <> Only when <code>{f.when}</code>.</>}</td>
+        </tr>
+      ))}
+    </table>
+  </div>
+  {note && <p class="aside">{note}</p>}
+</figure>

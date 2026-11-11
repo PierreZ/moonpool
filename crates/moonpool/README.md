@@ -73,7 +73,8 @@ moonpool = { version = "0.8", default-features = false, features = ["tokio"] }
 
 ## Documentation
 
-- [The Sim Book](https://pierrez.github.io/moonpool/)
+- [The site](https://pierrez.github.io/moonpool/): a live run, the [quick start](https://pierrez.github.io/moonpool/guide/quick-start/) and [The Sim Book](https://pierrez.github.io/moonpool/guide/)
+- [The techniques](https://pierrez.github.io/moonpool/techniques/), each with a live run, and the [playground](https://pierrez.github.io/moonpool/playground/)
 - [API documentation](https://docs.rs/moonpool)
 - [Repository](https://github.com/PierreZ/moonpool)
 

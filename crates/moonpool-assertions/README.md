@@ -61,6 +61,7 @@ as always-violations, so a lost evaluation is never silent.
 ## Documentation
 
 - [Assertion reference](https://pierrez.github.io/moonpool/appendix/01-assertion-reference.html) in the Sim Book
+- [Assertions that must fire](https://pierrez.github.io/moonpool/techniques/assertions/) on the website
 - [API documentation](https://docs.rs/moonpool-assertions)
 - [Repository](https://github.com/PierreZ/moonpool)
 

@@ -95,6 +95,7 @@ thread-local, and every path into the crate (for example
 
 - [Buggify](https://pierrez.github.io/moonpool/part3-building/08-buggify.html) and
   [hint!](https://pierrez.github.io/moonpool/part3-building/29-hints.html) in the Sim Book
+- [Same code in production and simulation](https://pierrez.github.io/moonpool/techniques/same-code/) on the website: a `hint!` that the simulator strikes
 - [API documentation](https://docs.rs/moonpool-buggify)
 - [Repository](https://github.com/PierreZ/moonpool)
 
