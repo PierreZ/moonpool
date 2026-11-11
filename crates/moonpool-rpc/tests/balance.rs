@@ -360,7 +360,13 @@ async fn receipts_follow_the_permissions() {
         .await
         .expect("hedged");
     assert_eq!(done.reply.server, "fast");
-    assert_eq!(hole.receipts(), vec![4]);
+    // The hedge can answer before the black hole's task records the request:
+    // the two servers run on real time.
+    assert!(
+        eventually(|| hole.receipts() == [4]).await,
+        "the black hole got the first attempt: {:?}",
+        hole.receipts()
+    );
     assert_eq!(fast.receipts(), vec![2, 4]);
 
     // Neither permission, black-holed first choice with an attempt
