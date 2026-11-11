@@ -53,14 +53,15 @@ use async_trait::async_trait;
 
 use crate::SimulationResult;
 
-use super::context::SimContext;
+use super::context::{ProviderBundle, SimContext};
+use crate::SimProviders;
 
 /// A workload that participates in simulation testing.
 ///
 /// Workloads are the primary unit of distributed system behavior. The simulation
 /// framework calls lifecycle methods in order: `setup` → `run` → `check`.
 #[async_trait]
-pub trait Workload: Send + Sync + 'static {
+pub trait Workload<P: ProviderBundle = SimProviders>: Send + Sync + 'static {
     /// Name of this workload for topology and reporting.
     fn name(&self) -> &str;
 
@@ -68,14 +69,14 @@ pub trait Workload: Send + Sync + 'static {
     ///
     /// All workloads complete setup before any `run()` starts.
     /// Default implementation is a no-op.
-    async fn setup(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+    async fn setup(&mut self, _ctx: &SimContext<P>) -> SimulationResult<()> {
         Ok(())
     }
 
     /// Run phase: main workload logic.
     ///
     /// All workloads run concurrently. Ends on completion or shutdown signal.
-    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()>;
+    async fn run(&mut self, ctx: &SimContext<P>) -> SimulationResult<()>;
 
     /// Check phase: validate correctness after quiescence.
     ///
@@ -84,7 +85,7 @@ pub trait Workload: Send + Sync + 'static {
     /// fails the seed exactly as a failing `run()` does, even when every
     /// `run()` returned `Ok`.
     /// Default implementation is a no-op.
-    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+    async fn check(&mut self, _ctx: &SimContext<P>) -> SimulationResult<()> {
         Ok(())
     }
 }

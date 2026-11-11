@@ -20,11 +20,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
-use crate::SimulationError;
 use crate::executor::Executor;
 use crate::observability::{SimulationLayer, SimulationLayerHandle};
 use crate::providers::TaskPanicTracker;
 use crate::sim::WeakSimWorld;
+use crate::{SimProviders, SimulationError};
 
 use super::builder::SimulationBuilder;
 use super::iteration::IterationManager;
@@ -49,7 +49,7 @@ pub enum LiveStatus {
 pub struct LiveSimulation {
     // Drop order matters: the run first, then its executor, then the
     // observability layer and the thread-local overrides.
-    run: Option<Pin<Box<dyn Future<Output = OrchestrationOutcome>>>>,
+    run: Option<Pin<Box<dyn Future<Output = OrchestrationOutcome<SimProviders>>>>>,
     executor: Executor,
     clock: WeakSimWorld,
     task_panics: TaskPanicTracker,
