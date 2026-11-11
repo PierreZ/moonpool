@@ -447,6 +447,37 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Reserve disk space for `[0, len)` of the file (`fallocate`), growing
+    /// it first when it is shorter. `ENOSPC` when the sectors that have no
+    /// space yet do not fit; then nothing changes.
+    pub(super) fn complete_allocate(
+        &mut self,
+        pending: &PendingStorageOp,
+        len: u64,
+        actions: &mut StorageActions,
+    ) -> Result<(), StorageError> {
+        let file_id = pending.file_id;
+        let Some((path, needed)) = self
+            .state
+            .files
+            .get(&file_id)
+            .map(|file| (file.path.clone(), file.image.space_needed_to_allocate(len)))
+        else {
+            return Err(StorageError::InvalidFileHandle {
+                handle_id: pending.handle_id,
+            });
+        };
+        if !self.has_room(pending.owner_ip, needed) {
+            let sectors = 0..len.div_ceil(SECTOR_SIZE as u64);
+            return Err(self.refuse_full((pending.owner_ip, file_id), &path, sectors, actions));
+        }
+        if let Some(file) = self.state.files.get_mut(&file_id) {
+            file.image.allocate(len);
+        }
+        self.state.note_damage_changed();
+        Ok(())
+    }
+
     /// Fail a write with an injected `EIO`: nothing landed.
     fn refuse_eio(
         &mut self,

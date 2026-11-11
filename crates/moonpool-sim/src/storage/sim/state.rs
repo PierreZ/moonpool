@@ -131,6 +131,7 @@ pub(crate) enum PendingOpType {
     Write,
     Sync,
     SetLen,
+    Allocate,
 }
 
 impl PendingOpType {

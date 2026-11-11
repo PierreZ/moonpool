@@ -41,6 +41,12 @@ pub enum StorageOperation {
         new_len: u64,
     },
 
+    /// Space reservation (`fallocate`) completed. May fail with `ENOSPC`.
+    AllocateComplete {
+        /// The end of the reserved range
+        len: u64,
+    },
+
     /// Namespace operation completed: an open, delete, rename,
     /// `create_dir_all` or `sync_dir`. It takes effect now.
     NamespaceComplete,
