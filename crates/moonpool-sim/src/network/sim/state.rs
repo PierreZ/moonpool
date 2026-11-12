@@ -330,6 +330,20 @@ impl SendWindow {
             .expect("send window: outstanding bytes exceed the capacity")
     }
 
+    /// Whether a writer parked on a full window should wake: once the free
+    /// window is at least half of what is still outstanding, a third of the
+    /// capacity when it filled. Linux wakes a blocked writer at the same mark
+    /// (`sk_stream_write_space`: free space at least `sk_stream_min_wspace`,
+    /// half the queued bytes). Waking on every byte a reader frees instead
+    /// lets the writer take the window back a sliver at a time, so a stream
+    /// that stays full moves a byte or two per write and the world spends a
+    /// few events on every byte (silly-window syndrome).
+    pub(crate) fn wakes_writer(self) -> bool {
+        self.available()
+            .checked_mul(2)
+            .is_none_or(|doubled| doubled >= self.outstanding)
+    }
+
     /// Take `bytes` of the window.
     ///
     /// # Panics
@@ -504,6 +518,22 @@ mod tests {
         window.release(4);
         assert_eq!(window.outstanding(), 0);
         assert_eq!(window.available(), 10);
+    }
+
+    #[test]
+    fn a_full_window_wakes_its_writer_only_once_a_third_is_free() {
+        let mut window = SendWindow::new(90);
+        assert!(window.wakes_writer(), "an empty window");
+        window.acquire(90);
+        assert!(!window.wakes_writer(), "a full window");
+        window.release(1);
+        assert!(!window.wakes_writer(), "one byte read back is a sliver");
+        window.release(28);
+        assert!(!window.wakes_writer(), "29 free of 90 is under a third");
+        window.release(1);
+        assert!(window.wakes_writer(), "30 free, 60 outstanding");
+        window.release(60);
+        assert!(window.wakes_writer(), "drained");
     }
 
     #[test]
