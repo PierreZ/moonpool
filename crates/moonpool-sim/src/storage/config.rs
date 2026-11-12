@@ -582,7 +582,10 @@ pub struct StorageConfiguration {
     ///
     /// # Real-World Scenario
     /// Simulates misdirected reads where data is read from a different
-    /// block than intended. Tests checksum validation.
+    /// block than intended. Tests checksum validation. A read is never
+    /// misdirected when the sectors it aims at, or the sectors it would be
+    /// served from, have a fault weight of zero (the eligibility mask, the
+    /// focus, the shard gate).
     /// `TigerBeetle` ref: storage fault injection
     pub misdirect_read_probability: f64,
 

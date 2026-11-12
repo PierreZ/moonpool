@@ -113,16 +113,9 @@ impl StorageEngine {
             self.record(&path, StorageFaultKind::ReadCorruption, Some(sectors));
         }
 
-        let read_offset = misdirected_read_offset(&config, pending.offset, len, file_size);
+        let read_offset =
+            self.misdirect_read((owner_ip, &path), &config, pending.offset, len, file_size);
         let misdirected = read_offset != pending.offset;
-        if misdirected {
-            assert_reachable!("disk fault: read served from the wrong offset");
-            self.record(
-                &path,
-                StorageFaultKind::MisdirectedRead,
-                Some(sector_range(read_offset, len)),
-            );
-        }
 
         let mut data = vec![0; len];
         let file =
@@ -147,6 +140,42 @@ impl StorageEngine {
             });
         }
         Ok(StorageCompletion::Read(data))
+    }
+
+    /// The offset a `len`-byte read at `offset` is served from: `offset`,
+    /// or another one when the read is misdirected.
+    ///
+    /// The draw is gated by the configured rate alone, so the weights only
+    /// grant immunity, as for a misdirected write: an immune sector is
+    /// neither read from elsewhere nor served to another read.
+    fn misdirect_read(
+        &mut self,
+        (owner_ip, path): (IpAddr, &str),
+        config: &StorageConfiguration,
+        offset: u64,
+        len: usize,
+        file_size: u64,
+    ) -> u64 {
+        let served = misdirected_read_offset(config, offset, len, file_size);
+        if served == offset
+            || self
+                .state
+                .weight_range(owner_ip, path, sector_range(offset, len))
+                <= 0.0
+            || self
+                .state
+                .weight_range(owner_ip, path, sector_range(served, len))
+                <= 0.0
+        {
+            return offset;
+        }
+        assert_reachable!("disk fault: read served from the wrong offset");
+        self.record(
+            path,
+            StorageFaultKind::MisdirectedRead,
+            Some(sector_range(served, len)),
+        );
+        served
     }
 
     /// Where one write actually lands, once the disk has had its say.
@@ -443,6 +472,37 @@ impl StorageEngine {
             });
         };
         file.image.set_len(new_len);
+        self.state.note_damage_changed();
+        Ok(())
+    }
+
+    /// Reserve disk space for `[0, len)` of the file (`fallocate`), growing
+    /// it first when it is shorter. `ENOSPC` when the sectors that have no
+    /// space yet do not fit; then nothing changes.
+    pub(super) fn complete_allocate(
+        &mut self,
+        pending: &PendingStorageOp,
+        len: u64,
+        actions: &mut StorageActions,
+    ) -> Result<(), StorageError> {
+        let file_id = pending.file_id;
+        let Some((path, needed)) = self
+            .state
+            .files
+            .get(&file_id)
+            .map(|file| (file.path.clone(), file.image.space_needed_to_allocate(len)))
+        else {
+            return Err(StorageError::InvalidFileHandle {
+                handle_id: pending.handle_id,
+            });
+        };
+        if !self.has_room(pending.owner_ip, needed) {
+            let sectors = 0..len.div_ceil(SECTOR_SIZE as u64);
+            return Err(self.refuse_full((pending.owner_ip, file_id), &path, sectors, actions));
+        }
+        if let Some(file) = self.state.files.get_mut(&file_id) {
+            file.image.allocate(len);
+        }
         self.state.note_damage_changed();
         Ok(())
     }

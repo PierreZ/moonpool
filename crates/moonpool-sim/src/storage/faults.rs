@@ -145,8 +145,9 @@ pub type StorageEligibilityMask = Arc<dyn Fn(&str, u64) -> bool + Send + Sync>;
 /// corruption, read and write EIO, phantom writes, sync lies, and the
 /// damaging crash outcomes): a weight of 4 makes a sector four times as
 /// likely to be hit, 0 makes it immune, and a weight never creates a family
-/// the configuration leaves at zero. A misdirected write honours only the
-/// immunity, and recovery mode silences every family whatever its weight.
+/// the configuration leaves at zero. A misdirected write or read honours
+/// only the immunity (of the range it aims at and of the range it reaches),
+/// and recovery mode silences every family whatever its weight.
 ///
 /// The random draws are made whatever the weights, so installing or
 /// changing a focus never shifts the random stream. The
