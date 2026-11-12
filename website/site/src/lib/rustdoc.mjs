@@ -345,7 +345,8 @@ export function fillBytes(rows, hex, { when = false } = {}) {
 
 /**
  * The variants of `enum Name` with their doc comments, in order:
- * `{ name, doc, fields }`, where `fields` holds the doc of each named field.
+ * `{ name, doc, fields, value }`, where `fields` holds the doc of each named
+ * field and `value` is the discriminant of `Name = 3` (undefined without one).
  */
 export function variantDocs(text, name) {
   const at = text.search(new RegExp(`enum ${name} \\{`));
@@ -363,9 +364,9 @@ export function variantDocs(text, name) {
       continue;
     }
     if (depth === 0) {
-      const v = /^\s*([A-Z]\w*)\b/.exec(line);
+      const v = /^\s*([A-Z]\w*)\b(?:\s*=\s*(\d+))?/.exec(line);
       if (v) {
-        current = { name: v[1], doc: doc.join("\n").trim(), fields: {} };
+        current = { name: v[1], doc: doc.join("\n").trim(), fields: {}, value: v[2] === undefined ? undefined : Number(v[2]) };
         out.push(current);
       }
     } else {
