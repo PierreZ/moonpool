@@ -4,8 +4,10 @@
 //! Every positioned transfer, sync and size query is one completion-based
 //! operation on compio's driver: `io_uring` on Linux (polling where the kernel
 //! refuses `io_uring`), IOCP on Windows. Nothing goes through a blocking
-//! thread pool except listing a directory, which compio has no operation
-//! for.
+//! thread pool except the calls compio has no operation for: listing a
+//! directory, `fallocate` ([`LocalStorageFile::allocate`]) and
+//! `posix_fadvise` ([`LocalStorageFile::drop_cache`]). Those can block for a
+//! long time, so they must not stop the runtime thread.
 
 use std::future::Future;
 use std::io::{self, SeekFrom};
@@ -185,6 +187,38 @@ impl LocalStorageProvider for CompioStorageProvider {
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
         sync_dir_impl(path).await
     }
+}
+
+/// Run `work` on compio's blocking pool, on a duplicate of `file`'s
+/// descriptor.
+///
+/// Use it for a syscall that compio has no operation for and that can block
+/// for a long time (`fallocate`, `posix_fadvise`): on the runtime thread it
+/// would stop every task of the thread. The duplicate is a plain
+/// [`std::fs::File`], because a compio file must stay on its runtime thread.
+async fn off_runtime<T, F>(file: &compio::fs::File, work: F) -> io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&std::fs::File) -> io::Result<T> + Send + 'static,
+{
+    let duplicate = duplicate_descriptor(file)?;
+    compio::runtime::spawn_blocking(move || work(&duplicate))
+        .await
+        .map_err(|error| io::Error::other(format!("blocking file task failed: {error}")))?
+}
+
+/// A second descriptor for the open file of `file`, as a [`std::fs::File`].
+#[cfg(unix)]
+fn duplicate_descriptor(file: &compio::fs::File) -> io::Result<std::fs::File> {
+    use std::os::fd::AsFd as _;
+    Ok(std::fs::File::from(file.as_fd().try_clone_to_owned()?))
+}
+
+/// A second handle for the open file of `file`, as a [`std::fs::File`].
+#[cfg(windows)]
+fn duplicate_descriptor(file: &compio::fs::File) -> io::Result<std::fs::File> {
+    use std::os::windows::io::AsHandle as _;
+    Ok(std::fs::File::from(file.as_handle().try_clone_to_owned()?))
 }
 
 fn list_dir_blocking(path: &str) -> io::Result<Vec<String>> {
@@ -579,19 +613,20 @@ impl LocalStorageFile for CompioStorageFile {
     }
 
     async fn allocate(&self, len: u64) -> io::Result<()> {
-        // A short metadata call on the descriptor: run on this thread.
-        if !native::fallocate(&self.file, len)? && self.size().await? < len {
+        // `fallocate` of a large range can block for a long time.
+        let allocated = off_runtime(&self.file, move |file| native::fallocate(file, len)).await?;
+        if !allocated && self.size().await? < len {
             self.file.set_len(len).await?;
         }
         Ok(())
     }
 
     async fn drop_cache(&self) -> io::Result<()> {
-        // A short advice call on the descriptor: run on this thread.
         if self.direct {
             return Ok(());
         }
-        native::drop_cache(&self.file)
+        // `POSIX_FADV_DONTNEED` over a large file can block for a long time.
+        off_runtime(&self.file, native::drop_cache).await
     }
 }
 
@@ -769,5 +804,37 @@ mod tests {
                 assert_eq!(status_flags(&log.file) & libc::O_APPEND, 0, "{driver:?}");
             });
         }
+    }
+
+    /// `fallocate` and `posix_fadvise` run on the blocking pool, not on the
+    /// runtime thread, and they act on the file: `allocate` grows it, and
+    /// `drop_cache` keeps its bytes.
+    #[test]
+    fn allocate_and_drop_cache_run_off_the_runtime_thread() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("off-runtime.db");
+        let path = path.to_str().expect("UTF-8 path").to_owned();
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+        runtime.block_on(async {
+            let storage = CompioStorageProvider::new();
+            let file = storage
+                .open(&path, OpenOptions::create_write().read(true))
+                .await
+                .expect("open");
+
+            let runtime_thread = std::thread::current().id();
+            let work_thread = super::off_runtime(&file.file, |_| Ok(std::thread::current().id()))
+                .await
+                .expect("blocking task");
+            assert_ne!(work_thread, runtime_thread);
+
+            file.write_at(0, b"keep").await.expect("write");
+            file.allocate(1 << 20).await.expect("allocate");
+            assert!(file.size().await.expect("size") >= 1 << 20);
+            file.drop_cache().await.expect("drop cache");
+            let mut back = [0_u8; 4];
+            file.read_at(0, &mut back).await.expect("read");
+            assert_eq!(&back, b"keep");
+        });
     }
 }
