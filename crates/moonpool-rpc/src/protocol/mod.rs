@@ -39,13 +39,14 @@ pub mod metadata;
 mod schema;
 pub mod wire;
 
-pub use frame::{FrameDecoder, FrameError, HEADER_LEN, encode_frame};
+pub use frame::{DEFAULT_RETAINED_CAPACITY, FrameDecoder, FrameError, HEADER_LEN, encode_frame};
 pub use schema::{MethodId, RpcMethod, SchemaVersion};
 pub use wire::{
-    CREDENTIALS_VERSION, EnvelopeError, HELLO_ENVELOPE_LEN, LIVENESS_ENVELOPE_LEN,
-    MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION, REJECTION_ENVELOPE_LEN,
-    REQUEST_FLAG_ONE_WAY, REQUEST_FLAG_STREAM, STREAM_ACK_ENVELOPE_LEN, STREAM_END_ENVELOPE_LEN,
-    WireError, WireMessage, WireOutcome, decode_message, decode_message_at, encode_message,
-    negotiate, reply_envelope_len, request_envelope_len, request_metadata_len,
-    stream_item_envelope_len, stream_item_frame_len, stream_request_envelope_len,
+    CREDENTIALS_VERSION, EnvelopeError, HANDSHAKE_MAX_FRAME_BYTES, HELLO_ENVELOPE_LEN,
+    LIVENESS_ENVELOPE_LEN, MIN_PROTOCOL_VERSION, PROTOCOL_MAGIC, PROTOCOL_VERSION,
+    REJECTION_ENVELOPE_LEN, REQUEST_FLAG_ONE_WAY, REQUEST_FLAG_STREAM, STREAM_ACK_ENVELOPE_LEN,
+    STREAM_END_ENVELOPE_LEN, WireError, WireMessage, WireOutcome, decode_message,
+    decode_message_at, encode_message, negotiate, reply_envelope_len, request_envelope_len,
+    request_metadata_len, stream_item_envelope_len, stream_item_frame_len,
+    stream_request_envelope_len,
 };
