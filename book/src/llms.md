@@ -160,7 +160,7 @@ impl Invariant for NoSplitBrain {
 }
 ```
 
-Capture rule: INFO and above, constant message, inside a process or workload task. `TraceEvent { seq, time_ms, source, target, level, name, fields }` with `u64`, `i64`, `f64`, `bool`, `str` accessors. `TraceQuery { len(name), since(name, &cursor), snapshot(name) }`. Sim faults appear as `"sim_fault"` events with a `kind` field. `init_sim_tracing(Level)` in a binary's `main`.
+Capture rule: INFO and above, constant message, inside a process or workload task. `TraceEvent { seq, time_ms, source, target, level, name, fields }` with `u64`, `i64`, `f64`, `bool`, `str` accessors. `TraceQuery { len(name), since(name, &cursor), snapshot(name), names() }`. Sim faults appear as `"sim_fault"` events with a `kind` field. `init_sim_tracing(Level)` in a binary's `main`.
 
 ## Buggify and Hints
 

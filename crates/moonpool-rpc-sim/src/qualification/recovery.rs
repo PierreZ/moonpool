@@ -18,7 +18,7 @@ use super::workload::{
 use super::{CALL_TIMEOUT, RECOVERY_BOUND, RELEASE_BOUND, pause};
 use crate::foundations::state::Board;
 use crate::security::state::{Class as AuthClass, Ledger as AuthLedger};
-use crate::security::trust::Kind;
+use crate::security::trust::{Kind, Trust};
 use crate::streams::state::{ProducerEnd, StreamLedger};
 
 /// While the operations run: whenever a server boot starts draining for a
@@ -546,23 +546,45 @@ fn judge_stream(ledger: &StreamLedger, check: &super::ops::StreamCheck) {
     }
 }
 
-/// No credential a caller minted appears in any traced field.
-pub(crate) fn check_redaction(ctx: &SimContext, trace: &[String]) {
-    let tokens: Vec<String> = AuthLedger::of(ctx.state())
+/// No credential minted in the run appears in any field of any captured
+/// event: the secrets are each token the run made (a caller's first
+/// token, each one a refreshing source minted, each one the balancer's
+/// source minted), and the search reads every event, whatever its name.
+pub(crate) fn check_redaction(ctx: &SimContext, trace: &super::CapturedTrace) {
+    let Ok(trust) = Trust::of(ctx.state()) else {
+        return;
+    };
+    let minted = trust.tokens();
+    let first = AuthLedger::of(ctx.state())
         .all()
+        .iter()
+        .filter(|(_, issued, _, _)| issued.minted.token.is_some())
+        .count();
+    assert_sometimes!(
+        minted.len() > first,
+        "rpc qual the redaction check searched for tokens minted after the first ones"
+    );
+    let secrets: Vec<String> = minted
         .into_iter()
-        .filter_map(|(_, issued, _, _)| issued.minted.token)
         .filter_map(|token| String::from_utf8(token).ok())
         // The signature segment: never a prefix of anything else.
         .filter_map(|token| token.rsplit('.').next().map(ToString::to_string))
         .filter(|signature| signature.len() >= 16)
         .collect();
     let leaked = trace
+        .every
         .iter()
-        .any(|line| tokens.iter().any(|token| line.contains(token.as_str())));
-    assert_always!(!leaked, "rpc qual no credential appeared in a trace field");
+        .find(|line| secrets.iter().any(|secret| line.contains(secret.as_str())));
+    assert_always!(
+        leaked.is_none(),
+        "rpc qual no credential appeared in a trace field",
+        { "event" => leaked.cloned().unwrap_or_default() }
+    );
     assert_sometimes!(
-        trace.iter().any(|line| line.contains("rpc_request_denied")),
+        trace
+            .semantic
+            .iter()
+            .any(|line| line.contains("rpc_request_denied")),
         "rpc qual a denial was audited in the trace"
     );
 }

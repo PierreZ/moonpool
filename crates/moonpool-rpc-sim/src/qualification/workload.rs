@@ -27,7 +27,9 @@ use super::state::{
     Instance, LANES_STOPPED_KEY, LaneRecord, QUIESCED_KEY, QualLedger, SCRIPT_DONE_KEY,
     VERSION1_LABEL, WORKLOAD_IP_KEY, WORKLOAD_LABEL, lane_key,
 };
-use super::{HostJitter, QualificationRecord, QualificationRecords, RPC_PORT, qual_config};
+use super::{
+    CapturedTrace, HostJitter, QualificationRecord, QualificationRecords, RPC_PORT, qual_config,
+};
 use crate::foundations::report_stats;
 use crate::foundations::state::Board;
 use crate::security::judge::Caller;
@@ -299,7 +301,7 @@ pub struct QualificationWorkload {
     label: String,
     pub(crate) config: QualificationConfig,
     records: QualificationRecords,
-    trace: Arc<Mutex<Vec<String>>>,
+    trace: Arc<Mutex<CapturedTrace>>,
     pub(crate) history: Vec<String>,
     pub(crate) next_id: u64,
     pub(crate) next_configuration: u64,
@@ -330,7 +332,7 @@ impl QualificationWorkload {
         lanes: usize,
         config: QualificationConfig,
         records: QualificationRecords,
-        trace: Arc<Mutex<Vec<String>>>,
+        trace: Arc<Mutex<CapturedTrace>>,
     ) -> Self {
         Self {
             lane,
@@ -802,10 +804,20 @@ impl Workload for QualificationWorkload {
         let mut history = Vec::new();
         let mut baseline = ended_at_baseline;
         for lane in 0..self.lanes {
-            let record = ctx
-                .state()
-                .get::<LaneRecord>(&lane_key(lane))
-                .unwrap_or_default();
+            // The binary runs many more seeds than the test: it asserts the
+            // same conditions on each lane's record.
+            let record = ctx.state().get::<LaneRecord>(&lane_key(lane));
+            assert_always!(
+                record.is_some(),
+                "rpc qual every lane wrote its record",
+                { "lane" => lane }
+            );
+            let record = record.unwrap_or_default();
+            assert_always!(
+                record.baseline,
+                "rpc qual every lane's runtimes returned to baseline",
+                { "lane" => lane }
+            );
             baseline &= record.baseline;
             history.extend(
                 record
@@ -814,17 +826,17 @@ impl Workload for QualificationWorkload {
                     .map(|line| format!("[{lane}] {line}")),
             );
         }
-        let trace = std::mem::take(
+        let captured = std::mem::take(
             &mut *self
                 .trace
                 .lock()
                 .expect("Mutex poisoned: prior task panicked"),
         );
-        super::recovery::check_redaction(ctx, &trace);
+        super::recovery::check_redaction(ctx, &captured);
         let record = QualificationRecord {
             history,
             ledger: ledger.digest(),
-            trace,
+            trace: captured.semantic,
             recovered_ms: self.recovered_ms,
             baseline,
         };

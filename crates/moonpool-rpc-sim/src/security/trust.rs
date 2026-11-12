@@ -178,6 +178,8 @@ pub struct Trust {
     clock_epoch: Arc<AtomicU64>,
     keys: JwksKeys,
     ring: Arc<Mutex<Ring>>,
+    /// Every token minted in the run, by any caller or source.
+    tokens: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl Trust {
@@ -204,6 +206,7 @@ impl Trust {
                 history: BTreeMap::from([(keys.generation(), vec![0])]),
             })),
             keys,
+            tokens: Arc::new(Mutex::new(Vec::new())),
         };
         state.publish(TRUST_KEY, trust.clone());
         Ok(trust)
@@ -324,6 +327,21 @@ impl Trust {
     /// and `delay` (seconds) shape the time window where it applies.
     #[must_use]
     pub fn mint(&self, kind: Kind, subject: &str, ttl: u64, delay: u64) -> Minted {
+        let minted = self.mint_unrecorded(kind, subject, ttl, delay);
+        if let Some(token) = &minted.token {
+            lock(&self.tokens).push(token.clone());
+        }
+        minted
+    }
+
+    /// Every token minted so far in the run: each caller's, each one a
+    /// refreshing source made, each one the balancer's source made.
+    #[must_use]
+    pub fn tokens(&self) -> Vec<Vec<u8>> {
+        lock(&self.tokens).clone()
+    }
+
+    fn mint_unrecorded(&self, kind: Kind, subject: &str, ttl: u64, delay: u64) -> Minted {
         let now = self.utc();
         let (newest, retired) = {
             let ring = lock(&self.ring);
