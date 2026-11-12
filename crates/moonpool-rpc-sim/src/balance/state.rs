@@ -147,4 +147,60 @@ impl Ledger {
     pub fn outages(&self) -> u64 {
         lock(&self.inner).outages
     }
+
+    /// The outage state now, to compare with [`Ledger::outage_since`].
+    #[must_use]
+    pub fn outage_mark(&self) -> OutageMark {
+        let inner = lock(&self.inner);
+        OutageMark {
+            down: inner.outage,
+            ended: inner.outages,
+        }
+    }
+
+    /// Whether every alternative was down at some time since `mark`: at
+    /// the mark, now, or in an outage that started and ended between.
+    #[must_use]
+    pub fn outage_since(&self, mark: OutageMark) -> bool {
+        let inner = lock(&self.inner);
+        mark.down || inner.outage || inner.outages != mark.ended
+    }
+}
+
+/// The outage state at one time (see [`Ledger::outage_mark`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutageMark {
+    down: bool,
+    ended: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Ledger;
+
+    #[test]
+    fn an_outage_inside_the_interval_is_seen() {
+        let ledger = Ledger::default();
+        let mark = ledger.outage_mark();
+        assert!(!ledger.outage_since(mark));
+        // Starts and ends between the two reads: the flag alone is false
+        // at both ends.
+        ledger.set_outage(true);
+        ledger.set_outage(false);
+        assert!(!ledger.outage());
+        assert!(ledger.outage_since(mark));
+        assert!(!ledger.outage_since(ledger.outage_mark()));
+    }
+
+    #[test]
+    fn an_outage_open_at_either_end_is_seen() {
+        let ledger = Ledger::default();
+        ledger.set_outage(true);
+        let mark = ledger.outage_mark();
+        assert!(ledger.outage_since(mark));
+        let ledger = Ledger::default();
+        let mark = ledger.outage_mark();
+        ledger.set_outage(true);
+        assert!(ledger.outage_since(mark));
+    }
 }
