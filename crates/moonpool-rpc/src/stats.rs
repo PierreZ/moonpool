@@ -71,6 +71,16 @@ pub struct RpcStats {
     pub reliable_calls_started: u64,
     /// Retained requests queued again on a new connection.
     pub retransmissions: u64,
+    /// Sessions the peer ended in order, between two frames (for TLS, with
+    /// a `close_notify`). An end without it is an I/O error or a
+    /// truncation.
+    pub peer_closes: u64,
+    /// Dials started for a new failure-monitor watcher of a failing address
+    /// that had no connection, or for a probe that waited for a free slot.
+    pub probes: u64,
+    /// Probes of a watched, failing address that found no free connection
+    /// slot and wait for the next connection to end.
+    pub probes_deferred: u64,
     /// Retained requests released because their endpoint failed for good.
     pub retention_released_by_failure: u64,
     /// Calls refused locally because the failure monitor knew the endpoint was gone.
@@ -211,6 +221,9 @@ pub(crate) struct Counters {
     pub(crate) calls_failed_by_corruption: AtomicU64,
     pub(crate) reliable_calls_started: AtomicU64,
     pub(crate) retransmissions: AtomicU64,
+    pub(crate) probes: AtomicU64,
+    pub(crate) peer_closes: AtomicU64,
+    pub(crate) probes_deferred: AtomicU64,
     pub(crate) retention_released_by_failure: AtomicU64,
     pub(crate) calls_failed_fast: AtomicU64,
     pub(crate) one_way_sent: AtomicU64,
@@ -331,6 +344,9 @@ impl Counters {
             calls_failed_by_corruption: load(&self.calls_failed_by_corruption),
             reliable_calls_started: load(&self.reliable_calls_started),
             retransmissions: load(&self.retransmissions),
+            probes: load(&self.probes),
+            peer_closes: load(&self.peer_closes),
+            probes_deferred: load(&self.probes_deferred),
             retention_released_by_failure: load(&self.retention_released_by_failure),
             calls_failed_fast: load(&self.calls_failed_fast),
             one_way_sent: load(&self.one_way_sent),
@@ -450,6 +466,18 @@ impl ResourceProbe {
     #[must_use]
     pub fn live_connections(&self) -> usize {
         self.counters.live_connections.load(Ordering::Relaxed)
+    }
+
+    /// The runtime's counters, also after the driver is dropped, so the
+    /// last increments before a shutdown or a crash can still be read.
+    ///
+    /// Only the runtime state knows the gauges `endpoints`,
+    /// `pending_calls`, `retained_calls`, `peers` and `streams_consuming`:
+    /// they read zero here. Use [`RpcHandle::stats`](crate::RpcHandle::stats)
+    /// for them while the runtime runs.
+    #[must_use]
+    pub fn counters(&self) -> RpcStats {
+        self.counters.snapshot(0, 0, 0)
     }
 
     /// Whether the runtime's shared state still exists.

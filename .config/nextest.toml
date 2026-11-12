@@ -35,7 +35,8 @@ slow-timeout = { period = "10s", terminate-after = 4 }
 filter = 'package(moonpool-sim) and test(=a_busy_yield_fails_under_the_cpu_model_too)'
 slow-timeout = { period = "10s", terminate-after = 4 }
 
-# The journal's crash loops run 120 seeds, one test per fault model and
+# The journal's crash loops run 120 seeds (480 for Batched under the full
+# physics, where a torn record is rare), one test per fault model and
 # durability setting, every seed eight crashed incarnations of a writer on
 # the simulated disk and a recovery per crash: about 6s each in the debug
 # profile locally, past a minute for the two fault models' three settings

@@ -3,6 +3,7 @@
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::task::{Context, Poll, ready};
 
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
@@ -38,6 +39,7 @@ impl StorageProvider for TokioStorageProvider {
             positioned: Arc::new(positioned),
             constraints: opened.constraints,
             direct: opened.direct,
+            dsync_refused: Arc::new(AtomicBool::new(false)),
             in_flight: None,
         })
     }
@@ -229,6 +231,11 @@ pub struct TokioStorageFile {
     positioned: Arc<std::fs::File>,
     constraints: IoConstraints,
     direct: bool,
+    /// Set once the filesystem of this file refused a durable write with
+    /// `RWF_DSYNC` (`EOPNOTSUPP`): later durable writes on this file use a
+    /// write and a sync. Other files keep their own flag, because they can
+    /// be on another filesystem.
+    dsync_refused: Arc<AtomicBool>,
     /// The bytes of the stream write that Tokio accepted and whose OS write
     /// is not yet known to be done.
     in_flight: Option<Vec<u8>>,
@@ -288,54 +295,97 @@ fn write_at_blocking(_file: &std::fs::File, _offset: u64, _buf: &[u8]) -> io::Re
 /// data-sync, one syscall where `pwrite` plus `fdatasync` are two, and on a
 /// direct-I/O file whose blocks are already allocated the kernel can turn it
 /// into a single FUA write instead of a write and a cache flush. Like
-/// `O_DSYNC`, it covers this write's range only. A kernel without
-/// `pwritev2` (`ENOSYS`) or without `RWF_DSYNC` (`EOPNOTSUPP`) falls back to
-/// the portable pair, once for the process.
+/// `O_DSYNC`, it covers this write's range only. If the kernel refuses the
+/// call, the write falls back to the portable pair (see [`choose_durable`]).
 #[cfg(all(target_os = "linux", any(target_env = "gnu", target_env = "musl")))]
-fn write_at_durable_blocking(file: &std::fs::File, offset: u64, buf: &[u8]) -> io::Result<usize> {
+fn write_at_durable_blocking(
+    file: &std::fs::File,
+    dsync_refused: &AtomicBool,
+    offset: u64,
+    buf: &[u8],
+) -> io::Result<usize> {
     use std::os::fd::AsRawFd as _;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Set once the kernel refused `RWF_DSYNC`: every later call goes
-    /// straight to the fallback instead of failing the same syscall again.
-    static DSYNC_REFUSED: AtomicBool = AtomicBool::new(false);
+    /// Set once the kernel has no `pwritev2` (`ENOSYS`): that is true of
+    /// every file, so every later call of the process goes straight to the
+    /// fallback.
+    static PWRITEV2_MISSING: AtomicBool = AtomicBool::new(false);
 
-    if DSYNC_REFUSED.load(Ordering::Relaxed) {
-        return write_then_sync_blocking(file, offset, buf);
-    }
     let position = libc::off_t::try_from(offset)
         .map_err(|_| super::invalid_input(format!("offset {offset} overflows off_t")))?;
-    let iov = libc::iovec {
-        iov_base: buf.as_ptr().cast_mut().cast::<libc::c_void>(),
-        iov_len: buf.len(),
-    };
-    // SAFETY: the descriptor is open for the duration of the call, `iov`
-    // describes exactly `buf`, which outlives the call, and the kernel only
-    // reads through it (a write never stores into the source buffer).
-    let written = unsafe {
-        libc::pwritev2(
-            file.as_raw_fd(),
-            &raw const iov,
-            1,
-            position,
-            libc::RWF_DSYNC,
-        )
-    };
-    if let Ok(written) = usize::try_from(written) {
-        return Ok(written);
+    choose_durable(
+        &PWRITEV2_MISSING,
+        dsync_refused,
+        || {
+            let iov = libc::iovec {
+                iov_base: buf.as_ptr().cast_mut().cast::<libc::c_void>(),
+                iov_len: buf.len(),
+            };
+            // SAFETY: the descriptor is open for the duration of the call,
+            // `iov` describes exactly `buf`, which outlives the call, and the
+            // kernel only reads through it (a write never stores into the
+            // source buffer).
+            let written = unsafe {
+                libc::pwritev2(
+                    file.as_raw_fd(),
+                    &raw const iov,
+                    1,
+                    position,
+                    libc::RWF_DSYNC,
+                )
+            };
+            usize::try_from(written).map_err(|_| io::Error::last_os_error())
+        },
+        || write_then_sync_blocking(file, offset, buf),
+    )
+}
+
+/// Run `dsync` (one write with its own data-sync), or `fallback` (a write,
+/// then a sync) where `dsync` is known to fail.
+///
+/// - `ENOSYS`: the kernel has no `pwritev2`. This is true of every file, so
+///   it sets `process_missing`, and all later calls of the process use
+///   `fallback`.
+/// - `EOPNOTSUPP`: the filesystem of this file refuses `RWF_DSYNC`. Another
+///   filesystem can accept it, so it sets `file_refused` only, and only the
+///   later calls on this file use `fallback`.
+///
+/// Both errors write no bytes, so the fallback writes them all.
+#[cfg(all(target_os = "linux", any(target_env = "gnu", target_env = "musl")))]
+fn choose_durable(
+    process_missing: &AtomicBool,
+    file_refused: &AtomicBool,
+    dsync: impl FnOnce() -> io::Result<usize>,
+    fallback: impl FnOnce() -> io::Result<usize>,
+) -> io::Result<usize> {
+    use std::sync::atomic::Ordering;
+
+    if process_missing.load(Ordering::Relaxed) || file_refused.load(Ordering::Relaxed) {
+        return fallback();
     }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ENOSYS | libc::EOPNOTSUPP) => {
-            DSYNC_REFUSED.store(true, Ordering::Relaxed);
-            write_then_sync_blocking(file, offset, buf)
-        }
-        _ => Err(error),
+    match dsync() {
+        Ok(written) => Ok(written),
+        Err(error) => match error.raw_os_error() {
+            Some(libc::ENOSYS) => {
+                process_missing.store(true, Ordering::Relaxed);
+                fallback()
+            }
+            Some(libc::EOPNOTSUPP) => {
+                file_refused.store(true, Ordering::Relaxed);
+                fallback()
+            }
+            _ => Err(error),
+        },
     }
 }
 
 #[cfg(not(all(target_os = "linux", any(target_env = "gnu", target_env = "musl"))))]
-fn write_at_durable_blocking(file: &std::fs::File, offset: u64, buf: &[u8]) -> io::Result<usize> {
+fn write_at_durable_blocking(
+    file: &std::fs::File,
+    _dsync_refused: &AtomicBool,
+    offset: u64,
+    buf: &[u8],
+) -> io::Result<usize> {
     write_then_sync_blocking(file, offset, buf)
 }
 
@@ -413,10 +463,13 @@ impl TokioStorageFile {
         }
         self.constraints.check(offset, buf.as_slice())?;
         let file = Arc::clone(&self.positioned);
+        let dsync_refused = Arc::clone(&self.dsync_refused);
         run_blocking(move || {
             let written = match kind {
                 WriteKind::Visible => write_at_blocking(&file, offset, buf.as_slice())?,
-                WriteKind::Durable => write_at_durable_blocking(&file, offset, buf.as_slice())?,
+                WriteKind::Durable => {
+                    write_at_durable_blocking(&file, &dsync_refused, offset, buf.as_slice())?
+                }
             };
             Ok((written, buf))
         })
@@ -601,5 +654,98 @@ impl AsyncSeek for TokioStorageFile {
         let this = self.get_mut();
         ready!(this.poll_in_flight(cx))?;
         Pin::new(&mut this.inner).poll_seek(cx, pos)
+    }
+}
+
+#[cfg(all(
+    test,
+    target_os = "linux",
+    any(target_env = "gnu", target_env = "musl")
+))]
+mod tests {
+    use std::cell::Cell;
+    use std::io;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::choose_durable;
+
+    /// One durable write through [`choose_durable`]: `dsync` returns
+    /// `dsync_result`, the fallback writes 4 bytes. Returns the result and
+    /// whether `dsync` was tried.
+    fn durable_write(
+        process_missing: &AtomicBool,
+        file_refused: &AtomicBool,
+        dsync_result: fn() -> io::Result<usize>,
+    ) -> (io::Result<usize>, bool) {
+        let tried = Cell::new(false);
+        let result = choose_durable(
+            process_missing,
+            file_refused,
+            || {
+                tried.set(true);
+                dsync_result()
+            },
+            || Ok(4),
+        );
+        (result, tried.get())
+    }
+
+    /// `EOPNOTSUPP` comes from the filesystem of one file. It moves that
+    /// file to the fallback, and another file still tries `RWF_DSYNC`.
+    #[test]
+    fn one_file_refusing_dsync_does_not_change_another_file() {
+        let process_missing = AtomicBool::new(false);
+        let refusing = AtomicBool::new(false);
+        let other = AtomicBool::new(false);
+        let refuse = || Err(io::Error::from_raw_os_error(libc::EOPNOTSUPP));
+
+        let (result, tried) = durable_write(&process_missing, &refusing, refuse);
+        assert_eq!(result.ok(), Some(4), "the fallback writes the bytes");
+        assert!(tried);
+        assert!(refusing.load(Ordering::Relaxed));
+        assert!(!process_missing.load(Ordering::Relaxed));
+
+        let (result, tried) = durable_write(&process_missing, &refusing, || Ok(8));
+        assert_eq!(result.ok(), Some(4));
+        assert!(!tried, "the refusing file goes straight to the fallback");
+
+        let (result, tried) = durable_write(&process_missing, &other, || Ok(8));
+        assert_eq!(result.ok(), Some(8));
+        assert!(tried, "another file still tries RWF_DSYNC");
+        assert!(!other.load(Ordering::Relaxed));
+    }
+
+    /// `ENOSYS` means the kernel has no `pwritev2`: true of every file, so
+    /// every file uses the fallback after it.
+    #[test]
+    fn missing_pwritev2_moves_every_file_to_the_fallback() {
+        let process_missing = AtomicBool::new(false);
+        let first = AtomicBool::new(false);
+        let other = AtomicBool::new(false);
+        let missing = || Err(io::Error::from_raw_os_error(libc::ENOSYS));
+
+        let (result, _) = durable_write(&process_missing, &first, missing);
+        assert_eq!(result.ok(), Some(4));
+        assert!(process_missing.load(Ordering::Relaxed));
+
+        let (result, tried) = durable_write(&process_missing, &other, || Ok(8));
+        assert_eq!(result.ok(), Some(4));
+        assert!(!tried);
+    }
+
+    /// Any other error is the write's own failure: no fallback, no flag.
+    #[test]
+    fn other_errors_are_returned() {
+        let process_missing = AtomicBool::new(false);
+        let file = AtomicBool::new(false);
+        let (result, _) = durable_write(&process_missing, &file, || {
+            Err(io::Error::from_raw_os_error(libc::EIO))
+        });
+        assert_eq!(
+            result.err().and_then(|error| error.raw_os_error()),
+            Some(libc::EIO)
+        );
+        assert!(!file.load(Ordering::Relaxed));
+        assert!(!process_missing.load(Ordering::Relaxed));
     }
 }

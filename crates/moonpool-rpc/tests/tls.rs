@@ -529,3 +529,42 @@ async fn a_graceful_shutdown_closes_tls_sessions_in_order() {
     server_driver.abort();
     holder.abort();
 }
+
+/// An idle close sends a TLS `close_notify` before the stream ends, so the
+/// server sees an orderly end of the session, not a truncation or an I/O
+/// error (#479).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_close_ends_the_tls_session_in_order() {
+    let authority = Authority::new("idle ca");
+    let (chain, key) = authority.leaf();
+    let server_tls = TlsServer::new(chain, key, clock(JUNE_2030)).expect("server");
+    let (server, server_driver) = tls_server(server_tls, SecurityConfig::trusted_network()).await;
+    let executed = Arc::new(AtomicU32::new(0));
+    let (service, stream) = server.register::<Echo>(AccessClass::Private).expect("reg");
+    let handler = serve(stream, &executed);
+    let mut config = RpcConfig::default();
+    config.peer.ping_interval = Duration::from_millis(50);
+    config.peer.idle_timeout = Duration::from_millis(150);
+    let tls = TlsClient::new([authority.root.clone()], clock(JUNE_2030)).expect("client");
+    let (client, client_driver) = tls_client(tls, config);
+    assert_eq!(call(&client, &service).await.expect("call").text, "hi");
+    assert!(
+        eventually(|| client
+            .stats()
+            .is_some_and(|stats| stats.idle_closes >= 1 && stats.connections == 0))
+        .await,
+        "{:?}",
+        client.stats()
+    );
+    assert!(
+        eventually(|| server.stats().is_some_and(|stats| stats.peer_closes >= 1)).await,
+        "the server saw no orderly end: {:?}",
+        server.stats()
+    );
+    let stats = server.stats().expect("running");
+    assert_eq!(stats.truncated_sessions, 0, "{stats:?}");
+    assert_eq!(stats.protocol_violations, 0, "{stats:?}");
+    client_driver.abort();
+    server_driver.abort();
+    handler.abort();
+}

@@ -462,13 +462,13 @@ async fn monitor<P: RpcProviders>(
             .sleep(shared.jitter(policy.ping_interval))
             .await;
         if connection.is_closed() {
-            return CloseReason::Local;
+            return closed_from_this_side(shared, CloseReason::Local).await;
         }
         if !connection.is_established() {
             continue;
         }
         if shared.close_if_idle(connection) {
-            return CloseReason::Idle;
+            return closed_from_this_side(shared, CloseReason::Idle).await;
         }
         if connection.peer_address().is_none()
             && connection.silent_for(shared.now()) < policy.inbound_idle_timeout
@@ -492,11 +492,25 @@ async fn monitor<P: RpcProviders>(
         shared.ping(connection);
         let _ = shared.time().sleep(policy.ping_timeout).await;
         if connection.is_closed() {
-            return CloseReason::Local;
+            return closed_from_this_side(shared, CloseReason::Local).await;
         }
         if connection.received() == before {
             tracing::debug!(peer = %connection.peer(), "rpc ping timed out");
             return CloseReason::PingTimeout;
         }
     }
+}
+
+/// The session was closed from this side (idle, replaced, shutdown): the
+/// writer sees it, closes the stream in order (a TLS `close_notify`) and
+/// ends the session. This waits for that, and ends the session as `reason`
+/// only if the writer is stuck past the handshake budget, the bound the
+/// writer itself gives the close. The connection keeps the reason recorded
+/// first either way.
+async fn closed_from_this_side<P: RpcProviders>(
+    shared: &Arc<Shared<P>>,
+    reason: CloseReason,
+) -> CloseReason {
+    let _ = shared.time().sleep(shared.config.handshake_timeout).await;
+    reason
 }

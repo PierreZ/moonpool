@@ -61,6 +61,11 @@ fn bounded_campaign_hits_every_required_scenario() {
     assert_clean(&report);
     let mut missing = Vec::new();
     for required in [
+        // moonpool-rpc's own buggify sites (see `observe_injections`).
+        "rpc buggify: session cut behind an at-most-once request",
+        "rpc buggify: request refused overloaded at admission",
+        "rpc buggify: stream acknowledgement deferred",
+        "rpc buggify: failure-monitor wakeup with nothing changed",
         // Completion, credit and the two acknowledgement paths.
         "rpc stream completed normally with every item",
         "rpc stream producer waited for credit and resumed",

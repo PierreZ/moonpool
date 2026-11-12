@@ -606,6 +606,15 @@ fn encode_stream(out: &mut Writer, message: &WireMessage) {
 /// address).
 pub const HELLO_ENVELOPE_LEN: usize = 1 + 4 + 2 + 2 + 16 + 8 + 4 + 1 + 16 + 2;
 
+/// The largest frame payload a session accepts before the peer's `Hello`
+/// passed: only a `Hello` is valid then. It is far above
+/// [`HELLO_ENVELOPE_LEN`] so that a later version may grow its `Hello`, and
+/// far below a data frame, so that an unauthenticated peer cannot make the
+/// runtime buffer a large frame on each connection it opens.
+pub const HANDSHAKE_MAX_FRAME_BYTES: u32 = 1024;
+
+const _: () = assert!(HELLO_ENVELOPE_LEN <= HANDSHAKE_MAX_FRAME_BYTES as usize);
+
 /// Size of a `Ping` or `Pong` envelope.
 pub const LIVENESS_ENVELOPE_LEN: usize = 1 + 8;
 
