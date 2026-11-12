@@ -217,7 +217,12 @@
 //! a later open generation than the metainfo's proves the metainfo older
 //! than the log (both copies lost an update): [`OpenError::MetaRolledBack`].
 //! A rollback inside one open generation stays invisible to the journal;
-//! the caller can check its metainfo against its own entries. A medium
+//! the caller can check its metainfo against its own entries. A batch
+//! number holds the open generation in its high 24 bits and the count in
+//! its low 40 bits: an open after generation 2^24 - 1 refuses
+//! ([`OpenError::InvalidConfig`]), and a commit after 2^40 - 1 batches in
+//! one open refuses ([`CommitError::BatchNumbersExhausted`]) before it
+//! writes; a reopen starts a new generation. A medium
 //! error reads as damaged bytes (CLSTORE's treatment of EIO). A damaged or
 //! missing file is a crash ([`OpenError::BadSegment`],
 //! [`OpenError::MetaLost`]). Opening reads only the last batch's entries; the

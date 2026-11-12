@@ -50,7 +50,7 @@ const VERSION: u16 = 3;
 const _: () = assert!(BLOCK.is_multiple_of(RECORD_SIZE));
 const _: () = assert!(RECORDS_PER_BLOCK == 64);
 const _: () = assert!(META_MAX >= 4000);
-const _: () = assert!(GENERATION_SHIFT >= 32 && GENERATION_SHIFT < 64);
+const _: () = assert!(GENERATION_SHIFT > 32 && GENERATION_SHIFT < 64);
 const _: () = assert!(META_COPY_B_AT >= 16 * BLOCK_U64);
 
 fn crc(bytes: &[u8]) -> u32 {
@@ -455,9 +455,19 @@ pub(crate) fn generation_of(batch: u64) -> u64 {
     batch >> GENERATION_SHIFT
 }
 
+/// The highest open generation a batch number can hold: the bits above
+/// [`GENERATION_SHIFT`]. An open past it refuses.
+pub(crate) const MAX_GENERATION: u32 = (1 << (64 - GENERATION_SHIFT)) - 1;
+
 /// The first batch number of open generation `generation`.
 pub(crate) fn first_batch_of(generation: u64) -> u64 {
     (generation << GENERATION_SHIFT) + 1
+}
+
+/// The last batch number of open generation `generation`. A commit past it
+/// refuses: the next number is of the next generation.
+pub(crate) fn last_batch_of(generation: u64) -> u64 {
+    (generation << GENERATION_SHIFT) | ((1 << GENERATION_SHIFT) - 1)
 }
 
 /// One copy of the metainfo: the journal's own fields and the caller's bytes.
@@ -617,5 +627,26 @@ mod tests {
     fn shipped_geometries_are_valid() {
         assert!(Geometry::default().is_valid());
         assert!(Geometry::small().is_valid());
+    }
+
+    #[test]
+    fn batch_numbers_of_the_last_generation_stay_above_the_ones_before() {
+        let last = u64::from(MAX_GENERATION);
+        assert!(first_batch_of(last) > last_batch_of(last - 1));
+        assert_eq!(generation_of(first_batch_of(last)), last);
+        assert_eq!(generation_of(last_batch_of(last)), last);
+        assert_eq!(last_batch_of(last), u64::MAX);
+    }
+
+    #[test]
+    fn the_last_batch_of_a_generation_is_the_last_of_its_range() {
+        for generation in [1, 2, 1000, u64::from(MAX_GENERATION) - 1] {
+            assert_eq!(generation_of(last_batch_of(generation)), generation);
+            assert_eq!(
+                last_batch_of(generation) + 1,
+                first_batch_of(generation + 1) - 1
+            );
+            assert!(last_batch_of(generation) > first_batch_of(generation));
+        }
     }
 }

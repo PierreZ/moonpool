@@ -306,7 +306,12 @@ generation that wrote it, and every open raises the generation in both
 copies before it writes, so a batch of a later generation than the
 metainfo's proves the metainfo older than the log: `MetaRolledBack`. A
 rollback inside one open generation stays invisible to the journal; the
-caller can check its metainfo against its own entries. Opening returns a `Recovery` that says
+caller can check its metainfo against its own entries. A batch number
+holds the generation in its high 24 bits and the count in its low 40 bits,
+so both have a limit. The 16,777,215th open is the last: the next one is
+refused with `OpenError::InvalidConfig`. One open writes at most 2^40 - 1
+batches: the next commit is refused with `CommitError::BatchNumbersExhausted`
+before anything is written, and a reopen starts a new generation. Opening returns a `Recovery` that says
 what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`,
 `meta_repaired` (a metainfo copy rewritten from its twin),
 `headers_repaired`, `segments_removed`, `spares_removed` and `spare_kept`. Only the last batch's entries are
