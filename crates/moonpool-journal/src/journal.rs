@@ -835,8 +835,8 @@ impl<P: LocalStorageProvider> Journal<P> {
     }
 
     /// The live positions in `range` whose persist record on disk no longer
-    /// matches the record this open holds: read from disk, one record each,
-    /// and changes nothing.
+    /// matches the record this open holds, in position order: read from
+    /// disk, and changes nothing.
     ///
     /// After an open, nothing reads a persist record again: [`read`](Self::read)
     /// and [`replay`](Self::replay) judge an entry against the record held
@@ -845,26 +845,59 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// ([`OpenError::DoubleFault`]). A caller's scrub calls this to find
     /// such a record first, and repairs the position by writing it again in
     /// a new batch, as for a damaged entry. A medium error reads as a
-    /// mismatch.
+    /// mismatch for the records of the failed block only.
+    ///
+    /// The records are read in disk order: each persist block one time, and
+    /// blocks that follow each other in one segment together, at most
+    /// `REPLAY_READ` bytes per read.
     ///
     /// # Errors
     /// Only a provider failure that is not the medium's.
+    ///
+    /// # Panics
+    /// If a read returns fewer bytes than asked: a provider bug.
     pub async fn verify_records(
         &self,
         range: impl RangeBounds<u64>,
     ) -> Result<Vec<u64>, std::io::Error> {
+        let mut located: Vec<(u64, &Located)> =
+            self.index.range(range).map(|(&p, at)| (p, at)).collect();
+        located.sort_by_key(|(_, at)| (at.segment, at.record_at));
         let mut mismatched = Vec::new();
-        for (&position, at) in self.index.range(range) {
-            let segment = &self.segments[self.segment_index(at.segment)];
-            let bytes = segment.read_at(at.record_at, RECORD_SIZE).await?;
-            let intact = matches!(
-                Record::decode(&bytes),
-                Slot::Valid(on_disk) if on_disk == record_of(position, at)
-            );
-            if !intact {
-                mismatched.push(position);
+        let mut first = 0;
+        while first < located.len() {
+            // A run: the persist blocks that follow each other in one
+            // segment, read with one read of at most `REPLAY_READ` bytes.
+            let at = located[first].1;
+            let start = at.record_at / BLOCK_U64 * BLOCK_U64;
+            let mut end = align_up(at.record_at + u64_of(RECORD_SIZE), BLOCK_U64);
+            let mut stop = first + 1;
+            while let Some(&(_, next)) = located.get(stop) {
+                let next_start = next.record_at / BLOCK_U64 * BLOCK_U64;
+                let next_end = align_up(next.record_at + u64_of(RECORD_SIZE), BLOCK_U64);
+                if next.segment != at.segment || next_start > end || next_end - start > REPLAY_READ
+                {
+                    break;
+                }
+                end = end.max(next_end);
+                stop += 1;
             }
+            let segment = &self.segments[self.segment_index(at.segment)];
+            let bytes = segment.read_at(start, usize_of(end - start)).await?;
+            assert_eq!(u64_of(bytes.len()), end - start, "a run reads whole");
+            for &(position, at) in &located[first..stop] {
+                let from = usize_of(at.record_at - start);
+                let intact = matches!(
+                    Record::decode(&bytes[from..from + RECORD_SIZE]),
+                    Slot::Valid(on_disk) if on_disk == record_of(position, at)
+                );
+                if !intact {
+                    mismatched.push(position);
+                }
+            }
+            first = stop;
         }
+        mismatched.sort_unstable();
         Ok(mismatched)
     }
 
@@ -935,8 +968,8 @@ impl<P: LocalStorageProvider> Journal<P> {
     // ---- writes ----
 
     /// Make `batch` durable, then return. See [`Durability`] for the
-    /// protocol. Metainfo, when the batch changes it, is written copy A in
-    /// the first window and copy B in the second.
+    /// protocol. Metainfo, when the batch changes it, is written after the
+    /// last sync of the batch: copy A, durable, then copy B, durable.
     ///
     /// # Errors
     /// [`CommitError::BelowFloor`], [`CommitError::MetaTooLarge`] and
@@ -1346,9 +1379,8 @@ impl<P: LocalStorageProvider> Journal<P> {
     }
 }
 
-/// The persist record a located entry was written under.
-/// The most bytes one replay read covers: a run of entries longer than
-/// this is read in several.
+/// The most bytes one replay or verify read covers: a run of entries (or
+/// of persist blocks) longer than this is read in several.
 const REPLAY_READ: u64 = 1 << 20;
 
 /// The most bytes between two entries a replay read covers rather than
@@ -1363,6 +1395,7 @@ fn entry_bytes(at: &Located) -> usize {
     RECORD_SIZE + usize_of(u64::from(at.len))
 }
 
+/// The persist record a located entry was written under.
 fn record_of(position: u64, at: &Located) -> Record {
     Record {
         kind: Kind::Put,
