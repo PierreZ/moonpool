@@ -107,6 +107,12 @@ async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
 
 Everything the script reads is per-iteration simulated state, so the crash target, the milestone and the restart point replay from the seed. `crates/moonpool-sim/tests/scripted_faults.rs` is the full version: it checks that a held-down process runs no application work until the restart.
 
+Each process has a **lifecycle generation** (`SimWorld::process_generation(ip)`). It moves on at every boot and at every `crash` (hold-down). Every lifecycle event (a graceful shutdown, a force kill, a restart) carries the generation it was decided in, and the runner drops an event whose generation is old. So a decision for one boot never reaches a later one:
+
+- A `restart` during a grace period boots the process again; the force kill at the end of the old grace period is dropped and does not kill the new boot.
+- A `crash` after a timed reboot holds the process down; the recovery restart of the reboot is dropped and does not end the hold-down.
+- A `restart` before a timed reboot's recovery restart boots the process; the recovery restart is dropped and does not restart the new boot in place.
+
 `restart` on a process that is still running is an **in-place restart**. The old boot is killed like a force kill: its task, the tasks it spawned and its connections, which peers see aborted. Storage is left alone, as when a process exits on its own. The fresh boot starts one scheduler tick later, after the executor has dropped the old one, so two boots of one process never overlap. The kill is recorded in the fault timeline as a `process_force_kill` with cause `restart_in_place`.
 
 ## Publishing Vetoes and Reading Landings

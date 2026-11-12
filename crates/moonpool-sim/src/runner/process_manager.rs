@@ -411,9 +411,12 @@ impl<'a> ProcessManager<'a> {
             };
             factory()
         };
-        // Each boot starts its own clock, read by the process's time provider.
+        // Each boot starts its own clock, read by the process's time
+        // provider, and a new lifecycle generation: the pending lifecycle
+        // events of the previous boot become stale.
         if let Ok(world) = sim.upgrade() {
             world.boot_process_clock(ip);
+            world.advance_process_generation(ip);
         }
         let ip_string = ip.to_string();
         let process_token = shutdown_signal.child_token();

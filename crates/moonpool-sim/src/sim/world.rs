@@ -73,6 +73,9 @@ pub(crate) struct SimInner {
     /// Timers that the `Shutdown` event cut before they fired. Their sleeps
     /// return `Err(SimulationShutdown)`, not `Ok`.
     cut_timers: BTreeSet<u64>,
+    /// The lifecycle generation of each process (see
+    /// [`SimWorld::process_generation`]).
+    process_generations: BTreeMap<IpAddr, u64>,
     pub(crate) events_processed: u64,
     pub(crate) last_processed_event: Option<Event>,
     pub(crate) pending_faults: Vec<SimFaultRecord>,
@@ -113,6 +116,7 @@ impl SimInner {
             next_task_id: 0,
             awakened_tasks: BTreeSet::new(),
             cut_timers: BTreeSet::new(),
+            process_generations: BTreeMap::new(),
             events_processed: 0,
             last_processed_event: None,
             pending_faults: Vec::new(),
@@ -893,10 +897,36 @@ impl SimWorld {
         inner.cut_timers.remove(&task_id);
     }
 
-    /// Schedules a process restart.
+    /// Schedules a process restart for the current generation of `ip`.
     #[instrument(level = "debug", skip(self))]
     pub fn schedule_process_restart(&self, ip: IpAddr, recovery_delay: Duration) {
-        self.schedule_event(Event::ProcessRestart { ip }, recovery_delay);
+        let generation = self.process_generation(ip);
+        self.schedule_event(Event::ProcessRestart { ip, generation }, recovery_delay);
+    }
+
+    /// The lifecycle generation of the process at `ip`: 0 until its first
+    /// boot. It moves on at each boot and at each hold-down crash. A
+    /// process lifecycle event carries the generation it was decided in,
+    /// and the runner drops an event whose generation is no longer the
+    /// current one, so a grace-period kill or a recovery restart of an old
+    /// boot never hits a newer boot or ends a hold-down.
+    #[must_use]
+    pub fn process_generation(&self, ip: IpAddr) -> u64 {
+        self.inner
+            .read()
+            .process_generations
+            .get(&ip)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Move the process at `ip` to its next lifecycle generation and return
+    /// it: the pending lifecycle events of older generations become stale.
+    pub(crate) fn advance_process_generation(&self, ip: IpAddr) -> u64 {
+        let mut inner = self.inner.write();
+        let generation = inner.process_generations.entry(ip).or_insert(0);
+        *generation += 1;
+        *generation
     }
 }
 

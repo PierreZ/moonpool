@@ -918,10 +918,7 @@ impl WorkloadOrchestrator {
             return;
         };
         for ip in &restart {
-            sim.schedule_event(
-                crate::sim::Event::ProcessRestart { ip: *ip },
-                Duration::from_nanos(1),
-            );
+            sim.schedule_process_restart(*ip, Duration::from_nanos(1));
         }
         for a in &healthy {
             sim.set_slowness(*a, crate::Slowness::HEALTHY);
@@ -1416,7 +1413,11 @@ impl WorkloadOrchestrator {
                 ip,
                 grace_period_ms,
                 recovery_delay_ms,
+                generation,
             }) => {
+                if Self::is_stale(sim, ip, generation) {
+                    return;
+                }
                 assert_reachable!("event: ProcessGracefulShutdown");
                 let event = SimFaultEvent::ProcessGracefulShutdown {
                     ip: ip.to_string(),
@@ -1429,6 +1430,7 @@ impl WorkloadOrchestrator {
                         ip,
                         recovery_delay_ms: Some(recovery_delay_ms),
                         cause: ProcessKillKind::GracePeriodExpired,
+                        generation,
                     },
                     Duration::from_millis(grace_period_ms),
                 );
@@ -1437,7 +1439,11 @@ impl WorkloadOrchestrator {
                 ip,
                 recovery_delay_ms,
                 cause,
+                generation,
             }) => {
+                if Self::is_stale(sim, ip, generation) {
+                    return;
+                }
                 assert_reachable!("event: ProcessForceKill");
                 let event = SimFaultEvent::ProcessForceKill {
                     ip: ip.to_string(),
@@ -1456,7 +1462,10 @@ impl WorkloadOrchestrator {
                 // A held-down crash (None) schedules no restart: the process
                 // stays dead until a fault injector explicitly restarts it.
                 if let Some(recovery_delay_ms) = recovery_delay_ms {
-                    sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
+                    sim.schedule_event(
+                        crate::sim::Event::ProcessRestart { ip, generation },
+                        Duration::from_millis(recovery_delay_ms),
+                    );
                 }
             }
             Some(crate::sim::Event::ProcessSpawn { ip }) => {
@@ -1476,54 +1485,84 @@ impl WorkloadOrchestrator {
                 sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
                 sim.set_slowness(ip, crate::Slowness::HEALTHY);
             }
-            Some(crate::sim::Event::ProcessRestart { ip }) => {
-                assert_reachable!("event: ProcessRestart");
-                if crate::runner::shard::ShardBook::of(env.state)
-                    .is_some_and(|book| book.drops_restart(ip, process_manager.is_running(ip)))
-                {
-                    return;
-                }
-                if process_manager.is_running(ip) {
-                    // Restarting a running process is a kill, then a boot.
-                    // Killing cancels the root task, but the executor drops
-                    // a cancelled future only when it next runs it; booting
-                    // the replacement in the same step could poll it first,
-                    // beside the old boot's live state (a listener, a
-                    // registry, open connections). Kill now, like a force
-                    // kill, and boot one tick later, after the executor
-                    // has drained the old boot: two boots of one process
-                    // never overlap.
-                    // Recorded as a force kill so the aborted connections
-                    // have a cause in the fault timeline.
-                    obs.record_sim_fault(
-                        Self::sim_now_ms(sim),
-                        &SimFaultEvent::ProcessForceKill {
-                            ip: ip.to_string(),
-                            cause: ProcessKillKind::RestartInPlace,
-                        },
-                    );
-                    process_manager.abort_process(ip);
-                    sim.reset_cpu_owner(ip);
-                    sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
-                    sim.schedule_process_restart(ip, Duration::from_nanos(1));
-                    assert_reachable!(
-                        "process_manager: running process stopped before its restart"
-                    );
-                    return;
-                }
-                let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
-                obs.record_sim_fault(Self::sim_now_ms(sim), &event);
-                let weak_sim = sim.downgrade();
-                // The restarted process keeps its node's metrics source: the
-                // IP is unchanged, so counters survive the reboot exactly as a
-                // real node's do across a process restart on the same host.
-                process_manager.restart(ip, &env.process_env(&weak_sim));
-                if let Some(ledger) = crate::runner::wipe::WipeLedger::of(env.state) {
-                    ledger.note_restart(ip, sim.current_time());
-                }
+            Some(crate::sim::Event::ProcessRestart { ip, generation }) => {
+                Self::handle_restart(sim, process_manager, env, ip, generation);
             }
             _ => {}
         }
+    }
+
+    /// Handle a `ProcessRestart` of `generation`: boot the process at `ip`
+    /// again, or, when it still runs, kill it now and boot it one tick later.
+    fn handle_restart(
+        sim: &mut SimWorld,
+        process_manager: &mut ProcessManager<'_>,
+        env: &IterationEnv<'_>,
+        ip: std::net::IpAddr,
+        generation: u64,
+    ) {
+        let obs = env.obs;
+        if Self::is_stale(sim, ip, generation) {
+            return;
+        }
+        assert_reachable!("event: ProcessRestart");
+        if crate::runner::shard::ShardBook::of(env.state)
+            .is_some_and(|book| book.drops_restart(ip, process_manager.is_running(ip)))
+        {
+            return;
+        }
+        if process_manager.is_running(ip) {
+            // Restarting a running process is a kill, then a boot.
+            // Killing cancels the root task, but the executor drops
+            // a cancelled future only when it next runs it; booting
+            // the replacement in the same step could poll it first,
+            // beside the old boot's live state (a listener, a
+            // registry, open connections). Kill now, like a force
+            // kill, and boot one tick later, after the executor
+            // has drained the old boot: two boots of one process
+            // never overlap.
+            // Recorded as a force kill so the aborted connections
+            // have a cause in the fault timeline.
+            obs.record_sim_fault(
+                Self::sim_now_ms(sim),
+                &SimFaultEvent::ProcessForceKill {
+                    ip: ip.to_string(),
+                    cause: ProcessKillKind::RestartInPlace,
+                },
+            );
+            process_manager.abort_process(ip);
+            sim.reset_cpu_owner(ip);
+            sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
+            sim.schedule_event(
+                crate::sim::Event::ProcessRestart { ip, generation },
+                Duration::from_nanos(1),
+            );
+            assert_reachable!("process_manager: running process stopped before its restart");
+            return;
+        }
+        let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
+        obs.record_sim_fault(Self::sim_now_ms(sim), &event);
+        let weak_sim = sim.downgrade();
+        // The restarted process keeps its node's metrics source: the
+        // IP is unchanged, so counters survive the reboot exactly as a
+        // real node's do across a process restart on the same host.
+        process_manager.restart(ip, &env.process_env(&weak_sim));
+        if let Some(ledger) = crate::runner::wipe::WipeLedger::of(env.state) {
+            ledger.note_restart(ip, sim.current_time());
+        }
+    }
+
+    /// Whether a lifecycle event decided in `generation` is stale: the
+    /// process at `ip` booted again, or was held down, after the decision.
+    /// A stale event is dropped, so a grace-period kill or a recovery
+    /// restart of an old boot never hits a newer boot.
+    fn is_stale(sim: &SimWorld, ip: std::net::IpAddr, generation: u64) -> bool {
+        let current = sim.process_generation(ip);
+        if generation == current {
+            return false;
+        }
+        tracing::debug!(%ip, generation, current, "dropped a stale process lifecycle event");
+        true
     }
 
     /// What the peers of a process killed by `cause` learn: a host that

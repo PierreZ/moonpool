@@ -45,6 +45,11 @@ pub enum Event {
     ProcessRestart {
         /// The IP address of the process to restart.
         ip: std::net::IpAddr,
+        /// The process generation the event was decided in (see
+        /// [`SimWorld::process_generation`](crate::SimWorld::process_generation)).
+        /// The runner drops the event when the generation of the process
+        /// moved on before it ran: a newer boot or hold-down supersedes it.
+        generation: u64,
     },
     /// A process spawned mid-run by a workload's
     /// [`Deployment`](crate::Deployment) boots.
@@ -66,6 +71,11 @@ pub enum Event {
         grace_period_ms: u64,
         /// Recovery delay in milliseconds after force-kill before restart.
         recovery_delay_ms: u64,
+        /// The process generation the event was decided in (see
+        /// [`SimWorld::process_generation`](crate::SimWorld::process_generation)).
+        /// The runner drops the event when the generation of the process
+        /// moved on before it ran: a newer boot or hold-down supersedes it.
+        generation: u64,
     },
     /// Force-kill a process: the task is aborted before any other side effect
     /// of the kill can wake it again.
@@ -79,6 +89,11 @@ pub enum Event {
         recovery_delay_ms: Option<u64>,
         /// Why the process is dying, and what that costs its storage.
         cause: ProcessKillKind,
+        /// The process generation the event was decided in (see
+        /// [`SimWorld::process_generation`](crate::SimWorld::process_generation)).
+        /// The runner drops the event when the generation of the process
+        /// moved on before it ran: a newer boot or hold-down supersedes it.
+        generation: u64,
     },
 }
 

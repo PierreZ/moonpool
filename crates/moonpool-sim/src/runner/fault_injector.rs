@@ -537,6 +537,7 @@ impl FaultContext {
                         ip: ip_addr,
                         grace_period_ms: grace_ms,
                         recovery_delay_ms: recovery_ms,
+                        generation: self.sim.process_generation(ip_addr),
                     },
                     Duration::from_nanos(1),
                 );
@@ -574,6 +575,7 @@ impl FaultContext {
                         ip: ip_addr,
                         recovery_delay_ms: Some(delay_ms),
                         cause,
+                        generation: self.sim.process_generation(ip_addr),
                     },
                     Duration::from_nanos(1),
                 );
@@ -610,11 +612,15 @@ impl FaultContext {
         };
         assert_reachable!("crash: hold-down path");
         self.mark_dead(ip_addr);
+        // A hold-down starts a new generation: a restart still pending from
+        // an earlier reboot, or the kill of a grace period, must not end it.
+        let generation = self.sim.advance_process_generation(ip_addr);
         self.sim.schedule_event(
             crate::sim::Event::ProcessForceKill {
                 ip: ip_addr,
                 recovery_delay_ms: None,
                 cause: kill_cause(kind),
+                generation,
             },
             Duration::from_nanos(1),
         );
@@ -659,6 +665,7 @@ impl FaultContext {
                 ip: ip_addr,
                 recovery_delay_ms: Some(u64::try_from(down.as_millis()).unwrap_or(u64::MAX)),
                 cause: kill_cause(kind),
+                generation: self.sim.process_generation(ip_addr),
             },
             Duration::from_nanos(1),
         );
@@ -810,10 +817,8 @@ impl FaultContext {
             return Ok(());
         }
         assert_reachable!("restart: explicit restart path");
-        self.sim.schedule_event(
-            crate::sim::Event::ProcessRestart { ip: ip_addr },
-            Duration::from_nanos(1),
-        );
+        self.sim
+            .schedule_process_restart(ip_addr, Duration::from_nanos(1));
         tracing::info!("Explicitly restarting process at IP {}", ip);
         Ok(())
     }
