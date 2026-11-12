@@ -117,6 +117,9 @@ struct MembershipInner {
     changes: DeploymentChanges,
     /// Spawns still allowed in this run.
     spawns_left: usize,
+    /// The processes were aborted: no spawn or retire event is handled any
+    /// more.
+    stopped: bool,
 }
 
 /// The run's live process membership, shared by every context of one
@@ -159,6 +162,17 @@ impl Membership {
         self.0
             .write()
             .expect("RwLock poisoned: prior task panicked")
+    }
+
+    /// Mark the processes as aborted: from now on, a deployment change has
+    /// no process manager to handle it.
+    pub(crate) fn stop(&self) {
+        self.write().stopped = true;
+    }
+
+    /// Whether the processes were aborted ([`Self::stop`]).
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.read().stopped
     }
 
     /// The membership version: +1 on every spawned process that boots and

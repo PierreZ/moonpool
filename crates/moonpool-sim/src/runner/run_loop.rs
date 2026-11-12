@@ -28,7 +28,7 @@ use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestr
 /// Inputs to `run_orchestrator_blocking`.
 pub(super) struct RunOrchestratorInputs<'a> {
     seed: u64,
-    metrics_factory: Option<&'a SourceFactory>,
+    metrics_factory: Option<SourceFactory>,
     iteration_count: usize,
     workloads: Vec<Box<dyn Workload>>,
     workload_info: Vec<(String, String)>,
@@ -380,7 +380,7 @@ impl SimulationBuilder {
                 sim,
                 chaos_duration,
                 chaos_until_run_ends,
-                metrics_factory,
+                metrics_factory: metrics_factory.as_ref(),
                 iteration_count,
                 run_time_budget,
                 max_spawns,
@@ -933,7 +933,7 @@ impl SimulationBuilder {
     /// historical `10.0.1.x` addresses.
     fn resolve_process_config(
         entries: &[ProcessEntry],
-    ) -> Option<super::process_manager::ProcessConfig<'_>> {
+    ) -> Option<super::process_manager::ProcessConfig<'static>> {
         if entries.is_empty() {
             return None;
         }
@@ -949,7 +949,7 @@ impl SimulationBuilder {
             let base_name = &entry.name;
             // Listed even when this seed drew zero members.
             group_registry.declare(base_name);
-            factories.insert(base_name.clone(), &*entry.factory);
+            factories.insert(base_name.clone(), entry.factory.clone());
             plans.insert(
                 base_name.clone(),
                 crate::runner::membership::GroupPlan {
@@ -1484,7 +1484,7 @@ impl SimulationBuilder {
         obs_handle: &SimulationLayerHandle,
         seed: u64,
         iteration_count: usize,
-    ) -> RunOrchestratorInputs<'_> {
+    ) -> RunOrchestratorInputs<'static> {
         let ResolvedEntries {
             workloads,
             client_info,
@@ -1590,7 +1590,7 @@ impl SimulationBuilder {
         let fault_injectors = self.fault_injectors_for_seed(&sim, attritions, outages);
         RunOrchestratorInputs {
             seed,
-            metrics_factory: self.metrics_factory.as_ref(),
+            metrics_factory: self.metrics_factory.clone(),
             iteration_count,
             workloads,
             workload_info,

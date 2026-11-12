@@ -3,6 +3,7 @@
 //! This module provides the main `SimulationBuilder` type for setting up
 //! and executing simulation experiments.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::instrument;
@@ -33,7 +34,7 @@ pub(crate) struct WorkloadClientInfo {
 /// `.cluster()` registration.
 pub(crate) struct ProcessEntry {
     pub(crate) count: ProcessCount,
-    pub(crate) factory: Box<dyn Fn() -> Box<dyn Process>>,
+    pub(crate) factory: Arc<dyn Fn() -> Box<dyn Process>>,
     pub(crate) tags: TagDistribution,
     /// The group's name: its process type's [`Process::name`].
     pub(crate) name: String,
@@ -425,7 +426,7 @@ impl SimulationBuilder {
         );
         self.process_entries.push(ProcessEntry {
             count,
-            factory: Box::new(factory),
+            factory: Arc::new(factory),
             tags: TagDistribution::new(),
             name,
             locality,
@@ -854,7 +855,7 @@ impl SimulationBuilder {
         S: MetricsSource,
         F: Fn(&str) -> std::sync::Arc<S> + 'static,
     {
-        self.metrics_factory = Some(Box::new(move |ip| {
+        self.metrics_factory = Some(Arc::new(move |ip| {
             let source = factory(ip);
             // Kept twice: as the trait object the runner scrapes, and as `Any`
             // so `ctx.metrics::<S>()` can hand the concrete type back.

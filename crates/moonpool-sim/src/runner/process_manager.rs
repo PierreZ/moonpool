@@ -22,8 +22,9 @@ use crate::runner::tags::TagRegistry;
 use crate::runner::topology::{TopologyFactory, TopologyInputs};
 use crate::{assert_always_less_than_or_equal_to, assert_reachable};
 
-/// A process factory borrowed from the builder for one iteration.
-pub(crate) type ProcessFactory<'a> = &'a dyn Fn() -> Box<dyn Process>;
+/// A process factory, shared with the builder: an iteration (a live one
+/// included) owns its copy and borrows nothing from the builder.
+pub(crate) type ProcessFactory<'a> = std::sync::Arc<dyn Fn() -> Box<dyn Process> + 'a>;
 
 /// Resolved server-process configuration for one iteration.
 pub(crate) struct ProcessConfig<'a> {
@@ -450,6 +451,9 @@ impl<'a> ProcessManager<'a> {
     }
 
     pub(crate) fn abort_all(&mut self) {
+        // A deployment change made after this point would schedule an event
+        // that nothing handles: the handle refuses it instead.
+        self.membership.stop();
         for boot in &mut self.handles {
             if let Some(boot) = boot.take() {
                 boot.kill();

@@ -667,3 +667,63 @@ fn the_same_seed_spawns_at_the_same_time_with_the_same_ip() {
     assert!(first.iter().any(|(_, ip)| ip == "10.0.1.3"));
     assert_eq!(first, run());
 }
+
+// ============================================================================
+// Deployment calls from check()
+// ============================================================================
+
+/// Calls `spawn` from `check()` and records the answer.
+struct SpawnFromCheck(Arc<Mutex<Option<SimulationResult<String>>>>);
+
+#[async_trait]
+impl Workload for SpawnFromCheck {
+    fn name(&self) -> &'static str {
+        "operator"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        Ok(())
+    }
+
+    async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let answer = ctx.deployment().spawn("server");
+        *self.0.lock().expect("Mutex poisoned: prior task panicked") = Some(answer);
+        Ok(())
+    }
+}
+
+/// In the default mode `check()` runs after the processes are aborted, so a
+/// deployment change there has nothing to handle it: the call refuses
+/// instead of returning `Ok` (#460). With `chaos_until_run_ends` the
+/// processes are alive and the call succeeds.
+#[test]
+fn a_deployment_change_from_check_refuses_once_the_processes_are_stopped() {
+    let answer = |live: bool| {
+        let log = boot_log();
+        let seen = Arc::new(Mutex::new(None));
+        let builder = SimulationBuilder::new()
+            .processes(2, Server::factory(&log))
+            .workload(SpawnFromCheck(seen.clone()))
+            .set_iterations(1)
+            .set_debug_seeds(vec![1]);
+        let builder = if live {
+            builder
+                .chaos_duration(Duration::from_secs(1))
+                .chaos_until_run_ends()
+        } else {
+            builder
+        };
+        builder.run().expect("simulation configuration is valid");
+        let answer = seen
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .take();
+        answer.expect("check() ran")
+    };
+    let stopped = answer(false);
+    assert!(
+        matches!(&stopped, Err(SimulationError::InvalidState(m)) if m.contains("already stopped")),
+        "{stopped:?}"
+    );
+    assert_eq!(answer(true).ok().as_deref(), Some("10.0.1.3"));
+}

@@ -37,7 +37,7 @@ let version = deployment.version();
 | `retire(ip)` | The process leaves every topology query and victim pool at once. One tick later it is killed. It never restarts, and its IP is never reused. Its disk stays readable for a checker (`FaultContext::durable_bytes`). |
 | `version()` | The membership version, also on `topology().membership_version()` and `FaultContext::membership_version()`. |
 
-A process gets a handle too, but every call returns an error: only a client changes the deployment. A hand-built `SimContext` carries a detached handle that refuses as well.
+A process gets a handle too, but every call returns an error: only a client changes the deployment. A hand-built `SimContext` carries a detached handle that refuses as well. Every call also returns an error once the processes are aborted. In the default mode `check()` runs after that, so a deployment change from `check()` is refused; with `chaos_until_run_ends()`, `check()` runs on the live processes and may change the deployment.
 
 ## The topology is live
 

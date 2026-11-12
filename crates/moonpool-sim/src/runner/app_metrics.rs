@@ -51,7 +51,7 @@ struct SourceEntry {
 ///
 /// Produced by [`SimulationBuilder::metrics_factory`](super::builder::SimulationBuilder::metrics_factory);
 /// not constructed directly.
-pub(crate) type SourceFactory = Box<dyn Fn(&str) -> SourceEntryPair>;
+pub(crate) type SourceFactory = std::sync::Arc<dyn Fn(&str) -> SourceEntryPair>;
 
 /// A source in both of the forms the runner needs. Opaque; see [`SourceFactory`].
 pub(crate) type SourceEntryPair = (Arc<dyn MetricsSource>, Arc<dyn Any + Send + Sync>);
@@ -272,7 +272,7 @@ mod tests {
     }
 
     fn handle_for(ips: &[&str]) -> (MetricsHandle, crate::observability::InstallGuard) {
-        let factory: SourceFactory = Box::new(|_ip| {
+        let factory: SourceFactory = std::sync::Arc::new(|_ip| {
             let s = Arc::new(Counting {
                 hits: AtomicU64::new(0),
             });
