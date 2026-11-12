@@ -258,9 +258,9 @@ pub(crate) fn crash_loop(
 /// Flip one byte of one valid `Put` or `Clear` persist record of a random
 /// segment, durably, whose entry is intact: one fault on the slot. A record
 /// whose entry a crash damaged is skipped, because a rot there makes two
-/// faults on one slot, which the open rightly refuses. A void record is
-/// skipped too: one fault on a void refuses the open (#483). Returns whether
-/// a record was rotted.
+/// faults on one slot, which the open rightly refuses. A void record, and a
+/// record after a void in its batch, are skipped too: one fault there
+/// refuses the open (#483). Returns whether a record was rotted.
 async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
     let pick = rng.below(u64::MAX);
     run(sim, move |provider| async move {
@@ -293,7 +293,18 @@ async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
         let first = usize::try_from(pick >> 20).expect("fits") % slots;
         for slot in (first..slots).chain(0..first) {
             let record = &log[slot * 64..slot * 64 + 64];
-            if !matches!(record[0], 1 | 2) || u32_at(record, 60) != crc32c::crc32c(&record[..60]) {
+            if !matches!(record[0], 1 | 2) || !valid(record) {
+                continue;
+            }
+            // A void stops the entry walk, so a record after one in its
+            // batch cannot be rebuilt (#483).
+            let index = usize::from(u16::from_le_bytes([record[2], record[3]]));
+            let first = slot.saturating_sub(index);
+            let after_void = (first..slot).any(|earlier| {
+                let before = &log[earlier * 64..earlier * 64 + 64];
+                before[0] == 3 && valid(before)
+            });
+            if after_void {
                 continue;
             }
             if !entry_intact(&file, record).await {
@@ -312,6 +323,11 @@ async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
         false
     })
     .await
+}
+
+/// Whether a 64-byte persist record passes its CRC.
+fn valid(record: &[u8]) -> bool {
+    u32_at(record, 60) == crc32c::crc32c(&record[..60])
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
