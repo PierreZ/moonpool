@@ -45,7 +45,8 @@ const SEGMENT_MAGIC: u32 = u32::from_le_bytes(*b"MPJS");
 const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 const META_MAGIC: u32 = u32::from_le_bytes(*b"MPJM");
 /// 3: segments are recycled, so a batch older than its segment is stale.
-const VERSION: u16 = 3;
+/// 4: a retire record names a dead slot; the void record is gone.
+const VERSION: u16 = 4;
 
 const _: () = assert!(BLOCK.is_multiple_of(RECORD_SIZE));
 const _: () = assert!(RECORDS_PER_BLOCK == 64);
@@ -237,8 +238,11 @@ pub(crate) enum Kind {
     Put = 1,
     /// A tombstone over `position..end`; `end` rides in the id's first word.
     Clear = 2,
-    /// A record recovery discarded: a torn write in the last batch.
-    Void = 3,
+    /// Names a slot of an earlier batch whose record may be lost without
+    /// refusing the open: a slot a crash tore, or a dead slot whose entry
+    /// is damaged. The fields ride in the position and the id
+    /// ([`Retire`]). (3 was the void record of version 3.)
+    Retire = 4,
 }
 
 impl Kind {
@@ -246,9 +250,53 @@ impl Kind {
         match byte {
             1 => Some(Kind::Put),
             2 => Some(Kind::Clear),
-            3 => Some(Kind::Void),
+            4 => Some(Kind::Retire),
             _ => None,
         }
+    }
+}
+
+/// The slot a retire record names, as its persist record and its entry
+/// carry it: the batch in `position`, and in the id the slot's index
+/// (bytes 0..2), its batch's record count (2..4) and the resume offset
+/// (8..16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Retire {
+    /// The batch of the retired slot.
+    pub batch: u64,
+    /// The slot's index in its batch.
+    pub index: u16,
+    /// Records in that batch, so a batch whose first slot is retired is
+    /// still found when no record of it survives.
+    pub count: u16,
+    /// Where the entry walk of that batch continues after the slot: the
+    /// offset of the next located entry, 0 when none follows.
+    pub resume: u64,
+}
+
+impl Retire {
+    /// The id a retire record carries.
+    pub fn id(&self) -> Id {
+        let mut id = [0; ID_SIZE];
+        id[0..2].copy_from_slice(&self.index.to_le_bytes());
+        id[2..4].copy_from_slice(&self.count.to_le_bytes());
+        id[8..16].copy_from_slice(&self.resume.to_le_bytes());
+        id
+    }
+
+    /// The slot a retire record names; `None` for another kind, or for a
+    /// retire record whose fields cannot name a slot.
+    pub fn of(record: &Record) -> Option<Self> {
+        if record.kind != Kind::Retire {
+            return None;
+        }
+        let retire = Retire {
+            batch: record.position,
+            index: get_u16(&record.id, 0),
+            count: get_u16(&record.id, 2),
+            resume: get_u64(&record.id, 8),
+        };
+        (retire.index < retire.count && retire.batch < record.batch).then_some(retire)
     }
 }
 
@@ -611,6 +659,30 @@ mod tests {
         meta.encode(1, &mut block);
         assert_eq!(Meta::decode(&block, 1), Some(meta));
         assert_eq!(Meta::decode(&block, 0), None, "copy B's bytes in A's place");
+    }
+
+    #[test]
+    fn a_retire_round_trips_through_its_record() {
+        let retire = Retire {
+            batch: 41,
+            index: 2,
+            count: 3,
+            resume: 70_000,
+        };
+        let retiring = Record {
+            kind: Kind::Retire,
+            position: retire.batch,
+            id: retire.id(),
+            len: 0,
+            ..record()
+        };
+        assert_eq!(Retire::of(&retiring), Some(retire));
+        let later = Record {
+            batch: 41,
+            ..retiring
+        };
+        assert_eq!(Retire::of(&later), None, "names its own batch");
+        assert_eq!(Retire::of(&record()), None, "a put names no slot");
     }
 
     #[test]

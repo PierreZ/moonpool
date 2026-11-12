@@ -78,7 +78,8 @@
 //!   format marker) is up to [`META_MAX`] bytes, kept in two local copies.
 //!   [`Journal::peek_meta`] reads it from a closed journal without recovery.
 //! - **Bounded batches.** [`Batch::fits`] and [`Batch::fits_another`] tell
-//!   the caller whether a batch fits one segment of a [`Geometry`], so it can
+//!   the caller whether a batch fits one segment of a [`Geometry`] (each write
+//!   counted with room for one retire record), so it can
 //!   split its writes across commits before [`Journal::commit`] refuses them.
 //! - **Two commit protocols.** [`Durability::Batched`] (one sync) and
 //!   [`Durability::Ordered`] (two syncs), chosen per open.
@@ -202,21 +203,36 @@
 //! | intact | valid | live |
 //! | intact | damaged | live; the record is rebuilt from the entry, and written back before `last` |
 //! | damaged | valid | [`State::Corrupt`], or [`State::Ambiguous`] in a `Batched` last batch |
-//! | damaged | damaged, in an unwitnessed `last` | torn by a crash: discarded |
-//! | damaged | damaged, in a witnessed `last` | [`OpenError::DoubleFault`]: refuse to open |
-//! | damaged | damaged, before `last` | [`OpenError::DoubleFault`]: refuse to open |
+//! | damaged | damaged, named by a retire record | ignored |
+//! | damaged | damaged, in an unwitnessed last batch of its open generation | torn by a crash: discarded and retired |
+//! | damaged | damaged, in a witnessed batch, or before the last of its generation | [`OpenError::DoubleFault`]: refuse to open |
 //!
+//! A **retire record** names a slot of an earlier batch that holds nothing
+//! the caller needs: a slot a crash tore, or the dead slot of a position
+//! that a later batch replaced, cleared or dropped while its entry was known
+//! damaged. Like a tombstone, it has a persist record and an entry, so one
+//! fault on it is rebuilt. It carries the offset where the entry walk goes
+//! on after the slot, so an intact entry behind a retired slot is found
+//! again. An open that finds torn slots starts its new generation without
+//! raising the high-water mark, commits one retire batch for them, and the
+//! mark records that batch once it is durable: a crash anywhere in that
+//! open leaves the slots judged the same way at the next one. A commit that
+//! makes dead a slot whose entry is damaged ([`State::Corrupt`], or a read
+//! that returned [`ReadError::Damaged`]) retires it in the same batch.//!
 //! A batch is **witnessed** when something other than its own two damaged
 //! parts proves it durable: the metainfo's high-water mark records it (a
 //! commit that changed the metainfo records its own batch, and every open
-//! records the last batch it found), or it is an [`Ordered`](Durability::Ordered)
+//! records the last batch it found once nothing in it is left to retire), or
+//! it is an [`Ordered`](Durability::Ordered)
 //! batch with an intact record, whose entries were durable before any
 //! record was written. A crash in the middle of a commit cannot leave a
 //! witnessed batch with a slot whose record and entry are both damaged, so
 //! there that is corruption, not a crash. In a witnessed batch, an entry
 //! that is damaged while its record is valid is [`State::Corrupt`] too.
-//! The one batch that may still be discarded is an acknowledged last batch
-//! that nothing witnesses: its bytes look exactly like a torn commit.
+//! Only the last batch of an open generation can be torn by a crash, because
+//! a failed commit poisons the journal. The one batch that may still be
+//! discarded is an acknowledged last batch that nothing witnesses: its bytes
+//! look exactly like a torn commit.
 //!
 //! A batch missing while later ones exist, or a log that ends before the
 //! batch the metainfo proves durable, is [`OpenError::LostBatch`]. A batch of

@@ -48,7 +48,7 @@ journal.commit(batch).await?;
 | `Journal::rolls` / `Rolls` | How this open's rolls went: onto a recycled segment, or onto a newly allocated one |
 | `Journal::peek_meta` | Read a closed journal's metainfo without recovery, repair or sync; segments with no meta file are `MetaLost`, as for `open` and `create` |
 | `Batch` | What one commit makes durable: `put`, `clear`, `truncate_prefix`, `set_meta` |
-| `Batch::fits` / `Batch::fits_another` | Whether a batch fits one segment, so the caller can split it |
+| `Batch::fits` / `Batch::fits_another` | Whether a batch fits one segment (each write with room for one retire record), so the caller can split it |
 | `JournalConfig` / `Durability` / `Geometry` | One or two syncs per commit; the segment shape; direct I/O |
 | `Id` / `JournalId` | The caller's 24-byte identity per entry; the journal's own identity |
 | `State` / `Recovery` | What a position holds (`Live`, `Corrupt`, `Ambiguous`); what opening found and repaired |
@@ -73,6 +73,14 @@ journal.commit(batch).await?;
   record, refuse the open (`DoubleFault`) instead of discarding an
   acknowledged entry. A batch of a later generation than the metainfo's
   refuses it too (`MetaRolledBack`): the metainfo lost an update.
+- **One fault never refuses an open.** A slot that a crash tore, or a dead
+  slot whose entry is known damaged, is named by a **retire record** in a
+  later batch. A retire record has a persist record and an entry, as a
+  tombstone does, so one fault on it is rebuilt, and it says where the entry
+  walk goes on, so an intact entry behind the slot is found again. The open
+  that retires torn slots raises the high-water mark only once its retire
+  batch is durable. The format is version 4: a segment of version 3 (with
+  void records) is refused.
 - **Two protocols.** `Durability::Batched` is the paper's protocol (`write
   entries; write records; fsync`): one sync, and the last batch's damaged
   entries are `Ambiguous`. `Durability::Ordered` syncs in between: two syncs,
@@ -140,6 +148,9 @@ filesystem.
   witnessed last batch (`DoubleFault`), every record and the first entry of
   a witnessed last batch damaged (`LostBatch`), a metainfo older than the
   log (`MetaRolledBack`), and a rotted record found by `verify_records`;
+- retire records: the probes of #482 and #483 (a repaired position, a record
+  after a torn slot, a fault on a retire record), a crash at each moment of
+  an open that retires torn slots, and a refused version 3 segment;
 - record repair: an open writes back a rebuilt record of an earlier batch,
   a torn repair write leaves each record rebuildable, a block with a damaged
   entry is not written, and `repair_records` repairs the records of
