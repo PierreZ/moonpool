@@ -653,3 +653,67 @@ fn a_lost_directory_entry_lands_only_where_the_shard_can_lose_the_copy() {
         "the last copy the shard needs: the gate keeps the entry"
     );
 }
+
+/// Damage to some bytes of a sector costs only the regions that hold those
+/// bytes: a neighbour region in the same sector keeps its clean copy. The
+/// gate judges the damaged bytes, and the end-of-run copy count judges the
+/// same ones (paros #1036 (sector neighbour counted lost)).
+#[test]
+fn damage_to_part_of_a_sector_spares_its_neighbour_region() {
+    let nodes = ips(3);
+    let mut sim = SimWorld::new_with_seed(13);
+    let book = sim.install_shard_book(ShardFaults::default());
+    moonpool_sim::shard!(
+        "s",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    // Stripes 0 and 1 share sector 0 on every replica.
+    let regions = vec![
+        LayoutRegion {
+            path: "replica".to_string(),
+            bytes: 0..100,
+            kind: "record",
+            stripe: Some(0),
+            shard: Some("s".to_string()),
+        },
+        LayoutRegion {
+            path: "replica".to_string(),
+            bytes: 100..SECTOR,
+            kind: "record",
+            stripe: Some(1),
+            shard: Some("s".to_string()),
+        },
+    ];
+    for ip in &nodes {
+        let regions = regions.clone();
+        local_runtime().block_on(async {
+            run_as(&mut sim, *ip, move |provider| async move {
+                provider.publish_layout(&regions).expect("publish");
+                let file = provider
+                    .open("replica", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open");
+                file.write_at(0, &vec![0x5A; SECTOR_SIZE])
+                    .await
+                    .expect("write");
+                file.sync_all().await.expect("sync");
+            })
+            .await;
+        });
+    }
+    let first = sim.storage_provider(nodes[0]);
+    assert!(first.corrupt_bytes("replica", 120..128).expect("corrupt"));
+    assert_eq!(book.clean_copies("s", 1).len(), 2, "stripe 1 lost a copy");
+    assert_eq!(
+        book.clean_copies("s", 0).len(),
+        3,
+        "stripe 0 shares the sector, not the damaged bytes"
+    );
+    // More damage in the same sector, still outside stripe 0's bytes.
+    assert!(first.corrupt_bytes("replica", 200..204).expect("corrupt"));
+    assert_eq!(book.clean_copies("s", 0).len(), 3);
+    // Damage that reaches stripe 0's bytes costs it the copy.
+    assert!(first.corrupt_bytes("replica", 96..104).expect("corrupt"));
+    assert_eq!(book.clean_copies("s", 0).len(), 2);
+    moonpool_sim::shard::clear_sink();
+}

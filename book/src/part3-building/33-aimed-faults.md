@@ -84,7 +84,7 @@ let record = find_last_record(&image); // the format's own parsing
 ctx.corrupt_bytes(first, "data", record.start..record.start + 3)?;
 ```
 
-The other replicas' files at `"data"` are untouched. `corrupt_bytes` refuses a range past the durable end with `StorageError::OutOfRange`, and a missing file with `NotFound`.
+The other replicas' files at `"data"` are untouched. `corrupt_bytes` refuses a range past the durable end with `StorageError::OutOfRange`, and a missing file with `NotFound`. The damage is exactly those bytes: a record that shares a sector with them but none of the bytes keeps its clean copy, both for the shard gate that judges the fault and for the copy count at the end of the run (`Shards::clean_copies`).
 
 ## Replicated Fault Patterns
 
