@@ -262,9 +262,11 @@ async fn scan_segment<F: LocalStorageFile>(
             _ => None,
         });
         // The batch here: from a valid record that belongs at this
-        // boundary, else from its first entry (every record damaged).
+        // boundary, else from its first entry (every record damaged). A
+        // record can lie before its own place (a misdirected write), so its
+        // index can be above its slot.
         let from_record = match first_valid {
-            Some((j, record)) if j - usize::from(record.index) == at => {
+            Some((j, record)) if j.checked_sub(usize::from(record.index)) == Some(at) => {
                 if record.batch <= last || record.batch < segment.first_batch {
                     return Err(OpenError::LostBatch { batch: last + 1 });
                 }

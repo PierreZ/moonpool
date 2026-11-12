@@ -1222,3 +1222,56 @@ fn a_scrub_finds_a_rotted_record_and_a_new_put_repairs_it() {
         }
     });
 }
+
+/// Where the persist log of a segment starts: after its two header blocks.
+const PERSIST_START: usize = 2 * 4096;
+const BLOCK: usize = 4096;
+
+/// The segment file that holds `position`.
+fn segment_of(journal: &J, position: u64) -> String {
+    journal
+        .layout(position)
+        .expect("a live position")
+        .record
+        .path
+}
+
+/// Read each position of `positions`, each with the payload of
+/// `(position, version, len)`.
+async fn read_all(sim: &mut SimWorld, mut journal: J, positions: &[(u64, u64, usize)]) -> J {
+    for &(position, version, len) in positions {
+        let (back, bytes) = read(sim, journal, position).await;
+        journal = back;
+        assert_eq!(
+            bytes.expect("intact"),
+            payload(position, version, len),
+            "position {position}"
+        );
+    }
+    journal
+}
+
+/// #485: the second persist block of a batch of 70 records written over
+/// the first persist block of the segment. Slot 0 then holds a valid record
+/// with index 64. The open must not compute a batch start below slot 0: it
+/// rebuilds the record of position 0 from its entry, in every build.
+#[test]
+fn a_record_whose_index_is_above_its_slot_is_rebuilt_not_a_panic() {
+    runtime().block_on(async {
+        let mut sim = sim(30);
+        let journal = create(&mut sim, Durability::Ordered).await;
+        let journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        let many: Vec<(u64, u64, usize)> = (100..170).map(|p| (p, 1, 8)).collect();
+        let journal = put(&mut sim, journal, &many).await;
+        let path = segment_of(&journal, 0);
+        drop(journal);
+        let mut bytes = file_bytes(&mut sim, path.clone()).await;
+        let second = PERSIST_START + 2 * BLOCK;
+        bytes.copy_within(second..second + BLOCK, PERSIST_START);
+        put_bytes(&mut sim, path, bytes).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        assert_eq!(recovery.rebuilt, 1, "{recovery:?}");
+        let journal = read_all(&mut sim, journal, &[(0, 1, 100)]).await;
+        read_all(&mut sim, journal, &many).await;
+    });
+}
