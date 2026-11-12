@@ -388,15 +388,22 @@ pub struct PeerPolicy {
     pub inbound_idle_timeout: Duration,
     /// Connection failures to an address must persist this long before the
     /// failure monitor marks the address failed. A disconnect is reported
-    /// immediately either way.
+    /// immediately either way. Two failures further apart than one full
+    /// redial cycle (the longest jittered `max_reconnect_delay`, plus
+    /// `connect_timeout` and `handshake_timeout`, plus this delay) belong to
+    /// different runs: the time is measured from the first failure of the
+    /// current run.
     pub failure_detection_delay: Duration,
     /// Endpoint failures (destroyed endpoints, stale incarnations) the
     /// failure monitor remembers; the oldest is forgotten first. Forgetting
     /// one costs one more round trip, never a wrong answer: the server
     /// still rejects every stale reference.
     pub max_failed_endpoints: usize,
-    /// Addresses the failure monitor tracks; available addresses without a
-    /// live peer are forgotten first.
+    /// Addresses the failure monitor tracks. When the table is full, an
+    /// address nobody watches is forgotten: an available one with no
+    /// failure run first, then the one whose last failure is oldest (not
+    /// failed before failed). Only addresses that a failure-monitor watcher
+    /// holds can take the table above this bound.
     pub max_tracked_addresses: usize,
     /// Whether an accepted session may become this runtime's own
     /// connection to the peer that dialed it (see [`InboundSharing`]).

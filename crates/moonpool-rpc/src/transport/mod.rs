@@ -80,7 +80,7 @@ use crate::endpoint::registry::{Registry, RegistryError};
 use crate::endpoint::{AccessClass, Endpoint, EndpointToken, Incarnation, WellKnownId};
 use crate::error::{CallIdentity, ErrorReason, RpcError};
 use crate::failure::watch::Watch;
-use crate::failure::{MonitorState, PermanentFailure};
+use crate::failure::{FailureWindow, MonitorState, PermanentFailure};
 use crate::interface::{InterfaceId, RpcInterface, ServiceGroup, ServiceRef};
 use crate::protocol::{
     MethodId, PROTOCOL_MAGIC, RpcMethod, SchemaVersion, WireError, WireMessage, encode_frame,
@@ -353,6 +353,7 @@ impl<P: RpcProviders> Shared<P> {
                 monitor: MonitorState::new(
                     config.peer.max_failed_endpoints,
                     config.peer.max_tracked_addresses,
+                    FailureWindow::of(&config),
                 ),
             }),
             config,
@@ -404,8 +405,13 @@ impl<P: RpcProviders> Shared<P> {
     }
 
     /// A failure-monitor watcher of `address` starts or stops.
+    /// A new watcher of a failing address with no connection probes it at
+    /// once (see [`probe`](Self::probe)).
     pub(crate) fn reference(&self, address: SocketAddr, add: bool) {
         self.lock().monitor.reference(address, add);
+        if add {
+            self.probe(address);
+        }
     }
 
     /// Whether a graceful shutdown began: nothing new may start.

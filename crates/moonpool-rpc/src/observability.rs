@@ -104,6 +104,8 @@ impl MetricsSource for RpcMetrics {
             counter("calls_started", stats.calls_started),
             counter("reliable_calls_started", stats.reliable_calls_started),
             counter("retransmissions", stats.retransmissions),
+            counter("probes", stats.probes),
+            counter("probes_deferred", stats.probes_deferred),
             counter("calls_abandoned", stats.calls_abandoned),
             counter("calls_failed_fast", stats.calls_failed_fast),
             counter("calls_ended_by_shutdown", stats.calls_ended_by_shutdown),

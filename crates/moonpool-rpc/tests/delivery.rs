@@ -696,6 +696,149 @@ async fn idle_connections_close_and_calls_reconnect() {
     client_driver.abort();
 }
 
+/// A peer that closed an idle session cleanly leaves no failure behind:
+/// one connect failure long after it does not mark the address failed
+/// (#463). Failures that persist still do, and a watcher that starts after
+/// the last connection ended probes the address, so its verdict follows
+/// the peer when it comes back (#477).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_clean_close_is_no_failure_and_watchers_probe() {
+    let mut server_config = fast();
+    server_config.peer.ping_interval = Duration::from_millis(50);
+    server_config.peer.inbound_idle_timeout = Duration::from_millis(150);
+    let (server, server_driver) = listen(server_config).await;
+    let (service, stream) = server
+        .register::<Echo>(AccessClass::Public)
+        .expect("register");
+    let _handler = serve_echo(stream);
+    let address = service.endpoint().address();
+    let (client, client_driver) = client_with!(fast(), moonpool_rpc::Plaintext);
+    let echo = service.bind(&client);
+    echo.try_get_reply(&Ping { id: 1 }).await.expect("first");
+    // The server closes the idle session; the client sees a clean end.
+    assert!(
+        eventually(|| client.stats().is_some_and(|stats| stats.connections == 0)).await,
+        "{:?}",
+        client.stats()
+    );
+    let monitor = client.failure_monitor().expect("running");
+    // Longer than the detection delay, with no traffic.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    server_driver.abort();
+    let _ = server_driver.await;
+    drop(server);
+    let single = echo.try_get_reply(&Ping { id: 2 }).await;
+    assert!(
+        matches!(outcome(&single), Some((ErrorReason::ConnectFailed(_), _))),
+        "{single:?}"
+    );
+    assert_eq!(
+        monitor.address_state(address),
+        AddressState::Available,
+        "one connect failure after a clean close is not a sustained failure"
+    );
+
+    // The peer stays down. The watcher starts after the last connection
+    // ended: it probes, and the failure is reported after the delay.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        monitor.on_failed_for(service.endpoint(), Duration::ZERO, 0.0),
+    )
+    .await
+    .expect("a persistent failure is reported")
+    .expect("runtime alive");
+    assert_eq!(monitor.address_state(address), AddressState::Failed);
+    assert!(client.stats().expect("running").probes >= 1);
+
+    // The watcher is gone: the last probe ends and nothing dials again.
+    assert!(
+        eventually(|| client.stats().is_some_and(|stats| stats.connections == 0)).await,
+        "{:?}",
+        client.stats()
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let dials = client.stats().expect("running").dials;
+
+    // The peer comes back while the address is failed and has no
+    // connection. A new watcher probes it, so the verdict changes and the
+    // wait for a sustained failure does not end.
+    let Ok((back, back_driver)) =
+        RpcDriver::listen(TokioProviders::new(), &address.to_string(), fast())
+            .await
+            .map(|(driver, rpc)| (rpc, tokio::spawn(driver.run())))
+    else {
+        eprintln!("could not rebind {address}; skipping the recovery half");
+        client_driver.abort();
+        return;
+    };
+    // Without a watcher, nothing dials: the verdict stays.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(client.stats().expect("running").dials, dials);
+    assert_eq!(monitor.address_state(address), AddressState::Failed);
+    let waited = tokio::time::timeout(
+        Duration::from_secs(2),
+        monitor.on_failed_for(service.endpoint(), Duration::from_millis(500), 0.0),
+    )
+    .await;
+    assert!(waited.is_err(), "a false sustained failure: {waited:?}");
+    assert_eq!(monitor.address_state(address), AddressState::Available);
+    assert!(client.stats().expect("running").dials > dials);
+    drop(back);
+    back_driver.abort();
+    client_driver.abort();
+}
+
+/// A probe that finds no free connection slot waits for one: the end of
+/// the next connection starts it, so the watcher still gets its verdict
+/// (#477).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_probe_without_a_free_slot_starts_when_one_frees() {
+    let mut held = held_server(1).await;
+    let failing = held.service.endpoint();
+    let (echo_server, echo_driver) = listen(fast()).await;
+    let (service, stream) = echo_server
+        .register::<Echo>(AccessClass::Public)
+        .expect("register");
+    let _handler = serve_echo(stream);
+    let mut config = fast();
+    config.max_connections = 1;
+    config.peer.idle_timeout = Duration::from_millis(300);
+    let (client, client_driver) = client_with!(config, moonpool_rpc::Plaintext);
+
+    // A call in flight when the server dies: the address starts failing.
+    let call = {
+        let held_ref = held.service.bind(&client);
+        tokio::spawn(async move { held_ref.try_get_reply(&Ping { id: 1 }).await })
+    };
+    held.executed.recv().await.expect("executed");
+    held.driver.abort();
+    let _ = (&mut held.driver).await;
+    let _ = call.await.expect("call task");
+    let monitor = client.failure_monitor().expect("running");
+    assert_eq!(
+        monitor.address_state(failing.address()),
+        AddressState::Available
+    );
+
+    // The only connection slot now holds an idle session to another peer.
+    service
+        .bind(&client)
+        .try_get_reply(&Ping { id: 2 })
+        .await
+        .expect("other peer answers");
+    let failed = monitor.on_failed_for(failing, Duration::ZERO, 0.0);
+    tokio::time::timeout(Duration::from_secs(5), failed)
+        .await
+        .expect("the deferred probe ran and the failure was reported")
+        .expect("runtime alive");
+    let stats = client.stats().expect("running");
+    assert!(stats.probes_deferred >= 1, "{stats:?}");
+    assert!(stats.probes >= 1, "{stats:?}");
+    drop(held.rpc);
+    echo_driver.abort();
+    client_driver.abort();
+}
+
 /// A resolver whose answers the test edits.
 #[derive(Clone, Default)]
 struct TableResolver {
