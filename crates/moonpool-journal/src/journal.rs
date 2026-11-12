@@ -280,6 +280,42 @@ async fn list_segments<P: LocalStorageProvider>(
     Ok(Some(Listing { firsts, spares }))
 }
 
+/// Whether `dir` holds a segment, read only: no sync, no delete. `false`
+/// when `dir` does not exist.
+async fn holds_segments<P: LocalStorageProvider>(provider: &P, dir: &str) -> std::io::Result<bool> {
+    match provider.list_dir(dir).await {
+        Ok(names) => Ok(names.iter().any(|name| parse_segment_name(name).is_some())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Make `dir`, which holds no meta file, ready for a new journal. A segment
+/// is a journal that lost its metainfo: [`OpenError::MetaLost`]. A spare or
+/// a segment that a crashed creation left is deleted: its old batches can
+/// carry a later open generation than the new journal, and a roll onto it
+/// would read them as evidence.
+async fn clear_for_create<P: LocalStorageProvider>(
+    provider: &P,
+    dir: &str,
+) -> Result<(), OpenError> {
+    let names = provider.list_dir(dir).await?;
+    if names.iter().any(|name| parse_segment_name(name).is_some()) {
+        return Err(OpenError::MetaLost);
+    }
+    let mut removed = false;
+    for name in names {
+        if is_spare(&name) || is_segment_leftover(&name) {
+            delete_if_present(provider, &format!("{dir}/{name}")).await?;
+            removed = true;
+        }
+    }
+    if removed {
+        provider.sync_dir(dir).await?;
+    }
+    Ok(())
+}
+
 /// Keep one whole spare of `spares` and delete the others (with their
 /// count). A spare is never evidence: no batch is written to it before it
 /// is renamed to a segment, so deleting one loses nothing. Kept, its old
@@ -378,8 +414,15 @@ async fn begin_generation<F: moonpool_core::LocalStorageFile>(
 impl<P: LocalStorageProvider> Journal<P> {
     /// Create a journal in `dir` with the caller's first metainfo.
     ///
+    /// A directory with segments and no meta file is a journal that lost
+    /// its metainfo, not an empty one: `create` refuses it, as
+    /// [`Journal::open`] does. A spare or a file that a crashed creation
+    /// left is not a journal: `create` deletes it.
+    ///
     /// # Errors
-    /// [`OpenError::AlreadyExists`] if `dir` holds a journal; any I/O error.
+    /// [`OpenError::AlreadyExists`] if `dir` holds a meta file;
+    /// [`OpenError::MetaLost`] if `dir` holds segments and no meta file; any
+    /// I/O error.
     pub async fn create(
         provider: P,
         dir: &str,
@@ -398,6 +441,7 @@ impl<P: LocalStorageProvider> Journal<P> {
         if provider.exists(&format!("{dir}/{META_NAME}")).await? {
             return Err(OpenError::AlreadyExists);
         }
+        clear_for_create(&provider, dir).await?;
         let first = Meta {
             seq: 1,
             journal: id,
@@ -553,19 +597,23 @@ impl<P: LocalStorageProvider> Journal<P> {
 
     /// The caller's metainfo of the journal in `dir`, read without opening
     /// it: no recovery, no repair, no sync, nothing created, so a probe never
-    /// changes what the next open finds. `Ok(None)` where there is no journal.
+    /// changes what the next open finds. `Ok(None)` where there is no journal:
+    /// no meta file and no segment.
     ///
     /// # Errors
-    /// [`OpenError::MetaLost`] when no copy is valid,
-    /// [`OpenError::WrongJournal`], or the provider's error.
+    /// [`OpenError::MetaLost`] when no copy is valid, or when the directory
+    /// holds segments and no meta file (the verdict of [`Journal::open`]);
+    /// [`OpenError::WrongJournal`]; or the provider's error.
     pub async fn peek_meta(
         provider: &P,
         dir: &str,
         id: JournalId,
     ) -> Result<Option<Vec<u8>>, OpenError> {
-        Ok(MetaFile::<P::File>::peek(provider, dir, id)
-            .await?
-            .map(|meta| meta.bytes))
+        match MetaFile::<P::File>::peek(provider, dir, id).await? {
+            Some(meta) => Ok(Some(meta.bytes)),
+            None if holds_segments(provider, dir).await? => Err(OpenError::MetaLost),
+            None => Ok(None),
+        }
     }
 
     // ---- what the journal knows, from memory ----

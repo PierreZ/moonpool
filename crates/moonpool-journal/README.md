@@ -46,7 +46,7 @@ journal.commit(batch).await?;
 |---|---|
 | `Journal<P>` | `create`, `open` (recover), `commit`, `read`, `replay`, over any `LocalStorageProvider` (every `StorageProvider` is one); `Send` when `P` is |
 | `Journal::rolls` / `Rolls` | How this open's rolls went: onto a recycled segment, or onto a newly allocated one |
-| `Journal::peek_meta` | Read a closed journal's metainfo without recovery, repair or sync |
+| `Journal::peek_meta` | Read a closed journal's metainfo without recovery, repair or sync; segments with no meta file are `MetaLost`, as for `open` and `create` |
 | `Batch` | What one commit makes durable: `put`, `clear`, `truncate_prefix`, `set_meta` |
 | `Batch::fits` / `Batch::fits_another` | Whether a batch fits one segment, so the caller can split it |
 | `JournalConfig` / `Durability` / `Geometry` | One or two syncs per commit; the segment shape; direct I/O |
