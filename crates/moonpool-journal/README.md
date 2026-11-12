@@ -53,6 +53,7 @@ journal.commit(batch).await?;
 | `Id` / `JournalId` | The caller's 24-byte identity per entry; the journal's own identity |
 | `State` / `Recovery` | What a position holds (`Live`, `Corrupt`, `Ambiguous`); what opening found and repaired |
 | `Journal::verify_records` | Read a range's persist records from disk and name the positions whose record rotted since the open, for a caller's scrub |
+| `Journal::repair_records` / `RecordRepair` | Write back each persist record that is damaged while its entry is intact (tombstones and replaced positions too); each open does it for the batches before the last |
 | `Journal::layout` / `Journal::regions` / `Layout` | Byte ranges of records, entries, metainfo and headers, for aiming faults |
 | `OpenError` / `CommitError` / `ReadError` / `Durable` | Operating errors versus evidence of damage |
 
@@ -106,8 +107,10 @@ No snapshots and no compaction.
 `<dir>/meta` holds the metainfo: copy A at block 0, copy B at block 16. Each
 `<dir>/seg-<first batch>.wal` is allocated whole: two header copies, a
 persist log of 64-byte records, a guard gap, and an entry log. Every batch
-starts on a fresh 4 KiB block in both logs, so no write touches a sector that
-holds acknowledged data.
+starts on a fresh 4 KiB block in both logs, so a commit never touches a sector
+that holds acknowledged data. A record repair is the one exception: it writes
+a persist block again only when the entry of each record in it is intact, so a
+crash that tears the write leaves each record rebuildable from its entry.
 
 `<dir>/spare-<generation>-<n>.wal` is a dead segment's file, renamed and kept
 for the next roll. A roll writes and syncs its headers, renames it to its
@@ -137,12 +140,16 @@ filesystem.
   witnessed last batch (`DoubleFault`), every record and the first entry of
   a witnessed last batch damaged (`LostBatch`), a metainfo older than the
   log (`MetaRolledBack`), and a rotted record found by `verify_records`;
+- record repair: an open writes back a rebuilt record of an earlier batch,
+  a torn repair write leaves each record rebuildable, a block with a damaged
+  entry is not written, and `repair_records` repairs the records of
+  tombstones and replaced positions;
 - lost batches and lost segments;
 - crash loops under two fault models (the paper's sector-atomic model, and
   moonpool's full model with lost, latent and shorn sectors), for each
   durability mode and for a mode drawn again every round, with crashes
-  inside recovery, floor raises that recycle segments, and rolls onto
-  recycled segments.
+  inside recovery, floor raises that recycle segments, rolls onto
+  recycled segments, and scrubs (`repair_records`) cut by a crash.
 
 `JOURNAL_CRASH_SEEDS` raises the seed count. `JOURNAL_CRASH_SEED` replays one
 seed.

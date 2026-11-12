@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
+use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{Batch, Durability, Id, Journal, OpenError, ReadError};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 
@@ -42,6 +43,12 @@ pub(crate) struct Tally {
     /// Seeds whose first segment no longer starts at batch 1.
     pub prefix_dropped: usize,
     pub crashed_opens: usize,
+    /// Persist blocks written again by an open or a scrub.
+    pub blocks_repaired: u32,
+    /// Scrubs (`Journal::repair_records`) that finished.
+    pub scrubs: usize,
+    /// Persist records rotted out of band between rounds.
+    pub records_rotted: u32,
 }
 
 /// A tiny deterministic generator.
@@ -91,6 +98,9 @@ struct Ledger {
     commits: usize,
     /// Rolls onto a recycled spare, over every open.
     onto_spare: u64,
+    /// Scrubs that finished, and the blocks they wrote again.
+    scrubs: usize,
+    blocks_repaired: u32,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -101,6 +111,9 @@ struct Pending {
     clears: Vec<Range<u64>>,
     floor: Option<u64>,
     meta: Option<Vec<u8>>,
+    /// Run a scrub of the persist records once the batch is acknowledged:
+    /// a crash may then tear a repair write.
+    scrub: bool,
 }
 
 impl Ledger {
@@ -139,6 +152,9 @@ pub(crate) fn crash_loop(
 ) {
     runtime().block_on(async {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        // Its own stream, so the scrubs leave each seed's batches as they
+        // were.
+        let mut scrubs = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
         let mut sim = SimWorld::new_with_seed(seed);
         sim.set_storage_config(storage(model, &mut rng));
         let ledger: Shared = Arc::new(Mutex::new(Ledger {
@@ -155,6 +171,13 @@ pub(crate) fn crash_loop(
                 }
             });
             let at = format!("{model:?} {durability:?} seed {seed} round {round}");
+            // Sometimes one persist record rots while the node is down: one
+            // fault, which the open rebuilds from its entry and, before the
+            // last batch, writes back (a crash inside the open may tear that
+            // write).
+            if round > 0 && scrubs.below(4) == 0 {
+                tally.records_rotted += u32::from(rot_a_record(&mut sim, &mut scrubs).await);
+            }
             // Sometimes the crash lands inside recovery itself: while it
             // voids torn records, repairs a metainfo copy, deletes segments.
             if round > 0 && rng.below(4) == 0 {
@@ -184,7 +207,9 @@ pub(crate) fn crash_loop(
             let mut plan = Vec::new();
             for _ in 0..ops {
                 version += 1;
-                plan.push(random_batch(&mut rng, &ledger, version));
+                let mut pending = random_batch(&mut rng, &ledger, version);
+                pending.scrub = scrubs.below(16) == 0;
+                plan.push(pending);
             }
             for pending in &mut plan {
                 pending.batched = durability == Durability::Batched;
@@ -215,6 +240,8 @@ pub(crate) fn crash_loop(
         }
         tally.commits += ledger.lock().expect("ledger").commits;
         tally.onto_spare += ledger.lock().expect("ledger").onto_spare;
+        tally.scrubs += ledger.lock().expect("ledger").scrubs;
+        tally.blocks_repaired += ledger.lock().expect("ledger").blocks_repaired;
         let names = run(&mut sim, |provider| async move {
             moonpool_core::StorageProvider::list_dir(&provider, DIR).await
         })
@@ -226,6 +253,55 @@ pub(crate) fn crash_loop(
             tally.prefix_dropped += 1;
         }
     });
+}
+
+/// Flip one byte of one `Put` or `Clear` persist record of a random
+/// segment, durably. Never a void record: one fault on a void refuses the
+/// open (#483). Returns whether a record was found.
+async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
+    let pick = rng.below(u64::MAX);
+    run(sim, move |provider| async move {
+        let mut names: Vec<String> = provider
+            .list_dir(DIR)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| name.starts_with("seg-") && name.ends_with(".wal"))
+            .collect();
+        if names.is_empty() {
+            return false;
+        }
+        names.sort();
+        let name = &names[usize::try_from(pick % names.len() as u64).expect("small")];
+        let path = format!("{DIR}/{name}");
+        let geometry = config(Durability::Ordered).geometry;
+        let start = 2 * 4096_u64;
+        let len = u64::from(geometry.persist_blocks) * 4096;
+        let Ok(file) = provider.open(&path, OpenOptions::read_write()).await else {
+            return false;
+        };
+        let mut log = vec![0u8; usize::try_from(len).expect("small")];
+        if file.read_at(start, &mut log).await.is_err() {
+            return false;
+        }
+        let records: Vec<u64> = (0..len / 64)
+            .filter(|&slot| matches!(log[usize::try_from(slot * 64).expect("small")], 1 | 2))
+            .collect();
+        if records.is_empty() {
+            return false;
+        }
+        let slot = records[usize::try_from((pick >> 20) % records.len() as u64).expect("small")];
+        let at = start + slot * 64 + 20;
+        let mut byte = [0u8; 1];
+        let flipped = async {
+            file.read_at(at, &mut byte).await?;
+            byte[0] ^= 0x10;
+            file.write_at(at, &byte).await?;
+            file.sync_all().await
+        };
+        flipped.await.is_ok()
+    })
+    .await
 }
 
 fn random_batch(rng: &mut Rng, ledger: &Shared, version: u64) -> Pending {
@@ -291,9 +367,23 @@ async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
         if outcome.is_err() {
             return;
         }
-        let mut ledger = ledger.lock().expect("ledger");
-        ledger.pending = None;
-        ledger.ack(pending);
+        let scrub = pending.scrub;
+        {
+            let mut ledger = ledger.lock().expect("ledger");
+            ledger.pending = None;
+            ledger.ack(pending);
+        }
+        if scrub {
+            // A scrub writes no data: whatever it hits, the ledger stands.
+            match journal.repair_records().await {
+                Ok(repair) => {
+                    let mut ledger = ledger.lock().expect("ledger");
+                    ledger.scrubs += 1;
+                    ledger.blocks_repaired += repair.blocks_written;
+                }
+                Err(_) => return,
+            }
+        }
     }
 }
 
@@ -331,6 +421,7 @@ async fn recover(
         }
         tally.torn += recovery.torn;
         tally.rebuilt += recovery.rebuilt;
+        tally.blocks_repaired += recovery.repair.blocks_written;
         tally.ambiguous += recovery.ambiguous.len();
         tally.meta_repaired += usize::from(recovery.meta_repaired);
         tally.segments_removed += recovery.segments_removed;
