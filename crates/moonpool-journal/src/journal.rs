@@ -1,15 +1,16 @@
 //! [`Journal`]: create, open, commit, read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeBounds;
+use std::sync::Mutex;
 
 use moonpool_core::{AlignedBuf, DirectIo, LayoutRegion, LocalStorageFile, LocalStorageProvider};
 
 use crate::batch::{Batch, Write};
 use crate::format::{
-    BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, META_COPY_B_AT, META_MAX,
-    Meta, RECORD_SIZE, Record, SegmentHeader, Slot, align_up, clear_id, entry_crc, first_batch_of,
-    generation_of, journal_tag, u64_of, usize_of,
+    BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, MAX_BATCH_RECORDS,
+    META_COPY_B_AT, META_MAX, Meta, RECORD_SIZE, Record, Retire, SegmentHeader, Slot, align_up,
+    clear_id, entry_crc, first_batch_of, generation_of, journal_tag, u64_of, usize_of,
 };
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
@@ -102,8 +103,10 @@ pub struct Recovery {
     pub corrupt: Vec<(u64, Id)>,
     /// The last batch's damaged entries of a [`Durability::Batched`] commit.
     pub ambiguous: Vec<(u64, Id)>,
-    /// Records of the last batch torn by a crash and discarded: both the
-    /// record and its entry damaged.
+    /// Slots of the last batch of an open generation torn by a crash and
+    /// discarded: both the record and its entry damaged. The open names
+    /// each one in a retire record of a new batch, so a later fault on
+    /// what is left of the slot never refuses an open.
     pub torn: u32,
     /// Persist records rebuilt from their intact entries.
     pub rebuilt: u32,
@@ -194,8 +197,12 @@ pub struct Journal<P: LocalStorageProvider> {
     /// The last batch in the log (0: none).
     last_batch: u64,
     /// The batch whose damaged entries are still ambiguous: the last one at
-    /// open, until the next batch commits.
+    /// open, until the caller's next batch commits.
     ambiguous_batch: Option<u64>,
+    /// Slots `(batch, index)` whose entry a read or a replay found damaged.
+    /// A batch that replaces, clears or drops such a position retires the
+    /// slot, as it does a slot the open found damaged.
+    seen_damaged: Mutex<BTreeSet<(u64, u16)>>,
     /// This open's generation: the high bits of every batch it writes.
     generation: u32,
     poisoned: bool,
@@ -391,6 +398,33 @@ async fn delete_if_present<P: LocalStorageProvider>(
     }
 }
 
+/// Open every segment of `firsts`, in order; with the count of header
+/// copies repaired.
+async fn open_segments<P: LocalStorageProvider>(
+    provider: &P,
+    dir: &str,
+    firsts: &[(u64, String)],
+    (id, config): (JournalId, &JournalConfig),
+) -> Result<(Vec<Segment<P::File>>, u32), OpenError> {
+    let mut segments = Vec::with_capacity(firsts.len());
+    let mut repaired = 0;
+    for (first, name) in firsts {
+        let (segment, header_repaired) = Segment::open(
+            provider,
+            dir,
+            name,
+            *first,
+            id,
+            config.geometry,
+            config.direct_io,
+        )
+        .await?;
+        repaired += u32::from(header_repaired);
+        segments.push(segment);
+    }
+    Ok((segments, repaired))
+}
+
 /// Write persist blocks again: the last batch's verdicts and the repaired
 /// blocks of earlier batches, in order, each durable before the next.
 async fn write_persist<F: moonpool_core::LocalStorageFile>(
@@ -417,10 +451,17 @@ async fn write_persist<F: moonpool_core::LocalStorageFile>(
 /// Make what this open found the log from now on: a new generation, durable
 /// in both metainfo copies before any write, so whatever lies beyond the end
 /// and was invisible here can never come back as evidence.
+///
+/// The high-water mark moves up to `last_batch` only when `raise_mark`:
+/// not while the last batch has torn slots that no durable retire record
+/// names yet, because a slot at or below the mark whose record and entry
+/// are both damaged is corruption. The retire batch's own commit then
+/// records itself as the mark, once it is durable.
 async fn begin_generation<F: moonpool_core::LocalStorageFile>(
     meta_file: &MetaFile<F>,
     meta: Meta,
     last_batch: u64,
+    raise_mark: bool,
 ) -> Result<Meta, OpenError> {
     let generation = meta
         .open_generation
@@ -428,7 +469,11 @@ async fn begin_generation<F: moonpool_core::LocalStorageFile>(
         .ok_or(OpenError::InvalidConfig("open generations exhausted"))?;
     let meta = Meta {
         seq: meta.seq + 1,
-        last_batch,
+        last_batch: if raise_mark {
+            last_batch
+        } else {
+            meta.last_batch
+        },
         open_generation: generation,
         open_last: last_batch,
         ..meta
@@ -491,6 +536,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             index: BTreeMap::new(),
             last_batch: 0,
             ambiguous_batch: None,
+            seen_damaged: Mutex::default(),
             generation: 1,
             poisoned: false,
             layout_shard: None,
@@ -544,21 +590,9 @@ impl<P: LocalStorageProvider> Journal<P> {
             spare_kept: spare.is_some(),
             ..Recovery::default()
         };
-        let mut segments = Vec::with_capacity(firsts.len());
-        for (first, name) in &firsts {
-            let (segment, repaired) = Segment::open(
-                &provider,
-                dir,
-                name,
-                *first,
-                id,
-                config.geometry,
-                config.direct_io,
-            )
-            .await?;
-            recovery.headers_repaired += u32::from(repaired);
-            segments.push(segment);
-        }
+        let (mut segments, headers_repaired) =
+            open_segments(&provider, dir, &firsts, (id, &config)).await?;
+        recovery.headers_repaired = headers_repaired;
 
         let tag = journal_tag(id);
         let known = Known {
@@ -582,12 +616,13 @@ impl<P: LocalStorageProvider> Journal<P> {
             segment.sync().await?;
         }
         meta_file.sync().await?;
-        let meta = begin_generation(&meta_file, meta, scanned.last_batch).await?;
+        let torn = std::mem::take(&mut scanned.torn);
+        let meta = begin_generation(&meta_file, meta, scanned.last_batch, torn.is_empty()).await?;
         let generation = meta.open_generation;
 
         recovery.corrupt = scanned.corrupt;
         recovery.ambiguous = scanned.ambiguous;
-        recovery.torn = scanned.voided;
+        recovery.torn = u32::try_from(torn.len()).unwrap_or(u32::MAX);
         recovery.rebuilt = scanned.rebuilt;
         recovery.repair = scanned.repair;
         let ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(scanned.last_batch);
@@ -603,6 +638,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             index: BTreeMap::new(),
             last_batch: scanned.last_batch,
             ambiguous_batch,
+            seen_damaged: Mutex::default(),
             generation,
             poisoned: false,
             layout_shard: None,
@@ -616,6 +652,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         }
         journal.drop_below_floor();
         recovery.segments_removed = journal.remove_dead_segments().await?;
+        if !torn.is_empty() {
+            journal.commit_retires(torn).await?;
+        }
         journal.assert_invariants();
         Ok(Some((journal, recovery)))
     }
@@ -895,6 +934,10 @@ impl<P: LocalStorageProvider> Journal<P> {
                 && entry_crc(&bytes[..RECORD_SIZE], &bytes[RECORD_SIZE..]) == stored
         });
         if !intact {
+            self.seen_damaged
+                .lock()
+                .expect("a lock poisoned: a prior holder panicked")
+                .insert((at.batch, at.index));
             return Err(ReadError::Damaged {
                 position,
                 id: at.id,
@@ -1045,6 +1088,73 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// failure poisons the journal ([`CommitError::Io`] says whether the
     /// batch may be durable anyway).
     pub async fn commit(&mut self, batch: Batch) -> Result<(), CommitError> {
+        self.commit_with(batch, Vec::new()).await
+    }
+
+    /// The retire batch of an open: one retire record for each slot the
+    /// scan found torn, with a metainfo write, so the mark records the
+    /// batch once it is durable. The caller's ambiguous entries stay
+    /// ambiguous: this is not the caller's batch.
+    async fn commit_retires(&mut self, torn: Vec<Retire>) -> Result<(), OpenError> {
+        let ambiguous_batch = self.ambiguous_batch;
+        let mut batch = Batch::new();
+        batch.set_meta(self.meta.bytes.clone());
+        self.commit_with(batch, torn)
+            .await
+            .map_err(|error| match error {
+                CommitError::Io { error, .. } => OpenError::Io(error),
+                other => OpenError::Io(std::io::Error::other(other.to_string())),
+            })?;
+        self.ambiguous_batch = ambiguous_batch;
+        Ok(())
+    }
+
+    /// The slots this batch makes dead whose entry is known damaged: the
+    /// old slot of each position it replaces, clears, or drops below
+    /// `floor`. Each gets a retire record in the batch, so a later fault on
+    /// its record never refuses an open.
+    fn retires_for(&self, batch: &Batch, floor: u64) -> Vec<Retire> {
+        let seen = self
+            .seen_damaged
+            .lock()
+            .expect("a lock poisoned: a prior holder panicked");
+        let mut retires = BTreeMap::new();
+        let mut consider = |at: &Located| {
+            if at.damaged || seen.contains(&(at.batch, at.index)) {
+                let follows = at.index + 1 < at.count;
+                let resume = u64::from(at.offset) + EntryHeader::footprint(at.len);
+                retires.insert(
+                    (at.batch, at.index),
+                    Retire {
+                        batch: at.batch,
+                        index: at.index,
+                        count: at.count,
+                        resume: if follows { resume } else { 0 },
+                    },
+                );
+            }
+        };
+        for write in &batch.writes {
+            match write {
+                Write::Put { position, .. } => {
+                    if let Some(at) = self.index.get(position) {
+                        consider(at);
+                    }
+                }
+                Write::Clear { start, end } => {
+                    self.index
+                        .range(*start..*end)
+                        .for_each(|(_, at)| consider(at));
+                }
+            }
+        }
+        self.index.range(..floor).for_each(|(_, at)| consider(at));
+        retires.into_values().collect()
+    }
+
+    /// The floor after `batch`, once it is checked: everything a commit
+    /// refuses before it writes.
+    fn check(&self, batch: &Batch) -> Result<u64, CommitError> {
         if self.poisoned {
             return Err(CommitError::Poisoned);
         }
@@ -1069,6 +1179,22 @@ impl<P: LocalStorageProvider> Journal<P> {
         if !batch.fits(self.config.geometry) {
             return Err(CommitError::BatchTooLarge);
         }
+        Ok(floor)
+    }
+
+    async fn commit_with(
+        &mut self,
+        batch: Batch,
+        mut retires: Vec<Retire>,
+    ) -> Result<(), CommitError> {
+        let floor = self.check(&batch)?;
+        retires.extend(self.retires_for(&batch, floor));
+        // `fits` counts one retire record for each write; a clear or a floor
+        // may retire more. A retire that does not fit is left out: its slot
+        // stays as it was, one fault from a refused open.
+        while !batch.fits_exactly(self.config.geometry, retires.len()) {
+            retires.pop();
+        }
         let meta_changes = batch.meta.is_some() || floor != self.meta.floor;
         let mut next_meta = Meta {
             seq: self.meta.seq + 1,
@@ -1080,7 +1206,7 @@ impl<P: LocalStorageProvider> Journal<P> {
                 .unwrap_or_else(|| self.meta.bytes.clone()),
             ..self.meta.clone()
         };
-        if batch.writes.is_empty() {
+        if batch.writes.is_empty() && retires.is_empty() {
             if meta_changes {
                 self.write_meta_only(&next_meta).await?;
                 self.meta = next_meta;
@@ -1088,7 +1214,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             }
             return Ok(());
         }
-        let mut prepared = self.prepare(&batch)?;
+        let mut prepared = self.prepare(&batch, &retires)?;
         // The metainfo lands only once the batch is durable, so it records
         // the batch itself as the high-water mark.
         next_meta.last_batch = prepared.seq;
@@ -1176,14 +1302,40 @@ impl<P: LocalStorageProvider> Journal<P> {
         self.rolls
     }
 
-    fn prepare(&self, batch: &Batch) -> Result<Prepared, CommitError> {
+    fn prepare(&self, batch: &Batch, retires: &[Retire]) -> Result<Prepared, CommitError> {
         let seq = if generation_of(self.last_batch) == u64::from(self.generation) {
             self.last_batch + 1
         } else {
             first_batch_of(u64::from(self.generation))
         };
         assert!(seq > self.last_batch, "batch numbers only grow");
-        let count = u16::try_from(batch.writes.len()).map_err(|_| CommitError::BatchTooLarge)?;
+        assert!(
+            retires.iter().all(|retire| retire.batch < seq),
+            "a retire record comes after its slot"
+        );
+        // The caller's writes, then one retire record for each slot.
+        let writes: Vec<(Kind, u64, Id, &[u8])> = batch
+            .writes
+            .iter()
+            .map(|write| match write {
+                Write::Put {
+                    position,
+                    id,
+                    payload,
+                } => (Kind::Put, *position, *id, payload.as_slice()),
+                Write::Clear { start, end } => (Kind::Clear, *start, clear_id(*end), &[][..]),
+            })
+            .chain(
+                retires
+                    .iter()
+                    .map(|retire| (Kind::Retire, retire.batch, retire.id(), &[][..])),
+            )
+            .collect();
+        assert!(
+            writes.len() <= MAX_BATCH_RECORDS,
+            "a batch that fits counts its retires"
+        );
+        let count = u16::try_from(writes.len()).map_err(|_| CommitError::BatchTooLarge)?;
         let flags = match self.config.durability {
             Durability::Ordered => FLAG_ORDERED,
             Durability::Batched => 0,
@@ -1194,26 +1346,14 @@ impl<P: LocalStorageProvider> Journal<P> {
         // kernel: sized first (`Batch::fits` bounded it), so it is
         // allocated once, zeroed padding included, and never copied.
         let mut footprint = 0_u64;
-        for write in &batch.writes {
-            let len = match write {
-                Write::Put { payload, .. } => payload.len(),
-                Write::Clear { .. } => 0,
-            };
-            let len = u32::try_from(len).map_err(|_| CommitError::BatchTooLarge)?;
+        for (_, _, _, payload) in &writes {
+            let len = u32::try_from(payload.len()).map_err(|_| CommitError::BatchTooLarge)?;
             footprint += EntryHeader::footprint(len);
         }
         let mut entries = block_buf(usize_of(align_up(footprint, BLOCK_U64)));
         let mut start = 0;
-        let mut decoded = Vec::with_capacity(batch.writes.len());
-        for (index, write) in (0u16..).zip(&batch.writes) {
-            let (kind, position, id, payload): (Kind, u64, Id, &[u8]) = match write {
-                Write::Put {
-                    position,
-                    id,
-                    payload,
-                } => (Kind::Put, *position, *id, payload),
-                Write::Clear { start, end } => (Kind::Clear, *start, clear_id(*end), &[]),
-            };
+        let mut decoded = Vec::with_capacity(writes.len());
+        for (index, &(kind, position, id, payload)) in (0u16..).zip(&writes) {
             let len = u32::try_from(payload.len()).map_err(|_| CommitError::BatchTooLarge)?;
             let header = EntryHeader {
                 kind,
@@ -1374,6 +1514,10 @@ impl<P: LocalStorageProvider> Journal<P> {
     }
 
     fn release(&mut self, old: &Located) {
+        self.seen_damaged
+            .get_mut()
+            .expect("a lock poisoned: a prior holder panicked")
+            .remove(&(old.batch, old.index));
         let at = self.segment_index(old.segment);
         assert!(
             self.segments[at].live > 0,

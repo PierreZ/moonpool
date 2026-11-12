@@ -82,11 +82,15 @@ impl Batch {
 
     /// Whether the batch fits one empty segment of `geometry`, the bound
     /// [`commit`](crate::Journal::commit) refuses with
-    /// [`CommitError::BatchTooLarge`](crate::CommitError::BatchTooLarge): at
-    /// most [`MAX_BATCH_RECORDS`] writes, their records within the persist
-    /// log and their entries (header and payload, each padded to 8 bytes,
-    /// the batch to a block) within the entry log. A caller with more to
-    /// make durable than one segment holds splits it across commits.
+    /// [`CommitError::BatchTooLarge`](crate::CommitError::BatchTooLarge): its
+    /// records within the persist log and its entries (header and payload,
+    /// each padded to 8 bytes, the batch to a block) within the entry log, at
+    /// most [`MAX_BATCH_RECORDS`] records in all. A caller with more to make
+    /// durable than one segment holds splits it across commits.
+    ///
+    /// Each write counts twice in the records, and once more as a 64-byte
+    /// entry: a write that replaces a position whose entry is damaged takes
+    /// a retire record for the old slot in the same batch.
     #[must_use]
     pub fn fits(&self, geometry: Geometry) -> bool {
         self.fits_with(geometry, None)
@@ -101,8 +105,26 @@ impl Batch {
     }
 
     fn fits_with(&self, geometry: Geometry, another: Option<usize>) -> bool {
-        let count = self.writes.len() + usize::from(another.is_some());
-        if count > MAX_BATCH_RECORDS {
+        let writes = self.writes.len() + usize::from(another.is_some());
+        self.fits_records(geometry, another, 2 * writes, writes)
+    }
+
+    /// Whether the batch fits `geometry` with exactly `retires` retire
+    /// records beside its writes: what a commit writes.
+    pub(crate) fn fits_exactly(&self, geometry: Geometry, retires: usize) -> bool {
+        self.fits_records(geometry, None, self.writes.len() + retires, retires)
+    }
+
+    /// Whether `records` persist records fit, with the entries of the writes,
+    /// of `another` write, and of `empty` entries with no payload.
+    fn fits_records(
+        &self,
+        geometry: Geometry,
+        another: Option<usize>,
+        records: usize,
+        empty: usize,
+    ) -> bool {
+        if records > MAX_BATCH_RECORDS {
             return false;
         }
         let lens = self
@@ -112,7 +134,8 @@ impl Batch {
                 Write::Put { payload, .. } => payload.len(),
                 Write::Clear { .. } => 0,
             })
-            .chain(another);
+            .chain(another)
+            .chain(std::iter::repeat_n(0, empty));
         let mut entry_bytes = 0_u64;
         for len in lens {
             let Ok(len) = u32::try_from(len) else {
@@ -120,7 +143,7 @@ impl Batch {
             };
             entry_bytes += EntryHeader::footprint(len);
         }
-        Record::blocks_for(count) <= u64::from(geometry.persist_blocks)
+        Record::blocks_for(records) <= u64::from(geometry.persist_blocks)
             && align_up(entry_bytes, BLOCK_U64) <= u64::from(geometry.entry_blocks) * BLOCK_U64
     }
 
