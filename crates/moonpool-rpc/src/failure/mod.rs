@@ -9,7 +9,10 @@
 //!   [`Failed`](AddressState::Failed) only after connections to it kept
 //!   failing for [`PeerPolicy::failure_detection_delay`](crate::PeerPolicy::failure_detection_delay),
 //!   and [`Available`](AddressState::Available) again as soon as a session
-//!   with it establishes. An address never contacted is available.
+//!   with it establishes. An address never contacted is available. Two
+//!   failures further apart than one full redial cycle belong to different
+//!   runs. A peer that closes an established session cleanly, with no call
+//!   on it and no watcher of its address, causes no failure.
 //! - **Disconnect events.** Every end of a connection this runtime used to
 //!   call an address is stamped at once with a runtime-wide, monotonic
 //!   sequence, even while the address still
@@ -39,7 +42,7 @@ use moonpool_core::LocalTimeProvider;
 
 use crate::RpcProviders;
 
-pub(crate) use self::state::{MonitorState, PermanentFailure};
+pub(crate) use self::state::{FailureWindow, MonitorState, PermanentFailure};
 use self::watch::Watch;
 use crate::endpoint::Endpoint;
 use crate::error::{ErrorReason, RpcError};
@@ -278,7 +281,11 @@ impl<P: RpcProviders> FailureMonitor<P> {
     ///
     /// The slope lets a long wait tolerate proportionally longer outages;
     /// it is clamped to `0.0..=0.99`. While the future is alive the
-    /// runtime keeps probing a failing address so the verdict can change.
+    /// runtime keeps probing a failing address so the verdict can change:
+    /// it dials the address at once if it is failing and has no
+    /// connection, and again after each failed dial (paced by the
+    /// reconnect backoff). A probe that finds no free connection slot
+    /// starts when the next connection ends.
     /// "Failed for a while" is an observation, never proof that the remote
     /// process is dead.
     ///

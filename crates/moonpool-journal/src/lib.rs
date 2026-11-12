@@ -89,8 +89,11 @@
 //!   repaired segment headers, torn records.
 //! - **A scrub of the persist records.** [`Journal::verify_records`] reads
 //!   the records of a range from disk and names the positions whose record
-//!   rotted since the open, so a caller's scrub can write them again before
-//!   a second fault makes the next open refuse.
+//!   rotted since the open. [`Journal::repair_records`] writes back every
+//!   record that is damaged while its entry is intact, the records of
+//!   tombstones and replaced positions too, before a second fault on the
+//!   same slot makes the next open refuse. Each open does the same for the
+//!   batches before the last one ([`RecordRepair`]).
 //! - **Fault aiming.** [`Journal::layout`] and [`Journal::regions`] return the
 //!   byte ranges of each record, entry, metainfo copy and segment header as
 //!   [`LayoutRegion`](moonpool_core::LayoutRegion) values. A simulation uses them to aim
@@ -159,8 +162,11 @@
 //! - **entries**: a 64-byte header that repeats the record's identity, then
 //!   the payload.
 //!
-//! Every batch starts on a fresh [`BLOCK`] in both logs, so no write touches
-//! a sector that holds acknowledged data. A segment header links to the last
+//! Every batch starts on a fresh [`BLOCK`] in both logs, so a commit never
+//! touches a sector that holds acknowledged data. The one exception is a
+//! record repair ([`RecordRepair`]): it writes a persist block again only
+//! when the entry of each record in it is intact, so a crash that tears the
+//! write leaves each record rebuildable. A segment header links to the last
 //! batch before it, so the journal never reads a missing segment as the end
 //! of the log. [`Geometry::default`] is a 64 MiB segment;
 //! [`Geometry::small`] rolls over quickly for tests and simulation.
@@ -194,7 +200,7 @@
 //! | Entry | Persist record | Verdict |
 //! |---|---|---|
 //! | intact | valid | live |
-//! | intact | damaged | live; the record is rebuilt from the entry |
+//! | intact | damaged | live; the record is rebuilt from the entry, and written back before `last` |
 //! | damaged | valid | [`State::Corrupt`], or [`State::Ambiguous`] in a `Batched` last batch |
 //! | damaged | damaged, in an unwitnessed `last` | torn by a crash: discarded |
 //! | damaged | damaged, in a witnessed `last` | [`OpenError::DoubleFault`]: refuse to open |
@@ -250,5 +256,6 @@ pub use batch::Batch;
 pub use error::{CommitError, Durable, OpenError, ReadError};
 pub use format::{BLOCK, Geometry, ID_SIZE, Id, MAX_BATCH_RECORDS, META_MAX, RECORD_SIZE};
 pub use journal::{
-    Durability, Entry, Journal, JournalConfig, JournalId, Layout, Recovery, Rolls, State,
+    Durability, Entry, Journal, JournalConfig, JournalId, Layout, RecordRepair, Recovery, Rolls,
+    State,
 };

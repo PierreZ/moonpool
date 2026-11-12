@@ -91,7 +91,12 @@ pub struct InvalidConfig(pub String);
 pub struct RpcConfig {
     /// Largest frame payload accepted or produced, in bytes. A peer
     /// declaring a larger frame is a protocol violation; a local request
-    /// or reply above it fails without being sent.
+    /// or reply above it fails without being sent. Before the peer's
+    /// `Hello` passed, a session accepts only
+    /// [`HANDSHAKE_MAX_FRAME_BYTES`](crate::protocol::HANDSHAKE_MAX_FRAME_BYTES)
+    /// (or this limit, if it is smaller). The receive buffer of a
+    /// connection grows to the largest frame received and gives the room
+    /// above one read chunk (at least 64 KiB) back after it.
     pub max_frame_bytes: u32,
     /// Live endpoints this runtime may register.
     pub max_endpoints: usize,
@@ -388,15 +393,22 @@ pub struct PeerPolicy {
     pub inbound_idle_timeout: Duration,
     /// Connection failures to an address must persist this long before the
     /// failure monitor marks the address failed. A disconnect is reported
-    /// immediately either way.
+    /// immediately either way. Two failures further apart than one full
+    /// redial cycle (the longest jittered `max_reconnect_delay`, plus
+    /// `connect_timeout` and `handshake_timeout`, plus this delay) belong to
+    /// different runs: the time is measured from the first failure of the
+    /// current run.
     pub failure_detection_delay: Duration,
     /// Endpoint failures (destroyed endpoints, stale incarnations) the
     /// failure monitor remembers; the oldest is forgotten first. Forgetting
     /// one costs one more round trip, never a wrong answer: the server
     /// still rejects every stale reference.
     pub max_failed_endpoints: usize,
-    /// Addresses the failure monitor tracks; available addresses without a
-    /// live peer are forgotten first.
+    /// Addresses the failure monitor tracks. When the table is full, an
+    /// address nobody watches is forgotten: an available one with no
+    /// failure run first, then the one whose last failure is oldest (not
+    /// failed before failed). Only addresses that a failure-monitor watcher
+    /// holds can take the table above this bound.
     pub max_tracked_addresses: usize,
     /// Whether an accepted session may become this runtime's own
     /// connection to the peer that dialed it (see [`InboundSharing`]).
@@ -418,11 +430,14 @@ pub struct PeerPolicy {
 ///
 /// **With a session upgrade that authenticates servers (TLS), sharing is
 /// always off**, whatever this says: our own dial would have verified the
-/// server's certificate, an accepted session verified nothing about its
-/// dialer, so adopting it would let any client that can reach us pose as
-/// the peer and receive our calls (and their credentials). And a request
-/// carrying a credential is never written on an accepted session whose
-/// dialer was not authenticated.
+/// server's certificate for that address, but an accepted session never
+/// proves that its dialer owns the listen address it claims. Even mutual
+/// TLS (`security::tls::ClientAuth`) proves only the
+/// dialer's certificate identity, not that address. So adopting the
+/// session would let any client that can reach us pose as the peer and
+/// receive our calls (and their credentials). And a request carrying a
+/// credential is never written on an accepted session whose dialer was not
+/// authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InboundSharing {
     /// Never share: announce no listen address, adopt nothing. Two
@@ -433,9 +448,10 @@ pub enum InboundSharing {
     /// host from claiming a peer's identity; it does not stop another
     /// process on the claimed host, and it refuses peers behind NAT or with
     /// several addresses (they keep one connection per direction).
-    /// No session upgrade authenticates the dialer (TLS here authenticates
-    /// servers only; mutual TLS is not provided), so the claim stays
-    /// unauthenticated whatever the upgrade.
+    /// A session upgrade can authenticate the dialer (mutual TLS,
+    /// `security::tls::ClientAuth`), but no upgrade
+    /// binds that identity to the announced listen address, so the claim
+    /// stays unauthenticated whatever the upgrade.
     #[default]
     SameIp,
     /// Share on the claim alone (`FoundationDB`'s behaviour). Only for

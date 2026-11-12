@@ -50,7 +50,7 @@ let latency = source.histogram_with_buckets(
 served.inc();
 ```
 
-`counter`, `gauge`, `histogram`, `histogram_with_buckets` and `histogram_with_opts` are get-or-register. The vector forms `counter_vec`, `gauge_vec` and `histogram_vec` take label names and hand out children with `with_label_values`. Get-or-register matters because a source outlives process reboots. A rebooted process looks its metrics up instead of failing with `AlreadyReg`.
+`counter`, `gauge`, `histogram`, `histogram_with_buckets` and `histogram_with_opts` are get-or-register. The vector forms `counter_vec`, `gauge_vec` and `histogram_vec` take label names and hand out children with `with_label_values`. Get-or-register matters because a source outlives process reboots. A rebooted process looks its metrics up instead of failing with `AlreadyReg`. The lookup checks the shape. A second registration of a name with other label names, or a histogram with other buckets, returns an error, because the cached metric would record the values under the wrong labels or in the wrong buckets. A different help text is accepted, and the first one stays.
 
 To wrap a registry your application already built, use `PrometheusSource::new(registry)`.
 

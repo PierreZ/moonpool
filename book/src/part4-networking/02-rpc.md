@@ -181,13 +181,21 @@ pushes every field to an extreme on some seeds.
 
 `RpcHandle::failure_monitor()` answers "is this worth calling?". It keeps
 three facts apart. An **address** is failed only after connections to it
-kept failing for `failure_detection_delay`. A **disconnect** is counted the
+kept failing for `failure_detection_delay`. Failures that are further apart
+than one full redial cycle start a new run, so one old failure and one new
+failure never add up to a sustained one. A peer that cleanly closes an idle
+session, with no call on it and no watcher of its address, causes no
+failure at all. A **disconnect** is counted the
 moment a connection ends. A **permanent endpoint failure** (destroyed
 endpoint, stale incarnation) is learned from the server's own rejection and
 remembered, so the next call to that reference fails without a round trip.
 Every `on_*` wait (`on_disconnect`, `on_failed`, `on_available`,
 `on_failed_for`) registers before it checks, on a versioned latch, so a
-change between the check and the wait still wakes it.
+change between the check and the wait still wakes it. While an
+`on_failed_for` wait lives, the runtime dials a failing address that has no
+connection (`RpcStats::probes`), so the verdict follows the peer when it
+comes back. A probe that finds no free connection slot waits for the next
+connection to end (`probes_deferred`).
 
 ## Bootstrap Names
 

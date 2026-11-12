@@ -111,8 +111,10 @@ pub trait Connector<S>: Send + Sync + 'static {
     /// connection to the address that session's dialer claims (inbound
     /// sharing is forced off, whatever
     /// [`PeerPolicy::share_inbound_sessions`](crate::PeerPolicy::share_inbound_sessions)
-    /// says): an accepted session never authenticated its dialer, so using
-    /// it for calls would bypass the authentication our own dial performs.
+    /// says): an accepted session never proves that its dialer owns the
+    /// listen address it claims (mutual TLS proves the dialer's certificate
+    /// identity, not that address), so using it for calls would bypass the
+    /// authentication our own dial performs.
     fn authenticates_server(&self) -> bool {
         false
     }

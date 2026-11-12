@@ -82,13 +82,22 @@ async fn listen(
         .map_err(|error| SimulationError::IoError(format!("rpc listen: {error}")))
 }
 
-/// Publish a runtime's counters to the board every 100 ms of sim time.
+/// Publish a runtime's counters to the board every 100 ms of sim time, and
+/// one last time when this future is dropped (the runtime stops, its boot
+/// crashes, or another branch of the caller's `select!` ended): the
+/// increments of the last 100 ms, buggify injections included, are not
+/// lost.
 pub(crate) async fn report_stats(
     rpc: &RpcHandle<SimProviders>,
     board: &state::Board,
     label: &str,
     ctx: &SimContext,
 ) {
+    let _last = rpc.probe().map(|probe| LastReport {
+        probe,
+        board,
+        label,
+    });
     loop {
         if let Some(stats) = rpc.stats() {
             crate::observe_injections(&stats);
@@ -97,6 +106,23 @@ pub(crate) async fn report_stats(
         if ctx.time().sleep(Duration::from_millis(100)).await.is_err() {
             return;
         }
+    }
+}
+
+/// The last report of [`report_stats`], made on drop. The driver may be
+/// gone by then (a `select!` drops its branches in order), so the counters
+/// come from the runtime's probe, which outlives it.
+struct LastReport<'a> {
+    probe: moonpool_rpc::ResourceProbe,
+    board: &'a state::Board,
+    label: &'a str,
+}
+
+impl Drop for LastReport<'_> {
+    fn drop(&mut self) {
+        let counters = self.probe.counters();
+        crate::observe_injections(&counters);
+        self.board.report_last(self.label, counters);
     }
 }
 
