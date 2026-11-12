@@ -799,6 +799,18 @@ impl WorkloadOrchestrator {
             if any_finished && !stall.shutdown_triggered && !chaos_until_run_ends {
                 Self::trigger_shutdown(sim, env.shutdown_signal);
                 stall.shutdown_triggered = true;
+                // While a sibling still runs, let every task see the
+                // cancelled token before the next step runs the `Shutdown`
+                // event: that event closes every listener and fails every
+                // pending accept, so a process that retries `accept` ahead
+                // of its shutdown check (a `biased` select) would spin on
+                // the error and never yield. Then collect again, since a
+                // sibling may have returned now. With no workload left the
+                // loop ends below and the processes are aborted unpolled.
+                if workload_handles.iter().any(Option::is_some) {
+                    crate::executor::until_stalled().await;
+                    continue;
+                }
             }
 
             Self::reap_finished_injectors(injector_handles, injector_errors).await;

@@ -1,6 +1,7 @@
 //! The end of a run: the run phase stops at the step where the last
 //! workload returned (#456), and the settle phase does not fail a healthy
-//! seed when the events left are far in simulated time (#455).
+//! seed when the events left are far in simulated time (#455). Every task
+//! sees the shutdown before the `Shutdown` event closes the listeners.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,8 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, Process, SimContext, SimulationBuilder, SimulationError,
-    SimulationResult, TimeProvider, Workload,
+    FaultContext, FaultInjector, NetworkProvider, Process, SimContext, SimulationBuilder,
+    SimulationError, SimulationResult, TcpListenerTrait, TimeProvider, Workload,
 };
 
 /// When the workload returns.
@@ -138,4 +139,67 @@ fn far_restarts_do_not_fail_the_settle_phase() {
         "settle must not step to the far restarts: {:?}",
         report.metrics.simulated_time
     );
+}
+
+/// A server that retries `accept` ahead of its shutdown check, like the
+/// `operator` example's node: a `biased` select polls the accept first.
+struct AcceptFirst;
+
+#[async_trait]
+impl Process for AcceptFirst {
+    fn name(&self) -> &'static str {
+        "accept_first"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let listener = ctx.network().bind(ctx.my_ip()).await?;
+        loop {
+            moonpool_sim::select! {
+                biased;
+                _accepted = listener.accept() => {}
+                () = ctx.shutdown().cancelled() => return Ok(()),
+            }
+        }
+    }
+}
+
+/// Returns after `after`; a sleep the end of the run cuts is not an error.
+struct ReturnAfter {
+    name: &'static str,
+    after: Duration,
+}
+
+#[async_trait]
+impl Workload for ReturnAfter {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let _cut = ctx.time().sleep(self.after).await;
+        Ok(())
+    }
+}
+
+/// The first return shuts the run down. Every task sees the cancelled token
+/// before the `Shutdown` event closes the listeners, so a server whose
+/// `accept` fails at once after that event does not spin forever.
+#[test]
+fn servers_see_the_shutdown_before_their_listeners_close() {
+    let report = SimulationBuilder::new()
+        .processes(2, || Box::new(AcceptFirst))
+        .workload(ReturnAfter {
+            name: "returns_soon",
+            after: Duration::from_secs(1),
+        })
+        .workload(ReturnAfter {
+            name: "returns_late",
+            after: Duration::from_secs(10),
+        })
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .run()
+        .expect("simulation configuration is valid");
+
+    assert_eq!(report.failed_runs, 0, "{:?}", report.seeds_failing);
 }
