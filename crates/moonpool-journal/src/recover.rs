@@ -14,6 +14,12 @@
 //! segment is stale, not valid: a recycled file's old bytes (see
 //! [`crate::spare`]) read like never-written ones.
 //!
+//! **The rule of position.** In one segment, batch numbers grow with the
+//! place in the persist log. A valid record at or after the boundary the
+//! scan is at, whose batch is not above the last batch found so far, is
+//! old bytes too: it cannot prove that a batch is missing. ([`Known::is_stale`]
+//! still covers old bytes exactly at the end of the log.)
+//!
 //! **Pass 2, verdicts** (the table in the crate docs). Only the **last
 //! batch** and damaged records cost entry reads: the rest of the log is
 //! checked when it is read.
@@ -241,9 +247,13 @@ async fn scan_segment<F: LocalStorageFile>(
     let log = segment.read_persist_log().await?;
     let slots = log.len() / RECORD_SIZE;
     // A stale record reads as damage: it is not evidence of anything. That
-    // covers a batch older than the segment, left in a recycled file.
-    let slot = |at: usize| match Record::decode(&log[at * RECORD_SIZE..]) {
-        Slot::Valid(record) if known.is_stale_in(segment.first_batch, record.batch) => {
+    // covers a batch older than the segment, left in a recycled file, and
+    // the rule of position: a record at or after the boundary the scan is
+    // at whose batch is not above `last` (the last batch found so far).
+    let slot = |at: usize, last: u64| match Record::decode(&log[at * RECORD_SIZE..]) {
+        Slot::Valid(record)
+            if record.batch <= last || known.is_stale_in(segment.first_batch, record.batch) =>
+        {
             Slot::Damaged
         }
         slot => slot,
@@ -257,7 +267,7 @@ async fn scan_segment<F: LocalStorageFile>(
     let mut entry_cursor = geometry.entry_start();
     while at < slots {
         // The batch here, from the first valid record at or after `at`.
-        let first_valid = (at..slots).find_map(|j| match slot(j) {
+        let first_valid = (at..slots).find_map(|j| match slot(j, last) {
             Slot::Valid(record) => Some((j, record)),
             _ => None,
         });
@@ -267,9 +277,6 @@ async fn scan_segment<F: LocalStorageFile>(
         // index can be above its slot.
         let from_record = match first_valid {
             Some((j, record)) if j.checked_sub(usize::from(record.index)) == Some(at) => {
-                if record.batch <= last || record.batch < segment.first_batch {
-                    return Err(OpenError::LostBatch { batch: last + 1 });
-                }
                 Some((record.batch, record.count))
             }
             _ => None,
@@ -294,7 +301,7 @@ async fn scan_segment<F: LocalStorageFile>(
         let mut walk = Some(entry_cursor);
         let mut entries_end = entry_cursor;
         for index in 0..count {
-            let here = match slot(at + usize::from(index)) {
+            let here = match slot(at + usize::from(index), last) {
                 Slot::Valid(record)
                     if record.batch == seq && record.index == index && record.count == count =>
                 {

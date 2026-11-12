@@ -99,7 +99,11 @@
 //! - **Recycled segments, no zero-fill.** A dead segment's file becomes the
 //!   spare, and the next roll adopts it with a header write and a rename.
 //!   Its old batches are older than the segment it becomes, so they read
-//!   as stale bytes, never as evidence. With no spare, a roll allocates a
+//!   as stale bytes, never as evidence. The same holds for old records
+//!   beyond the end of a segment's log: batch numbers grow with the place
+//!   in the persist log, so a record at or after a batch boundary whose
+//!   batch is not above the last batch found before it is old bytes, at
+//!   every open. With no spare, a roll allocates a
 //!   new file ([`allocate`](moonpool_core::StorageFile::allocate)) and
 //!   writes only its headers. No segment is ever zero-filled.
 //!   [`Journal::rolls`] counts the rolls of each kind.
