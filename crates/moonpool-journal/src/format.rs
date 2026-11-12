@@ -238,10 +238,9 @@ pub(crate) enum Kind {
     Put = 1,
     /// A tombstone over `position..end`; `end` rides in the id's first word.
     Clear = 2,
-    /// Names a slot of an earlier batch whose record may be lost without
-    /// refusing the open: a slot a crash tore, or a dead slot whose entry
-    /// is damaged. The fields ride in the position and the id
-    /// ([`Retire`]). (3 was the void record of version 3.)
+    // The fields ride in the position and the id ([`Retire`]). 3 was the
+    // void record of version 3.
+    /// A retired slot of an earlier batch: torn by a crash, or dead with a damaged entry.
     Retire = 4,
 }
 
