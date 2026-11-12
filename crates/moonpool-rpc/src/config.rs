@@ -430,11 +430,14 @@ pub struct PeerPolicy {
 ///
 /// **With a session upgrade that authenticates servers (TLS), sharing is
 /// always off**, whatever this says: our own dial would have verified the
-/// server's certificate, an accepted session verified nothing about its
-/// dialer, so adopting it would let any client that can reach us pose as
-/// the peer and receive our calls (and their credentials). And a request
-/// carrying a credential is never written on an accepted session whose
-/// dialer was not authenticated.
+/// server's certificate for that address, but an accepted session never
+/// proves that its dialer owns the listen address it claims. Even mutual
+/// TLS (`security::tls::ClientAuth`) proves only the
+/// dialer's certificate identity, not that address. So adopting the
+/// session would let any client that can reach us pose as the peer and
+/// receive our calls (and their credentials). And a request carrying a
+/// credential is never written on an accepted session whose dialer was not
+/// authenticated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InboundSharing {
     /// Never share: announce no listen address, adopt nothing. Two
@@ -445,9 +448,10 @@ pub enum InboundSharing {
     /// host from claiming a peer's identity; it does not stop another
     /// process on the claimed host, and it refuses peers behind NAT or with
     /// several addresses (they keep one connection per direction).
-    /// No session upgrade authenticates the dialer (TLS here authenticates
-    /// servers only; mutual TLS is not provided), so the claim stays
-    /// unauthenticated whatever the upgrade.
+    /// A session upgrade can authenticate the dialer (mutual TLS,
+    /// `security::tls::ClientAuth`), but no upgrade
+    /// binds that identity to the announced listen address, so the claim
+    /// stays unauthenticated whatever the upgrade.
     #[default]
     SameIp,
     /// Share on the claim alone (`FoundationDB`'s behaviour). Only for

@@ -167,8 +167,9 @@ out is revoked at once.
 carrying a credential goes out only on an encrypted session, or when the
 client opted in with `send_credentials_over_plaintext()`, and never on a
 protocol version 1 session. A refused send fails as `NotAdmitted` with
-`CredentialWithheld`. A session this runtime **accepted** never carries one
-either, because nothing authenticated its dialer.
+`CredentialWithheld`. A session this runtime **accepted** carries one only
+when the upgrade authenticated its dialer (mutual TLS, below). Without that,
+nothing authenticated the dialer.
 
 **TLS** (feature `tls`). `security::tls::Tls` is a session upgrade over the
 provider's own streams (rustls through `futures-rustls`, TLS 1.3, the `ring`
@@ -189,7 +190,10 @@ its first DNS name, else its first IP address) becomes the session's
 `PeerContext::identity`. It grants access only on a runtime that says so
 with `SecurityConfig::admit_authenticated_peers()`: a request without a
 credential then runs as `Principal::new(identity)` with issuer `"tls"`, and
-the access policy judges it like any other principal.
+the access policy judges it like any other principal. The certificate
+proves who the dialer is, not the listen address its `Hello` claims. So a
+runtime with a TLS upgrade still never adopts an accepted session as its
+connection to that address: inbound sharing stays off.
 
 **Certificates** (feature `tls-pki`). `security::tls::pki::Authority` makes
 Ed25519 roots and the leaves they sign (`LeafSpec`: names, UTC validity, use,
