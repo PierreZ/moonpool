@@ -13,7 +13,7 @@ use crate::format::{
 };
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
-use crate::recover::{Known, Located, Op, entry_matches, scan};
+use crate::recover::{BlockWrite, Known, Located, Op, entry_matches, plan_repair, scan};
 use crate::segment::{Segment, is_segment_leftover, named_batches, parse_segment_name};
 use crate::spare::{is_spare, spare_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
@@ -107,6 +107,9 @@ pub struct Recovery {
     pub torn: u32,
     /// Persist records rebuilt from their intact entries.
     pub rebuilt: u32,
+    /// The persist blocks of earlier batches that held a rebuilt record:
+    /// written again, or left damaged (see [`RecordRepair`]).
+    pub repair: RecordRepair,
     /// A metainfo copy was rewritten from its twin.
     pub meta_repaired: bool,
     /// Segment header copies rewritten from their twin.
@@ -119,6 +122,25 @@ pub struct Recovery {
     /// A dead segment's file an earlier open recycled, kept for the next
     /// roll.
     pub spare_kept: bool,
+}
+
+/// What a repair of the persist records did ([`Journal::repair_records`],
+/// and each open for the batches before the last one).
+///
+/// A record that is damaged while its entry is intact is rebuilt from the
+/// entry. A repair writes the rebuilt record back, so the damage is gone
+/// before a second fault on the same slot makes an open refuse. It writes a
+/// whole persist block, and only when the entry of each record in that
+/// block is intact: a crash that tears the write then leaves each record of
+/// the block rebuildable, as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecordRepair {
+    /// Persist blocks written again, each with every record encoded.
+    pub blocks_written: u32,
+    /// Persist blocks that hold a rebuilt record but were not written,
+    /// because the entry of another record in them is damaged: that
+    /// record is the only copy of its identity.
+    pub blocks_left: u32,
 }
 
 /// How this open of the journal rolled onto new segments.
@@ -369,21 +391,25 @@ async fn delete_if_present<P: LocalStorageProvider>(
     }
 }
 
-/// Write the last batch's verdicts down: the persist extent `writes`, in
-/// order, each durable before the next.
-async fn rewrite_last_batch<F: moonpool_core::LocalStorageFile>(
-    segment: &Segment<F>,
-    offset: u64,
-    writes: Vec<AlignedBuf>,
+/// Write persist blocks again: the last batch's verdicts and the repaired
+/// blocks of earlier batches, in order, each durable before the next.
+async fn write_persist<F: moonpool_core::LocalStorageFile>(
+    segments: &[Segment<F>],
+    writes: Vec<BlockWrite>,
 ) -> std::io::Result<()> {
     // A rebuilt record says its entry was persisted, and the entry it was
     // rebuilt from may be a predecessor's unsynced write still in the page
     // cache: the entry reaches the disk first, as in a commit. (A crash
     // between a rewrite and the entries' sync left records naming entries
     // that never landed: corruption from a crash alone.)
-    segment.sync().await?;
-    for bytes in writes {
-        segment.write_durable(offset, bytes).await?;
+    let mut synced: Vec<usize> = writes.iter().map(|(at, _, _)| *at).collect();
+    synced.sort_unstable();
+    synced.dedup();
+    for at in synced {
+        segments[at].sync().await?;
+    }
+    for (at, offset, bytes) in writes {
+        segments[at].write_durable(offset, bytes).await?;
     }
     Ok(())
 }
@@ -550,9 +576,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             segment.persist_next = *persist_next;
             segment.entry_next = *entry_next;
         }
-        if let Some((at, offset, writes)) = scanned.rewrite.take() {
-            rewrite_last_batch(&segments[at], offset, writes).await?;
-        }
+        write_persist(&segments, std::mem::take(&mut scanned.writes)).await?;
         // Whatever opening keeps must survive the next power loss.
         for segment in &segments {
             segment.sync().await?;
@@ -565,6 +589,7 @@ impl<P: LocalStorageProvider> Journal<P> {
         recovery.ambiguous = scanned.ambiguous;
         recovery.torn = scanned.voided;
         recovery.rebuilt = scanned.rebuilt;
+        recovery.repair = scanned.repair;
         let ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(scanned.last_batch);
         let mut journal = Self {
             tag,
@@ -914,6 +939,34 @@ impl<P: LocalStorageProvider> Journal<P> {
             }
         }
         Ok(mismatched)
+    }
+
+    /// Write back each persist record that is damaged while its entry is
+    /// intact, in every segment: the records of live positions, of
+    /// tombstones and of positions a later batch replaced, which a caller
+    /// cannot write again itself. See [`RecordRepair`] for the rule that
+    /// keeps a torn repair safe.
+    ///
+    /// Each open does the same for the batches before the last one, so a
+    /// scrub calls this between opens, after [`verify_records`](Self::verify_records)
+    /// found a mismatch or on its own schedule. It reads the whole persist
+    /// log, and the entries of each block it writes. A medium error reads
+    /// as damage, so a block that holds one is left.
+    ///
+    /// # Errors
+    /// [`OpenError::Io`] when the provider fails; an evidence variant of
+    /// [`OpenError`] when the persist log no longer reads as a log (damage
+    /// since the open that the next open refuses too).
+    pub async fn repair_records(&mut self) -> Result<RecordRepair, OpenError> {
+        let known = Known {
+            generation: self.generation,
+            last: self.meta.open_last,
+            mark: self.meta.last_batch,
+        };
+        let (writes, repair) =
+            plan_repair(&self.segments, self.tag, known, self.last_batch).await?;
+        write_persist(&self.segments, writes).await?;
+        Ok(repair)
     }
 
     /// Read every non-empty position in `range`, in order: a damaged entry
