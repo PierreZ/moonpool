@@ -1276,6 +1276,36 @@ fn a_record_whose_index_is_above_its_slot_is_rebuilt_not_a_panic() {
     });
 }
 
+/// #487: the records block of batch 3 written at the place of batch 2 (a
+/// misdirected write), and its own place left zero. Each entry is intact:
+/// the open sees that the record at the place of batch 2 names an entry
+/// that is not the first entry of that place, and rebuilds both batches
+/// from their entries. (A batch whose record and entry are both gone is
+/// still `LostBatch`: `a_lost_batch_in_the_middle_is_refused_not_read_as_the_end`.)
+#[test]
+fn a_misdirected_records_block_is_rebuilt_from_the_entries() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(31);
+            let mut journal = create(&mut sim, durability).await;
+            for position in 0..4 {
+                journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+            }
+            let path = segment_of(&journal, 0);
+            drop(journal);
+            let mut bytes = file_bytes(&mut sim, path.clone()).await;
+            let (second, third) = (PERSIST_START + BLOCK, PERSIST_START + 2 * BLOCK);
+            bytes.copy_within(third..third + BLOCK, second);
+            bytes[third..third + BLOCK].fill(0);
+            put_bytes(&mut sim, path, bytes).await;
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+            assert_eq!(recovery.rebuilt, 2, "{durability:?}: {recovery:?}");
+            let all: Vec<(u64, u64, usize)> = (0..4).map(|p| (p, 1, 100)).collect();
+            read_all(&mut sim, journal, &all).await;
+        }
+    });
+}
+
 /// #484: a batch X of three persist blocks that one open did not see (its
 /// blocks did not read), then a smaller batch Y over its first block. When
 /// the other two blocks of X read again, they lie after Y and their batch

@@ -20,6 +20,12 @@
 //! old bytes too: it cannot prove that a batch is missing. ([`Known::is_stale`]
 //! still covers old bytes exactly at the end of the log.)
 //!
+//! **A record at its own place.** The first record of a batch names the
+//! first entry of the batch, and the scan knows where the entries of each
+//! boundary start. A first record that names another offset was written to
+//! the wrong block (a misdirected write): it reads as damaged, and the
+//! batch is located from its first entry.
+//!
 //! **Pass 2, verdicts** (the table in the crate docs). Only the **last
 //! batch** and damaged records cost entry reads: the rest of the log is
 //! checked when it is read.
@@ -236,6 +242,16 @@ async fn batch_from_entry<F: LocalStorageFile>(
     }
 }
 
+/// Whether a valid record that locates a batch at a boundary is at its own
+/// place. The first record of a batch names the first entry of the batch,
+/// which is where the entries of the boundary start: a record that names
+/// another offset was written to the wrong block (a misdirected write). A
+/// void record names no entry, and a later record has no offset to compare
+/// with: those are taken as they are.
+fn at_its_place(record: &Record, entry_cursor: u64) -> bool {
+    record.index != 0 || record.kind == Kind::Void || u64::from(record.offset) == entry_cursor
+}
+
 /// Pass 1 over one segment. `prev` is the last batch before it.
 async fn scan_segment<F: LocalStorageFile>(
     segment: &Segment<F>,
@@ -276,7 +292,10 @@ async fn scan_segment<F: LocalStorageFile>(
         // record can lie before its own place (a misdirected write), so its
         // index can be above its slot.
         let from_record = match first_valid {
-            Some((j, record)) if j.checked_sub(usize::from(record.index)) == Some(at) => {
+            Some((j, record))
+                if j.checked_sub(usize::from(record.index)) == Some(at)
+                    && at_its_place(&record, entry_cursor) =>
+            {
                 Some((record.batch, record.count))
             }
             _ => None,

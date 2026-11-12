@@ -295,6 +295,14 @@ acknowledged last batch that nothing witnesses can still be discarded: a
 metainfo, with no open since. Its bytes look exactly like a torn commit. A
 caller that needs a batch witnessed sets its metainfo in that batch.
 
+Two rules keep old or misplaced records from passing for evidence. Batch
+numbers grow with the place in the persist log, so a record after a batch
+boundary whose batch is not above the batch before it is old bytes, at
+every open. And the first record of a batch names the first entry of its
+own place: a records block written to the wrong block (a misdirected write)
+names another offset, so the open reads it as damaged and rebuilds the
+batch from its entries.
+
 A batch missing while later ones exist, or a log ending before the batch the
 metainfo proves durable, is `LostBatch`: that covers every record and the
 first entry of a witnessed last batch damaged, where nothing on disk even

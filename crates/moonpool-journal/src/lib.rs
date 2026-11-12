@@ -216,6 +216,11 @@
 //! The one batch that may still be discarded is an acknowledged last batch
 //! that nothing witnesses: its bytes look exactly like a torn commit.
 //!
+//! A record that the scan finds at a batch boundary but that names an entry
+//! other than the first entry of that boundary was written to the wrong
+//! block (a misdirected write): the open reads it as damaged and locates
+//! the batch from its first entry.
+//!
 //! A batch missing while later ones exist, or a log that ends before the
 //! batch the metainfo proves durable, is [`OpenError::LostBatch`]. A batch of
 //! a later open generation than the metainfo's proves the metainfo older

@@ -72,6 +72,10 @@ journal.commit(batch).await?;
   record, refuse the open (`DoubleFault`) instead of discarding an
   acknowledged entry. A batch of a later generation than the metainfo's
   refuses it too (`MetaRolledBack`): the metainfo lost an update.
+- **A misplaced records block is rebuilt, not a lost batch.** A records
+  block written at the wrong place (a misdirected write) is found, because
+  the first record of a batch names the first entry of its own place. The
+  open rebuilds the batch from its entries.
 - **Two protocols.** `Durability::Batched` is the paper's protocol (`write
   entries; write records; fsync`): one sync, and the last batch's damaged
   entries are `Ambiguous`. `Durability::Ordered` syncs in between: two syncs,
