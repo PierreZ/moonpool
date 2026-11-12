@@ -218,6 +218,15 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
 /// (and only those) durable before it returns. Nothing else on this trait
 /// implies durability.
 ///
+/// ## Dropped futures
+///
+/// Dropping a pending read cancels it: the caller never sees its bytes. A
+/// dropped write, sync or resize is **not** cancelled. It can still land
+/// after the future is gone: the simulator completes it, and the Tokio
+/// backend lets its blocking task run to the end. A caller that puts a
+/// timeout on [`write_at`](Self::write_at) must expect that the write can
+/// land later, and must not reuse the range as if it never happened.
+///
 /// ## Stream I/O and alignment do not mix
 ///
 /// The [`AsyncRead`] / [`AsyncWrite`] half of this trait is available only on

@@ -28,6 +28,12 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
     /// Generate a random value within a specified range.
     ///
     /// The range is exclusive of the upper bound (start..end).
+    ///
+    /// # Panics
+    ///
+    /// Every implementation panics when the range is empty (`start >= end`),
+    /// as `rand` does: there is no value to return. Check the range first
+    /// when it can be empty.
     fn random_range<T>(&self, range: Range<T>) -> T
     where
         T: SampleUniform + PartialOrd;
@@ -62,7 +68,7 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
 /// let in_range = random.random_range(1..100);
 /// ```
 #[cfg(feature = "tokio-random")]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TokioRandomProvider;
 
 #[cfg(feature = "tokio-random")]
@@ -88,5 +94,24 @@ impl RandomProvider for TokioRandomProvider {
         T: SampleUniform + PartialOrd,
     {
         rand::rng().random_range(range)
+    }
+}
+
+#[cfg(all(test, feature = "tokio-random"))]
+mod tests {
+    use super::{RandomProvider, TokioRandomProvider};
+
+    #[test]
+    #[should_panic(expected = "empty")]
+    fn an_empty_range_panics() {
+        let _ = TokioRandomProvider::new().random_range(5..5);
+    }
+
+    #[test]
+    fn the_provider_is_debug() {
+        assert_eq!(
+            format!("{:?}", TokioRandomProvider::new()),
+            "TokioRandomProvider"
+        );
     }
 }

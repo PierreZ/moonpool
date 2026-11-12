@@ -227,7 +227,7 @@ Every call needs a compio runtime on the current thread. Storage opens follow th
 
 **io_uring in containers.** Docker's default seccomp profile blocks the `io_uring_setup`, `io_uring_enter` and `io_uring_register` syscalls, and some hosts turn io_uring off with the `kernel.io_uring_disabled` sysctl. There, compio falls back to its polling driver: the code still works, but without the batched submissions that make the backend worth it. To get io_uring in a container, run it with a seccomp profile that allows those three syscalls.
 
-**Method-name ambiguity.** A concrete Tokio or sim type has both traits' methods under the same names. With both traits in scope, `file.read_at(..)` is ambiguous: import one trait per module, or call through the trait (`LocalStorageFile::read_at(&file, ..)`). Generic code bounded by one trait is not affected. The local traits are not in the prelude.
+**Method-name ambiguity.** A concrete Tokio or sim type has both traits' methods under the same names. With both traits in scope, `file.read_at(..)` is ambiguous: import one trait per module, or call through the trait (`LocalStorageFile::read_at(&file, ..)`). Generic code bounded by one trait is not affected. The local traits are not in `prelude`. They have their own: `use moonpool_core::local_prelude::*;` imports every local trait (and `CompioProviders` with `compio-providers`) in one line.
 
 ## Resolver
 

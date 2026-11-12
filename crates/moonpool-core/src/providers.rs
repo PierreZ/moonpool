@@ -186,7 +186,9 @@ pub trait Providers: Clone + Send + Sync + 'static {
 /// names. With both traits in scope, `providers.time()` is ambiguous on a
 /// concrete type: import one trait per module, or call
 /// `LocalProviders::time(&providers)`. Generic code bounded by one trait is
-/// not affected.
+/// not affected. [`prelude`](crate::prelude) holds the `Send` traits and
+/// [`local_prelude`](crate::local_prelude) the local ones, so a module glob
+/// imports one of the two, never both.
 pub trait LocalProviders: Clone + 'static {
     /// Network provider type for TCP connections and listeners.
     type Network: LocalNetworkProvider;
@@ -316,7 +318,7 @@ where
 /// let _coin = providers.random().random_bool(0.5);
 /// ```
 #[cfg(feature = "tokio-providers")]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TokioProviders {
     network: TokioNetworkProvider,
     time: TokioTimeProvider,
@@ -391,7 +393,7 @@ impl_providers_bundle!(TokioProviders {
 /// });
 /// ```
 #[cfg(feature = "compio-providers")]
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CompioProviders {
     network: crate::CompioNetworkProvider,
     time: crate::CompioTimeProvider,
