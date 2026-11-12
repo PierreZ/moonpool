@@ -198,7 +198,10 @@ fn a_live_run_dropped_during_chaos_leaves_no_state_behind() {
         sim.advance(&mut || clock.now() >= Duration::from_millis(500)),
         LiveStatus::Running
     ));
-    assert!(moonpool_buggify::is_simulated(), "buggify is on during the run");
+    assert!(
+        moonpool_buggify::is_simulated(),
+        "buggify is on during the run"
+    );
     drop(sim);
 
     assert_eq!(

@@ -109,7 +109,7 @@ The bucket table is fixed. The constants are a contract that changes the saturat
 | Buckets per run | 256 | `MAX_EACH_BUCKETS` |
 | Identity keys per site | 6 | `MAX_EACH_KEYS`, extra keys are ignored |
 | Quality keys per site | 4 | extra keys are ignored |
-| Message bytes stored per bucket | 32 | longer messages are truncated for identity |
+| Message bytes stored per bucket | 32 | a longer message is cut for display; the identity is the hash of the full message, and the report adds ` #` and 8 hex digits of the hash when two sites show the same text |
 | Propositions per `sometimes_all` | 255 | the frontier is a `u8` |
 
 Overflow is loud. An observation that finds the table full is counted, and the run fails with `each-bucket table dropped N sometimes_each observations`. A bucket reached by a different message or key set with the same hash is flagged, and the run fails with `bucket [..] collides with another key set`.

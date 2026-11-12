@@ -189,7 +189,7 @@ fn discovery_kind_name(kind: moonpool_assertions::DiscoveryKind) -> &'static str
 struct ConvergenceState<'a> {
     iteration_control: &'a IterationControl,
     iteration_count: usize,
-    reached_sometimes: &'a std::collections::BTreeSet<String>,
+    reached_sometimes: &'a std::collections::BTreeSet<u64>,
     all_sometimes_count: usize,
     /// Whether fork-based exploration is active (selects sancov history vs
     /// the live BSS counter reader for the code-coverage signal).
@@ -249,7 +249,7 @@ struct RunState {
     #[cfg(feature = "exploration")]
     exploration_totals: ExplorationTotals,
     // Saturation tracking (`UntilCoverageStable`).
-    reached_sometimes: std::collections::BTreeSet<String>,
+    reached_sometimes: std::collections::BTreeSet<u64>,
     /// Previous progress-signal value (code edges, or reached-assertion count
     /// in the no-sancov fallback). Both signals are monotonic non-decreasing.
     prev_signal: usize,
@@ -1007,14 +1007,20 @@ impl SimulationBuilder {
         }
     }
 
-    /// Scan all assertion slots from shared memory: insert the messages of
-    /// every satisfied coverage assertion into `reached`, warn for incomplete
-    /// sites, and return the number of unique observed coverage contracts.
-    fn scan_assertion_slots(reached: &mut std::collections::BTreeSet<String>) -> usize {
+    /// Scan all assertion slots from shared memory: insert the message hash
+    /// of every satisfied coverage assertion into `reached`, warn for
+    /// incomplete sites, and return the number of unique observed coverage
+    /// contracts.
+    ///
+    /// The key is the hash of the full message, not the stored text: two
+    /// sites whose messages share their first 63 bytes stay two sites.
+    fn scan_assertion_slots(reached: &mut std::collections::BTreeSet<u64>) -> usize {
         use moonpool_assertions::AssertKind;
 
+        let slots = moonpool_assertions::assertion_read_all();
+        let names = crate::chaos::assertions::slot_names(&slots);
         let mut observed = std::collections::BTreeSet::new();
-        for slot in &moonpool_assertions::assertion_read_all() {
+        for (slot, name) in slots.iter().zip(&names) {
             let Some(kind) = AssertKind::from_u8(slot.kind) else {
                 continue;
             };
@@ -1027,7 +1033,7 @@ impl SimulationBuilder {
             ) {
                 continue;
             }
-            observed.insert(slot.msg.clone());
+            observed.insert(slot.msg_hash);
             let satisfied = match kind {
                 AssertKind::BooleanSometimesAll => {
                     slot.frontier_target > 0 && slot.frontier >= slot.frontier_target
@@ -1035,12 +1041,12 @@ impl SimulationBuilder {
                 _ => slot.pass_count > 0,
             };
             if satisfied {
-                reached.insert(slot.msg.clone());
-            } else if !reached.contains(&slot.msg) {
+                reached.insert(slot.msg_hash);
+            } else if !reached.contains(&slot.msg_hash) {
                 tracing::warn!(
                     "INCOMPLETE coverage slot: kind={:?} msg={:?} pass={} fail={} frontier={}/{}",
                     kind,
-                    slot.msg,
+                    name,
                     slot.pass_count,
                     slot.fail_count,
                     slot.frontier,
@@ -1878,7 +1884,8 @@ fn build_assertion_details(
 
     slots
         .iter()
-        .filter_map(|slot| {
+        .zip(crate::chaos::assertions::slot_names(slots))
+        .filter_map(|(slot, name)| {
             let kind = AssertKind::from_u8(slot.kind)?;
             let total = slot.pass_count.saturating_add(slot.fail_count);
 
@@ -1921,7 +1928,7 @@ fn build_assertion_details(
             };
 
             Some(AssertionDetail {
-                msg: slot.msg.clone(),
+                msg: name,
                 kind,
                 pass_count: slot.pass_count,
                 fail_count: slot.fail_count,
@@ -1957,7 +1964,20 @@ fn build_bucket_summaries(
         entry.total_hits += u64::from(bucket.pass_count);
     }
 
-    let mut summaries: Vec<_> = sites.into_values().collect();
+    // The stored text is cut to 31 bytes: two sites can show the same text.
+    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+    for summary in sites.values() {
+        *uses.entry(summary.msg.clone()).or_default() += 1;
+    }
+    let mut summaries: Vec<_> = sites
+        .into_iter()
+        .map(|(site_hash, mut summary)| {
+            if uses[&summary.msg] > 1 {
+                summary.msg = format!("{} #{:08x}", summary.msg, site_hash & 0xffff_ffff);
+            }
+            summary
+        })
+        .collect();
     summaries.sort_by_key(|s| std::cmp::Reverse(s.total_hits));
     summaries
 }
@@ -1970,6 +1990,7 @@ mod tests {
     fn sometimes_all_is_a_miss_until_the_full_frontier_is_reached() {
         let partial = moonpool_assertions::AssertionSlotSnapshot {
             msg: "cluster ready".to_string(),
+            msg_hash: moonpool_assertions::msg_hash("cluster ready"),
             kind: moonpool_assertions::AssertKind::BooleanSometimesAll as u8,
             must_hit: 1,
             pass_count: 4,
