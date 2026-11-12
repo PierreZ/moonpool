@@ -145,8 +145,12 @@ pub struct InterfacesWorkload {
     /// Every publication ever learned, stored encoded (as an application
     /// would persist it) — including those of ended boots.
     stored: Vec<Vec<u8>>,
-    /// Members recruited and not dismissed.
+    /// Members recruited and not confirmed dismissed. A member whose
+    /// dismiss call failed stays here: it may or may not still serve.
     recruited: Vec<Publication>,
+    /// Members a dismiss call answered for, with the first probe id issued
+    /// after the answer. No probe from that id on may run in the member.
+    dismissed: Vec<(Instance, u64)>,
     /// Participants whose learned interface was refused as stale, until a
     /// lookup replaced it.
     refused: BTreeMap<String, u64>,
@@ -168,6 +172,7 @@ impl InterfacesWorkload {
             known: BTreeMap::new(),
             stored: Vec::new(),
             recruited: Vec::new(),
+            dismissed: Vec::new(),
             refused: BTreeMap::new(),
             foreign: Vec::new(),
         }
@@ -626,9 +631,8 @@ impl InterfacesWorkload {
         if self.recruited.is_empty() {
             return;
         }
-        let member = self
-            .recruited
-            .remove(ctx.random().random_range(0..self.recruited.len()));
+        let index = ctx.random().random_range(0..self.recruited.len());
+        let member = self.recruited[index].clone();
         let Some(dismiss) = Self::well_known::<Dismiss>(rpc, &member.participant, DISMISS_ID)
         else {
             return;
@@ -648,8 +652,21 @@ impl InterfacesWorkload {
             describe(&outcome)
         ));
         let Ok(dismissed) = outcome else {
+            // Failed or ambiguous: the member may still serve, so it stays
+            // recruited and later calls to it accept both results.
             return;
         };
+        // The participant answered, so the member no longer serves: it was
+        // removed now, by an earlier ambiguous dismiss, or with its boot.
+        self.recruited.remove(index);
+        self.dismissed.push((
+            Instance {
+                participant: member.participant.clone(),
+                boot: member.boot,
+                configuration: member.configuration,
+            },
+            self.next_id + 1,
+        ));
         let Some(after) = self.status(ctx, rpc, InterfaceOp::Dismiss, &member).await else {
             return;
         };
@@ -729,7 +746,7 @@ impl InterfacesWorkload {
         let mut reachable = true;
         for participant in ctx.topology().ips_in_group("participant") {
             let mut answered = false;
-            for _ in 0..3 {
+            for _ in 0..6 {
                 if let Some(publication) = self.lookup(ctx, rpc, &participant).await
                     && matches!(
                         self.status(ctx, rpc, InterfaceOp::Call, &publication).await,
@@ -739,10 +756,13 @@ impl InterfacesWorkload {
                     answered = true;
                     break;
                 }
+                let _ = ctx.time().sleep(Duration::from_millis(500)).await;
             }
+            self.history
+                .push(format!("recovered {participant} {answered}"));
             reachable &= answered;
         }
-        assert_sometimes!(
+        assert_always!(
             reachable,
             "rpc every participant answered a fresh publication at the end"
         );
@@ -814,6 +834,22 @@ impl Workload for InterfacesWorkload {
             if call.op == InterfaceOp::OneWay && call.class == Class::Maybe && executions.len() == 1
             {
                 one_way_executed = true;
+            }
+        }
+        // A dismissed member never runs a probe issued after the dismissal
+        // was answered (Stored calls still reach for it).
+        for (instance, first) in &self.dismissed {
+            for call in &self.calls {
+                if call.id < *first || call.expected != *instance {
+                    continue;
+                }
+                let executions = ledger.executions(call.id);
+                assert_always!(
+                    executions.is_empty(),
+                    "a dismissed instance never runs a later probe",
+                    { "id" => call.id, "participant" => instance.participant, "configuration" => instance.configuration }
+                );
+                assert_sometimes!(true, "rpc later call to a dismissed instance judged");
             }
         }
         for id in &self.foreign {
