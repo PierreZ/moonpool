@@ -14,6 +14,14 @@ wasm32-unknown-unknown` then `wasm-bindgen` to generate the JS glue.
 - `scripts/check-site-wasm.sh <seed>...` (repository root) proves that one
   config gives the same JSON natively (`--bin site-run`) and on wasm32 under
   node.
+- `tests/exploration_tree.rs` explores seed 7 with the bug natively
+  (`workers: 0`, `record_exploration_tree`) and writes
+  `website/site/src/runs/exploration.json`. The explorer forks, so the tree is
+  never run on wasm; the bug timeline replays there from its `recipe`.
+- `coverage` (`src/coverage.rs`, wasm export `coverage`) runs seeds until the
+  checks of `register::CHECKS` are stable. Keep `CHECKS` in step with the
+  `assert_sometimes!` / `assert_reachable!` sites of `src/register.rs`: a test
+  compares them.
 - `--bin sim-register` is the same system as an example simulation
   (`cargo xtask sim run register`, with `check_determinism`).
 - A config can narrow the chaos: `network_faults` and `storage_faults` keep

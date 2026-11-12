@@ -212,7 +212,6 @@ pre {
 @keyframes blink { 50% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
 .brand .mark-moon { color: var(--fg); }
-.brand .mark-moon .sea { fill: var(--accent); }
 
 /* The home page: one column of flat panels. */
 .home { display: flex; flex-direction: column; gap: 28px; }
@@ -332,6 +331,66 @@ pre {
 .run-out.bad { color: var(--fail); }
 .run-under { margin-top: 12px; }
 
+/* Swarm: one dot per fault family. Assertions: the coverage bar. */
+.swarm-table td, .swarm-table th { padding: 4px 2px; text-align: center; }
+.swarm-table td:first-child, .swarm-table th:first-child { padding-left: 12px; text-align: left; }
+.swarm-table td:nth-last-child(-n+2), .swarm-table th:nth-last-child(-n+2) { padding: 4px 8px; text-align: left; white-space: nowrap; }
+.swarm-table .fam { width: 1.6ch; }
+.swarm-table .fam.on { color: var(--fault); }
+.swarm-table .fam.off { color: var(--muted); }
+.swarm-table .gap { width: 10px; padding: 0; }
+.swarm-table tr.pick { cursor: pointer; }
+.swarm-table tr.pick:hover, .swarm-table tr.current { background: var(--info-tint); }
+.swarm-table tr.total td { border-top: 1px solid var(--rule-strong); color: var(--fg); }
+.fam-legend { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 0; padding: 4px 12px 10px; list-style: none; color: var(--muted); }
+.fam-legend li::before { content: none !important; }
+.fam-legend b { color: var(--fg); font-weight: 600; }
+.bar { height: 10px; margin: 10px 12px 4px; border: 1px solid var(--rule-strong); }
+.bar-fill { height: 100%; width: 0; background: var(--accent); }
+.bar-fill.bad { background: var(--fail); }
+.bar-text { margin: 0; padding: 0 12px 8px; color: var(--muted); }
+
+/* The playground: the config, the player, the report. */
+.play fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.play legend { padding: 0; margin-bottom: 4px; color: var(--muted); }
+.play-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 4px 16px; padding: 10px 12px 0; }
+.play-grid .switches { padding: 0; }
+.play-seed { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.play-seed label { width: 100%; color: var(--muted); }
+.play-seed input { width: 16ch; height: 28px; padding: 0 6px; border: 1px solid var(--rule-strong); border-radius: 0; background: var(--bg); color: var(--fg); font: inherit; font-size: 12.5px; }
+.play-actions { border-top: 1px solid var(--rule); margin-top: 10px; }
+.play-actions .btn { min-height: 36px; }
+.report-cols { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 0; border-top: 1px solid var(--rule); }
+.report-cols .table-wrap + .table-wrap { border-left: 1px solid var(--rule); }
+.report-cols td.bad { color: var(--fail); font-weight: 600; }
+.report-cols td { overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .report-cols { grid-template-columns: minmax(0, 1fr); }
+  #report-assertions th:nth-child(2), #report-assertions td:nth-child(2) { display: none; }
+  .report-cols .table-wrap + .table-wrap { border-left: 0; border-top: 1px solid var(--rule); }
+}
+.tree-wrap { overflow-x: auto; padding: 8px 0; border-bottom: 1px solid var(--rule); }
+.tree { display: block; font-family: var(--font-mono); font-size: 11px; }
+.tree-rule { stroke: var(--rule); stroke-dasharray: 2 4; }
+.tree-edge { fill: none; stroke: var(--rule-strong); stroke-width: 1.5; }
+.tree-node { cursor: pointer; outline: none; }
+.tree-node circle { fill: var(--bg); stroke: var(--muted); stroke-width: 1.5; }
+.tree-node text { fill: var(--fg); pointer-events: none; }
+.tree-node.found circle { stroke: var(--accent); fill: var(--accent-tint); }
+.tree-node.bug circle { stroke: var(--fail); fill: var(--fail); }
+.tree-node.bug text { fill: var(--bg); font-weight: 700; }
+.tree-node.sel circle, .tree-node:focus-visible circle { stroke-width: 3; stroke: var(--fg); }
+.tree-node.bug.sel circle { stroke: var(--fg); }
+.tree-info { padding: 8px 12px; font-size: 13.5px; }
+.tree-info p { margin: 0 0 4px; }
+.tree-info ul { margin: 4px 0 0; font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); }
+.walk { margin: 0; padding: 8px 12px 8px 32px; font-size: 13.5px; }
+.walk:empty { display: none; }
+.walk li { margin: 0 0 4px; }
+.walk li.current { color: var(--fg); font-weight: 600; }
+.report-box { margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--rule); font-family: var(--font-mono); font-size: 12.5px; white-space: pre-wrap; }
+.report-box .bad { color: var(--fail); font-weight: 600; }
+
 /* ---- the Guide: a sidebar from SUMMARY.md, the chapter, a search ---- */
 
 .guide { display: grid; grid-template-columns: 17rem minmax(0, 1fr); gap: 40px; max-width: calc(var(--measure) + 8ch + 17rem + 40px); margin: 0 auto; }
@@ -389,3 +448,46 @@ pre {
 
 /* A page in a frame (Base with `bare`): the run alone. */
 body.bare .main { padding: 0; max-width: none; }
+
+/* An extra page: a segment to scale, a structure byte by byte. */
+.seg-shape { padding: 10px 12px; border-top: 1px solid var(--rule); }
+.seg-shape:first-of-type { border-top: 0; }
+.seg-name { color: var(--muted); margin-bottom: 6px; }
+.seg-bar { display: flex; height: 22px; border: 1px solid var(--rule-strong); }
+.seg-region { min-width: 3px; }
+.seg-region + .seg-region { border-left: 1px solid var(--bg); }
+.r-head { background: var(--fg); }
+.r-persist { background: var(--accent); }
+.r-gap { background: transparent; border-top: 1px dashed var(--muted); border-bottom: 1px dashed var(--muted); }
+.r-entry { background: var(--info, var(--muted)); }
+.seg-legend { display: flex; flex-wrap: wrap; gap: 2px 16px; margin: 6px 0 0; padding: 0; list-style: none; color: var(--muted); }
+.seg-legend li::before { content: none !important; }
+.seg-legend b { color: var(--fg); font-weight: 600; }
+.swatch { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 1px solid var(--rule-strong); vertical-align: -1px; }
+.bytes { margin: 1em 0 1.6em; }
+.bytes figcaption { color: var(--muted); margin-bottom: 6px; }
+.byte-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; margin-bottom: 8px; font-family: var(--font-mono); font-size: 11.5px; }
+.byte { min-height: 28px; padding: 4px 6px; border: 1px solid var(--rule-strong); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.byte.zero { color: var(--muted); border-style: dashed; text-align: center; }
+.byte.f0 { background: var(--accent-tint); }
+.byte.f1 { background: var(--info-tint); }
+.byte.f2 { background: var(--panel); }
+.byte.f3 { background: var(--bg); }
+.byte-table td:nth-child(-n+2) { white-space: nowrap; }
+/* A frame of the wire: its real bytes, a block per field. */
+.hex-strip { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 8px; font-family: var(--font-mono); font-size: 12px; }
+.hx { display: inline-flex; flex-direction: column; padding: 3px 6px; border: 1px solid var(--rule-strong); word-break: break-all; }
+.hx-name { font-size: 10.5px; color: var(--muted); }
+.hx.f0 { background: var(--accent-tint); }
+.hx.f1 { background: var(--info-tint); }
+.hx.f2 { background: var(--panel); }
+.hx.f3 { background: var(--bg); }
+.hx-value { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
+.prose ol.admission li { margin: 2px 0; }
+.prose ol.admission .label { color: var(--muted); margin-left: 6px; }
+/* On a phone, a frame's table puts the doc of a field under its numbers. */
+@media (max-width: 640px) {
+  .frame-table tr { display: grid; grid-template-columns: 2.6em 2.6em minmax(0, 1fr) minmax(0, 1fr); }
+  .frame-table th:last-child, .frame-table td:last-child { grid-column: 1 / -1; padding-top: 0; }
+  .frame-table th:last-child { display: none; }
+}

@@ -488,6 +488,8 @@ pub use moonpool_assertions::{AssertCmp, AssertKind, reachable, sometimes};
 // Exploration-only re-exports (fork-based multiverse engine).
 #[cfg(feature = "exploration")]
 pub use moonpool_explorer::{ExplorationConfig, Recipe, format_timeline, parse_timeline};
-pub use runner::report::{BugRecipe, ExplorationReport, MetricAggregate};
+pub use runner::report::{
+    BugRecipe, ExplorationReport, ExploredDiscovery, ExploredTimeline, MetricAggregate,
+};
 
 // Macros are automatically available at crate root when defined with #[macro_export]

@@ -494,6 +494,11 @@ impl SimWorld {
         self.inner.read().scheduler.len()
     }
 
+    /// Record a fault event at the current time, for the next drain.
+    pub(crate) fn note_fault(&self, event: SimFaultEvent) {
+        self.inner.write().record_fault(event);
+    }
+
     /// Returns and clears faults recorded since the previous drain.
     #[must_use]
     pub fn take_faults(&self) -> Vec<SimFaultRecord> {

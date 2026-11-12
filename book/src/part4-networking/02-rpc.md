@@ -12,6 +12,8 @@ against the provider traits, so the same runtime serves real sockets through
 `TokioProviders` and the simulator through `SimProviders`. It never depends
 on `moonpool-sim`.
 
+[moonpool-rpc, call by call](../extras/rpc/) on the website draws each frame of the wire byte by byte from the code and the golden vectors, with the table of reply statuses, the order of the admission checks and the rules of each delivery mode.
+
 ## One Driver, Many Endpoints
 
 A server does not open a port per service. It runs one `RpcDriver` and

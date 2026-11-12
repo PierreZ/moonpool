@@ -10,6 +10,8 @@ transport what it thinks happened. The full evidence record (every behaviour
 row, the seeds, the mutation checks and the measurements) lives in the
 repository at `docs/plans/moonpool-rpc/qualification.md`.
 
+[moonpool-rpc, call by call](../extras/rpc/) on the website draws each frame of the wire byte by byte from the code and the golden vectors, with the table of reply statuses, the order of the admission checks and the rules of each delivery mode.
+
 ## The Promises
 
 **Every failure says what it proves.** An `RpcError` carries a reason and one

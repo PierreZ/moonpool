@@ -35,11 +35,24 @@ export function warm() {
   start();
 }
 
-/** Run one config in the worker: resolves to `{ run, ms }`. */
-export function runConfig(config) {
+function ask(op, config) {
   return new Promise((resolve, reject) => {
     const id = ++next;
     waiting.set(id, { resolve, reject });
-    start().postMessage({ id, config });
+    start().postMessage({ id, config, op });
   });
+}
+
+/** Run one config in the worker: resolves to `{ run, ms }`. */
+export function runConfig(config) {
+  return ask("run", config);
+}
+
+/**
+ * Run seeds until the register's checks are stable (`coverage` of the
+ * engine, crates/moonpool-wasm-demo/src/coverage.rs): resolves to
+ * `{ run, ms }`, where `run` is the coverage result.
+ */
+export function runCoverage(config) {
+  return ask("coverage", config);
 }

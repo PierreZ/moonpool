@@ -10,6 +10,8 @@ The problem is called **passive suppression**, and it comes from "Swarm Testing"
 
 The fix is counterintuitive. For each run, turn **off** a random subset of features entirely. One seed is clog-only. Another is partition plus bit flip. Another is the all-off baseline. Across many seeds you reach the single-family extremes the all-on config never reaches. Will Wilson's Antithesis talks made the same point for distributed systems.
 
+[Swarm testing](../techniques/swarm/) shows it on the website: eight seeds of a small replicated register in swarm mode, the families each seed drew, and the run of each seed in your browser. No seed has every family on, and the eight together cover each one.
+
 ## ChaosMode::Swarm, Surface by Surface
 
 `ChaosMode::Swarm` applies the paper per surface. Each surface starts from its `Random` profile, then draws one coin per family and switches the losers fully off. The all-off subset is allowed on purpose: a no-fault run is a valid configuration, and it is where slow leaks show.
@@ -56,7 +58,22 @@ SimulationBuilder::new()
 
 Both masks have the same shape: `all()`, `none()`, `with(fault)`, `without(fault)` and `contains(fault)`. The default is `all()`. A mask is applied after profile sampling and after `Chaos::BuggifyKnobs`, right before the world is built, and it consumes no randomness. Adding or removing a mask shifts no draw, so recipes and replays stay valid. A family a mask removes is never chosen, whatever the seed's coin said.
 
-The `NetworkFault` families are `Clog`, `Partition`, `BitFlip`, `RandomClose`, `ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, `PairLatency` and `BlackHole`. The `StorageFault` families are `Corruption`, `Eio`, `Misdirect`, `PhantomWrite`, `SyncFailure`, `ShortTransfer`, `DirEntryLoss`, `CrashDamage`, `Degradation` and `DiskFailure`. Partial reads and writes are TCP behaviour driven by buggify, not a family, so no mask touches them.
+The `NetworkFault` families are `Clog`, `Partition`, `BitFlip`, `RandomClose`, `ConnectFailure`, `ClockDrift`, `BuggifiedDelay`, `PairLatency` and `BlackHole`. The `StorageFault` families are `Corruption`, `Eio`, `Misdirect`, `PhantomWrite`, `SyncFailure`, `ShortTransfer`, `DirEntryLoss`, `CrashDamage`, `Degradation`, `DiskFailure`, `DroppedMutationDiscard` and `WritebackError`. Partial reads and writes are TCP behaviour driven by buggify, not a family, so no mask touches them.
+
+`NetworkFault::ALL` and `StorageFault::ALL` list the families, and `name()` gives each one in `snake_case` (`bit_flip`, `sync_failure`). `NetworkFaultMask::of(&chaos)` and `StorageFaultMask::of(&config)` go the other way: the families a sampled profile has on. `names()` writes a mask as a comma-separated list.
+
+## Which Families a Seed Drew
+
+When network or storage chaos is on, the world records the families of the seed, after the swarm draw and after the masks, as one fault event with `kind = "chaos_families"` and two fields, `network` and `storage`, each a comma-separated list of names. It is read-only: it draws nothing and changes nothing in the run. An invariant or a tool reads it like any other fault event:
+
+```rust,ignore
+for e in q.since(SIM_FAULT_EVENT_NAME, &self.cursor) {
+    if e.str("kind") == Some("chaos_families") {
+        let network = e.str("network").unwrap_or_default(); // "clog,partition,bit_flip"
+        let storage = e.str("storage").unwrap_or_default();
+    }
+}
+```
 
 ## Budgets
 

@@ -18,12 +18,14 @@ The site presents moonpool as an engineering tool. The book is its manual.
 |---|---|---|
 | `/` | `src/pages/index.astro`, `public/home.js` | sells the tool: a hero with a live run, what you get, a test, your code and the providers, the techniques, used by paros |
 | `/techniques/` | `src/pages/techniques/`, `src/lib/techniques.mjs`, `src/layouts/Technique.astro` | one page per technique: the problem, the technique, the live run, the code, the Guide chapters |
+| `/playground/` | `src/pages/playground/index.astro`, `public/playground.js` | the full config in the address (`playConfig` / `playQuery` of `public/run-model.js`), Run, Hunt (seeds one after the other in the worker, stoppable), Replay, the report |
+| `/extras/` | `src/pages/extras/`, `src/lib/extras.mjs`, `src/layouts/Extra.astro` | one page per crate, in depth: its module docs, its byte layouts and its code, read with `src/lib/rustdoc.mjs` (`moduleDoc`, `docSection`, `unlink`, `readerCode`, `encodeLayout`, `writerLayout`, `fillBytes`, `constValue`, `itemDoc`, `fieldDocs`, `variantDocs`) and drawn by `src/components/ByteLayout.astro`; the rpc page lays each frame its encoder writes over a golden vector of `crates/moonpool-rpc/tests/fixtures/` (`src/components/FrameLayout.astro`) and reads its status table and admission order with `src/lib/rpc.mjs` |
 | `/crates/` | `src/pages/crates/index.astro`, `src/lib/crates.mjs` | one entry per crate of the README table: what it is for, when to depend on it, docs.rs, its chapter |
 | `/guide/` | `src/pages/guide/index.astro` | `book/src/welcome.md`, then the map of `book/src/index.md` |
 | `/guide/quick-start/` | `src/pages/guide/quick-start/index.astro` | install, the first test, run it, read the report, replay a seed |
 | `/<part>/<chapter>.html`, `/llms.html` | `src/pages/[...slug].astro` | each chapter of `book/src/SUMMARY.md`, at its mdbook address |
 
-Later issues add the other technique pages (#418) and `/playground/` (#419). Add a
+Add a
 section to the top bar (`src/nav.ts`) in the issue that adds its page.
 
 ## The Guide
@@ -90,9 +92,13 @@ per technique page:
 | `/techniques/network/` | `public/network.js` | a switch per network fault family (`NETWORK_FAULTS` of the engine) and the faults of each kind |
 | `/techniques/storage/` | `public/storage.js` | the log of each server as a row of sectors (`log_written`, `log_synced`, `storage_crash_sectors`) |
 | `/techniques/reboots/` | `public/reboots.js` | each reboot: kind, down, back, the version on its disk |
+| `/techniques/swarm/` | `public/swarm.js` | eight swarm seeds as rows, a dot per family each drew (`Run.families`, from the `chaos_families` event); a row opens its run |
+| `/techniques/assertions/` | `public/assertions.js` | the register's checks (`CHECKS`) turning green seed after seed, a coverage bar; the stop rule is the engine's `coverage` export |
+| `/techniques/exploration/` | `public/exploration.js` | the recorded tree of an exploration (`tests/exploration_tree.rs`, the explorer forks so it never runs in a browser); the bug timeline replays from its `recipe` |
+| `/techniques/debugging/` | `public/debugging.js` | the report of a failing seed, its replay, and the walk back from the broken invariant (`walkBack` in `public/run-model.js`) |
 
 A technique page reads its code samples and names from the files
-(`excerpt`, `lineWith`, `constNames`, `constStr`, `hintLabels` in
+(`excerpt` (with `after` to keep lines past the end marker), `lineWith`, `constList`, `constNames`, `constStr`, `hintLabels` in
 `src/lib/source.mjs`), so a sample never goes stale: a marker that is gone
 fails the build. Each page links to its Guide chapters, and each chapter links
 back to the page.
@@ -121,6 +127,21 @@ back to the page.
 - Every page works on a phone. Check each page you change at 390 px and
   1280 px, light and dark, with no horizontal scroll of the page, and put the
   screenshots in the pull request.
+
+## The mark and the links
+
+- The mark is "M1 · the module" (Pierre chose it in #420 (finish)): a module
+  on two legs on the sea floor, the sea above it, the pool in its floor.
+  `src/components/Mark.astro` draws it in the top bar. `scripts/icons.mjs`
+  makes `public/favicon.svg`, `favicon.ico`, `apple-touch-icon.png`,
+  `icon-192.png`, `icon-512.png` and `social-card.png` (1200 by 630, with the
+  astronaut of `book/src/images/logo.png`) from the mark and the tokens: run
+  it by hand and commit the files. `Base.astro` holds the icon links and the
+  `og:` tags.
+- `scripts/redirects.mjs` checks, after each build: each link inside the
+  site, each old book address (each chapter of `SUMMARY.md` at its `.html`,
+  each redirect), and each link to the site in the READMEs and the
+  `Cargo.toml` files of the repository.
 
 ## Writing
 

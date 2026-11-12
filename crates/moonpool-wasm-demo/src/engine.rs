@@ -25,7 +25,7 @@ use crate::register::{
 };
 
 /// The version of the [`Run`] model. Bump it when a field changes meaning.
-pub const MODEL: u32 = 2;
+pub const MODEL: u32 = 3;
 
 /// The event that the simulator emits, in the process, when attrition reboots
 /// it at its own `hint!` (fields `ip` and `label`).
@@ -76,6 +76,15 @@ pub struct RunConfig {
     pub storage_faults: Option<Vec<String>>,
     /// Reboots can also wipe a server's disk, one server per run.
     pub wipes: bool,
+    /// The network and storage surfaces use `ChaosMode::Swarm`: each seed
+    /// keeps a random subset of the fault families ([`Run::families`]).
+    pub swarm: bool,
+    /// Replay one explored timeline of the seed, written as moonpool writes
+    /// a recipe (`format_timeline`): `"count@seed -> count@seed"`, one
+    /// `(rng_call_count, seed)` breakpoint per segment. A string, since a
+    /// seed above 2^53 is not exact as a JavaScript number. `None` runs the
+    /// seed's root timeline.
+    pub recipe: Option<String>,
 }
 
 /// The network fault families a config can name, and their mask bits.
@@ -135,6 +144,8 @@ impl Default for RunConfig {
             network_faults: None,
             storage_faults: None,
             wipes: false,
+            swarm: false,
+            recipe: None,
         }
     }
 }
@@ -242,6 +253,19 @@ pub struct Fingerprint {
     pub draws: u64,
 }
 
+/// The fault families of one seed, by name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Families {
+    /// The network families that can fire ([`NETWORK_FAULTS`] names).
+    pub network: Vec<String>,
+    /// The storage families that can fire ([`STORAGE_FAULTS`] names).
+    pub storage: Vec<String>,
+}
+
+/// The `kind` of the simulator's read-only fault event that names the
+/// families of a seed.
+const CHAOS_FAMILIES: &str = "chaos_families";
+
 /// What one run recorded: the model of the site's player.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Run {
@@ -259,6 +283,9 @@ pub struct Run {
     pub messages: Vec<Message>,
     /// The assertions of the scenario and of the simulator.
     pub assertions: Vec<Assertion>,
+    /// The fault families this seed can fire, from the simulator's
+    /// `chaos_families` event; `None` with no network or storage chaos.
+    pub families: Option<Families>,
     /// The report.
     pub report: Summary,
     /// The print of the run.
@@ -344,13 +371,18 @@ pub(crate) fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
-fn chaos_surfaces(chaos: ChaosSet, servers: usize, wipes: bool) -> Vec<Chaos> {
+fn chaos_surfaces(chaos: ChaosSet, servers: usize, wipes: bool, swarm: bool) -> Vec<Chaos> {
     let mut out = Vec::new();
+    let mode = if swarm {
+        ChaosMode::Swarm
+    } else {
+        ChaosMode::Random
+    };
     if chaos.network {
-        out.push(Chaos::Network(ChaosMode::Random));
+        out.push(Chaos::Network(mode));
     }
     if chaos.storage {
-        out.push(Chaos::Storage(ChaosMode::Random));
+        out.push(Chaos::Storage(mode));
     }
     if chaos.reboots {
         out.push(Chaos::Attrition {
@@ -417,7 +449,7 @@ pub fn simulation(config: &RunConfig) -> SimulationBuilder {
         ),
         None => builder,
     };
-    let surfaces = chaos_surfaces(config.chaos, config.servers, config.wipes);
+    let surfaces = chaos_surfaces(config.chaos, config.servers, config.wipes, config.swarm);
     if surfaces.is_empty() {
         builder
     } else {
@@ -425,7 +457,34 @@ pub fn simulation(config: &RunConfig) -> SimulationBuilder {
     }
 }
 
-/// Check a config: a known scenario and 1 to 5 servers.
+/// Parse a recipe written as `"count@seed -> count@seed"`, the format of
+/// `moonpool_sim::format_timeline` (which needs the `exploration` feature,
+/// so it is not in the wasm build).
+///
+/// # Errors
+///
+/// When a segment is not `count@seed` with two decimal `u64`.
+pub fn parse_recipe(text: &str) -> Result<Vec<(u64, u64)>, ConfigError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    text.split(" -> ")
+        .map(|segment| {
+            let (count, seed) = segment.trim().split_once('@').ok_or_else(|| {
+                ConfigError(format!("a recipe segment is count@seed, not {segment:?}"))
+            })?;
+            let number = |s: &str| {
+                s.parse::<u64>()
+                    .map_err(|e| ConfigError(format!("recipe segment {segment:?}: {e}")))
+            };
+            Ok((number(count)?, number(seed)?))
+        })
+        .collect()
+}
+
+/// Check a config: a known scenario and 1 to 5 servers, known fault
+/// families and a recipe that parses.
 ///
 /// # Errors
 ///
@@ -451,6 +510,9 @@ pub fn check(config: &RunConfig) -> Result<(), ConfigError> {
         families(STORAGE_FAULTS, names)
             .map_err(|n| ConfigError(format!("unknown storage fault family {n:?}")))?;
     }
+    if let Some(recipe) = &config.recipe {
+        parse_recipe(recipe)?;
+    }
     Ok(())
 }
 
@@ -458,7 +520,7 @@ pub fn check(config: &RunConfig) -> Result<(), ConfigError> {
 ///
 /// # Errors
 ///
-/// A config with an unknown scenario or a server count out of 1 to 5.
+/// A config that [`check`] refuses.
 ///
 /// # Panics
 ///
@@ -474,10 +536,11 @@ pub fn run(config: &RunConfig) -> Result<Run, ConfigError> {
         names,
         out: out.clone(),
     };
-    let builder = simulation(config)
-        .invariant(recorder)
-        .set_iterations(1)
-        .set_debug_seeds(vec![config.seed]);
+    let builder = simulation(config).invariant(recorder);
+    let builder = match config.recipe.as_deref().map(parse_recipe).transpose()? {
+        Some(recipe) => builder.replay_timeline(config.seed, recipe),
+        None => builder.set_iterations(1).set_debug_seeds(vec![config.seed]),
+    };
     let report = builder
         .run()
         .map_err(|e| ConfigError(format!("the simulation refused the config: {e}")))?;
@@ -485,6 +548,7 @@ pub fn run(config: &RunConfig) -> Result<Run, ConfigError> {
     let captured = std::mem::take(&mut *out.lock().expect("Mutex poisoned: prior task panicked"));
     let mut raw = captured.events;
     raw.sort_by_key(|e| e.seq);
+    let families = take_families(&mut raw);
     let events: Vec<Event> = raw
         .iter()
         .map(|e| Event {
@@ -550,6 +614,7 @@ pub fn run(config: &RunConfig) -> Result<Run, ConfigError> {
         faults,
         messages,
         assertions,
+        families,
         report: Summary {
             passed: report.failed_runs == 0 && report.assertion_violations.is_empty(),
             violations: report.assertion_violations.clone(),
@@ -561,6 +626,27 @@ pub fn run(config: &RunConfig) -> Result<Run, ConfigError> {
             draws: captured.draws,
         },
     })
+}
+
+/// Take the simulator's `chaos_families` event out of the events: the
+/// families of the seed are a fact of its setup, not a moment of the run.
+fn take_families(raw: &mut Vec<TraceEvent>) -> Option<Families> {
+    let is_families =
+        |e: &TraceEvent| e.name == SIM_FAULT_EVENT_NAME && e.str("kind") == Some(CHAOS_FAMILIES);
+    let names = |e: &TraceEvent, key: &str| -> Vec<String> {
+        e.str(key)
+            .unwrap_or_default()
+            .split(',')
+            .filter(|n| !n.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let families = raw.iter().find(|e| is_families(e)).map(|e| Families {
+        network: names(e, "network"),
+        storage: names(e, "storage"),
+    });
+    raw.retain(|e| !is_families(e));
+    families
 }
 
 /// The first event that breaks the register's invariant, with the rule the

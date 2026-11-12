@@ -1,0 +1,75 @@
+---
+// Multiverse exploration (#418 (technique pages, part 2)): the tree of an
+// exploration of the register with the planted bug. The explorer forks, so
+// the tree is recorded natively (crates/moonpool-wasm-demo/tests/
+// exploration_tree.rs, src/runs/exploration.json); public/exploration.js
+// draws it.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { excerpt, repoFile } from "../../../lib/source.mjs";
+import tree from "../../../runs/exploration.json";
+
+const test = repoFile("crates/moonpool-wasm-demo/tests/exploration_tree.rs");
+const config = excerpt(test, "fn exploration() -> ExplorationConfig {", "max_recipe_len: 6,", 2);
+const explore = excerpt(test, "fn explore(seed: u64) -> SimulationReport {", ".expect(\"the site's config is valid\")", 1);
+const bugIndex = tree.nodes.findIndex((n) => n.failed);
+const bug = tree.nodes[bugIndex];
+---
+<Technique
+  title="Multiverse exploration"
+  description="At each new discovery, the run forks. The children try other futures from the same moment."
+  guide={[
+    "part5-building-on-top/01-exploration.md",
+    "part5-building-on-top/02-exploration-problem.md",
+    "part5-building-on-top/03-frontier-controller.md",
+    "part5-building-on-top/05-exemplars-continuations.md",
+    "part5-building-on-top/06-multi-seed.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>A bug can need two rare things, one after the other. Each new seed starts from zero, so it must find the
+    first rare thing again before it can try for the second. The chance is the product of the two, and most
+    seeds never get near.</p>
+
+  <h2>The technique</h2>
+  <p>A run is a stream of random numbers. A <b>recipe</b> is a list of <code>(draw count, seed)</code> pairs:
+    replay the stream up to that draw, then go on with a new seed. When a run makes a discovery that no run
+    made before (a coverage assertion fires for the first time, a bucket fills, a watermark rises), the
+    explorer forks it there: the children replay the run up to the discovery, then each takes another
+    future. A productive child forks again; a child with nothing new ends its branch. A failing child is a
+    bug, with the recipe that replays it.</p>
+  <p><code>moonpool-explorer</code> forks processes and shares memory between them, so it does not run in a
+    browser. A Rust test ran this exploration and recorded its tree.</p>
+
+  <h2>The live run</h2>
+  <p>Seed {tree.seed} of the register with the planted bug. Its root timeline passes. The explorer ran {tree.nodes.length} timelines:
+    each column is one, in the order it ran, and each row is a depth. Step through them, or select one.
+    Timeline {bugIndex} forks from timeline {bug.parent} at draw {bug.fork_at} and breaks the invariant. The engine replays it from its recipe in your browser.</p>
+  <div class="breakout">
+    <div class="run">
+      <div class="run-head label"><span>the timelines of seed {tree.seed}</span><span>+ discovery · ✗ bug · ○ nothing new</span></div>
+      <div class="tree-wrap"><svg id="tree-svg" class="tree" role="img" aria-label="The tree of the exploration"></svg></div>
+      <div class="switches">
+        <button class="btn small" type="button" id="tree-step">Next timeline</button>
+        <button class="btn small" type="button" id="tree-all">All</button>
+        <button class="btn small" type="button" id="tree-bug">The bug</button>
+        <button class="btn small" type="button" id="tree-root">The root</button>
+      </div>
+      <div class="tree-info" id="tree-info" aria-live="polite"></div>
+    </div>
+    <section class="run run-under" id="run" aria-label="A timeline in the player"></section>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="tree" set:html={JSON.stringify(tree).replace(/</g, "\\u003c")} />
+
+  <h2>The code</h2>
+  <p>The settings of this exploration. <code>workers: 0</code> runs each timeline in the process, one after
+    the other, so the tree is the same each time:</p>
+  <Code theme="css-variables" lang="rust" code={config} />
+  <p>The test turns it on, and keeps the tree in the report:</p>
+  <Code theme="css-variables" lang="rust" code={explore} />
+  <p>The report gives each bug as a <code>BugRecipe</code>. <code>replay_timeline(seed, recipe)</code> runs
+    that one timeline again.</p>
+  <script is:inline type="module" src={url("exploration.js")}></script>
+</Technique>

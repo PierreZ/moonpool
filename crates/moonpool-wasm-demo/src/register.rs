@@ -32,8 +32,20 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use moonpool_sim::{
     Invariant, NetworkProvider, OpenOptions, Process, SimContext, SimulationError,
     SimulationResult, StorageFile, StorageProvider, TcpListenerTrait, TimeProvider, TraceQuery,
-    Workload, assert_always, assert_sometimes, buggify, hint,
+    Workload, assert_always, assert_reachable, assert_sometimes, buggify, hint,
 };
+
+/// The messages of the register's coverage checks (`assert_sometimes!` and
+/// `assert_reachable!`), in the order of the code. A seed set that leaves
+/// one of them unhit did not test that path. `tests/engine.rs` checks that
+/// this list matches the code.
+pub const CHECKS: &[&str] = &[
+    "a server boots with a stored value",
+    "a server drops a damaged frame",
+    "a write commits without one server",
+    "a write misses its quorum",
+    "a read sees two versions",
+];
 
 /// The group name of the servers.
 pub const SERVER: &str = "register";
@@ -207,7 +219,13 @@ impl Process for RegisterServer {
                 result = stream.read_exact(&mut bytes) => result,
                 () = shutdown.cancelled() => break,
             };
-            let Some(request) = read.ok().and_then(|()| Frame::decode(&bytes)) else {
+            if read.is_err() {
+                continue;
+            }
+            let Some(request) = Frame::decode(&bytes) else {
+                // A flipped bit: the check word does not match. Only the
+                // bit_flip network family reaches this line.
+                assert_reachable!("a server drops a damaged frame");
                 continue;
             };
             let peer = peer.split(':').next().unwrap_or(&peer).to_string();

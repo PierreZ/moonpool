@@ -178,6 +178,42 @@ impl WritebackErrorReporting {
 }
 
 impl StorageFault {
+    /// Every storage fault family, in mask order.
+    pub const ALL: [Self; 12] = [
+        Self::Corruption,
+        Self::Eio,
+        Self::Misdirect,
+        Self::PhantomWrite,
+        Self::SyncFailure,
+        Self::ShortTransfer,
+        Self::DirEntryLoss,
+        Self::CrashDamage,
+        Self::Degradation,
+        Self::DiskFailure,
+        Self::DroppedMutationDiscard,
+        Self::WritebackError,
+    ];
+
+    /// The family's name in `snake_case`, as the `chaos_families` fault
+    /// event writes it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Corruption => "corruption",
+            Self::Eio => "eio",
+            Self::Misdirect => "misdirect",
+            Self::PhantomWrite => "phantom_write",
+            Self::SyncFailure => "sync_failure",
+            Self::ShortTransfer => "short_transfer",
+            Self::DirEntryLoss => "dir_entry_loss",
+            Self::CrashDamage => "crash_damage",
+            Self::Degradation => "degradation",
+            Self::DiskFailure => "disk_failure",
+            Self::DroppedMutationDiscard => "dropped_mutation_discard",
+            Self::WritebackError => "writeback_error",
+        }
+    }
+
     const fn bit(self) -> u16 {
         match self {
             Self::Corruption => 1 << 0,
@@ -255,6 +291,80 @@ impl StorageFaultMask {
     #[must_use]
     pub const fn contains(self, fault: StorageFault) -> bool {
         self.0 & fault.bit() != 0
+    }
+
+    /// The families that a sampled configuration has on: the inverse of
+    /// applying a mask.
+    #[must_use]
+    pub fn of(config: &StorageConfiguration) -> Self {
+        let on = [
+            (
+                StorageFault::Corruption,
+                config.read_corruption_probability > 0.0
+                    || config.write_corruption_probability > 0.0,
+            ),
+            (
+                StorageFault::Eio,
+                config.read_eio_probability > 0.0 || config.write_eio_probability > 0.0,
+            ),
+            (
+                StorageFault::Misdirect,
+                config.misdirect_read_probability > 0.0 || config.misdirect_write_probability > 0.0,
+            ),
+            (
+                StorageFault::PhantomWrite,
+                config.phantom_write_probability > 0.0,
+            ),
+            (
+                StorageFault::SyncFailure,
+                config.sync_failure_probability > 0.0,
+            ),
+            (
+                StorageFault::ShortTransfer,
+                config.short_transfer_probability > 0.0,
+            ),
+            (
+                StorageFault::DirEntryLoss,
+                config.unsynced_dir_entry_loss_probability > 0.0,
+            ),
+            (
+                StorageFault::CrashDamage,
+                config.crash_lost_probability > 0.0
+                    || config.crash_latent_fault_probability > 0.0
+                    || config.shorn_write_probability > 0.0,
+            ),
+            (
+                StorageFault::Degradation,
+                config.disk_stall_probability > 0.0 || config.disk_throttle_probability > 0.0,
+            ),
+            (
+                StorageFault::DiskFailure,
+                config.disk_failure_probability > 0.0,
+            ),
+            (
+                StorageFault::DroppedMutationDiscard,
+                config.dropped_mutation_discard_probability > 0.0,
+            ),
+            (
+                StorageFault::WritebackError,
+                config.writeback_error_probability > 0.0,
+            ),
+        ];
+        on.into_iter()
+            .filter(|(_, on)| *on)
+            .fold(Self::none(), |mask, (fault, _)| mask.with(fault))
+    }
+
+    /// The names of the families this mask retains, comma separated, in mask
+    /// order.
+    #[must_use]
+    pub fn names(self) -> String {
+        StorageFault::ALL
+            .into_iter()
+            .filter(|f| self.contains(*f))
+            .map(StorageFault::name)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// Zero every suppressed family's probabilities in `config`.
@@ -1200,6 +1310,23 @@ mod swarm_tests {
             value.to_bits(),
             0.0_f64.to_bits(),
             "expected 0.0, got {value}"
+        );
+    }
+
+    /// The families of a sampled profile after a mask are within the mask.
+    #[test]
+    fn the_families_of_a_masked_profile_stay_within_the_mask() {
+        for seed in 0..64 {
+            let mut config = swarm_for(seed);
+            let mask = StorageFaultMask::all().without(StorageFault::CrashDamage);
+            mask.apply_to(&mut config);
+            let on = StorageFaultMask::of(&config);
+            assert!(!on.contains(StorageFault::CrashDamage));
+            assert!(!on.names().contains("crash_damage"));
+        }
+        assert_eq!(
+            StorageFaultMask::none().with(StorageFault::Eio).names(),
+            "eio"
         );
     }
 }

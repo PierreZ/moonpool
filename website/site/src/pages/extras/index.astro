@@ -1,0 +1,18 @@
+---
+// The extras (#428 (journal page)): one page per crate, on how it works.
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+import { EXTRAS } from "../../lib/extras.mjs";
+---
+<Doc title="Extras" description="How the crates built on moonpool work, in depth: their files, their wire formats, their rules." kicker="extras" section="extras/">
+  <p>Each page reads its facts from the crate's code when the site builds: the byte layouts, the constants and the
+    rules are the ones in the source, so a page cannot fall behind it.</p>
+  <ol class="index-list">
+    {EXTRAS.map((e) => (
+      <li>
+        {e.path ? <a class="n" href={url(e.path)}>{e.name}</a> : <span class="n">{e.name} <span class="chip-status">to come</span></span>}
+        <span class="desc">{e.line}</span>
+      </li>
+    ))}
+  </ol>
+</Doc>
