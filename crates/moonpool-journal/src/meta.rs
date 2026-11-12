@@ -15,7 +15,7 @@
 
 use moonpool_core::{BlockFile, LocalStorageFile, LocalStorageProvider, OpenOptions};
 
-use crate::format::{BLOCK, BLOCK_U64, META_COPY_B_AT, META_FILE_BLOCKS, Meta};
+use crate::format::{BLOCK, BLOCK_U64, META_COPY_B_AT, META_FILE_BLOCKS, Meta, VERSION};
 use crate::io::{block_buf, read_blocks, write_blocks, write_blocks_durable};
 use crate::{JournalId, OpenError};
 
@@ -106,10 +106,21 @@ impl<F: LocalStorageFile> MetaFile<F> {
 
     /// The current value and the copy that is stale, if one is: the valid
     /// copy with the higher sequence number. Two damaged copies, or two valid
-    /// copies of one sequence that disagree, are [`OpenError::MetaLost`].
+    /// copies of one sequence that disagree, are [`OpenError::MetaLost`]. With
+    /// no valid copy, an intact copy of another version is
+    /// [`OpenError::UnsupportedVersion`]: a copy of this version wins over it.
     async fn choose(&self, journal: JournalId) -> Result<(Meta, Option<Copy>), OpenError> {
         let a = self.read(Copy::A).await?;
         let b = self.read(Copy::B).await?;
+        let (a, b) = match (a, b) {
+            (Err(Some(found)), Err(_)) | (Err(None), Err(Some(found))) => {
+                return Err(OpenError::UnsupportedVersion {
+                    found,
+                    supported: VERSION,
+                });
+            }
+            (a, b) => (a.ok(), b.ok()),
+        };
         let (meta, stale) = match (a, b) {
             (Some(a), Some(b)) if a == b => (a, None),
             (Some(a), Some(b)) if a.seq == b.seq => return Err(OpenError::MetaLost),
@@ -146,9 +157,12 @@ impl<F: LocalStorageFile> MetaFile<F> {
         Ok(Some(meta))
     }
 
-    async fn read(&self, copy: Copy) -> std::io::Result<Option<Meta>> {
+    /// One copy: `Ok` when it is valid, else `Err` with the version of an
+    /// intact copy of another version (`None`: damaged).
+    async fn read(&self, copy: Copy) -> std::io::Result<Result<Meta, Option<u16>>> {
         let buf = read_blocks(&self.file, copy.block(), self.file.buffer(1)?).await?;
-        Ok(Meta::decode(buf.as_slice(), copy as u8))
+        let block = buf.as_slice();
+        Ok(Meta::decode(block, copy as u8).ok_or_else(|| Meta::other_version(block)))
     }
 
     /// Write one copy, durable on return. Only that block: the file must

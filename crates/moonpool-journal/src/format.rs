@@ -45,7 +45,7 @@ const SEGMENT_MAGIC: u32 = u32::from_le_bytes(*b"MPJS");
 const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 const META_MAGIC: u32 = u32::from_le_bytes(*b"MPJM");
 /// 3: segments are recycled, so a batch older than its segment is stale.
-const VERSION: u16 = 3;
+pub(crate) const VERSION: u16 = 3;
 
 const _: () = assert!(BLOCK.is_multiple_of(RECORD_SIZE));
 const _: () = assert!(RECORDS_PER_BLOCK == 64);
@@ -204,6 +204,12 @@ impl SegmentHeader {
         check_round_trip(Self::decode(block) == Some(*self));
     }
 
+    /// The version of an intact header written by another version of the
+    /// crate: the magic and the checksum hold, the version is not ours.
+    pub fn other_version(block: &[u8]) -> Option<u16> {
+        intact_other_version(block, SEGMENT_MAGIC, 52)
+    }
+
     pub fn decode(block: &[u8]) -> Option<Self> {
         if get_u32(block, 0) != SEGMENT_MAGIC
             || get_u16(block, 4) != VERSION
@@ -222,6 +228,17 @@ impl SegmentHeader {
             },
         })
     }
+}
+
+/// The version of `block` when it holds an intact structure of `magic`
+/// written by another version: the checksum at `crc_at` covers the version
+/// field, so damage cannot read as another version.
+fn intact_other_version(block: &[u8], magic: u32, crc_at: usize) -> Option<u16> {
+    let version = get_u16(block, 4);
+    (get_u32(block, 0) == magic
+        && version != VERSION
+        && get_u32(block, crc_at) == crc(&block[..crc_at]))
+    .then_some(version)
 }
 
 /// An encoder's postcondition: what it wrote decodes back to its input.
@@ -525,6 +542,12 @@ impl Meta {
         check_round_trip(Self::decode(block, copy).as_ref() == Some(self));
     }
 
+    /// The version of an intact copy written by another version of the
+    /// crate: the magic and the checksum hold, the version is not ours.
+    pub fn other_version(block: &[u8]) -> Option<u16> {
+        intact_other_version(block, META_MAGIC, META_CRC_AT)
+    }
+
     /// The copy in `block`, if it checks out and is the copy it claims to be.
     pub fn decode(block: &[u8], copy: u8) -> Option<Self> {
         if get_u32(block, 0) != META_MAGIC
@@ -648,5 +671,47 @@ mod tests {
             );
             assert!(last_batch_of(generation) > first_batch_of(generation));
         }
+    }
+
+    /// Write version `version` into an encoded block and seal it again.
+    fn reversion(block: &mut [u8], crc_at: usize, version: u16) {
+        put_u16(block, 4, version);
+        put_u32(block, crc_at, crc(&block[..crc_at]));
+    }
+
+    #[test]
+    fn an_intact_structure_of_another_version_names_its_version() {
+        let header = SegmentHeader {
+            journal: JournalId(9),
+            first_batch: 1,
+            prev_batch: 0,
+            geometry: Geometry::small(),
+        };
+        let mut block = vec![0; BLOCK];
+        header.encode(&mut block);
+        assert_eq!(SegmentHeader::other_version(&block), None);
+        reversion(&mut block, 52, VERSION + 1);
+        assert_eq!(SegmentHeader::decode(&block), None);
+        assert_eq!(SegmentHeader::other_version(&block), Some(VERSION + 1));
+        block[30] ^= 1;
+        assert_eq!(SegmentHeader::other_version(&block), None, "damage");
+
+        let meta = Meta {
+            seq: 1,
+            journal: JournalId(9),
+            floor: 0,
+            last_batch: 0,
+            open_generation: 1,
+            open_last: 0,
+            geometry: Geometry::small(),
+            bytes: vec![1, 2],
+        };
+        meta.encode(0, &mut block);
+        assert_eq!(Meta::other_version(&block), None);
+        reversion(&mut block, META_CRC_AT, VERSION + 1);
+        assert_eq!(Meta::decode(&block, 0), None);
+        assert_eq!(Meta::other_version(&block), Some(VERSION + 1));
+        block[30] ^= 1;
+        assert_eq!(Meta::other_version(&block), None, "damage");
     }
 }

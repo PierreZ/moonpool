@@ -15,7 +15,7 @@ use moonpool_core::{
     AlignedBuf, BlockFile, DirectIo, LocalStorageFile, LocalStorageProvider, OpenOptions,
 };
 
-use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, usize_of};
+use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, VERSION, usize_of};
 use crate::io::{
     ReadBytes, block_buf, read_blocks, read_bytes, write_blocks, write_blocks_durable,
 };
@@ -220,7 +220,17 @@ impl<F: LocalStorageFile> Segment<F> {
             (Some(_), Some(_)) => return Err(bad("header copies disagree")),
             (Some(a), None) => (a, Some(1)),
             (None, Some(b)) => (b, Some(0)),
-            (None, None) => return Err(bad("no valid header")),
+            (None, None) => {
+                let other = SegmentHeader::other_version(&headers.as_slice()[..BLOCK])
+                    .or_else(|| SegmentHeader::other_version(&headers.as_slice()[BLOCK..]));
+                return Err(other.map_or_else(
+                    || bad("no valid header"),
+                    |found| OpenError::UnsupportedVersion {
+                        found,
+                        supported: VERSION,
+                    },
+                ));
+            }
         };
         if header.journal != journal {
             return Err(OpenError::WrongJournal {

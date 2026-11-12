@@ -71,7 +71,9 @@ journal.commit(batch).await?;
   in a batch the mark records, or in an `Ordered` batch with an intact
   record, refuse the open (`DoubleFault`) instead of discarding an
   acknowledged entry. A batch of a later generation than the metainfo's
-  refuses it too (`MetaRolledBack`): the metainfo lost an update. A batch
+  refuses it too (`MetaRolledBack`): the metainfo lost an update. An intact
+  metainfo or segment header of another format version is not damage:
+  `UnsupportedVersion` names the version found. A batch
   number holds the generation in its high 24 bits and the count in its
   low 40 bits: the open after generation 2^24 - 1 and the commit after
   2^40 - 1 batches in one open are refused, before anything is written.

@@ -299,7 +299,10 @@ A batch missing while later ones exist, or a log ending before the batch the
 metainfo proves durable, is `LostBatch`: that covers every record and the
 first entry of a witnessed last batch damaged, where nothing on disk even
 says the batch was there. A missing meta file beside segments, or two
-damaged copies, is `MetaLost`. Two faults can also roll the metainfo back:
+damaged copies, is `MetaLost`. But what if the bytes are intact and only
+the format version is not ours? That is a binary of another version, not a
+lost disk: `UnsupportedVersion { found, supported }`. Each checksum covers
+the version field, so damage never reads as another version. Two faults can also roll the metainfo back:
 the device loses both copy writes of one update, or loses one while the
 other rots, and the older value wins. Every batch number carries the open
 generation that wrote it, and every open raises the generation in both

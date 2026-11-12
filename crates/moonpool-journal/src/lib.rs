@@ -225,7 +225,10 @@
 //! writes; a reopen starts a new generation. A medium
 //! error reads as damaged bytes (CLSTORE's treatment of EIO). A damaged or
 //! missing file is a crash ([`OpenError::BadSegment`],
-//! [`OpenError::MetaLost`]). Opening reads only the last batch's entries; the
+//! [`OpenError::MetaLost`]). An intact metainfo or segment header written
+//! by another version of the crate is not damage: it is
+//! [`OpenError::UnsupportedVersion`], because each checksum covers the
+//! version field. Opening reads only the last batch's entries; the
 //! journal checks the rest when they are read ([`Journal::read`],
 //! [`Journal::replay`]). Opening syncs what it keeps before it returns.
 //!

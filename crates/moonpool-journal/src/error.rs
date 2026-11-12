@@ -68,6 +68,21 @@ pub enum OpenError {
         reason: &'static str,
     },
 
+    /// The bytes are intact but another version of this crate wrote them:
+    /// the magic and the checksum hold, and the format version is not the
+    /// one this build reads. This is not damage: open it with a build of
+    /// that version. Each structure's checksum covers its version field, so
+    /// damage never reads as another version.
+    #[error(
+        "the journal was written in format version {found}; this build reads version {supported}"
+    )]
+    UnsupportedVersion {
+        /// The format version on disk.
+        found: u16,
+        /// The format version this build reads and writes.
+        supported: u16,
+    },
+
     /// The directory holds another journal's files.
     #[error("the directory holds journal {found:#x}")]
     WrongJournal {

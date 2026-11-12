@@ -1222,3 +1222,163 @@ fn a_scrub_finds_a_rotted_record_and_a_new_put_repairs_it() {
         }
     });
 }
+
+/// Rewrite the structure in the block of `path` at `offset` as the next
+/// format version, sealed with a correct checksum at `crc_at`: the bytes a
+/// later build of the crate would write. Returns that version.
+async fn other_version(sim: &mut SimWorld, path: String, offset: u64, crc_at: usize) -> u16 {
+    run(sim, move |provider| async move {
+        let file = provider.open(&path, OpenOptions::read_write()).await?;
+        let mut block = vec![0u8; 4096];
+        file.read_at(offset, &mut block).await?;
+        let version = u16::from_le_bytes([block[4], block[5]]) + 1;
+        block[4..6].copy_from_slice(&version.to_le_bytes());
+        let crc = crc32c::crc32c(&block[..crc_at]);
+        block[crc_at..crc_at + 4].copy_from_slice(&crc.to_le_bytes());
+        file.write_at(offset, &block).await?;
+        file.sync_all().await?;
+        Ok::<_, std::io::Error>(version)
+    })
+    .await
+    .expect("rewrite the version")
+}
+
+/// The offset of each metainfo copy, and where its checksum sits.
+const META_COPIES: [u64; 2] = [0, 16 * 4096];
+const META_CRC_AT: usize = 4092;
+/// The offset of each segment header copy, and where its checksum sits.
+const HEADER_COPIES: [u64; 2] = [0, 4096];
+const HEADER_CRC_AT: usize = 52;
+
+/// Whether `error` names version `found` as the one after the supported one.
+fn is_unsupported(error: &OpenError, found: u16) -> bool {
+    matches!(
+        error,
+        OpenError::UnsupportedVersion { found: f, supported } if *f == found && *supported + 1 == found
+    )
+}
+
+#[test]
+fn a_metainfo_of_another_version_is_unsupported_not_lost() {
+    runtime().block_on(async {
+        let mut sim = sim(17);
+        drop(create(&mut sim, Durability::Ordered).await);
+        let mut found = 0;
+        for at in META_COPIES {
+            found = other_version(&mut sim, format!("{DIR}/meta"), at, META_CRC_AT).await;
+        }
+        let peeked = run(&mut sim, |provider| async move {
+            Journal::peek_meta(&provider, DIR, JOURNAL).await
+        })
+        .await
+        .expect_err("another version");
+        assert!(is_unsupported(&peeked, found), "{peeked}");
+        let opened = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect_err("another version");
+        assert!(is_unsupported(&opened, found), "{opened}");
+    });
+}
+
+#[test]
+fn a_metainfo_copy_of_another_version_and_a_damaged_one_is_unsupported() {
+    runtime().block_on(async {
+        for (damaged, other) in [(0, 1), (1, 0)] {
+            let mut sim = sim(18);
+            drop(create(&mut sim, Durability::Ordered).await);
+            let path = format!("{DIR}/meta");
+            let found =
+                other_version(&mut sim, path.clone(), META_COPIES[other], META_CRC_AT).await;
+            flip(&mut sim, path, META_COPIES[damaged] + 30).await;
+            let opened = reopen(&mut sim, Durability::Ordered)
+                .await
+                .expect_err("another version");
+            assert!(is_unsupported(&opened, found), "{opened}");
+        }
+    });
+}
+
+#[test]
+fn a_metainfo_copy_of_this_version_wins_over_one_of_another() {
+    runtime().block_on(async {
+        let mut sim = sim(19);
+        drop(create(&mut sim, Durability::Ordered).await);
+        other_version(&mut sim, format!("{DIR}/meta"), META_COPIES[1], META_CRC_AT).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect("copy A is of this version");
+        assert!(recovery.meta_repaired);
+        assert_eq!(journal.meta(), b"born");
+    });
+}
+
+/// The path of the journal's one segment.
+async fn segment_path(sim: &mut SimWorld) -> String {
+    let names = names(sim).await;
+    let segments: Vec<&String> = names.iter().filter(|n| n.starts_with("seg-")).collect();
+    assert_eq!(segments.len(), 1, "{names:?}");
+    format!("{DIR}/{}", segments[0])
+}
+
+#[test]
+fn a_segment_header_of_another_version_is_unsupported_not_bad() {
+    runtime().block_on(async {
+        let mut sim = sim(20);
+        let journal = create(&mut sim, Durability::Ordered).await;
+        drop(put(&mut sim, journal, &[(1, 1, 10)]).await);
+        let path = segment_path(&mut sim).await;
+        let mut found = 0;
+        for at in HEADER_COPIES {
+            found = other_version(&mut sim, path.clone(), at, HEADER_CRC_AT).await;
+        }
+        let opened = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect_err("another version");
+        assert!(is_unsupported(&opened, found), "{opened}");
+    });
+}
+
+#[test]
+fn a_segment_header_of_another_version_and_a_damaged_one_is_unsupported() {
+    runtime().block_on(async {
+        for (damaged, other) in [(0, 1), (1, 0)] {
+            let mut sim = sim(21);
+            let journal = create(&mut sim, Durability::Ordered).await;
+            drop(put(&mut sim, journal, &[(1, 1, 10)]).await);
+            let path = segment_path(&mut sim).await;
+            let found =
+                other_version(&mut sim, path.clone(), HEADER_COPIES[other], HEADER_CRC_AT).await;
+            flip(&mut sim, path, HEADER_COPIES[damaged] + 30).await;
+            let opened = reopen(&mut sim, Durability::Ordered)
+                .await
+                .expect_err("another version");
+            assert!(is_unsupported(&opened, found), "{opened}");
+        }
+    });
+}
+
+#[test]
+fn two_damaged_segment_headers_are_still_a_bad_segment() {
+    runtime().block_on(async {
+        let mut sim = sim(22);
+        let journal = create(&mut sim, Durability::Ordered).await;
+        drop(put(&mut sim, journal, &[(1, 1, 10)]).await);
+        let path = segment_path(&mut sim).await;
+        for at in HEADER_COPIES {
+            flip(&mut sim, path.clone(), at + 30).await;
+        }
+        let opened = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect_err("both headers damaged");
+        assert!(
+            matches!(
+                opened,
+                OpenError::BadSegment {
+                    reason: "no valid header",
+                    ..
+                }
+            ),
+            "{opened}"
+        );
+    });
+}
