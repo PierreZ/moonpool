@@ -255,6 +255,14 @@ impl Kind {
 /// A batch's flags, stamped in each of its records and entries.
 pub(crate) const FLAG_ORDERED: u8 = 1;
 
+/// A record's own flag, never an entry's: an open rebuilt the record from
+/// its entry. Such a record proves only that its entry is intact, not that
+/// the batch's records were ever written, so it is never an `Ordered`
+/// batch's witness that its entries were durable.
+pub(crate) const FLAG_REBUILT: u8 = 2;
+
+const _: () = assert!(FLAG_ORDERED & FLAG_REBUILT == 0);
+
 /// One persist record (CLSTORE's identifier and persist record in one): far
 /// from its entry, it says the entry was written and which one it was.
 ///

@@ -211,7 +211,10 @@
 //! commit that changed the metainfo records its own batch, and every open
 //! records the last batch it found), or it is an [`Ordered`](Durability::Ordered)
 //! batch with an intact record, whose entries were durable before any
-//! record was written. A crash in the middle of a commit cannot leave a
+//! record was written. A record an open rebuilt from its entry is marked as
+//! such and is no witness: it proves its entry intact, not that the batch's
+//! records were written, and a crash that tears that open's rewrite can
+//! leave it beside a slot the rewrite discarded. A crash in the middle of a commit cannot leave a
 //! witnessed batch with a slot whose record and entry are both damaged, so
 //! there that is corruption, not a crash. In a witnessed batch, an entry
 //! that is damaged while its record is valid is [`State::Corrupt`] too.

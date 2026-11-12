@@ -343,10 +343,14 @@ is the only copy of that entry's identity. `RecordRepair` counts the blocks
 written and the blocks left.
 
 Three rules keep recovery's own writes honest, and the crash loops found
-each of them. A fourth keeps them apart from the witness rule: when an open
-discards torn slots of an `Ordered` batch and rebuilds other records of it,
-the discards land first and alone, so a crash inside the rewrite never
-leaves a rebuilt record beside a slot that reads both damaged. **What opening keeps, it syncs**, because a process that
+each of them. A fourth keeps them apart from the witness rule: **a rebuilt
+record is never a witness**. An open marks each record it rebuilds from its
+entry. Such a record proves only that its entry is intact, not that the
+batch's records were ever written. A crash can tear the open's rewrite of an
+`Ordered` batch and lose the sector of a discard, even one that was durable
+before. The next open then finds a rebuilt record beside a slot that reads
+both damaged, and it discards that slot again instead of refusing to open.
+**What opening keeps, it syncs**, because a process that
 restarted without a power loss reads its predecessor's unsynced writes from
 the page cache. **A record never reaches the disk before its entry**, so a
 rebuilt record is written only after the entries are synced. **What an open

@@ -28,8 +28,8 @@
 use moonpool_core::{AlignedBuf, LocalStorageFile};
 
 use crate::format::{
-    BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, RECORD_SIZE, RECORDS_PER_BLOCK,
-    Record, Slot, align_up, entry_crc, generation_of, u64_of, usize_of,
+    BLOCK_U64, EntryHeader, FLAG_ORDERED, FLAG_REBUILT, Geometry, Id, Kind, RECORD_SIZE,
+    RECORDS_PER_BLOCK, Record, Slot, align_up, entry_crc, generation_of, u64_of, usize_of,
 };
 use crate::segment::Segment;
 use crate::{OpenError, RecordRepair};
@@ -107,8 +107,7 @@ pub(crate) struct Scan {
     /// The persist writes the open makes, in order, each durable before the
     /// next. The last batch's extent, when it voids or rebuilds a record, so
     /// the next open finds a durable verdict instead of damage before a
-    /// later batch: when the batch has both voids and rebuilt records, the
-    /// voids land first (see [`judge_batch`]). Then each block of an earlier
+    /// later batch (see [`judge_batch`]). Then each block of an earlier
     /// batch whose rebuilt records its entries prove (see [`repair_batch`]).
     pub writes: Vec<BlockWrite>,
     /// The blocks of earlier batches written again, and those left.
@@ -143,9 +142,10 @@ async fn read_entry<F: LocalStorageFile>(
 }
 
 /// Whether `header` (with CRC `stored`) is exactly the entry `record` names.
+/// A record's `FLAG_REBUILT` is its own: the entry never carries it.
 pub(crate) fn entry_matches(record: &Record, header: &EntryHeader, stored: u32) -> bool {
     header.kind == record.kind
-        && header.flags == record.flags
+        && header.flags == record.flags & !FLAG_REBUILT
         && header.index == record.index
         && header.count == record.count
         && header.batch == record.batch
@@ -155,11 +155,11 @@ pub(crate) fn entry_matches(record: &Record, header: &EntryHeader, stored: u32) 
         && stored == record.entry_crc
 }
 
-/// The record an intact entry at `offset` stands for.
+/// The record an intact entry at `offset` stands for, marked `FLAG_REBUILT`.
 fn rebuild(header: &EntryHeader, stored: u32, offset: u64) -> Record {
     Record {
         kind: header.kind,
-        flags: header.flags,
+        flags: header.flags | FLAG_REBUILT,
         index: header.index,
         count: header.count,
         batch: header.batch,
@@ -446,11 +446,14 @@ impl Judge {
     /// are both damaged: only in the last batch, above the mark, and not in
     /// an `Ordered` batch that kept an intact record (its entries were
     /// durable before any record was written, so a damaged one is
-    /// corruption).
+    /// corruption). A record an earlier open rebuilt is no such witness:
+    /// that open's rewrite, torn by a crash, can leave it beside a slot
+    /// whose void was lost.
     fn crash_explains_lost(self, batch: &BatchScan) -> bool {
-        let ordered_witness = batch.slots.iter().any(
-            |found| matches!(found, Found::Record(record) if record.flags & FLAG_ORDERED != 0),
-        );
+        let ordered_witness = batch.slots.iter().any(|found| {
+            matches!(found, Found::Record(record)
+                if record.flags & FLAG_ORDERED != 0 && record.flags & FLAG_REBUILT == 0)
+        });
         self.is_last && batch.seq > self.mark && !ordered_witness
     }
 }
@@ -466,30 +469,19 @@ async fn judge_batch<F: LocalStorageFile>(
     let Judge { is_last, tag, mark } = judge;
     let crash_explains_lost = judge.crash_explains_lost(batch);
     let mut rewrite = false;
-    let mut voided = false;
-    let mut rebuilt = false;
     let mut kept: Vec<Record> = Vec::with_capacity(batch.slots.len());
-    // What the slots held on disk before this open: the voids-first write
-    // keeps a valid record and leaves a rebuilt slot zero.
-    let mut on_disk: Vec<Option<Record>> = Vec::with_capacity(batch.slots.len());
     for (index, found) in (0u16..).zip(batch.slots.iter()) {
         let record = match *found {
-            Found::Record(record) => {
-                on_disk.push(Some(record));
-                record
-            }
+            Found::Record(record) => record,
             Found::Rebuilt(record) => {
                 out.rebuilt += 1;
                 rewrite |= is_last;
-                rebuilt = true;
-                on_disk.push(None);
                 record
             }
             Found::Lost if crash_explains_lost => {
                 // Torn by a crash: never acknowledged, discarded.
                 out.voided += 1;
                 rewrite = true;
-                voided = true;
                 let void = Record {
                     kind: Kind::Void,
                     flags: 0,
@@ -502,7 +494,6 @@ async fn judge_batch<F: LocalStorageFile>(
                     len: 0,
                     entry_crc: 0,
                 };
-                on_disk.push(Some(void));
                 kept.push(void);
                 continue;
             }
@@ -561,17 +552,15 @@ async fn judge_batch<F: LocalStorageFile>(
         }
     }
     if rewrite {
-        // Voids land before rebuilt records. A rebuilt `Ordered` record is
-        // an intact record, which makes a lost slot corruption: if a crash
-        // tore one rewrite, a rebuilt record that landed beside a void that
-        // did not would read as a double fault. Written first and alone,
-        // the voids leave every slot either valid or rebuildable.
-        let at = |bytes| (segment_index, batch.persist_at, bytes);
-        if voided && rebuilt {
-            out.writes
-                .push(at(encode_records(on_disk.iter().map(Option::as_ref))));
-        }
-        out.writes.push(at(encode_records(kept.iter().map(Some))));
+        // One write. A crash that tears it leaves each slot as it was, as
+        // written, or lost: a rebuilt record carries `FLAG_REBUILT`, so it
+        // never makes a lost slot beside it corruption, and the next open
+        // judges the batch again.
+        out.writes.push((
+            segment_index,
+            batch.persist_at,
+            encode_records(kept.iter().map(Some)),
+        ));
     }
     Ok(())
 }

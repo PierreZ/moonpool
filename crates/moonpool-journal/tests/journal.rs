@@ -1187,6 +1187,50 @@ fn two_faults_on_a_witnessed_last_batch_refuse_to_open() {
     });
 }
 
+/// An `Ordered` last batch torn by a crash: one record damaged beside its
+/// intact entry, one slot with its record and entry both damaged. The open
+/// rebuilds the first and discards the second in one rewrite, and a crash
+/// that tears that rewrite can lose the discard while the rebuilt record
+/// lands. The rebuilt record is no witness, so the next open discards the
+/// slot again; it never refuses to open.
+#[test]
+fn a_rebuilt_record_beside_a_lost_discard_is_no_witness() {
+    runtime().block_on(async {
+        let mut sim = sim(22);
+        let journal = five_then_two(&mut sim, Durability::Ordered, false).await;
+        let (record_6, _) = spots(&journal, 6);
+        let (record_7, entry_7) = spots(&journal, 7);
+        drop(journal);
+        flip(&mut sim, record_6.0.clone(), record_6.1).await;
+        flip(&mut sim, record_7.0.clone(), record_7.1).await;
+        flip(&mut sim, entry_7.0, entry_7.1).await;
+        // The metainfo as the crash leaves it: an open raises its generation
+        // only after the rewrite.
+        let meta = file_bytes(&mut sim, format!("{DIR}/meta")).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        assert_eq!((recovery.rebuilt, recovery.torn), (1, 1));
+        assert_eq!(journal.state(7), State::Empty);
+        drop(journal);
+        // The torn rewrite: the rebuilt record landed, the discard was lost.
+        put_bytes(&mut sim, format!("{DIR}/meta"), meta).await;
+        flip(&mut sim, record_7.0, record_7.1).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect("a rebuilt record is no witness");
+        assert_eq!((recovery.rebuilt, recovery.torn), (0, 1));
+        assert_eq!(journal.state(7), State::Empty);
+        let (journal, bytes) = read(&mut sim, journal, 6).await;
+        assert_eq!(bytes.expect("intact"), payload(6, 1, 300));
+        drop(journal);
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect("reopens");
+        assert_eq!(recovery.torn, 0, "the second open wrote its verdict down");
+        let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+        assert_eq!(live, vec![1, 2, 3, 4, 5, 6]);
+    });
+}
+
 /// Every record and the first entry of an acknowledged last batch rotted:
 /// nothing on disk says the batch was there, but the metainfo recorded it,
 /// so the log ending before it is a lost batch, not the end.
