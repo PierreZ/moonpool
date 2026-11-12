@@ -48,6 +48,7 @@
 //! | [`balance`] | `sim-rpc-balance` | Balanced calls under separate retry and duplicate permissions, hedging, cancellation, late losers and outages of every alternative |
 //! | [`streams`] | `sim-rpc-streams` | Reply streams with consumption credit, abandonment, saturation, bounded admission and producer reboots |
 //! | [`security`] | `sim-rpc-security` | Credentials and endpoint access under key rotation, UTC transitions, crashes, graceful shutdowns and mixed protocol versions: no unauthorized execution, ever |
+//! | [`tls`] | `sim-rpc-tls` | TLS 1.3 sessions, mutual or not, with certificates from the production authority, under UTC steps, certificate rotation, an impostor server and bit flips |
 //! | [`qualification`] | `sim-rpc-qualification` | All of the above at once, with a declared recovery phase, resource baselines after every process death, and semantic replay across runs and host speeds |
 //!
 //! Each module exposes a campaign function that returns a configured
@@ -58,8 +59,10 @@
 //! # Faults
 //!
 //! - **Network chaos.** Swarm network faults per seed. Every campaign but
-//!   foundations masks bit flips with [`without_corruption`]: corruption is
-//!   its own explicit suite, never arbitrary loss on healthy TCP.
+//!   foundations and tls masks bit flips with [`without_corruption`]:
+//!   corruption is its own explicit suite, never arbitrary loss on healthy
+//!   TCP. Under TLS a flipped bit is an authentication failure that ends
+//!   the session, so the tls campaign keeps them.
 //! - **Process faults.** Scripted crashes (for example, right after a
 //!   handler received a request), same-address restarts and graceful
 //!   shutdowns, through each campaign's `FaultInjector`.
@@ -74,9 +77,10 @@
 //!
 //! # Feature flags
 //!
-//! None. The crate enables the `derive` and `jwt` features of
+//! None. The crate enables the `derive`, `jwt` and `tls-pki` features of
 //! `moonpool-rpc`: the interfaces campaign serves a generated interface,
-//! and the security campaign verifies real signed tokens.
+//! the security campaign verifies real signed tokens, and the tls campaign
+//! makes its certificates with the production authority.
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 

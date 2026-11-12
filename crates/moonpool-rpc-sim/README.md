@@ -19,10 +19,13 @@ ledger, and the workload judges its own outcomes against that ledger.
 | `sim-rpc-balance` | `balance` | Balanced calls under separate retry and duplicate permissions, hedging, cancellation, late losers |
 | `sim-rpc-streams` | `streams` | Reply streams with consumption credit, abandonment, saturation, bounded admission, producer reboots |
 | `sim-rpc-security` | `security` | Credentials and access under key rotation, UTC transitions, crashes and mixed protocol versions |
+| `sim-rpc-tls` | `tls` | TLS 1.3 sessions, mutual or not, with certificates from the production authority, under UTC steps, certificate rotation and bit flips |
 | `sim-rpc-qualification` | `qualification` | All of the above at once, with a recovery phase, resource baselines and semantic replay |
 
-Every campaign except foundations masks network bit flips with
-`without_corruption()`. Each campaign also records which of
+Every campaign except foundations and tls masks network bit flips with
+`without_corruption()`. Under TLS a flipped bit is an authentication
+failure that ends the session, so the tls campaign keeps them. Each
+campaign also records which of
 `moonpool-rpc`'s own buggify sites fired (session cuts behind a request,
 spurious overload refusals, deferred stream acknowledgements, spurious
 failure-monitor wakeups), from the counters that every runtime reports,
