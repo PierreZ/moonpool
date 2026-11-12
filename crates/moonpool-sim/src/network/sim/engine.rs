@@ -384,7 +384,8 @@ impl NetworkSimulation {
         (Ok(limit), wakes)
     }
 
-    /// Return `bytes` to `sender`'s window and wake a writer parked on it.
+    /// Return `bytes` to `sender`'s window and wake a writer parked on it
+    /// once the window has room enough ([`SendWindow::wakes_writer`]).
     pub(super) fn release_window(
         &mut self,
         sender: ConnectionId,
@@ -396,7 +397,9 @@ impl NetworkSimulation {
         }
         if let Some(sender_state) = self.state.connections.get_mut(&sender) {
             sender_state.window.release(bytes);
-            Self::take_waiter(&mut self.waiters.send_buffers, sender, wakes);
+            if sender_state.window.wakes_writer() {
+                Self::take_waiter(&mut self.waiters.send_buffers, sender, wakes);
+            }
         }
     }
 

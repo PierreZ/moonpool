@@ -202,3 +202,22 @@ fn a_scripted_failure_parks_without_drawing_randomness() {
             .any(|record| matches!(record.event, SimFaultEvent::StorageDiskFailure { .. }))
     );
 }
+
+/// `allocate` is a metadata write like `set_len`: on a failed disk it parks
+/// too, and the file does not grow.
+#[test]
+fn allocate_parks_on_a_failed_disk() {
+    let mut sim = SimWorld::new_with_seed(20_260_905);
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let mut file = open(&mut sim, ip(1), "allocate.bin");
+    assert!(write_and_sync(&mut sim, &mut file).is_ready());
+    let size = ready(settle(&mut sim, file.size()), "size").expect("size");
+
+    sim.fail_disk_for_process(ip(1));
+    assert!(
+        settle(&mut sim, file.allocate(8_192)).is_pending(),
+        "allocate parks on a failed disk"
+    );
+    let after = ready(settle(&mut sim, file.size()), "size").expect("size");
+    assert_eq!(after, size, "a parked allocate changes nothing");
+}

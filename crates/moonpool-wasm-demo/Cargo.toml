@@ -32,6 +32,11 @@ serde_json = "1"
 # The scenario emits ordinary tracing events; the recorder reads them back.
 tracing = "0.1"
 
+[dev-dependencies]
+# The exploration tree of the site (tests/exploration_tree.rs) runs the
+# fork-based explorer natively; the library itself stays wasm-able.
+moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", default-features = false, features = ["exploration"] }
+
 # wasm-only glue. The crate version MUST exactly match the flake's
 # wasm-bindgen-cli (0.2.129) — a mismatch is the #1 wasm-bindgen footgun and
 # produces an opaque "schema version" error at bindgen time. dependabot is told

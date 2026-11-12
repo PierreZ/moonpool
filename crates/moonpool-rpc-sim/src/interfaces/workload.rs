@@ -126,6 +126,7 @@ const RELIABLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// what its outcome proved.
 struct Call {
     id: u64,
+    op: InterfaceOp,
     expected: Instance,
     single_attempt: bool,
     class: Class,
@@ -220,6 +221,7 @@ impl InterfacesWorkload {
     ) {
         self.calls.push(Call {
             id: probe.id,
+            op,
             expected: Instance {
                 participant: probe.participant.clone(),
                 boot: probe.boot,
@@ -777,6 +779,7 @@ impl Workload for InterfacesWorkload {
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let ledger = Ledger::of(ctx.state());
+        let mut ambiguous_executed = false;
         let mut one_way_executed = false;
         for call in &self.calls {
             let executions = ledger.executions(call.id);
@@ -805,6 +808,11 @@ impl Workload for InterfacesWorkload {
                 Class::Maybe => {}
             }
             if call.single_attempt && call.class == Class::Maybe && !executions.is_empty() {
+                ambiguous_executed = true;
+            }
+            // The upper limit is the single-attempt check above.
+            if call.op == InterfaceOp::OneWay && call.class == Class::Maybe && executions.len() == 1
+            {
                 one_way_executed = true;
             }
         }
@@ -815,8 +823,12 @@ impl Workload for InterfacesWorkload {
             );
         }
         assert_sometimes!(
-            one_way_executed,
+            ambiguous_executed,
             "rpc ambiguous interface call executed in its published instance"
+        );
+        assert_sometimes!(
+            one_way_executed,
+            "rpc one-way request executed exactly once"
         );
         assert_sometimes!(
             ledger.restarts() >= 2,

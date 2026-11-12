@@ -113,9 +113,9 @@ impl SimulationBuilder {
         }
         // Without exploration configured, no explorer is created.
         #[cfg(feature = "exploration")]
-        drop(Self::init_assertions_and_exploration(None));
+        drop(self.init_assertions_and_exploration());
         #[cfg(not(feature = "exploration"))]
-        Self::init_assertions_and_exploration(None);
+        crate::chaos::exploration_glue::init_assertion_region();
 
         let mut iterations = IterationManager::new(
             self.iteration_control.clone(),

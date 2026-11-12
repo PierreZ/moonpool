@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
     Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
-    Layout, OpenError, ReadError, Recovery, State,
+    Layout, OpenError, ReadError, RecordRepair, Recovery, State,
 };
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 
@@ -911,6 +911,65 @@ fn segments_without_metainfo_are_a_lost_journal_not_an_empty_one() {
         .expect("delete");
         let refused = reopen(&mut sim, Durability::Ordered).await.map(drop);
         assert!(matches!(refused, Err(OpenError::MetaLost)), "{refused:?}");
+        let before = names(&mut sim).await;
+        // A peek and a create give the verdict of the open (#488). A create
+        // that succeeded here would read the old segments as its own log.
+        let peeked = run(&mut sim, |provider| async move {
+            Journal::peek_meta(&provider, DIR, JOURNAL).await
+        })
+        .await;
+        assert!(matches!(peeked, Err(OpenError::MetaLost)), "{peeked:?}");
+        let created = run(&mut sim, |provider| async move {
+            Journal::create(provider, DIR, JOURNAL, config(Durability::Ordered), b"new")
+                .await
+                .map(drop)
+        })
+        .await;
+        assert!(matches!(created, Err(OpenError::MetaLost)), "{created:?}");
+        assert_eq!(names(&mut sim).await, before, "nothing deleted");
+        let refused = reopen(&mut sim, Durability::Ordered).await.map(drop);
+        assert!(matches!(refused, Err(OpenError::MetaLost)), "{refused:?}");
+    });
+}
+
+/// A spare, or a file that a crashed creation left, is not a journal:
+/// `create` deletes it and succeeds, and the new journal reads empty.
+#[test]
+fn create_deletes_a_spare_or_a_leftover_and_succeeds() {
+    runtime().block_on(async {
+        for leftover in [
+            "spare-0000000009-0000000000.wal",
+            "seg-00000000000000000001.wal.tmp",
+            "meta.tmp",
+        ] {
+            let mut sim = sim(19);
+            run(&mut sim, move |provider| async move {
+                provider.create_dir_all(DIR).await?;
+                let file = provider
+                    .open(&format!("{DIR}/{leftover}"), OpenOptions::create_write())
+                    .await?;
+                file.write_at(0, &[0xAB; 4096]).await?;
+                file.sync_all().await
+            })
+            .await
+            .expect("write a leftover");
+            let peeked = run(&mut sim, |provider| async move {
+                Journal::peek_meta(&provider, DIR, JOURNAL).await
+            })
+            .await
+            .expect("peek");
+            assert_eq!(peeked, None, "{leftover}");
+            let journal = create(&mut sim, Durability::Ordered).await;
+            assert_eq!(journal.positions().count(), 0, "{leftover}");
+            drop(journal);
+            assert_eq!(
+                names(&mut sim).await,
+                vec!["meta".to_string()],
+                "{leftover}"
+            );
+            let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+            assert_eq!(journal.positions().count(), 0, "{leftover}");
+        }
     });
 }
 
@@ -941,6 +1000,10 @@ fn paper(durability: Option<Durability>) {
         "no commit ever rolled onto a recycled segment"
     );
     assert!(tally.spares_kept > 0, "no open ever kept a recycled spare");
+    assert!(
+        tally.blocks_repaired > 0,
+        "no open or scrub ever wrote a rebuilt record back"
+    );
 }
 
 /// The crash loop under moonpool's full crash physics, for one durability
@@ -958,6 +1021,10 @@ fn harsh(durability: Option<Durability>) {
         "no commit ever rolled onto a recycled segment"
     );
     assert!(tally.spares_kept > 0, "no open ever kept a recycled spare");
+    assert!(
+        tally.blocks_repaired > 0,
+        "no open or scrub ever wrote a rebuilt record back"
+    );
 }
 
 #[test]
@@ -1208,9 +1275,10 @@ fn a_scrub_finds_a_rotted_record_and_a_new_put_repairs_it() {
             drop(journal);
             let (journal, recovery) = reopen(&mut sim, durability).await.expect("reopen");
             // The superseded record is still damaged on disk: the open
-            // rebuilds it from its entry, and the position lives on in its
-            // new record.
+            // rebuilds it from its entry and writes it back, and the
+            // position lives on in its new record.
             assert_eq!(recovery.rebuilt, 1, "{durability:?}");
+            assert_eq!(recovery.repair.blocks_written, 1, "{durability:?}");
             let (journal, found) = run(&mut sim, move |_| async move {
                 let found = journal.verify_records(..).await;
                 (journal, found)
@@ -1219,6 +1287,184 @@ fn a_scrub_finds_a_rotted_record_and_a_new_put_repairs_it() {
             assert_eq!(found.expect("verify"), Vec::<u64>::new());
             let (_, bytes) = read(&mut sim, journal, 3).await;
             assert_eq!(bytes.expect("intact"), payload(3, 2, 300));
+        }
+    });
+}
+
+/// Two batches: positions 1 and 2 in the first, 3 in the second, so the
+/// first is not the last batch.
+async fn two_then_one(sim: &mut SimWorld, durability: Durability) -> J {
+    let journal = create(sim, durability).await;
+    let journal = put(sim, journal, &[(1, 1, 300), (2, 1, 300)]).await;
+    put(sim, journal, &[(3, 1, 300)]).await
+}
+
+async fn repair_records(sim: &mut SimWorld, mut journal: J) -> (J, RecordRepair) {
+    run(sim, move |_| async move {
+        let repair = journal.repair_records().await.expect("repair");
+        (journal, repair)
+    })
+    .await
+}
+
+/// Probe `t7` of #482: a record rebuilt by an open is written back, so the
+/// old slot of a position that a caller repaired is whole again, and a
+/// later fault on its entry is one fault, not the second half of a double
+/// fault.
+#[test]
+fn an_open_writes_back_a_rebuilt_record_of_an_earlier_batch() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(19);
+            let journal = two_then_one(&mut sim, durability).await;
+            let (record, entry) = spots(&journal, 1);
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+            assert_eq!(recovery.rebuilt, 1, "{durability:?}");
+            assert_eq!(
+                recovery.repair,
+                RecordRepair {
+                    blocks_written: 1,
+                    blocks_left: 0
+                },
+                "{durability:?}"
+            );
+            let (journal, found) = run(&mut sim, move |_| async move {
+                let found = journal.verify_records(..).await;
+                (journal, found)
+            })
+            .await;
+            assert_eq!(found.expect("verify"), Vec::<u64>::new(), "{durability:?}");
+            let journal = put(&mut sim, journal, &[(1, 2, 300)]).await;
+            drop(journal);
+            // The second fault: the old, replaced entry of position 1.
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("still opens");
+            assert_eq!(recovery.rebuilt, 0, "{durability:?}");
+            let (_, bytes) = read(&mut sim, journal, 1).await;
+            assert_eq!(bytes.expect("intact"), payload(1, 2, 300));
+        }
+    });
+}
+
+/// A crash that tears the repair write can lose every record of the
+/// block. Each entry is intact, so the next open rebuilds each record and
+/// writes the block again.
+#[test]
+fn a_torn_repair_write_leaves_every_record_rebuildable() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(20);
+            let journal = two_then_one(&mut sim, durability).await;
+            let (record, _) = spots(&journal, 1);
+            drop(journal);
+            // The image of a repair write of the first batch's block that
+            // was torn to nothing: both records gone, both entries intact.
+            zero(&mut sim, record.0, record.1 / 4096 * 4096, 4096).await;
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+            assert_eq!(recovery.rebuilt, 2, "{durability:?}");
+            assert_eq!(recovery.repair.blocks_written, 1, "{durability:?}");
+            drop(journal);
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("reopens");
+            assert_eq!(recovery.rebuilt, 0, "the block was written whole");
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, vec![1, 2, 3]);
+            let mut journal = journal;
+            for position in 1..=3 {
+                let (back, bytes) = read(&mut sim, journal, position).await;
+                journal = back;
+                assert_eq!(bytes.expect("intact"), payload(position, 1, 300));
+            }
+        }
+    });
+}
+
+/// A block whose rebuilt record sits beside a valid record with a damaged
+/// entry is not written: that valid record is the only copy of the
+/// damaged entry's identity.
+#[test]
+fn a_block_with_a_damaged_entry_is_not_written() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(21);
+            let journal = two_then_one(&mut sim, durability).await;
+            let (record_1, _) = spots(&journal, 1);
+            let (_, entry_2) = spots(&journal, 2);
+            drop(journal);
+            flip(&mut sim, record_1.0, record_1.1).await;
+            flip(&mut sim, entry_2.0, entry_2.1).await;
+            for _ in 0..2 {
+                let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+                assert_eq!(recovery.rebuilt, 1, "{durability:?}");
+                assert_eq!(
+                    recovery.repair,
+                    RecordRepair {
+                        blocks_written: 0,
+                        blocks_left: 1
+                    },
+                    "{durability:?}"
+                );
+                let (_, bytes) = read(&mut sim, journal, 2).await;
+                assert!(
+                    matches!(bytes, Err(ReadError::Damaged { position: 2, id: got }) if got == id(2, 1)),
+                    "{bytes:?}"
+                );
+            }
+        }
+    });
+}
+
+/// A scrub repairs what a caller cannot write again: the rotted record of
+/// a replaced position and of a tombstone, on an open journal.
+#[test]
+fn a_scrub_repairs_the_records_of_replaced_positions_and_tombstones() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(22);
+            let journal = create(&mut sim, durability).await;
+            let mut batch = Batch::new();
+            batch.put(1, id(1, 1), payload(1, 1, 300)).clear(30..40);
+            let journal = commit(&mut sim, journal, batch).await.expect("commit");
+            let (record_1, entry_1) = spots(&journal, 1);
+            // The tombstone is slot 1 of the batch: its record follows the
+            // put's, its entry follows the put's 300-byte entry (368 bytes
+            // with its header and padding): its last byte is 68 bytes on.
+            let record_clear = (record_1.0.clone(), record_1.1 + 64);
+            let entry_clear = (entry_1.0.clone(), entry_1.1 + 68);
+            let journal = put(&mut sim, journal, &[(1, 2, 300)]).await;
+            let journal = put(&mut sim, journal, &[(5, 1, 10)]).await;
+            flip(&mut sim, record_1.0.clone(), record_1.1).await;
+            flip(&mut sim, record_clear.0.clone(), record_clear.1).await;
+            let (journal, found) = run(&mut sim, move |_| async move {
+                let found = journal.verify_records(..).await;
+                (journal, found)
+            })
+            .await;
+            assert_eq!(
+                found.expect("verify"),
+                Vec::<u64>::new(),
+                "neither record is of a live position"
+            );
+            let (journal, repair) = repair_records(&mut sim, journal).await;
+            assert_eq!(
+                repair,
+                RecordRepair {
+                    blocks_written: 1,
+                    blocks_left: 0
+                },
+                "{durability:?}"
+            );
+            let (journal, again) = repair_records(&mut sim, journal).await;
+            assert_eq!(again, RecordRepair::default(), "nothing is left to repair");
+            drop(journal);
+            // The second faults: both entries of the repaired slots.
+            flip(&mut sim, entry_1.0, entry_1.1).await;
+            flip(&mut sim, entry_clear.0, entry_clear.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+            assert_eq!(recovery.rebuilt, 0, "{durability:?}");
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, vec![1, 5]);
         }
     });
 }

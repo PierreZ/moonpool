@@ -64,6 +64,11 @@ fn bounded_campaign_hits_every_required_scenario() {
     let mut missing = Vec::new();
     for required in [
         // Same-address restarts, all three kinds.
+        // moonpool-rpc's own buggify sites (see `observe_injections`).
+        "rpc buggify: session cut behind an at-most-once request",
+        "rpc buggify: session cut behind a reliable request",
+        "rpc buggify: request refused overloaded at admission",
+        "rpc buggify: failure-monitor wakeup with nothing changed",
         "rpc participant crashed and held down",
         "rpc participant rebooted in place",
         "rpc participant shut down gracefully",
@@ -85,6 +90,7 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc dismissed recruited interface refused",
         "rpc foreign interface refused before any handler",
         "rpc ambiguous interface call executed in its published instance",
+        "rpc one-way request executed exactly once",
         "rpc every participant answered a fresh publication at the end",
     ] {
         if !fired(&report, required) {

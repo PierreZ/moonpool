@@ -93,7 +93,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use super::{MetricPoint, MetricSample, cmp_f64, series_identity, u64_to_f64_exact};
+use super::{MetricPoint, MetricSample, MetricValue, cmp_f64, series_identity, u64_to_f64_exact};
 
 // ---------------------------------------------------------------------------
 // Series identity
@@ -126,10 +126,10 @@ impl SeriesKey {
 
     /// Parse the canonical `name{key="value",...}` form.
     ///
-    /// Anything that is not that shape is taken as a bare metric name with no
-    /// labels. Label values are not unescaped: moonpool's own key formatter
-    /// does not escape them either, so a value containing `,` or `"` round
-    /// trips inexactly — keep such characters out of label values.
+    /// Label values are unescaped as in the Prometheus text format (`\\`,
+    /// `\"`, `\n`), the escapes the key formatter writes, so every key
+    /// round trips exactly. Anything that is not that shape is taken as a bare
+    /// metric name with no labels.
     #[must_use]
     pub fn parse(key: &str) -> Self {
         let Some((metric, rest)) = key.split_once('{') else {
@@ -138,16 +138,10 @@ impl SeriesKey {
         let Some(inner) = rest.strip_suffix('}') else {
             return Self::new(key, Vec::new());
         };
-        let labels = inner
-            .split(',')
-            .filter(|part| !part.is_empty())
-            .filter_map(|part| {
-                let (k, v) = part.split_once('=')?;
-                let v = v.trim_matches('"');
-                Some((k.to_owned(), v.to_owned()))
-            })
-            .collect();
-        Self::new(metric, labels)
+        match parse_labels(inner) {
+            Some(labels) => Self::new(metric, labels),
+            None => Self::new(key, Vec::new()),
+        }
     }
 
     /// The value of `key`, when this series carries that label.
@@ -173,6 +167,35 @@ impl SeriesKey {
     }
 }
 
+/// Parse `key="value",...` with escaped values. `None` when malformed.
+fn parse_labels(inner: &str) -> Option<Vec<(String, String)>> {
+    let mut labels = Vec::new();
+    let mut rest = inner;
+    while !rest.is_empty() {
+        let (key, after) = rest.split_once("=\"")?;
+        let mut value = String::new();
+        let mut chars = after.char_indices();
+        let end = loop {
+            match chars.next()? {
+                (i, '"') => break i,
+                (_, '\\') => match chars.next()?.1 {
+                    'n' => value.push('\n'),
+                    escaped => value.push(escaped),
+                },
+                (_, c) => value.push(c),
+            }
+        };
+        labels.push((key.to_owned(), value));
+        rest = &after[end + 1..];
+        if let Some(next) = rest.strip_prefix(',') {
+            rest = next;
+        } else if !rest.is_empty() {
+            return None;
+        }
+    }
+    Some(labels)
+}
+
 impl fmt::Display for SeriesKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&series_identity(&self.metric, &self.labels))
@@ -190,6 +213,11 @@ impl fmt::Display for SeriesKey {
 /// series that only appears in the scrape (a foreign registry, a `lazy_static!`
 /// global) contributes a single point at the run's end time, which is enough
 /// for [`rate`](MetricQuery::rate) to read as "this much, over the whole run".
+///
+/// A scrape-only **histogram** is not added. Its scrape holds bucket counts
+/// and a sum, not the observations, so a single point would make a
+/// [`Percentile`] or a `rate()` report the sum. A query on such a series
+/// returns no rows: record it through an instrumented handle to query it.
 #[derive(Debug, Clone, Default)]
 pub struct MetricSnapshot {
     series: BTreeMap<SeriesKey, Vec<MetricPoint>>,
@@ -210,8 +238,10 @@ impl MetricSnapshot {
     ///
     /// `series` is keyed by [`MetricSample::sort_key`] (what
     /// `SimulationMetrics::app_series` holds); `samples` is the end-of-run
-    /// scrape. Recorded series win, and any scraped series without a recorded
-    /// history is added as a single end-of-run point.
+    /// scrape. Recorded series win, and any scraped counter or gauge without
+    /// a recorded history is added as a single end-of-run point. A scraped
+    /// histogram without a recorded history is left out, because one point
+    /// cannot hold its observations.
     #[must_use]
     pub fn from_run(
         samples: &[MetricSample],
@@ -223,13 +253,18 @@ impl MetricSnapshot {
             snapshot.insert(SeriesKey::parse(key), points.clone());
         }
         for sample in samples {
+            let value = match &sample.value {
+                MetricValue::Counter(v) | MetricValue::Gauge(v) => *v,
+                // The sum of the observations is not an observation.
+                MetricValue::Histogram(_) => continue,
+            };
             let key = SeriesKey::new(sample.name.clone(), sample.labels.clone());
             if !snapshot.series.contains_key(&key) {
                 snapshot.insert(
                     key,
                     vec![MetricPoint {
                         time_ms: end_time_ms,
-                        value: sample.value.scalar(),
+                        value,
                     }],
                 );
             }
@@ -714,6 +749,11 @@ impl<S: Stage> MetricQuery<S> {
     /// The output point spans from the first point of the window to the last,
     /// so a rolling mean over 60s buckets keeps bucket-aligned boundaries. A
     /// window of `0`, or one longer than the series, produces nothing.
+    ///
+    /// A rolling window spans more than one bucket, so the output has no
+    /// bucket grid. A [`fill`](Self::fill) or an
+    /// [`interpolate`](Self::interpolate) after a map does nothing: put it
+    /// before the map.
     #[must_use]
     pub fn map<A>(mut self, window: usize, agg: A) -> MetricQuery<A::Out>
     where
@@ -1044,7 +1084,12 @@ impl EvalState {
                 self.map_windows(|w| bucketize(w, *every_ms, *agg));
                 self.grid = Some(*every_ms);
             }
-            QueryOp::Map { window, agg } => self.map_windows(|w| rolling_map(w, *window, *agg)),
+            QueryOp::Map { window, agg } => {
+                self.map_windows(|w| rolling_map(w, *window, *agg));
+                // A rolling window spans several buckets, so it is not one
+                // cell of the grid any more.
+                self.grid = None;
+            }
             QueryOp::Reduce { by, agg } => self.reduce(by.as_deref(), *agg),
             // Without a grid there are no empty buckets to fill.
             QueryOp::Fill { policy } => {
@@ -1475,7 +1520,7 @@ fn summarize_window(rows: &[MetricQueryRow]) -> MetricWindowSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::MetricValue;
+    use crate::metrics::HistogramValue;
 
     #[test]
     fn f64_to_u64_truncates_and_saturates() {
@@ -1566,6 +1611,36 @@ mod tests {
     }
 
     #[test]
+    fn label_values_are_escaped_so_identities_do_not_collide() {
+        let tricky = MetricSample::new(
+            "m",
+            vec![("a".to_owned(), r#"x",b="y"#.to_owned())],
+            MetricValue::Counter(1.0),
+        );
+        let plain = MetricSample::new(
+            "m",
+            vec![
+                ("a".to_owned(), "x".to_owned()),
+                ("b".to_owned(), "y".to_owned()),
+            ],
+            MetricValue::Counter(1.0),
+        );
+        assert_ne!(tricky.sort_key(), plain.sort_key());
+
+        for value in [r#"x",b="y"#, r"back\slash", "new\nline", "", "a,b"] {
+            let key = SeriesKey::new(
+                "m",
+                vec![
+                    ("a".to_owned(), value.to_owned()),
+                    ("z".to_owned(), "1".to_owned()),
+                ],
+            );
+            let parsed = SeriesKey::parse(&key.to_string());
+            assert_eq!(parsed, key, "{value:?} round trips");
+        }
+    }
+
+    #[test]
     fn parse_round_trips_the_canonical_form() {
         let key = SeriesKey::parse(r#"requests_total{method="GET",code="200"}"#);
         assert_eq!(key.metric, "requests_total");
@@ -1645,6 +1720,36 @@ mod tests {
             .evaluate(&snap, 7, 42);
         assert_eq!(rows.len(), 1);
         assert!(is_close(rows[0].value, 5.0));
+    }
+
+    #[test]
+    fn a_scrape_only_histogram_is_not_a_point() {
+        // Every observation is <= 5.0 and the sum is 250.0. One point that
+        // holds the sum would make a p99 report 250.0 and a rate 25.0/s.
+        let histogram = HistogramValue {
+            count: 100,
+            sum: 250.0,
+            buckets: vec![(1.0, 10), (5.0, 100)],
+        };
+        let samples = vec![MetricSample::new(
+            "latency_seconds",
+            Vec::new(),
+            MetricValue::Histogram(histogram),
+        )];
+        let snap = MetricSnapshot::from_run(&samples, &BTreeMap::new(), 10_000);
+        assert!(snap.points(&SeriesKey::parse("latency_seconds")).is_none());
+
+        let p99 = MetricQuery::select("latency_seconds")
+            .reduce(Percentile(0.99))
+            .named("p99")
+            .evaluate(&snap, 1, 1);
+        assert!(p99.is_empty(), "no number is better than a wrong number");
+        let rate = MetricQuery::select("latency_seconds")
+            .rate()
+            .reduce(Mean)
+            .named("r")
+            .evaluate(&snap, 1, 1);
+        assert!(rate.is_empty());
     }
 
     #[test]
@@ -2044,6 +2149,40 @@ mod tests {
         assert_eq!(bounds(&rows[0]), (0, 120_000));
         assert!(is_close(rows[0].value, 1.5));
         assert!(is_close(rows[1].value, 16.0));
+    }
+
+    #[test]
+    fn fill_and_interpolate_after_map_keep_the_rolling_windows() {
+        let snap = snapshot(
+            &[(
+                "g",
+                &[(10_000, 1.0), (70_000, 2.0), (130_000, 3.0), (250_000, 9.0)],
+            )],
+            300_000,
+        );
+        let mapped = || per_minute("g").map(2, Mean);
+        let expected: Vec<(u64, u64, f64)> = vec![
+            (0, 120_000, 1.5),
+            (60_000, 180_000, 2.5),
+            (120_000, 300_000, 6.0),
+        ];
+        for plan in [
+            mapped().named("q"),
+            mapped().fill(Fill::Value(0.0)).named("q"),
+            mapped().fill(Fill::Previous).named("q"),
+            mapped().interpolate().named("q"),
+        ] {
+            let rows = plan.evaluate(&snap, 1, 1);
+            let got: Vec<(u64, u64, f64)> = rows
+                .iter()
+                .map(|r| (bounds(r).0, bounds(r).1, r.value))
+                .collect();
+            assert_eq!(got.len(), expected.len(), "{got:?}");
+            for (g, e) in got.iter().zip(&expected) {
+                assert_eq!((g.0, g.1), (e.0, e.1), "{got:?}");
+                assert!(is_close(g.2, e.2), "{got:?}");
+            }
+        }
     }
 
     #[test]

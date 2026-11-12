@@ -61,6 +61,26 @@ The default iteration control is `UntilCoverageStable { plateau_seeds: 10, max_i
 
 The campaign converges when every sometimes-style site has passed and the signal has not moved for `plateau_seeds` consecutive seeds. Because the history map is cumulative, the signal is monotonic. Barren seeds move it by zero, so ten barren seeds in a row end the campaign. The `converged` flag in `ExplorationReport` reports which way the loop stopped, and `report.convergence_timeout` is set when `max_iterations` ran out first.
 
+## Keeping the Tree
+
+The report counts timelines, but by default it does not keep them. `record_exploration_tree()` on the builder keeps each one in `ExplorationReport::timelines`, in the order it ran:
+
+```rust,ignore
+pub struct ExploredTimeline {
+    pub seed: u64,
+    pub recipe: Vec<(u64, u64)>,        // empty for the root
+    pub failed: bool,
+    pub discoveries: Vec<ExploredDiscovery>,
+}
+pub struct ExploredDiscovery {
+    pub call_count: u64,                // the RNG draw where it happened
+    pub kind: String,                   // "sometimes_pass", "bucket_first", "watermark_improvement", ...
+    pub assertion: Option<String>,      // the assertion's message, when known
+}
+```
+
+A timeline's parent is the timeline whose recipe is its recipe without the last segment, and the last segment's draw count is where it forked. With `workers: 0` the order is deterministic, so a test can write the tree to a file and compare it on the next run. The website's [Multiverse exploration](../techniques/exploration/) page draws a tree recorded this way.
+
 The dungeon binary uses `set_iterations(3)` instead. Three multiverses are enough to show that the treasure depends on accumulated progress and not on a lucky root seed, and a fixed count keeps the CI wall clock predictable.
 
 ## The Complete Picture

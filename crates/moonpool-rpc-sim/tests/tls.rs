@@ -38,6 +38,10 @@ fn bounded_campaign_hits_every_required_scenario() {
     );
     let mut missing = Vec::new();
     for required in [
+        // moonpool-rpc's own buggify sites (see `observe_injections`).
+        "rpc buggify: session cut behind an at-most-once request",
+        "rpc buggify: request refused overloaded at admission",
+        "rpc buggify: failure-monitor wakeup with nothing changed",
         "rpc tls member reached a private endpoint over mutual TLS",
         "rpc tls anonymous client reached a public endpoint",
         "rpc tls impostor server refused by its client",

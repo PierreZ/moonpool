@@ -23,14 +23,14 @@ A details block turns every failure into a line with the seed and the values you
 
 ```rust
 assert_always!(
-    executed <= self.permitted,
+    executed <= self.policy_cap,
     "a balanced job never runs more often than its permissions allow",
-    { "id" => self.id, "executed" => executed, "permitted" => self.permitted }
+    { "id" => self.id, "executed" => executed, "cap" => self.policy_cap }
 );
 ```
 
 ```text
-[ASSERTION FAILED] a balanced job never runs more often than its permissions allow (seed=9182) | id=4, executed=3, permitted=2
+[ASSERTION FAILED] a balanced job never runs more often than its permissions allow (seed=9182) | id=4, executed=3, cap=2
 ```
 
 Every value must implement `Display`. The details are printed, never stored: the table keeps counts, not strings.

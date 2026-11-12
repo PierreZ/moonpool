@@ -202,6 +202,10 @@ impl MetricSample {
 /// The canonical `name{key="value",...}` form of a series, shared by
 /// [`MetricSample::sort_key`] and [`query::SeriesKey`]'s `Display` so the two
 /// stay byte-identical.
+///
+/// Label values are escaped as in the Prometheus text format (`\\`, `\"`,
+/// `\n`), so a value that contains `"` or `,` cannot make two different label
+/// sets give the same key. [`query::SeriesKey::parse`] reverses the escapes.
 fn series_identity(name: &str, labels: &[(String, String)]) -> String {
     if labels.is_empty() {
         return name.to_owned();
@@ -215,7 +219,14 @@ fn series_identity(name: &str, labels: &[(String, String)]) -> String {
         }
         key.push_str(k);
         key.push_str("=\"");
-        key.push_str(v);
+        for c in v.chars() {
+            match c {
+                '\\' => key.push_str("\\\\"),
+                '"' => key.push_str("\\\""),
+                '\n' => key.push_str("\\n"),
+                other => key.push(other),
+            }
+        }
         key.push('"');
     }
     key.push('}');
@@ -312,8 +323,8 @@ impl SeriesRecorder {
 
     /// Record `value` for the series named `key`, at the clock's current time.
     ///
-    /// A no-op when no clock is installed, so instrumented handles cost one
-    /// atomic read outside a simulation.
+    /// A no-op when no clock is installed, so outside a simulation an
+    /// instrumented handle costs one uncontended `RwLock` read.
     ///
     /// # Panics
     ///
@@ -330,9 +341,17 @@ impl SeriesRecorder {
             return;
         };
 
-        let mut state = self.state();
+        let mut guard = self.state();
+        let state = &mut *guard;
         let capacity = state.capacity.unwrap_or(DEFAULT_SERIES_CAPACITY);
-        let entry = state.points.entry(key.to_owned()).or_default();
+        // Allocate the key only for a new series, not on every call to a hot
+        // counter that already has one.
+        if !state.points.contains_key(key) {
+            state.points.insert(key.to_owned(), Vec::new());
+        }
+        let Some(entry) = state.points.get_mut(key) else {
+            return;
+        };
         if entry.len() >= capacity {
             state.dropped += 1;
             return;

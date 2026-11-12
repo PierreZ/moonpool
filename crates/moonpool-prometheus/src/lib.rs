@@ -131,7 +131,9 @@
 //! a real node's `/metrics` does across a restart on the same host. The
 //! `counter`, `gauge` and `histogram` methods are therefore
 //! get-or-register: a process that boots a second time looks its metrics up
-//! instead of failing with `AlreadyReg`.
+//! instead of failing with `AlreadyReg`. The lookup checks the label names
+//! and the histogram buckets: a second registration of a name with another
+//! shape is an error, not the first metric.
 //!
 //! ## Examples
 //!
@@ -169,9 +171,47 @@ pub struct PrometheusSource {
     registry: Registry,
     recorder: SeriesRecorder,
     /// Every metric registered through this source, by name, kept so a
-    /// rebooted process can look it up. A family is cached with its label
-    /// names, as `(family, labels)`.
-    cache: Mutex<BTreeMap<String, Box<dyn Any + Send>>>,
+    /// rebooted process can look it up, with the shape it was registered
+    /// with.
+    cache: Mutex<BTreeMap<String, Cached>>,
+}
+
+/// One metric in the cache of a [`PrometheusSource`].
+struct Cached {
+    metric: Box<dyn Any + Send>,
+    shape: Shape,
+}
+
+/// What a second registration of a name must repeat: the label names, in
+/// order, and the histogram buckets. The help text is not part of it.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Shape {
+    labels: Vec<String>,
+    buckets: Vec<f64>,
+}
+
+impl Shape {
+    /// The shape of a family with these label names.
+    fn labelled(labels: &[&str]) -> Self {
+        Self {
+            labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+            buckets: Vec::new(),
+        }
+    }
+
+    /// The shape of a histogram (family). Empty buckets are the default
+    /// buckets, as in `prometheus`.
+    fn histogram(opts: &HistogramOpts, labels: &[&str]) -> Self {
+        let buckets = if opts.buckets.is_empty() {
+            prometheus::DEFAULT_BUCKETS.to_vec()
+        } else {
+            opts.buckets.clone()
+        };
+        Self {
+            buckets,
+            ..Self::labelled(labels)
+        }
+    }
 }
 
 impl Default for PrometheusSource {
@@ -221,9 +261,11 @@ impl PrometheusSource {
     /// # Errors
     ///
     /// Returns an error if `name` is not a valid metric name, or if it is
-    /// already registered as a different metric kind.
+    /// already registered as a different metric kind or with a different
+    /// shape (label names or buckets). A different help text is accepted:
+    /// the first one stays.
     pub fn counter(&self, name: &str, help: &str) -> prometheus::Result<SimCounter> {
-        let counter = self.get_or_register(name, "counter", || {
+        let counter = self.get_or_register(name, "counter", Shape::default(), || {
             self.register(IntCounter::with_opts(Opts::new(name, help))?)
         })?;
         Ok(SimCounter::new(
@@ -239,7 +281,7 @@ impl PrometheusSource {
     ///
     /// As [`counter`](Self::counter).
     pub fn gauge(&self, name: &str, help: &str) -> prometheus::Result<SimGauge> {
-        let gauge = self.get_or_register(name, "gauge", || {
+        let gauge = self.get_or_register(name, "gauge", Shape::default(), || {
             self.register(Gauge::with_opts(Opts::new(name, help))?)
         })?;
         Ok(SimGauge::new(gauge, name.to_owned(), self.recorder.clone()))
@@ -281,7 +323,8 @@ impl PrometheusSource {
     /// As [`histogram_with_buckets`](Self::histogram_with_buckets).
     pub fn histogram_with_opts(&self, opts: HistogramOpts) -> prometheus::Result<SimHistogram> {
         let name = opts.common_opts.name.clone();
-        let histogram = self.get_or_register(&name, "histogram", || {
+        let shape = Shape::histogram(&opts, &[]);
+        let histogram = self.get_or_register(&name, "histogram", shape, || {
             self.register(Histogram::with_opts(opts)?)
         })?;
         Ok(SimHistogram::new(histogram, name, self.recorder.clone()))
@@ -298,14 +341,14 @@ impl PrometheusSource {
         help: &str,
         labels: &[&str],
     ) -> prometheus::Result<SimCounterVec> {
-        let (family, labels) = self.get_or_register(name, "counter vec", || {
-            let family = IntCounterVec::new(Opts::new(name, help), labels)?;
-            Ok((self.register(family)?, owned(labels)))
+        let shape = Shape::labelled(labels);
+        let family = self.get_or_register(name, "counter vec", shape.clone(), || {
+            self.register(IntCounterVec::new(Opts::new(name, help), labels)?)
         })?;
         Ok(SimCounterVec::new(
             family,
             name.to_owned(),
-            labels,
+            shape.labels,
             self.recorder.clone(),
         ))
     }
@@ -321,14 +364,14 @@ impl PrometheusSource {
         help: &str,
         labels: &[&str],
     ) -> prometheus::Result<SimGaugeVec> {
-        let (family, labels) = self.get_or_register(name, "gauge vec", || {
-            let family = GaugeVec::new(Opts::new(name, help), labels)?;
-            Ok((self.register(family)?, owned(labels)))
+        let shape = Shape::labelled(labels);
+        let family = self.get_or_register(name, "gauge vec", shape.clone(), || {
+            self.register(GaugeVec::new(Opts::new(name, help), labels)?)
         })?;
         Ok(SimGaugeVec::new(
             family,
             name.to_owned(),
-            labels,
+            shape.labels,
             self.recorder.clone(),
         ))
     }
@@ -344,14 +387,14 @@ impl PrometheusSource {
         labels: &[&str],
     ) -> prometheus::Result<SimHistogramVec> {
         let name = opts.common_opts.name.clone();
-        let (family, labels) = self.get_or_register(&name, "histogram vec", || {
-            let family = HistogramVec::new(opts, labels)?;
-            Ok((self.register(family)?, owned(labels)))
+        let shape = Shape::histogram(&opts, labels);
+        let family = self.get_or_register(&name, "histogram vec", shape.clone(), || {
+            self.register(HistogramVec::new(opts, labels)?)
         })?;
         Ok(SimHistogramVec::new(
             family,
             name,
-            labels,
+            shape.labels,
             self.recorder.clone(),
         ))
     }
@@ -367,11 +410,15 @@ impl PrometheusSource {
     /// The cache is what makes reboots work: a process that boots again finds
     /// its metrics already registered rather than hitting `AlreadyReg`. A name
     /// cached as a different type than `M` is a kind clash, reported as
-    /// wanting a `kind`.
+    /// wanting a `kind`. A name cached with a different [`Shape`] is a shape
+    /// clash: to give back the cached metric would record the values of the
+    /// caller under the wrong label names or in the wrong buckets. A
+    /// different help text is accepted, and the first one stays.
     fn get_or_register<M: Clone + Send + 'static>(
         &self,
         name: &str,
         kind: &str,
+        shape: Shape,
         create: impl FnOnce() -> prometheus::Result<M>,
     ) -> prometheus::Result<M> {
         let mut cache = self
@@ -379,13 +426,24 @@ impl PrometheusSource {
             .lock()
             .expect("Mutex poisoned: prior task panicked");
         if let Some(existing) = cache.get(name) {
-            return existing
+            let metric = existing
+                .metric
                 .downcast_ref::<M>()
                 .cloned()
-                .ok_or_else(|| kind_clash(name, kind));
+                .ok_or_else(|| kind_clash(name, kind))?;
+            if existing.shape != shape {
+                return Err(shape_clash(name, &existing.shape, &shape));
+            }
+            return Ok(metric);
         }
         let created = create()?;
-        cache.insert(name.to_owned(), Box::new(created.clone()));
+        cache.insert(
+            name.to_owned(),
+            Cached {
+                metric: Box::new(created.clone()),
+                shape,
+            },
+        );
         Ok(created)
     }
 }
@@ -478,14 +536,95 @@ fn read_value(
     }
 }
 
-/// Owned copies of a family's label names.
-fn owned(labels: &[&str]) -> Vec<String> {
-    labels.iter().map(|label| (*label).to_owned()).collect()
-}
-
 /// Error for a name already registered under a different metric kind.
 fn kind_clash(name: &str, wanted: &str) -> prometheus::Error {
     prometheus::Error::Msg(format!(
         "metric {name:?} is already registered as a different kind (wanted a {wanted})"
     ))
+}
+
+/// Error for a name already registered with other label names or buckets.
+fn shape_clash(name: &str, registered: &Shape, wanted: &Shape) -> prometheus::Error {
+    prometheus::Error::Msg(format!(
+        "metric {name:?} is already registered with labels {:?} and buckets {:?} \
+         (wanted labels {:?} and buckets {:?})",
+        registered.labels, registered.buckets, wanted.labels, wanted.buckets
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_family_with_other_label_names_is_refused() {
+        let source = PrometheusSource::default();
+        source
+            .counter_vec("requests_total", "Requests", &["method"])
+            .expect("first registration");
+        let Err(error) = source.counter_vec("requests_total", "Requests", &["code"]) else {
+            panic!("other label names must be refused");
+        };
+        assert!(error.to_string().contains("already registered with labels"));
+    }
+
+    #[test]
+    fn a_second_family_with_another_label_count_is_refused() {
+        let source = PrometheusSource::default();
+        source
+            .gauge_vec("depth", "Depth", &["queue"])
+            .expect("first registration");
+        assert!(
+            source
+                .gauge_vec("depth", "Depth", &["queue", "node"])
+                .is_err()
+        );
+        assert!(source.gauge_vec("depth", "Depth", &[]).is_err());
+    }
+
+    #[test]
+    fn a_second_histogram_with_other_buckets_is_refused() {
+        let source = PrometheusSource::default();
+        source
+            .histogram_with_buckets("latency", "Latency", vec![1.0, 2.0])
+            .expect("first registration");
+        assert!(
+            source
+                .histogram_with_buckets("latency", "Latency", vec![100.0, 200.0])
+                .is_err()
+        );
+        let family = HistogramOpts::new("latency_by_node", "Latency").buckets(vec![1.0, 2.0]);
+        source
+            .histogram_vec(family, &["node"])
+            .expect("first registration");
+        let other = HistogramOpts::new("latency_by_node", "Latency").buckets(vec![5.0]);
+        assert!(source.histogram_vec(other, &["node"]).is_err());
+    }
+
+    #[test]
+    fn an_identical_second_registration_returns_the_cached_metric() {
+        let source = PrometheusSource::default();
+        let first = source
+            .counter_vec("requests_total", "Requests", &["method"])
+            .expect("first registration");
+        // The help text is not part of the shape.
+        let second = source
+            .counter_vec("requests_total", "Other help", &["method"])
+            .expect("same shape");
+        first.with_label_values(&["GET"]).expect("one label").inc();
+        assert_eq!(
+            second.with_label_values(&["GET"]).expect("one label").get(),
+            1
+        );
+
+        let histogram = source
+            .histogram("latency", "Latency")
+            .expect("first registration");
+        histogram.observe(0.2);
+        // The default buckets, given by value, are the same shape.
+        let again = source
+            .histogram_with_buckets("latency", "Latency", prometheus::DEFAULT_BUCKETS.to_vec())
+            .expect("same buckets");
+        assert_eq!(again.count(), 1);
+    }
 }

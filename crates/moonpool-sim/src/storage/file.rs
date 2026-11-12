@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
-use super::futures::{ReadAtFuture, SetLenFuture, SyncFuture, WriteAtFuture};
+use super::futures::{AllocateFuture, ReadAtFuture, SetLenFuture, SyncFuture, WriteAtFuture};
 use super::sim_shutdown_error;
 
 /// How often an active durable-write point fires per call: the window a
@@ -199,11 +199,12 @@ impl StorageFile for SimStorageFile {
     /// grows to `len` when it is shorter, the new range reads as zeros, and
     /// a later write inside the range never fails for space. `ENOSPC` when
     /// the space does not fit; then nothing changes. A `set_len` growth, by
-    /// contrast, is a hole that reserves nothing.
+    /// contrast, is a hole that reserves nothing. Like `set_len` it is a
+    /// metadata write: it needs a handle open for writing, waits in the
+    /// disk queue, and parks on a failed disk.
     async fn allocate(&self, len: u64) -> io::Result<()> {
         self.ensure_open()?;
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-        sim.allocate_file(self.handle_id, len).map_err(Into::into)
+        AllocateFuture::new(self.sim.clone(), self.handle_id, len).await
     }
 
     async fn drop_cache(&self) -> io::Result<()> {

@@ -382,6 +382,7 @@ impl QualificationWorkload {
     /// request against the independent ledgers.
     pub(crate) fn judge_all(&self, ctx: &SimContext) {
         let ledger = QualLedger::of(ctx.state());
+        let mut one_way_executed = false;
         for call in &self.calls {
             let runs = ledger.executions(call.id);
             for run in &runs {
@@ -422,7 +423,14 @@ impl QualificationWorkload {
                     { "id" => call.id, "op" => format!("{:?}", call.op), "runs" => runs.len() }
                 );
             }
+            if call.op == QualOp::OneWay && call.class == Class::Maybe && runs.len() == 1 {
+                one_way_executed = true;
+            }
         }
+        assert_sometimes!(
+            one_way_executed,
+            "rpc qual a one-way request executed exactly once"
+        );
         for check in &self.balanced {
             check.verify(&ledger);
         }

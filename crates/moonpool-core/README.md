@@ -72,6 +72,7 @@ types, and it compiles for `wasm32-unknown-unknown`.
 ## Documentation
 
 - [The Six Providers](https://pierrez.github.io/moonpool/part2-foundations/07-provider-traits.html) in the Sim Book
+- [Same code in production and simulation](https://pierrez.github.io/moonpool/techniques/same-code/) on the website
 - [API documentation](https://docs.rs/moonpool-core)
 - [Repository](https://github.com/PierreZ/moonpool)
 

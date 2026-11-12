@@ -131,6 +131,7 @@ pub(crate) enum PendingOpType {
     Write,
     Sync,
     SetLen,
+    Allocate,
 }
 
 impl PendingOpType {
@@ -379,14 +380,31 @@ impl StorageState {
         }
     }
 
-    /// The bytes the files `ip` owns hold in all: every file's length, an
-    /// unlinked file still open included.
+    /// The disk space the files `ip` owns use in all: the allocated bytes
+    /// of every file with a visible name or an open handle, an unlinked file
+    /// still open included. An unlinked, closed file uses none, even while
+    /// its durable name can still bring it back at a crash: a real
+    /// filesystem frees its blocks without a sync of the directory.
     pub(crate) fn file_bytes(&self, ip: IpAddr) -> u64 {
+        let named: BTreeSet<FileId> = self.path_to_file.values().copied().collect();
+        let open: BTreeSet<FileId> = self.open_files().collect();
         self.files
-            .values()
-            .filter(|file| file.owner_ip == ip)
-            .map(|file| file.image.allocated_bytes())
+            .iter()
+            .filter(|(file_id, file)| {
+                file.owner_ip == ip && (named.contains(file_id) || open.contains(file_id))
+            })
+            .map(|(_, file)| file.image.allocated_bytes())
             .fold(0, u64::saturating_add)
+    }
+
+    /// The files an open handle still reaches. A closed handle whose dropped
+    /// mutations are still landing reaches its file until the last one
+    /// lands.
+    pub(crate) fn open_files(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.handles
+            .values()
+            .filter(|handle| !handle.is_closed || !handle.pending_ops.is_empty())
+            .map(|handle| handle.file_id)
     }
 
     pub(crate) fn config_for(&self, ip: IpAddr) -> &StorageConfiguration {

@@ -53,20 +53,25 @@ struct FakeState {
 #[derive(Debug, Clone)]
 struct AwkwardFile {
     state: Arc<Mutex<FakeState>>,
+    constraints: IoConstraints,
 }
 
 impl AwkwardFile {
     fn new(size: usize) -> Self {
+        Self::with_constraints(
+            size,
+            IoConstraints::new(OFFSET_ALIGNMENT, LENGTH_ALIGNMENT, MEMORY_ALIGNMENT),
+        )
+    }
+
+    fn with_constraints(size: usize, constraints: IoConstraints) -> Self {
         Self {
             state: Arc::new(Mutex::new(FakeState {
                 bytes: vec![0; size],
                 ..FakeState::default()
             })),
+            constraints,
         }
-    }
-
-    fn constraints() -> IoConstraints {
-        IoConstraints::new(OFFSET_ALIGNMENT, LENGTH_ALIGNMENT, MEMORY_ALIGNMENT)
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, FakeState> {
@@ -78,7 +83,7 @@ impl AwkwardFile {
     /// Record a request, refuse it if misaligned, and decide how many bytes it
     /// moves: the first transfer is short, every later one is complete.
     fn admit(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        let aligned = Self::constraints().check(offset, buf).is_ok();
+        let aligned = self.constraints.check(offset, buf).is_ok();
         let mut state = self.state();
         state.requests.push(Request {
             offset,
@@ -102,7 +107,7 @@ impl AwkwardFile {
 
 impl StorageFile for AwkwardFile {
     fn constraints(&self) -> IoConstraints {
-        Self::constraints()
+        self.constraints
     }
 
     fn is_direct_io(&self) -> bool {
@@ -305,6 +310,20 @@ async fn a_short_transfer_mid_file_resumes_on_an_absolute_boundary() {
         2 * 8192,
         "and the retry resumes from the same aligned boundary"
     );
+}
+
+/// A memory alignment larger than the block makes a block boundary that the
+/// transfer loops cannot resume on, so such a block size is refused up front.
+#[test]
+fn a_block_smaller_than_the_memory_alignment_is_refused() {
+    let file = AwkwardFile::with_constraints(0, IoConstraints::new(512, 512, 4096));
+    assert!(
+        BlockFile::new(file, 512).is_err_and(|error| error.kind() == io::ErrorKind::InvalidInput),
+        "a 512-byte block under a 4096-byte memory alignment must be refused"
+    );
+
+    let file = AwkwardFile::with_constraints(0, IoConstraints::new(512, 512, 4096));
+    assert!(BlockFile::new(file, 4096).is_ok());
 }
 
 /// A caller's own buffer must satisfy the file's memory alignment, and is

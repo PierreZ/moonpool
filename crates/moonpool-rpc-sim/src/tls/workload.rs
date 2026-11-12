@@ -22,7 +22,8 @@ use super::{
     IMPOSTOR_REFS_KEY, Mode, Pki, PrivateEcho, Probe, PublicEcho, Refs, SCRIPT_DONE_KEY,
     SERVER_REFS_KEY, Sender,
 };
-use crate::foundations::{CALL_TIMEOUT, rpc_config};
+use crate::foundations::state::Board;
+use crate::foundations::{CALL_TIMEOUT, report_stats, rpc_config};
 use crate::security::judge::classify;
 use crate::streams::pause;
 
@@ -389,11 +390,20 @@ impl Workload for TlsWorkload {
             stranger,
             anonymous,
         };
+        let board = Board::of(ctx.state());
+        let report = async {
+            futures::join!(
+                report_stats(&runtimes.member, &board, "tls-workload-member", ctx),
+                report_stats(&runtimes.stranger, &board, "tls-workload-stranger", ctx),
+                report_stats(&runtimes.anonymous, &board, "tls-workload-anonymous", ctx),
+            );
+        };
         moonpool_sim::select! {
             error = member_driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             error = stranger_driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             error = anonymous_driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             result = self.drive(ctx, &runtimes, &pki) => result,
+            () = report => Ok(()),
         }
     }
 

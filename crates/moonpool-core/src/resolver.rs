@@ -42,7 +42,10 @@ pub trait Resolver: Clone + Send + Sync + 'static {
 ///
 /// # Errors
 ///
-/// [`io::ErrorKind::InvalidInput`] when the port is missing or not a number.
+/// [`io::ErrorKind::InvalidInput`] when the port is missing or not a number,
+/// when the host is empty, when the host has only one bracket, or when an
+/// unbracketed host contains `:` (an IPv6 host without brackets is
+/// ambiguous: `::1:80` can be `::1` port 80 or `::1:80` with no port).
 pub fn split_host_port(target: &str) -> io::Result<(&str, u16)> {
     let invalid = || {
         io::Error::new(
@@ -52,11 +55,15 @@ pub fn split_host_port(target: &str) -> io::Result<(&str, u16)> {
     };
     let (host, port) = target.rsplit_once(':').ok_or_else(invalid)?;
     let port = port.parse::<u16>().map_err(|_| invalid())?;
-    let host = host
-        .strip_prefix('[')
-        .and_then(|inner| inner.strip_suffix(']'))
-        .unwrap_or(host);
-    if host.is_empty() {
+    let host = match host.strip_prefix('[') {
+        Some(rest) => rest.strip_suffix(']').ok_or_else(invalid)?,
+        None => host,
+    };
+    if host.is_empty() || host.contains(['[', ']']) {
+        return Err(invalid());
+    }
+    // Only a bracketed host can contain ':' (an IPv6 address).
+    if host.contains(':') && !target.starts_with('[') {
         return Err(invalid());
     }
     Ok((host, port))
@@ -116,6 +123,10 @@ impl Resolver for CompioResolver {
     async fn resolve(&self, target: &str) -> io::Result<Vec<SocketAddr>> {
         use std::net::ToSocketAddrs as _;
 
+        // A numeric target needs no lookup, so it needs no thread.
+        if let Ok(address) = target.parse::<SocketAddr>() {
+            return Ok(vec![address]);
+        }
         let (answer, answered) = futures::channel::oneshot::channel();
         let owned = target.to_string();
         std::thread::Builder::new()
@@ -154,6 +165,27 @@ mod tests {
         assert!(split_host_port("no-port").is_err());
         assert!(split_host_port(":80").is_err());
         assert!(split_host_port("host:99999").is_err());
+    }
+
+    #[test]
+    fn refuses_ambiguous_and_half_bracketed_hosts() {
+        assert!(split_host_port("::1:80").is_err(), "IPv6 needs brackets");
+        assert!(split_host_port("[host:80").is_err(), "only an open bracket");
+        assert!(split_host_port("host]:80").is_err(), "only a close bracket");
+        assert!(split_host_port("[::1]x:80").is_err(), "text after bracket");
+        assert!(split_host_port("[]:80").is_err(), "empty brackets");
+        assert!(split_host_port("[[::1]]:80").is_err(), "nested brackets");
+    }
+
+    #[cfg(feature = "compio-net")]
+    #[test]
+    fn compio_resolver_answers_a_literal_without_a_lookup() {
+        use super::{CompioResolver, Resolver};
+        let literal = futures::executor::block_on(CompioResolver::new().resolve("[::1]:4500"));
+        assert_eq!(
+            literal.ok(),
+            Some(vec!["[::1]:4500".parse().expect("literal address")])
+        );
     }
 
     #[cfg(feature = "tokio-net")]

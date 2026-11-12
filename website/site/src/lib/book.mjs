@@ -155,6 +155,11 @@ async function markdown() {
   return processor;
 }
 
+/** Render markdown to HTML with the site's processor (code in css-variables). */
+export async function renderMarkdown(md) {
+  return (await (await markdown()).render(md)).code;
+}
+
 /** The chapters in SUMMARY order. */
 export function chapters() {
   return parseSummary(readFileSync(join(BOOK, "SUMMARY.md"), "utf8"));

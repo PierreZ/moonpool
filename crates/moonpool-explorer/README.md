@@ -109,6 +109,7 @@ processes only from a standalone single-threaded simulation binary: raw
 ## Documentation
 
 - [Multiverse Exploration](https://pierrez.github.io/moonpool/part5-building-on-top/01-exploration.html) in the Sim Book
+- [Multiverse exploration](https://pierrez.github.io/moonpool/techniques/exploration/) on the website: a recorded exploration tree
 - [API documentation](https://docs.rs/moonpool-explorer)
 
 ## License

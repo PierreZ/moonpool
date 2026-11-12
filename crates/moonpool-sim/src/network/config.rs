@@ -200,6 +200,36 @@ pub enum NetworkFault {
 }
 
 impl NetworkFault {
+    /// Every network fault family, in mask order.
+    pub const ALL: [Self; 9] = [
+        Self::Clog,
+        Self::Partition,
+        Self::BitFlip,
+        Self::RandomClose,
+        Self::ConnectFailure,
+        Self::ClockDrift,
+        Self::BuggifiedDelay,
+        Self::PairLatency,
+        Self::BlackHole,
+    ];
+
+    /// The family's name in `snake_case`, as the `chaos_families` fault
+    /// event writes it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Clog => "clog",
+            Self::Partition => "partition",
+            Self::BitFlip => "bit_flip",
+            Self::RandomClose => "random_close",
+            Self::ConnectFailure => "connect_failure",
+            Self::ClockDrift => "clock_drift",
+            Self::BuggifiedDelay => "buggified_delay",
+            Self::PairLatency => "pair_latency",
+            Self::BlackHole => "black_hole",
+        }
+    }
+
     const fn bit(self) -> u16 {
         match self {
             Self::Clog => 1 << 0,
@@ -275,6 +305,48 @@ impl NetworkFaultMask {
     #[must_use]
     pub const fn contains(self, fault: NetworkFault) -> bool {
         self.0 & fault.bit() != 0
+    }
+
+    /// The families that a sampled configuration has on: the inverse of
+    /// applying a mask. A seed's Random or Swarm profile, after the caller's
+    /// mask, gives the families that can fire in its run.
+    #[must_use]
+    pub fn of(chaos: &ChaosConfiguration) -> Self {
+        let on = [
+            (NetworkFault::Clog, chaos.clog_rate > 0.0),
+            (NetworkFault::Partition, chaos.partition_rate > 0.0),
+            (NetworkFault::BitFlip, chaos.bit_flip_probability > 0.0),
+            (
+                NetworkFault::RandomClose,
+                chaos.random_close_probability > 0.0,
+            ),
+            (
+                NetworkFault::ConnectFailure,
+                chaos.connect_failure_mode != ConnectFailureMode::Disabled,
+            ),
+            (NetworkFault::ClockDrift, chaos.clock_drift_enabled),
+            (NetworkFault::BuggifiedDelay, chaos.buggified_delay_enabled),
+            (
+                NetworkFault::PairLatency,
+                chaos.max_pair_latency.end > Duration::ZERO,
+            ),
+            (NetworkFault::BlackHole, chaos.black_hole_probability > 0.0),
+        ];
+        on.into_iter()
+            .filter(|(_, on)| *on)
+            .fold(Self::none(), |mask, (fault, _)| mask.with(fault))
+    }
+
+    /// The names of the families this mask retains, comma separated, in mask
+    /// order.
+    #[must_use]
+    pub fn names(self) -> String {
+        NetworkFault::ALL
+            .into_iter()
+            .filter(|f| self.contains(*f))
+            .map(NetworkFault::name)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     pub(crate) fn apply_to(self, chaos: &mut ChaosConfiguration) {
@@ -1309,6 +1381,32 @@ mod swarm_tests {
             value.to_bits(),
             0.0_f64.to_bits(),
             "expected 0.0, got {value}"
+        );
+    }
+
+    /// The families of a sampled profile after a mask are within the mask,
+    /// and `names` lists them in mask order.
+    #[test]
+    fn the_families_of_a_masked_profile_stay_within_the_mask() {
+        use super::{NetworkFault, NetworkFaultMask};
+        for seed in 0..64 {
+            let mut config = swarm_for(seed);
+            let mask = NetworkFaultMask::all()
+                .without(NetworkFault::Partition)
+                .without(NetworkFault::BlackHole);
+            mask.apply_to(&mut config.chaos);
+            let on = NetworkFaultMask::of(&config.chaos);
+            assert!(!on.contains(NetworkFault::Partition));
+            assert!(!on.contains(NetworkFault::BlackHole));
+            let names = on.names();
+            assert!(!names.contains("partition") && !names.contains("black_hole"));
+        }
+        assert_eq!(
+            NetworkFaultMask::none()
+                .with(NetworkFault::BlackHole)
+                .with(NetworkFault::Clog)
+                .names(),
+            "clog,black_hole"
         );
     }
 }

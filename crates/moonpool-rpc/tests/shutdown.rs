@@ -489,8 +489,20 @@ async fn dropping_the_driver_overtakes_a_graceful_shutdown() {
     };
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(server.is_shutting_down());
+    let before = server.stats().expect("running");
     server_driver.abort();
     let _ = server_driver.await;
+    // The counters stay readable through the probe once the runtime is
+    // gone; only the runtime knew the state gauges.
+    assert!(server.stats().is_none());
+    let after = probe.counters();
+    assert!(
+        after.calls_started + after.requests_admitted > 0,
+        "{after:?}"
+    );
+    assert_eq!(after.calls_started, before.calls_started);
+    assert_eq!(after.requests_admitted, before.requests_admitted);
+    assert_eq!(after.endpoints, 0);
     drop(stream);
     let report = shutdown.await.expect("join");
     assert!(report.already_stopped, "{report:?}");

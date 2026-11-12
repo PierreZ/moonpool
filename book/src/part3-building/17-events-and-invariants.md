@@ -135,7 +135,7 @@ assert_always!(total <= max_funds, "spent more than reserves");
 
 ## The Fault Timeline
 
-Every fault the simulator injects lands in the same timeline under the name `SIM_FAULT_EVENT_NAME` (`"sim_fault"`), with `source = "sim"` and a `kind` field. The engine records them internally (`SimWorld::take_faults()`), and the runner merges them after each step. No workload code is involved.
+Every fault the simulator injects lands in the same timeline under the name `SIM_FAULT_EVENT_NAME` (`"sim_fault"`), with `source = "sim"` and a `kind` field. The engine records them internally (`SimWorld::take_faults()`), and the runner merges them after each step. No workload code is involved. One kind is not a fault: `chaos_families` names, once per seed, the families the seed has on ([Swarm Testing](./28-swarm-testing.md)).
 
 ```rust
 use std::cell::Cell;

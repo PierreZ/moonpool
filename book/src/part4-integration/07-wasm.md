@@ -106,12 +106,25 @@ pub fn simulation(config: &RunConfig) -> SimulationBuilder {
 `run(config)` adds one seed and a recorder. The recorder is an `Invariant`
 too: it reads the same trace timeline your correctness invariants read, with
 the injected faults under `SIM_FAULT_EVENT_NAME`, and returns the run as JSON.
-A `#[wasm_bindgen]` wrapper exports `run_json` to JavaScript as `run(config)`,
-and that is the whole browser surface. The config holds the seed, the chaos
-surfaces and a planted bug: the client reads from one server in place of a
-quorum, and about one seed in seven breaks the invariant.
+A `#[wasm_bindgen]` wrapper exports `run_json` to JavaScript as `run(config)`.
+The config holds the seed, the count of servers, the chaos surfaces (network,
+storage, reboots, disk wipes), the swarm mode, and a planted bug: the client
+reads from one server in place of a quorum, and about one seed in eight breaks
+the invariant. Two more fields serve the technique pages: `network_faults` and
+`storage_faults` keep only the named fault families, and `recipe` replays one
+timeline of an exploration (`"count@seed -> count@seed"`, a string so a 64-bit
+seed stays exact in JavaScript). A second export, `coverage(config)`, runs seeds
+one after another until each coverage assertion of the register has fired and
+the coverage stops growing, as `UntilCoverageStable` does. The run that comes
+back (`Run`, versioned by `MODEL`) holds the processes, the trace events, the
+faults, the messages, the assertion counts, the fault families of a swarm seed,
+the report and a fingerprint: a hash of the events and the count of random
+draws.
 
-It is running right here, compiled to wasm in a Web Worker. Press **Play**,
+The [playground](../playground/) is the full surface: pick the faults, the
+count of servers and the bug, run a seed, hunt for a red one, and replay it.
+The address holds the whole config, so a shared link gives the same run. A
+smaller copy is running right here, compiled to wasm in a Web Worker. Press **Play**,
 step with the arrow keys, or type a seed. The same seed always replays the
 same history, and the print under the run proves it.
 
@@ -129,7 +142,7 @@ To build it outside the site:
 2. Generate the JavaScript glue:
    `wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/moonpool_wasm_demo.wasm`
 3. Import `pkg/moonpool_wasm_demo.js`, await its default `init()`, and call
-   `run('{"seed": 42}')`.
+   `run('{"seed": 42}')` or `coverage('{"run": {"seed": 1}}')`.
 
 `website/site/scripts/build-wasm-demo.sh` runs those steps and stages the
 bundle in `website/site/public/wasm-demo/pkg/`, where the site's engine worker

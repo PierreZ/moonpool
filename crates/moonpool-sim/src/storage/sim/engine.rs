@@ -409,10 +409,11 @@ impl StorageEngine {
 
     /// Forget a file's contents once nothing reaches it any more: no name,
     /// visible or durable, and no open handle. A file whose only remaining
-    /// link is the durable one is still on the disk: a crash before the
-    /// directory sync brings it back. A file whose only remaining link is an
-    /// open handle is an unlinked-but-open file, freed when that handle
-    /// closes.
+    /// link is the durable one is still in memory: a crash before the
+    /// directory sync brings it back. Its disk space is free already
+    /// ([`StorageState::file_bytes`] counts only a file with a visible name
+    /// or an open handle). A file whose only remaining link is an open
+    /// handle is an unlinked-but-open file, freed when that handle closes.
     fn drop_file_if_unlinked(&mut self, file_id: FileId) {
         let named = self
             .state
@@ -420,11 +421,7 @@ impl StorageEngine {
             .values()
             .chain(self.state.durable_paths.values())
             .any(|id| *id == file_id);
-        // A closed handle whose dropped mutations are still landing keeps
-        // reaching the bytes until the last one lands.
-        let open = self.state.handles.values().any(|handle| {
-            handle.file_id == file_id && (!handle.is_closed || !handle.pending_ops.is_empty())
-        });
+        let open = self.state.open_files().any(|id| id == file_id);
         if !named && !open {
             self.state.files.remove(&file_id);
         }
@@ -882,6 +879,11 @@ impl StorageEngine {
                 .map(|(name, file_id)| (name.clone(), *file_id))
                 .collect();
             self.state.durable_paths.extend(visible);
+            // A file that lost its last durable name here, with no visible
+            // name and no open handle, is gone.
+            for file_id in touched {
+                self.drop_file_if_unlinked(file_id);
+            }
         }
         self.state
             .durable_directories
@@ -1043,15 +1045,52 @@ impl StorageEngine {
         new_len: u64,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
+        self.schedule_metadata_write(
+            handle_id,
+            (PendingOpType::SetLen, "set_len"),
+            new_len,
+            StorageOperation::SetLenComplete { new_len },
+            now,
+        )
+    }
+
+    /// Schedule an `allocate` of `[0, len)` (`fallocate`): a metadata write
+    /// like `set_len`. The space check happens when it completes.
+    pub(crate) fn schedule_allocate(
+        &mut self,
+        handle_id: HandleId,
+        len: u64,
+        now: Duration,
+    ) -> Result<(OperationId, StorageActions), StorageError> {
+        self.schedule_metadata_write(
+            handle_id,
+            (PendingOpType::Allocate, "allocate"),
+            len,
+            StorageOperation::AllocateComplete { len },
+            now,
+        )
+    }
+
+    /// Schedule a metadata write (`set_len`, `allocate`) on a writable
+    /// handle. It parks on a failed disk and otherwise honours the disk's
+    /// degradation episode (and may enter one) exactly like its siblings.
+    fn schedule_metadata_write(
+        &mut self,
+        handle_id: HandleId,
+        (op_type, name): (PendingOpType, &'static str),
+        offset: u64,
+        operation: StorageOperation,
+        now: Duration,
+    ) -> Result<(OperationId, StorageActions), StorageError> {
         self.set_clock(now);
-        self.ensure_writable(handle_id, "set_len")?;
+        self.ensure_writable(handle_id, name)?;
         let file_id = self.open_file_id(handle_id)?;
         let owner_ip = self.owner_ip(file_id)?;
         let pending = PendingStorageOp {
             handle_id,
             file_id,
-            op_type: PendingOpType::SetLen,
-            offset: new_len,
+            op_type,
+            offset,
             len: 0,
             data: None,
             append: false,
@@ -1063,14 +1102,8 @@ impl StorageEngine {
         if let Some(actions) = self.roll_disk_failure(owner_ip) {
             return self.park_operation(pending, actions);
         }
-        // A length change is a metadata write: it honours the disk's
-        // degradation episode (and may enter one) exactly like its siblings.
         let latency = self.transfer_latency(owner_ip, 0, true, now);
-        self.schedule_operation(
-            pending,
-            StorageOperation::SetLenComplete { new_len },
-            now.saturating_add(latency),
-        )
+        self.schedule_operation(pending, operation, now.saturating_add(latency))
     }
 
     /// Advance `owner_ip`'s disk episode and sample the latency of one
@@ -1259,7 +1292,7 @@ impl StorageEngine {
                 activity.write_bytes = activity.write_bytes.saturating_add(bytes);
                 activity.write_time += took;
             }
-            PendingOpType::Sync | PendingOpType::SetLen => {}
+            PendingOpType::Sync | PendingOpType::SetLen | PendingOpType::Allocate => {}
         }
     }
 
@@ -1355,6 +1388,9 @@ impl StorageEngine {
                 .map(|()| StorageCompletion::Unit),
             (PendingOpType::SetLen, StorageOperation::SetLenComplete { new_len }) => self
                 .complete_set_len(&pending, new_len)
+                .map(|()| StorageCompletion::Unit),
+            (PendingOpType::Allocate, StorageOperation::AllocateComplete { len }) => self
+                .complete_allocate(&pending, len, &mut actions)
                 .map(|()| StorageCompletion::Unit),
             _ => Err(StorageError::InvalidOperation {
                 operation_id: event.operation_id(),
@@ -1536,40 +1572,6 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Reserve disk space for `[0, len)` of the file (`fallocate`), growing
-    /// it first when it is shorter. `ENOSPC` when the sectors that have no
-    /// space yet do not fit; then nothing changes.
-    pub(crate) fn allocate(
-        &mut self,
-        handle_id: HandleId,
-        len: u64,
-    ) -> (Result<(), StorageError>, StorageActions) {
-        let mut actions = StorageActions::default();
-        let file_id = match self.open_file_id(handle_id) {
-            Ok(file_id) => file_id,
-            Err(error) => return (Err(error), actions),
-        };
-        let Some((owner_ip, path, needed)) = self.state.files.get(&file_id).map(|file| {
-            (
-                file.owner_ip,
-                file.path.clone(),
-                file.image.space_needed_to_allocate(len),
-            )
-        }) else {
-            return (Err(StorageError::InvalidFileHandle { handle_id }), actions);
-        };
-        if !self.has_room(owner_ip, needed) {
-            let sectors = 0..len.div_ceil(crate::storage::SECTOR_SIZE as u64);
-            let error = self.refuse_full((owner_ip, file_id), &path, sectors, &mut actions);
-            return (Err(error), actions);
-        }
-        if let Some(file) = self.state.files.get_mut(&file_id) {
-            file.image.allocate(len);
-        }
-        self.state.note_damage_changed();
-        (Ok(()), actions)
-    }
-
     pub(crate) fn file_size(&self, handle_id: HandleId) -> Result<u64, StorageError> {
         let file_id = self.open_file_id(handle_id)?;
         self.state
@@ -1651,7 +1653,7 @@ impl StorageEngine {
                 continue;
             };
             let report = if keep_cache {
-                file.image.keep_cache(&path, armed)
+                file.image.keep_cache(&path, armed, &weigh)
             } else {
                 file.image.crash(&path, &config, armed, &weigh)
             };
