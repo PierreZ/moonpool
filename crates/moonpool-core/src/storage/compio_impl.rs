@@ -124,7 +124,6 @@ impl LocalStorageProvider for CompioStorageProvider {
     type File = CompioStorageFile;
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
-        options.validate()?;
         let opened = native::open_file(&CompioFs, path, &options).await?;
         let append = match (options.is_append(), NATIVE_APPEND) {
             (false, _) => Append::No,
