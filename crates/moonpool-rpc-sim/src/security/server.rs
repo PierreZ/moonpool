@@ -48,12 +48,7 @@ impl Recorder {
     fn receive(&self, id: u64, target: Target, subject: Option<&str>) {
         let allowed = self.ledger.receive(
             id,
-            Receipt {
-                target,
-                subject: subject.map(ToString::to_string),
-                utc: self.trust.utc(),
-                generation: self.trust.generation(),
-            },
+            Receipt::now(target, subject.map(ToString::to_string), &self.trust),
             &self.trust,
         );
         assert_always!(

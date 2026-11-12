@@ -26,4 +26,9 @@ pub trait TraceQuery {
     /// Convenience for full re-scans; prefer [`since`](Self::since) when an
     /// incremental cursor will do.
     fn snapshot(&self, name: &str) -> Vec<TraceEvent>;
+
+    /// Every event name captured since the start of the seed, sorted. An
+    /// invariant that must read every event (a search for a leaked secret,
+    /// say) walks these names with [`since`](Self::since).
+    fn names(&self) -> Vec<String>;
 }

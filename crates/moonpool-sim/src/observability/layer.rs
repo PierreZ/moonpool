@@ -374,6 +374,10 @@ impl TraceQuery for SimulationLayerHandle {
             .cloned()
             .unwrap_or_default()
     }
+
+    fn names(&self) -> Vec<String> {
+        self.events.lock().by_name.keys().cloned().collect()
+    }
 }
 
 /// Span-extension marker storing the `ip` field recorded on a process or
