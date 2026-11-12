@@ -184,6 +184,8 @@ pub(crate) struct CallRecord {
     pub(crate) expected: Instance,
     /// A single attempt: at most one execution.
     pub(crate) single: bool,
+    /// Sent to a boot that was draining: it must never run.
+    pub(crate) drain: bool,
     pub(crate) class: Class,
 }
 
@@ -412,6 +414,7 @@ impl QualificationWorkload {
             op,
             expected: expected.clone(),
             single,
+            drain: false,
             class,
         });
         let line = format!("{id} {op:?} {expected} {note}");

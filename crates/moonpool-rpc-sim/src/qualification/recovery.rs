@@ -25,6 +25,12 @@ use crate::streams::state::{ProducerEnd, StreamLedger};
 /// graceful shutdown, send it a call at once through the reference we know
 /// for that boot. It must be refused without running (admission is
 /// closed), or, if the session was already gone, fail without a reply.
+///
+/// The property has no window: the server records its draining boot and
+/// then, with no await between, polls `shutdown`, whose first poll closes
+/// admission. This watcher sees the boot 20 ms later or more, and only then
+/// sends its probe. A probe that meets a later boot is refused as a stale
+/// incarnation. Thus no probe ever runs (`judge_all` asserts it).
 pub(crate) async fn drain_watcher(
     ctx: &SimContext,
     rpc: &RpcHandle<SimProviders>,
@@ -84,6 +90,7 @@ pub(crate) async fn drain_watcher(
                 op: QualOp::Unary,
                 expected,
                 single: true,
+                drain: true,
                 class,
             });
         }
@@ -400,6 +407,13 @@ impl QualificationWorkload {
                     );
                 }
                 Class::Maybe => {}
+            }
+            if call.drain {
+                assert_always!(
+                    runs.is_empty(),
+                    "rpc qual a call sent to a draining server never executed",
+                    { "id" => call.id, "runs" => runs.len() }
+                );
             }
             if call.single {
                 assert_always!(
