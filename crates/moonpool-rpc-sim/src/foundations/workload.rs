@@ -15,15 +15,18 @@ use moonpool_rpc::{
     Wire,
 };
 use moonpool_sim::{
-    NetworkProvider, RandomProvider, SimContext, SimProviders, SimulationError, SimulationResult,
-    TimeProvider, Workload, assert_always, assert_sometimes,
+    NetworkProvider, RandomProvider, SIM_FAULT_EVENT_NAME, SimContext, SimProviders,
+    SimulationError, SimulationResult, TimeProvider, TraceQuery, Workload, assert_always,
+    assert_sometimes,
 };
 
 use super::messages::{
     CrashAfterReceipt, Echo, EchoForeignCodec, EchoNextSchema, Echoed, Ephemeral, ForeignBody,
     Probe, Relay, RelayOutcome, Slow, WrongMethod,
 };
-use super::state::{Board, EPHEMERAL_KEY, Ledger, RELAY_REF_KEY, SERVER_REFS_KEY, ServerRefs};
+use super::state::{
+    Board, EPHEMERAL_KEY, Ledger, RELAY_REF_KEY, SERVER_BOOTS_KEY, SERVER_REFS_KEY, ServerRefs,
+};
 use super::{CALL_TIMEOUT, CorruptingWire, Observations, RPC_PORT, RunRecord, rpc_config};
 
 /// One operation of the workload's alphabet.
@@ -494,6 +497,7 @@ impl FoundationsWorkload {
             return;
         };
         let (kind, bytes) = malformed_input(ctx.random().random_range(0..4), id);
+        let faults_before = ctx.observability().len(SIM_FAULT_EVENT_NAME);
         let address = format!("{server}:{RPC_PORT}");
         let connect = ctx.network().connect(&address);
         let Ok(Ok(mut stream)) = ctx.time().timeout(Duration::from_secs(1), connect).await else {
@@ -501,6 +505,8 @@ impl FoundationsWorkload {
                 .push(format!("{id} Malformed {kind} unreachable"));
             return;
         };
+        // The server's own count of this kind of refusal, before the frame.
+        let before = server_refusals(ctx, kind);
         let closed = async {
             if stream.write_all(&bytes).await.is_err() {
                 return true;
@@ -519,17 +525,95 @@ impl FoundationsWorkload {
             .timeout(Duration::from_secs(3), closed)
             .await
             .unwrap_or(false);
-        if closed {
+        // Counters reach the board every 100 ms.
+        let _ = ctx.time().sleep(Duration::from_millis(250)).await;
+        let after = server_refusals(ctx, kind);
+        // The refusal is the server's own only when its counter for this
+        // kind went up within one boot; a close alone may be a network fault.
+        let refused = matches!(
+            (before, after),
+            (Some((boot, earlier)), Some((later_boot, later))) if boot == later_boot && later > earlier
+        );
+        let quiet = quiet_window(ctx, faults_before, ctx.my_ip(), &server);
+        if quiet && before.is_some() {
+            // Nothing touched the session and the server stayed up: the
+            // server must refuse the frame itself and close the session.
+            assert_always!(
+                closed && refused,
+                "a server refuses a malformed frame and closes the session",
+                { "kind" => kind, "closed" => closed, "refused" => refused }
+            );
+            assert_sometimes!(
+                true,
+                "rpc malformed frame judged with no fault on its session"
+            );
+        }
+        if closed && refused {
             assert_sometimes!(true, "rpc malformed input closed the session");
-            if kind == "checksum" {
-                // A corrupt opening frame, before any handshake: its own gate,
-                // distinct from corruption of live traffic.
-                assert_sometimes!(true, "rpc scripted corrupt frame closed the session");
+            match kind {
+                // A corrupt opening frame, before any handshake: its own
+                // gate, distinct from corruption of live traffic.
+                "checksum" => {
+                    assert_sometimes!(true, "rpc scripted corrupt frame closed the session");
+                }
+                "oversized" => {
+                    assert_sometimes!(true, "rpc server refused an oversized frame");
+                }
+                "envelope" => {
+                    assert_sometimes!(true, "rpc server refused a garbled envelope");
+                }
+                _ => assert_sometimes!(true, "rpc server refused an unsupported version"),
             }
         }
-        self.history
-            .push(format!("{id} Malformed {kind} closed={closed}"));
+        self.history.push(format!(
+            "{id} Malformed {kind} closed={closed} refused={refused} quiet={quiet}"
+        ));
     }
+}
+
+/// The current server boot and its count of refusals of `kind`, as last
+/// reported on the board.
+fn server_refusals(ctx: &SimContext, kind: &str) -> Option<(u64, u64)> {
+    let boot = ctx.state().get::<u64>(SERVER_BOOTS_KEY)?;
+    let label = format!("server#{boot}");
+    let stats = Board::of(ctx.state())
+        .stats_with_prefix(&label)
+        .into_iter()
+        .find(|(found, _)| *found == label)?
+        .1;
+    let count = match kind {
+        // A bad opening frame: a checksum failure before the handshake.
+        "checksum" => stats
+            .checksum_failures
+            .saturating_sub(stats.established_checksum_failures),
+        "version" => stats.version_rejections,
+        // Oversized frames and garbled envelopes are plain violations.
+        _ => stats.protocol_violations,
+    };
+    Some((boot, count))
+}
+
+/// Whether no simulated fault could have touched a raw session between the
+/// workload at `me` and the server at `server`: no fault event of any kind
+/// since `faults_before`, and no partition or clog that names either
+/// address in the whole run (one may still hold from before the window).
+fn quiet_window(ctx: &SimContext, faults_before: usize, me: &str, server: &str) -> bool {
+    let faults = ctx.observability().snapshot(SIM_FAULT_EVENT_NAME);
+    if faults.len() > faults_before {
+        return false;
+    }
+    faults.iter().all(|fault| {
+        let lasting = matches!(
+            fault.str("kind"),
+            Some(kind) if kind.contains("partition") || kind.contains("clog")
+        );
+        let names = |ip: &str| {
+            ["ip", "from", "to"]
+                .iter()
+                .any(|key| fault.str(key) == Some(ip))
+        };
+        !(lasting && (names(me) || names(server)))
+    })
 }
 
 /// One malformed opening for a raw session.
@@ -631,9 +715,9 @@ impl Workload for FoundationsWorkload {
             tracing::debug!(id, ?op, ?class, receipts, "rpc call judged");
         }
         let totals = Board::of(ctx.state()).totals();
-        // Corruption of live traffic on an established session, which only
-        // the network's bit flips produce (the scripted corrupt frame never
-        // gets past the handshake).
+        // Corruption of live traffic on an established session: the
+        // network's bit flips and the corrupting wire produce it (the
+        // scripted corrupt frame never gets past the handshake).
         assert_sometimes!(
             totals.established_checksum_failures > 0,
             "rpc checksum mismatch on an established session"

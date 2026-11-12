@@ -87,6 +87,7 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc ambiguous interface call executed in its published instance",
         "rpc one-way request executed exactly once",
         "rpc every participant answered a fresh publication at the end",
+        "rpc later call to a dismissed instance judged",
     ] {
         if !fired(&report, required) {
             missing.push(required);
