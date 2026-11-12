@@ -24,7 +24,12 @@ use super::messages::{
     Probe, Relay, RelayOutcome, Slow, WrongMethod,
 };
 use super::state::{Board, EPHEMERAL_KEY, Ledger, RELAY_REF_KEY, SERVER_REFS_KEY, ServerRefs};
-use super::{CALL_TIMEOUT, CorruptingWire, Observations, RPC_PORT, RunRecord, rpc_config};
+use super::{
+    CALL_TIMEOUT, CorruptingWire, Observations, RPC_PORT, RunRecord, report_stats, rpc_config,
+};
+
+/// Board label of the workload's runtime.
+const WORKLOAD_LABEL: &str = "workload";
 
 /// One operation of the workload's alphabet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -590,12 +595,14 @@ impl Workload for FoundationsWorkload {
             RpcDriver::client_only_with(ctx.providers().clone(), rpc_config(), wire)
                 .map_err(|error| SimulationError::InvalidState(format!("rpc config: {error}")))?;
         let probe = rpc.probe();
+        let board = Board::of(ctx.state());
         if let Some(probe) = &probe {
-            Board::of(ctx.state()).register_probe("workload", probe.clone());
+            board.register_probe(WORKLOAD_LABEL, probe.clone());
         }
         let result = moonpool_sim::select! {
             error = driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             result = self.drive(ctx, &rpc) => result,
+            () = report_stats(&rpc, &board, WORKLOAD_LABEL, ctx) => Ok(()),
         };
         // The driver future was dropped with the select: the runtime, its
         // connections and child futures must be gone, whatever was pending.

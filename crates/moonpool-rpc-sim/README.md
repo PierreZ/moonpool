@@ -25,7 +25,8 @@ Every campaign except foundations masks network bit flips with
 `without_corruption()`. Each campaign also records which of
 `moonpool-rpc`'s own buggify sites fired (session cuts behind a request,
 spurious overload refusals, deferred stream acknowledgements, spurious
-failure-monitor wakeups).
+failure-monitor wakeups), from the counters that every runtime reports,
+and its test requires the sites that the campaign reaches.
 
 ## Running
 

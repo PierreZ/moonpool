@@ -67,7 +67,10 @@
 //!   points: session cuts behind a request, spurious overload refusals,
 //!   deferred stream acknowledgements and spurious failure-monitor
 //!   wakeups. Each campaign records which ones fired as reachable
-//!   assertions, read from the counters of `moonpool_rpc::RpcStats`.
+//!   assertions, read from the counters of `moonpool_rpc::RpcStats` that
+//!   every runtime reports (one last time when it stops, through its
+//!   `moonpool_rpc::ResourceProbe`). Each campaign's test requires the
+//!   sites that campaign reaches.
 //!
 //! # Feature flags
 //!

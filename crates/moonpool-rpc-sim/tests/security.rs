@@ -67,6 +67,11 @@ fn bounded_campaign_hits_every_required_scenario() {
     let mut missing = Vec::new();
     for required in [
         // Accepted, on every route.
+        // moonpool-rpc's own buggify sites (see `observe_injections`).
+        "rpc buggify: session cut behind an at-most-once request",
+        "rpc buggify: session cut behind a reliable request",
+        "rpc buggify: request refused overloaded at admission",
+        "rpc buggify: failure-monitor wakeup with nothing changed",
         "rpc security verified token reached a private endpoint",
         "rpc security verified token reached a private endpoint locally",
         "rpc security anonymous caller reached a public endpoint",

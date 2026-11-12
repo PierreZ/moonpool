@@ -27,7 +27,7 @@
 //! private endpoint again (when the mode verifies clients) and anyone
 //! reaches the public one.
 //!
-//! **Faults.** Swarm network chaos **with bit flips**: under TLS a flipped
+//! **Faults.** Swarm network chaos with knob spikes, **with bit flips**: under TLS a flipped
 //! bit is an authentication failure that ends the session, never a
 //! corrupted delivery. The script ([`TlsFaults`]) moves the UTC (steps and
 //! jumps past certificate lifetimes), rotates the server's and the member's
@@ -374,7 +374,7 @@ pub fn tls_campaign() -> SimulationBuilder {
         .processes(1, || Box::new(ImpostorProcess))
         .workload_factory(|| Box::new(TlsWorkload::default()))
         .fault_factory(|| Box::new(TlsFaults))
-        .enable_chaos([Chaos::Network(ChaosMode::Swarm)])
+        .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])
         .chaos_duration(Duration::from_secs(8))
 }
 

@@ -452,6 +452,18 @@ impl ResourceProbe {
         self.counters.live_connections.load(Ordering::Relaxed)
     }
 
+    /// The runtime's counters, also after the driver is dropped, so the
+    /// last increments before a shutdown or a crash can still be read.
+    ///
+    /// Only the runtime state knows the gauges `endpoints`,
+    /// `pending_calls`, `retained_calls`, `peers` and `streams_consuming`:
+    /// they read zero here. Use [`RpcHandle::stats`](crate::RpcHandle::stats)
+    /// for them while the runtime runs.
+    #[must_use]
+    pub fn counters(&self) -> RpcStats {
+        self.counters.snapshot(0, 0, 0)
+    }
+
     /// Whether the runtime's shared state still exists.
     #[must_use]
     pub fn runtime_alive(&self) -> bool {

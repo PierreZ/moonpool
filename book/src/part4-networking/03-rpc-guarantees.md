@@ -162,6 +162,9 @@ A few fields to watch:
   chapter). Always zero outside a simulation.
 - `ResourceProbe::outstanding()` after a shutdown: every gauge an owner still
   holds. All zero means the runtime left nothing behind.
+- `ResourceProbe::counters()` after the driver stopped or crashed: the last
+  values of the counters, which `RpcHandle::stats` can no longer read. The
+  simulation campaigns take their last report this way.
 
 `ShutdownReport` says whether a graceful shutdown drained, how many calls it
 ended and how many replies it abandoned at the deadline.
