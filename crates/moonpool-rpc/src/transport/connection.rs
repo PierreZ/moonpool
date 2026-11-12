@@ -978,7 +978,14 @@ pub(crate) async fn read_loop<R: AsyncRead + Unpin>(
     batch: usize,
     mut on_frame: impl FnMut(Vec<u8>) -> Result<(), CloseReason>,
 ) -> CloseReason {
-    let mut decoder = crate::protocol::FrameDecoder::new(max_frame_bytes);
+    // Only a `Hello` is valid until the first frame passed: a small limit
+    // until then, the session's limit after it. Capacity above one read
+    // chunk (at least 64 KiB) is given back after a large frame.
+    let mut decoder = crate::protocol::FrameDecoder::new(
+        max_frame_bytes.min(crate::protocol::HANDSHAKE_MAX_FRAME_BYTES),
+    )
+    .with_retained_capacity(chunk_bytes.max(crate::protocol::DEFAULT_RETAINED_CAPACITY));
+    let mut handshake = true;
     let mut chunk = vec![0; chunk_bytes.max(1)];
     let mut handled = 0usize;
     loop {
@@ -1002,6 +1009,10 @@ pub(crate) async fn read_loop<R: AsyncRead + Unpin>(
                 Ok(Some(payload)) => {
                     if let Err(reason) = on_frame(payload) {
                         return reason;
+                    }
+                    if handshake {
+                        handshake = false;
+                        decoder.set_max_frame_bytes(max_frame_bytes);
                     }
                     handled += 1;
                     if handled >= batch.max(1) {

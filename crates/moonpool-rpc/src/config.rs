@@ -91,7 +91,12 @@ pub struct InvalidConfig(pub String);
 pub struct RpcConfig {
     /// Largest frame payload accepted or produced, in bytes. A peer
     /// declaring a larger frame is a protocol violation; a local request
-    /// or reply above it fails without being sent.
+    /// or reply above it fails without being sent. Before the peer's
+    /// `Hello` passed, a session accepts only
+    /// [`HANDSHAKE_MAX_FRAME_BYTES`](crate::protocol::HANDSHAKE_MAX_FRAME_BYTES)
+    /// (or this limit, if it is smaller). The receive buffer of a
+    /// connection grows to the largest frame received and gives the room
+    /// above one read chunk (at least 64 KiB) back after it.
     pub max_frame_bytes: u32,
     /// Live endpoints this runtime may register.
     pub max_endpoints: usize,

@@ -37,6 +37,15 @@ handler. Nothing already admitted is ever dropped to make room.
 | `StreamPolicy::window_bytes`, `max_buffered_bytes` | stream, consuming runtime | 1 MiB, 256 MiB |
 | `StreamPolicy::max_producer_bytes_per_connection`, `max_producer_bytes` | connection, producing runtime | 64 MiB, 1 GiB |
 | `RpcConfig::max_frame_bytes` | frame | 1 MiB |
+| `HANDSHAKE_MAX_FRAME_BYTES` | frame before the peer's `Hello` passed | 1 KiB |
+
+Two bounds keep the receive buffer of a connection small. Before the
+handshake only a `Hello` is valid, so the runtime refuses a larger first
+frame from its length alone, before it buffers a byte of the body. A peer
+without a credential cannot make each of its connections hold 1 MiB.
+After a large frame, the buffer gives back the room above one read chunk
+(at least 64 KiB), so one large reply does not hold its memory for the
+life of the session.
 
 Replies are the interesting one. In the first package replies shared the
 control queue, so a caller that pipelined requests to a server whose writer

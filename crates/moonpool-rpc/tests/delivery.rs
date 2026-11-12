@@ -1026,6 +1026,42 @@ async fn claim(address: &str, listen: &str) -> tokio::net::TcpStream {
     stream
 }
 
+/// Before the handshake only a `Hello` is valid, so a first frame that
+/// announces a data-sized payload is refused from its length alone, at
+/// once, and not after the handshake timeout with its body buffered (#480).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_oversized_first_frame_is_refused_at_once() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut config = fast();
+    config.handshake_timeout = Duration::from_secs(30);
+    let (server, server_driver) = listen(config).await;
+    let address = server.address().expect("listening");
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect");
+    // A header for a 512 KiB payload (below `max_frame_bytes`), then a
+    // part of its body. The checksum is never checked.
+    let mut header = (512u32 * 1024).to_le_bytes().to_vec();
+    header.extend_from_slice(&[0; 8]);
+    stream.write_all(&header).await.expect("write header");
+    stream.write_all(&[0; 1024]).await.expect("write body");
+    let mut rest = Vec::new();
+    let ended = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await;
+    assert!(
+        ended.is_ok(),
+        "the session waited for the handshake timeout"
+    );
+    assert!(
+        eventually(|| server
+            .stats()
+            .is_some_and(|stats| stats.protocol_violations == 1))
+        .await,
+        "{:?}",
+        server.stats()
+    );
+    server_driver.abort();
+}
+
 /// A session claiming another host's address is served but never becomes
 /// the connection to that address; a same-host claim is adopted (the
 /// documented residual); the peer table stays bounded.
