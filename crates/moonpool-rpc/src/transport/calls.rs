@@ -813,6 +813,10 @@ impl<P: RpcProviders> Shared<P> {
                 Counters::bump(&self.counters.idle_closes);
                 tracing::debug!(peer = %connection.peer(), "rpc idle connection closed");
             }
+            CloseReason::PeerClosed => {
+                Counters::bump(&self.counters.peer_closes);
+                tracing::debug!(peer = %connection.peer(), "rpc session closed by the peer in order");
+            }
             CloseReason::Replaced => {
                 Counters::bump(&self.counters.replaced_connections);
                 tracing::debug!(peer = %connection.peer(), ?reason, "rpc duplicate connection closed");

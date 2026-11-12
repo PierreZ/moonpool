@@ -71,6 +71,10 @@ pub struct RpcStats {
     pub reliable_calls_started: u64,
     /// Retained requests queued again on a new connection.
     pub retransmissions: u64,
+    /// Sessions the peer ended in order, between two frames (for TLS, with
+    /// a `close_notify`). An end without it is an I/O error or a
+    /// truncation.
+    pub peer_closes: u64,
     /// Dials started for a new failure-monitor watcher of a failing address
     /// that had no connection, or for a probe that waited for a free slot.
     pub probes: u64,
@@ -218,6 +222,7 @@ pub(crate) struct Counters {
     pub(crate) reliable_calls_started: AtomicU64,
     pub(crate) retransmissions: AtomicU64,
     pub(crate) probes: AtomicU64,
+    pub(crate) peer_closes: AtomicU64,
     pub(crate) probes_deferred: AtomicU64,
     pub(crate) retention_released_by_failure: AtomicU64,
     pub(crate) calls_failed_fast: AtomicU64,
@@ -340,6 +345,7 @@ impl Counters {
             reliable_calls_started: load(&self.reliable_calls_started),
             retransmissions: load(&self.retransmissions),
             probes: load(&self.probes),
+            peer_closes: load(&self.peer_closes),
             probes_deferred: load(&self.probes_deferred),
             retention_released_by_failure: load(&self.retention_released_by_failure),
             calls_failed_fast: load(&self.calls_failed_fast),
