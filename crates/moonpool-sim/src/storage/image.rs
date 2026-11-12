@@ -251,6 +251,12 @@ pub struct FileImage {
     /// The damage marks of the durable image: what `damaged` returns to when
     /// a crash rolls a sector back.
     durable_damaged: SectorBitSet,
+    /// The bytes an out-of-band [`corrupt_bytes`](Self::corrupt_bytes)
+    /// changed, for a damaged sector it changed only in part: file offsets
+    /// inside that sector. Read only while the sector's `damaged` mark is
+    /// set; a sector marked with no span here is damaged whole. Any other
+    /// damage to the sector drops its span, so a span never hides damage.
+    damaged_spans: BTreeMap<u64, Range<u64>>,
     /// Per-sector `(CRC, byte length)` of the content the caller believes
     /// durable. A stamp exists only for sectors a sync claimed: a write to the
     /// sector drops it, a shrink into the sector narrows it to the surviving
@@ -291,6 +297,7 @@ impl FileImage {
             eio_write: SectorBitSet::new(0),
             damaged: SectorBitSet::new(0),
             durable_damaged: SectorBitSet::new(0),
+            damaged_spans: BTreeMap::new(),
             oracle: BTreeMap::new(),
             fill,
             allocated: SectorBitSet::new(0),
@@ -793,12 +800,68 @@ impl FileImage {
     /// [`damaged_sectors`](Self::damaged_sectors)).
     pub fn mark_damaged(&mut self, sectors: Range<u64>) {
         for sector in sectors {
-            let index = as_index(sector);
-            self.damaged.set(index);
-            if !self.dirty.is_set(index) {
-                self.durable_damaged.set(index);
-            }
+            self.damaged_spans.remove(&sector);
+            self.mark_sector_damaged(as_index(sector));
         }
+    }
+
+    /// Mark the sectors that hold `bytes` as damaged by an out-of-band
+    /// corruption of exactly those bytes. A sector it covers whole is
+    /// damaged whole; a sector it covers in part keeps the span, so
+    /// [`damage_overlaps`](Self::damage_overlaps) does not count its other
+    /// bytes. A sector already damaged keeps its damage: a whole one stays
+    /// whole, and two spans join into the span that holds both.
+    pub fn mark_damaged_bytes(&mut self, bytes: Range<u64>) {
+        if bytes.is_empty() {
+            return;
+        }
+        let size = SECTOR_SIZE as u64;
+        for sector in (bytes.start / size)..=((bytes.end - 1) / size) {
+            let index = as_index(sector);
+            let within = bytes.start.max(sector * size)..bytes.end.min((sector + 1) * size);
+            let whole = within.end - within.start == size;
+            if self.damaged.is_set(index) {
+                // Already damaged: whole stays whole, a span grows.
+                if let Some(span) = self.damaged_spans.get_mut(&sector) {
+                    *span = span.start.min(within.start)..span.end.max(within.end);
+                    if span.end - span.start == size {
+                        self.damaged_spans.remove(&sector);
+                    }
+                }
+            } else if whole {
+                self.damaged_spans.remove(&sector);
+            } else {
+                self.damaged_spans.insert(sector, within);
+            }
+            self.mark_sector_damaged(index);
+        }
+    }
+
+    /// Set one sector's damage mark, durably unless it holds an unsynced
+    /// write.
+    fn mark_sector_damaged(&mut self, index: usize) {
+        self.damaged.set(index);
+        if !self.dirty.is_set(index) {
+            self.durable_damaged.set(index);
+        }
+    }
+
+    /// Whether any byte of `bytes` is damaged: in a damaged sector, and in
+    /// its span when an out-of-band corruption damaged it only in part
+    /// ([`mark_damaged_bytes`](Self::mark_damaged_bytes)).
+    #[must_use]
+    pub fn damage_overlaps(&self, bytes: Range<u64>) -> bool {
+        if bytes.is_empty() {
+            return false;
+        }
+        let size = SECTOR_SIZE as u64;
+        (bytes.start / size..bytes.end.div_ceil(size)).any(|sector| {
+            self.damaged.is_set(as_index(sector))
+                && self
+                    .damaged_spans
+                    .get(&sector)
+                    .is_none_or(|span| span.start < bytes.end && bytes.start < span.end)
+        })
     }
 
     /// The sectors a random fault left holding the wrong bytes (a crash's
@@ -1139,6 +1202,8 @@ impl FileImage {
             self.faults.set(index);
             self.durable_faults.set(index);
         }
+        self.damaged_spans
+            .remove(&u64::try_from(index).unwrap_or(u64::MAX));
         self.damaged.set(index);
         self.durable_damaged.set(index);
     }
@@ -1825,5 +1890,43 @@ mod tests {
         image.sync(&config, &always_eligible);
         image.crash("f", &config, false, &always_eligible);
         assert!(image.is_corrupt(0), "the fault is on the durable bytes");
+    }
+
+    /// Damage to part of a sector covers only those bytes; any other damage
+    /// to the sector covers it whole, and a rewrite heals it.
+    #[test]
+    fn a_partial_damage_span_covers_only_its_bytes() {
+        let size = SECTOR_SIZE as u64;
+        let mut image = image(2 * size);
+        image.mark_damaged_bytes(100..108);
+        assert!(image.damage_overlaps(104..200));
+        assert!(!image.damage_overlaps(0..100), "the bytes before the span");
+        assert!(
+            !image.damage_overlaps(108..size),
+            "the bytes after the span"
+        );
+        assert!(!image.damage_overlaps(size..2 * size), "the next sector");
+        // A second span joins the first.
+        image.mark_damaged_bytes(300..310);
+        assert!(image.damage_overlaps(200..201), "the joined span");
+        assert!(!image.damage_overlaps(310..size));
+        // A whole-sector fault ends the span.
+        image.mark_damaged(0..1);
+        assert!(image.damage_overlaps(0..1));
+        // A range across two sectors damages each in part.
+        let mut image = super::tests::image(2 * size);
+        image.mark_damaged_bytes(size - 4..size + 4);
+        assert!(image.damage_overlaps(size - 1..size));
+        assert!(image.damage_overlaps(size..size + 1));
+        assert!(!image.damage_overlaps(0..size - 4));
+        assert!(!image.damage_overlaps(size + 4..2 * size));
+        // A rewrite heals the sector, and a later span starts fresh.
+        image.write(0, &[1; SECTOR_SIZE]);
+        assert!(!image.damage_overlaps(0..size));
+        image.mark_damaged_bytes(0..2);
+        assert!(
+            !image.damage_overlaps(size - 4..size),
+            "the old span is gone"
+        );
     }
 }

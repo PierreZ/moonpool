@@ -650,9 +650,10 @@ impl StorageEngine {
         let len = file.image.durable_size();
         if file.image.corrupt_bytes(bytes.clone()) {
             if !bytes.is_empty() {
-                let size = crate::storage::faults::SECTOR_SIZE as u64;
-                file.image
-                    .mark_damaged(bytes.start / size..(bytes.end - 1) / size + 1);
+                // Exactly these bytes: the shard gate judged them, and the
+                // end-of-run copy count must judge the same ones, not the
+                // sectors' other bytes.
+                file.image.mark_damaged_bytes(bytes);
                 self.state.note_damage_changed();
             }
             Ok(())
