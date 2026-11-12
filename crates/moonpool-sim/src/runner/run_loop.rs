@@ -28,7 +28,7 @@ use super::orchestrator::{OrchestrateInputs, OrchestrateOutput, WorkloadOrchestr
 /// Inputs to `run_orchestrator_blocking`.
 pub(super) struct RunOrchestratorInputs<'a> {
     seed: u64,
-    metrics_factory: Option<&'a SourceFactory>,
+    metrics_factory: Option<SourceFactory>,
     iteration_count: usize,
     workloads: Vec<Box<dyn Workload>>,
     workload_info: Vec<(String, String)>,
@@ -59,7 +59,9 @@ pub(super) type OrchestrationOutcome = Result<OrchestrateOutput, (Vec<u64>, usiz
 enum IterationOutcome {
     /// The seed ran to completion (successfully or not).
     Completed,
-    /// The seed deadlocked: the campaign stops and reports what it gathered.
+    /// The seed deadlocked and lost an instance workload: the campaign stops
+    /// and reports what it gathered. A deadlocked seed whose workloads all
+    /// come from factories is [`Self::Completed`] (a failed seed).
     Deadlocked,
 }
 
@@ -187,7 +189,7 @@ fn discovery_kind_name(kind: moonpool_assertions::DiscoveryKind) -> &'static str
 struct ConvergenceState<'a> {
     iteration_control: &'a IterationControl,
     iteration_count: usize,
-    reached_sometimes: &'a std::collections::BTreeSet<String>,
+    reached_sometimes: &'a std::collections::BTreeSet<u64>,
     all_sometimes_count: usize,
     /// Whether fork-based exploration is active (selects sancov history vs
     /// the live BSS counter reader for the code-coverage signal).
@@ -247,7 +249,7 @@ struct RunState {
     #[cfg(feature = "exploration")]
     exploration_totals: ExplorationTotals,
     // Saturation tracking (`UntilCoverageStable`).
-    reached_sometimes: std::collections::BTreeSet<String>,
+    reached_sometimes: std::collections::BTreeSet<u64>,
     /// Previous progress-signal value (code edges, or reached-assertion count
     /// in the no-sancov fallback). Both signals are monotonic non-decreasing.
     prev_signal: usize,
@@ -378,7 +380,7 @@ impl SimulationBuilder {
                 sim,
                 chaos_duration,
                 chaos_until_run_ends,
-                metrics_factory,
+                metrics_factory: metrics_factory.as_ref(),
                 iteration_count,
                 run_time_budget,
                 max_spawns,
@@ -440,8 +442,9 @@ impl SimulationBuilder {
     pub(super) fn build_sim_for_iteration(&self, seed: u64) -> crate::sim::SimWorld {
         let network_chaos = self.network_chaos;
         let storage_chaos = self.storage_chaos;
-        // Network before storage, both before the world resets the stream
-        // (the draw-order contract on `ChaosMode::resolve`).
+        // Network before storage, both on the configuration stream, before
+        // the world reseeds the stream for the run (the draw-order contract
+        // on `ChaosMode::resolve`).
         let mut network_config = ChaosMode::resolve(
             network_chaos,
             crate::NetworkConfiguration::without_chaos,
@@ -607,7 +610,9 @@ impl SimulationBuilder {
     /// factories, attrition regimes and outages) only run inside the chaos
     /// window, so without [`Self::chaos_duration`] they would be dropped
     /// unrun while the campaign reports success. Also refuse an outage that
-    /// names no registered group or carries a malformed range.
+    /// names no registered group or carries a malformed range, and an
+    /// attrition regime that can never reboot a process
+    /// ([`Self::attrition_invalid`]).
     pub(super) fn validate_fault_injectors(&self) -> Result<(), SimulationError> {
         // A group spawned mid-run counts once it is declared.
         let registered: Vec<&str> = self
@@ -627,6 +632,13 @@ impl SimulationBuilder {
             .gray_failures
             .iter()
             .find_map(|(gray, _)| gray.invalid(&registered))
+        {
+            return Err(SimulationError::InvalidConfiguration(reason));
+        }
+        if let Some(reason) = self
+            .attritions
+            .iter()
+            .find_map(|(attrition, mode)| self.attrition_invalid(attrition, *mode, &registered))
         {
             return Err(SimulationError::InvalidConfiguration(reason));
         }
@@ -670,6 +682,91 @@ impl SimulationBuilder {
              inside the chaos window, so they would never fire; set chaos_duration",
             unrun.join(" and ")
         )))
+    }
+
+    /// Whether every workload comes from a factory, so that a seed whose
+    /// workload task was lost does not stop the campaign.
+    fn workloads_rebuilt_each_seed(&self) -> bool {
+        self.entries
+            .iter()
+            .all(|entry| matches!(entry, WorkloadEntry::Factory { .. }))
+    }
+
+    /// Why an attrition regime can never reboot a process, if it cannot: its
+    /// victims name a group or a tag that no process has, its failure-domain
+    /// scope has no `.cluster()` topology among its victims, or (with
+    /// [`ChaosMode::Random`], which keeps `max_dead` as written) the smallest
+    /// domain any seed can draw holds more victims than `max_dead`. `Swarm`
+    /// draws its own budget and only picks a scope that fits it.
+    fn attrition_invalid(
+        &self,
+        attrition: &Attrition,
+        mode: ChaosMode,
+        registered: &[&str],
+    ) -> Option<String> {
+        use crate::locality::DomainLevel;
+        use crate::runner::process::{AttritionScope, AttritionVictims};
+        match &attrition.victims {
+            AttritionVictims::Group(group) if !registered.contains(&group.as_str()) => {
+                return Some(format!(
+                    "a Chaos::Attrition names the unregistered group '{group}' \
+                     (declare a group spawned mid-run with SimulationBuilder::spawnable_group)"
+                ));
+            }
+            AttritionVictims::Tagged { key, value }
+                if !self
+                    .process_entries
+                    .iter()
+                    .any(|entry| entry.tags.offers(key, value)) =>
+            {
+                return Some(format!(
+                    "a Chaos::Attrition names the tag '{key}={value}', which no process group \
+                     carries (give it to a group with SimulationBuilder::tags)"
+                ));
+            }
+            _ => {}
+        }
+        let level = match attrition.scope {
+            AttritionScope::PerProcess => return None,
+            AttritionScope::PerMachine => DomainLevel::Machine,
+            AttritionScope::PerZone => DomainLevel::Zone,
+            AttritionScope::PerDatacenter => DomainLevel::Datacenter,
+        };
+        let clusters: Vec<&crate::LocalityConfig> = self
+            .process_entries
+            .iter()
+            .filter(|entry| match &attrition.victims {
+                AttritionVictims::Group(group) => entry.name == *group,
+                AttritionVictims::Any | AttritionVictims::Tagged { .. } => true,
+            })
+            .filter_map(|entry| entry.locality.as_ref())
+            .collect();
+        let scope = attrition.scope;
+        if clusters.is_empty() {
+            return Some(format!(
+                "a Chaos::Attrition with scope {scope:?} reboots whole failure domains, but no \
+                 victim has a SimulationBuilder::cluster topology: it would never reboot"
+            ));
+        }
+        // A tag filter can leave fewer victims in a domain than it holds, so
+        // only the other filters have a known domain size.
+        if mode != ChaosMode::Random || matches!(attrition.victims, AttritionVictims::Tagged { .. })
+        {
+            return None;
+        }
+        let smallest = clusters
+            .iter()
+            .map(|cluster| cluster.smallest_domain(level))
+            .min()
+            .unwrap_or_default();
+        (smallest > attrition.max_dead).then(|| {
+            format!(
+                "a Chaos::Attrition with scope {scope:?} can never reboot: the smallest domain \
+                 holds {smallest} processes, more than max_dead {} (raise max_dead, or use \
+                 ChaosMode::Swarm, which picks a scope that fits)",
+                attrition.max_dead
+            )
+        })
     }
 
     /// Enforce the fresh-state boundary required by exploration recipes.
@@ -814,7 +911,10 @@ impl SimulationBuilder {
     fn reset_per_iteration_state(seed: u64, obs_handle: &SimulationLayerHandle) {
         obs_handle.reset_for_seed();
         crate::sim::reset_sim_rng();
-        crate::sim::set_sim_seed(seed);
+        // The configuration draws (process counts, network and storage
+        // profiles) read their own stream; `SimWorld` construction reseeds
+        // the stream with `seed` for the run (#452).
+        crate::sim::rng::set_sim_config_seed(seed);
         // Route moonpool_core::select!'s branch offsets through the simulation
         // stream for this iteration.
         crate::sim::install_select_offset();
@@ -833,7 +933,7 @@ impl SimulationBuilder {
     /// historical `10.0.1.x` addresses.
     fn resolve_process_config(
         entries: &[ProcessEntry],
-    ) -> Option<super::process_manager::ProcessConfig<'_>> {
+    ) -> Option<super::process_manager::ProcessConfig<'static>> {
         if entries.is_empty() {
             return None;
         }
@@ -849,7 +949,7 @@ impl SimulationBuilder {
             let base_name = &entry.name;
             // Listed even when this seed drew zero members.
             group_registry.declare(base_name);
-            factories.insert(base_name.clone(), &*entry.factory);
+            factories.insert(base_name.clone(), entry.factory.clone());
             plans.insert(
                 base_name.clone(),
                 crate::runner::membership::GroupPlan {
@@ -907,14 +1007,20 @@ impl SimulationBuilder {
         }
     }
 
-    /// Scan all assertion slots from shared memory: insert the messages of
-    /// every satisfied coverage assertion into `reached`, warn for incomplete
-    /// sites, and return the number of unique observed coverage contracts.
-    fn scan_assertion_slots(reached: &mut std::collections::BTreeSet<String>) -> usize {
+    /// Scan all assertion slots from shared memory: insert the message hash
+    /// of every satisfied coverage assertion into `reached`, warn for
+    /// incomplete sites, and return the number of unique observed coverage
+    /// contracts.
+    ///
+    /// The key is the hash of the full message, not the stored text: two
+    /// sites whose messages share their first 63 bytes stay two sites.
+    fn scan_assertion_slots(reached: &mut std::collections::BTreeSet<u64>) -> usize {
         use moonpool_assertions::AssertKind;
 
+        let slots = moonpool_assertions::assertion_read_all();
+        let names = crate::chaos::assertions::slot_names(&slots);
         let mut observed = std::collections::BTreeSet::new();
-        for slot in &moonpool_assertions::assertion_read_all() {
+        for (slot, name) in slots.iter().zip(&names) {
             let Some(kind) = AssertKind::from_u8(slot.kind) else {
                 continue;
             };
@@ -927,7 +1033,7 @@ impl SimulationBuilder {
             ) {
                 continue;
             }
-            observed.insert(slot.msg.clone());
+            observed.insert(slot.msg_hash);
             let satisfied = match kind {
                 AssertKind::BooleanSometimesAll => {
                     slot.frontier_target > 0 && slot.frontier >= slot.frontier_target
@@ -935,12 +1041,12 @@ impl SimulationBuilder {
                 _ => slot.pass_count > 0,
             };
             if satisfied {
-                reached.insert(slot.msg.clone());
-            } else if !reached.contains(&slot.msg) {
+                reached.insert(slot.msg_hash);
+            } else if !reached.contains(&slot.msg_hash) {
                 tracing::warn!(
                     "INCOMPLETE coverage slot: kind={:?} msg={:?} pass={} fail={} frontier={}/{}",
                     kind,
-                    slot.msg,
+                    name,
                     slot.pass_count,
                     slot.fail_count,
                     slot.frontier,
@@ -962,6 +1068,7 @@ impl SimulationBuilder {
             seeds_used: Vec::new(),
             seeds_failing: Vec::new(),
             seeds_stalled: Vec::new(),
+            failure_causes: BTreeMap::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             dropped_assertion_allocations: 0,
@@ -1063,15 +1170,16 @@ impl SimulationBuilder {
             tracing::info!(declared, "assertion sites declared at link time");
         }
 
-        self.load_corpus();
+        let loaded_corpus = self.load_corpus();
         let mut state = RunState::new(&self);
         #[cfg(feature = "exploration")]
         {
             state.explorer = explorer;
         }
 
-        // A deadlocked seed aborts the campaign, but the report still carries
-        // everything gathered so far (exploration, assertions, saturation).
+        // A deadlocked seed that lost an instance workload aborts the
+        // campaign, but the report still carries everything gathered so far
+        // (exploration, assertions, saturation).
         let mut deadlocked = false;
         let mut budget_spent = false;
         let campaign_start = Instant::now();
@@ -1095,7 +1203,11 @@ impl SimulationBuilder {
                 break;
             }
         }
-        self.store_corpus(&state.corpus_seeds);
+        self.store_corpus(
+            &loaded_corpus,
+            state.iteration_manager.seeds_used(),
+            &state.corpus_seeds,
+        );
 
         // Read the sancov totals while the controller (which owns the sancov
         // shared memory) is still alive, then drop it — freeing the worker
@@ -1175,6 +1287,12 @@ impl SimulationBuilder {
                     .accumulate(state.explorer.as_ref(), seed);
             }
             crate::chaos::buggify_reset();
+            // A lost instance workload cannot run the next seed. Workloads
+            // built by a factory are built again, so the campaign goes on and
+            // the seed counts as failed.
+            if self.workloads_rebuilt_each_seed() {
+                return IterationOutcome::Completed;
+            }
             return IterationOutcome::Deadlocked;
         }
 
@@ -1372,7 +1490,7 @@ impl SimulationBuilder {
         obs_handle: &SimulationLayerHandle,
         seed: u64,
         iteration_count: usize,
-    ) -> RunOrchestratorInputs<'_> {
+    ) -> RunOrchestratorInputs<'static> {
         let ResolvedEntries {
             workloads,
             client_info,
@@ -1478,7 +1596,7 @@ impl SimulationBuilder {
         let fault_injectors = self.fault_injectors_for_seed(&sim, attritions, outages);
         RunOrchestratorInputs {
             seed,
-            metrics_factory: self.metrics_factory.as_ref(),
+            metrics_factory: self.metrics_factory.clone(),
             iteration_count,
             workloads,
             workload_info,
@@ -1528,11 +1646,10 @@ impl SimulationBuilder {
                 );
                 IterationOutcome::Completed
             }
-            Err((faulty_seeds_from_deadlock, failed_count)) => {
-                state
-                    .metrics_collector
-                    .add_faulty_seeds(faulty_seeds_from_deadlock);
-                state.metrics_collector.add_failed_runs(failed_count);
+            Err((deadlocked_seeds, _)) => {
+                for seed in deadlocked_seeds {
+                    state.metrics_collector.record_lost_workload(seed);
+                }
                 IterationOutcome::Deadlocked
             }
         }
@@ -1671,8 +1788,9 @@ fn parse_corpus(text: &str) -> Vec<u64> {
 
 /// Render a corpus file that [`parse_corpus`] reads back.
 fn render_corpus(seeds: &[u64]) -> String {
-    let mut text =
-        String::from("# moonpool seed corpus: the seeds that grew coverage, in run order.\n");
+    let mut text = String::from(
+        "# moonpool seed corpus: the seeds that grew coverage, and the corpus seeds not replayed yet.\n",
+    );
     for seed in seeds {
         text.push_str(&seed.to_string());
         text.push('\n');
@@ -1680,14 +1798,45 @@ fn render_corpus(seeds: &[u64]) -> String {
     text
 }
 
+/// The next corpus: each loaded seed that this run did not replay, or that
+/// grew coverage again, in file order; then the other seeds of this run that
+/// grew coverage, in run order. A loaded seed drops out only when this run
+/// replayed it and it added nothing.
+fn merge_corpus(loaded: &[u64], replayed: &[u64], grew: &[u64]) -> Vec<u64> {
+    let mut next: Vec<u64> = loaded
+        .iter()
+        .copied()
+        .filter(|seed| grew.contains(seed) || !replayed.contains(seed))
+        .collect();
+    for &seed in grew {
+        if !next.contains(&seed) {
+            next.push(seed);
+        }
+    }
+    next
+}
+
+/// Replace the file at `path` with `text` through a temporary file and a
+/// rename, so that an interrupted write never leaves a partial file.
+fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp.{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
+}
+
 impl SimulationBuilder {
     /// Append the seeds of the corpus file, if any, after the pinned seeds.
-    fn load_corpus(&mut self) {
+    /// Returns the seeds read from the file.
+    fn load_corpus(&mut self) -> Vec<u64> {
         let Some(path) = &self.corpus_file else {
-            return;
+            return Vec::new();
         };
         if self.replay_recipe.is_some() {
-            return;
+            return Vec::new();
         }
         let seeds = match std::fs::read_to_string(path) {
             Ok(text) => parse_corpus(&text),
@@ -1698,22 +1847,24 @@ impl SimulationBuilder {
             }
         };
         tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: loaded");
-        for seed in seeds {
+        for &seed in &seeds {
             if !self.seeds.contains(&seed) {
                 self.seeds.push(seed);
             }
         }
+        seeds
     }
 
-    /// Write the seeds that grew coverage to the corpus file, if any.
-    fn store_corpus(&self, seeds: &[u64]) {
+    /// Write the next corpus ([`merge_corpus`]) to the corpus file, if any.
+    fn store_corpus(&self, loaded: &[u64], replayed: &[u64], grew: &[u64]) {
         let Some(path) = &self.corpus_file else {
             return;
         };
         if self.replay_recipe.is_some() {
             return;
         }
-        match std::fs::write(path, render_corpus(seeds)) {
+        let seeds = merge_corpus(loaded, replayed, grew);
+        match write_atomically(path, &render_corpus(&seeds)) {
             Ok(()) => {
                 tracing::info!(path = %path.display(), seeds = seeds.len(), "corpus: written");
             }
@@ -1733,7 +1884,8 @@ fn build_assertion_details(
 
     slots
         .iter()
-        .filter_map(|slot| {
+        .zip(crate::chaos::assertions::slot_names(slots))
+        .filter_map(|(slot, name)| {
             let kind = AssertKind::from_u8(slot.kind)?;
             let total = slot.pass_count.saturating_add(slot.fail_count);
 
@@ -1776,7 +1928,7 @@ fn build_assertion_details(
             };
 
             Some(AssertionDetail {
-                msg: slot.msg.clone(),
+                msg: name,
                 kind,
                 pass_count: slot.pass_count,
                 fail_count: slot.fail_count,
@@ -1812,7 +1964,20 @@ fn build_bucket_summaries(
         entry.total_hits += u64::from(bucket.pass_count);
     }
 
-    let mut summaries: Vec<_> = sites.into_values().collect();
+    // The stored text is cut to 31 bytes: two sites can show the same text.
+    let mut uses: BTreeMap<String, usize> = BTreeMap::new();
+    for summary in sites.values() {
+        *uses.entry(summary.msg.clone()).or_default() += 1;
+    }
+    let mut summaries: Vec<_> = sites
+        .into_iter()
+        .map(|(site_hash, mut summary)| {
+            if uses[&summary.msg] > 1 {
+                summary.msg = format!("{} #{:08x}", summary.msg, site_hash & 0xffff_ffff);
+            }
+            summary
+        })
+        .collect();
     summaries.sort_by_key(|s| std::cmp::Reverse(s.total_hits));
     summaries
 }
@@ -1825,6 +1990,7 @@ mod tests {
     fn sometimes_all_is_a_miss_until_the_full_frontier_is_reached() {
         let partial = moonpool_assertions::AssertionSlotSnapshot {
             msg: "cluster ready".to_string(),
+            msg_hash: moonpool_assertions::msg_hash("cluster ready"),
             kind: moonpool_assertions::AssertKind::BooleanSometimesAll as u8,
             must_hit: 1,
             pass_count: 4,

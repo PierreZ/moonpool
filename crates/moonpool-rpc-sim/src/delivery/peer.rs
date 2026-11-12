@@ -16,10 +16,12 @@ use moonpool_sim::{
     StateHandle, TimeProvider, assert_always, assert_reachable, assert_sometimes,
 };
 
+use super::judge::{Judged, classify};
 use super::messages::{Greet, Greeting};
 use super::policy::{delivery_config_sharing, sharing_from};
+use super::state::{GREET_IDS_KEY, GreetCalls, greet_ledger};
 use super::{RPC_PORT, report_stats};
-use crate::foundations::state::{Board, bump};
+use crate::foundations::state::{Board, Ledger, bump};
 
 /// State key of a peer's greeting reference, by its IP.
 fn peer_key(ip: &str) -> String {
@@ -134,7 +136,7 @@ impl Process for DeliveryPeer {
             .find(|ip| *ip != me);
         let work = async {
             futures::join!(
-                serve(greet),
+                serve(greet, greet_ledger(&state)),
                 call_other(&rpc, ctx, &me, other.as_deref()),
                 report_stats(&rpc, &board, &label, ctx),
             );
@@ -147,14 +149,19 @@ impl Process for DeliveryPeer {
     }
 }
 
-async fn serve(mut stream: RequestStream<Greet>) {
+/// Answer each greeting. The ledger is written first: it is the record of
+/// receipts that the greetings are judged against, outside the transport.
+async fn serve(mut stream: RequestStream<Greet>, ledger: Ledger) {
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
+        let _ = ledger.record(request.seq);
         let _ = reply.send(&request);
     }
 }
 
 /// Call the other peer at the same instants it calls us (every multiple of
 /// the period), alternating single attempts and bounded reliable calls.
+/// Each greeting has a run-unique id and goes into the greeting records,
+/// which the workload judges against the peers' ledger at the end.
 async fn call_other(
     rpc: &RpcHandle<SimProviders>,
     ctx: &SimContext,
@@ -165,7 +172,8 @@ async fn call_other(
         return;
     };
     let period = Duration::from_millis(600);
-    let mut seq = 0u64;
+    let calls = GreetCalls::of(ctx.state());
+    let resent = || rpc.stats().map_or(0, |stats| stats.retransmissions);
     loop {
         let now = ctx.time().now();
         let into = Duration::from_nanos(
@@ -181,9 +189,11 @@ async fn call_other(
         else {
             continue;
         };
-        seq += 1;
+        let seq = bump(ctx.state(), GREET_IDS_KEY);
         let client = target.bind(rpc);
-        let outcome = if ctx.random().random_bool(0.5) {
+        let single = ctx.random().random_bool(0.5);
+        let resent_before = resent();
+        let outcome = if single {
             client
                 .try_get_reply_within(&Greeting { seq }, Duration::from_secs(2))
                 .await
@@ -195,6 +205,12 @@ async fn call_other(
         if let Ok(reply) = &outcome {
             assert_always!(reply.seq == seq, "a peer's reply matches its greeting");
         }
+        calls.push(Judged {
+            id: seq,
+            single,
+            class: classify(&outcome),
+            resends: resent().saturating_sub(resent_before),
+        });
         let mine = ctx.state().get::<u8>(&sharing_key(me));
         let theirs = ctx.state().get::<u8>(&sharing_key(other));
         if outcome.is_ok() && mine.is_some() && theirs.is_some() && mine != theirs {
@@ -205,6 +221,7 @@ async fn call_other(
                 stats.replaced_connections > 0 && outcome.is_ok(),
                 "rpc simultaneous connect resolved to one shared connection"
             );
+            // Secondary evidence only: the greeting ledger is the oracle.
             assert_always!(
                 stats.calls_cut_by_replacement == 0,
                 "a replaced connection never fails or resends a call it carried"

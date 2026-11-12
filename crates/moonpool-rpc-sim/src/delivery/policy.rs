@@ -14,7 +14,8 @@ fn millis(value: u64) -> Duration {
 /// A configuration with each timing knob drawn for this run.
 ///
 /// Defaults are `FoundationDB`'s simulated flow knobs (a 750 ms ping loop,
-/// 1.5 s ping timeout, 1 s failure detection); a knob that fires moves to
+/// 1.5 s ping timeout, 1 s failure detection), except the idle timeout
+/// (1.5 s, so an idle pause fits in the chaos window); a knob that fires moves to
 /// an extreme that is still a valid configuration (the policy validates).
 #[must_use]
 pub fn delivery_config() -> RpcConfig {
@@ -51,7 +52,9 @@ fn knobbed() -> RpcConfig {
     let max = buggify_knob!(500, 1..3000).max(initial);
     let ping_interval = buggify_knob!(750, 20..3000);
     let ping_timeout = buggify_knob!(1500, 30..6000);
-    let idle = buggify_knob!(30_000, 50..3000);
+    // Shorter than the other defaults: the workload's pause waits out the
+    // idle timeout, and it must stay well inside the 8 s chaos window.
+    let idle = buggify_knob!(1_500, 50..3000);
     let inbound_idle = buggify_knob!(36_000, 100..8000).max(ping_interval * 4);
     let peer = PeerPolicy {
         initial_reconnect_delay: millis(initial),

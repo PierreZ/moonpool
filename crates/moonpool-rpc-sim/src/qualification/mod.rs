@@ -79,7 +79,8 @@ pub mod state;
 mod third;
 mod workload;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -185,10 +186,30 @@ pub(crate) fn check_previous_boots(board: &Board, role: &str, me: &str, boot: u6
     label
 }
 
+/// What the capture keeps of a seed's timeline.
+#[derive(Debug, Default)]
+pub struct CapturedTrace {
+    /// The campaign's and the transport's semantic events (see
+    /// [`QualificationRecord::trace`]).
+    pub semantic: Vec<String>,
+    /// Every captured event, whatever its name: the redaction check
+    /// searches them all for a credential.
+    pub every: Vec<String>,
+}
+
+fn trace_line(event: &moonpool_sim::TraceEvent) -> String {
+    format!(
+        "{} {} {} {:?}",
+        event.time_ms, event.source, event.name, event.fields
+    )
+}
+
 /// Captures the campaign's trace events from the simulation's timeline.
 struct TraceCapture {
     cursors: [Cell<usize>; TRACED.len()],
-    sink: Arc<Mutex<Vec<String>>>,
+    /// One cursor per event name, for [`CapturedTrace::every`].
+    every: RefCell<BTreeMap<String, Cell<usize>>>,
+    sink: Arc<Mutex<CapturedTrace>>,
 }
 
 impl Invariant for TraceCapture {
@@ -202,26 +223,32 @@ impl Invariant for TraceCapture {
             events.extend(q.since(name, cursor));
         }
         events.sort_by_key(|event| event.seq);
+        let mut every = Vec::new();
+        {
+            let mut cursors = self.every.borrow_mut();
+            for name in q.names() {
+                let cursor = cursors.entry(name.clone()).or_default();
+                every.extend(q.since(&name, cursor));
+            }
+        }
+        every.sort_by_key(|event| event.seq);
         let mut sink = self
             .sink
             .lock()
             .expect("Mutex poisoned: prior task panicked");
-        for event in events {
-            sink.push(format!(
-                "{} {} {} {:?}",
-                event.time_ms, event.source, event.name, event.fields
-            ));
-        }
+        sink.semantic.extend(events.iter().map(trace_line));
+        sink.every.extend(every.iter().map(trace_line));
     }
 
     fn reset(&mut self) {
         for cursor in &self.cursors {
             cursor.set(0);
         }
-        self.sink
+        self.every.borrow_mut().clear();
+        *self
+            .sink
             .lock()
-            .expect("Mutex poisoned: prior task panicked")
-            .clear();
+            .expect("Mutex poisoned: prior task panicked") = CapturedTrace::default();
     }
 }
 
@@ -232,7 +259,7 @@ pub fn qualification_campaign(
     records: &QualificationRecords,
 ) -> SimulationBuilder {
     let records = Arc::clone(records);
-    let trace = Arc::new(Mutex::new(Vec::new()));
+    let trace = Arc::new(Mutex::new(CapturedTrace::default()));
     let jitter = config.jitter;
     let storm = config.storm;
     let workload_trace = Arc::clone(&trace);
@@ -261,6 +288,7 @@ pub fn qualification_campaign(
         })
         .invariant(TraceCapture {
             cursors: Default::default(),
+            every: RefCell::default(),
             sink: trace,
         })
         .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])

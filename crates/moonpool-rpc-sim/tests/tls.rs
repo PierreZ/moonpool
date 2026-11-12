@@ -52,6 +52,21 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc tls server certificate rotated",
         "rpc tls member certificate rotated",
         "rpc tls server client roots moved away",
+        "rpc tls handshake aborted by a fault site",
+        "rpc tls server leaf issued with a flaw",
+        "rpc tls member leaf issued with a flaw",
+        "rpc tls server crashed",
+        "rpc tls UTC jumped past the leaves' lifetime",
+        "rpc tls server requests no client certificate",
+        "rpc tls server restarted during a run",
+        "rpc tls restarted server ran a request",
+        "rpc tls new session refused: server leaf expired",
+        "rpc tls new session refused: stray client authority",
+        "rpc tls new session refused: client roots moved away",
+        "rpc tls new session refused: member leaf expired",
+        "rpc tls new session refused: no client certificate",
+        "rpc tls new session kept out of a private endpoint",
+        "rpc tls request kept out of a private endpoint was not admitted",
     ] {
         if !fired(&report, required) {
             missing.push(required);

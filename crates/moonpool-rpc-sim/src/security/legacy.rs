@@ -72,16 +72,7 @@ where
 {
     while let Some(IncomingRequest { request, reply }) = stream.recv().await {
         let subject = reply.principal().map(|who| who.subject().to_string());
-        let allowed = ledger.receive(
-            request.id,
-            Receipt {
-                target,
-                subject,
-                utc: trust.utc(),
-                generation: trust.generation(),
-            },
-            trust,
-        );
+        let allowed = ledger.receive(request.id, Receipt::now(target, subject, trust), trust);
         assert_always!(
             allowed,
             "a version 1 session only ever reaches a public endpoint, anonymously"

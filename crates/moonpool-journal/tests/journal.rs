@@ -1474,6 +1474,255 @@ fn a_scrub_repairs_the_records_of_replaced_positions_and_tombstones() {
     });
 }
 
+/// Probe `t7b` of #482: the entry of a position is damaged, a caller reads
+/// it, then repairs the position with a new put. The batch of the put
+/// retires the old slot, so a later fault on the old record is not the
+/// second half of a double fault. The same for a clear, and for a commit
+/// that only raises the floor (it writes a batch for the retire record).
+#[test]
+fn a_dead_slot_whose_entry_was_damaged_is_retired() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            for how in ["put", "clear", "floor"] {
+                let at = format!("{durability:?} {how}");
+                let mut sim = sim(23);
+                let journal = two_then_one(&mut sim, durability).await;
+                let (record, entry) = spots(&journal, 1);
+                drop(journal);
+                flip(&mut sim, entry.0, entry.1).await;
+                let (journal, _) = reopen(&mut sim, durability).await.expect("opens");
+                let (journal, bytes) = read(&mut sim, journal, 1).await;
+                assert!(matches!(bytes, Err(ReadError::Damaged { .. })), "{at}");
+                let before = journal.last_batch();
+                let mut batch = Batch::new();
+                match how {
+                    "put" => drop(batch.put(1, id(1, 2), payload(1, 2, 300))),
+                    "clear" => drop(batch.clear(1..2)),
+                    _ => drop(batch.truncate_prefix(2)),
+                }
+                let journal = commit(&mut sim, journal, batch).await.expect("commit");
+                assert!(journal.last_batch() > before, "{at}: a batch was written");
+                drop(journal);
+                // The second fault: the old record of position 1.
+                flip(&mut sim, record.0, record.1).await;
+                let (journal, _) = reopen(&mut sim, durability)
+                    .await
+                    .unwrap_or_else(|error| panic!("{at}: {error}"));
+                let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+                let expected: Vec<u64> = if how == "put" {
+                    vec![1, 2, 3]
+                } else {
+                    vec![2, 3]
+                };
+                assert_eq!(live, expected, "{at}");
+            }
+        }
+    });
+}
+
+/// A batch of positions 10, 11 and 12 after a batch at 0; returns the
+/// layouts of the three.
+async fn zero_then_three(sim: &mut SimWorld, durability: Durability) -> [Layout; 3] {
+    let journal = create(sim, durability).await;
+    let journal = put(sim, journal, &[(0, 1, 300)]).await;
+    let journal = put(sim, journal, &[(10, 1, 300), (11, 1, 300), (12, 1, 300)]).await;
+    [10, 11, 12].map(|position| journal.layout(position).expect("live"))
+}
+
+/// Probe `t3` of #483: a crash inside the entries write of an `Ordered`
+/// batch leaves no record and a torn last entry. The open retires the torn
+/// slot in a new batch. One fault later on the retire record, or on what
+/// is left of the torn slot, does not refuse the open: the retire record
+/// is rebuilt from its entry.
+#[test]
+fn one_fault_on_a_retire_record_or_its_slot_never_refuses_the_open() {
+    runtime().block_on(async {
+        let mut sim = sim(24);
+        let [l10, _, l12] = zero_then_three(&mut sim, Durability::Ordered).await;
+        let block = l10.record.bytes.start / 4096 * 4096;
+        zero(&mut sim, l10.record.path.clone(), block, 4096).await;
+        flip(&mut sim, l12.entry.path.clone(), l12.entry.bytes.end - 1).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        assert_eq!((recovery.torn, recovery.rebuilt), (1, 2), "{recovery:?}");
+        assert_eq!(journal.state(12), State::Empty);
+        drop(journal);
+        // One fault on each: the retire record (slot 0 of the next persist
+        // block) and the torn slot's own record.
+        flip(&mut sim, l10.record.path.clone(), block + 4096 + 20).await;
+        flip(&mut sim, l10.record.path.clone(), block + 2 * 64 + 20).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        assert_eq!(recovery.torn, 0, "{recovery:?}");
+        assert!(
+            recovery.rebuilt >= 1,
+            "the retire record is rebuilt: {recovery:?}"
+        );
+        let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+        assert_eq!(live, vec![0, 10, 11]);
+        drop(journal);
+        let (_, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        assert_eq!(
+            recovery.rebuilt, 0,
+            "the open wrote each rebuilt record back"
+        );
+    });
+}
+
+/// Probe `t3b` of #483: a torn slot in the middle of a `Batched` batch. The
+/// retire record says where the entry walk goes on, so one fault later on
+/// the record after the torn slot is rebuilt from its intact entry.
+#[test]
+fn an_intact_entry_after_a_retired_slot_is_found_again() {
+    runtime().block_on(async {
+        let mut sim = sim(25);
+        let [_, l11, l12] = zero_then_three(&mut sim, Durability::Batched).await;
+        flip(
+            &mut sim,
+            l11.record.path.clone(),
+            l11.record.bytes.start + 20,
+        )
+        .await;
+        flip(&mut sim, l11.entry.path.clone(), l11.entry.bytes.end - 1).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+        assert_eq!(recovery.torn, 1, "{recovery:?}");
+        drop(journal);
+        flip(
+            &mut sim,
+            l12.record.path.clone(),
+            l12.record.bytes.start + 20,
+        )
+        .await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+        assert_eq!(recovery.rebuilt, 1, "{recovery:?}");
+        let (_, bytes) = read(&mut sim, journal, 12).await;
+        assert_eq!(bytes.expect("intact"), payload(12, 1, 300));
+    });
+}
+
+/// Kills the caller at its `n`-th hint, any label: a crash at each named
+/// moment of an open, the writes of its retire batch among them.
+struct KillAtHint {
+    n: usize,
+    seen: std::cell::Cell<usize>,
+}
+
+impl moonpool_buggify::hint::Sink for KillAtHint {
+    fn strike(&self, _: &'static str) -> moonpool_buggify::hint::Strike {
+        self.seen.set(self.seen.get() + 1);
+        if self.seen.get() == self.n {
+            moonpool_buggify::hint::Strike::Killed
+        } else {
+            moonpool_buggify::hint::Strike::None
+        }
+    }
+}
+
+/// The open that retires a torn slot, cut by a crash at each moment it
+/// names: before its retire batch is durable, inside the retire batch, and
+/// after it without its metainfo. Each time the next open finds the same
+/// journal: the torn slot gone, every other position live, and no fault
+/// refused. The open after that has nothing left to retire.
+#[test]
+fn a_crash_anywhere_in_a_retiring_open_leaves_the_same_journal() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut cut = 0;
+            for n in 1..64 {
+                let at = format!("{durability:?} hint {n}");
+                let mut sim = sim(26);
+                let [_, l11, _] = zero_then_three(&mut sim, Durability::Batched).await;
+                flip(
+                    &mut sim,
+                    l11.record.path.clone(),
+                    l11.record.bytes.start + 20,
+                )
+                .await;
+                flip(&mut sim, l11.entry.path.clone(), l11.entry.bytes.end - 1).await;
+                sim.set_storage_config(StorageConfiguration::fast_local());
+                moonpool_buggify::set_random_source(|| 0.0);
+                moonpool_buggify::buggify_init(1.0);
+                moonpool_buggify::hint::set_sink(Box::new(KillAtHint {
+                    n,
+                    seen: std::cell::Cell::new(0),
+                }));
+                let handle = tokio::spawn(Journal::open(
+                    sim.storage_provider(ip()),
+                    DIR,
+                    JOURNAL,
+                    config(durability),
+                ));
+                for _ in 0..1000 {
+                    if handle.is_finished() {
+                        break;
+                    }
+                    while sim.pending_event_count() > 0 {
+                        sim.step();
+                    }
+                    tokio::task::yield_now().await;
+                }
+                moonpool_buggify::hint::clear_sink();
+                moonpool_buggify::buggify_reset();
+                let finished = handle.is_finished();
+                handle.abort();
+                let opened = handle.await;
+                if finished {
+                    let (_, recovery) = opened
+                        .expect("no panic")
+                        .expect("opens")
+                        .expect("a journal is there");
+                    assert_eq!(recovery.torn, 1, "{at}");
+                    break;
+                }
+                cut += 1;
+                sim.simulate_crash_for_process(ip(), true);
+                let (journal, _) = reopen(&mut sim, durability)
+                    .await
+                    .unwrap_or_else(|error| panic!("{at}: {error}"));
+                let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+                assert_eq!(live, vec![0, 10, 12], "{at}");
+                drop(journal);
+                let (journal, recovery) = reopen(&mut sim, durability)
+                    .await
+                    .unwrap_or_else(|error| panic!("{at}: {error}"));
+                assert_eq!(recovery.torn, 0, "{at}: the slot is retired");
+                let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+                assert_eq!(live, vec![0, 10, 12], "{at}");
+            }
+            assert!(cut >= 2, "{durability:?}: the open was cut {cut} times");
+        }
+    });
+}
+
+/// A segment of format version 3 (with void records) is refused, and the
+/// error names the version found.
+#[test]
+fn a_segment_of_format_version_3_is_refused() {
+    runtime().block_on(async {
+        let mut sim = sim(27);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let (record, _) = spots(&journal, 1);
+        drop(journal);
+        let mut bytes = file_bytes(&mut sim, record.0.clone()).await;
+        for copy in 0..2 {
+            let header = &mut bytes[copy * 4096..copy * 4096 + 4096];
+            header[4..6].copy_from_slice(&3u16.to_le_bytes());
+            let sum = crc32c::crc32c(&header[..52]);
+            header[52..56].copy_from_slice(&sum.to_le_bytes());
+        }
+        put_bytes(&mut sim, record.0, bytes).await;
+        let refused = reopen(&mut sim, Durability::Ordered).await.map(drop);
+        assert!(
+            matches!(
+                refused,
+                Err(OpenError::UnsupportedVersion {
+                    found: 3,
+                    supported: 4
+                })
+            ),
+            "{refused:?}"
+        );
+    });
+}
+
 /// Rewrite the structure in the block of `path` at `offset` as the next
 /// format version, sealed with a correct checksum at `crc_at`: the bytes a
 /// later build of the crate would write. Returns that version.

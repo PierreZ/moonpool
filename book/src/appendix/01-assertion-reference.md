@@ -81,6 +81,7 @@ Coverage violations do not fail a `FixedCount` campaign by themselves. They stop
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | `MAX_ASSERTION_SLOTS` | 8192 | distinct assertion sites per campaign; an open-addressed table indexed by the message hash, so an evaluation reads one or two slots |
+| `SLOT_MSG_LEN` | 64 | bytes stored per slot message (63 bytes and a NUL); a longer message is shown cut with `…`, and the hash of the full message stays the identity |
 | `MAX_EACH_BUCKETS` | 256 | distinct `assert_sometimes_each!` identity buckets |
 | `MAX_EACH_KEYS` | 6 | identity keys per `assert_sometimes_each!` call |
 

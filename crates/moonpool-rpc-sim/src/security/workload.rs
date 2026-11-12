@@ -111,12 +111,7 @@ impl CredentialSource for Refresher {
         let minted = self.trust.mint(Kind::Refreshing, &self.subject, 120, 0);
         // Recorded before it can leave: the oracle judges each receipt
         // against the tokens actually minted, at their mint.
-        self.ledger.mint(
-            self.id,
-            minted.clone(),
-            self.trust.utc(),
-            self.trust.generation(),
-        );
+        self.ledger.mint(self.id, minted.clone(), &self.trust);
         minted.token.map(Credential::bearer)
     }
 }
@@ -124,14 +119,21 @@ impl CredentialSource for Refresher {
 /// While the operations run: whenever a server boot starts draining for a
 /// graceful shutdown, send it a call at once, which it must refuse without
 /// running it (the drain lasts as long as its admitted work). Returns its
-/// history lines.
+/// history lines and the ids of its probes.
+///
+/// The property has no window: the server publishes its draining boot and
+/// then, with no await between, polls `shutdown`, whose first poll closes
+/// admission. This watcher sees the boot 20 ms later or more, and only then
+/// sends its probe. A probe that meets a later boot is refused as a stale
+/// incarnation. Thus no probe ever runs (checked at the end of the run).
 async fn drain_watcher(
     ctx: &SimContext,
     rpc: &RpcHandle<SimProviders>,
     remote: &Caller,
     done: &std::sync::atomic::AtomicBool,
-) -> Vec<String> {
+) -> (Vec<String>, Vec<u64>) {
     let mut history = Vec::new();
+    let mut drain_probes = Vec::new();
     let mut probed = 0;
     while !done.load(Ordering::Relaxed) {
         if pause(ctx, Duration::from_millis(20)).await.is_err() {
@@ -149,11 +151,12 @@ async fn drain_watcher(
             continue;
         };
         let (id, _) = remote.issue(Kind::Valid, Target::Private, 120, 0);
+        drain_probes.push(id);
         let outcome = remote.unary(rpc, &service, id, 0).await;
         let _ = remote.judge(id, &outcome.clone().map(Some));
         history.push(format!("{id} Drain Valid {}", describe(&outcome)));
     }
-    history
+    (history, drain_probes)
 }
 
 /// The workload runtimes' configuration: the simulation's sessions are
@@ -171,6 +174,8 @@ pub struct SecurityWorkload {
     config: SecurityConfig,
     records: SecurityRecords,
     history: Vec<String>,
+    /// The requests sent to a draining server boot: none may run.
+    drain_probes: Vec<u64>,
 }
 
 struct Runtimes {
@@ -186,6 +191,7 @@ impl SecurityWorkload {
             config,
             records,
             history: Vec::new(),
+            drain_probes: Vec::new(),
         }
     }
 
@@ -242,8 +248,9 @@ impl SecurityWorkload {
             }
             done.store(true, Ordering::Relaxed);
         };
-        let ((), drained) = futures::join!(operations, watcher);
+        let ((), (drained, probes)) = futures::join!(operations, watcher);
         self.history.extend(drained);
+        self.drain_probes.extend(probes);
         if ctx.shutdown().is_cancelled() {
             return Ok(());
         }
@@ -707,6 +714,13 @@ impl Workload for SecurityWorkload {
             if issued.target == Target::Note && class == Some(Class::Maybe) && receipts == 1 {
                 one_way_executed = true;
             }
+        }
+        for id in std::mem::take(&mut self.drain_probes) {
+            assert_always!(
+                ledger.receipts(id) == 0,
+                "a request sent to a draining server never runs",
+                { "id" => id }
+            );
         }
         assert_sometimes!(
             one_way_executed,

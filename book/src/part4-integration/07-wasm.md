@@ -109,7 +109,7 @@ the injected faults under `SIM_FAULT_EVENT_NAME`, and returns the run as JSON.
 A `#[wasm_bindgen]` wrapper exports `run_json` to JavaScript as `run(config)`.
 The config holds the seed, the count of servers, the chaos surfaces (network,
 storage, reboots, disk wipes), the swarm mode, and a planted bug: the client
-reads from one server in place of a quorum, and about one seed in eight breaks
+reads from one server in place of a quorum, and about one seed in nine breaks
 the invariant. Two more fields serve the technique pages: `network_faults` and
 `storage_faults` keep only the named fault families, and `recipe` replays one
 timeline of an exploration (`"count@seed -> count@seed"`, a string so a 64-bit

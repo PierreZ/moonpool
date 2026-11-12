@@ -8,7 +8,7 @@ use moonpool_sim::{SimProviders, assert_always, assert_sometimes};
 
 use super::CALL_TIMEOUT;
 use super::messages::{Answer, Probe};
-use super::state::{Class, Issued, Ledger, Route, Target, consistent_denial};
+use super::state::{Class, Issued, Ledger, Moment, Route, Target, consistent_denial};
 use super::trust::{Kind, Minted, Trust};
 
 /// One caller: where it records, whose trust material it uses, its route.
@@ -66,6 +66,7 @@ impl Caller {
             route: self.route,
             utc_sent: self.trust.utc(),
             generation_sent: self.trust.generation(),
+            clock_sent: self.trust.clock_epoch(),
         })
     }
 
@@ -195,13 +196,7 @@ impl Caller {
                 // A refreshing source's refusal concerns one of the tokens
                 // it minted; any of them may be the one refused.
                 let consistent = self.ledger.carried(id).iter().any(|carried| {
-                    consistent_denial(
-                        carried,
-                        *reason,
-                        self.trust.utc(),
-                        self.trust.generation(),
-                        &self.trust,
-                    )
+                    consistent_denial(carried, *reason, Moment::now(&self.trust), &self.trust)
                 });
                 assert_always!(
                     consistent,
@@ -342,8 +337,7 @@ mod tests {
             caller.ledger.mint(
                 id,
                 caller.trust.mint(Kind::Refreshing, "refresher", 120, 0),
-                caller.trust.utc(),
-                caller.trust.generation(),
+                &caller.trust,
             );
         };
 

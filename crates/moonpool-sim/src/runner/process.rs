@@ -263,7 +263,11 @@ pub struct Attrition {
     /// [`AttritionScope::PerDatacenter`] kill all collocated processes together,
     /// modeling correlated failure; they require a
     /// [`.cluster()`](super::builder::SimulationBuilder::cluster) topology and
-    /// respect `max_dead` as a whole-group budget.
+    /// respect `max_dead` as a whole-group budget. `run()` refuses a
+    /// correlated scope with no cluster among the victims, and, in
+    /// [`ChaosMode::Random`](super::config::ChaosMode::Random), one whose
+    /// smallest domain holds more processes than `max_dead`: it could never
+    /// reboot.
     pub scope: AttritionScope,
 
     /// Which processes may be chosen as victims.
@@ -275,6 +279,10 @@ pub struct Attrition {
     /// only picks domains holding an eligible process and only reboots the
     /// eligible processes in it. Register one [`Chaos::Attrition`](super::config::Chaos::Attrition)
     /// entry per pool to give each process group its own regime.
+    ///
+    /// [`SimulationBuilder::run`](super::builder::SimulationBuilder::run)
+    /// refuses a group that is not registered and a tag that no group
+    /// carries, because such a filter never matches a process.
     pub victims: AttritionVictims,
 
     /// An optional bound on wiped processes of the victim pool that are
