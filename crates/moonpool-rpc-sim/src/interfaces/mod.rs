@@ -26,7 +26,10 @@
 //! crashed boot runs); the workload asserts that every learned interface
 //! was published by the boot it names, that every stale refusal names a
 //! boot that really ended, that replies come from the publishing instance,
-//! and at the end judges every call against the execution ledger.
+//! and at the end judges every call against the execution ledger: no
+//! probe issued after a dismissal was answered runs in the dismissed
+//! instance. After the reboot script is done, every participant must
+//! answer through a freshly looked-up interface.
 //!
 //! **Faults.** A reboot script ([`InterfaceFaults`]) restarts participants
 //! at their own address all through the chaos window (held-down crashes,

@@ -86,6 +86,7 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc foreign interface refused before any handler",
         "rpc ambiguous interface call executed in its published instance",
         "rpc every participant answered a fresh publication at the end",
+        "rpc later call to a dismissed instance judged",
     ] {
         if !fired(&report, required) {
             missing.push(required);
