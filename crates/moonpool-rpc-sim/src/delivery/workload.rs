@@ -16,10 +16,12 @@ use moonpool_sim::{
     TimeProvider, Workload, assert_always, assert_reachable, assert_sometimes,
 };
 
+use super::judge::{Class, Judged, classify, judge};
 use super::messages::{DIRECTORY_ID, Directory, Done, Execute, Job, Listing, Lookup, Mode};
 use super::policy::delivery_config;
 use super::state::{
-    RESOLVER_KEY, SCRIPT_DONE_KEY, SERVER_NAME, WORKLOAD_IP_KEY, WORKLOAD_LABEL, WORKLOAD_RPC_KEY,
+    GreetCalls, RESOLVER_KEY, SCRIPT_DONE_KEY, SERVER_NAME, WORKLOAD_IP_KEY, WORKLOAD_LABEL,
+    WORKLOAD_RPC_KEY, greet_ledger,
 };
 use super::{DeliveryRecord, DeliveryRecords, RPC_PORT, report_stats};
 use crate::foundations::state::{Board, Ledger};
@@ -108,26 +110,6 @@ impl DeliveryConfig {
     }
 }
 
-/// What an outcome proves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Class {
-    Replied,
-    NotAdmitted,
-    Maybe,
-    Executed,
-}
-
-fn classify<T>(outcome: &Result<T, RpcError>) -> Class {
-    match outcome {
-        Ok(_) => Class::Replied,
-        Err(error) => match error.execution() {
-            Execution::NotAdmitted => Class::NotAdmitted,
-            Execution::Executed => Class::Executed,
-            _ => Class::Maybe,
-        },
-    }
-}
-
 fn describe<T>(outcome: &Result<T, RpcError>) -> String {
     match outcome {
         Ok(_) => "ok".to_string(),
@@ -141,11 +123,18 @@ type Client = moonpool_rpc::ServiceClient<SimProviders, Execute>;
 /// Deadline for calls that should normally complete.
 const LONG: Duration = Duration::from_secs(30);
 
+/// The longest [`DeliveryOp::Pause`] the workload sleeps. A longer idle
+/// wait would move every later operation past the chaos window, so with
+/// such a policy the pause is a plain single attempt.
+const LONGEST_PAUSE: Duration = Duration::from_secs(4);
+
 /// One judged call.
 struct Call {
     id: u64,
     op: DeliveryOp,
     class: Class,
+    /// Retained requests the runtime queued again while the call ran.
+    resends: u64,
     /// The error was a disconnect after transmission.
     lost_in_disconnect: bool,
 }
@@ -155,8 +144,13 @@ pub struct DeliveryWorkload {
     config: DeliveryConfig,
     /// This run's runtime, once started.
     rpc: Option<RpcHandle<SimProviders>>,
-    /// The idle timeout this run's runtime drew.
+    /// How long a connection must sit unused before the idle check
+    /// surely saw it: the idle timeout plus a few ping periods.
     idle: Duration,
+    /// The runtime's retransmission count when the current job started.
+    resent_mark: u64,
+    /// A pause already ran in this run.
+    paused: bool,
     records: DeliveryRecords,
     history: Vec<String>,
     calls: Vec<Call>,
@@ -175,6 +169,8 @@ impl DeliveryWorkload {
             config,
             rpc: None,
             idle: Duration::ZERO,
+            resent_mark: 0,
+            paused: false,
             records,
             history: Vec::new(),
             calls: Vec::new(),
@@ -190,10 +186,12 @@ impl DeliveryWorkload {
             Err(error) if *error.reason() == ErrorReason::Disconnected
                 && error.execution() == Execution::MaybeExecuted
         );
+        let resends = self.resent().saturating_sub(self.resent_mark);
         self.calls.push(Call {
             id,
             op,
             class: classify(outcome),
+            resends,
             lost_in_disconnect,
         });
         self.history
@@ -212,8 +210,17 @@ impl DeliveryWorkload {
         DeliveryOp::Single
     }
 
+    /// Retained requests this run's runtime queued again so far.
+    fn resent(&self) -> u64 {
+        self.rpc
+            .as_ref()
+            .and_then(RpcHandle::stats)
+            .map_or(0, |stats| stats.retransmissions)
+    }
+
     fn job(&mut self, mode: Mode, delay_ms: u32) -> Job {
         self.next_id += 1;
+        self.resent_mark = self.resent();
         Job {
             id: self.next_id,
             mode: mode as u32,
@@ -340,8 +347,13 @@ impl DeliveryWorkload {
                 self.record(job.id, op, &outcome);
             }
             DeliveryOp::Pause => {
-                // Long enough for the idle check to see the whole timeout.
-                let _ = ctx.time().sleep(self.idle * 2).await;
+                // Long enough for the idle check to see the whole timeout,
+                // but never so long that the rest of the run leaves the
+                // chaos window.
+                if self.idle <= LONGEST_PAUSE {
+                    let _ = ctx.time().sleep(self.idle).await;
+                    self.paused = true;
+                }
                 self.single(&client, monitor).await;
             }
         }
@@ -564,9 +576,12 @@ impl DeliveryWorkload {
             && *error.reason() == ErrorReason::StaleIncarnation
         {
             assert_sometimes!(true, "rpc stale dynamic reference failed terminally");
+            // The runtime records the stale incarnation before it fails the
+            // call, and this workload makes one call at a time, so no other
+            // failure can push it out of the bounded memory in between.
+            // This holds whether the reference was known before or not.
             assert_always!(
-                monitor.endpoint_state(&old.endpoint()) == EndpointState::StaleIncarnation
-                    || !known,
+                monitor.endpoint_state(&old.endpoint()) == EndpointState::StaleIncarnation,
                 "the failure monitor remembers a stale incarnation"
             );
             if known && rpc.stats().map_or(0, |stats| stats.calls_failed_fast) > fast_before {
@@ -601,6 +616,17 @@ impl DeliveryWorkload {
                     other => other,
                 };
             }
+            if self.paused
+                && matches!(
+                    op,
+                    DeliveryOp::Crash
+                        | DeliveryOp::LostReliable
+                        | DeliveryOp::LostSingle
+                        | DeliveryOp::Race
+                )
+            {
+                assert_sometimes!(true, "rpc scripted fault operation ran after a pause");
+            }
             let rediscover = op == DeliveryOp::Rediscover
                 || self.dead.contains(&execute.to_bytes())
                 || monitor.endpoint_state(&execute.endpoint()).is_permanent();
@@ -611,10 +637,61 @@ impl DeliveryWorkload {
             let (low, high) = self.config.gap_ms;
             let gap = ctx.random().random_range(low..high.max(low + 1));
             if ctx.time().sleep(Duration::from_millis(gap)).await.is_err() {
-                break;
+                return Ok(());
             }
         }
+        self.recover(ctx, rpc, bootstrap).await;
         Ok(())
+    }
+
+    /// After the fault script is done and the network healed: the server
+    /// must answer a fresh call again, found by its bootstrap name.
+    async fn recover(
+        &mut self,
+        ctx: &SimContext,
+        rpc: &RpcHandle<SimProviders>,
+        bootstrap: &BootstrapClient<SimProviders, ScriptedResolver>,
+    ) {
+        if ctx.shutdown().is_cancelled() {
+            return;
+        }
+        for _ in 0..600 {
+            if ctx.state().get::<bool>(SCRIPT_DONE_KEY).unwrap_or(false) {
+                break;
+            }
+            if ctx.time().sleep(Duration::from_millis(50)).await.is_err() {
+                return;
+            }
+        }
+        // The last crash the script served keeps the server down for at
+        // most 5 s; the attempts below cover that.
+        if ctx.time().sleep(Duration::from_secs(2)).await.is_err() {
+            return;
+        }
+        let mut recovered = false;
+        for _ in 0..10 {
+            if let Some(execute) = self.discover(bootstrap).await {
+                let job = self.job(Mode::Reply, 0);
+                let outcome = execute
+                    .bind(rpc)
+                    .try_get_reply_within(&job, Duration::from_secs(3))
+                    .await;
+                judge_reply(&job, &outcome);
+                self.record(job.id, DeliveryOp::Single, &outcome);
+                if outcome.is_ok() {
+                    recovered = true;
+                    break;
+                }
+            }
+            if ctx.time().sleep(Duration::from_secs(1)).await.is_err() {
+                return;
+            }
+        }
+        self.history.push(format!("recovered {recovered}"));
+        assert_always!(
+            recovered,
+            "rpc the delivery server answers a fresh call after the faults stopped"
+        );
     }
 }
 
@@ -686,7 +763,7 @@ impl Workload for DeliveryWorkload {
         let resolver = ScriptedResolver::new();
         ctx.state().publish(RESOLVER_KEY, resolver.clone());
         let config = delivery_config();
-        self.idle = config.peer.idle_timeout + config.peer.ping_interval * 2;
+        self.idle = config.peer.idle_timeout + config.peer.ping_interval * 3;
         let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), config)
             .map_err(|error| SimulationError::InvalidState(format!("rpc config: {error}")))?;
         ctx.state().publish(WORKLOAD_RPC_KEY, rpc.clone());
@@ -739,36 +816,32 @@ impl Workload for DeliveryWorkload {
         let ledger = Ledger::of(ctx.state());
         let mut duplicates = 0u32;
         for call in &self.calls {
-            let receipts = ledger.receipts(call.id);
-            if call.op.single_attempt() {
-                // The independent external check that nothing retransmits
-                // a single attempt, on any path.
-                assert_always!(
-                    receipts <= 1,
-                    "a single attempt never reaches a handler twice"
-                );
-                if call.lost_in_disconnect && receipts == 1 {
-                    assert_sometimes!(true, "rpc reply lost after execution is reported ambiguous");
-                }
-                if call.class == Class::Executed {
-                    assert_always!(receipts == 1, "an executed outcome executed exactly once");
-                }
-            } else if receipts > 1 {
+            let single = call.op.single_attempt();
+            let receipts = judge(
+                &Judged {
+                    id: call.id,
+                    single,
+                    class: call.class,
+                    resends: call.resends,
+                },
+                ledger.receipts(call.id),
+            );
+            if single && call.lost_in_disconnect && receipts == 1 {
+                assert_sometimes!(true, "rpc reply lost after execution is reported ambiguous");
+            }
+            if !single && receipts > 1 {
                 duplicates += 1;
             }
-            match call.class {
-                Class::Replied | Class::Executed => {
-                    assert_always!(receipts >= 1, "a call that produced an outcome executed");
-                }
-                Class::NotAdmitted => {
-                    assert_always!(
-                        receipts == 0,
-                        "a call reported not admitted never reached a handler"
-                    );
-                }
-                Class::Maybe => {}
-            }
             tracing::debug!(id = call.id, op = ?call.op, class = ?call.class, receipts, "rpc delivery call judged");
+        }
+        // The peers' greetings, against the peers' own ledger: a connection
+        // replacement never delivers a single greeting twice.
+        let greetings = greet_ledger(ctx.state());
+        for greeting in GreetCalls::of(ctx.state()).all() {
+            let receipts = judge(&greeting, greetings.receipts(greeting.id));
+            if greeting.class == Class::Replied {
+                assert_sometimes!(receipts == 1, "rpc peer greeting judged against its ledger");
+            }
         }
         // Permitted duplicates: reliable delivery may execute twice, and the
         // campaign must show that it does.
