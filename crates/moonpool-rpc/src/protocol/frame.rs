@@ -109,25 +109,57 @@ fn checksum(length: [u8; 4], payload: &[u8]) -> u64 {
 /// tail of one frame and the head of the next — and pull complete payloads
 /// with [`next_frame`](Self::next_frame). Split points never change the
 /// frames produced.
+///
+/// The buffer grows to hold the largest frame received, then gives the
+/// capacity above [`retained_capacity`](Self::with_retained_capacity)
+/// back once it holds no more than that.
 #[derive(Debug)]
 pub struct FrameDecoder {
     buffer: Vec<u8>,
     /// Start of the unconsumed bytes in `buffer`.
     start: usize,
     max_frame_bytes: u32,
+    retained_capacity: usize,
     failed: Option<FrameError>,
 }
 
+/// The buffer capacity a [`FrameDecoder`] keeps by default between frames.
+pub const DEFAULT_RETAINED_CAPACITY: usize = 64 * 1024;
+
 impl FrameDecoder {
-    /// A parser accepting payloads of at most `max_frame_bytes`.
+    /// A parser accepting payloads of at most `max_frame_bytes`, that keeps
+    /// [`DEFAULT_RETAINED_CAPACITY`] bytes of buffer between frames.
     #[must_use]
     pub fn new(max_frame_bytes: u32) -> Self {
         Self {
             buffer: Vec::new(),
             start: 0,
             max_frame_bytes,
+            retained_capacity: DEFAULT_RETAINED_CAPACITY,
             failed: None,
         }
+    }
+
+    /// Keep at most `bytes` of buffer capacity once the buffered bytes fit
+    /// in it: a large frame does not hold its memory for the life of the
+    /// decoder.
+    #[must_use]
+    pub fn with_retained_capacity(mut self, bytes: usize) -> Self {
+        self.retained_capacity = bytes;
+        self
+    }
+
+    /// Change the largest payload accepted from the next frame on. A
+    /// session starts with a small limit (only a `Hello` is valid before
+    /// the handshake) and raises it once the handshake frame passed.
+    pub fn set_max_frame_bytes(&mut self, max_frame_bytes: u32) {
+        self.max_frame_bytes = max_frame_bytes;
+    }
+
+    /// The buffer's capacity, in bytes.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.buffer.capacity()
     }
 
     /// Append received bytes.
@@ -135,8 +167,19 @@ impl FrameDecoder {
         if self.start > 0 && self.start >= self.buffer.len() / 2 {
             self.buffer.drain(..self.start);
             self.start = 0;
+            self.release_capacity();
         }
         self.buffer.extend_from_slice(bytes);
+    }
+
+    /// Give back the capacity above the retained bound when the buffered
+    /// bytes fit in that bound.
+    fn release_capacity(&mut self) {
+        if self.buffer.capacity() > self.retained_capacity
+            && self.buffer.len() <= self.retained_capacity
+        {
+            self.buffer.shrink_to(self.retained_capacity);
+        }
     }
 
     /// Bytes buffered but not yet returned as a frame.
@@ -211,6 +254,7 @@ impl FrameDecoder {
         if self.start == self.buffer.len() {
             self.buffer.clear();
             self.start = 0;
+            self.release_capacity();
         }
         Ok(Some(payload))
     }
@@ -397,5 +441,54 @@ mod tests {
             xxhash_rust::xxh3::xxh3_64(&covered)
         );
         assert_eq!(&frame[12..], b"abc");
+    }
+
+    #[test]
+    fn a_large_frame_does_not_keep_its_capacity() {
+        let retained = 4096;
+        let mut decoder = FrameDecoder::new(1 << 20).with_retained_capacity(retained);
+        let large = encode_frame(&vec![9; 512 * 1024], 1 << 20).expect("encodes");
+        decoder.feed(&large);
+        assert_eq!(drain(&mut decoder).len(), 1);
+        assert!(decoder.capacity() <= retained, "{}", decoder.capacity());
+        // Small frames after it, in pieces: the capacity stays bounded.
+        for piece in stream().chunks(7) {
+            decoder.feed(piece);
+            let _ = drain(&mut decoder);
+            assert!(decoder.capacity() <= retained, "{}", decoder.capacity());
+        }
+        // A large frame split across feeds that each leave a partial frame
+        // also gives its capacity back once compacted.
+        let mut decoder = FrameDecoder::new(1 << 20).with_retained_capacity(retained);
+        let mut input = large.clone();
+        input.extend_from_slice(&encode_frame(b"tail", 1 << 20).expect("encodes"));
+        let (head, rest) = input.split_at(large.len() + 3);
+        decoder.feed(head);
+        assert_eq!(drain(&mut decoder).len(), 1);
+        decoder.feed(rest);
+        assert_eq!(drain(&mut decoder), vec![b"tail".to_vec()]);
+        assert!(decoder.capacity() <= retained, "{}", decoder.capacity());
+    }
+
+    #[test]
+    fn the_frame_limit_can_rise_after_the_first_frame() {
+        let big = encode_frame(&[1; 300], 1024).expect("encodes");
+        // Under a small limit the length alone refuses it, before its body.
+        let mut decoder = FrameDecoder::new(64);
+        decoder.feed(&big[..HEADER_LEN]);
+        assert!(matches!(
+            decoder.next_frame(),
+            Err(FrameError::TooLarge {
+                size: 300,
+                limit: 64
+            })
+        ));
+        // Raised after a first small frame, the same frame passes.
+        let mut decoder = FrameDecoder::new(64);
+        decoder.feed(&encode_frame(b"hello", 64).expect("encodes"));
+        assert_eq!(drain(&mut decoder), vec![b"hello".to_vec()]);
+        decoder.set_max_frame_bytes(1024);
+        decoder.feed(&big);
+        assert_eq!(drain(&mut decoder), vec![vec![1; 300]]);
     }
 }
