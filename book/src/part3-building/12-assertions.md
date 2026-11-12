@@ -45,7 +45,7 @@ The next chapter sorts the same fifteen by **purpose**: invariant, discovery or 
 
 The macros in `moonpool_sim` are thin wrappers. The accounting is `moonpool-assertions`, a crate with zero dependencies that compiles to wasm. It keeps two fixed-size tables:
 
-- The **slot table**: 8192 slots, one per assertion site. A slot's identity is the 64-bit FNV-1a hash of its message. Each slot holds the kind, the pass and fail counts, a numeric watermark, and the frontier of a compound assertion. The message itself is stored truncated to 64 bytes.
+- The **slot table**: 8192 slots, one per assertion site. A slot's identity is the 64-bit FNV-1a hash of its message. Each slot holds the kind, the pass and fail counts, a numeric watermark, and the frontier of a compound assertion. The slot stores only the first 63 bytes of the message. The identity is the hash of the **full** message, so two messages that share their first 63 bytes are two sites.
 - The **bucket table**: 256 buckets for `assert_sometimes_each!`, keyed by message plus identity keys.
 
 By default both tables live on the heap of the test process. Under exploration, moonpool-explorer replaces them with `MAP_SHARED` memory, so forked worker processes write into the same counts. The macros behave the same either way.
@@ -54,7 +54,8 @@ Three rules follow from "the message is the identity":
 
 1. **Use a constant message.** `assert_always!(ok, format!("slot {slot}"))` compiles, but every distinct string claims a new slot. Keep `format!` for a failure branch that fires rarely, as the leader-election test does, and never put it on a hot path.
 2. **One message, one kind.** An `assert_always!` and an `assert_sometimes!` that share a message would evaluate one site under the other's contract. The table flags the slot as conflicted instead, and the run fails with "assertion '...' is shared by call sites of different kinds".
-3. **Never let the table overflow silently.** An evaluation that finds the table full is counted. `SimulationReport::dropped_assertion_allocations` reports the count, and `is_failure()` returns true when it is non-zero. A full table fails loudly instead of looking green.
+3. **Keep messages short.** The report shows the stored text. A message longer than 63 bytes is shown cut, with `…` at the end. When two cut messages show the same text, the report adds ` #` and 8 hex digits of the hash to each name, for example `"the coordinator must not accept a commit when the log is behind… #1a2b3c4d"`. The two sites keep separate counts, and the coverage rule counts each one. A message under 64 bytes avoids all of this.
+4. **Never let the table overflow silently.** An evaluation that finds the table full is counted. `SimulationReport::dropped_assertion_allocations` reports the count, and `is_failure()` returns true when it is non-zero. A full table fails loudly instead of looking green.
 
 ## Sites That Never Run
 

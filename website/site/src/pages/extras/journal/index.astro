@@ -8,7 +8,7 @@ import ByteLayout from "../../../components/ByteLayout.astro";
 import { url } from "../../../nav";
 import { excerpt, repoFile } from "../../../lib/source.mjs";
 import { renderMarkdown } from "../../../lib/book.mjs";
-import { constValue, docSection, encodeLayout, fieldDocs, implFields, itemDoc, moduleDoc, unlink } from "../../../lib/rustdoc.mjs";
+import { constValue, docSection, encodeLayout, fieldDocs, implFields, itemDoc, moduleDoc, unlink, variantDocs } from "../../../lib/rustdoc.mjs";
 
 const src = (f: string) => repoFile("crates/moonpool-journal/src/" + f);
 const lib = moduleDoc(src("lib.rs"));
@@ -42,7 +42,9 @@ const magic = (name: string) => {
   if (!m) throw new Error(`no ${name}`);
   return m[1];
 };
-const kinds = [...format.matchAll(/\/\/\/ ([^\n]+)\n\s+(Put|Clear|Void) = (\d)/g)].map((m) => `${m[3]} ${m[2]}: ${m[1].replace(/`/g, "")}`);
+// Every record kind of `enum Kind`, with its byte and its doc.
+const kinds = variantDocs(format, "Kind").map((k) => `${k.value} ${k.name}: ${k.doc.replace(/`/g, "").replace(/\s+/g, " ")}`);
+if (kinds.length === 0) throw new Error("format.rs has no enum Kind");
 const common = (magicName: string) => ({
   magic: `"${magic(magicName)}" in ASCII: what this structure is.`,
   version: `The format version, ${VERSION} today.`,

@@ -27,6 +27,18 @@
 //! private endpoint again (when the mode verifies clients) and anyone
 //! reaches the public one.
 //!
+//! Some calls go on a runtime made for the call alone, so on a new
+//! session. When the server's leaf and client roots did not change during
+//! such a call, [`ledger::refusal`] says from the certificates in force
+//! (expired, not valid yet, the wrong use, a stray or a moved authority, no
+//! certificate under mutual TLS) whether the call must fail, and a call
+//! that must fail never completes. At the end of a run, [`ledger::Ledger`]
+//! judges each call against the receipts of the servers: at most one
+//! execution, a reply or an executed outcome has its receipt, a call not
+//! admitted has none, and each receipt is permitted by the mode (mutual
+//! TLS admits only the member, optional TLS never a stray certificate, no
+//! client authentication proves no identity).
+//!
 //! **Faults.** Swarm network chaos with knob spikes, **with bit flips**: under TLS a flipped
 //! bit is an authentication failure that ends the session, never a
 //! corrupted delivery. The script ([`TlsFaults`]) moves the UTC (steps and
@@ -35,6 +47,7 @@
 //! holds a leaf from for a while, and crashes the server.
 
 mod faults;
+pub mod ledger;
 mod server;
 mod workload;
 
@@ -182,6 +195,8 @@ struct Inner {
     impostor: Issued,
     /// Whether the server's client roots are the unused authority's.
     roots_swapped: bool,
+    /// Bumped on each change of the server's leaf or client roots.
+    generation: u64,
     server_tls: Option<moonpool_rpc::security::tls::TlsServer>,
     member_tls: Option<moonpool_rpc::security::tls::TlsClient>,
 }
@@ -298,6 +313,7 @@ impl Pki {
             stranger,
             impostor,
             roots_swapped: false,
+            generation: 0,
             server_tls: None,
             member_tls: None,
         })));
@@ -350,6 +366,24 @@ impl Pki {
         });
     }
 
+    /// What a new session meets now: the server's state as of
+    /// [`Snapshot::generation`].
+    fn snapshot(&self) -> Snapshot {
+        self.with(|inner| Snapshot {
+            generation: inner.generation,
+            utc: inner.utc,
+            mode: inner.mode,
+            server: inner.server.clone(),
+            server_ip: inner.server_ip.parse().ok(),
+            roots_swapped: inner.roots_swapped,
+        })
+    }
+
+    /// The server's state generation and the UTC now.
+    fn generation_and_utc(&self) -> (u64, u64) {
+        self.with(|inner| (inner.generation, inner.utc))
+    }
+
     fn authority_root(&self) -> moonpool_rpc::security::tls::CertificateDer<'static> {
         self.with(|inner| inner.authority.certificate().clone())
     }
@@ -363,6 +397,16 @@ impl Pki {
             }
         })
     }
+}
+
+/// The server's state at one moment, for the new-session oracle.
+struct Snapshot {
+    generation: u64,
+    utc: u64,
+    mode: Mode,
+    server: Issued,
+    server_ip: Option<std::net::IpAddr>,
+    roots_swapped: bool,
 }
 
 /// The campaign's builder without an iteration policy.

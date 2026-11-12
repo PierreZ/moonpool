@@ -492,6 +492,7 @@ pub fn assertion_read_all() -> Vec<AssertionSlotSnapshot> {
         table::published_entries::<AssertionSlot>(table_ptr)
             .map(|slot| AssertionSlotSnapshot {
                 msg: table::msg_str(&(*slot).msg).to_string(),
+                msg_hash: atomic(&raw const (*slot).msg_hash).load(Ordering::Relaxed),
                 kind: (*slot).kind,
                 must_hit: (*slot).must_hit,
                 pass_count: atomic(&raw const (*slot).pass_count).load(Ordering::Relaxed),
@@ -528,8 +529,13 @@ pub fn assertion_dropped_allocations() -> u32 {
 /// A snapshot of an assertion slot for reporting.
 #[derive(Debug, Clone)]
 pub struct AssertionSlotSnapshot {
-    /// The assertion message.
+    /// The assertion message, cut to its first 63 bytes.
+    ///
+    /// Two sites whose messages share these bytes have the same `msg`: use
+    /// `msg_hash` to tell them apart.
     pub msg: String,
+    /// The [`msg_hash`] of the full message: the identity of the site.
+    pub msg_hash: u64,
     /// The kind of assertion (`AssertKind` as u8).
     pub kind: u8,
     /// Whether this assertion must be hit.

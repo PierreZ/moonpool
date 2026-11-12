@@ -167,3 +167,48 @@ fn a_command_pushed_between_steps_reaches_the_workload() {
         LiveStatus::Finished(Ok(()))
     ));
 }
+
+/// A live run dropped in the middle of its chaos window leaks nothing: the
+/// builder and its factories are freed, the world is gone (the hint sink no
+/// longer holds it), and buggify is off again (#460).
+#[test]
+fn a_live_run_dropped_during_chaos_leaves_no_state_behind() {
+    let seen: Seen = Arc::default();
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let mut sim = builder(&seen, &commands)
+        .enable_chaos([moonpool_sim::Chaos::Attrition {
+            config: moonpool_sim::Attrition {
+                max_dead: 1,
+                prob_graceful: 0.0,
+                prob_crash: 1.0,
+                prob_wipe: 0.0,
+                recovery_delay_ms: None,
+                grace_period_ms: None,
+                scope: moonpool_sim::AttritionScope::PerProcess,
+                victims: moonpool_sim::AttritionVictims::Any,
+                wipe_budget: None,
+            },
+            mode: moonpool_sim::ChaosMode::Random,
+        }])
+        .chaos_duration(Duration::from_secs(10))
+        .live()
+        .expect("a live run");
+    let clock = sim.clock();
+    assert!(matches!(
+        sim.advance(&mut || clock.now() >= Duration::from_millis(500)),
+        LiveStatus::Running
+    ));
+    assert!(
+        moonpool_buggify::is_simulated(),
+        "buggify is on during the run"
+    );
+    drop(sim);
+
+    assert_eq!(
+        Arc::strong_count(&seen),
+        1,
+        "the builder's factory and the workload were dropped with the run"
+    );
+    assert_eq!(clock.now(), Duration::ZERO, "the world is gone");
+    assert!(!moonpool_buggify::is_simulated(), "buggify is off again");
+}

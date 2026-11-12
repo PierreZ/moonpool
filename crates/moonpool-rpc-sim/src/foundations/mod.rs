@@ -14,7 +14,11 @@
 //! assert that the body is exactly what was sent. At the end the workload
 //! judges each of its own outcomes against the ledger: at most one receipt
 //! per id (no retransmission), exactly one for a reply, none for anything
-//! the error said was never admitted. The oracle never reads the transport.
+//! the error said was never admitted. This oracle never reads the transport.
+//! For a raw malformed session it reads the server's own refusal counter of
+//! that kind of frame, before and after: when no simulated fault touched the
+//! session and the server stayed up, the counter must go up and the session
+//! must close.
 //!
 //! **Faults.** Network chaos (swarm per seed, bit flips included, knob
 //! extremes under `Chaos::BuggifyKnobs`), a
@@ -131,7 +135,8 @@ pub struct RunRecord {
     /// Checksum mismatches observed by any runtime (scripted openings
     /// included).
     pub checksum_failures: u64,
-    /// Checksum mismatches on established sessions (network bit flips).
+    /// Checksum mismatches on established sessions (network bit flips and
+    /// the corrupting wire).
     pub established_checksum_failures: u64,
     /// Protocol violations observed by any runtime.
     pub protocol_violations: u64,

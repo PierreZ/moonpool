@@ -26,9 +26,18 @@
 //! the wrong block (a misdirected write): it reads as damaged, and the
 //! batch is located from its first entry.
 //!
-//! **Pass 2, verdicts** (the table in the crate docs). Only the **last
-//! batch** and damaged records cost entry reads: the rest of the log is
-//! checked when it is read.
+//! **Retired slots.** A retire record ([`Retire`]) names a slot of an
+//! earlier batch whose record may be lost: a slot a crash tore, or a dead
+//! slot whose entry is damaged. It carries the offset where the entry walk
+//! continues after that slot, so an intact entry behind a retired slot is
+//! found again. The retire records come after their slots in the log, so
+//! pass 1 runs again with them when it needs them: when a lost slot breaks
+//! the walk of the slots after it, or when a batch whose first slot is
+//! retired cannot be located ([`pass_one_retired`]).
+//!
+//! **Pass 2, verdicts** (the table in the crate docs). A lost slot that a
+//! retire record names is ignored. Only the **last batch** and damaged
+//! records cost entry reads: the rest of the log is checked when it is read.
 //!
 //! **What the metainfo proves.** Its high-water mark ([`Known::mark`]) is a
 //! batch known durable: a slot of a batch at or below it whose record and
@@ -37,11 +46,13 @@
 //! batch of a later generation proves the metainfo older than the log
 //! ([`OpenError::MetaRolledBack`]).
 
+use std::collections::BTreeMap;
+
 use moonpool_core::{AlignedBuf, LocalStorageFile};
 
 use crate::format::{
     BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, RECORD_SIZE, RECORDS_PER_BLOCK,
-    Record, Slot, align_up, entry_crc, generation_of, u64_of, usize_of,
+    Record, Retire, Slot, align_up, entry_crc, generation_of, u64_of, usize_of,
 };
 use crate::segment::Segment;
 use crate::{OpenError, RecordRepair};
@@ -96,6 +107,21 @@ impl Found {
 /// bytes)`.
 pub(crate) type BlockWrite = (usize, u64, AlignedBuf);
 
+/// The slots that retire records name, by `(batch, index)`.
+pub(crate) type Retires = BTreeMap<(u64, u16), Retire>;
+
+/// What pass 1 knows beyond the segment it reads.
+#[derive(Clone, Copy)]
+struct Context<'a> {
+    tag: u32,
+    known: Known,
+    retires: &'a Retires,
+}
+
+/// Pass 1 over every segment: per segment, its batches and its two
+/// cursors.
+type PerSegment = Vec<(Vec<BatchScan>, u64, u64)>;
+
 #[derive(Debug)]
 struct BatchScan {
     seq: u64,
@@ -115,13 +141,12 @@ pub(crate) struct Scan {
     pub corrupt: Vec<(u64, Id)>,
     pub ambiguous: Vec<(u64, Id)>,
     pub rebuilt: u32,
-    pub voided: u32,
-    /// The persist writes the open makes, in order, each durable before the
-    /// next. The last batch's extent, when it voids or rebuilds a record, so
-    /// the next open finds a durable verdict instead of damage before a
-    /// later batch: when the batch has both voids and rebuilt records, the
-    /// voids land first (see [`judge_batch`]). Then each block of an earlier
-    /// batch whose rebuilt records its entries prove (see [`repair_batch`]).
+    /// The slots of the last batch of an open generation that a crash
+    /// tore: the open retires them in a new batch before it raises the
+    /// high-water mark.
+    pub torn: Vec<Retire>,
+    /// The persist blocks the open writes again, in order, each durable
+    /// before the next (see [`repair_batch`]).
     pub writes: Vec<BlockWrite>,
     /// The blocks of earlier batches written again, and those left.
     pub repair: RecordRepair,
@@ -262,19 +287,87 @@ async fn batch_from_entry<F: LocalStorageFile>(
 /// place. The first record of a batch names the first entry of the batch,
 /// which is where the entries of the boundary start: a record that names
 /// another offset was written to the wrong block (a misdirected write). A
-/// void record names no entry, and a later record has no offset to compare
-/// with: those are taken as they are.
+/// later record has no offset to compare with: it is taken as it is.
 fn at_its_place(record: &Record, entry_cursor: u64) -> bool {
-    record.index != 0 || record.kind == Kind::Void || u64::from(record.offset) == entry_cursor
+    record.index != 0 || u64::from(record.offset) == entry_cursor
+}
+
+/// The batch at a boundary where no record or first entry locates one: a
+/// batch whose first slot is retired. The first retired batch after `last`
+/// in this segment, if what lies after the boundary agrees: the first
+/// valid record there (`first_valid`, at slot `j`) is of a later batch,
+/// beyond the retired batch's persist blocks.
+fn batch_from_retire(
+    retires: &Retires,
+    (last, first_batch): (u64, u64),
+    known: Known,
+    (at, first_valid): (usize, Option<(usize, Record)>),
+) -> Option<(u64, u16)> {
+    let retire = retires
+        .range((last + 1, 0)..)
+        .map(|(_, retire)| retire)
+        .find(|retire| retire.index == 0)?;
+    let span = usize_of(Record::blocks_for(usize::from(retire.count)))
+        * (usize_of(BLOCK_U64) / RECORD_SIZE);
+    let agrees =
+        first_valid.is_none_or(|(j, record)| record.batch > retire.batch && j >= at + span);
+    (agrees && retire.batch >= first_batch && !known.is_stale(retire.batch))
+        .then_some((retire.batch, retire.count))
+}
+
+/// The batch at boundary `at` (slot index), with `first_valid` the first
+/// valid record at or after it: from a valid record that belongs at this
+/// boundary, else from its first entry (every record damaged), else from a
+/// retire record that names its first slot. `None` at the end of the log.
+/// `(last, entry_cursor)`: the batch before it, and where its entries
+/// start.
+async fn locate_batch<F: LocalStorageFile>(
+    segment: &Segment<F>,
+    (at, first_valid): (usize, Option<(usize, Record)>),
+    (last, entry_cursor): (u64, u64),
+    context: Context<'_>,
+) -> Result<Option<(u64, u16)>, OpenError> {
+    let Context {
+        tag,
+        known,
+        retires,
+    } = context;
+    // A record can lie before its own place (a misdirected write), so its
+    // index can be above its slot.
+    if let Some((j, record)) = first_valid
+        && j.checked_sub(usize::from(record.index)) == Some(at)
+        && at_its_place(&record, entry_cursor)
+    {
+        return Ok(Some((record.batch, record.count)));
+    }
+    let shape = match batch_from_entry(segment, entry_cursor, (tag, last), known).await? {
+        Some(shape) => Some(shape),
+        None => batch_from_retire(
+            retires,
+            (last, segment.first_batch),
+            known,
+            (at, first_valid),
+        ),
+    };
+    // Something valid lies further on, but nothing locates a batch at this
+    // boundary: the batch here is gone, not the end of the log.
+    if shape.is_none() && first_valid.is_some() {
+        return Err(OpenError::LostBatch { batch: last + 1 });
+    }
+    Ok(shape)
 }
 
 /// Pass 1 over one segment. `prev` is the last batch before it.
 async fn scan_segment<F: LocalStorageFile>(
     segment: &Segment<F>,
     prev: u64,
-    tag: u32,
-    known: Known,
+    context: Context<'_>,
 ) -> Result<(Vec<BatchScan>, u64, u64), OpenError> {
+    let Context {
+        tag,
+        known,
+        retires,
+    } = context;
     let geometry = segment.geometry;
     let log = segment.read_persist_log().await?;
     let slots = log.len() / RECORD_SIZE;
@@ -303,28 +396,7 @@ async fn scan_segment<F: LocalStorageFile>(
             Slot::Valid(record) => Some((j, record)),
             _ => None,
         });
-        // The batch here: from a valid record that belongs at this
-        // boundary, else from its first entry (every record damaged). A
-        // record can lie before its own place (a misdirected write), so its
-        // index can be above its slot.
-        let from_record = match first_valid {
-            Some((j, record))
-                if j.checked_sub(usize::from(record.index)) == Some(at)
-                    && at_its_place(&record, entry_cursor) =>
-            {
-                Some((record.batch, record.count))
-            }
-            _ => None,
-        };
-        let shape = match from_record {
-            Some(shape) => Some(shape),
-            None => batch_from_entry(segment, entry_cursor, (tag, last), known).await?,
-        };
-        // Something valid lies further on, but nothing locates a batch at
-        // this boundary: the batch here is gone, not the end of the log.
-        if shape.is_none() && first_valid.is_some() {
-            return Err(OpenError::LostBatch { batch: last + 1 });
-        }
+        let shape = locate_batch(segment, (at, first_valid), (last, entry_cursor), context).await?;
         let Some((seq, count)) = shape else {
             break;
         };
@@ -357,12 +429,15 @@ async fn scan_segment<F: LocalStorageFile>(
                 },
             };
             walk = match here {
-                Found::Record(record) | Found::Rebuilt(record) if record.kind != Kind::Void => {
+                Found::Record(record) | Found::Rebuilt(record) => {
                     let end = u64::from(record.offset) + EntryHeader::footprint(record.len);
                     entries_end = entries_end.max(end);
                     Some(end)
                 }
-                _ => None,
+                // A retired slot says where the walk goes on.
+                Found::Lost => retires
+                    .get(&(seq, index))
+                    .and_then(|retire| (retire.resume != 0).then_some(retire.resume)),
             };
             found.push(here);
         }
@@ -384,9 +459,9 @@ async fn scan_segment<F: LocalStorageFile>(
 /// batches and its two cursors; and the last batch in the log.
 async fn pass_one<F: LocalStorageFile>(
     segments: &[Segment<F>],
-    tag: u32,
-    known: Known,
-) -> Result<(Vec<(Vec<BatchScan>, u64, u64)>, u64), OpenError> {
+    context: Context<'_>,
+) -> Result<(PerSegment, u64), OpenError> {
+    let known = context.known;
     let mut per_segment = Vec::with_capacity(segments.len());
     let mut last = segments.first().map_or(0, |s| s.prev_batch);
     for segment in segments {
@@ -394,13 +469,107 @@ async fn pass_one<F: LocalStorageFile>(
         if segment.prev_batch != last {
             return Err(OpenError::LostBatch { batch: last + 1 });
         }
-        let (batches, persist_next, entry_next) = scan_segment(segment, last, tag, known).await?;
+        let (batches, persist_next, entry_next) = scan_segment(segment, last, context).await?;
         if let Some(batch) = batches.last() {
             last = batch.seq;
         }
         per_segment.push((batches, persist_next, entry_next));
     }
     Ok((per_segment, last))
+}
+
+/// Pass 1 with the retire records of the log: run without them first, and
+/// again with the ones found while that changes what pass 1 finds. Only a
+/// second fault near a retired slot needs the second run: a lost slot that
+/// a retire record names, with a lost slot after it in the same batch (the
+/// walk broke there, and the batch's entry cursor may be short), or a batch
+/// that no record or entry locates (its first slot may be retired).
+async fn pass_one_retired<F: LocalStorageFile>(
+    segments: &[Segment<F>],
+    tag: u32,
+    known: Known,
+) -> Result<(PerSegment, u64, Retires), OpenError> {
+    let mut used = Retires::new();
+    loop {
+        let context = Context {
+            tag,
+            known,
+            retires: &used,
+        };
+        let more = match pass_one(segments, context).await {
+            Ok((per_segment, last)) => {
+                let found = retires_in(&per_segment);
+                if !breaks_a_walk(&per_segment, &used, &found) {
+                    return Ok((per_segment, last, found));
+                }
+                found
+            }
+            Err(OpenError::LostBatch { batch }) => {
+                let found = valid_retires(segments, known).await?;
+                if found.keys().all(|key| used.contains_key(key)) {
+                    return Err(OpenError::LostBatch { batch });
+                }
+                found
+            }
+            Err(error) => return Err(error),
+        };
+        let before = used.len();
+        used.extend(more);
+        assert!(used.len() > before, "each new run of pass 1 knows more");
+    }
+}
+
+/// The retire records pass 1 found, valid or rebuilt.
+fn retires_in(per_segment: &PerSegment) -> Retires {
+    per_segment
+        .iter()
+        .flat_map(|(batches, _, _)| batches)
+        .flat_map(|batch| &batch.slots)
+        .filter_map(|found| found.record().and_then(Retire::of))
+        .map(|retire| ((retire.batch, retire.index), retire))
+        .collect()
+}
+
+/// Whether a retire record in `found` and not in `used` names a lost slot
+/// that has a lost slot after it in its batch.
+fn breaks_a_walk(per_segment: &PerSegment, used: &Retires, found: &Retires) -> bool {
+    per_segment
+        .iter()
+        .flat_map(|(batches, _, _)| batches)
+        .any(|batch| {
+            let lost: Vec<u16> = (0u16..)
+                .zip(&batch.slots)
+                .filter(|(_, found)| matches!(found, Found::Lost))
+                .map(|(index, _)| index)
+                .collect();
+            lost.iter().any(|&index| {
+                let key = (batch.seq, index);
+                found.contains_key(&key)
+                    && !used.contains_key(&key)
+                    && lost.last().is_some_and(|&after| after > index)
+            })
+        })
+}
+
+/// Every valid retire record of the persist logs, read without pass 1:
+/// what a run of pass 1 that met a lost batch could not collect.
+async fn valid_retires<F: LocalStorageFile>(
+    segments: &[Segment<F>],
+    known: Known,
+) -> Result<Retires, OpenError> {
+    let mut retires = Retires::new();
+    for segment in segments {
+        let log = segment.read_persist_log().await?;
+        for bytes in log.as_chunks::<RECORD_SIZE>().0 {
+            if let Slot::Valid(record) = Record::decode(bytes)
+                && !known.is_stale_in(segment.first_batch, record.batch)
+                && let Some(retire) = Retire::of(&record)
+            {
+                retires.insert((retire.batch, retire.index), retire);
+            }
+        }
+    }
+    Ok(retires)
 }
 
 /// The persist blocks a scrub of an open journal writes again: pass 1 over
@@ -413,12 +582,13 @@ pub(crate) async fn plan_repair<F: LocalStorageFile>(
     known: Known,
     last: u64,
 ) -> Result<(Vec<BlockWrite>, RecordRepair), OpenError> {
-    let (per_segment, _) = pass_one(segments, tag, known).await?;
+    let (per_segment, _, retires) = pass_one_retired(segments, tag, known).await?;
     let mut writes = Vec::new();
     let mut repair = RecordRepair::default();
     for (s, (batches, _, _)) in per_segment.iter().enumerate() {
         for batch in batches.iter().filter(|batch| batch.seq <= last) {
-            repair_batch(&segments[s], s, batch, tag, &mut writes, &mut repair).await?;
+            let at = (&segments[s], s);
+            repair_batch(at, batch, (tag, &retires), &mut writes, &mut repair).await?;
         }
     }
     Ok((writes, repair))
@@ -430,30 +600,40 @@ pub(crate) async fn scan<F: LocalStorageFile>(
     tag: u32,
     known: Known,
 ) -> Result<Scan, OpenError> {
-    let (per_segment, last) = pass_one(segments, tag, known).await?;
+    let (per_segment, last, retires) = pass_one_retired(segments, tag, known).await?;
     let mut out = Scan {
         last_batch: last,
         ..Scan::default()
     };
-    let last_location = per_segment
+    // Each batch's successor in the log, to tell the last batch of an open
+    // generation.
+    let order: Vec<u64> = per_segment
         .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(s, (batches, _, _))| (!batches.is_empty()).then(|| (s, batches.len() - 1)));
+        .flat_map(|(batches, _, _)| batches.iter().map(|batch| batch.seq))
+        .collect();
+    let mut next = order.iter().skip(1).copied();
     for (s, (batches, persist_next, entry_next)) in per_segment.into_iter().enumerate() {
         out.cursors.push((persist_next, entry_next));
         let segment = &segments[s];
-        for (b, batch) in batches.into_iter().enumerate() {
-            let is_last = last_location == Some((s, b));
+        for batch in batches {
+            let successor = next.next();
             let judge = Judge {
-                is_last,
+                is_last: batch.seq == last,
+                last_of_generation: successor
+                    .is_none_or(|after| generation_of(after) != generation_of(batch.seq)),
                 tag,
                 mark: known.mark,
             };
-            judge_batch(segment, s, &batch, judge, &mut out).await?;
-            if !is_last {
-                repair_batch(segment, s, &batch, tag, &mut out.writes, &mut out.repair).await?;
-            }
+            judge_batch(segment, &batch, judge, &retires, &mut out).await?;
+            let repair = &mut out.repair;
+            repair_batch(
+                (segment, s),
+                &batch,
+                (tag, &retires),
+                &mut out.writes,
+                repair,
+            )
+            .await?;
         }
     }
     Ok(out)
@@ -462,8 +642,10 @@ pub(crate) async fn scan<F: LocalStorageFile>(
 /// What pass 2 knows of a batch beyond its slots.
 #[derive(Clone, Copy)]
 struct Judge {
-    /// The batch is the last in the log.
+    /// The batch is the last in the log: its entries are read now.
     is_last: bool,
+    /// The batch is the last that its open generation wrote.
+    last_of_generation: bool,
     tag: u32,
     /// The metainfo's high-water mark.
     mark: u64,
@@ -471,67 +653,65 @@ struct Judge {
 
 impl Judge {
     /// Whether a crash can explain a slot of `batch` whose record and entry
-    /// are both damaged: only in the last batch, above the mark, and not in
-    /// an `Ordered` batch that kept an intact record (its entries were
-    /// durable before any record was written, so a damaged one is
-    /// corruption).
+    /// are both damaged: only in the last batch of its open generation (a
+    /// failed commit poisons the journal, so a crash tears no other), above
+    /// the mark, and not in an `Ordered` batch that kept an intact record
+    /// (its entries were durable before any record was written, so a
+    /// damaged one is corruption).
+    ///
+    /// The open that retires such slots leaves the mark below the batch
+    /// until the retire batch is durable, so an open that a crash cut, or a
+    /// retire batch that a crash tore, leaves the slots judged the same
+    /// way again.
     fn crash_explains_lost(self, batch: &BatchScan) -> bool {
         let ordered_witness = batch.slots.iter().any(
             |found| matches!(found, Found::Record(record) if record.flags & FLAG_ORDERED != 0),
         );
-        self.is_last && batch.seq > self.mark && !ordered_witness
+        self.last_of_generation && batch.seq > self.mark && !ordered_witness
     }
+}
+
+/// The offset of the first located entry after slot `index` of `batch`: where
+/// the entry walk goes on after it. 0 when none follows.
+fn resume_after(batch: &BatchScan, index: u16) -> u64 {
+    batch
+        .slots
+        .iter()
+        .skip(usize::from(index) + 1)
+        .find_map(Found::record)
+        .map_or(0, |record| u64::from(record.offset))
 }
 
 /// Pass 2 for one batch.
 async fn judge_batch<F: LocalStorageFile>(
     segment: &Segment<F>,
-    segment_index: usize,
     batch: &BatchScan,
     judge: Judge,
+    retires: &Retires,
     out: &mut Scan,
 ) -> Result<(), OpenError> {
-    let Judge { is_last, tag, mark } = judge;
+    let Judge {
+        is_last, tag, mark, ..
+    } = judge;
     let crash_explains_lost = judge.crash_explains_lost(batch);
-    let mut rewrite = false;
-    let mut voided = false;
-    let mut rebuilt = false;
-    let mut kept: Vec<Record> = Vec::with_capacity(batch.slots.len());
-    // What the slots held on disk before this open: the voids-first write
-    // keeps a valid record and leaves a rebuilt slot zero.
-    let mut on_disk: Vec<Option<Record>> = Vec::with_capacity(batch.slots.len());
     for (index, found) in (0u16..).zip(batch.slots.iter()) {
         let record = match *found {
-            Found::Record(record) => {
-                on_disk.push(Some(record));
-                record
-            }
+            Found::Record(record) => record,
             Found::Rebuilt(record) => {
                 out.rebuilt += 1;
-                rewrite |= is_last;
-                rebuilt = true;
-                on_disk.push(None);
                 record
             }
+            // Named by a retire record: nothing the caller needs.
+            Found::Lost if retires.contains_key(&(batch.seq, index)) => continue,
             Found::Lost if crash_explains_lost => {
-                // Torn by a crash: never acknowledged, discarded.
-                out.voided += 1;
-                rewrite = true;
-                voided = true;
-                let void = Record {
-                    kind: Kind::Void,
-                    flags: 0,
+                // Torn by a crash: never acknowledged, discarded. The open
+                // retires it before anything vouches for the batch.
+                out.torn.push(Retire {
+                    batch: batch.seq,
                     index,
                     count: batch.count,
-                    batch: batch.seq,
-                    position: 0,
-                    id: [0; crate::ID_SIZE],
-                    offset: 0,
-                    len: 0,
-                    entry_crc: 0,
-                };
-                on_disk.push(Some(void));
-                kept.push(void);
+                    resume: resume_after(batch, index),
+                });
                 continue;
             }
             Found::Lost => {
@@ -541,9 +721,8 @@ async fn judge_batch<F: LocalStorageFile>(
                 });
             }
         };
-        kept.push(record);
         match record.kind {
-            Kind::Void => {}
+            Kind::Retire => {}
             Kind::Clear => out.ops.push(Op::Clear {
                 start: record.position,
                 end: record.clear_end(),
@@ -588,45 +767,45 @@ async fn judge_batch<F: LocalStorageFile>(
             }
         }
     }
-    if rewrite {
-        // Voids land before rebuilt records. A rebuilt `Ordered` record is
-        // an intact record, which makes a lost slot corruption: if a crash
-        // tore one rewrite, a rebuilt record that landed beside a void that
-        // did not would read as a double fault. Written first and alone,
-        // the voids leave every slot either valid or rebuildable.
-        let at = |bytes| (segment_index, batch.persist_at, bytes);
-        if voided && rebuilt {
-            out.writes
-                .push(at(encode_records(on_disk.iter().map(Option::as_ref))));
-        }
-        out.writes.push(at(encode_records(kept.iter().map(Some))));
-    }
     Ok(())
 }
 
-/// Write back the rebuilt records of `batch`, a batch before the last one,
-/// so the damage of each record is gone before a second fault on its slot
-/// makes an open refuse.
+/// Write back the rebuilt records of `batch`, so the damage of each record
+/// is gone before a second fault on its slot makes an open refuse.
 ///
 /// A persist block that holds a rebuilt record is written again whole, as
-/// one durable write, but only when the entry of each slot in it is intact
-/// and is the entry its record names: then a crash that tears the write
-/// leaves each record of the block rebuildable from its entry, as before
-/// the write. A block with one damaged entry is not written, because its
-/// valid record is the only copy of that identity; it is counted as left.
+/// one durable write, but only when each slot in it is proven: its entry is
+/// intact and is the entry its record names, or a retire record names the
+/// slot (its record is written back as it is, or left zero when it is
+/// lost). Then a crash that tears the write leaves each record of the block
+/// rebuildable from its entry, or retired, as before the write. A block
+/// with one damaged entry is not written, because its valid record is the
+/// only copy of that identity; it is counted as left.
+///
+/// A batch with a lost slot that no retire record names is not written at
+/// all: its torn slots are retired first. A rebuilt `Ordered` record
+/// written back beside them would read as a witness that makes them
+/// corruption, if a crash came before the retire batch is durable.
 async fn repair_batch<F: LocalStorageFile>(
-    segment: &Segment<F>,
-    segment_index: usize,
+    (segment, segment_index): (&Segment<F>, usize),
     batch: &BatchScan,
-    tag: u32,
+    (tag, retires): (u32, &Retires),
     writes: &mut Vec<BlockWrite>,
     repair: &mut RecordRepair,
 ) -> std::io::Result<()> {
+    let named = |index: usize| {
+        u16::try_from(index).is_ok_and(|index| retires.contains_key(&(batch.seq, index)))
+    };
+    let unretired_loss = (0..batch.slots.len())
+        .any(|index| matches!(batch.slots[index], Found::Lost) && !named(index));
     for (block, slots) in (0u64..).zip(batch.slots.chunks(RECORDS_PER_BLOCK)) {
         if !slots.iter().any(|found| matches!(found, Found::Rebuilt(_))) {
             continue;
         }
-        if entries_prove(segment, slots, tag).await? {
+        let first = usize_of(block) * RECORDS_PER_BLOCK;
+        let proven =
+            !unretired_loss && entries_prove(segment, slots, tag, |at| named(first + at)).await?;
+        if proven {
             writes.push((
                 segment_index,
                 batch.persist_at + block * BLOCK_U64,
@@ -640,24 +819,26 @@ async fn repair_batch<F: LocalStorageFile>(
     Ok(())
 }
 
-/// Whether each slot of `slots` has an intact entry that is exactly the
-/// entry its record names. A rebuilt record was made from such an entry.
-/// A lost slot, or a void record (it has no entry), proves nothing.
+/// Whether each slot of `slots` is proven: a rebuilt record was made from an
+/// intact entry, a retired slot (`retired`, by its place in `slots`) holds
+/// nothing the caller needs, and a valid record needs its intact entry.
 async fn entries_prove<F: LocalStorageFile>(
     segment: &Segment<F>,
     slots: &[Found],
     tag: u32,
+    retired: impl Fn(usize) -> bool,
 ) -> std::io::Result<bool> {
-    for found in slots {
+    for (at, found) in slots.iter().enumerate() {
         match found {
             Found::Rebuilt(_) => {}
-            Found::Record(record) if record.kind != Kind::Void => {
+            _ if retired(at) => {}
+            Found::Record(record) => {
                 match read_entry(segment, u64::from(record.offset), tag).await? {
                     Some((header, stored, _)) if entry_matches(record, &header, stored) => {}
                     _ => return Ok(false),
                 }
             }
-            Found::Record(_) | Found::Lost => return Ok(false),
+            Found::Lost => return Ok(false),
         }
     }
     Ok(true)

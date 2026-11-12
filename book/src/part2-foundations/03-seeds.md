@@ -73,7 +73,7 @@ SimulationBuilder::new()
 ```
 
 - **`wall_clock_budget`** stops the run between seeds once it has run this long. Parallel CI shards then take the same time. The other stop rules still apply. A run that the budget stops is not a convergence timeout: the report sets `wall_clock_budget_spent`.
-- **`corpus_file`** reads a list of seeds before the first seed and runs them first. After the last seed, it writes the seeds of this run that grew coverage (new code edges or a new `sometimes`) to the same file, also in `report.corpus_seeds`. A CI job that restores the corpus of `main` replays the seeds that reached the most coverage first. A corpus seed that adds nothing drops out of the next file.
+- **`corpus_file`** reads a list of seeds before the first seed and runs them first. After the last seed, it writes the seeds of this run that grew coverage (new code edges or a new `sometimes`) to the same file, also in `report.corpus_seeds`. A CI job that restores the corpus of `main` replays the seeds that reached the most coverage first. A corpus seed that the run replayed and that added nothing drops out of the next file. A corpus seed that the run did not reach (a short run, a spent budget, a deadlock) stays in the file. The runner writes the file through a temporary file and a rename.
 
 Each seed also draws its own **swarm**: with `ChaosMode::Swarm` a seed enables a random subset of fault families, and `swarm_operations()` enables a random subset of each workload's operations. Two seeds therefore differ in which behaviours are even possible, not only in timing. [Swarm Testing](../part3-building/28-swarm-testing.md) explains why this finds more bugs than every fault on at once.
 

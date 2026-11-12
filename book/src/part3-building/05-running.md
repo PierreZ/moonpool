@@ -97,7 +97,9 @@ Both matter. A run that never violates an invariant but never reaches an error p
   Events       8,432 avg
 
   Faulty seeds: [7891, 42033]
+  Seed 7891: an always assertion was violated
   Replay: .set_debug_seeds(vec![7891])
+  Seed 42033: an always assertion was violated
   Replay: .set_debug_seeds(vec![42033])
 
 ━━━ Assertions (4) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -108,7 +110,7 @@ Both matter. A run that never violates an invariant but never reaches an error p
   ✗  assert_always!('kv: read matches the model') failed 47 times out of 12,847
 ```
 
-The report says which seeds failed, which assertion broke, and how rare it was. An assertion written with a detail block also printed `[ASSERTION FAILED] kv: read matches the model (seed=7891) | key=k3 server=10.0.1.2` on stderr the moment it failed, which is why the workload chapter attached the key and the server. [Debugging a Failing Seed](./20-debugging.md) takes it from here: pin seed 7891 with `set_debug_seeds(vec![7891])` and `set_iterations(1)`, raise the trace level, read backwards from the first violation.
+The report says which seeds failed and why (`report.failure_causes`: the error of a workload's `run()` or `check()`, a panic, a stall guard, a settle timeout, a violated always-assertion), which assertion broke, and how rare it was. An assertion written with a detail block also printed `[ASSERTION FAILED] kv: read matches the model (seed=7891) | key=k3 server=10.0.1.2` on stderr the moment it failed, which is why the workload chapter attached the key and the server. [Debugging a Failing Seed](./20-debugging.md) takes it from here: pin seed 7891 with `set_debug_seeds(vec![7891])` and `set_iterations(1)`, raise the trace level, read backwards from the first violation.
 
 ## Stop Conditions
 
@@ -127,9 +129,9 @@ A seed must end. Four deterministic guards make sure it does, each a pure functi
 - **Run-time budget.** Simulated time past `run_time_budget` (one simulated hour by default) with workloads still running triggers a shutdown request. Another full budget past that declares a deadlock. This catches a detached task that re-arms a timer every tick while the workload waits on it, which the first guard cannot see. Setup and check phases use the same guard.
 - **Settle timeout.** After every workload returns, processes are aborted and the orchestrator drains the queue without yielding. Five simulated minutes of events still pending fails the seed with `SimulationError::SettleTimeout`, which surfaces leaked timers and unclosed connections.
 
-A deadlocked seed stops the whole campaign. The report still carries everything earlier seeds gathered, with the deadlocked seed in `seeds_failing` and `convergence_timeout` left false.
+A deadlocked seed loses its workload tasks. When every workload comes from a factory (`workload_factory`, `workloads`), the next seed builds new ones, so the campaign goes on and the deadlocked seed counts as failed. When a workload was given as an instance (`workload`), the instance is lost and the deadlocked seed stops the whole campaign. In both cases the report carries everything the seeds gathered, with the deadlocked seed in `seeds_failing` and `convergence_timeout` left false.
 
-Two more things end a campaign early. A workload task that panics or is cancelled before it returns its `Box<dyn Workload>` stops the run, because reusing the survivors would hand one workload another's identity. An ordinary `Err` from a workload keeps the instance and fails only that seed. A process that panics fails its seed as well.
+The same rule applies to a workload task that panics or is cancelled before it returns its `Box<dyn Workload>`: with instance workloads it stops the run, because reusing the survivors would hand one workload another's identity. An ordinary `Err` from a workload keeps the instance and fails only that seed. A process that panics fails its seed as well.
 
 ## Checking Determinism
 

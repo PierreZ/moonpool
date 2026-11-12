@@ -44,8 +44,10 @@ pub enum LiveStatus {
 /// One iteration of a [`SimulationBuilder`], driven in steps.
 ///
 /// Built by [`SimulationBuilder::live`]. Dropping it stops the run: the
-/// executor cancels every task. The builder it came from is leaked (a few
-/// kilobytes): the run borrows it for as long as it lives.
+/// executor cancels every task, and the thread-local state the run
+/// installed (buggify, the hint and shard sinks, the CPU model, the
+/// determinism canary, the `select!` offset, the assertion region) is
+/// removed, so a later run or plain code on the thread starts clean.
 pub struct LiveSimulation {
     // Drop order matters: the run first, then its executor, then the
     // observability layer and the thread-local overrides.
@@ -67,6 +69,11 @@ impl Drop for LiveGuards {
     fn drop(&mut self) {
         crate::sim::uninstall_select_offset();
         crate::chaos::exploration_glue::cleanup_assertion_region();
+        // Buggify off, and the hint and shard sinks gone: the hint sink
+        // holds the run's world, which would otherwise outlive the run.
+        crate::chaos::buggify_reset();
+        crate::sim::cpu::uninstall();
+        crate::sim::stop_determinism_canary();
     }
 }
 
@@ -126,10 +133,10 @@ impl SimulationBuilder {
         let iteration = iterations.current_iteration();
         self.prepare_iteration(&obs, seed, iteration);
 
-        // The run borrows the builder for its whole life.
-        let builder: &'static mut SimulationBuilder = Box::leak(Box::new(self));
+        // The run owns its inputs (the factories are shared, not borrowed),
+        // so the builder is dropped when this function returns.
         let mut return_map = Vec::new();
-        let inputs = builder.orchestrator_inputs(&mut return_map, &obs, seed, iteration);
+        let inputs = self.orchestrator_inputs(&mut return_map, &obs, seed, iteration);
         let clock = inputs.sim().downgrade();
         let task_panics = TaskPanicTracker::default();
         let run = Box::pin(Self::orchestrator_future(inputs, task_panics.clone()));

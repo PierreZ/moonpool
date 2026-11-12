@@ -38,7 +38,7 @@ const boot = excerpt(repoFile("crates/moonpool-wasm-demo/src/register.rs"), "let
     stay up. A process can also be rebooted at a moment its code names with <code>hint!</code>.</p>
 
   <h2>The live run</h2>
-  <p>Three servers and one client. At 437 ms a server is crashed and wiped at its own hint, after it wrote a
+  <p>Three servers and one client. At 122 ms a server is crashed and wiped at its own hint, after it wrote a
     record and before the sync. It boots again with version 0: its disk is empty. Later a crash hits another
     server, and it boots with the version it synced. The client did not stop, and each read returned the last
     committed write.</p>

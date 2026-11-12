@@ -263,3 +263,39 @@ fn the_corpus_file_keeps_the_seeds_that_grew_coverage() {
     assert_eq!(&second.corpus_seeds[..written.len()], written.as_slice());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A run that stops before the end of the corpus keeps the corpus seeds it
+/// did not replay (#454).
+#[test]
+fn a_short_run_keeps_the_corpus_seeds_it_did_not_replay() {
+    let dir = std::env::temp_dir().join(format!("moonpool-corpus-short-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("corpus.txt");
+    let text = (101..=108)
+        .map(|seed: u64| seed.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&path, text).expect("corpus written");
+
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .set_iterations(2)
+            .corpus_file(&path)
+            .workload(ThreeAlwaysHitWorkload),
+    );
+    assert_eq!(report.seeds_used, vec![101, 102], "report: {report:?}");
+    // Seed 101 grew coverage; seed 102 added nothing and drops out.
+    assert_eq!(report.corpus_seeds, vec![101], "report: {report:?}");
+
+    let text = std::fs::read_to_string(&path).expect("corpus read");
+    let written: Vec<u64> = text
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(|line| line.parse().expect("a seed"))
+        .collect();
+    assert_eq!(written, vec![101, 103, 104, 105, 106, 107, 108]);
+    // The write goes through a temporary file, which the rename removes.
+    let leftovers = std::fs::read_dir(&dir).expect("dir").count();
+    assert_eq!(leftovers, 1, "only the corpus file stays");
+    let _ = std::fs::remove_dir_all(&dir);
+}

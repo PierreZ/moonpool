@@ -32,7 +32,7 @@ wasm32-unknown-unknown` then `wasm-bindgen` to generate the JS glue.
   version, and emits `log_written` and `log_synced` per sector. Its two
   `hint!` sites are between the write and the sync, and between the sync and
   the reply. The site's storage and same-code pages read these events.
-- The planted bug (`bug: true`) breaks the invariant on about 12% of seeds
+- The planted bug (`bug: true`) breaks the invariant on about 11% of seeds
   with the default chaos, and no seed fails with it off. Measure again with
   `SEEDS=2000 cargo test -p moonpool-wasm-demo --test engine -- --ignored`
   after a change to the scenario, and keep it between 5% and 20%.

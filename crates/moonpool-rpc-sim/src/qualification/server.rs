@@ -291,12 +291,7 @@ fn private_request<'a>(
     let subject = reply.principal().map(|who| who.subject().to_string());
     let allowed = AuthLedger::of(ctx.state()).receive(
         request.id,
-        Receipt {
-            target: Target::Private,
-            subject: subject.clone(),
-            utc: trust.utc(),
-            generation: trust.generation(),
-        },
+        Receipt::now(Target::Private, subject.clone(), trust),
         trust,
     );
     assert_always!(

@@ -4,7 +4,10 @@
 //! gracefully at their own address; the third participant and the legacy
 //! peer restarted; the workload cut off from one server while it holds a
 //! reliable call there, or from every server at once; the UTC stepped and
-//! jumped past token lifetimes, lost and restored; the key set rotated.
+//! jumped past token lifetimes, lost and restored; the key set rotated
+//! (half the time, the first rotation of a run is an emergency rotation: a
+//! second rotation at once retires the first key, so the workload can
+//! present a retired key in the same run).
 //! The reboot-storm variant restarts one server at least ten times. At the
 //! end it restores the clock and marks itself done; everything after that
 //! is the workload's recovery phase.
@@ -30,6 +33,7 @@ pub struct QualificationFaults {
     cuts_handled: usize,
     shutdowns_handled: usize,
     storm_reboots: u64,
+    rotations: u32,
 }
 
 impl QualificationFaults {
@@ -196,6 +200,20 @@ impl FaultInjector for QualificationFaults {
                     let generation = trust.rotate()?;
                     tracing::info!(line = %format!("keys rotated to {generation}"), "rpc_qual_event");
                     assert_reachable!("rpc qual key set rotated");
+                    self.rotations += 1;
+                    // The ring keeps two keys, so a key is retired only from
+                    // the second rotation on, and the loop rotates about once
+                    // in three seeds. Half of the first rotations are an
+                    // emergency rotation (as after a key leak): a second
+                    // rotation at once retires key 0, so the workload can
+                    // present a retired key while the run goes on.
+                    if self.rotations == 1 && ctx.random().random_bool(0.5) {
+                        let generation = trust.rotate()?;
+                        tracing::info!(
+                            line = %format!("emergency rotation to {generation}"),
+                            "rpc_qual_event"
+                        );
+                    }
                 }
                 7 => {
                     trust.forget();

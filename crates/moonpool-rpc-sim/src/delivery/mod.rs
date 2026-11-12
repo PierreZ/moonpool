@@ -18,7 +18,11 @@
 //! counts executions independently of the transport. A single attempt
 //! (`try_get_reply`, one-way, attempts) never shows two receipts; a reply
 //! shows at least one; a `NotAdmitted` error shows none; reliable delivery
-//! may show several and the campaign requires that it sometimes does.
+//! may show several (never more than one per copy the runtime sent) and
+//! the campaign requires that it sometimes does. The peers keep their own
+//! greeting ledger with the same rules, so a connection replacement that
+//! delivers a single greeting twice fails the run. After the fault script
+//! is done, the server must answer a fresh call again.
 //!
 //! **Faults.** Swarm network chaos (bit flips masked: [`crate::without_corruption`]) with knob spikes, every
 //! [`PeerPolicy`](moonpool_rpc::PeerPolicy) field a `buggify_knob!`, and a
@@ -29,6 +33,7 @@
 //! address.
 
 mod faults;
+mod judge;
 pub mod messages;
 mod peer;
 mod policy;

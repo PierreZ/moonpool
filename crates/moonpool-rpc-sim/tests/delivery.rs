@@ -102,6 +102,8 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc peers cut apart with one-way reachability",
         "rpc peer reached through its own dial while ours stalled",
         "rpc peers agree on one shared connection at the end of the run",
+        "rpc peer greeting judged against its ledger",
+        "rpc scripted fault operation ran after a pause",
         // Failure-monitor transitions.
         "rpc disconnect observed before the address failed",
         "rpc failure monitor marked the address failed",

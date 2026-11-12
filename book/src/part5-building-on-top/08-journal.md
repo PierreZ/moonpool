@@ -72,7 +72,9 @@ for (position, payload) in puts {
 journal.commit(chunk).await?;   // metainfo and floor go in the last one
 ```
 
-`Batch::fits(geometry)` is the same bound for a staged batch. The default
+`Batch::fits(geometry)` is the same bound for a staged batch. Both count
+each write twice in the persist log: a write that replaces a position whose
+entry is damaged takes a retire record for the old slot (below). The default
 `Geometry` is a 64 MiB segment with persist and entry logs of the same size
 (507,904 records and 31 MiB of entries). Every batch starts on a fresh block
 in both logs, so a segment holds 7,936 batches of one small entry.
@@ -280,9 +282,9 @@ to match damaged records with their entries, and judges each one:
 | intact | valid | live |
 | intact | damaged | live; the record is rebuilt from the entry |
 | damaged | valid | `Corrupt`, or `Ambiguous` in a `Batched` last batch |
-| damaged | damaged, unwitnessed last batch | torn by a crash: discarded |
-| damaged | damaged, witnessed last batch | `OpenError::DoubleFault`: refuse to open |
-| damaged | damaged, earlier | `OpenError::DoubleFault`: refuse to open |
+| damaged | damaged, named by a retire record | ignored |
+| damaged | damaged, unwitnessed last batch of its open generation | torn by a crash: discarded and retired |
+| damaged | damaged, witnessed, or earlier in its generation | `OpenError::DoubleFault`: refuse to open |
 
 A slot whose record and entry are both damaged is what a crash in the middle
 of a commit leaves, and it is also what two faults leave on an acknowledged
@@ -291,7 +293,8 @@ proves the batch durable:
 
 - **The high-water mark.** The metainfo records the batch of its last update
   (it is written only once that batch is durable), and every open records
-  the last batch it found. A batch at or below the mark was durable.
+  the last batch it found, once nothing in it is left to retire. A batch at
+  or below the mark was durable.
 - **An intact `Ordered` record.** An `Ordered` commit syncs every entry
   before it writes any record, so one valid record proves every entry of
   its batch was durable.
@@ -302,6 +305,33 @@ acknowledged last batch that nothing witnesses can still be discarded: a
 `Batched` commit (or an `Ordered` one with no intact record) that changed no
 metainfo, with no open since. Its bytes look exactly like a torn commit. A
 caller that needs a batch witnessed sets its metainfo in that batch.
+
+What happens to a torn slot after the open discards it? It stays in its
+segment, half damaged, until the floor frees the segment. If one more fault
+hits what is left of it, the slot reads both damaged in a batch that is no
+longer the last: a double fault, from one fault. So the open writes down its
+verdict as a **retire record**. A retire record names one slot (its batch
+and index) and carries the offset where the entry walk goes on after it. It
+has a persist record and a 64-byte entry, as a tombstone has, so one fault on
+it is rebuilt. A lost slot that a retire record names is ignored, and an
+intact entry behind it is found again from the offset.
+
+The open that retires is the delicate part. It scans, then starts its new
+generation durably but **leaves the high-water mark where it was**. Then it
+commits the retire batch with a metainfo write, and the normal commit path
+moves the mark to the retire batch once that batch is durable. A crash
+before the retire batch is durable leaves the torn batch above the mark and
+still the last of its generation, so the next open finds the same torn slots.
+A crash that tears the retire batch makes it the last of its generation, so
+its own lost slots are torn slots too. Only the last batch of a generation
+can be torn by a crash, because a failed commit poisons the journal.
+
+A commit retires slots too. When a batch replaces, clears or drops below the
+floor a position whose entry is known damaged (`State::Corrupt`, or a read
+that returned `ReadError::Damaged`), the batch carries a retire record for
+the old slot. The caller's usual repair, a new put of the position, then
+leaves nothing behind that a second fault can turn into a refused open. A
+commit that only raises the floor writes a batch for such retire records.
 
 Two rules keep old or misplaced records from passing for evidence. Batch
 numbers grow with the place in the persist log, so a record after a batch
@@ -351,10 +381,11 @@ is the only copy of that entry's identity. `RecordRepair` counts the blocks
 written and the blocks left.
 
 Three rules keep recovery's own writes honest, and the crash loops found
-each of them. A fourth keeps them apart from the witness rule: when an open
-discards torn slots of an `Ordered` batch and rebuilds other records of it,
-the discards land first and alone, so a crash inside the rewrite never
-leaves a rebuilt record beside a slot that reads both damaged. **What opening keeps, it syncs**, because a process that
+each of them. A fourth keeps them apart from the witness rule: an open never
+writes back a rebuilt record of a batch that still has a torn slot no retire
+record names. A rebuilt `Ordered` record is an intact record, which would make
+the torn slot corruption if a crash came before the retire batch is durable.
+**What opening keeps, it syncs**, because a process that
 restarted without a power loss reads its predecessor's unsynced writes from
 the page cache. **A record never reaches the disk before its entry**, so a
 rebuilt record is written only after the entries are synced. **What an open
@@ -381,7 +412,8 @@ let focus = FaultFocus::new()
 
 The crash loops in `tests/support/mod.rs` commit random batches, cut the
 writer off mid-commit with `simulate_crash_for_process`, sometimes crash
-inside recovery itself, and judge every reopen against a ledger of what was
+inside recovery itself, rot one persist record while the node is down, run
+a scrub (`repair_records`) that a crash can cut, and judge every reopen against a ledger of what was
 acknowledged and what was in flight. They run under two fault models:
 
 - **The paper's:** every unsynced sector ends up old or new, plus clean

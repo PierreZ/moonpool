@@ -14,7 +14,7 @@
 //! here.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::lock;
@@ -173,9 +173,13 @@ pub struct Trust {
     utc: Arc<AtomicU64>,
     /// What servers read: the script's UTC, or unknown while forgotten.
     clock: FixedUtc,
-    forgotten: Arc<AtomicBool>,
+    /// The clock epoch: incremented at each forget and each restore, so
+    /// the servers have no UTC exactly when it is odd.
+    clock_epoch: Arc<AtomicU64>,
     keys: JwksKeys,
     ring: Arc<Mutex<Ring>>,
+    /// Every token minted in the run, by any caller or source.
+    tokens: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl Trust {
@@ -194,7 +198,7 @@ impl Trust {
         let trust = Self {
             utc: Arc::new(AtomicU64::new(START_UTC)),
             clock: FixedUtc::new(UtcTime::from_unix_seconds(START_UTC)),
-            forgotten: Arc::new(AtomicBool::new(false)),
+            clock_epoch: Arc::new(AtomicU64::new(0)),
             ring: Arc::new(Mutex::new(Ring {
                 published: vec![0],
                 retired: Vec::new(),
@@ -202,6 +206,7 @@ impl Trust {
                 history: BTreeMap::from([(keys.generation(), vec![0])]),
             })),
             keys,
+            tokens: Arc::new(Mutex::new(Vec::new())),
         };
         state.publish(TRUST_KEY, trust.clone());
         Ok(trust)
@@ -241,7 +246,7 @@ impl Trust {
     /// Move UTC `seconds` later (servers see it unless it is forgotten).
     pub fn advance(&self, seconds: u64) {
         let now = self.utc.fetch_add(seconds, Ordering::Relaxed) + seconds;
-        if !self.forgotten.load(Ordering::Relaxed) {
+        if !self.is_forgotten() {
             self.clock.set(UtcTime::from_unix_seconds(now));
         }
     }
@@ -249,19 +254,32 @@ impl Trust {
     /// Servers lose the time (every expiring credential then fails
     /// closed).
     pub fn forget(&self) {
-        self.forgotten.store(true, Ordering::Relaxed);
+        if !self.is_forgotten() {
+            self.clock_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         self.clock.forget();
     }
 
     /// Whether servers currently know the time.
     #[must_use]
     pub fn is_forgotten(&self) -> bool {
-        self.forgotten.load(Ordering::Relaxed)
+        !self.clock_epoch().is_multiple_of(2)
+    }
+
+    /// The clock epoch now: it changes at each forget and each restore,
+    /// and it is odd while servers have no UTC. The change and the clock
+    /// change happen together (no await between them), so the epochs of
+    /// two moments tell whether the clock was absent between them.
+    #[must_use]
+    pub fn clock_epoch(&self) -> u64 {
+        self.clock_epoch.load(Ordering::Relaxed)
     }
 
     /// Servers see the script's UTC again.
     pub fn restore(&self) {
-        self.forgotten.store(false, Ordering::Relaxed);
+        if self.is_forgotten() {
+            self.clock_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         self.clock.set(UtcTime::from_unix_seconds(self.utc()));
     }
 
@@ -309,6 +327,21 @@ impl Trust {
     /// and `delay` (seconds) shape the time window where it applies.
     #[must_use]
     pub fn mint(&self, kind: Kind, subject: &str, ttl: u64, delay: u64) -> Minted {
+        let minted = self.mint_unrecorded(kind, subject, ttl, delay);
+        if let Some(token) = &minted.token {
+            lock(&self.tokens).push(token.clone());
+        }
+        minted
+    }
+
+    /// Every token minted so far in the run: each caller's, each one a
+    /// refreshing source made, each one the balancer's source made.
+    #[must_use]
+    pub fn tokens(&self) -> Vec<Vec<u8>> {
+        lock(&self.tokens).clone()
+    }
+
+    fn mint_unrecorded(&self, kind: Kind, subject: &str, ttl: u64, delay: u64) -> Minted {
         let now = self.utc();
         let (newest, retired) = {
             let ring = lock(&self.ring);

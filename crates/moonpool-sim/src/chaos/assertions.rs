@@ -202,23 +202,59 @@ pub fn on_sometimes_each(msg: &str, keys: &[(&str, i64)], quality: &[(&str, i64)
 // Shared-memory-based result collection
 // =============================================================================
 
+/// The name under which the report shows each slot, in slot order.
+///
+/// A slot keeps only the first 63 bytes of its message, but its identity is
+/// the hash of the full message. So two sites can show the same text. The
+/// name is that text, with `…` when the message was cut, and with
+/// ` #<hash>` (the low 32 bits of the hash in hex) when another slot shows
+/// the same text. Each slot gets a different name.
+#[must_use]
+pub fn slot_names(slots: &[moonpool_assertions::AssertionSlotSnapshot]) -> Vec<String> {
+    let shown: Vec<String> = slots
+        .iter()
+        .map(|slot| {
+            if moonpool_assertions::msg_hash(&slot.msg) == slot.msg_hash {
+                slot.msg.clone()
+            } else {
+                format!("{}…", slot.msg)
+            }
+        })
+        .collect();
+    let mut uses: BTreeMap<&str, usize> = BTreeMap::new();
+    for name in &shown {
+        *uses.entry(name.as_str()).or_default() += 1;
+    }
+    shown
+        .iter()
+        .zip(slots)
+        .map(|(name, slot)| {
+            if uses[name.as_str()] > 1 {
+                format!("{name} #{:08x}", slot.msg_hash & 0xffff_ffff)
+            } else {
+                name.clone()
+            }
+        })
+        .collect()
+}
+
 /// Get current assertion statistics for all tracked assertions.
 ///
 /// Reads from shared memory assertion slots. Returns a snapshot of assertion
-/// results for reporting and validation.
+/// results for reporting and validation, keyed by [`slot_names`].
 #[must_use]
 pub fn assertion_results() -> BTreeMap<String, AssertionStats> {
     let slots = moonpool_assertions::assertion_read_all();
     let mut results = BTreeMap::new();
 
-    for slot in &slots {
+    for (slot, name) in slots.iter().zip(slot_names(&slots)) {
         let total =
             usize::try_from(slot.pass_count.saturating_add(slot.fail_count)).unwrap_or(usize::MAX);
         if total == 0 {
             continue;
         }
         results.insert(
-            slot.msg.clone(),
+            name,
             AssertionStats {
                 total_checks: total,
                 successes: usize::try_from(slot.pass_count).unwrap_or(usize::MAX),
@@ -259,6 +295,7 @@ pub fn reset_assertion_results() {
 /// call site reached.
 fn table_integrity_violations(
     slots: &[moonpool_assertions::AssertionSlotSnapshot],
+    names: &[String],
     always_violations: &mut Vec<String>,
 ) {
     let dropped_allocations = moonpool_assertions::assertion_dropped_allocations();
@@ -279,10 +316,9 @@ fn table_integrity_violations(
     // (another kind, another watermark direction, or a colliding message or
     // key set) was not accounted: report it rather than evaluating one site
     // under the other's contract.
-    for slot in slots.iter().filter(|slot| slot.conflicted) {
+    for (_, name) in slots.iter().zip(names).filter(|(slot, _)| slot.conflicted) {
         always_violations.push(format!(
-            "assertion '{}' is shared by call sites of different kinds or by a colliding message",
-            slot.msg
+            "assertion '{name}' is shared by call sites of different kinds or by a colliding message"
         ));
     }
     for bucket in moonpool_assertions::each_bucket_read_all()
@@ -311,9 +347,10 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
     let mut coverage_violations = Vec::new();
     let slots = moonpool_assertions::assertion_read_all();
 
-    table_integrity_violations(&slots, &mut always_violations);
+    let names = slot_names(&slots);
+    table_integrity_violations(&slots, &names, &mut always_violations);
 
-    for slot in &slots {
+    for (slot, name) in slots.iter().zip(&names) {
         let total = slot.pass_count.saturating_add(slot.fail_count);
         let kind = moonpool_assertions::AssertKind::from_u8(slot.kind);
 
@@ -321,19 +358,18 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
             Some(moonpool_assertions::AssertKind::Always) => {
                 if slot.fail_count > 0 {
                     always_violations.push(format!(
-                        "assert_always!('{}') failed {} times out of {}",
-                        slot.msg, slot.fail_count, total
+                        "assert_always!('{name}') failed {} times out of {}",
+                        slot.fail_count, total
                     ));
                 }
                 if slot.must_hit != 0 && total == 0 {
-                    always_violations
-                        .push(format!("assert_always!('{}') was never reached", slot.msg));
+                    always_violations.push(format!("assert_always!('{name}') was never reached"));
                 }
             }
             Some(moonpool_assertions::AssertKind::AlwaysOrUnreachable) if slot.fail_count > 0 => {
                 always_violations.push(format!(
-                    "assert_always_or_unreachable!('{}') failed {} times out of {}",
-                    slot.msg, slot.fail_count, total
+                    "assert_always_or_unreachable!('{name}') failed {} times out of {}",
+                    slot.fail_count, total
                 ));
             }
             Some(
@@ -341,39 +377,34 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                 | moonpool_assertions::AssertKind::NumericSometimes,
             ) if total == 0 => {
                 // Only a declared site has a slot with no evaluation.
-                coverage_violations.push(format!("'{}' was never reached", slot.msg));
+                coverage_violations.push(format!("'{name}' was never reached"));
             }
             Some(moonpool_assertions::AssertKind::Sometimes)
                 if total > 0 && slot.pass_count == 0 =>
             {
                 coverage_violations.push(format!(
-                    "assert_sometimes!('{}') has 0% success rate ({} checks)",
-                    slot.msg, total
+                    "assert_sometimes!('{name}') has 0% success rate ({total} checks)"
                 ));
             }
             Some(moonpool_assertions::AssertKind::Reachable) if slot.pass_count == 0 => {
-                coverage_violations.push(format!(
-                    "assert_reachable!('{}') was never reached",
-                    slot.msg
-                ));
+                coverage_violations.push(format!("assert_reachable!('{name}') was never reached"));
             }
             Some(moonpool_assertions::AssertKind::Unreachable) if slot.pass_count > 0 => {
                 always_violations.push(format!(
-                    "assert_unreachable!('{}') was reached {} times",
-                    slot.msg, slot.pass_count
+                    "assert_unreachable!('{name}') was reached {} times",
+                    slot.pass_count
                 ));
             }
             Some(moonpool_assertions::AssertKind::NumericAlways) => {
                 if slot.fail_count > 0 {
                     always_violations.push(format!(
-                        "numeric assert_always ('{}') failed {} times out of {}",
-                        slot.msg, slot.fail_count, total
+                        "numeric assert_always ('{name}') failed {} times out of {}",
+                        slot.fail_count, total
                     ));
                 }
                 if slot.must_hit != 0 && total == 0 {
                     always_violations.push(format!(
-                        "numeric assert_always ('{}') was never reached",
-                        slot.msg
+                        "numeric assert_always ('{name}') was never reached"
                     ));
                 }
             }
@@ -381,16 +412,15 @@ pub fn validate_assertion_contracts() -> (Vec<String>, Vec<String>) {
                 if total > 0 && slot.pass_count == 0 =>
             {
                 coverage_violations.push(format!(
-                    "numeric assert_sometimes ('{}') has 0% success rate ({} checks)",
-                    slot.msg, total
+                    "numeric assert_sometimes ('{name}') has 0% success rate ({total} checks)"
                 ));
             }
             Some(moonpool_assertions::AssertKind::BooleanSometimesAll)
                 if slot.frontier_target > 0 && slot.frontier < slot.frontier_target =>
             {
                 coverage_violations.push(format!(
-                    "assert_sometimes_all!('{}') reached frontier {}/{}",
-                    slot.msg, slot.frontier, slot.frontier_target
+                    "assert_sometimes_all!('{name}') reached frontier {}/{}",
+                    slot.frontier, slot.frontier_target
                 ));
             }
             Some(

@@ -255,12 +255,12 @@ pub(crate) fn crash_loop(
     });
 }
 
-/// Flip one byte of one valid `Put` or `Clear` persist record of a random
-/// segment, durably, whose entry is intact: one fault on the slot. A record
-/// whose entry a crash damaged is skipped, because a rot there makes two
-/// faults on one slot, which the open rightly refuses. A void record, and a
-/// record after a void in its batch, are skipped too: one fault there
-/// refuses the open (#483). Returns whether a record was rotted.
+/// Flip one byte of one valid persist record of a random segment, durably,
+/// whose entry is intact: one fault on the slot. A record whose entry a
+/// crash damaged is skipped, because a rot there makes two faults on one
+/// slot, which the open rightly refuses unless a retire record names it.
+/// A record after a retired slot is not skipped: the retire record says
+/// where the entry walk goes on. Returns whether a record was rotted.
 async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
     let pick = rng.below(u64::MAX);
     run(sim, move |provider| async move {
@@ -293,18 +293,7 @@ async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
         let first = usize::try_from(pick >> 20).expect("fits") % slots;
         for slot in (first..slots).chain(0..first) {
             let record = &log[slot * 64..slot * 64 + 64];
-            if !matches!(record[0], 1 | 2) || !valid(record) {
-                continue;
-            }
-            // A void stops the entry walk, so a record after one in its
-            // batch cannot be rebuilt (#483).
-            let index = usize::from(u16::from_le_bytes([record[2], record[3]]));
-            let first = slot.saturating_sub(index);
-            let after_void = (first..slot).any(|earlier| {
-                let before = &log[earlier * 64..earlier * 64 + 64];
-                before[0] == 3 && valid(before)
-            });
-            if after_void {
+            if !matches!(record[0], 1 | 2 | 4) || !valid(record) {
                 continue;
             }
             if !entry_intact(&file, record).await {

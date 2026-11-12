@@ -38,7 +38,7 @@ A list of mistakes we have made ourselves when building simulations with Moonpoo
 
 ## A Workload That Never Returns
 
-**Symptom**: the log says `DEADLOCK detected on iteration .. with seed ..` after a long simulated run, and the campaign stops.
+**Symptom**: the log says `DEADLOCK detected on iteration .. with seed ..` after a long simulated run. The seed fails, and with an instance workload (`workload`) the campaign stops.
 
 **Cause**: `run()` loops forever, or waits on a detached task that re-arms a timer every tick. The stall guards request shutdown after `run_time_budget` (one simulated hour) and declare a deadlock a budget later. A zero-duration sleep loop trips the same-time guard after 100,000 events.
 

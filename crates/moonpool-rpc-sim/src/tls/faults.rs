@@ -48,6 +48,7 @@ fn rotate_server(pki: &Pki, issued: Issued) -> SimulationResult<()> {
                 .map_err(invalid)?;
         }
         inner.server = issued;
+        inner.generation += 1;
         Ok(())
     })
 }
@@ -66,7 +67,10 @@ fn rotate_member(pki: &Pki, issued: Issued) -> SimulationResult<()> {
 }
 
 fn set_roots_swapped(pki: &Pki, swapped: bool) -> SimulationResult<()> {
-    pki.with(|inner| inner.roots_swapped = swapped);
+    pki.with(|inner| {
+        inner.roots_swapped = swapped;
+        inner.generation += 1;
+    });
     let roots = pki.client_roots();
     pki.with(|inner| match &inner.server_tls {
         Some(tls) if tls.client_auth().verifies_clients() => {
