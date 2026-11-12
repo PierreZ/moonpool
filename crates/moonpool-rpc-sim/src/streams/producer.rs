@@ -183,7 +183,14 @@ pub(crate) async fn produce(
     };
     let id = request.id;
     let window = producer.window();
-    ledger.open(id, boot, window);
+    let first = ledger.open(id, boot, window);
+    // A stream request is a single attempt: nothing may deliver it to a
+    // producer twice (the ledger keeps the first run's record).
+    assert_always!(
+        first,
+        "a stream request reaches a producer at most once",
+        { "id" => id, "boot" => boot }
+    );
     let end = End::from_u32(request.end);
     let data = vec![0x5a; usize::try_from(request.item_bytes).unwrap_or(0)];
     let mut seq = 0u64;
