@@ -1007,10 +1007,11 @@ fn paper(durability: Option<Durability>) {
 }
 
 /// The crash loop under moonpool's full crash physics, for one durability
-/// setting (`None` draws it afresh every round).
-fn harsh(durability: Option<Durability>) {
+/// setting (`None` draws it afresh every round), over `count` seeds unless
+/// `JOURNAL_CRASH_SEEDS` sets another count.
+fn harsh(durability: Option<Durability>, count: u64) {
     let mut tally = support::Tally::default();
-    for seed in seeds(120) {
+    for seed in seeds(count) {
         crash_loop(seed, CrashModel::Harsh, durability, &mut tally);
     }
     eprintln!("harsh {durability:?}: {tally:?}");
@@ -1044,17 +1045,21 @@ fn mixed_under_the_papers_fault_model_nothing_acknowledged_is_lost_or_damaged() 
 
 #[test]
 fn ordered_under_moonpools_full_physics_nothing_acknowledged_is_lost_or_damaged() {
-    harsh(Some(Durability::Ordered));
+    harsh(Some(Durability::Ordered), 120);
 }
 
 #[test]
 fn batched_under_moonpools_full_physics_nothing_acknowledged_is_lost_or_damaged() {
-    harsh(Some(Durability::Batched));
+    // A torn record under Batched needs a crash to damage a record and its
+    // entry, both written since the last sync: about one seed in 60 finds
+    // one. 120 seeds found from 0 to 7, so a change anywhere in the loop
+    // could leave none. 480 seeds find about 8.
+    harsh(Some(Durability::Batched), 480);
 }
 
 #[test]
 fn mixed_under_moonpools_full_physics_nothing_acknowledged_is_lost_or_damaged() {
-    harsh(None);
+    harsh(None, 120);
 }
 
 #[test]
