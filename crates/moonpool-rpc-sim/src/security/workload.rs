@@ -105,12 +105,7 @@ impl CredentialSource for Refresher {
         let minted = self.trust.mint(Kind::Refreshing, &self.subject, 120, 0);
         // Recorded before it can leave: the oracle judges each receipt
         // against the tokens actually minted, at their mint.
-        self.ledger.mint(
-            self.id,
-            minted.clone(),
-            self.trust.utc(),
-            self.trust.generation(),
-        );
+        self.ledger.mint(self.id, minted.clone(), &self.trust);
         minted.token.map(Credential::bearer)
     }
 }

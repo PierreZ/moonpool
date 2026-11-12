@@ -14,7 +14,7 @@
 //! here.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::lock;
@@ -173,7 +173,9 @@ pub struct Trust {
     utc: Arc<AtomicU64>,
     /// What servers read: the script's UTC, or unknown while forgotten.
     clock: FixedUtc,
-    forgotten: Arc<AtomicBool>,
+    /// The clock epoch: incremented at each forget and each restore, so
+    /// the servers have no UTC exactly when it is odd.
+    clock_epoch: Arc<AtomicU64>,
     keys: JwksKeys,
     ring: Arc<Mutex<Ring>>,
 }
@@ -194,7 +196,7 @@ impl Trust {
         let trust = Self {
             utc: Arc::new(AtomicU64::new(START_UTC)),
             clock: FixedUtc::new(UtcTime::from_unix_seconds(START_UTC)),
-            forgotten: Arc::new(AtomicBool::new(false)),
+            clock_epoch: Arc::new(AtomicU64::new(0)),
             ring: Arc::new(Mutex::new(Ring {
                 published: vec![0],
                 retired: Vec::new(),
@@ -241,7 +243,7 @@ impl Trust {
     /// Move UTC `seconds` later (servers see it unless it is forgotten).
     pub fn advance(&self, seconds: u64) {
         let now = self.utc.fetch_add(seconds, Ordering::Relaxed) + seconds;
-        if !self.forgotten.load(Ordering::Relaxed) {
+        if !self.is_forgotten() {
             self.clock.set(UtcTime::from_unix_seconds(now));
         }
     }
@@ -249,19 +251,32 @@ impl Trust {
     /// Servers lose the time (every expiring credential then fails
     /// closed).
     pub fn forget(&self) {
-        self.forgotten.store(true, Ordering::Relaxed);
+        if !self.is_forgotten() {
+            self.clock_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         self.clock.forget();
     }
 
     /// Whether servers currently know the time.
     #[must_use]
     pub fn is_forgotten(&self) -> bool {
-        self.forgotten.load(Ordering::Relaxed)
+        !self.clock_epoch().is_multiple_of(2)
+    }
+
+    /// The clock epoch now: it changes at each forget and each restore,
+    /// and it is odd while servers have no UTC. The change and the clock
+    /// change happen together (no await between them), so the epochs of
+    /// two moments tell whether the clock was absent between them.
+    #[must_use]
+    pub fn clock_epoch(&self) -> u64 {
+        self.clock_epoch.load(Ordering::Relaxed)
     }
 
     /// Servers see the script's UTC again.
     pub fn restore(&self) {
-        self.forgotten.store(false, Ordering::Relaxed);
+        if self.is_forgotten() {
+            self.clock_epoch.fetch_add(1, Ordering::Relaxed);
+        }
         self.clock.set(UtcTime::from_unix_seconds(self.utc()));
     }
 

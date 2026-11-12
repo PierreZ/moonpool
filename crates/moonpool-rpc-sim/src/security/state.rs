@@ -13,6 +13,13 @@
 //! (forged, unknown key, wrong audience or issuer, a symmetric algorithm,
 //! garbage) is never acceptable; an anonymous request reaches only public
 //! endpoints; a version 1 session carries no credential at all.
+//!
+//! **Fail closed with no UTC.** The ledger also stamps the clock epoch of
+//! [`Trust`] (odd while the servers have no UTC) when a request is sent,
+//! when a handler receives it and when its caller sees the outcome. A
+//! signed token can run only if the servers had the time at some moment in
+//! that interval, and a `ClockUnavailable` refusal is honest only if they
+//! lacked it at some moment in that interval.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -121,6 +128,8 @@ pub struct Issued {
     pub utc_sent: u64,
     /// The key-set generation when it was sent.
     pub generation_sent: u64,
+    /// The [`Trust::clock_epoch`] when it was sent.
+    pub clock_sent: u64,
 }
 
 /// One handler receipt.
@@ -134,6 +143,61 @@ pub struct Receipt {
     pub utc: u64,
     /// The key-set generation at receipt.
     pub generation: u64,
+    /// The [`Trust::clock_epoch`] at receipt.
+    pub clock: u64,
+}
+
+impl Receipt {
+    /// A receipt by `target` now, of a request whose session proved
+    /// `subject`.
+    #[must_use]
+    pub fn now(target: Target, subject: Option<String>, trust: &Trust) -> Self {
+        Self {
+            target,
+            subject,
+            utc: trust.utc(),
+            generation: trust.generation(),
+            clock: trust.clock_epoch(),
+        }
+    }
+}
+
+/// When a credential was minted or a request was seen: the script's UTC,
+/// the key-set generation and the clock epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Moment {
+    /// The script's UTC.
+    pub utc: u64,
+    /// The key-set generation.
+    pub generation: u64,
+    /// The [`Trust::clock_epoch`].
+    pub clock: u64,
+}
+
+impl Moment {
+    /// The moment now.
+    #[must_use]
+    pub fn now(trust: &Trust) -> Self {
+        Self {
+            utc: trust.utc(),
+            generation: trust.generation(),
+            clock: trust.clock_epoch(),
+        }
+    }
+}
+
+/// Whether the servers had the UTC at some moment between the clock epochs
+/// `from` and `to` (`to` not earlier).
+#[must_use]
+pub fn clock_known_between(from: u64, to: u64) -> bool {
+    from.is_multiple_of(2) || to > from
+}
+
+/// Whether the servers lacked the UTC at some moment between the clock
+/// epochs `from` and `to` (`to` not earlier).
+#[must_use]
+pub fn clock_absent_between(from: u64, to: u64) -> bool {
+    !from.is_multiple_of(2) || to > from
 }
 
 #[derive(Default)]
@@ -144,8 +208,8 @@ struct Inner {
     receipts: BTreeMap<u64, Vec<Receipt>>,
     outcomes: BTreeMap<u64, Class>,
     /// Every credential a refreshing source minted for a request, with the
-    /// UTC and key-set generation of the mint.
-    mints: BTreeMap<u64, Vec<(Minted, u64, u64)>>,
+    /// moment of the mint.
+    mints: BTreeMap<u64, Vec<(Minted, Moment)>>,
 }
 
 /// The run's ledger. Clones share it.
@@ -211,13 +275,13 @@ impl Ledger {
     }
 
     /// Record a credential a refreshing source minted for request `id`, at
-    /// the script's current UTC and key-set generation.
-    pub fn mint(&self, id: u64, minted: Minted, utc: u64, generation: u64) {
+    /// the current moment of `trust`.
+    pub fn mint(&self, id: u64, minted: Minted, trust: &Trust) {
         lock(&self.inner)
             .mints
             .entry(id)
             .or_default()
-            .push((minted, utc, generation));
+            .push((minted, Moment::now(trust)));
     }
 
     /// The credentials request `id` may have carried: its own, or for a
@@ -258,30 +322,38 @@ impl Ledger {
 
 /// The credentials a request may have carried: for a refreshing source,
 /// each minted one as if issued at its mint; otherwise the request's own.
-fn candidates(issued: &Issued, mints: Option<&Vec<(Minted, u64, u64)>>) -> Vec<Issued> {
+fn candidates(issued: &Issued, mints: Option<&Vec<(Minted, Moment)>>) -> Vec<Issued> {
     if issued.minted.kind != Kind::Refreshing {
         return vec![issued.clone()];
     }
     mints
         .into_iter()
         .flatten()
-        .map(|(minted, utc, generation)| Issued {
+        .map(|(minted, moment)| Issued {
             minted: minted.clone(),
-            utc_sent: *utc,
-            generation_sent: *generation,
+            utc_sent: moment.utc,
+            generation_sent: moment.generation,
+            clock_sent: moment.clock,
             ..issued.clone()
         })
         .collect()
 }
 
 /// Whether the credential could have been accepted at some point between
-/// its sending and `utc`/`generation` (a receipt, or the caller seeing the
-/// outcome).
+/// its sending and `seen` (a receipt, or the caller seeing the outcome).
+/// A server with no UTC fails closed: the servers must have had the time
+/// at some moment in between.
 #[must_use]
-pub fn acceptable(issued: &Issued, utc: u64, generation: u64, trust: &Trust) -> bool {
+pub fn acceptable(issued: &Issued, seen: Moment, trust: &Trust) -> bool {
+    let Moment {
+        utc,
+        generation,
+        clock,
+    } = seen;
     let minted = &issued.minted;
     match minted.kind {
         kind if kind.is_signed_by_the_issuer() => {
+            clock_known_between(issued.clock_sent, clock) &&
             // Some instant in [utc_sent, utc] lies in [nbf, exp).
             minted.not_before <= utc
                 && minted.expires > issued.utc_sent
@@ -300,8 +372,15 @@ fn may_run(issued: &Issued, receipt: &Receipt, trust: &Trust) -> bool {
         return false;
     }
     let verified = || {
-        acceptable(issued, receipt.utc, receipt.generation, trust)
-            && receipt.subject.as_deref() == Some(issued.subject.as_str())
+        acceptable(
+            issued,
+            Moment {
+                utc: receipt.utc,
+                generation: receipt.generation,
+                clock: receipt.clock,
+            },
+            trust,
+        ) && receipt.subject.as_deref() == Some(issued.subject.as_str())
     };
     match issued.target {
         // A version 1 session carries no credential: anonymous, always.
@@ -316,15 +395,19 @@ fn may_run(issued: &Issued, receipt: &Receipt, trust: &Trust) -> bool {
 }
 
 /// Whether `reason` is what the server may say about this credential at
-/// some point up to `utc`/`generation` (when the caller saw it).
+/// some point up to `seen` (when the caller saw it).
 #[must_use]
 pub fn consistent_denial(
     issued: &Issued,
     reason: CredentialError,
-    utc: u64,
-    generation: u64,
+    seen: Moment,
     trust: &Trust,
 ) -> bool {
+    let Moment {
+        utc,
+        generation,
+        clock,
+    } = seen;
     let minted = &issued.minted;
     let private = matches!(issued.target, Target::Private | Target::Scan | Target::Note);
     match (minted.kind, reason) {
@@ -335,9 +418,11 @@ pub fn consistent_denial(
         | (Kind::WrongIssuer, CredentialError::WrongIssuer)
         | (Kind::Symmetric, CredentialError::UnsupportedAlgorithm)
         | (Kind::Garbage, CredentialError::Malformed) => true,
-        // Only while servers had lost the time (the ledger does not track
-        // when), and only once the signature verified.
-        (kind, CredentialError::ClockUnavailable) => kind.is_signed_by_the_issuer(),
+        // Only if servers lacked the time at some moment between the
+        // sending and the outcome, and only once the signature verified.
+        (kind, CredentialError::ClockUnavailable) => {
+            kind.is_signed_by_the_issuer() && clock_absent_between(issued.clock_sent, clock)
+        }
         (kind, CredentialError::Expired) if kind.is_signed_by_the_issuer() => minted.expires <= utc,
         (kind, CredentialError::NotYetValid) if kind.is_signed_by_the_issuer() => {
             minted.not_before > issued.utc_sent
@@ -357,7 +442,9 @@ pub fn consistent_denial(
 mod tests {
     use moonpool_sim::StateHandle;
 
-    use super::{Issued, Ledger, Receipt, Route, Target};
+    use moonpool_rpc::security::CredentialError;
+
+    use super::{Issued, Ledger, Moment, Receipt, Route, Target, consistent_denial};
     use crate::security::trust::{Kind, START_UTC, Trust};
 
     /// Regression: a receipt of a refreshing source's request was accepted
@@ -376,6 +463,7 @@ mod tests {
                 route: Route::Remote,
                 utc_sent: trust.utc(),
                 generation_sent: trust.generation(),
+                clock_sent: trust.clock_epoch(),
             })
         };
         let receipt = |utc| Receipt {
@@ -383,6 +471,7 @@ mod tests {
             subject: Some("refresher".into()),
             utc,
             generation: trust.generation(),
+            clock: trust.clock_epoch(),
         };
         let unminted = issue();
         assert!(!ledger.receive(unminted, receipt(START_UTC), &trust));
@@ -390,8 +479,7 @@ mod tests {
         ledger.mint(
             minted,
             trust.mint(Kind::Refreshing, "refresher", 120, 0),
-            trust.utc(),
-            trust.generation(),
+            &trust,
         );
         assert!(ledger.receive(minted, receipt(START_UTC + 1), &trust));
         trust.advance(10_000);
@@ -401,7 +489,68 @@ mod tests {
         let mut old = trust.mint(Kind::Refreshing, "refresher", 120, 0);
         old.not_before = START_UTC;
         old.expires = START_UTC + 60;
-        ledger.mint(lapsed, old, trust.utc(), trust.generation());
+        ledger.mint(lapsed, old, &trust);
         assert!(!ledger.receive(lapsed, receipt(START_UTC + 20_000), &trust));
+    }
+
+    /// Regression (#445): the oracle did not know when the servers had no
+    /// UTC. A signed token that ran while the clock was absent the whole
+    /// time passed, and a `ClockUnavailable` refusal passed at any time.
+    #[test]
+    fn a_signed_token_fails_closed_while_the_servers_have_no_utc() {
+        let state = StateHandle::new();
+        let trust = Trust::of(&state).expect("trust");
+        let ledger = Ledger::of(&state);
+        let issue = || {
+            ledger.issue(Issued {
+                minted: trust.mint(Kind::Valid, "member", 120, 0),
+                subject: "member".into(),
+                target: Target::Private,
+                route: Route::Remote,
+                utc_sent: trust.utc(),
+                generation_sent: trust.generation(),
+                clock_sent: trust.clock_epoch(),
+            })
+        };
+        let receipt = || Receipt::now(Target::Private, Some("member".into()), &trust);
+        let refused = |id| {
+            let issued = ledger.issued(id).expect("issued");
+            consistent_denial(
+                &issued,
+                CredentialError::ClockUnavailable,
+                Moment::now(&trust),
+                &trust,
+            )
+        };
+
+        // The clock is known the whole time: it may run, and a refusal
+        // for a missing clock is a lie.
+        let known = issue();
+        assert!(!refused(known));
+        assert!(ledger.receive(known, receipt(), &trust));
+
+        // Sent while known, the clock lost before the receipt: it may have
+        // been verified in time, and it may also have been refused.
+        let lost_meanwhile = issue();
+        trust.forget();
+        assert!(refused(lost_meanwhile));
+        assert!(ledger.receive(lost_meanwhile, receipt(), &trust));
+
+        // Sent and received while the clock is absent: it never runs.
+        let absent = issue();
+        assert!(refused(absent));
+        assert!(!ledger.receive(absent, receipt(), &trust));
+
+        // A forget while already forgotten changes nothing.
+        let still_absent = issue();
+        trust.forget();
+        assert!(!ledger.receive(still_absent, receipt(), &trust));
+
+        // Restored meanwhile: it may have been verified after the restore.
+        let restored_meanwhile = issue();
+        trust.restore();
+        assert!(ledger.receive(restored_meanwhile, receipt(), &trust));
+        let after = issue();
+        assert!(!refused(after));
     }
 }
