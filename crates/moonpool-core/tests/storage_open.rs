@@ -417,6 +417,75 @@ async fn a_buffered_file_keeps_stream_io() {
     assert_eq!(&buf, b"streamed");
 }
 
+/// A stream write is visible to `size` and `read_at` when it returns, with
+/// no flush, as in the simulation ("one file state"). The defect this pins:
+/// the stream write returned when Tokio had copied the bytes, before the OS
+/// write, so `size` read a stale length on a multi-thread runtime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stream_write_is_visible_without_a_flush() {
+    use futures::io::AsyncWriteExt;
+
+    let dir = TempDir::new().expect("temp dir");
+    let provider = TokioStorageProvider::new();
+    for round in 0..200 {
+        let path = &scratch_file(&dir, &format!("visible-{round}.db"));
+        let mut file = provider
+            .open(path, OpenOptions::create_write().read(true))
+            .await
+            .expect("open failed");
+        file.write_all(&[7u8; 4096]).await.expect("write failed");
+        assert_eq!(
+            file.size().await.expect("size failed"),
+            4096,
+            "round {round}"
+        );
+        let mut buf = [0u8; 4096];
+        assert_eq!(file.read_at(0, &mut buf).await.expect("read failed"), 4096);
+        assert!(buf.iter().all(|&byte| byte == 7), "round {round}");
+    }
+}
+
+/// A stream write whose future is dropped still lands, and the next write
+/// writes its own bytes and reports its own count. The same future polled
+/// again writes its bytes one time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dropped_stream_write_does_not_answer_the_next_write() {
+    use futures::io::AsyncWriteExt;
+
+    let dir = TempDir::new().expect("temp dir");
+    let provider = TokioStorageProvider::new();
+    for round in 0..50 {
+        let path = &scratch_file(&dir, &format!("dropped-{round}.db"));
+        let mut file = provider
+            .open(path, OpenOptions::create_write().read(true))
+            .await
+            .expect("open failed");
+        {
+            let dropped = file.write(&[b'A'; 8]);
+            futures::pin_mut!(dropped);
+            let _ = futures::poll!(dropped.as_mut());
+        }
+        let written = file.write(b"BB").await.expect("write failed");
+        assert!(written <= 2, "a write reported {written} bytes of 2");
+        file.write_all(&b"BB"[written..])
+            .await
+            .expect("write failed");
+        {
+            let resumed = file.write(b"CCC");
+            futures::pin_mut!(resumed);
+            let written = match futures::poll!(resumed.as_mut()) {
+                std::task::Poll::Ready(result) => result,
+                std::task::Poll::Pending => resumed.await,
+            };
+            assert_eq!(written.expect("write failed"), 3);
+        }
+        file.flush().await.expect("flush failed");
+        let mut buf = [0u8; 16];
+        let read = file.read_at(0, &mut buf).await.expect("read failed");
+        assert_eq!(&buf[..read], b"AAAAAAAABBCCC", "round {round}");
+    }
+}
+
 /// `write_at` is positioned even on a file opened for appending.
 ///
 /// The two halves of such a file mean different things: a stream write goes to
