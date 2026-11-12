@@ -24,8 +24,10 @@
 //! ```
 //!
 //! The slot is cleared by the controller before each fork and written by the
-//! worker just before `_exit`, so a crashed worker leaves an empty journal
-//! (its recipe is still recorded as a crash reproducer by the controller).
+//! worker just before `_exit`. A worker catches a panic of its run and still
+//! writes its journal; a worker that dies (abort, signal) leaves an empty
+//! journal. In both cases the controller records the recipe of the job as a
+//! crash reproducer.
 //! Sanitizer-coverage counters travel through the per-slot sancov pool (see
 //! [`crate::sancov`]).
 //!
@@ -71,6 +73,20 @@ pub(crate) fn enter_worker() {
     IS_WORKER.with(|w| w.set(true));
 }
 
+/// Exit code of a worker whose run completed and passed.
+#[cfg(unix)]
+pub(crate) const EXIT_OK: libc::c_int = 0;
+
+/// Exit code of a worker whose run completed and reported a failure.
+#[cfg(unix)]
+pub(crate) const EXIT_FAILED: libc::c_int = 42;
+
+/// Exit code of a worker whose run panicked. The controller classifies it as
+/// [`WorkerExit::Crashed`], like any other code that is not [`EXIT_OK`] or
+/// [`EXIT_FAILED`].
+#[cfg(unix)]
+pub(crate) const EXIT_PANICKED: libc::c_int = 43;
+
 /// How a finished worker run ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerExit {
@@ -78,7 +94,8 @@ pub(crate) enum WorkerExit {
     Ok,
     /// Run completed and reported a simulation failure (exit code 42).
     Failed,
-    /// Worker died without reporting (panic, abort, signal).
+    /// Worker panicked ([`EXIT_PANICKED`]) or died without reporting
+    /// (abort, signal, wall-clock ceiling).
     Crashed,
 }
 
@@ -233,8 +250,8 @@ pub(crate) fn kill_worker(pid: libc::pid_t) -> Option<libc::c_int> {
 pub(crate) fn classify_exit(status: libc::c_int) -> WorkerExit {
     if libc::WIFEXITED(status) {
         match libc::WEXITSTATUS(status) {
-            0 => WorkerExit::Ok,
-            42 => WorkerExit::Failed,
+            EXIT_OK => WorkerExit::Ok,
+            EXIT_FAILED => WorkerExit::Failed,
             _ => WorkerExit::Crashed,
         }
     } else {

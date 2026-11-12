@@ -123,24 +123,42 @@ pub(crate) trait Entry: Sized {
 pub(crate) enum Claim<E> {
     /// A published entry with the requested identity.
     Entry(*mut E),
-    /// Another claimant claimed the identity and never finished initializing
-    /// it within the bounded wait: it most likely died mid-initialization.
+    /// Another claimant claimed an entry for this identity (or for an
+    /// identity it did not store yet) and did not publish it within the
+    /// bounded wait: it most likely died mid-initialization.
     Busy,
     /// The table is full.
     Full,
 }
 
-/// How many times [`claim`] re-reads the publication byte of an entry that
-/// another claimant is still initializing before it gives up on it.
-///
-/// An initializer holds an entry for a handful of plain stores, so a live one
-/// publishes long before this runs out. Only an initializer that died between
-/// claiming and publishing (a forked worker killed mid-store) exhausts it, and
-/// the caller then counts the observation as dropped rather than hanging.
-const BUSY_SPINS: u32 = 1 << 12;
+/// How many times [`await_published`] re-reads the publication byte with a
+/// plain spin before it starts to yield and sleep.
+const BUSY_SPINS: u32 = 1 << 6;
 
-/// Wait, bounded by [`BUSY_SPINS`], for `published` to leave the
+/// How long [`await_published`] waits for another claimant to publish an
+/// entry before it gives up on it.
+///
+/// An initializer holds an entry for a handful of plain stores. But the
+/// scheduler can stop it between two stores, and the explorer shares the
+/// table between forked processes, so a wait counted in spins is too short:
+/// a context switch is longer than a few thousand spins. Only an initializer
+/// that died between claiming and publishing (a forked worker killed
+/// mid-store) exhausts this wait. The caller then counts the observation as
+/// dropped rather than hanging.
+#[cfg(not(target_family = "wasm"))]
+const PUBLISH_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Longest sleep between two reads in [`await_published`].
+#[cfg(not(target_family = "wasm"))]
+const MAX_PUBLISH_SLEEP: std::time::Duration = std::time::Duration::from_millis(1);
+
+/// Wait, bounded by [`PUBLISH_WAIT`], for `published` to leave the
 /// initializing state, and return the state it settled in.
+///
+/// The wait spins first, then yields, then sleeps with an exponential
+/// backoff. On wasm there is one thread and no clock, so the wait only
+/// spins: an entry can stay in the initializing state there only when its
+/// initializer is gone.
 fn await_published(published: &AtomicU8) -> u8 {
     for _ in 0..BUSY_SPINS {
         let state = published.load(Ordering::Acquire);
@@ -148,6 +166,25 @@ fn await_published(published: &AtomicU8) -> u8 {
             return state;
         }
         std::hint::spin_loop();
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let start = std::time::Instant::now();
+        let mut sleep = std::time::Duration::from_micros(1);
+        let mut yields = 0_u32;
+        while start.elapsed() < PUBLISH_WAIT {
+            let state = published.load(Ordering::Acquire);
+            if state != INITIALIZING {
+                return state;
+            }
+            if yields < BUSY_SPINS {
+                yields += 1;
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(sleep);
+                sleep = (sleep * 2).min(MAX_PUBLISH_SLEEP);
+            }
+        }
     }
     published.load(Ordering::Acquire)
 }
@@ -173,8 +210,11 @@ pub(crate) fn home_index<E: Entry>(id: E::Id) -> usize {
 /// unused entry with a compare-and-swap of its publication byte (unused to
 /// initializing), stores the identity and the metadata, then publishes it
 /// with a release-store. A reader that meets an entry still being
-/// initialized waits for it, bounded by [`BUSY_SPINS`], before it reads
-/// the identity. The table stays fixed-size and position-independent, so it
+/// initialized waits for it, bounded by [`PUBLISH_WAIT`], before it reads
+/// the identity. If the entry is still not published after the wait, and it
+/// holds this identity or no identity yet, the result is [`Claim::Busy`]:
+/// the probe never goes past an entry that can hold this identity, so one
+/// identity never gets two entries. The table stays fixed-size and position-independent, so it
 /// works in `MAP_SHARED` memory across forked processes.
 ///
 /// # Safety
@@ -202,6 +242,8 @@ pub(crate) unsafe fn claim<E: Entry>(
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
+                        #[cfg(test)]
+                        tests::pause_after_claim();
                         E::store_id(entry, id);
                         if let Some(init) = init.take() {
                             init(entry);
@@ -222,9 +264,18 @@ pub(crate) unsafe fn claim<E: Entry>(
             match state {
                 READY if E::load_id(entry) == id => return Claim::Entry(entry),
                 // The initializer did not publish within the bounded wait: it
-                // most likely died mid-initialization. Its identity decides
-                // whether the observation is lost or the probe goes on.
-                INITIALIZING if E::load_id(entry) == id => return Claim::Busy,
+                // most likely died mid-initialization. When the entry holds
+                // this identity, or no identity yet (the initializer stopped
+                // between its claim and its first store), the observation is
+                // lost and counted. To go on would claim a second entry for
+                // an identity that this entry can still hold, and one site
+                // would then have two entries.
+                INITIALIZING => {
+                    let held = E::load_id(entry);
+                    if held == id || held == E::Id::default() {
+                        return Claim::Busy;
+                    }
+                }
                 _ => {}
             }
         }
@@ -265,7 +316,124 @@ pub(crate) fn msg_str(buf: &[u8]) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{msg_buf, msg_str};
+    use std::cell::Cell;
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        Claim, Entry, INITIALIZING, UNUSED, atomic, base, claim, dropped_allocations, header_word,
+        home_index, msg_buf, msg_str, published_entries,
+    };
+    use crate::slots::{ASSERTION_TABLE_MEM_SIZE, AssertionSlot};
+
+    thread_local! {
+        /// Delay of this thread between its claim of an entry and the store
+        /// of the identity.
+        static PAUSE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    /// Test hook in [`claim`]: stop the calling thread in the window between
+    /// the claim of an entry and the store of its identity.
+    pub(super) fn pause_after_claim() {
+        let pause = PAUSE.get();
+        if !pause.is_zero() {
+            std::thread::sleep(pause);
+        }
+    }
+
+    /// How long the slow initializer stops. It is much longer than a spin
+    /// wait and shorter than [`super::PUBLISH_WAIT`].
+    const SLOW_INIT: Duration = Duration::from_millis(30);
+
+    const SITE: u64 = 0x5eed_0000_0000_0461;
+
+    /// A zeroed slot-table region and its address.
+    fn slot_region() -> (Vec<u64>, usize) {
+        let mut memory = vec![0_u64; ASSERTION_TABLE_MEM_SIZE.div_ceil(8)];
+        let address = memory.as_mut_ptr() as usize;
+        (memory, address)
+    }
+
+    /// Claim `SITE` in the region at `address` and return the entry address,
+    /// or `None` when the claim is busy or the table is full.
+    fn claim_site(address: usize, init: impl FnOnce(*mut AssertionSlot)) -> Option<usize> {
+        // Safety: `address` is a live, zeroed slot-table region.
+        match unsafe { claim::<AssertionSlot>(address as *mut u8, SITE, init) } {
+            Claim::Entry(entry) => Some(entry as usize),
+            Claim::Busy | Claim::Full => None,
+        }
+    }
+
+    /// Wait until the home entry of `SITE` is claimed and `ready` is true
+    /// for it.
+    fn wait_for_claim(address: usize, ready: impl Fn(*mut AssertionSlot) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Safety: `address` is a live slot-table region; the index is in
+        // bounds.
+        let entry = unsafe {
+            base::<AssertionSlot>(address as *mut u8).add(home_index::<AssertionSlot>(SITE))
+        };
+        loop {
+            // Safety: `entry` points into the live region.
+            let state = unsafe { atomic(AssertionSlot::published(entry)).load(Ordering::Acquire) };
+            if state != UNUSED && ready(entry) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the first claim never started");
+            std::thread::yield_now();
+        }
+    }
+
+    /// The region at `address` has exactly one published entry, it is the
+    /// entry both claimants got, and nothing was dropped.
+    fn assert_one_entry(address: usize, first: Option<usize>, second: Option<usize>) {
+        assert!(first.is_some(), "the first claimant got no entry");
+        assert_eq!(first, second, "the claimants did not get the same entry");
+        let region = address as *mut u8;
+        // Safety: `address` is a live slot-table region.
+        unsafe {
+            assert_eq!(published_entries::<AssertionSlot>(region).count(), 1);
+            assert_eq!(header_word(region, 0).load(Ordering::Acquire), 1);
+            assert_eq!(dropped_allocations(region), 0);
+        }
+    }
+
+    /// A claimant stopped between its claim and the store of the identity
+    /// must not make a second claimant take a second entry for the same
+    /// site (#461 (slow slot initializer treated as dead)).
+    #[test]
+    fn a_claimant_stopped_before_its_id_store_keeps_one_entry() {
+        let (_memory, address) = slot_region();
+        let (first, second) = std::thread::scope(|scope| {
+            let slow = scope.spawn(move || {
+                PAUSE.set(SLOW_INIT);
+                claim_site(address, |_| {})
+            });
+            wait_for_claim(address, |_| true);
+            let second = claim_site(address, |_| {});
+            (slow.join().expect("slow claimant"), second)
+        });
+        assert_one_entry(address, first, second);
+    }
+
+    /// A slow initializer that stored the identity must not make a second
+    /// claimant drop its evaluation (#461).
+    #[test]
+    fn a_slow_initializer_with_its_id_stored_is_waited_for() {
+        let (_memory, address) = slot_region();
+        let (first, second) = std::thread::scope(|scope| {
+            let slow = scope.spawn(move || claim_site(address, |_| std::thread::sleep(SLOW_INIT)));
+            // Safety: the entry points into the live region.
+            wait_for_claim(address, |entry| unsafe {
+                AssertionSlot::load_id(entry) == SITE
+                    && atomic(AssertionSlot::published(entry)).load(Ordering::Acquire)
+                        == INITIALIZING
+            });
+            let second = claim_site(address, |_| {});
+            (slow.join().expect("slow claimant"), second)
+        });
+        assert_one_entry(address, first, second);
+    }
 
     #[test]
     fn msg_buf_truncates_on_a_char_boundary() {

@@ -1,0 +1,70 @@
+---
+// Assertions that must fire (#418 (technique pages, part 2)): the checks of
+// the register turn green seed after seed; one stays red. The recorded
+// result is src/runs/assertions.json, written by the engine's coverage run;
+// public/assertions.js plays it and runs it again in the browser.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { constList, excerpt, lineWith, repoFile } from "../../../lib/source.mjs";
+import coverage from "../../../runs/assertions.json";
+
+const register = repoFile("crates/moonpool-wasm-demo/src/register.rs");
+const checks = constList(register, "CHECKS");
+const damaged = excerpt(register, "let Some(request) = Frame::decode(&bytes) else {", "continue;", 1);
+const always = lineWith(register, "assert_always!(");
+const sometimes = lineWith(register, "assert_sometimes!(oldest < seen");
+---
+<Technique
+  title="Assertions that must fire"
+  description="A fault that never fires tests nothing. The coverage fills seed after seed, and a hole fails the run."
+  guide={[
+    "part3-building/12-assertions.md",
+    "part3-building/14-always-sometimes.md",
+    "part3-building/13-assertion-concepts.md",
+    "appendix/01-assertion-reference.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>A test that passes a thousand seeds says nothing about a path that no seed took. The retry after a lost
+    reply, the read that sees two versions, the check of a damaged frame: if no run reached them, they are
+    not tested. A green run cannot tell you this.</p>
+
+  <h2>The technique</h2>
+  <p>Two kinds of assertions. <code>assert_always!</code> is an invariant: it must hold each time, and one
+    failure fails the seed. <code>assert_sometimes!</code> and <code>assert_reachable!</code> are coverage:
+    each one must fire in at least one seed of the run. The runner counts them across the seeds.</p>
+  <p>With <code>UntilCoverageStable</code>, the default, the runner runs seeds until each coverage assertion
+    has fired and the coverage stops growing (by default, 10 seeds in a row with nothing new, and at most
+    1000 seeds). An assertion that never fired is in the report (<code>coverage_violations</code>), and the
+    run fails. A run that hits the cap before the coverage is stable fails too.</p>
+
+  <h2>The live run</h2>
+  <p>The register has {checks.length} coverage checks. This run removes the <code>bit_flip</code> network
+    family, so no frame is ever damaged: one check can never fire. The checks turn green at their first
+    hit; the last one stays red, and the run stops at its cap of {coverage.config.max_seeds} seeds and
+    fails. Put <code>bit_flip</code> back and run again: in this register, a flipped bit is rare, so the
+    check fires late.</p>
+  <div class="breakout">
+    <div class="run">
+      <div class="run-head label"><span>the coverage checks of the register</span></div>
+      <div class="bar" aria-hidden="true"><div class="bar-fill" id="check-bar"></div></div>
+      <p class="bar-text label" id="check-bar-text"></p>
+      <div class="table-wrap"><table class="run-table" id="check-table"></table></div>
+      <form class="switches" id="check-form">
+        <label><input type="checkbox" id="check-flip" /> bit_flip on</label>
+        <button class="btn small" type="submit">Run the seeds</button>
+      </form>
+      <p class="run-out" id="check-out" aria-live="polite"></p>
+    </div>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="coverage" set:html={JSON.stringify(coverage).replace(/</g, "\\u003c")} />
+
+  <h2>The code</h2>
+  <p>The check that no seed reaches here. Only a flipped bit makes a frame fail its check word:</p>
+  <Code theme="css-variables" lang="rust" code={damaged} />
+  <p>A coverage check on the client, and the invariant that the planted bug breaks:</p>
+  <Code theme="css-variables" lang="rust" code={sometimes + "\n" + always} />
+  <script is:inline type="module" src={url("assertions.js")}></script>
+</Technique>

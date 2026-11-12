@@ -152,10 +152,8 @@
 // Re-export all public items from sub-crates. `moonpool-core` is always present;
 // `sim` is feature-gated so a lean production build pulls neither the simulation
 // runtime nor the explorer (no libc/mio in the prod dependency tree).
-#[allow(ambiguous_glob_reexports)]
 pub use moonpool_core::*;
 #[cfg(feature = "sim")]
-#[allow(ambiguous_glob_reexports)]
 pub use moonpool_sim::*;
 
 /// hyper 1.x integration, from [`moonpool_hyper`]. Requires the `hyper`

@@ -1,0 +1,49 @@
+---
+// One on-disk structure, byte by byte (#428 (journal page)): the fields that
+// its `encode` writes (src/lib/rustdoc.mjs encodeLayout), as a strip of
+// 8-byte rows when the structure is small, and as a table with each field's
+// doc comment. Bytes that no field writes are zeros.
+interface Field { at: number; size: number | null; name: string }
+interface Props { title: string; size: number; fields: Field[]; docs: Record<string, string>; strip?: boolean; tail?: string }
+const { title, size, fields, docs, strip = false, tail } = Astro.props;
+const ROW = 8;
+// Each field cut into row pieces: grid row, first column, span.
+const pieces: { name: string; row: number; col: number; span: number; first: boolean; k: number }[] = [];
+const covered = new Set<number>();
+fields.forEach((f, k) => {
+  const end = f.size === null ? f.at : f.at + f.size;
+  for (let b = f.at; b < end; b++) covered.add(b);
+  let b = f.at;
+  while (b < end) {
+    const row = Math.floor(b / ROW);
+    const stop = Math.min(end, (row + 1) * ROW);
+    pieces.push({ name: f.name, row: row + 1, col: (b % ROW) + 1, span: stop - b, first: b === f.at, k });
+    b = stop;
+  }
+});
+const zeros: { row: number; col: number }[] = [];
+if (strip) for (let b = 0; b < size; b++) if (!covered.has(b)) zeros.push({ row: Math.floor(b / ROW) + 1, col: (b % ROW) + 1 });
+const sizeOf = (f: Field, i: number) => (f.size === null ? (fields[i + 1] ? fields[i + 1].at - f.at : size - f.at) : f.size);
+---
+<figure class="bytes">
+  <figcaption class="label">{title} · {size} bytes</figcaption>
+  {strip && (
+    <div class="byte-grid" role="img" aria-label={`${title}: ${fields.map((f) => f.name).join(", ")}`}>
+      {pieces.map((p) => (
+        <div class={`byte f${p.k % 4}`} style={`grid-row:${p.row};grid-column:${p.col} / span ${p.span}`}>
+          {p.first && <span>{p.name}</span>}
+        </div>
+      ))}
+      {zeros.map((z) => <div class="byte zero" style={`grid-row:${z.row};grid-column:${z.col}`}>0</div>)}
+    </div>
+  )}
+  <div class="table-wrap">
+    <table class="run-table byte-table">
+      <tr><th>at</th><th>bytes</th><th>field</th><th>what it holds</th></tr>
+      {fields.map((f, i) => (
+        <tr><td>{f.at}</td><td>{sizeOf(f, i)}</td><td><code>{f.name}</code></td><td>{docs[f.name] ?? ""}</td></tr>
+      ))}
+    </table>
+  </div>
+  {tail && <p class="aside">{tail}</p>}
+</figure>

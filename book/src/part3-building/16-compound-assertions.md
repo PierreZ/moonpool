@@ -96,7 +96,7 @@ assert_sometimes_each!(
 );
 ```
 
-Each bucket remembers its best quality score. A hit with a better score is a `BucketQuality` discovery, and the explorer re-forks from the healthier state. Up to four quality keys are packed into one 64-bit score. The first key is the most significant. Each key keeps only its low 16 bits, so scale values into `0..=65535` before passing them, and keep "higher is better" as the convention.
+Each bucket remembers its best quality score. A hit with a better score is a `BucketQuality` discovery, and the explorer re-forks from the healthier state. Up to four quality keys are packed into one 64-bit score. The first key is the most significant. Each key holds a value in `0..=65535` (`MAX_QUALITY`). A larger value saturates to 65535 and a negative value counts as 0, so progress above the limit is not seen. Scale values such as a byte count or a time in milliseconds into the range before passing them, and keep "higher is better" as the convention.
 
 Quality values are not part of the bucket's identity. Health 3 and health 9 on floor 2 are the same bucket with two scores.
 

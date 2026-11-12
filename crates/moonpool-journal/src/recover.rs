@@ -39,12 +39,12 @@
 
 use moonpool_core::{AlignedBuf, LocalStorageFile};
 
-use crate::OpenError;
 use crate::format::{
-    BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, RECORD_SIZE, Record, Slot, align_up,
-    entry_crc, generation_of, u64_of, usize_of,
+    BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, RECORD_SIZE, RECORDS_PER_BLOCK,
+    Record, Slot, align_up, entry_crc, generation_of, u64_of, usize_of,
 };
 use crate::segment::Segment;
+use crate::{OpenError, RecordRepair};
 
 /// Where a live entry is, and what is known of its bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +82,20 @@ enum Found {
     Lost,
 }
 
+impl Found {
+    /// The record this slot holds, valid or rebuilt.
+    fn record(&self) -> Option<&Record> {
+        match self {
+            Found::Record(record) | Found::Rebuilt(record) => Some(record),
+            Found::Lost => None,
+        }
+    }
+}
+
+/// One persist write of the open or of a scrub: `(segment index, offset,
+/// bytes)`.
+pub(crate) type BlockWrite = (usize, u64, AlignedBuf);
+
 #[derive(Debug)]
 struct BatchScan {
     seq: u64,
@@ -102,13 +116,15 @@ pub(crate) struct Scan {
     pub ambiguous: Vec<(u64, Id)>,
     pub rebuilt: u32,
     pub voided: u32,
-    /// The last batch's persist extent rewritten: `(segment index, offset,
-    /// bytes)`. Set when it voids or rebuilds a record, so the next open
-    /// finds a durable verdict instead of damage before a later batch.
-    /// Written in order, each durable before the next: when the batch has
-    /// both voids and rebuilt records, the voids land first (see
-    /// [`judge_batch`]).
-    pub rewrite: Option<(usize, u64, Vec<AlignedBuf>)>,
+    /// The persist writes the open makes, in order, each durable before the
+    /// next. The last batch's extent, when it voids or rebuilds a record, so
+    /// the next open finds a durable verdict instead of damage before a
+    /// later batch: when the batch has both voids and rebuilt records, the
+    /// voids land first (see [`judge_batch`]). Then each block of an earlier
+    /// batch whose rebuilt records its entries prove (see [`repair_batch`]).
+    pub writes: Vec<BlockWrite>,
+    /// The blocks of earlier batches written again, and those left.
+    pub repair: RecordRepair,
 }
 
 /// An entry checked against what is expected of it.
@@ -364,12 +380,13 @@ async fn scan_segment<F: LocalStorageFile>(
     Ok((batches, persist_next, entry_cursor))
 }
 
-/// Scan every segment (sorted by first batch) and judge every record.
-pub(crate) async fn scan<F: LocalStorageFile>(
+/// Pass 1 over every segment (sorted by first batch): per segment, its
+/// batches and its two cursors; and the last batch in the log.
+async fn pass_one<F: LocalStorageFile>(
     segments: &[Segment<F>],
     tag: u32,
     known: Known,
-) -> Result<Scan, OpenError> {
+) -> Result<(Vec<(Vec<BatchScan>, u64, u64)>, u64), OpenError> {
     let mut per_segment = Vec::with_capacity(segments.len());
     let mut last = segments.first().map_or(0, |s| s.prev_batch);
     for segment in segments {
@@ -383,7 +400,37 @@ pub(crate) async fn scan<F: LocalStorageFile>(
         }
         per_segment.push((batches, persist_next, entry_next));
     }
+    Ok((per_segment, last))
+}
 
+/// The persist blocks a scrub of an open journal writes again: pass 1 over
+/// every segment, then [`repair_batch`] for each batch up to `last`, the
+/// last batch the journal committed (a batch beyond it is a failed commit's,
+/// never acknowledged).
+pub(crate) async fn plan_repair<F: LocalStorageFile>(
+    segments: &[Segment<F>],
+    tag: u32,
+    known: Known,
+    last: u64,
+) -> Result<(Vec<BlockWrite>, RecordRepair), OpenError> {
+    let (per_segment, _) = pass_one(segments, tag, known).await?;
+    let mut writes = Vec::new();
+    let mut repair = RecordRepair::default();
+    for (s, (batches, _, _)) in per_segment.iter().enumerate() {
+        for batch in batches.iter().filter(|batch| batch.seq <= last) {
+            repair_batch(&segments[s], s, batch, tag, &mut writes, &mut repair).await?;
+        }
+    }
+    Ok((writes, repair))
+}
+
+/// Scan every segment (sorted by first batch) and judge every record.
+pub(crate) async fn scan<F: LocalStorageFile>(
+    segments: &[Segment<F>],
+    tag: u32,
+    known: Known,
+) -> Result<Scan, OpenError> {
+    let (per_segment, last) = pass_one(segments, tag, known).await?;
     let mut out = Scan {
         last_batch: last,
         ..Scan::default()
@@ -403,7 +450,10 @@ pub(crate) async fn scan<F: LocalStorageFile>(
                 tag,
                 mark: known.mark,
             };
-            judge_batch(segment, s, batch, judge, &mut out).await?;
+            judge_batch(segment, s, &batch, judge, &mut out).await?;
+            if !is_last {
+                repair_batch(segment, s, &batch, tag, &mut out.writes, &mut out.repair).await?;
+            }
         }
     }
     Ok(out)
@@ -437,12 +487,12 @@ impl Judge {
 async fn judge_batch<F: LocalStorageFile>(
     segment: &Segment<F>,
     segment_index: usize,
-    batch: BatchScan,
+    batch: &BatchScan,
     judge: Judge,
     out: &mut Scan,
 ) -> Result<(), OpenError> {
     let Judge { is_last, tag, mark } = judge;
-    let crash_explains_lost = judge.crash_explains_lost(&batch);
+    let crash_explains_lost = judge.crash_explains_lost(batch);
     let mut rewrite = false;
     let mut voided = false;
     let mut rebuilt = false;
@@ -544,14 +594,73 @@ async fn judge_batch<F: LocalStorageFile>(
         // tore one rewrite, a rebuilt record that landed beside a void that
         // did not would read as a double fault. Written first and alone,
         // the voids leave every slot either valid or rebuildable.
-        let mut writes = Vec::with_capacity(2);
+        let at = |bytes| (segment_index, batch.persist_at, bytes);
         if voided && rebuilt {
-            writes.push(encode_records(on_disk.iter().map(|slot| slot.as_ref())));
+            out.writes
+                .push(at(encode_records(on_disk.iter().map(Option::as_ref))));
         }
-        writes.push(encode_records(kept.iter().map(Some)));
-        out.rewrite = Some((segment_index, batch.persist_at, writes));
+        out.writes.push(at(encode_records(kept.iter().map(Some))));
     }
     Ok(())
+}
+
+/// Write back the rebuilt records of `batch`, a batch before the last one,
+/// so the damage of each record is gone before a second fault on its slot
+/// makes an open refuse.
+///
+/// A persist block that holds a rebuilt record is written again whole, as
+/// one durable write, but only when the entry of each slot in it is intact
+/// and is the entry its record names: then a crash that tears the write
+/// leaves each record of the block rebuildable from its entry, as before
+/// the write. A block with one damaged entry is not written, because its
+/// valid record is the only copy of that identity; it is counted as left.
+async fn repair_batch<F: LocalStorageFile>(
+    segment: &Segment<F>,
+    segment_index: usize,
+    batch: &BatchScan,
+    tag: u32,
+    writes: &mut Vec<BlockWrite>,
+    repair: &mut RecordRepair,
+) -> std::io::Result<()> {
+    for (block, slots) in (0u64..).zip(batch.slots.chunks(RECORDS_PER_BLOCK)) {
+        if !slots.iter().any(|found| matches!(found, Found::Rebuilt(_))) {
+            continue;
+        }
+        if entries_prove(segment, slots, tag).await? {
+            writes.push((
+                segment_index,
+                batch.persist_at + block * BLOCK_U64,
+                encode_records(slots.iter().map(Found::record)),
+            ));
+            repair.blocks_written += 1;
+        } else {
+            repair.blocks_left += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Whether each slot of `slots` has an intact entry that is exactly the
+/// entry its record names. A rebuilt record was made from such an entry.
+/// A lost slot, or a void record (it has no entry), proves nothing.
+async fn entries_prove<F: LocalStorageFile>(
+    segment: &Segment<F>,
+    slots: &[Found],
+    tag: u32,
+) -> std::io::Result<bool> {
+    for found in slots {
+        match found {
+            Found::Rebuilt(_) => {}
+            Found::Record(record) if record.kind != Kind::Void => {
+                match read_entry(segment, u64::from(record.offset), tag).await? {
+                    Some((header, stored, _)) if entry_matches(record, &header, stored) => {}
+                    _ => return Ok(false),
+                }
+            }
+            Found::Record(_) | Found::Lost => return Ok(false),
+        }
+    }
+    Ok(true)
 }
 
 /// A batch's persist extent: each record encoded in its slot, a `None`

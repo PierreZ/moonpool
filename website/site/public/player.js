@@ -148,6 +148,8 @@ export class Player {
 
   /** Show a run. `info.source` is "recorded" or "live"; `info.ms` the real time. */
   show(run, info) {
+    // A run shown now wins over a live run still on its way (runLive).
+    this.ticket = (this.ticket || 0) + 1;
     this.pause();
     this.run = run;
     this.lanes = model.lanes(run);
@@ -217,15 +219,23 @@ export class Player {
     history.replaceState(null, "", u);
   }
 
-  /** Run a config in the engine and show it. Resolves to the run, or null. */
+  /**
+   * Run a config in the engine and show it. Resolves to the run, or null.
+   * The last call wins: a run that comes back after a later runLive or
+   * show is dropped, so a slow first run never hides the run the reader
+   * asked for.
+   */
   async runLive(config) {
+    const ticket = (this.ticket = (this.ticket || 0) + 1);
     this.setNote("Running seed " + config.seed + " in your browser…");
     try {
       const { run, ms } = await engine.runConfig(config);
+      if (ticket !== this.ticket) return null;
       this.show(run, { source: "live", ms });
       this.dispatchRun(run);
       return run;
     } catch (e) {
+      if (ticket !== this.ticket) return null;
       this.setNote("The engine did not run: " + e.message + ". The recorded run stays.", "bad");
       return null;
     }
@@ -465,11 +475,14 @@ addEventListener("keydown", (e) => {
  */
 export function mount(root, run, opts) {
   const player = new Player(root, { run, ...opts });
+  const first = player.ticket;
   const asked = opts.address === false ? null : model.seedFrom(location.search);
   let started = false;
   const begin = () => {
     if (started) return;
     started = true;
+    // The reader already chose another run: keep it.
+    if (player.ticket !== first) return;
     engine.warm();
     const config = asked !== null ? { ...run.config, seed: asked } : run.config;
     player.runLive(config).then((r) => {

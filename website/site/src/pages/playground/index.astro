@@ -1,0 +1,67 @@
+---
+// The playground (#419 (playground)): the visitor drives the small system of
+// the site, runs seeds, hunts the planted bug and replays a red seed.
+// public/playground.js sends each config to the engine and draws the result;
+// it holds no simulation logic.
+import Doc from "../../layouts/Doc.astro";
+import { url } from "../../nav";
+import runs from "../../runs/home.json";
+---
+<Doc
+  title="Playground"
+  description="Run seeds of a small replicated register, hunt its planted bug, and replay the red seed."
+  kicker="playground"
+  section="playground/"
+>
+  <p>Three servers keep one value on disk; a client writes it to a quorum and reads it back. Pick the faults,
+    the count of servers and the planted bug, then run a seed or hunt for a red one. The network, the disk and
+    the clock are simulated in your browser; the same code would run on Tokio.</p>
+  <div class="breakout">
+    <form class="run play" id="play" aria-label="The config of the run">
+      <div class="run-head label"><span>the config</span><span id="play-share"></span></div>
+      <div class="play-grid">
+        <div class="play-seed">
+          <label class="label" for="play-seed">seed</label>
+          <input id="play-seed" inputmode="numeric" pattern="[0-9]*" maxlength="15" autocomplete="off" />
+          <button class="btn small" type="button" id="play-next">Next seed</button>
+          <button class="btn small" type="button" id="play-random">Random seed</button>
+        </div>
+        <fieldset class="switches">
+          <legend class="label">faults</legend>
+          <label><input type="checkbox" id="play-net" /> network</label>
+          <label><input type="checkbox" id="play-disk" /> storage</label>
+          <label><input type="checkbox" id="play-reboots" /> reboots</label>
+          <label><input type="checkbox" id="play-wipes" /> disk wipes</label>
+          <label><input type="checkbox" id="play-swarm" /> swarm</label>
+        </fieldset>
+        <fieldset class="switches">
+          <legend class="label">system</legend>
+          <label>servers <select id="play-servers">{[1, 2, 3, 4, 5].map((n) => <option value={n}>{n}</option>)}</select></label>
+          <label><input type="checkbox" id="play-bug" /> planted bug</label>
+        </fieldset>
+      </div>
+      <div class="switches play-actions">
+        <button class="btn primary" type="submit" id="play-run">▶ Run</button>
+        <button class="btn" type="button" id="play-hunt">Hunt</button>
+        <button class="btn" type="button" id="play-replay">Replay</button>
+      </div>
+      <p class="run-out" id="play-out" aria-live="polite"></p>
+    </form>
+    <section class="run run-under" id="run" aria-label="The run in the player"></section>
+    <div class="run run-under">
+      <div class="run-head label"><span>the report</span><span id="report-time"></span></div>
+      <p class="run-out" id="report-verdict"></p>
+      <div class="report-cols">
+        <div class="table-wrap"><table class="run-table" id="report-assertions"></table></div>
+        <div class="table-wrap"><table class="run-table" id="report-faults"></table></div>
+      </div>
+    </div>
+    <noscript><p>The playground needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+  <p>A red seed is where the work starts: <a href={url("techniques/debugging/")}>From a red seed to the bug</a> walks
+    back from the broken invariant to the first wrong event.
+    The engine of this page is the crate <a href={url("crates/#moonpool-wasm-demo")}><code>moonpool-wasm-demo</code></a>, compiled to wasm;
+    the chapter <a href={url("part4-integration/07-wasm.html")}>Simulation in the Browser</a> explains how.</p>
+  <script is:inline type="module" src={url("playground.js")}></script>
+</Doc>

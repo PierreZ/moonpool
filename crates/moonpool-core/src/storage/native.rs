@@ -341,11 +341,20 @@ pub(super) fn access_only(options: &OpenOptions) -> OpenOptions {
 ///
 /// Only [`is_direct_io_unsupported`] failures of the upgrade are absorbed;
 /// every other error is returned, so `Optional` never hides a real problem.
+///
+/// # Contradictory options
+///
+/// [`OpenOptions::validate`] runs first, for every policy and every backend.
+/// The simulator refuses the same shapes, so production must not accept one.
+/// `std` cannot do this check here: a `Required` open removes the lifecycle
+/// flags before the OS sees them (see [`access_only`]), so `read + create`
+/// would open, and `append + truncate` would truncate the file.
 pub(super) async fn open_file<N: NativeFs>(
     fs: &N,
     path: &str,
     options: &OpenOptions,
 ) -> io::Result<OpenedFile<N::File>> {
+    options.validate()?;
     let named = Path::new(path);
     match options.requested_direct_io() {
         DirectIo::Disabled => Ok(OpenedFile::buffered(fs.open(named, options, false).await?)),

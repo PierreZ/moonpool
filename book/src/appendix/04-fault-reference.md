@@ -66,10 +66,10 @@ A crash (any `RebootKind::Crash`, `CrashAndWipe`, `crash_self`, or a disk crash 
 
 | `CrashOutcome` | Meaning |
 |----------------|---------|
-| `KeptOld` | The sector holds the bytes before the write. |
+| `KeptOld` | The sector holds the bytes before the write, with any latent fault or damage those bytes had. A sector whose fault weight is zero at the crash stays healed. |
 | `KeptNew` | The write survived. |
 | `Lost` | The sector holds the fill pattern (`garbage_fill_probability` chooses garbage over zeros). |
-| `LatentFault` | The sector reads back with an error until rewritten. |
+| `LatentFault` | The sector reads back with one flipped bit until rewritten. The bit is at a fixed position in the sector: a read that covers it sees the same damage whatever its range. |
 | `Shorn` | Part of the sector is old, part new. |
 
 `clean_crash_probability` makes some crashes lose nothing. `correlated_rollback_probability` and `correlated_rollback_max_run` roll back a run of adjacent sectors together. `length_survives_crash_probability` decides whether an unsynced `set_len` survives. `FileCrashReport` lists the outcome per sector (`clean_kept` lists the sectors a clean crash kept); `SimWorld::take_storage_crash_reports()` drains them.
@@ -168,6 +168,7 @@ The engine records `SimFaultEvent`s. The runner merges them into the trace under
 | `storage_read_fault`, `storage_write_fault`, `storage_sync_fault` | storage I/O faults |
 | `storage_disk_failure`, `storage_crash`, `storage_wipe` | disk and crash |
 | `storage_crash_sectors` | the fate of each unsynced sector of one file at a crash (read-only) |
+| `chaos_families` | the network and storage families this seed has on, after swarm and masks (read-only, once per seed) |
 
 `SimWorld::take_faults()` drains them in a low-level test.
 

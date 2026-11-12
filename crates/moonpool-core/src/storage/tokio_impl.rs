@@ -3,7 +3,7 @@
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
@@ -38,6 +38,7 @@ impl StorageProvider for TokioStorageProvider {
             positioned: Arc::new(positioned),
             constraints: opened.constraints,
             direct: opened.direct,
+            in_flight: None,
         })
     }
 
@@ -202,6 +203,23 @@ async fn positioned_descriptor(
 /// [`Compat::get_ref`] / [`Compat::get_mut`] to call tokio-specific APIs
 /// (`sync_all`, `sync_data`, `metadata`, `set_len`) that `Compat` itself
 /// does not expose.
+///
+/// # A stream write returns when the OS write is done
+///
+/// `tokio::fs::File` accepts a write into its own buffer and returns before
+/// the OS write on the blocking pool is done. `size` and the positioned
+/// methods do not wait for that write, so they could see the file without
+/// it. This breaks "one file state" (see the [module docs](super)), which
+/// the simulation keeps. Thus `poll_write` gives the bytes to Tokio, then
+/// waits for the OS write (a flush of the inner file) before it returns the
+/// count. An error of the OS write goes to that write call.
+///
+/// A write future dropped while its OS write runs leaves the write in
+/// flight. The write still lands, as a dropped write does on the other
+/// backends. The next stream call finishes it first. A `poll_write` whose
+/// buffer starts with the bytes in flight is the same call, polled again,
+/// and gets their count. A `poll_write` of other bytes is a new call: it
+/// writes its own bytes, and it does not get the count of the old write.
 #[derive(Debug)]
 pub struct TokioStorageFile {
     inner: Compat<tokio::fs::File>,
@@ -211,6 +229,9 @@ pub struct TokioStorageFile {
     positioned: Arc<std::fs::File>,
     constraints: IoConstraints,
     direct: bool,
+    /// The bytes of the stream write that Tokio accepted and whose OS write
+    /// is not yet known to be done.
+    in_flight: Option<Vec<u8>>,
 }
 
 /// One positioned read against the OS.
@@ -500,48 +521,85 @@ impl StorageFile for TokioStorageFile {
     }
 }
 
+impl TokioStorageFile {
+    /// Wait for the OS write of the stream write in flight, if any. The
+    /// error of that write is returned: its bytes did not land.
+    fn poll_in_flight(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.in_flight.is_none() {
+            return Poll::Ready(Ok(()));
+        }
+        let result = ready!(Pin::new(&mut self.inner).poll_flush(cx));
+        self.in_flight = None;
+        Poll::Ready(result)
+    }
+}
+
 impl AsyncRead for TokioStorageFile {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
         // Refused here rather than left to the kernel's EINVAL, so the
         // contract is the same one the simulation enforces.
-        if !self.constraints.is_unconstrained() {
+        if !this.constraints.is_unconstrained() {
             return Poll::Ready(Err(stream_io_unsupported()));
         }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
+        ready!(this.poll_in_flight(cx))?;
+        Pin::new(&mut this.inner).poll_read(cx, buf)
     }
 }
 
 impl AsyncWrite for TokioStorageFile {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if !self.constraints.is_unconstrained() {
+        let this = self.get_mut();
+        if !this.constraints.is_unconstrained() {
             return Poll::Ready(Err(stream_io_unsupported()));
         }
-        Pin::new(&mut self.inner).poll_write(cx, buf)
+        if let Some(bytes) = &this.in_flight {
+            // The same call, polled again: its bytes are already accepted.
+            let resumes = !bytes.is_empty() && buf.starts_with(bytes);
+            let accepted = bytes.len();
+            ready!(this.poll_in_flight(cx))?;
+            if resumes {
+                return Poll::Ready(Ok(accepted));
+            }
+        }
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+        let accepted = ready!(Pin::new(&mut this.inner).poll_write(cx, buf))?;
+        this.in_flight = Some(buf[..accepted].to_vec());
+        ready!(this.poll_in_flight(cx))?;
+        Poll::Ready(Ok(accepted))
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(this.poll_in_flight(cx))?;
+        Pin::new(&mut this.inner).poll_flush(cx)
     }
 
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_close(cx)
+    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        ready!(this.poll_in_flight(cx))?;
+        Pin::new(&mut this.inner).poll_close(cx)
     }
 }
 
 impl AsyncSeek for TokioStorageFile {
     fn poll_seek(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         pos: SeekFrom,
     ) -> Poll<io::Result<u64>> {
-        Pin::new(&mut self.inner).poll_seek(cx, pos)
+        let this = self.get_mut();
+        ready!(this.poll_in_flight(cx))?;
+        Pin::new(&mut this.inner).poll_seek(cx, pos)
     }
 }

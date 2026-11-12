@@ -4,6 +4,8 @@
 
 A simulation campaign runs many seeds. Each seed is one timeline. For most bugs, many seeds are enough. Some bugs are different. They need a **sequence** of rare events, and no single seed produces that exact sequence. Multiverse exploration is the answer. It is the capstone of moonpool, and the `moonpool-explorer` crate implements it.
 
+[Multiverse exploration](../techniques/exploration/) draws a recorded tree on the website: the timelines of one seed of a small replicated register with a planted bug, where each forks, and the one that finds the bug. Your browser replays that timeline from its recipe.
+
 ## The Core Idea
 
 A deterministic simulation makes every execution a **reproducible coordinate**. When a timeline reaches an interesting state for the first time (a retry fires, a leader changes, a dungeon floor is entered), moonpool remembers how to get back there. The memory is small: the root seed plus the RNG call count of the discovery. Later, the explorer replays that prefix and continues with fresh randomness. This is a short randomized rollout from a proven starting point.

@@ -271,8 +271,15 @@ impl SimWorld {
         self.inner.write().storage.drop_cache(handle_id)
     }
 
-    pub(crate) fn allocate_file(&self, handle_id: HandleId, len: u64) -> Result<(), StorageError> {
-        self.storage_transition(|inner| inner.storage.allocate(handle_id, len))
+    pub(crate) fn schedule_allocate(
+        &self,
+        handle_id: HandleId,
+        len: u64,
+    ) -> Result<OperationId, StorageError> {
+        self.try_storage_transition(|inner| {
+            let now = inner.now();
+            inner.storage.schedule_allocate(handle_id, len, now)
+        })
     }
 
     pub(crate) fn file_size(&self, handle_id: HandleId) -> Result<u64, StorageError> {
@@ -499,9 +506,9 @@ impl SimWorld {
         self.inner.write().storage.take_crash_reports()
     }
 
-    /// Plant a latent read fault on `sectors` of `path`: reads return
-    /// deterministically corrupted bytes, identically on every retry, until
-    /// the sectors are rewritten.
+    /// Plant a latent read fault on `sectors` of `path`: each sector reads
+    /// back with one flipped bit at a fixed position, identically on every
+    /// retry and whatever the range of the read, until it is rewritten.
     ///
     /// Path-global: it reaches every process's file at `path`. To damage one
     /// replica, use

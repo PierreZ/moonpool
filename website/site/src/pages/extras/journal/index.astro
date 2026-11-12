@@ -1,0 +1,175 @@
+---
+// moonpool-journal, byte by byte (#428 (journal page)). Every fact comes
+// from crates/moonpool-journal/src at build time: the module docs, the byte
+// layouts that the `encode` functions write, the constants, the commit code.
+import { Code } from "astro:components";
+import Extra from "../../../layouts/Extra.astro";
+import ByteLayout from "../../../components/ByteLayout.astro";
+import { url } from "../../../nav";
+import { excerpt, repoFile } from "../../../lib/source.mjs";
+import { renderMarkdown } from "../../../lib/book.mjs";
+import { constValue, docSection, encodeLayout, fieldDocs, implFields, itemDoc, moduleDoc, unlink } from "../../../lib/rustdoc.mjs";
+
+const src = (f: string) => repoFile("crates/moonpool-journal/src/" + f);
+const lib = moduleDoc(src("lib.rs"));
+const format = src("format.rs");
+const journal = src("journal.rs");
+const md = async (text: string) => renderMarkdown(unlink(text));
+
+const intro = await md(docSection(lib));
+const files = await md(docSection(lib, "Files"));
+const committing = await md(docSection(lib, "Committing"));
+const recovery = await md(docSection(lib, "Recovery"));
+const tests = await md(docSection(lib, "Examples and tests"));
+const segmentDoc = await md(moduleDoc(src("segment.rs")));
+const metaDoc = await md(moduleDoc(src("meta.rs")));
+const spareDoc = await md(moduleDoc(src("spare.rs")));
+const recoverDoc = await md(moduleDoc(src("recover.rs")));
+const ioDoc = await md(moduleDoc(src("io.rs")));
+const recordDoc = await md(itemDoc(format, "struct Record"));
+const entryDoc = await md(itemDoc(format, "struct EntryHeader"));
+const geometryDoc = await md(itemDoc(format, "struct Geometry"));
+
+const BLOCK = constValue(format, "BLOCK");
+const RECORD = constValue(format, "RECORD_SIZE");
+const ID = constValue(format, "ID_SIZE");
+const SHIFT = constValue(format, "GENERATION_SHIFT");
+const COPY_B = constValue(format, "META_COPY_B_AT");
+const META_BLOCKS = constValue(format, "META_FILE_BLOCKS");
+const VERSION = constValue(format, "VERSION");
+const magic = (name: string) => {
+  const m = new RegExp(`const ${name}: u32 = u32::from_le_bytes\\(\\*b"(\\w{4})"\\);`).exec(format);
+  if (!m) throw new Error(`no ${name}`);
+  return m[1];
+};
+const kinds = [...format.matchAll(/\/\/\/ ([^\n]+)\n\s+(Put|Clear|Void) = (\d)/g)].map((m) => `${m[3]} ${m[2]}: ${m[1].replace(/`/g, "")}`);
+const common = (magicName: string) => ({
+  magic: `"${magic(magicName)}" in ASCII: what this structure is.`,
+  version: `The format version, ${VERSION} today.`,
+  crc: "CRC32C of every byte before it.",
+  kind: kinds.join(" "),
+  flags: "The batch's flags. Bit 0: the batch was committed Ordered.",
+  index: "This record's index in its batch.",
+  count: "The records in its batch.",
+  batch: `The batch number. Its high bits above bit ${SHIFT} are the open generation that wrote it, so a number never repeats across opens.`,
+  position: "The caller's position: where the entry sits in the log's space.",
+  id: `The caller's ${ID}-byte identity of the entry (a ballot, a term). A Clear carries the end of its range in the first 8 bytes.`,
+});
+const geometryFields = fieldDocs(format, "Geometry");
+const layouts = [
+  {
+    title: "segment header (blocks 0 and 1)", size: BLOCK, strip: false,
+    fields: encodeLayout(format, "SegmentHeader"),
+    docs: { ...common("SEGMENT_MAGIC"), ...fieldDocs(format, "SegmentHeader"), ...geometryFields, journal: "The journal's id: a segment of another journal is never read as ours." },
+    tail: "The rest of the block is zeros. Both copies hold the same bytes.",
+  },
+  {
+    title: "persist record", size: RECORD, strip: true,
+    fields: encodeLayout(format, "Record"),
+    docs: { ...common("ENTRY_MAGIC"), ...fieldDocs(format, "Record") },
+  },
+  {
+    title: "entry header (then the payload, padded to 8 bytes)", size: RECORD, strip: true,
+    fields: encodeLayout(format, "EntryHeader"),
+    docs: { ...common("ENTRY_MAGIC"), ...fieldDocs(format, "EntryHeader"), index: "This entry's index in its batch: the same as its record's.", len: "The payload's length.", tag: "A CRC32C of the journal's id: an entry of another journal never passes for ours.", crc: "CRC32C of the header (this field as zero) and of the payload." },
+  },
+  {
+    title: "metainfo copy (block 0 and block " + COPY_B / BLOCK + " of meta)", size: BLOCK, strip: false,
+    fields: encodeLayout(format, "Meta"),
+    docs: { ...common("META_MAGIC"), ...fieldDocs(format, "Meta"), ...geometryFields, copy: "Which copy this is: 0 for A, 1 for B. A copy read in the other's place fails.", journal: "The journal's id.", len: "The length of the caller's bytes.", bytes: "The caller's metainfo bytes.", crc: "CRC32C of every byte before it, in the last 4 bytes of the block." },
+  },
+];
+
+const geo = implFields(format, "Default for Geometry", "default");
+const small = implFields(format, "Geometry", "small");
+const mib = (blocks: number) => (blocks * BLOCK) / (1024 * 1024);
+const regions = (g: Record<string, number>) => [
+  { name: "headers", blocks: 2, cls: "r-head" },
+  { name: "persist log", blocks: g.persist_blocks, cls: "r-persist" },
+  { name: "guard gap", blocks: g.gap_blocks, cls: "r-gap" },
+  { name: "entry log", blocks: g.entry_blocks, cls: "r-entry" },
+];
+const total = (g: Record<string, number>) => 2 + g.persist_blocks + g.gap_blocks + g.entry_blocks;
+const shapes = [
+  { name: "Geometry::default()", g: geo },
+  { name: "Geometry::small()", g: small },
+];
+const protocol = excerpt(journal, "async fn write_protocol<", "    Ok(())", 1);
+---
+<Extra
+  title="moonpool-journal, byte by byte"
+  description="A write-ahead journal that tells a crash apart from corruption, and names what it lost."
+  guide={["part5-building-on-top/08-journal.md"]}
+>
+  <p>This page is the journal's own documentation and code, read when the site builds. The tables of bytes come from
+    the <code>encode</code> functions in <code>format.rs</code>, so they are the format the code writes.</p>
+  <Fragment set:html={intro} />
+
+  <h2>The files</h2>
+  <Fragment set:html={files} />
+  <div class="breakout">
+    <div class="run">
+      <div class="run-head label"><span>one segment file, to scale</span><span>{BLOCK}-byte blocks</span></div>
+      {shapes.map((s) => (
+        <div class="seg-shape">
+          <div class="label seg-name">{s.name} · {total(s.g)} blocks · {mib(total(s.g)).toFixed(2)} MiB</div>
+          <div class="seg-bar" role="img" aria-label={`${s.name}: ` + regions(s.g).map((r) => `${r.name} ${r.blocks} blocks`).join(", ")}>
+            {regions(s.g).filter((r) => r.blocks > 0).map((r) => (
+              <div class={`seg-region ${r.cls}`} style={`flex-grow:${r.blocks}`} title={`${r.name}: ${r.blocks} blocks`} />
+            ))}
+          </div>
+          <ul class="seg-legend label">
+            {regions(s.g).map((r) => <li><span class={`swatch ${r.cls}`} />{r.name} <b>{r.blocks}</b></li>)}
+          </ul>
+        </div>
+      ))}
+    </div>
+  </div>
+  <Fragment set:html={geometryDoc} />
+  <p>Each persist block holds {BLOCK / RECORD} records of {RECORD} bytes. The meta file is {META_BLOCKS} blocks: copy A in
+    block 0, copy B in block {COPY_B / BLOCK}, zeros between them.</p>
+
+  <h3>Segments</h3>
+  <Fragment set:html={segmentDoc} />
+
+  <h2>Byte by byte</h2>
+  <p>Every integer is little-endian. Every structure ends with a CRC32C of what comes before it.</p>
+  <h3>The persist record</h3>
+  <Fragment set:html={recordDoc} />
+  <ByteLayout {...layouts[1]} />
+  <h3>The entry</h3>
+  <Fragment set:html={entryDoc} />
+  <ByteLayout {...layouts[2]} />
+  <h3>A batch on disk</h3>
+  <p>A batch of <i>n</i> records takes the next ⌈{RECORD}·<i>n</i> / {BLOCK}⌉ blocks of the persist log: record <i>i</i> at
+    byte {RECORD}·<i>i</i> of them, the rest of the last block zeros. Its entries go back to back from the next free block
+    of the entry log, each one {RECORD} bytes of header, then the payload, padded to a multiple of 8. The next batch
+    starts on a fresh block in both logs. A record's <code>offset</code>, <code>len</code> and <code>entry_crc</code> name its
+    entry exactly, and the entry's header repeats the record's identity: either one can find and check the other.</p>
+  <h3>The segment header</h3>
+  <ByteLayout {...layouts[0]} />
+  <h3>The metainfo</h3>
+  <Fragment set:html={metaDoc} />
+  <ByteLayout {...layouts[3]} />
+
+  <h2>Committing</h2>
+  <Fragment set:html={committing} />
+  <p>The commit's writes, from <code>journal.rs</code>. The <code>hint!</code> lines name the moments where a simulation
+    may crash the process:</p>
+  <Code theme="css-variables" lang="rust" code={protocol} />
+  <h3>Reads and EIO</h3>
+  <Fragment set:html={ioDoc} />
+
+  <h2>Recovery</h2>
+  <Fragment set:html={recovery} />
+  <h3>The scan</h3>
+  <Fragment set:html={recoverDoc} />
+
+  <h2>Spares and recycled segments</h2>
+  <Fragment set:html={spareDoc} />
+
+  <h2>How it is tested</h2>
+  <Fragment set:html={tests} />
+  <p>The crash model behind these tests is the simulator's: <a href={url("techniques/storage/")}>Storage faults</a> shows
+    what a crash does to each sector written after the last sync.</p>
+</Extra>

@@ -8,6 +8,8 @@ admission checks, the budgets that push back, the buggify points the runtime
 carries inside those paths, who may call what, protocol versions, and the
 `derive` macro that generates an interface from a trait.
 
+[moonpool-rpc, call by call](../extras/rpc/) on the website draws each frame of the wire byte by byte from the code and the golden vectors, with the table of reply statuses, the order of the admission checks and the rules of each delivery mode.
+
 ## What Admission Checks, and When
 
 Before one byte of the body reaches the codec, the server checks, in order:

@@ -606,3 +606,70 @@ fn test_process_network_guidance_recipe_replays_split_brain() {
         replay.assertion_violations
     );
 }
+
+/// With `record_exploration_tree`, the report keeps every timeline: the root
+/// first, each child's recipe extends a parent's recipe by one segment, the
+/// discoveries name their assertion, and a failed timeline is one of the
+/// bug recipes. In-process, the tree is the same on each run.
+#[test]
+fn the_exploration_tree_names_each_timeline_and_its_parent() {
+    let run = || {
+        let mut config = test_config(0, 300);
+        config.branching_factor = 4;
+        run_simulation(
+            SimulationBuilder::new()
+                .set_iterations(1)
+                .set_debug_seeds(vec![4242])
+                .enable_exploration(config)
+                .record_exploration_tree()
+                .workload_factory(|| Box::new(PlantedBugWorkload)),
+        )
+    };
+    let exp = run().exploration.expect("exploration report missing");
+    let tree = &exp.timelines;
+    assert_eq!(
+        tree.len() as u64,
+        exp.total_timelines,
+        "one record per timeline"
+    );
+    assert!(tree[0].recipe.is_empty(), "the root comes first");
+    for timeline in &tree[1..] {
+        let parent = &timeline.recipe[..timeline.recipe.len() - 1];
+        assert!(
+            tree.iter().any(|t| t.recipe == parent),
+            "each fork has its parent in the tree"
+        );
+    }
+    let named: Vec<&str> = tree
+        .iter()
+        .flat_map(|t| &t.discoveries)
+        .filter_map(|d| d.assertion.as_deref())
+        .collect();
+    assert!(named.contains(&"gate 1"), "{named:?}");
+    let failed: Vec<_> = tree.iter().filter(|t| t.failed).collect();
+    assert!(!failed.is_empty(), "the planted bug is in the tree");
+    assert!(
+        failed
+            .iter()
+            .any(|t| exp.bug_recipes.iter().any(|b| b.recipe == t.recipe))
+    );
+    let again = run().exploration.expect("exploration report missing");
+    assert_eq!(
+        tree, &again.timelines,
+        "the in-process tree is deterministic"
+    );
+}
+
+/// Without `record_exploration_tree`, the report keeps no timeline.
+#[test]
+fn the_exploration_tree_is_off_by_default() {
+    let report = run_simulation(
+        SimulationBuilder::new()
+            .set_iterations(1)
+            .set_debug_seeds(vec![1111])
+            .enable_exploration(test_config(0, 8))
+            .workload_factory(|| Box::new(PlantedBugWorkload)),
+    );
+    let exp = report.exploration.expect("exploration report missing");
+    assert!(exp.timelines.is_empty());
+}

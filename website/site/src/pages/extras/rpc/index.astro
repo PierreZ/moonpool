@@ -1,0 +1,249 @@
+---
+// moonpool-rpc, call by call (#427 (rpc page)). Every fact comes from
+// crates/moonpool-rpc (and moonpool-rpc-sim) at build time: the module docs,
+// the frame layouts that the encoder writes, laid over the golden vectors of
+// the crate's tests, the table of reply statuses and the order of the
+// admission checks.
+import Extra from "../../../layouts/Extra.astro";
+import FrameLayout from "../../../components/FrameLayout.astro";
+import { url } from "../../../nav";
+import { repoFile } from "../../../lib/source.mjs";
+import { renderMarkdown, tocHtml } from "../../../lib/book.mjs";
+import { docSection, fillBytes, fixtures, itemDoc, moduleDoc, readerCode, shiftHeadings, unlink, variantDocs, writerLayout } from "../../../lib/rustdoc.mjs";
+import { admissionOrder, protoFields, statusTable, tagTable } from "../../../lib/rpc.mjs";
+
+const CRATE = "crates/moonpool-rpc/";
+const src = (f: string) => repoFile(CRATE + "src/" + f);
+const md = async (text: string, shift = 0) => renderMarkdown(shiftHeadings(readerCode(unlink(text)), shift));
+const plain = (text: string) => unlink(text).replace(/`/g, "").replace(/\s+/g, " ").trim();
+
+const lib = moduleDoc(src("lib.rs"));
+const wire = src("protocol/wire.rs");
+const wireDoc = moduleDoc(wire);
+const error = src("error.rs");
+const transport = src("transport/mod.rs");
+const transportDoc = moduleDoc(transport);
+const reference = src("interface/reference.rs");
+const v1 = fixtures(repoFile(CRATE + "tests/fixtures/wire-v1.txt"));
+const v2 = fixtures(repoFile(CRATE + "tests/fixtures/wire-v2.txt"));
+const refs = fixtures(repoFile(CRATE + "tests/fixtures/references-v1.txt"));
+const simDoc = moduleDoc(repoFile("crates/moonpool-rpc-sim/src/lib.rs"));
+
+// The crate's modules, in the order lib.rs declares them, with the first
+// paragraph of each module doc.
+const modules = [...repoFile(CRATE + "src/lib.rs").matchAll(/^(pub(?:\(crate\))? )?mod (\w+);/gm)].map((m) => {
+  const name = m[2];
+  let text: string;
+  try { text = src(`${name}/mod.rs`); } catch { text = src(`${name}.rs`); }
+  return { name, public: m[1] === "pub ", line: plain(moduleDoc(text).split("\n\n")[0]) };
+});
+
+// The envelope: the module doc up to its status paragraph (the table below
+// holds the statuses).
+const envelope = docSection(wireDoc);
+const statusAt = envelope.indexOf("Reply status codes:");
+if (statusAt < 0) throw new Error("the wire doc has no status paragraph");
+const goldenAt = wireDoc.indexOf("The golden vectors");
+if (goldenAt < 0) throw new Error("the wire doc no longer names its golden vectors");
+
+// Field docs: the doc comment of each field of `WireMessage`, plus the
+// fields the encoder writes that are not a field of the enum.
+const kinds = Object.fromEntries([...wire.matchAll(/const KIND_(\w+): u8 = (0x[0-9a-f]+);/g)].map((m) => [m[1], m[2]]));
+const variants = Object.fromEntries(variantDocs(wire, "WireMessage").map((v) => [v.name, v.fields]));
+const tags = tagTable(docSection(itemDoc(reference, "struct ServiceRef"), "Encoding"));
+const KIND_OF: Record<string, string> = { Hello: "HELLO", Request: "REQUEST", Reply: "REPLY", Ping: "PING", Pong: "PONG", StreamItem: "STREAM_ITEM", StreamEnd: "STREAM_END", StreamAck: "STREAM_ACK", StreamCancel: "STREAM_CANCEL" };
+const docsOf = (variant: string, extra: Record<string, string> = {}) => {
+  const kind = KIND_OF[variant];
+  if (!kinds[kind]) throw new Error(`no KIND_${kind}`);
+  const fields = Object.fromEntries(Object.entries(variants[variant] ?? {}).map(([k, v]) => [k, plain(v)]));
+  return {
+    kind: `${kinds[kind]}: this frame is a ${kind}.`,
+    ...fields,
+    "token.index": `The endpoint token's ${tags[8].field}.`,
+    "token.generation": `The endpoint token's ${tags[9].field}: a slot used again has a new generation.`,
+    metadata_len: "The length of the metadata section, in bytes.",
+    listen: `${fields.listen ?? ""} One byte of family (0 none, 4, 6), the address (0, 4 or 16 bytes), then the port (u16).`,
+    detail: "What the status adds (see the table of statuses). 0 when it carries nothing.",
+    ...extra,
+  };
+};
+const frame = (title: string, fn: string, variant: string, vector: string, hex: string, opts: { branch?: string; literals?: string[]; when?: boolean } = {}, extra: Record<string, string> = {}, note?: string) => ({
+  title,
+  vector,
+  note,
+  fields: fillBytes(writerLayout(wire, fn, `WireMessage::${variant} {`, opts), hex, { when: opts.when }),
+  docs: docsOf(variant, extra),
+});
+const frames = [
+  frame("HELLO", "encode_message", "Hello", "hello-v1-v2-listen-v4", v1["hello-v1-v2-listen-v4"], {}, { magic: '"MPRC" in ASCII: a moonpool-rpc session.' }),
+  frame("REQUEST", "encode_message", "Request", "request", v1.request),
+  frame("REQUEST that opens a reply stream", "encode_message", "Request", "request-stream", v1["request-stream"], { when: true }),
+  frame("REQUEST with a bearer credential (version 2)", "encode_message", "Request", "request-bearer", v2["request-bearer"], {}, {}, "The metadata section holds one entry: kind 1 (a bearer credential), its length (u16), then its bytes."),
+  frame("REPLY, a success", "encode_message", "Reply", "reply-ok", v1["reply-ok"], { branch: "WireOutcome::Ok", literals: ["status"] }, { status: "0: the handler replied. The reply body follows." }),
+  frame("REPLY, a rejection", "encode_message", "Reply", "reply-method-mismatch", v1["reply-method-mismatch"], { branch: "WireOutcome::Err" }, { status: "The status code: 3 is a method mismatch, and its detail is the registered method." }),
+  frame("PING (a PONG has the same layout, kind 0x05)", "encode_message", "Ping", "ping", v1.ping),
+  frame("STREAM_ITEM", "encode_stream", "StreamItem", "stream-item", v1["stream-item"]),
+  frame("STREAM_END, a failed stream", "encode_stream", "StreamEnd", "stream-end-failed", v1["stream-end-failed"], {}, { status: "0 for a normal end, else a status code: 13 is a stream that its producer failed.", detail: "With status 13, the application's code." }),
+  frame("STREAM_ACK", "encode_stream", "StreamAck", "stream-ack", v1["stream-ack"]),
+  frame("STREAM_CANCEL", "encode_stream", "StreamCancel", "stream-cancel", v1["stream-cancel"]),
+];
+
+// The statuses, the admission order and what an error proves.
+const statuses = statusTable(wire, error);
+const codeOf = Object.fromEntries(statuses.map((s) => [s.name, s.code]));
+const admission = admissionOrder(transport);
+const executions = variantDocs(error, "Execution");
+
+// A reference, field by field.
+const serviceRef = protoFields(refs.service);
+const spaced = (hex: string) => hex.match(/../g)?.join(" ") ?? "";
+
+const H = [
+  ["modules", "The modules"],
+  ["the-wire", "The wire"],
+  ["frames-byte-by-byte", "Frames byte by byte"],
+  ["reply-statuses", "Reply statuses"],
+  ["versions", "Versions"],
+  ["identity-and-references", "Identity and references"],
+  ["admission", "Admission"],
+  ["delivery", "Delivery"],
+  ["reply-streams", "Reply streams"],
+  ["sessions-peers-and-failure", "Sessions, peers and failure"],
+  ["load-balancing", "Load balancing"],
+  ["security", "Security"],
+  ["shutdown", "Shutdown"],
+  ["how-it-is-tested", "How it is tested"],
+].map(([slug, text]) => ({ depth: 2, slug, text }));
+const toc = tocHtml(H);
+---
+<Extra
+  title="moonpool-rpc, call by call"
+  description="Typed RPC between dynamic endpoints: its frames byte by byte, what each failure proves, admission, streams and security."
+  guide={["part4-networking/02-rpc.md", "part4-networking/03-rpc-guarantees.md", "part4-networking/04-rpc-operations.md"]}
+>
+  <p>This page is the crate's own documentation and code, read when the site builds. The frames come from the encoder in <code>protocol/wire.rs</code>,
+    laid over the golden vectors that the crate's tests check, so each byte is a byte the
+    code writes.</p>
+  <Fragment set:html={await md(docSection(lib, "moonpool-rpc").split("\n## ")[0])} />
+  <Fragment set:html={toc} />
+
+  <h2 id="modules">The modules</h2>
+  <div class="table-wrap">
+    <table class="run-table">
+      <tr><th>module</th><th>what it holds</th></tr>
+      {modules.map((m) => <tr><td><code>{m.name}</code>{!m.public && <span class="chip-status">internal</span>}</td><td>{m.line}</td></tr>)}
+    </table>
+  </div>
+  <Fragment set:html={await md(docSection(lib, "Feature flags"))} />
+  <Fragment set:html={await md(docSection(transportDoc, "Ownership"))} />
+
+  <h2 id="the-wire">The wire</h2>
+  <Fragment set:html={await md(moduleDoc(src("protocol/mod.rs")))} />
+  <h3>The frame</h3>
+  <Fragment set:html={await md(moduleDoc(src("protocol/frame.rs")), 2)} />
+  <h3>The envelope</h3>
+  <Fragment set:html={await md(envelope.slice(0, statusAt))} />
+
+  <h2 id="frames-byte-by-byte">Frames byte by byte</h2>
+  <p>Each frame below is a golden vector of <code>tests/fixtures/</code>: the payload of one frame, without its 12-byte
+    header. The fields are the calls of the encoder, in order. The shared values of the vectors: call id 7, endpoint
+    token 3, generation 1, method 0x20, schema 1, codec 1 (prost), and the body <code>0a 02 68 69</code>, the protobuf of
+    the string "hi".</p>
+  {frames.map((f) => <FrameLayout {...f} />)}
+  <h3>The metadata section</h3>
+  <Fragment set:html={await md(moduleDoc(src("protocol/metadata.rs")))} />
+
+  <h2 id="reply-statuses">Reply statuses</h2>
+  <p>A REPLY or a STREAM_END with a status other than 0 is a rejection. The status tells the caller why, and the error that
+    the caller gets tells it what the server did: never ran the handler (<code>NotAdmitted</code>), maybe ran it
+    (<code>MaybeExecuted</code>), or ran it (<code>Executed</code>). A status that ends the reference fails every later
+    call through the same reference.</p>
+  <div class="table-wrap">
+    <table class="run-table status-table">
+      <tr><th>code</th><th>status</th><th>since</th><th>proves</th><th>ends the reference</th><th>what the server says</th></tr>
+      {statuses.map((s) => (
+        <tr>
+          <td>{s.code}</td><td><code>{s.name}</code></td><td>v{s.since}</td>
+          <td><code>{s.execution}</code></td>
+          <td>{s.terminal ? "yes" : "no"}</td><td>{plain(s.doc)}</td>
+        </tr>
+      ))}
+    </table>
+  </div>
+  <p>A failure that no server sent has a reason and a proof too: a disconnect before the request left is <code>NotAdmitted</code>,
+    after it <code>MaybeExecuted</code>; a timeout keeps the ambiguity.</p>
+  <div class="table-wrap">
+    <table class="run-table">
+      <tr><th>proof</th><th>what it means</th></tr>
+      {executions.map((e) => <tr><td><code>{e.name}</code></td><td>{plain(e.doc)}</td></tr>)}
+    </table>
+  </div>
+  <Fragment set:html={await md(itemDoc(error, "struct RpcError"))} />
+
+  <h2 id="versions">Versions</h2>
+  <Fragment set:html={await md(docSection(wireDoc, "Versions"))} />
+
+  <h2 id="identity-and-references">Identity and references</h2>
+  <Fragment set:html={await md(moduleDoc(src("endpoint/mod.rs")))} />
+  <h3>A reference, field by field</h3>
+  <p>A <code>ServiceRef</code> is a protobuf message. This is the golden vector <code>service</code> of <code>tests/fixtures/references-v1.txt</code>,
+    read field by field:</p>
+  <figure class="bytes">
+    <figcaption class="label">ServiceRef · {refs.service.length / 2} bytes · golden vector <code>service</code></figcaption>
+    <div class="hex-strip" aria-hidden="true">
+      {serviceRef.map((f, k) => <span class={`hx f${k % 4}`}><span class="hx-name">{f.tag}</span>{spaced(f.bytes)}</span>)}
+    </div>
+    <div class="table-wrap">
+      <table class="run-table byte-table">
+        <tr><th>at</th><th>tag</th><th>type</th><th>field</th><th>value</th></tr>
+        {serviceRef.map((f) => (
+          <tr><td>{f.at}</td><td>{f.tag}</td><td>{f.type}</td><td>{tags[f.tag]?.field ?? ""}</td><td class="hx-value">{f.type === "bytes" ? spaced(f.value) : f.value}</td></tr>
+        ))}
+      </table>
+    </div>
+    <p class="aside">A field equal to its default is not written. The incarnation is two <code>fixed64</code> halves
+      (tags 6 and 7); the address is 10.0.1.1 (tag 10) and the port 4500 (tag 11).</p>
+  </figure>
+  <h3>Interfaces as data</h3>
+  <Fragment set:html={await md(moduleDoc(src("interface/mod.rs")), 2)} />
+
+  <h2 id="admission">Admission</h2>
+  <Fragment set:html={await md(itemDoc(transport, "fn admit"))} />
+  <p>The rejections, in the order that <code>admit</code> makes them. The first check that fails sends its status, and
+    no body byte is decoded before the last one passed:</p>
+  <ol class="admission">
+    {admission.map((name) => <li><code>{name}</code> <span class="label">status {codeOf[name]}</span></li>)}
+  </ol>
+
+  <h2 id="delivery">Delivery</h2>
+  <Fragment set:html={await md(docSection(lib, "Delivery modes"))} />
+  <Fragment set:html={await md(docSection(transportDoc, "Delivery"))} />
+  <h3>Contracts</h3>
+  <Fragment set:html={await md(docSection(lib, "Contracts"))} />
+
+  <h2 id="reply-streams">Reply streams</h2>
+  <Fragment set:html={await md(moduleDoc(src("stream/mod.rs")), 2)} />
+
+  <h2 id="sessions-peers-and-failure">Sessions, peers and failure</h2>
+  <Fragment set:html={await md(docSection(transportDoc, "Sessions and peers"))} />
+  <h3>The failure monitor</h3>
+  <Fragment set:html={await md(moduleDoc(src("failure/mod.rs")), 2)} />
+
+  <h2 id="load-balancing">Load balancing</h2>
+  <Fragment set:html={await md(moduleDoc(src("balance/mod.rs")), 2)} />
+
+  <h2 id="security">Security</h2>
+  <Fragment set:html={await md(moduleDoc(src("security/mod.rs")), 2)} />
+
+  <h2 id="shutdown">Shutdown</h2>
+  <Fragment set:html={await md(itemDoc(src("transport/handle.rs"), "async fn shutdown"))} />
+
+  <h2 id="how-it-is-tested">How it is tested</h2>
+  <Fragment set:html={await md(docSection(lib, "Simulation"))} />
+  <Fragment set:html={await md(wireDoc.slice(goldenAt))} />
+  <h3>The campaigns of moonpool-rpc-sim</h3>
+  <Fragment set:html={await md(docSection(simDoc, "Campaigns"))} />
+  <Fragment set:html={await md(docSection(simDoc, "Faults"))} />
+  <p>The network faults are the simulator's: <a href={url("techniques/network/")}>Network faults</a> shows each family
+    in a live run.</p>
+</Extra>

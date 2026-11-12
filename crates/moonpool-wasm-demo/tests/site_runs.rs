@@ -10,6 +10,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+use moonpool_wasm_demo::coverage::{CoverageConfig, coverage};
+use moonpool_wasm_demo::engine::NETWORK_FAULTS;
 use moonpool_wasm_demo::{ChaosSet, RunConfig, run};
 
 /// The runs of each page, by file name under `website/site/src/runs/`.
@@ -51,7 +53,51 @@ fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
                 ..seed(56)
             }],
         ),
+        // Swarm testing: eight seeds, each with its own subset of the
+        // network and storage fault families.
+        (
+            "swarm",
+            (1..=8)
+                .map(|s| RunConfig {
+                    swarm: true,
+                    chaos: ChaosSet {
+                        network: true,
+                        storage: true,
+                        reboots: true,
+                    },
+                    ..seed(s)
+                })
+                .collect(),
+        ),
+        // From a red seed to the bug: the planted bug breaks the invariant.
+        (
+            "debugging",
+            vec![RunConfig {
+                bug: true,
+                ..seed(6)
+            }],
+        ),
     ]
+}
+
+/// The coverage run of the Assertions page: every network family but
+/// `bit_flip`, so no seed reaches the check of a damaged frame.
+fn assertions_page() -> CoverageConfig {
+    CoverageConfig {
+        run: RunConfig {
+            seed: 1,
+            network_faults: Some(
+                NETWORK_FAULTS
+                    .iter()
+                    .map(|(n, _)| (*n).to_string())
+                    .filter(|n| n != "bit_flip")
+                    .collect(),
+            ),
+            ..RunConfig::default()
+        },
+        plateau: 10,
+        max_seeds: 120,
+    }
 }
 
 fn page_json(configs: &[RunConfig]) -> String {
@@ -66,6 +112,11 @@ fn page_json(configs: &[RunConfig]) -> String {
     format!("[\n{}\n]\n", runs.join(",\n"))
 }
 
+fn coverage_json() -> String {
+    let c = coverage(&assertions_page()).expect("the config of the page is valid");
+    serde_json::to_string(&c).expect("a coverage run serializes") + "\n"
+}
+
 #[test]
 fn page_runs_are_recorded() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../website/site/src/runs");
@@ -77,6 +128,12 @@ fn page_runs_are_recorded() {
             fs::write(&path, &fresh).expect("write a recorded run of the site");
             stale.push(path.display().to_string());
         }
+    }
+    let path = dir.join("assertions.json");
+    let fresh = coverage_json();
+    if fs::read_to_string(&path).unwrap_or_default() != fresh {
+        fs::write(&path, &fresh).expect("write the coverage run of the site");
+        stale.push(path.display().to_string());
     }
     assert!(
         stale.is_empty(),

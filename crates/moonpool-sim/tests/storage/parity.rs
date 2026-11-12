@@ -1054,3 +1054,55 @@ fn growth_reads_the_same_bytes_on_both_backends() {
         assert_eq!(production, simulated, "growth bytes must match Tokio");
     });
 }
+
+/// Metadata writes on a handle opened read-only: `set_len` and `allocate`.
+/// Each step logs whether the backend refused it and the size after it.
+async fn read_only_metadata_contract<P: StorageProvider>(
+    provider: P,
+    prefix: String,
+) -> std::io::Result<Vec<(&'static str, bool, u64)>> {
+    let path = format!("{prefix}read-only-metadata.db");
+    let mut seed = provider
+        .open(&path, OpenOptions::create_new_write())
+        .await?;
+    seed.write_all(SEED_BYTES).await?;
+    seed.sync_all().await?;
+    drop(seed);
+
+    let file = provider.open(&path, OpenOptions::read_only()).await?;
+    let mut log = Vec::new();
+    let refused = file.set_len(4_096).await.is_err();
+    log.push(("set_len", refused, file.size().await?));
+    let refused = file.allocate(4_096).await.is_err();
+    log.push(("allocate", refused, file.size().await?));
+    Ok(log)
+}
+
+/// `fallocate` and `ftruncate` need a descriptor open for writing. The
+/// simulator used to grow a file through `allocate` on a read-only handle.
+/// The error kind differs by platform (`EBADF`, `EINVAL`), so only the
+/// verdict and the size are compared.
+#[test]
+fn a_read_only_handle_refuses_metadata_writes_on_both_backends() {
+    local_runtime().block_on(async {
+        let dir = TempDir::new().expect("temp dir");
+        let prefix = format!("{}/", dir.path().to_str().expect("temp path is UTF-8"));
+        let production = read_only_metadata_contract(TokioStorageProvider::new(), prefix)
+            .await
+            .expect("the production scenario must run");
+
+        let mut sim = SimWorld::new();
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let simulated = run_storage_test(sim, |provider| {
+            read_only_metadata_contract(provider, String::new())
+        })
+        .await
+        .expect("the simulated scenario must run");
+
+        assert_eq!(production, simulated, "metadata writes must match Tokio");
+        for (label, refused, size) in &production {
+            assert!(refused, "a read-only handle refuses {label}");
+            assert_eq!(*size, SEED_BYTES.len() as u64, "{label} changed nothing");
+        }
+    });
+}

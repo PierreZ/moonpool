@@ -1,6 +1,6 @@
 //! The run engine and the small system of the site (#416 (engine and player)).
 
-use moonpool_wasm_demo::engine::{ChaosSet, RunConfig, run, run_json};
+use moonpool_wasm_demo::engine::{ChaosSet, RunConfig, parse_recipe, run, run_json};
 
 fn config(seed: u64, bug: bool) -> RunConfig {
     RunConfig {
@@ -81,4 +81,108 @@ fn rates() {
             .count();
         println!("bug={bug}: {failed} of {n} seeds fail");
     }
+}
+
+#[test]
+fn the_fault_tables_name_every_family_of_the_simulator() {
+    use moonpool_sim::{NetworkFault, StorageFault};
+    use moonpool_wasm_demo::engine::{NETWORK_FAULTS, STORAGE_FAULTS};
+    let net: Vec<&str> = NETWORK_FAULTS.iter().map(|(n, _)| *n).collect();
+    let sim: Vec<&str> = NetworkFault::ALL.iter().map(|f| f.name()).collect();
+    assert_eq!(net, sim);
+    assert!(NETWORK_FAULTS.iter().all(|(n, f)| f.name() == *n));
+    let sto: Vec<&str> = STORAGE_FAULTS.iter().map(|(n, _)| *n).collect();
+    let sim: Vec<&str> = StorageFault::ALL.iter().map(|f| f.name()).collect();
+    assert_eq!(sto, sim);
+    assert!(STORAGE_FAULTS.iter().all(|(n, f)| f.name() == *n));
+}
+
+#[test]
+fn a_swarm_seed_names_its_families_and_keeps_them_out_of_the_events() {
+    let config = RunConfig {
+        seed: 3,
+        swarm: true,
+        chaos: ChaosSet {
+            network: true,
+            storage: true,
+            reboots: true,
+        },
+        ..RunConfig::default()
+    };
+    let swarm = run(&config).expect("valid config");
+    let families = swarm.families.expect("a run with chaos names its families");
+    assert!(families.network.len() < 9 || families.storage.len() < 12);
+    assert!(
+        swarm.faults.iter().all(|f| f.kind != "chaos_families"),
+        "the families are not a fault of the run"
+    );
+    let off = run(&RunConfig {
+        chaos: ChaosSet {
+            network: false,
+            storage: false,
+            reboots: true,
+        },
+        ..RunConfig::default()
+    })
+    .expect("valid config");
+    assert!(off.families.is_none());
+}
+
+#[test]
+fn the_checks_list_every_coverage_assertion_of_the_register() {
+    let code = include_str!("../src/register.rs");
+    let mut found = Vec::new();
+    for (i, _) in code
+        .match_indices("assert_sometimes!(")
+        .chain(code.match_indices("assert_reachable!("))
+    {
+        let rest = &code[i..];
+        let end = rest.find(");").expect("a macro call ends");
+        let call = &rest[..end];
+        let msg = call.rsplit('"').nth(1).expect("a literal message");
+        found.push((i, msg.to_string()));
+    }
+    found.sort();
+    let found: Vec<String> = found.into_iter().map(|(_, m)| m).collect();
+    assert_eq!(found, moonpool_wasm_demo::register::CHECKS);
+}
+
+#[test]
+fn coverage_stops_when_stable_and_names_a_check_no_seed_reaches() {
+    use moonpool_wasm_demo::coverage::{CoverageConfig, coverage};
+    use moonpool_wasm_demo::engine::NETWORK_FAULTS;
+    // Every network family but bit_flip: no frame is ever damaged.
+    let no_flip: Vec<String> = NETWORK_FAULTS
+        .iter()
+        .map(|(n, _)| (*n).to_string())
+        .filter(|n| n != "bit_flip")
+        .collect();
+    let off = coverage(&CoverageConfig {
+        run: RunConfig {
+            seed: 1,
+            network_faults: Some(no_flip),
+            ..RunConfig::default()
+        },
+        plateau: 10,
+        max_seeds: 40,
+    })
+    .expect("valid config");
+    assert!(!off.stable);
+    assert_eq!(off.seeds.len(), 40, "it runs to the cap");
+    assert_eq!(off.missing, ["a server drops a damaged frame"]);
+}
+
+#[test]
+fn a_recipe_reads_as_moonpool_writes_it() {
+    let recipe = vec![(10, 17_215_453_406_249_577_386), (3, 1)];
+    let text = moonpool_sim::format_timeline(&recipe);
+    assert_eq!(
+        parse_recipe(&text).expect("a recipe moonpool wrote"),
+        recipe
+    );
+    assert_eq!(parse_recipe("").expect("the root"), Vec::new());
+    assert!(parse_recipe("10:42").is_err());
+    assert!(parse_recipe("10@-1").is_err());
+    let refused = run_json(r#"{"seed": 7, "recipe": "ten@1"}"#);
+    assert!(refused.contains("\"error\""), "{refused}");
 }

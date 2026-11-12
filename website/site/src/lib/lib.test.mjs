@@ -149,16 +149,21 @@ test("rustFn takes one top-level function, and the pages' functions exist", asyn
 });
 
 test("the engine's fault tables and the register's hints read from the code", async () => {
-  const { constNames, constStr, hintLabels, lineWith, repoFile } = await import("./source.mjs");
+  const { constList, constNames, constStr, hintLabels, lineWith, repoFile } = await import("./source.mjs");
   const engine = repoFile("crates/moonpool-wasm-demo/src/engine.rs");
   assert.ok(constNames(engine, "NETWORK_FAULTS").includes("partition"));
   assert.ok(constNames(engine, "STORAGE_FAULTS").includes("crash_damage"));
+  // rustfmt puts a long tuple on its own lines: the name is still read.
+  assert.ok(constNames(engine, "STORAGE_FAULTS").includes("dropped_mutation_discard"));
+  assert.deepEqual(constNames("pub const X: &[(&str, u8)] = &[\n    (\n        \"a_long\",\n        1,\n    ),\n    (\"b\", 2),\n];", "X"), ["a_long", "b"]);
   assert.match(constStr(engine, "HINT_STRUCK"), /^hint: /);
   assert.throws(() => constStr(engine, "NO_SUCH_CONST"));
   const register = repoFile("crates/moonpool-wasm-demo/src/register.rs");
   assert.deepEqual(hintLabels(register), ["register: record written, not synced", "register: write durable, ack not sent"]);
   assert.match(lineWith(register, "file.sync_all()"), /sync_all/);
   assert.throws(() => lineWith(register, "no such line"));
+  assert.ok(constList(register, "CHECKS").includes("a server drops a damaged frame"));
+  assert.throws(() => constList(register, "NO_SUCH_LIST"));
 });
 
 test("excerpt takes the lines between two markers, without their indent", async () => {
@@ -166,4 +171,5 @@ test("excerpt takes the lines between two markers, without their indent", async 
   const text = "fn a() {\n    let x = 1;\n    if x {\n        y();\n    }\n}\n";
   assert.equal(excerpt(text, "if x", "    }"), "if x {\n    y();\n}");
   assert.throws(() => excerpt(text, "nope", "}"));
+  assert.equal(excerpt(text, "y();", "y();", 1), "    y();\n}", "after takes more lines");
 });

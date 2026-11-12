@@ -29,7 +29,7 @@ Rules that apply to every macro:
 - `msg` is any `Display` value. It identifies the site, so keep it stable and unique.
 - Numeric values go through `to_i64_saturating`, so any integer type works.
 - The detail map `{ "k" => v, .. }` prints `[ASSERTION FAILED] msg (seed=N) | k=v ...` on failure only. Values must implement `Display`.
-- `assert_sometimes_each!` takes at most 6 identity keys per site (`MAX_EACH_KEYS`). The quality list is optional.
+- `assert_sometimes_each!` takes at most 6 identity keys per site (`MAX_EACH_KEYS`). The quality list is optional, and up to 4 quality keys count. Each quality value is in `0..=65535` (`MAX_QUALITY`): a larger value saturates and a negative value counts as 0.
 
 ## Numeric Watermarks
 

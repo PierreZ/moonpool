@@ -38,17 +38,31 @@ The config:
 ```json
 { "scenario": "register", "seed": 256, "servers": 3, "bug": false,
   "chaos": { "network": true, "storage": false, "reboots": true },
-  "network_faults": null, "storage_faults": null, "wipes": false }
+  "network_faults": null, "storage_faults": null, "wipes": false,
+  "swarm": false, "recipe": null }
 ```
 
 Each field is optional. `network_faults` and `storage_faults` keep only the
 named fault families (`NETWORK_FAULTS` and `STORAGE_FAULTS` in
 `src/engine.rs`); `null` keeps them all. `wipes` lets attrition wipe the disk
-of one server, which comes back within the run on an empty log. The run (`Run` in `src/engine.rs`, versioned by
+of one server, which comes back within the run on an empty log. `swarm`
+runs the network and storage chaos in `ChaosMode::Swarm`, and the run then
+names the families the seed drew in `families`. `recipe` replays one timeline
+of an exploration (`replay_timeline`) in place of the plain seed. The run (`Run` in `src/engine.rs`, versioned by
 `MODEL`) holds the processes, the trace events, the faults, the messages, the
 assertion counts, the summary of the report with the first event that broke
 the invariant, and a fingerprint: a hash of the events and the count of random
 draws.
+
+## Coverage
+
+`coverage(&CoverageConfig)` (and `coverage_json`, exported to wasm as
+`coverage`) runs seeds one after another from a run config and records which
+of the register's checks (`register::CHECKS`, its `assert_sometimes!` and
+`assert_reachable!` sites) each seed hit first. It stops when every check
+fired and `plateau` seeds in a row hit nothing new, as `UntilCoverageStable`
+does, or at `max_seeds`, with the checks still missing. With the `bit_flip`
+family off, "a server drops a damaged frame" can never fire.
 
 ## Run it
 
@@ -77,3 +91,5 @@ builds for `wasm32-unknown-unknown`.
 
 - [Simulation in the Browser](https://pierrez.github.io/moonpool/part4-integration/07-wasm.html) in the Sim Book
 - [One thread, one clock, one seed](https://pierrez.github.io/moonpool/techniques/determinism/) on the website
+- [Multiverse exploration](https://pierrez.github.io/moonpool/techniques/exploration/): its tree is recorded natively by `tests/exploration_tree.rs`
+- [The playground](https://pierrez.github.io/moonpool/playground/): every field of the config, any seed, a hunt for a failing seed

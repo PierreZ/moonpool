@@ -128,6 +128,13 @@ impl<F: LocalStorageFile> BlockFile<F> {
                  {offset_alignment}, so block boundaries would be unaddressable"
             )));
         }
+        let memory_alignment = constraints.memory_alignment();
+        if !block_size.is_multiple_of(memory_alignment) {
+            return Err(invalid_input(format!(
+                "block size {block_size} is not a multiple of the file's memory alignment \
+                 {memory_alignment}, so a short transfer could not resume on a block boundary"
+            )));
+        }
         // All three alignments are powers of two, so the coarsest of them is
         // their least common multiple: a boundary that satisfies all three at
         // once. `block_size` is a multiple of each (checked above), so it is a
@@ -137,7 +144,7 @@ impl<F: LocalStorageFile> BlockFile<F> {
             .map_err(|_| invalid_input("the file's offset alignment does not fit in memory"))?;
         let transfer_step = offset_alignment
             .max(constraints.length_alignment())
-            .max(constraints.memory_alignment());
+            .max(memory_alignment);
         Ok(Self {
             file,
             block_size,

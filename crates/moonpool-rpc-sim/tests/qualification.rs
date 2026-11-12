@@ -70,6 +70,7 @@ const REQUIRED: &[&str] = &[
     "rpc qual timeout after execution",
     "rpc qual caller dropped a call in flight",
     "rpc qual reliable request executed more than once",
+    "rpc qual a one-way request executed exactly once",
     "rpc qual reliable duplicate while a stream shared the session",
     "rpc qual reliable call bounded by sustained failure",
     "rpc qual reply won a race with its server going down",

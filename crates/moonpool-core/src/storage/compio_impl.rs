@@ -124,7 +124,6 @@ impl LocalStorageProvider for CompioStorageProvider {
     type File = CompioStorageFile;
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
-        options.validate()?;
         let opened = native::open_file(&CompioFs, path, &options).await?;
         let append = match (options.is_append(), NATIVE_APPEND) {
             (false, _) => Append::No,
@@ -242,8 +241,13 @@ fn not_a_directory() -> io::Error {
 /// The stream half ([`AsyncRead`], [`AsyncWrite`], [`AsyncSeek`]) keeps its
 /// own cursor and runs one operation at a time. A started operation stays in
 /// the file: polling again resumes it, so a dropped read or write future
-/// loses nothing. A stream write that is pending when a stream read or seek
-/// is polled is finished first, and its bytes count. A file with alignment
+/// loses nothing. A stream write that is pending when another stream call is
+/// polled is finished first, and its bytes count, as a dropped write does on
+/// the other backends. A pending write resumes only for a write whose buffer
+/// starts with its bytes (the same call, polled again); a write of other
+/// bytes is a new call, which must not get the result of the old one. The
+/// error of a write that nobody collected goes to the next stream call that
+/// finishes it, or to `flush`. A file with alignment
 /// constraints (a direct-I/O file) refuses stream reads and writes with
 /// [`stream_io_unsupported`], as the contract requires.
 pub struct CompioStorageFile {
@@ -297,7 +301,12 @@ type WriteOutcome = io::Result<(Option<u64>, usize)>;
 /// its buffer, so it outlives any one poll.
 enum Pending {
     Read(LocalFuture<ReadOutcome>),
-    Write(LocalFuture<WriteOutcome>),
+    /// A write, with a copy of its bytes: a later `poll_write` resumes it
+    /// only when it is the same call (see [`CompioStorageFile`]).
+    Write {
+        op: LocalFuture<WriteOutcome>,
+        bytes: Vec<u8>,
+    },
     /// A seek that needs the file's size; resolves to the new cursor.
     Seek(LocalFuture<io::Result<u64>>),
 }
@@ -313,7 +322,7 @@ impl Pending {
     fn kind(&self) -> Kind {
         match self {
             Self::Read(_) => Kind::Read,
-            Self::Write(_) => Kind::Write,
+            Self::Write { .. } => Kind::Write,
             Self::Seek(_) => Kind::Seek,
         }
     }
@@ -321,7 +330,7 @@ impl Pending {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Done> {
         match self {
             Self::Read(op) => op.as_mut().poll(cx).map(Done::Read),
-            Self::Write(op) => op.as_mut().poll(cx).map(Done::Write),
+            Self::Write { op, .. } => op.as_mut().poll(cx).map(Done::Write),
             Self::Seek(op) => op.as_mut().poll(cx).map(Done::Seek),
         }
     }
@@ -340,21 +349,25 @@ impl CompioStorageFile {
     /// Poll the stream operation of kind `want`: an operation of another kind
     /// still in flight is finished and applied first, then `start` begins
     /// one unless it is already running.
+    ///
+    /// # Errors
+    ///
+    /// The error of a write in flight that nobody collected.
     fn poll_op(
         &mut self,
         cx: &mut Context<'_>,
         want: Kind,
         start: impl FnOnce(&Self) -> Pending,
-    ) -> Poll<Done> {
+    ) -> Poll<io::Result<Done>> {
         if !self.pending_is(want) {
-            ready!(self.poll_idle(cx));
+            ready!(self.poll_idle(cx))?;
         }
         let mut pending = match self.pending.take() {
             Some(pending) => pending,
             None => start(self),
         };
         match pending.poll(cx) {
-            Poll::Ready(done) => Poll::Ready(done),
+            Poll::Ready(done) => Poll::Ready(Ok(done)),
             Poll::Pending => {
                 self.pending = Some(pending);
                 Poll::Pending
@@ -369,14 +382,19 @@ impl CompioStorageFile {
     }
 
     /// Finish any stream operation in flight, applying its effect on the
-    /// cursor. Its result is dropped: whoever started it stopped polling.
-    fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    /// cursor. Its result is dropped, because whoever started it stopped
+    /// polling, except the error of a write: the bytes the caller gave did
+    /// not land, so the next stream call reports it.
+    fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if let Some(pending) = self.pending.as_mut() {
             let done = ready!(pending.poll(cx));
             self.pending = None;
+            if let Done::Write(Err(error)) = done {
+                return Poll::Ready(Err(error));
+            }
             self.apply(&done);
         }
-        Poll::Ready(())
+        Poll::Ready(Ok(()))
     }
 
     /// The cursor effect of a finished operation. A read moves nothing: its
@@ -413,7 +431,8 @@ impl CompioStorageFile {
         let stream = self.stream.clone();
         let cursor = self.cursor;
         let append = self.append;
-        Pending::Write(Box::pin(async move {
+        let copy = bytes.clone();
+        let op = Box::pin(async move {
             if append == Append::Native {
                 // O_APPEND: the kernel ignores the offset and appends.
                 let BufResult(result, _) = (&stream).write_at(bytes, 0).await;
@@ -427,7 +446,8 @@ impl CompioStorageFile {
             let BufResult(result, _) = (&stream).write_at(bytes, at).await;
             let written = result?;
             Ok((Some(at + written as u64), written))
-        }))
+        });
+        Pending::Write { op, bytes: copy }
     }
 
     fn start_seek_from_end(&self, offset: i64) -> Pending {
@@ -440,7 +460,7 @@ impl CompioStorageFile {
 
     /// Seek relative to the end of the file, which needs its size.
     fn poll_seek_from_end(&mut self, cx: &mut Context<'_>, offset: i64) -> Poll<io::Result<u64>> {
-        match ready!(self.poll_op(cx, Kind::Seek, |file| file.start_seek_from_end(offset))) {
+        match ready!(self.poll_op(cx, Kind::Seek, |file| file.start_seek_from_end(offset)))? {
             Done::Seek(result) => {
                 let position = result?;
                 self.cursor = Some(position);
@@ -584,11 +604,11 @@ impl AsyncRead for CompioStorageFile {
         let this = self.get_mut();
         this.check_stream()?;
         if buf.is_empty() {
-            ready!(this.poll_idle(cx));
+            ready!(this.poll_idle(cx))?;
             return Poll::Ready(Ok(0));
         }
         let len = buf.len();
-        match ready!(this.poll_op(cx, Kind::Read, |file| file.start_read(len))) {
+        match ready!(this.poll_op(cx, Kind::Read, |file| file.start_read(len)))? {
             Done::Read(result) => {
                 let (start, read_len, read) = result?;
                 // A resumed read may hand a shorter buffer than it started
@@ -611,11 +631,19 @@ impl AsyncWrite for CompioStorageFile {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.check_stream()?;
+        let resumes = matches!(
+            &this.pending,
+            Some(Pending::Write { bytes, .. }) if !buf.is_empty() && buf.starts_with(bytes)
+        );
+        if !resumes {
+            // A write in flight for other bytes belongs to a call that was
+            // dropped: finish it, then write these bytes.
+            ready!(this.poll_idle(cx))?;
+        }
         if buf.is_empty() {
-            ready!(this.poll_idle(cx));
             return Poll::Ready(Ok(0));
         }
-        match ready!(this.poll_op(cx, Kind::Write, |file| file.start_write(buf.to_vec()))) {
+        match ready!(this.poll_op(cx, Kind::Write, |file| file.start_write(buf.to_vec())))? {
             Done::Write(result) => {
                 let (cursor, written) = result?;
                 this.cursor = cursor;
@@ -626,17 +654,8 @@ impl AsyncWrite for CompioStorageFile {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if let Some(pending) = this.pending.as_mut() {
-            let done = ready!(pending.poll(cx));
-            this.pending = None;
-            // A write nobody collected still reports its error here.
-            if let Done::Write(Err(error)) = done {
-                return Poll::Ready(Err(error));
-            }
-            this.apply(&done);
-        }
-        Poll::Ready(Ok(()))
+        // A write nobody collected still reports its error here.
+        self.get_mut().poll_idle(cx)
     }
 
     fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -658,7 +677,7 @@ impl AsyncSeek for CompioStorageFile {
         {
             return this.poll_seek_from_end(cx, offset);
         }
-        ready!(this.poll_idle(cx));
+        ready!(this.poll_idle(cx))?;
         match (pos, this.cursor) {
             (SeekFrom::Start(position), _) => {
                 this.cursor = Some(position);

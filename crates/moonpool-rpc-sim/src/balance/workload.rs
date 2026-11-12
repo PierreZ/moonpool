@@ -5,7 +5,7 @@
 //! ledger.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -91,16 +91,58 @@ impl BalanceOp {
 }
 
 /// How many effectful handler runs (declined ones aside) one call may
-/// cause, given the attempts the observation hook saw it start: every
-/// attempt runs at most once; without retry permission at most one
-/// primary attempt (first or retry) may have run, plus each concurrent
-/// copy actually started.
-fn permitted_executions(policy: &BalancePolicy, primaries: u64, copies: u64) -> u64 {
+/// cause, from its policy alone: one primary run without retry
+/// permission (`max_attempts` with it), plus `max_copies` concurrent
+/// copies when duplicates are permitted. This limit does not use the
+/// balancer's own account of the attempts it started.
+fn policy_cap(policy: &BalancePolicy) -> u64 {
     let sequential = match policy.retry {
-        Retry::AtMostOnce => primaries.min(1),
-        Retry::AfterAmbiguous => primaries,
+        Retry::AtMostOnce => 1,
+        Retry::AfterAmbiguous => u64::from(policy.max_attempts.max(1)),
     };
-    sequential + copies
+    sequential + u64::from(copy_limit(policy))
+}
+
+/// The concurrent copies `policy` permits one call.
+fn copy_limit(policy: &BalancePolicy) -> u32 {
+    match &policy.duplicates {
+        Duplicates::Permitted(copies) => copies.max_copies,
+        Duplicates::Forbidden => 0,
+    }
+}
+
+/// A tighter limit from the attempts the observation hook saw the call
+/// start (the balancer's own account, so only an additional check):
+/// every attempt runs at most once; without retry permission at most
+/// one primary attempt (first or retry) may have run, plus each
+/// concurrent copy actually started.
+fn permitted_executions(policy: &BalancePolicy, attempts: CallAttempts) -> u64 {
+    let sequential = match policy.retry {
+        Retry::AtMostOnce => attempts.primaries.min(1),
+        Retry::AfterAmbiguous => attempts.primaries,
+    };
+    sequential + attempts.copies
+}
+
+/// Check the attempts one call started against its policy.
+fn check_attempts(policy: &BalancePolicy, id: u64, attempts: CallAttempts) {
+    assert_always!(
+        attempts.primaries <= u64::from(policy.max_attempts.max(1)),
+        "a balanced call starts no more primary attempts than its policy allows",
+        { "id" => id, "primaries" => attempts.primaries, "max_attempts" => policy.max_attempts }
+    );
+    assert_always!(
+        attempts.copies <= u64::from(copy_limit(policy)),
+        "a balanced call starts no more copies than its policy allows",
+        { "id" => id, "copies" => attempts.copies, "max_copies" => copy_limit(policy) }
+    );
+    if policy.retry == Retry::AtMostOnce {
+        assert_always!(
+            attempts.after_ambiguous == 0,
+            "an at-most-once call starts no attempt after an ambiguous one",
+            { "id" => id, "started" => attempts.after_ambiguous }
+        );
+    }
 }
 
 /// The workload's shape.
@@ -163,11 +205,81 @@ struct Observer {
     primaries: AtomicU64,
     /// Hedges and comparison copies started.
     copies: AtomicU64,
+    /// A primary attempt or a hedge of the running call ended
+    /// ambiguously (it may have executed).
+    ambiguous: AtomicBool,
+    /// Retries and hedges started after `ambiguous` was set.
+    after_ambiguous: AtomicU64,
+}
+
+/// The attempts one call started, as the observation hook saw them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CallAttempts {
+    primaries: u64,
+    copies: u64,
+    /// Retries and hedges started after an ambiguous end.
+    after_ambiguous: u64,
 }
 
 impl Observer {
     fn load(counter: &AtomicU64) -> u64 {
         counter.load(Ordering::Relaxed)
+    }
+
+    /// A call starts: forget the ambiguous end of the previous call.
+    /// Calls run one at a time and start attempts only while they run.
+    fn begin_call(&self) -> CallAttempts {
+        self.ambiguous.store(false, Ordering::Relaxed);
+        self.totals()
+    }
+
+    fn totals(&self) -> CallAttempts {
+        CallAttempts {
+            primaries: Self::load(&self.primaries),
+            copies: Self::load(&self.copies),
+            after_ambiguous: Self::load(&self.after_ambiguous),
+        }
+    }
+
+    /// The attempts started since `before`.
+    fn since(&self, before: CallAttempts) -> CallAttempts {
+        let now = self.totals();
+        CallAttempts {
+            primaries: now.primaries - before.primaries,
+            copies: now.copies - before.copies,
+            after_ambiguous: now.after_ambiguous - before.after_ambiguous,
+        }
+    }
+
+    fn started(&self, kind: AttemptKind) {
+        self.started.fetch_add(1, Ordering::Relaxed);
+        if kind == AttemptKind::Hedge {
+            self.hedges.fetch_add(1, Ordering::Relaxed);
+        }
+        let class = match kind {
+            AttemptKind::First | AttemptKind::Retry => &self.primaries,
+            AttemptKind::Hedge | AttemptKind::Comparison => &self.copies,
+        };
+        class.fetch_add(1, Ordering::Relaxed);
+        if matches!(kind, AttemptKind::Retry | AttemptKind::Hedge)
+            && self.ambiguous.load(Ordering::Relaxed)
+        {
+            self.after_ambiguous.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn ended(&self, kind: AttemptKind, end: &AttemptEnd, late: bool) {
+        self.ended.fetch_add(1, Ordering::Relaxed);
+        if late {
+            self.ended_late.fetch_add(1, Ordering::Relaxed);
+        } else if kind != AttemptKind::Comparison && end.execution() == Execution::MaybeExecuted {
+            // A comparison copy does not decide the call; any other
+            // ambiguous end does.
+            self.ambiguous.store(true, Ordering::Relaxed);
+        }
+        if *end == AttemptEnd::Dropped {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 
@@ -206,26 +318,10 @@ impl BalanceHooks<Work> for Hooks {
 
     fn observe(&self, event: &AttemptEvent) {
         match event {
-            AttemptEvent::Started { kind, .. } => {
-                self.observer.started.fetch_add(1, Ordering::Relaxed);
-                if *kind == AttemptKind::Hedge {
-                    self.observer.hedges.fetch_add(1, Ordering::Relaxed);
-                }
-                let class = match kind {
-                    AttemptKind::First | AttemptKind::Retry => &self.observer.primaries,
-                    _ => &self.observer.copies,
-                };
-                class.fetch_add(1, Ordering::Relaxed);
-            }
-            AttemptEvent::Ended { end, late, .. } => {
-                self.observer.ended.fetch_add(1, Ordering::Relaxed);
-                if *late {
-                    self.observer.ended_late.fetch_add(1, Ordering::Relaxed);
-                }
-                if *end == AttemptEnd::Dropped {
-                    self.observer.dropped.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+            AttemptEvent::Started { kind, .. } => self.observer.started(*kind),
+            AttemptEvent::Ended {
+                kind, end, late, ..
+            } => self.observer.ended(*kind, end, *late),
         }
     }
 }
@@ -254,6 +350,9 @@ pub struct BalanceWorkload {
 struct CallCheck {
     id: u64,
     op: BalanceOp,
+    /// The limit from the policy alone.
+    policy_cap: u64,
+    /// The tighter limit from the attempts the call started.
     permitted: u64,
     /// The call reported that nothing with an effect ran.
     not_admitted: bool,
@@ -264,8 +363,13 @@ impl CallCheck {
         let executed = receipts.iter().filter(|receipt| !receipt.declined).count();
         let executed = u64::try_from(executed).unwrap_or(u64::MAX);
         assert_always!(
-            executed <= self.permitted,
+            executed <= self.policy_cap,
             "a balanced job never runs more often than its permissions allow",
+            { "id" => self.id, "op" => format!("{:?}", self.op), "executed" => executed, "cap" => self.policy_cap }
+        );
+        assert_always!(
+            executed <= self.permitted,
+            "a balanced job never runs more often than its started attempts allow",
             { "id" => self.id, "op" => format!("{:?}", self.op), "executed" => executed, "permitted" => self.permitted }
         );
         if self.not_admitted {
@@ -367,12 +471,11 @@ impl BalanceWorkload {
         };
         let policy = op.policy();
         let ledger = Ledger::of(ctx.state());
-        let outage_at_start = ledger.outage();
+        let outage_mark = ledger.outage_mark();
         let hedges_before = Observer::load(&self.observer.hedges);
         // Calls run one at a time and start attempts only while running:
         // the counters' growth over the call is this call's attempts.
-        let primaries_before = Observer::load(&self.observer.primaries);
-        let copies_before = Observer::load(&self.observer.copies);
+        let attempts_before = self.observer.begin_call();
         let outcome: Outcome = if op == BalanceOp::Cancel {
             let wait_for_hedge = ctx.random().random_bool(0.5);
             let give_up = ctx.random().random_range(1..300u64);
@@ -398,16 +501,15 @@ impl BalanceWorkload {
             Some(balanced.call(job, &policy).await)
         };
         let succeeded = matches!(outcome, Some(Ok(_)));
+        let attempts = self.observer.since(attempts_before);
+        check_attempts(&policy, id, attempts);
         let call = Judged {
             op,
             id,
-            permitted: permitted_executions(
-                &policy,
-                Observer::load(&self.observer.primaries) - primaries_before,
-                Observer::load(&self.observer.copies) - copies_before,
-            ),
+            policy_cap: policy_cap(&policy),
+            permitted: permitted_executions(&policy, attempts),
             outcome,
-            outage: outage_at_start || ledger.outage(),
+            outage: ledger.outage_since(outage_mark),
             hedged: Observer::load(&self.observer.hedges) > hedges_before,
         };
         self.judge(ctx, balanced, &call);
@@ -429,6 +531,7 @@ impl BalanceWorkload {
         let check = CallCheck {
             id: call.id,
             op: call.op,
+            policy_cap: call.policy_cap,
             permitted: call.permitted,
             not_admitted: matches!(
                 &call.outcome,
@@ -600,9 +703,12 @@ impl BalanceWorkload {
 struct Judged {
     op: BalanceOp,
     id: u64,
+    /// Effectful executions its policy allows.
+    policy_cap: u64,
     /// Effectful executions its started attempts and permissions allow.
     permitted: u64,
     outcome: Outcome,
+    /// Every alternative was down at some time during the call.
     outage: bool,
     hedged: bool,
 }
@@ -789,5 +895,67 @@ impl BalanceWorkload {
         for check in &self.checks {
             check.verify(&ledger.receipts(check.id));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AttemptEnd, AttemptKind, BalanceOp, CallAttempts, Observer, permitted_executions,
+        policy_cap,
+    };
+
+    /// The policy limit stays fixed when the balancer starts more attempts
+    /// than permitted; the limit from the started attempts grows with them.
+    #[test]
+    fn policy_cap_does_not_grow_with_extra_copies() {
+        let policy = BalanceOp::AtMostOnce.policy();
+        assert_eq!(policy_cap(&policy), 1);
+        let too_many = CallAttempts {
+            primaries: 2,
+            copies: 2,
+            after_ambiguous: 1,
+        };
+        assert_eq!(permitted_executions(&policy, too_many), 3);
+        assert_eq!(policy_cap(&BalanceOp::Hedged.policy()), 2);
+        assert_eq!(policy_cap(&BalanceOp::Compare.policy()), 2);
+        let idempotent = BalanceOp::Idempotent.policy();
+        assert_eq!(policy_cap(&idempotent), u64::from(idempotent.max_attempts));
+    }
+
+    /// A retry or a hedge after an ambiguous end of the same call is
+    /// counted; an ambiguous comparison copy, a late loser and an earlier
+    /// call are not.
+    #[test]
+    fn observer_counts_attempts_after_an_ambiguous_end() {
+        let observer = Observer::default();
+        let before = observer.begin_call();
+        observer.started(AttemptKind::First);
+        observer.started(AttemptKind::Comparison);
+        observer.ended(AttemptKind::Comparison, &AttemptEnd::Dropped, false);
+        observer.started(AttemptKind::Hedge);
+        observer.ended(AttemptKind::First, &AttemptEnd::Replied, false);
+        assert_eq!(
+            observer.since(before),
+            CallAttempts {
+                primaries: 1,
+                copies: 2,
+                after_ambiguous: 0,
+            }
+        );
+
+        let before = observer.begin_call();
+        observer.started(AttemptKind::First);
+        observer.ended(AttemptKind::Hedge, &AttemptEnd::Dropped, true);
+        observer.ended(AttemptKind::First, &AttemptEnd::Dropped, false);
+        observer.started(AttemptKind::Retry);
+        observer.started(AttemptKind::Hedge);
+        assert_eq!(observer.since(before).after_ambiguous, 2);
+
+        // The next call starts clean.
+        let before = observer.begin_call();
+        observer.started(AttemptKind::First);
+        observer.started(AttemptKind::Retry);
+        assert_eq!(observer.since(before).after_ambiguous, 0);
     }
 }
