@@ -376,6 +376,11 @@ labelled_family!(
 /// produces for the same series (pairs sorted by label name), letting the
 /// recorded series and the final scrape line up.
 fn series_key(name: &str, label_names: &[String], values: &[&str]) -> String {
+    debug_assert_eq!(
+        label_names.len(),
+        values.len(),
+        "a series key needs one value for each label name"
+    );
     let pairs = label_names
         .iter()
         .zip(values)
