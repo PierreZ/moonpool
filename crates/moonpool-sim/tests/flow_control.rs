@@ -279,8 +279,11 @@ fn an_abort_wakes_a_writer_parked_on_the_window() {
     assert!(poll_write_with(&mut client, b"x", &waker).is_pending());
 
     sim.close_connection_abort(server.connection_id());
-
+    // The abort discards the server's unread bytes at once, which frees
+    // the window and wakes the writer; the reset itself reaches the client
+    // only when the RST lands.
     assert_eq!(wake_count.0.load(Ordering::Relaxed), 1);
+    sim.run_until_empty();
     assert!(
         matches!(poll_write_once(&mut client, b"x"), Poll::Ready(Err(_))),
         "the woken writer observes the connection error, not another Pending"
@@ -312,6 +315,8 @@ fn a_peer_drop_with_unread_bytes_resets_and_frees_the_window() {
         "the writer is woken"
     );
     assert_eq!(sim.outstanding_send_bytes(client.connection_id()), 0);
+    // The reset reaches the client when the RST lands.
+    sim.run_until_empty();
     assert!(
         matches!(
             poll_write_once(&mut client, b"after-close"),

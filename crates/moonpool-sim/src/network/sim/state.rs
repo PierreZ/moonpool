@@ -21,7 +21,7 @@
 //! stalls the send queue *and* freezes what is already in flight
 //! ([`ConnectionState::in_flight_held_since`]); a black hole makes in-flight
 //! bytes vanish at the instant they would land; an abort discards the send
-//! queue and the flight and resets the peer. Bytes that reached the receive
+//! queue and puts an RST in flight behind what is already on the wire. Bytes that reached the receive
 //! buffer are the peer's: nothing on the wire can take them back.
 
 use std::{
@@ -88,8 +88,8 @@ pub(crate) enum InFlightPayload {
     Data(Vec<u8>),
     /// A graceful close; always the last item of a stream.
     Fin,
-    /// A reset from an endpoint whose process died; always the last item of
-    /// a stream. It lands like data: behind the bytes already on the wire,
+    /// A reset from an endpoint whose process died or whose application
+    /// aborted it; always the last item of a stream. It lands like data: behind the bytes already on the wire,
     /// after the link latency, and never across a partition.
     Rst,
 }
@@ -123,6 +123,8 @@ impl ConnectionFlags {
     const SEND_STALLED: u16 = 1 << 9;
     const SEND_BLACK_HOLED: u16 = 1 << 10;
     const RESET_ON_ARRIVAL: u16 = 1 << 11;
+    const APP_RELEASED: u16 = 1 << 12;
+    const FIN_QUEUED: u16 = 1 << 13;
 
     fn get(self, mask: u16) -> bool {
         (self.0 & mask) != 0
@@ -217,6 +219,28 @@ impl ConnectionFlags {
 
     pub(crate) fn set_reset_on_arrival(&mut self, value: bool) {
         self.set_bit(Self::RESET_ON_ARRIVAL, value);
+    }
+
+    /// The application dropped its stream: no handle will ever ask about
+    /// this endpoint again.
+    pub(crate) fn app_released(self) -> bool {
+        self.get(Self::APP_RELEASED)
+    }
+
+    pub(crate) fn set_app_released(&mut self, value: bool) {
+        self.set_bit(Self::APP_RELEASED, value);
+    }
+
+    /// This side's FIN is on the wire, or pending behind its send queue
+    /// (`shutdown_send` or a graceful close put it there). A send side shut
+    /// by a random close has no FIN: `send_closed` alone does not say one
+    /// was sent.
+    pub(crate) fn fin_queued(self) -> bool {
+        self.get(Self::FIN_QUEUED)
+    }
+
+    pub(crate) fn set_fin_queued(&mut self, value: bool) {
+        self.set_bit(Self::FIN_QUEUED, value);
     }
 }
 

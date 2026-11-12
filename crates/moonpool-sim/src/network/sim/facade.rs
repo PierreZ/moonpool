@@ -412,6 +412,13 @@ impl SimWorld {
         self.network_transition_waking(|inner, now| inner.network.close_graceful(id, now));
     }
 
+    /// The application dropped its stream on `id`; the pair leaves the
+    /// table once both sides are closed, released and drained.
+    pub(crate) fn release_connection(&self, id: ConnectionId) {
+        let wakes = self.inner.write().network.release_endpoint(id);
+        self.release_wakes(wakes);
+    }
+
     /// Shuts down the send direction of a connection (`shutdown(SHUT_WR)`):
     /// a FIN behind the queued bytes, the receive direction left open.
     #[instrument(level = "debug", skip(self))]
@@ -419,11 +426,13 @@ impl SimWorld {
         self.network_transition_waking(|inner, now| inner.network.shutdown_send(id, now));
     }
 
-    /// Aborts a connection with RST semantics.
+    /// Aborts a connection with RST semantics: this side is reset now, and
+    /// the RST reaches the peer through the network, after the link latency
+    /// and never across a partition. A connection still in a listener
+    /// backlog is reset on both sides at once.
     #[instrument(level = "debug", skip(self))]
     pub fn close_connection_abort(&self, id: ConnectionId) {
-        let wakes = self.inner.write().network.close_aborted(id);
-        self.release_wakes(wakes);
+        self.network_transition_waking(|inner, now| inner.network.abort_endpoint(id, now));
     }
 
     /// Closes selected directions of a connection.
