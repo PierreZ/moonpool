@@ -53,3 +53,12 @@ test("an item's doc and its fields' docs read from the code", async () => {
   assert.match(itemDoc(format, "struct Record"), /persist record/);
   assert.ok(fieldDocs(format, "Meta").floor);
 });
+
+test("the record kinds of the journal read from its enum, with their bytes", async () => {
+  const { variantDocs } = await import("./rustdoc.mjs");
+  const text = "pub(crate) enum Kind {\n    /// An entry.\n    Put = 1,\n    /// A tombstone\n    /// over a range.\n    Clear = 2,\n    Other,\n}";
+  assert.deepEqual(variantDocs(text, "Kind").map((k) => [k.name, k.value, k.doc]), [["Put", 1, "An entry."], ["Clear", 2, "A tombstone\nover a range."], ["Other", undefined, ""]]);
+  const kinds = variantDocs(repoFile("crates/moonpool-journal/src/format.rs"), "Kind");
+  assert.ok(kinds.length >= 3);
+  assert.ok(kinds.every((k) => Number.isInteger(k.value) && k.doc.length > 0));
+});
