@@ -3,6 +3,7 @@
 //! This module provides the main `SimulationBuilder` type for setting up
 //! and executing simulation experiments.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::instrument;
@@ -33,7 +34,7 @@ pub(crate) struct WorkloadClientInfo {
 /// `.cluster()` registration.
 pub(crate) struct ProcessEntry {
     pub(crate) count: ProcessCount,
-    pub(crate) factory: Box<dyn Fn() -> Box<dyn Process>>,
+    pub(crate) factory: Arc<dyn Fn() -> Box<dyn Process>>,
     pub(crate) tags: TagDistribution,
     /// The group's name: its process type's [`Process::name`].
     pub(crate) name: String,
@@ -425,7 +426,7 @@ impl SimulationBuilder {
         );
         self.process_entries.push(ProcessEntry {
             count,
-            factory: Box::new(factory),
+            factory: Arc::new(factory),
             tags: TagDistribution::new(),
             name,
             locality,
@@ -854,7 +855,7 @@ impl SimulationBuilder {
         S: MetricsSource,
         F: Fn(&str) -> std::sync::Arc<S> + 'static,
     {
-        self.metrics_factory = Some(Box::new(move |ip| {
+        self.metrics_factory = Some(Arc::new(move |ip| {
             let source = factory(ip);
             // Kept twice: as the trait object the runner scrapes, and as `Any`
             // so `ctx.metrics::<S>()` can hand the concrete type back.
@@ -1151,6 +1152,9 @@ impl SimulationBuilder {
     /// The report prints the base seed of each run (it is also
     /// [`run_id`](crate::SimulationReport::run_id)). Pass it here to run the
     /// same sequence of seeds again, for example to replay a whole CI job.
+    /// Seed *i* is output *i* of a `SplitMix64` generator seeded with
+    /// `base_seed`, a fixed function: the sequence does not change with the
+    /// Rust toolchain.
     #[must_use]
     pub fn base_seed(mut self, base_seed: u64) -> Self {
         self.base_seed = Some(base_seed);
@@ -1186,8 +1190,13 @@ impl SimulationBuilder {
     ///
     /// A CI job that restores the corpus of `main` first replays the seeds
     /// that reached the most coverage, then draws new ones. A corpus seed
-    /// that adds nothing any more drops out of the next file. A read or a
-    /// write error is logged and does not fail the run. Ignored by
+    /// that this run replayed and that added nothing drops out of the next
+    /// file; a corpus seed that the run did not reach (a short
+    /// [`set_iterations`](Self::set_iterations), a spent budget, a
+    /// deadlock, convergence) stays in it. The file is replaced through a
+    /// temporary file and a rename, so an interrupted run never leaves a
+    /// partial file. A read or a write error is logged and does not fail
+    /// the run. Ignored by
     /// [`replay_timeline`](Self::replay_timeline).
     #[must_use]
     pub fn corpus_file(mut self, path: impl Into<std::path::PathBuf>) -> Self {
@@ -1557,7 +1566,7 @@ mod tests {
         seed: u64,
     ) -> (crate::sim::SimWorld, u64) {
         crate::sim::reset_sim_rng();
-        crate::sim::set_sim_seed(seed);
+        crate::sim::rng::set_sim_config_seed(seed);
         let mut builder = SimulationBuilder::new()
             .enable_chaos([Chaos::Storage(ChaosMode::Swarm), Chaos::BuggifyKnobs]);
         if let Some(mask) = mask {
@@ -1658,7 +1667,7 @@ mod tests {
         seed: u64,
     ) -> (crate::NetworkConfiguration, u64) {
         crate::sim::reset_sim_rng();
-        crate::sim::set_sim_seed(seed);
+        crate::sim::rng::set_sim_config_seed(seed);
         let sim = SimulationBuilder::new()
             .enable_chaos([Chaos::Network(mode)])
             .network_fault_mask(mask)

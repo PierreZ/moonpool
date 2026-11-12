@@ -278,6 +278,9 @@ fn write_report_faulty_seeds(w: &mut impl Write, report: &SimulationReport, colo
         let _ = writeln!(w, "  Stalled seeds: {:?}", report.seeds_stalled);
     }
     for seed in &report.seeds_failing {
+        if let Some(cause) = report.failure_causes.get(seed) {
+            let _ = writeln!(w, "  Seed {seed}: {cause}");
+        }
         let _ = writeln!(w, "  Replay: .set_debug_seeds(vec![{seed}])");
     }
 }

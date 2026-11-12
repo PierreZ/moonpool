@@ -32,6 +32,15 @@ pub(crate) struct MetricsCollector {
     metric_queries: Vec<MetricQueryPlan>,
     /// Rows produced so far, parallel to `metric_queries`.
     metric_query_rows: Vec<Vec<MetricQueryRow>>,
+    /// The cause of each failing seed, as the report shows it.
+    failure_causes: BTreeMap<u64, String>,
+    /// The seed whose successful iteration is the last entry of
+    /// `individual_metrics` and whose samples are not yet folded into
+    /// `app_metrics` and `metric_query_rows`. A second pass over the seed
+    /// (the determinism replay, exploration) can still fail it; its samples
+    /// are folded in only when the next iteration starts or the report is
+    /// made.
+    uncommitted_success: Option<u64>,
 }
 
 impl MetricsCollector {
@@ -50,6 +59,8 @@ impl MetricsCollector {
             run_id,
             metric_queries,
             metric_query_rows,
+            failure_causes: BTreeMap::new(),
+            uncommitted_success: None,
         }
     }
 
@@ -62,6 +73,7 @@ impl MetricsCollector {
         has_assertion_violations: bool,
         metrics: SimulationMetrics,
     ) {
+        self.commit_success();
         if results
             .iter()
             .any(|result| matches!(result, Err(SimulationError::Stall(_))))
@@ -71,7 +83,7 @@ impl MetricsCollector {
         if results.iter().all(Result::is_ok) && !has_assertion_violations {
             self.record_success(seed, wall_time, metrics);
         } else {
-            self.record_failure(seed);
+            self.record_failure(seed, failure_cause(results, has_assertion_violations));
         }
     }
 
@@ -82,19 +94,38 @@ impl MetricsCollector {
         self.aggregated_metrics.wall_time += wall_time;
         self.aggregated_metrics.simulated_time += metrics.simulated_time;
         self.aggregated_metrics.events_processed += metrics.events_processed;
-        // Only successful seeds contribute: a failed iteration's counters
-        // describe a run that did not finish, so folding them into the totals
-        // would misreport the system's steady-state behavior.
+
+        let mut individual = metrics;
+        individual.wall_time = wall_time;
+        self.individual_metrics.push(Ok(individual));
+        self.uncommitted_success = Some(seed);
+    }
+
+    /// Fold the samples of the last successful seed into `app_metrics` and
+    /// the query rows, once no second pass can fail it any more.
+    ///
+    /// Only successful seeds contribute: a failed iteration's counters
+    /// describe a run that did not finish, so folding them into the totals
+    /// would misreport the system's steady-state behavior.
+    fn commit_success(&mut self) {
+        let Some(seed) = self.uncommitted_success.take() else {
+            return;
+        };
+        let Some(Ok(metrics)) = self.individual_metrics.last() else {
+            return;
+        };
         MetricAggregate::absorb_samples(
             &mut self.app_metrics,
             &metrics.app_metrics,
             &metrics.app_series,
         );
-        self.evaluate_queries(seed, &metrics);
-
-        let mut individual = metrics;
-        individual.wall_time = wall_time;
-        self.individual_metrics.push(Ok(individual));
+        Self::evaluate_queries(
+            &self.metric_queries,
+            &mut self.metric_query_rows,
+            self.run_id,
+            seed,
+            metrics,
+        );
     }
 
     /// Evaluate every registered query against one iteration's metrics.
@@ -103,30 +134,53 @@ impl MetricsCollector {
     /// seed and the iteration's metrics meet, and because only successful
     /// iterations should contribute: a run that deadlocked describes a system
     /// that never reached steady state.
-    fn evaluate_queries(&mut self, seed: u64, metrics: &SimulationMetrics) {
-        if self.metric_queries.is_empty() {
+    fn evaluate_queries(
+        queries: &[MetricQueryPlan],
+        rows: &mut [Vec<MetricQueryRow>],
+        run_id: u64,
+        seed: u64,
+        metrics: &SimulationMetrics,
+    ) {
+        if queries.is_empty() {
             return;
         }
         let end_time_ms = u64::try_from(metrics.simulated_time.as_millis()).unwrap_or(u64::MAX);
         let snapshot =
             MetricSnapshot::from_run(&metrics.app_metrics, &metrics.app_series, end_time_ms);
-        for (plan, rows) in self
-            .metric_queries
-            .iter()
-            .zip(self.metric_query_rows.iter_mut())
-        {
-            rows.extend(plan.evaluate(&snapshot, self.run_id, seed));
+        for (plan, rows) in queries.iter().zip(rows.iter_mut()) {
+            rows.extend(plan.evaluate(&snapshot, run_id, seed));
         }
     }
 
-    fn record_failure(&mut self, seed: u64) {
+    fn record_failure(&mut self, seed: u64, cause: String) {
         self.failed_runs += 1;
-        tracing::error!(seed, "simulation iteration failed");
+        tracing::error!(seed, %cause, "simulation iteration failed");
         self.individual_metrics
             .push(Err(SimulationError::InvalidState(format!(
-                "one or more workloads failed (seed {seed})"
+                "seed {seed} failed: {cause}"
             ))));
+        self.add_faulty_seed(seed, cause);
+    }
+
+    /// Record a seed that lost a workload task (a panic, a cancellation, or
+    /// a deadlock declared by a stall guard), so the iteration has no
+    /// results.
+    pub(crate) fn record_lost_workload(&mut self, seed: u64) {
+        self.commit_success();
+        self.record_failure(
+            seed,
+            "a workload task was lost before it returned its workload \
+             (a panic, a cancellation, or a deadlock); the workload_task_lost \
+             log line names the phase and the cause"
+                .to_string(),
+        );
+    }
+
+    /// Add `seed` to the failing seeds with its cause; the first cause of a
+    /// seed is kept.
+    fn add_faulty_seed(&mut self, seed: u64, cause: String) {
         self.faulty_seeds.push(seed);
+        self.failure_causes.entry(seed).or_insert(cause);
     }
 
     /// Reclassify the current iteration as failed after its result was
@@ -145,6 +199,8 @@ impl MetricsCollector {
         let Ok(metrics) = last_result else {
             return;
         };
+        // The seed's samples were never folded in: drop them with it.
+        self.uncommitted_success = None;
 
         self.successful_runs = self.successful_runs.saturating_sub(1);
         self.failed_runs += 1;
@@ -161,24 +217,15 @@ impl MetricsCollector {
             .events_processed
             .saturating_sub(metrics.events_processed);
         *last_result = Err(SimulationError::InvalidState(format!(
-            "{reason} (seed {seed})"
+            "seed {seed} failed: {reason}"
         )));
-        self.faulty_seeds.push(seed);
+        self.add_faulty_seed(seed, reason.to_string());
         tracing::error!(seed, "{reason}");
-    }
-
-    /// Add faulty seeds reported by an external exploration phase.
-    pub(crate) fn add_faulty_seeds(&mut self, mut seeds: Vec<u64>) {
-        self.faulty_seeds.append(&mut seeds);
-    }
-
-    /// Add failures reported outside the normal iteration path.
-    pub(crate) fn add_failed_runs(&mut self, count: usize) {
-        self.failed_runs += count;
     }
 
     /// Consume the collector and assemble the public report.
     pub(crate) fn generate_report(mut self, inputs: GenerateReportInputs) -> SimulationReport {
+        self.commit_success();
         let app_metrics = std::mem::take(&mut self.app_metrics)
             .into_values()
             .collect::<Vec<_>>();
@@ -199,6 +246,7 @@ impl MetricsCollector {
             seeds_used: inputs.seeds_used,
             seeds_failing: self.faulty_seeds,
             seeds_stalled: self.stalled_seeds,
+            failure_causes: self.failure_causes,
             assertion_results: inputs.assertion_results,
             assertion_violations: inputs.assertion_violations,
             dropped_assertion_allocations: inputs.dropped_assertion_allocations,
@@ -215,6 +263,22 @@ impl MetricsCollector {
             metric_queries,
         }
     }
+}
+
+/// The cause of a failed iteration: the text of each distinct error, in
+/// result order, or the always-violation when no result failed.
+fn failure_cause(results: &[SimulationResult<()>], has_assertion_violations: bool) -> String {
+    let mut causes: Vec<String> = Vec::new();
+    for error in results.iter().filter_map(|result| result.as_ref().err()) {
+        let text = error.to_string();
+        if !causes.contains(&text) {
+            causes.push(text);
+        }
+    }
+    if has_assertion_violations {
+        causes.push("an always assertion was violated".to_string());
+    }
+    causes.join("; ")
 }
 
 /// Inputs needed to assemble a final simulation report.

@@ -59,6 +59,14 @@ pub enum ProcessCount {
 }
 
 impl ProcessCount {
+    /// The smallest count any seed can draw.
+    pub(crate) fn min(&self) -> usize {
+        match self {
+            Self::Fixed(count) => *count,
+            Self::Range(range) => *range.start(),
+        }
+    }
+
     pub(crate) fn resolve(&self) -> usize {
         match self {
             Self::Fixed(count) => *count,
@@ -119,11 +127,12 @@ impl ChaosMode {
     /// exploration recipes, because the constructors draw from `SIM_RNG` and
     /// every draw's position is part of a seed's schedule:
     ///
-    /// 1. network, then storage, in `build_sim_for_iteration`, **before**
-    ///    `SimWorld::new_with_network_config_and_seed` resets and reseeds the
-    ///    stream — so these draws are not counted in the run's
-    ///    `rng_call_count` and an exploration breakpoint can never land on
-    ///    them;
+    /// 1. network, then storage, in `build_sim_for_iteration`, on the
+    ///    configuration stream of the seed (after the process counts), and
+    ///    **before** `SimWorld::new_with_network_config_and_seed` reseeds the
+    ///    stream with the seed itself — so these draws are not counted in the
+    ///    run's `rng_call_count`, an exploration breakpoint can never land on
+    ///    them, and no run draw repeats their values;
     /// 2. then the operation-alphabet swarm mask and `set_rng_breakpoints`;
     /// 3. then attrition, in registration order, in
     ///    `run_orchestrator_for_iteration` — **after** the reset and the

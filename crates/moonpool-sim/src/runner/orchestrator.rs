@@ -443,9 +443,11 @@ impl WorkloadOrchestrator {
             ))));
         }
         if let Some(settle_err) = Self::settle_phase(sim) {
+            // Keep the workload and check errors beside the settle error.
+            results.push(Err(settle_err));
             return Ok(OrchestrateOutput {
                 workloads: final_workloads,
-                results: vec![Err(settle_err)],
+                results,
                 metrics: Self::extract_metrics(sim, env.metrics, &env.topology.membership),
             });
         }
@@ -596,9 +598,11 @@ impl WorkloadOrchestrator {
 
         // === 6. SETTLE ===
         if let Some(settle_err) = Self::settle_phase(sim) {
+            // Keep the workload errors beside the settle error.
+            results.push(Err(settle_err));
             return Ok(OrchestrateOutput {
                 workloads: returned_workloads,
-                results: vec![Err(settle_err)],
+                results,
                 metrics: Self::extract_metrics(sim, env.metrics, &env.topology.membership),
             });
         }

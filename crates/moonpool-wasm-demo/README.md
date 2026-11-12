@@ -22,7 +22,7 @@ The code has `assert_sometimes!` on its rare paths, a `hint!` between the
 write and its sync, a `hint!` between the durable write and the answer, and a
 `buggify!` that drops an answer. A planted
 bug, off by default, makes the client read from one server in place of a
-quorum: with the default chaos (network faults and reboots), about 12% of
+quorum: with the default chaos (network faults and reboots), about 11% of
 seeds break the invariant. With the bug off, no seed of a 2,000-seed run
 fails.
 

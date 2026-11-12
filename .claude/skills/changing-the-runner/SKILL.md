@@ -19,7 +19,8 @@ per-iteration lifecycle is where determinism is won or lost.
 ## The per-iteration lifecycle (`run_loop.rs`; setters in `builder.rs`)
 
 1. `reset_per_iteration_state(seed, ..)`: reset the observability layer for
-   the seed, `reset_sim_rng` + `set_sim_seed(seed)`, `install_select_offset`
+   the seed, `reset_sim_rng` + `set_sim_config_seed(seed)` (a stream derived
+   from the seed, for the configuration draws of step 2), `install_select_offset`
    (route `select!` branch offsets through the stream), `reset_always_violations`,
    `buggify_init(0.5)`.
 2. Draw the per-seed shape **in registration order**: each process group's
@@ -27,6 +28,10 @@ per-iteration lifecycle is where determinism is won or lost.
    `10.0.{g+1}.{1..=N}`, workloads on `10.0.0.x`), the chaos surfaces'
    `random_for_seed` / `swarm_for_seed`, the operation swarm mask
    (`draw_swarm_op_mask`, exactly four draws) when `swarm_operations()` is on.
+   The process counts and the network/storage profiles read the
+   configuration stream; `SimWorld::create` then reseeds with `seed` itself,
+   and the operation mask, attrition and later draws read that run stream.
+   Never let the two streams share a seed: the draws would repeat (#452).
 3. Under `check_determinism()`: `begin_determinism_record` on the first run
    of a seed, `begin_determinism_check` on the second, `finish_determinism_check`
    after; a mismatch becomes the always-assertion

@@ -384,6 +384,13 @@ pub struct SimulationReport {
     /// of events at one logical time, or a run phase past its virtual-time
     /// budget. Each one is also in [`seeds_failing`](Self::seeds_failing).
     pub seeds_stalled: Vec<u64>,
+    /// Why each seed of [`seeds_failing`](Self::seeds_failing) failed: the
+    /// text of each distinct error of the iteration (a workload's `run()` or
+    /// `check()` error, a panic, a stall guard, a settle timeout), an
+    /// always-assertion violation, a deadlock, or the second pass (the
+    /// determinism replay, an exploration timeline) that failed it. The
+    /// report prints it next to the seed.
+    pub failure_causes: BTreeMap<u64, String>,
     /// Aggregated assertion results across all iterations
     pub assertion_results: BTreeMap<String, AssertionStats>,
     /// Always-type assertion violations (definite bugs).
@@ -632,6 +639,7 @@ mod tests {
             seeds_used: vec![1],
             seeds_failing: Vec::new(),
             seeds_stalled: Vec::new(),
+            failure_causes: BTreeMap::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             dropped_assertion_allocations: 0,

@@ -17,6 +17,11 @@
 //! A process gets a handle too, but every call refuses: only a client
 //! changes the deployment.
 //!
+//! Every call also refuses once the processes are aborted: from `check()`
+//! in the default mode, which runs after them. With
+//! [`chaos_until_run_ends`](crate::SimulationBuilder::chaos_until_run_ends),
+//! `check()` runs on the live processes and may change the deployment.
+//!
 //! # Usage
 //!
 //! ```rust
@@ -117,6 +122,12 @@ impl Deployment {
             Some(attached) if attached.from_process => Err(SimulationError::InvalidState(format!(
                 "deployment().{call}: only a workload changes the deployment, not a process"
             ))),
+            Some(attached) if attached.membership.is_stopped() => {
+                Err(SimulationError::InvalidState(format!(
+                    "deployment().{call}: the processes are already stopped (check() runs after \
+                     them unless SimulationBuilder::chaos_until_run_ends keeps them alive)"
+                )))
+            }
             Some(attached) => Ok(attached),
         }
     }
