@@ -107,6 +107,32 @@ impl Board {
         lock(&self.inner).stats.insert(label.to_string(), stats);
     }
 
+    /// Record a runtime's last counters under `label`, read through its
+    /// probe as the runtime stops (see `ResourceProbe::counters`). The
+    /// gauges keep the values of the latest report: the probe does not
+    /// know some of them, and the others describe a runtime that is being
+    /// dropped, not one at rest.
+    pub fn report_last(&self, label: &str, counters: RpcStats) {
+        let mut inner = lock(&self.inner);
+        let mut last = counters;
+        if let Some(previous) = inner.stats.get(label) {
+            last.endpoints = previous.endpoints;
+            last.pending_calls = previous.pending_calls;
+            last.retained_calls = previous.retained_calls;
+            last.peers = previous.peers;
+            last.connections = previous.connections;
+            last.streams_consuming = previous.streams_consuming;
+            last.streams_producing = previous.streams_producing;
+            last.stream_buffered_bytes = previous.stream_buffered_bytes;
+            last.queued_bytes = previous.queued_bytes;
+            last.queued_request_bytes = previous.queued_request_bytes;
+            last.inflight_requests = previous.inflight_requests;
+            last.stream_window_reserved = previous.stream_window_reserved;
+            last.producer_window_reserved = previous.producer_window_reserved;
+        }
+        inner.stats.insert(label.to_string(), last);
+    }
+
     /// Every probe whose label starts with `prefix`, except `except`.
     #[must_use]
     pub fn probes(&self, prefix: &str, except: &str) -> Vec<(String, ResourceProbe)> {

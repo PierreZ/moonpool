@@ -565,6 +565,16 @@ impl<P: RpcProviders> Shared<P> {
         let mut state = self.lock();
         state.connections.remove(&connection.id());
         let address = connection.peer_address();
+        let carried = state.pending.on_connection(connection.id());
+        // A peer that ends an established session with nothing in progress
+        // on it and nobody watching its address closed an idle session: not
+        // a failure. A crash of the peer in that state has no observer; the
+        // next dial reports it.
+        let clean_close = reason == CloseReason::PeerClosed
+            && established
+            && carried.is_empty()
+            && address.is_none_or(|address| state.monitor.references(address) == 0);
+        let failure = reason.is_failure() && !clean_close;
         let mut notify = false;
         if let Some(address) = address {
             if let Some(peer) = state.peers.get_mut(&address)
@@ -578,16 +588,10 @@ impl<P: RpcProviders> Shared<P> {
             }
             // Every end of a selected connection is a disconnect event; only
             // failures extend the address's failure run.
-            state.monitor.disconnected(
-                address,
-                reason.is_failure(),
-                now,
-                self.config.peer.failure_detection_delay,
-            );
+            state.monitor.disconnected(address, failure, now);
             notify = true;
         }
         let origin = Origin::Connection(connection.id());
-        let carried = state.pending.on_connection(connection.id());
         if reason == CloseReason::Replaced && !carried.is_empty() {
             // Never expected: a replaced connection drains until no call
             // rides on it. The delivery campaign asserts this stays 0.
@@ -619,8 +623,7 @@ impl<P: RpcProviders> Shared<P> {
                 failed.push((call, error));
             }
         }
-        let probe = address
-            .is_some_and(|address| reason.is_failure() && state.monitor.references(address) > 0);
+        let probe = address.is_some_and(|address| failure && state.monitor.references(address) > 0);
         drop(state);
         self.log_close(connection, &reason, established);
         if notify {
@@ -661,6 +664,55 @@ impl<P: RpcProviders> Shared<P> {
             stream.terminate(Terminal::Disconnected);
             Counters::bump(&self.counters.streams_disconnected);
         }
+        // This end freed a connection slot: start the probes that found
+        // none.
+        self.probe_owed();
+    }
+
+    /// Dial a watched `address` that is failing and has no connection, so
+    /// its state can change while a failure-monitor watcher waits. Without
+    /// this, an address whose last connection ended before the watcher
+    /// started is never dialed again. The reconnect backoff paces the dial;
+    /// a failed dial ends in [`close_connection`](Self::close_connection),
+    /// which probes again while the watcher lives.
+    pub(crate) fn probe(&self, address: std::net::SocketAddr) {
+        let mut state = self.lock();
+        self.probe_locked(&mut state, address);
+    }
+
+    fn probe_locked(&self, state: &mut State, address: std::net::SocketAddr) {
+        let wanted = state.monitor.references(address) > 0 && state.monitor.is_failing(address);
+        let connected = state
+            .peers
+            .get(&address)
+            .and_then(super::peer::Peer::live)
+            .is_some();
+        if !wanted || connected || self.is_closing() {
+            return;
+        }
+        if self.peer_connection(state, address).is_ok() {
+            Counters::bump(&self.counters.probes);
+        } else {
+            self.owe_probe(state, address);
+        }
+    }
+
+    /// Remember that a probe of `address` could not start (no connection
+    /// slot was free), so the end of the next connection starts it. Nothing
+    /// is owed once a graceful shutdown began or nobody watches it.
+    fn owe_probe(&self, state: &mut State, address: std::net::SocketAddr) {
+        if !self.is_closing() && state.monitor.references(address) > 0 {
+            Counters::bump(&self.counters.probes_deferred);
+            state.monitor.owe_probe(address);
+        }
+    }
+
+    /// Start the probes that [`owe_probe`](Self::owe_probe) remembered.
+    fn probe_owed(&self) {
+        let mut state = self.lock();
+        for address in state.monitor.take_owed_probes() {
+            self.probe_locked(&mut state, address);
+        }
     }
 
     /// Queue the prepared `copies` of calls still waiting on the ended
@@ -684,6 +736,9 @@ impl<P: RpcProviders> Shared<P> {
         };
         let mut failed = Vec::new();
         let connection = self.peer_connection(state, address);
+        if connection.is_err() {
+            self.owe_probe(state, address);
+        }
         let now = self.now();
         for (call_id, frame) in copies {
             if state
@@ -757,6 +812,10 @@ impl<P: RpcProviders> Shared<P> {
             CloseReason::Idle => {
                 Counters::bump(&self.counters.idle_closes);
                 tracing::debug!(peer = %connection.peer(), "rpc idle connection closed");
+            }
+            CloseReason::PeerClosed => {
+                Counters::bump(&self.counters.peer_closes);
+                tracing::debug!(peer = %connection.peer(), "rpc session closed by the peer in order");
             }
             CloseReason::Replaced => {
                 Counters::bump(&self.counters.replaced_connections);

@@ -62,6 +62,8 @@ pub struct Produced {
     pub waited: bool,
     /// Accounted bytes sent and unconsumed when the producer ended it.
     pub in_flight_at_end: u64,
+    /// How many times a producer took the request (1 when correct).
+    pub runs: u32,
 }
 
 /// One stream as the workload's application consumed it.
@@ -104,16 +106,27 @@ impl StreamLedger {
             .expect("Mutex poisoned: prior task panicked")
     }
 
-    /// A producer took stream `id` in `boot`.
-    pub fn open(&self, id: u64, boot: u64, window: u64) {
-        self.lock().produced.insert(
+    /// A producer took stream `id` in `boot`. Returns `false` when a
+    /// producer already took it: a stream request is a single attempt, so
+    /// the caller must flag it. The first record stays, and the later runs
+    /// are counted in [`Produced::runs`]; the ledger never panics.
+    #[must_use]
+    pub fn open(&self, id: u64, boot: u64, window: u64) -> bool {
+        let mut state = self.lock();
+        if let Some(existing) = state.produced.get_mut(&id) {
+            existing.runs += 1;
+            return false;
+        }
+        state.produced.insert(
             id,
             Produced {
                 boot,
                 window,
+                runs: 1,
                 ..Produced::default()
             },
         );
+        true
     }
 
     /// The producer queued an item of `size` bytes; returns the bytes queued
@@ -175,5 +188,26 @@ impl StreamLedger {
     #[must_use]
     pub fn probes(&self, id: u64) -> u32 {
         self.lock().probes.get(&id).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamLedger;
+
+    /// A second run of the same stream request is reported and counted;
+    /// it does not replace the record of the first run.
+    #[test]
+    fn a_second_run_of_a_stream_is_reported() {
+        let ledger = StreamLedger::default();
+        assert!(ledger.open(7, 1, 64));
+        let _ = ledger.sent(7, 10, false);
+        assert!(!ledger.open(7, 2, 32));
+        let produced = ledger.produced(7).expect("recorded");
+        assert_eq!(produced.runs, 2);
+        assert_eq!(produced.boot, 1);
+        assert_eq!(produced.window, 64);
+        assert_eq!(produced.items, vec![10]);
+        assert!(ledger.open(8, 2, 32));
     }
 }

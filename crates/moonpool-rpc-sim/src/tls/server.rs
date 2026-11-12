@@ -15,7 +15,8 @@ use super::{
     IMPOSTOR_REFS_KEY, MEMBER, Mode, Pki, PrivateEcho, Probe, PublicEcho, Refs, SERVER_REFS_KEY,
     Sender,
 };
-use crate::foundations::{RPC_PORT, rpc_config};
+use crate::foundations::state::Board;
+use crate::foundations::{RPC_PORT, report_stats, rpc_config};
 
 fn pki(ctx: &SimContext) -> SimulationResult<Pki> {
     let topology = ctx.topology();
@@ -109,12 +110,15 @@ async fn run_server(
     let serve = async {
         futures::join!(serve(private, role, true), serve(public, role, false));
     };
+    let board = Board::of(ctx.state());
+    let label = format!("tls-{role:?}@{}", ctx.my_ip());
     let run = driver.run();
     futures::pin_mut!(run, serve);
     moonpool_sim::select! {
         error = &mut run => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
         () = &mut serve => Ok(()),
         () = ctx.shutdown().cancelled() => Ok(()),
+        () = report_stats(&rpc, &board, &label, ctx) => Ok(()),
     }
 }
 

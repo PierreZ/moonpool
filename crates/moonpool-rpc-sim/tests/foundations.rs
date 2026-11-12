@@ -75,6 +75,10 @@ fn bounded_campaign_hits_every_required_scenario() {
     report.eprint();
     assert_clean(&report);
     for required in [
+        // moonpool-rpc's own buggify sites (see `observe_injections`).
+        "rpc buggify: session cut behind an at-most-once request",
+        "rpc buggify: request refused overloaded at admission",
+        "rpc buggify: failure-monitor wakeup with nothing changed",
         "rpc typed call succeeded",
         "rpc process-to-process call succeeded",
         "rpc malformed input closed the session",

@@ -25,7 +25,13 @@ use super::state::{
 };
 use super::trust::{Kind, Trust};
 use super::{CALL_TIMEOUT, SecurityRecord, SecurityRecords, pause};
-use crate::foundations::rpc_config;
+use crate::foundations::state::Board;
+use crate::foundations::{report_stats, rpc_config};
+
+/// Board label of the workload's main runtime.
+const WORKLOAD_LABEL: &str = "security-workload";
+/// Board label of the workload's version 1 runtime.
+const WORKLOAD_V1_LABEL: &str = "security-workload-v1";
 
 /// One operation of the workload's alphabet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -652,12 +658,18 @@ impl Workload for SecurityWorkload {
         .map_err(config_error)?;
         let probes = [rpc.probe(), version1.probe()];
         let runtimes = Runtimes { rpc, version1 };
+        let board = Board::of(ctx.state());
+        let report = futures::future::join(
+            report_stats(&runtimes.rpc, &board, WORKLOAD_LABEL, ctx),
+            report_stats(&runtimes.version1, &board, WORKLOAD_V1_LABEL, ctx),
+        );
         let result = moonpool_sim::select! {
             error = driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             error = version1_driver.run() => {
                 Err(SimulationError::IoError(format!("rpc driver: {error}")))
             }
             result = self.drive(ctx, &runtimes) => result,
+            _ = report => Ok(()),
         };
         for probe in probes.into_iter().flatten() {
             assert_always!(
