@@ -255,9 +255,12 @@ pub(crate) fn crash_loop(
     });
 }
 
-/// Flip one byte of one `Put` or `Clear` persist record of a random
-/// segment, durably. Never a void record: one fault on a void refuses the
-/// open (#483). Returns whether a record was found.
+/// Flip one byte of one valid `Put` or `Clear` persist record of a random
+/// segment, durably, whose entry is intact: one fault on the slot. A record
+/// whose entry a crash damaged is skipped, because a rot there makes two
+/// faults on one slot, which the open rightly refuses. A void record is
+/// skipped too: one fault on a void refuses the open (#483). Returns whether
+/// a record was rotted.
 async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
     let pick = rng.below(u64::MAX);
     run(sim, move |provider| async move {
@@ -266,7 +269,10 @@ async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
             .await
             .unwrap_or_default()
             .into_iter()
-            .filter(|name| name.starts_with("seg-") && name.ends_with(".wal"))
+            .filter(|name| {
+                name.strip_suffix(".wal")
+                    .is_some_and(|stem| stem.starts_with("seg-"))
+            })
             .collect();
         if names.is_empty() {
             return false;
@@ -274,34 +280,58 @@ async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
         names.sort();
         let name = &names[usize::try_from(pick % names.len() as u64).expect("small")];
         let path = format!("{DIR}/{name}");
-        let geometry = config(Durability::Ordered).geometry;
-        let start = 2 * 4096_u64;
-        let len = u64::from(geometry.persist_blocks) * 4096;
         let Ok(file) = provider.open(&path, OpenOptions::read_write()).await else {
             return false;
         };
-        let mut log = vec![0u8; usize::try_from(len).expect("small")];
+        let geometry = config(Durability::Ordered).geometry;
+        let start = 2 * 4096_u64;
+        let mut log = vec![0u8; usize::try_from(geometry.persist_blocks).expect("small") * 4096];
         if file.read_at(start, &mut log).await.is_err() {
             return false;
         }
-        let records: Vec<u64> = (0..len / 64)
-            .filter(|&slot| matches!(log[usize::try_from(slot * 64).expect("small")], 1 | 2))
-            .collect();
-        if records.is_empty() {
-            return false;
+        let slots = log.len() / 64;
+        let first = usize::try_from(pick >> 20).expect("fits") % slots;
+        for slot in (first..slots).chain(0..first) {
+            let record = &log[slot * 64..slot * 64 + 64];
+            if !matches!(record[0], 1 | 2) || u32_at(record, 60) != crc32c::crc32c(&record[..60]) {
+                continue;
+            }
+            if !entry_intact(&file, record).await {
+                continue;
+            }
+            let at = start + u64::try_from(slot * 64 + 20).expect("fits");
+            let mut byte = [0u8; 1];
+            let flipped = async {
+                file.read_at(at, &mut byte).await?;
+                byte[0] ^= 0x10;
+                file.write_at(at, &byte).await?;
+                file.sync_all().await
+            };
+            return flipped.await.is_ok();
         }
-        let slot = records[usize::try_from((pick >> 20) % records.len() as u64).expect("small")];
-        let at = start + slot * 64 + 20;
-        let mut byte = [0u8; 1];
-        let flipped = async {
-            file.read_at(at, &mut byte).await?;
-            byte[0] ^= 0x10;
-            file.write_at(at, &byte).await?;
-            file.sync_all().await
-        };
-        flipped.await.is_ok()
+        false
     })
     .await
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+/// Whether the entry a valid persist record names is intact: its stored
+/// CRC and the CRC of its header and payload are the record's.
+async fn entry_intact(file: &impl StorageFile, record: &[u8]) -> bool {
+    let len = usize::try_from(u32_at(record, 4)).expect("fits");
+    let offset = u64::from(u32_at(record, 24));
+    let expected = u32_at(record, 28);
+    let mut entry = vec![0u8; 64 + len];
+    if file.read_at(offset, &mut entry).await.is_err() {
+        return false;
+    }
+    let stored = u32_at(&entry, 60);
+    entry[60..64].fill(0);
+    let sum = crc32c::crc32c_append(crc32c::crc32c(&entry[..64]), &entry[64..]);
+    stored == expected && sum == expected
 }
 
 fn random_batch(rng: &mut Rng, ledger: &Shared, version: u64) -> Pending {
