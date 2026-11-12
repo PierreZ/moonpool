@@ -7,8 +7,8 @@ export const TECHNIQUES = [
   { name: "Network faults", path: "techniques/network/", line: "Cut a link, clog it, close a connection." },
   { name: "Storage faults", path: "techniques/storage/", line: "What a crash does to each sector after the last sync." },
   { name: "Reboots", path: "techniques/reboots/", line: "A process starts again with fresh memory." },
-  { name: "Swarm testing", line: "Each seed draws its own set of faults." },
-  { name: "Assertions that must fire", line: "The coverage fills seed after seed." },
-  { name: "Multiverse exploration", line: "The run forks at each discovery." },
-  { name: "From a red seed to the bug", line: "Replay, then walk back to the first wrong event." },
+  { name: "Swarm testing", path: "techniques/swarm/", line: "Each seed draws its own set of faults." },
+  { name: "Assertions that must fire", path: "techniques/assertions/", line: "The coverage fills seed after seed." },
+  { name: "Multiverse exploration", path: "techniques/exploration/", line: "The run forks at each discovery." },
+  { name: "From a red seed to the bug", path: "techniques/debugging/", line: "Replay, then walk back to the first wrong event." },
 ];

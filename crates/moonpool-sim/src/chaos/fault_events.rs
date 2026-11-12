@@ -220,6 +220,17 @@ pub enum SimFaultEvent {
         /// The unsynced length change of the file went back.
         length_reverted: bool,
     },
+    /// The fault families a seed has on, recorded once at the start of a
+    /// run with network or storage chaos. Read-only: it reports the seed's
+    /// sampled profile (after `ChaosMode::Swarm` and the caller's masks) and
+    /// draws nothing. Each list is family names, comma separated, in mask
+    /// order (`NetworkFault::name`, `StorageFault::name`).
+    ChaosFamilies {
+        /// The network fault families that can fire in this run.
+        network: String,
+        /// The storage fault families that can fire in this run.
+        storage: String,
+    },
     /// All storage wiped for a process (`CrashAndWipe` reboot).
     StorageWipe {
         /// IP of the wiped process.
@@ -255,6 +266,7 @@ impl SimFaultEvent {
             Self::StorageCrash { .. } => "storage_crash",
             Self::StorageCrashSectors { .. } => "storage_crash_sectors",
             Self::StorageWipe { .. } => "storage_wipe",
+            Self::ChaosFamilies { .. } => "chaos_families",
         }
     }
 

@@ -191,6 +191,38 @@ impl Future for SetLenFuture {
     }
 }
 
+/// Future for `allocate` operations (`fallocate`).
+pub struct AllocateFuture {
+    op: PendingOperation,
+    handle_id: HandleId,
+    /// The end of the range to reserve.
+    len: u64,
+}
+
+impl AllocateFuture {
+    /// Create a new `allocate` future.
+    pub(crate) fn new(sim: WeakSimWorld, handle_id: HandleId, len: u64) -> Self {
+        Self {
+            op: PendingOperation::new(sim),
+            handle_id,
+            len,
+        }
+    }
+}
+
+impl Future for AllocateFuture {
+    type Output = io::Result<()>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.op.poll(
+            cx,
+            |sim| Ok(sim.schedule_allocate(self.handle_id, self.len)?),
+            |completion| matches!(completion, StorageCompletion::Unit).then_some(()),
+            "allocate operation returned a value completion",
+        )
+    }
+}
+
 /// Future for one positioned read (`read_at`).
 ///
 /// Same schedule → wait → complete pattern as [`SyncFuture`], but the

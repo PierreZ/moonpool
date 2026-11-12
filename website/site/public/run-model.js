@@ -230,3 +230,159 @@ export function committedAt(run, index) {
   }
   return v;
 }
+
+/**
+ * The walk back from a broken read of the register to the cause, one step
+ * per event: the read, the reply it kept, what that server served, the
+ * commit it missed, the write that never reached it, and the rule the read
+ * broke. Each step is `{ index, text }`. Empty when the run passed.
+ */
+export function walkBack(run) {
+  const v = violationAt(run);
+  if (v < 0) return [];
+  const ev = run.events;
+  const read = ev[v];
+  const client = read.source;
+  const seen = read.fields.version;
+  const replies = read.fields.replies;
+  const rounds = new Set(["write_committed", "write_failed", "read_returned", "read_failed"]);
+  const roundStart = (end) => {
+    let i = end;
+    while (i > 0 && !(rounds.has(ev[i - 1].name) && ev[i - 1].source === client)) i--;
+    return i;
+  };
+  let commit = -1;
+  for (let i = 0; i < v; i++) {
+    if (ev[i].name === "write_committed" && ev[i].fields.version > seen) commit = i;
+  }
+  const kept = [];
+  for (let i = roundStart(v); i < v && kept.length < replies; i++) {
+    const e = ev[i];
+    if (e.name === "msg_recv" && e.source === client && e.fields.kind === "read_reply") kept.push(i);
+  }
+  const steps = [{ index: v, text: "The read returned version " + seen + "." }];
+  const stale = kept.find((i) => {
+    const s = servedFor(ev, ev[i]);
+    return s >= 0 && ev[s].fields.version === seen;
+  });
+  if (stale === undefined || commit < 0) return steps;
+  const server = ev[stale].fields.from;
+  const served = servedFor(ev, ev[stale]);
+  const version = ev[commit].fields.version;
+  steps.push({
+    index: stale,
+    text: "The client kept " + (replies === 1 ? "one reply" : replies + " replies") + ", the first to come back: this one, from " + server + ".",
+  });
+  steps.push({ index: served, text: server + " served version " + seen + ": it did not have version " + version + "." });
+  steps.push({ index: commit, text: "Version " + version + " was committed before the read, with " + ev[commit].fields.acks + " acks." });
+  const sends = [];
+  for (let i = roundStart(commit); i < commit; i++) {
+    if (ev[i].name === "msg_send" && ev[i].source === client && ev[i].fields.kind === "write") sends.push(i);
+  }
+  const toServer = sends.find((i) => ev[i].fields.to === server);
+  if (toServer === undefined) {
+    const to = sends.map((i) => ev[i].fields.to).join(" and ");
+    steps.push({
+      index: sends.length ? sends[0] : commit,
+      text: "The write of version " + version + " went to " + (to || "no server") + ". The call to " + server + " got no connection before its timeout, so " + server + " never had it.",
+    });
+  } else {
+    const msg = run.messages.find((m) => m.id === ev[toServer].fields.msg);
+    steps.push({
+      index: toServer,
+      text: msg && msg.received_ms === null
+        ? "The write of version " + version + " to " + server + " was lost on the way."
+        : "The write of version " + version + " to " + server + " arrived after the commit.",
+    });
+  }
+  const quorum = Math.floor(lanesOf(run) / 2) + 1;
+  steps.push({
+    index: v,
+    text: "A quorum of replies (" + quorum + " of " + lanesOf(run) + ") always holds one server that has version " + version +
+      ". The read kept " + replies + ". That is the bug: a read must wait for a quorum.",
+  });
+  return steps;
+}
+
+/** The `read_served` event of the server that sent a reply, or -1. */
+function servedFor(ev, recv) {
+  const send = ev.findIndex((e) => e.name === "msg_send" && e.fields.msg === recv.fields.msg);
+  for (let i = send - 1; i >= 0; i--) {
+    if (ev[i].name === "read_served" && ev[i].source === ev[send].source) return i;
+  }
+  return -1;
+}
+
+function lanesOf(run) {
+  return run.processes.filter((p) => p.role !== "workload").length;
+}
+
+/**
+ * The tree of an exploration (src/runs/exploration.json) in depth-first
+ * order: each node with its index, its depth and its parent. The children
+ * of a node come in the order they ran.
+ */
+export function treeRows(nodes) {
+  const children = new Map();
+  nodes.forEach((n, i) => {
+    const p = n.parent === null ? -1 : n.parent;
+    if (!children.has(p)) children.set(p, []);
+    children.get(p).push(i);
+  });
+  const out = [];
+  const visit = (i, depth) => {
+    out.push({ ...nodes[i], index: i, depth });
+    for (const c of children.get(i) || []) visit(c, depth + 1);
+  };
+  for (const r of children.get(-1) || []) visit(r, 0);
+  return out;
+}
+
+/**
+ * The playground's config from the address (#419 (playground)): `seed`,
+ * `servers` (1 to 5), and the switches `net`, `disk`, `reboots`, `wipes`,
+ * `swarm` and `bug` as 1 or 0. A missing or bad value keeps the default.
+ */
+export function playConfig(search, defaults) {
+  const p = new URLSearchParams(search);
+  const flag = (name, value) => (p.get(name) === "1" ? true : p.get(name) === "0" ? false : value);
+  const seed = seedFrom(search);
+  const servers = Number(p.get("servers"));
+  return {
+    ...defaults,
+    seed: seed === null ? defaults.seed : seed,
+    servers: Number.isInteger(servers) && servers >= 1 && servers <= 5 ? servers : defaults.servers,
+    chaos: {
+      network: flag("net", defaults.chaos.network),
+      storage: flag("disk", defaults.chaos.storage),
+      reboots: flag("reboots", defaults.chaos.reboots),
+    },
+    wipes: flag("wipes", defaults.wipes),
+    swarm: flag("swarm", defaults.swarm),
+    bug: flag("bug", defaults.bug),
+  };
+}
+
+/** The address query of a playground config: the inverse of `playConfig`. */
+export function playQuery(config) {
+  const b = (v) => (v ? "1" : "0");
+  return new URLSearchParams({
+    seed: String(config.seed),
+    servers: String(config.servers),
+    net: b(config.chaos.network),
+    disk: b(config.chaos.storage),
+    reboots: b(config.chaos.reboots),
+    wipes: b(config.wipes),
+    swarm: b(config.swarm),
+    bug: b(config.bug),
+  }).toString();
+}
+
+/**
+ * The assertions of a run for the report, in the run's order: each with its
+ * kind, its counts and whether it failed.
+ */
+export function assertionRows(run) {
+  const must = (k) => k.endsWith("always") || k === "unreachable";
+  return run.assertions.map((a) => ({ ...a, failed: a.fails > 0 && must(a.kind) }));
+}

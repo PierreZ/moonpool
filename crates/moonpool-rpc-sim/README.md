@@ -62,3 +62,8 @@ cargo run --release -p moonpool-rpc-sim --example tcp_latency
 cargo run --release -p moonpool-rpc-sim --example balance_latency
 cargo run --release -p moonpool-rpc-sim --example rpc_soak -- --smoke
 ```
+
+## Documentation
+
+- [What moonpool-rpc Promises](https://pierrez.github.io/moonpool/part4-networking/03-rpc-guarantees.html) in the Sim Book: the seven campaigns
+- [moonpool-rpc, call by call](https://pierrez.github.io/moonpool/extras/rpc/) on the website

@@ -10,6 +10,8 @@ production hands it `TokioStorageProvider`, tests hand it the simulator's
 disk, and the code is the same. It is also the worked example of testing a
 storage engine under `Chaos::Storage`.
 
+[moonpool-journal, byte by byte](../extras/journal/) on the website draws each file, record and header of the format from the code, with the commit protocol and the recovery rules.
+
 ## The Problem It Solves
 
 A log that finds a bad checksum usually truncates there. For a torn write at
@@ -93,16 +95,22 @@ batch, its record count and the record's index. The **entry log** holds the
 payloads in arrival order, each behind a 64-byte header that repeats the
 record's identity, so a misdirected entry never passes for the one a record
 names, and an intact entry can rebuild a lost record. Every batch starts on
-a fresh block in both logs, so **no write ever touches a sector holding
+a fresh block in both logs, so **no commit ever touches a sector holding
 anything acknowledged**. That one rule is what makes the crash model below
-survivable.
+survivable. A record repair (below) is the one write that breaks it, and it
+does so only where a torn write loses nothing.
 
 The meta file is separate. It is the one structure rewritten in place, and
 it must outlive every segment. Its two copies are written one after the
 other, each a durable write (`write_at_durable`), so at most one is in flight and a single
 rotted copy never rolls the metainfo back. `Journal::peek_meta(&provider,
 dir, id)` reads it without opening the journal: no recovery, no repair, no
-sync, so a probe never changes what the next open finds.
+sync, so a probe never changes what the next open finds. A directory with
+segments and no meta file is a journal that lost its metainfo, not an empty
+one: `open`, `peek_meta` and `create` all return `MetaLost` there. Only a
+directory with no meta file and no segment is empty. `create` deletes a
+spare or a file that a crashed creation left, because none of them is a
+journal.
 
 ## Committing: One Sync or Two
 
@@ -315,7 +323,8 @@ so both have a limit. The 16,777,215th open is the last: the next one is
 refused with `OpenError::InvalidConfig`. One open writes at most 2^40 - 1
 batches: the next commit is refused with `CommitError::BatchNumbersExhausted`
 before anything is written, and a reopen starts a new generation. Opening returns a `Recovery` that says
-what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`,
+what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`, `repair`
+(the persist blocks it wrote back, and those it left),
 `meta_repaired` (a metainfo copy rewritten from its twin),
 `headers_repaired`, `segments_removed`, `spares_removed` and `spare_kept`. Only the last batch's entries are
 read at open. The rest are checked when read: `read(position)` returns
@@ -328,12 +337,18 @@ entries costs a few reads, not one read per entry.
 A persist record is read only at open: `read` and `replay` judge an entry
 against the record held in memory. A record that rots after the open is found
 at the next one, and if its entry rots too before then, that open refuses.
-`verify_records(range)` is the scrub's call: it reads the records of the live
-positions in `range` from disk, changes nothing, and returns the positions
-whose record no longer matches. The caller writes each one again in a new
-batch, as it does for a damaged entry. The superseded record stays damaged on
-disk until the floor frees its segment, and each open rebuilds it from its
-entry while that entry is intact.
+`verify_records(range)` reads the records of the live positions in `range`
+from disk, changes nothing, and returns the positions whose record no longer
+matches. `repair_records()` is the scrub's repair: it writes back each record
+that is damaged while its entry is intact, in every segment. That covers the
+records of tombstones and of positions a later batch replaced, which no caller
+can write again. Each open does the same for the batches before the last one.
+A repair writes a whole persist block, and only when the entry of each record
+in that block is intact and is the entry its record names. A crash that tears
+the write then leaves each record of the block rebuildable from its entry, as
+it was before. A block with one damaged entry is not written: its valid record
+is the only copy of that entry's identity. `RecordRepair` counts the blocks
+written and the blocks left.
 
 Three rules keep recovery's own writes honest, and the crash loops found
 each of them. A fourth keeps them apart from the witness rule: when an open

@@ -59,7 +59,7 @@ if buggify!() {
 }
 ```
 
-**Parameter randomization.** `buggify_pick!` and `buggify_range!` draw a value at an active point, with no `rand` dependency. `buggify_pick!(prob, n)` returns `Some(i)` with `i` in `0..n`. `buggify_range!(prob, lo..hi)` returns `Some(v)` in the range. Both return `None` when the point does not fire, and always outside a simulation:
+**Parameter randomization.** `buggify_pick!` and `buggify_range!` draw a value at an active point, with no `rand` dependency. `buggify_pick!(prob, n)` returns `Some(i)` with `i` in `0..n`. `buggify_range!(prob, lo..hi)` returns `Some(v)` in the range. The whole range can come out, also a span wider than `u32::MAX`, such as a delay of 0 to 10 seconds in nanoseconds. Both return `None` when the point does not fire, and always outside a simulation:
 
 ```rust
 use moonpool_buggify::buggify_range;

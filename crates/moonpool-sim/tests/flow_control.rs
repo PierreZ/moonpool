@@ -134,7 +134,8 @@ fn assert_accounted(sim: &SimWorld, sender: &SimTcpStream, receiver: &SimTcpStre
 
 /// The central test: a writer that never sees its bytes read fills the
 /// window and parks, even once every byte sits in the peer's receive buffer;
-/// the peer's read hands back exactly what it consumed and wakes the writer.
+/// the peer's read hands back exactly what it consumed, and wakes the writer
+/// only once a third of the window is free (no silly-window slivers).
 #[test]
 fn a_reader_that_never_reads_parks_the_writer_at_the_window() {
     const WINDOW: usize = 64 * 1024;
@@ -152,21 +153,33 @@ fn a_reader_that_never_reads_parks_the_writer_at_the_window() {
     let (wake_count, waker) = counting_waker();
     assert!(poll_write_with(&mut client, b"x", &waker).is_pending());
 
-    // The reader takes 4 KiB: that, and only that, comes back.
-    let mut buf = vec![0_u8; 4096];
+    // The reader takes 4 KiB: that, and only that, comes back, and a sliver
+    // of the window does not wake the writer.
+    let read = |server: &mut _, len: usize| {
+        let mut buf = vec![0_u8; len];
+        poll_read_once(server, &mut buf).map(|result| result.expect("read"))
+    };
+    assert_eq!(read(&mut server, 4096), Poll::Ready(4096));
+    assert_eq!(sim.available_send_bytes(client.connection_id()), 4096);
     assert_eq!(
-        poll_read_once(&mut server, &mut buf).map(|result| result.expect("read")),
-        Poll::Ready(4096)
+        wake_count.0.load(Ordering::Relaxed),
+        0,
+        "4 KiB of 64 KiB is a sliver: the writer stays parked"
     );
+    // 20 KiB free against 44 KiB outstanding: still under the mark.
+    assert_eq!(read(&mut server, 16 * 1024), Poll::Ready(16 * 1024));
+    assert_eq!(wake_count.0.load(Ordering::Relaxed), 0);
+    // 24 KiB free against 40 KiB outstanding: half of it, so the writer wakes.
+    assert_eq!(read(&mut server, 4096), Poll::Ready(4096));
     assert_eq!(
         wake_count.0.load(Ordering::Relaxed),
         1,
-        "the parked writer is woken"
+        "the parked writer is woken once a third of the window is free"
     );
-    assert_eq!(sim.available_send_bytes(client.connection_id()), 4096);
+    assert_eq!(sim.available_send_bytes(client.connection_id()), 24 * 1024);
     assert_eq!(
-        poll_write_once(&mut client, &vec![0_u8; 8192]).map(|result| result.expect("write")),
-        Poll::Ready(4096),
+        poll_write_once(&mut client, &vec![0_u8; 32 * 1024]).map(|result| result.expect("write")),
+        Poll::Ready(24 * 1024),
         "the next write accepts at most what was read"
     );
     assert_accounted(&sim, &client, &server);

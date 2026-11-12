@@ -456,25 +456,41 @@ macro_rules! buggify_range {
 }
 
 /// Internal implementation backing [`buggify_pick!`]: one draw more than
-/// [`buggify_internal`] when it fires, none for `n == 0`. `n` is capped at
-/// `u32::MAX`.
+/// [`buggify_internal`] when it fires, none for `n == 0`.
 #[must_use]
 pub fn buggify_pick_internal(prob: f64, n: usize, location: &'static str) -> Option<usize> {
-    let n = u32::try_from(n).unwrap_or(u32::MAX);
+    let n = u64::try_from(n).unwrap_or(u64::MAX);
     if n == 0 || !buggify_internal(prob, location) {
         return None;
     }
-    let draw = with_state(|state| state.random_source.map_or(0.0, |random| random()));
-    usize::try_from(scale(draw, n)).ok()
+    usize::try_from(scale(draw(), n)).ok()
+}
+
+/// One draw from the installed random source (`0.0` without one).
+fn draw() -> f64 {
+    with_state(|state| state.random_source.map_or(0.0, |random| random()))
+}
+
+/// `x` as the nearest `f64`. The conversion is exact up to 2^53 and
+/// monotonic above it.
+fn to_f64(x: u64) -> f64 {
+    let high = u32::try_from(x >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(x & 0xffff_ffff).unwrap_or(u32::MAX);
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
 
 /// The index `i` in `0..n` whose share `[i/n, (i+1)/n)` holds `draw`, a
 /// value in `[0, 1)`: a binary search, so no float-to-integer cast.
-fn scale(draw: f64, n: u32) -> u32 {
+///
+/// The search finds the smallest `i` with `draw < (i + 1) / n`, so for each
+/// `n` up to `u32::MAX` it gives the same index as the earlier search over
+/// `u32`, and seeds do not move.
+fn scale(draw: f64, n: u64) -> u64 {
     let (mut low, mut high) = (0, n - 1);
+    let n = to_f64(n);
     while low < high {
         let mid = low + (high - low) / 2;
-        if draw < f64::from(mid + 1) / f64::from(n) {
+        if draw < to_f64(mid + 1) / n {
             high = mid;
         } else {
             low = mid + 1;
@@ -484,20 +500,18 @@ fn scale(draw: f64, n: u32) -> u32 {
 }
 
 /// Internal implementation backing [`buggify_range!`]: one draw more than
-/// [`buggify_internal`] when it fires, none for an empty range.
+/// [`buggify_internal`] when it fires, none for an empty range. The whole
+/// range can be drawn, also when its span is larger than `u32::MAX`.
 #[must_use]
 pub fn buggify_range_internal(
     prob: f64,
     range: std::ops::Range<u64>,
     location: &'static str,
 ) -> Option<u64> {
-    if range.is_empty() {
+    if range.is_empty() || !buggify_internal(prob, location) {
         return None;
     }
-    let span = usize::try_from(range.end - range.start).unwrap_or(usize::MAX);
-    buggify_pick_internal(prob, span, location)
-        .and_then(|offset| u64::try_from(offset).ok())
-        .map(|offset| range.start + offset)
+    Some(range.start + scale(draw(), range.end - range.start))
 }
 
 #[cfg(test)]
@@ -562,6 +576,80 @@ mod tests {
             assert_eq!(crate::buggify_pick!(1.0, 0), None);
             assert_eq!(crate::buggify_range!(1.0, 5..5), None);
         });
+    }
+
+    /// The search over `u32` that `scale` replaced, as a reference.
+    fn scale_u32(draw: f64, n: u32) -> u32 {
+        let (mut low, mut high) = (0, n - 1);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if draw < f64::from(mid + 1) / f64::from(n) {
+                high = mid;
+            } else {
+                low = mid + 1;
+            }
+        }
+        low
+    }
+
+    /// For each span that fits in `u32`, the result does not change, so
+    /// seeds do not move.
+    #[test]
+    fn scale_matches_the_u32_search() {
+        for n in [
+            1,
+            2,
+            3,
+            7,
+            10,
+            1_000,
+            65_537,
+            1 << 31,
+            u32::MAX - 1,
+            u32::MAX,
+        ] {
+            TEST_DRAWS.with(|c| c.set(0));
+            for draw in (0..500)
+                .map(|_| test_source())
+                .chain([0.0, 0.5, 0.999_999_999])
+            {
+                assert_eq!(scale(draw, u64::from(n)), u64::from(scale_u32(draw, n)));
+            }
+        }
+    }
+
+    /// A span above `u32::MAX` reaches its top part (#475 (`buggify_range!`
+    /// capped at `start + u32::MAX`)).
+    #[test]
+    fn scale_covers_spans_above_u32() {
+        let span = 10_000_000_000_u64;
+        assert_eq!(scale(0.0, span), 0);
+        assert_eq!(scale(1.05e-9, span), 10);
+        let top = scale(0.999_999, span);
+        assert!((9_999_989_999..=9_999_990_000).contains(&top), "{top}");
+        assert_eq!(scale(0.999_999_999_999_999_9, span), span - 1);
+
+        let wide = u64::from(u32::MAX);
+        assert_eq!(scale(0.999_999_999_999_999_9, wide), wide - 1);
+        assert_eq!(scale(0.999_999_999_999_999_9, wide + 1), wide);
+        assert!(scale(0.999_999_999_999_999_9, u64::MAX) > u64::MAX - (1 << 12));
+    }
+
+    /// The draw that returns 0.999999 every time.
+    fn high_source() -> f64 {
+        0.999_999
+    }
+
+    #[test]
+    fn a_range_above_u32_reaches_its_top() {
+        set_random_source(high_source);
+        buggify_init(1.0);
+        let value = crate::buggify_range!(1.0, 0..10_000_000_000);
+        buggify_reset();
+        clear_random_source();
+        let value = value.expect("site is active and fires");
+        assert!(value > u64::from(u32::MAX), "{value}");
+        assert!((9_999_989_999..=9_999_990_000).contains(&value), "{value}");
     }
 
     #[test]

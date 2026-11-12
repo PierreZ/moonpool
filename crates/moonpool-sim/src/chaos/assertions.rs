@@ -796,6 +796,12 @@ macro_rules! assert_sometimes_all {
 /// discovery of a new bucket creates a replay anchor for exploration. If
 /// quality keys are provided, improvements create new anchors.
 ///
+/// Up to four quality keys count, the first one the most significant. Each
+/// quality value is in the range `0..=65535`
+/// ([`moonpool_assertions::MAX_QUALITY`]): a larger value saturates to 65535
+/// and a negative value counts as 0. Scale a value such as a byte count or a
+/// time in milliseconds into the range, and keep "higher is better".
+///
 /// # Usage
 ///
 /// ```rust

@@ -24,9 +24,10 @@ The controller forks at a **quiescent point** between runs, never mid-simulation
 |------|---------|
 | 0 | The run completed and passed. |
 | 42 | The run completed and reported a simulation failure. |
-| any other code, or a signal | The worker crashed (a panic, an abort). |
+| 43 | The run panicked. |
+| any other code, or a signal | The worker crashed (an abort, a kill). |
 
-Nothing catches a panic inside a worker. The worker dies, the controller classifies the `waitpid` status, and the recipe is kept as a crash reproducer like any other failure. Workers never fork, never touch the frontier, and never return into controller code. Recursion is structurally impossible.
+The worker catches a panic of its run with `catch_unwind`. It writes the journal it has, then exits with code 43. The panic never unwinds out of the worker, so it cannot run the rest of `explore` or a test harness in the child. The controller classifies 43, any other unknown code and a signal as a crash, and keeps the recipe of the job as a crash reproducer like any other failure. Workers never fork, never touch the frontier, and never return into controller code. Recursion is structurally impossible.
 
 Live processes are bounded by `1 + workers` at all times. A state fifty discoveries deep costs a fifty-segment recipe, not fifty processes. If `fork` itself fails (a resource limit), the controller runs that job in-process instead.
 
@@ -36,7 +37,7 @@ With `workers: 0` the controller runs every job in-process: sequential, fork-fre
 
 A worker stuck outside the simulation (a tight loop in user code, a blocking syscall) is invisible to the in-simulation stall guards. The controller stamps each fork with the wall clock. A worker still running after `DEFAULT_WORKER_TIMEOUT` (5 minutes) is killed with `SIGKILL`, reaped, and recorded as a crash with its recipe printed. `Explorer::set_worker_timeout` changes the ceiling. A timeline normally takes milliseconds to seconds, so the default is generous on purpose.
 
-The controller polls its own children by pid with `WNOHANG`, never `waitpid(-1)`, so a harness that embeds the explorer keeps its own children. It spins for 2048 polls, then sleeps between 10 microseconds and 1 millisecond, so short timelines pay no sleep latency. Dropping an `Explorer` kills and reaps every live worker, so a panic in the harness cannot orphan a worker that holds the shared regions.
+The controller polls its own children by pid with `WNOHANG`, never `waitpid(-1)`, so a harness that embeds the explorer keeps its own children. It spins for 2048 polls, then sleeps between 10 microseconds and 1 millisecond, so short timelines pay no sleep latency. Dropping an `Explorer` kills and reaps every live worker, so a panic in the harness cannot orphan a worker that holds the shared regions. In a worker, the drop does nothing: the worker has a copy of the pids of its siblings, but it did not fork them, so it must not kill them.
 
 ## What Crosses the Process Boundary
 

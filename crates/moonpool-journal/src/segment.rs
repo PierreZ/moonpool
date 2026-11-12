@@ -6,8 +6,10 @@
 //! file, whose headers are synced before the rename ([`Segment::adopt`]),
 //! so a segment file either does not exist or has its full size and both
 //! headers. It never changes size again. Both logs only ever append, and
-//! every batch starts on a fresh block in each, so no write ever touches a
-//! sector holding an acknowledged record or entry. A recycled file's old
+//! every batch starts on a fresh block in each, so no commit ever touches a
+//! sector holding an acknowledged record or entry. (A record repair writes a
+//! persist block again, but only when each record in it can be rebuilt from
+//! its intact entry: see [`crate::RecordRepair`].) A recycled file's old
 //! batches are older than its first batch: the scan reads them as stale
 //! (see [`crate::spare`]).
 

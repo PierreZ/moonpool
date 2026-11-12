@@ -185,6 +185,10 @@ pub struct SimulationBuilder {
     /// When the chaos phase ends ([`Self::chaos_until_run_ends`]).
     pub(super) chaos_end: ChaosEnd,
     pub(super) exploration_config: Option<crate::chaos::exploration_glue::ExplorationConfig>,
+    /// Keep every explored timeline in the report
+    /// ([`Self::record_exploration_tree`]).
+    #[cfg(feature = "exploration")]
+    pub(super) exploration_tree: ExplorationTree,
     /// Replay breakpoints staged for the next orchestration run. Installed
     /// *after* `SimWorld` construction (whose RNG reset would clear them);
     /// set by the exploration phase before executing a job.
@@ -262,6 +266,8 @@ impl SimulationBuilder {
             chaos_duration: None,
             chaos_end: ChaosEnd::AtDuration,
             exploration_config: None,
+            #[cfg(feature = "exploration")]
+            exploration_tree: ExplorationTree::Off,
             pending_replay: None,
             replay_recipe: None,
             run_time_budget: super::stall::DEFAULT_RUN_TIME_BUDGET,
@@ -1393,6 +1399,31 @@ impl SimulationBuilder {
         self.exploration_config = Some(config);
         self
     }
+
+    /// Keep every timeline that exploration runs in
+    /// [`ExplorationReport::timelines`](crate::ExplorationReport::timelines):
+    /// its recipe, whether it failed, and its discoveries. This is the tree
+    /// of the exploration, for a tool that draws it. Off by default, since a
+    /// campaign of many seeds runs many timelines. With
+    /// [`ExplorationConfig::workers`](crate::ExplorationConfig::workers) at
+    /// 0 the order of the timelines is deterministic.
+    #[cfg(feature = "exploration")]
+    #[must_use]
+    pub fn record_exploration_tree(mut self) -> Self {
+        self.exploration_tree = ExplorationTree::Record;
+        self
+    }
+}
+
+/// Whether the report keeps the tree of an exploration
+/// ([`SimulationBuilder::record_exploration_tree`]).
+#[cfg(feature = "exploration")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExplorationTree {
+    /// Only the totals and the bug recipes.
+    Off,
+    /// Every timeline, with its recipe and discoveries.
+    Record,
 }
 
 /// When the chaos phase ends.

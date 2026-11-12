@@ -31,12 +31,20 @@ const full = title ? `${title} · moonpool` : "moonpool";
   <meta property="og:site_name" content="moonpool" />
   <meta property="og:title" content={full} />
   <meta property="og:description" content={description} />
-  <meta property="og:image" content={new URL(url("images/logo.png"), Astro.site).href} />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content={new URL(Astro.url.pathname, Astro.site).href} />
+  <meta property="og:image" content={new URL(url("social-card.png"), Astro.site).href} />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="The moonpool astronaut on its lander, and the words: One seed, one exact run." />
+  <meta name="twitter:card" content="summary_large_image" />
   <script is:inline src={url("shared/theme.js")}></script>
   <link rel="stylesheet" href={url("shared/tokens.css")} />
   <link rel="stylesheet" href={url("shared/base.css")} />
   <link rel="preload" href={url("shared/fonts/jetbrains-mono-latin-400-normal.woff2")} as="font" type="font/woff2" crossorigin />
-  <link rel="icon" type="image/png" href={url("images/logo.png")} />
+  <link rel="icon" href={url("favicon.ico")} sizes="48x48" />
+  <link rel="icon" type="image/svg+xml" href={url("favicon.svg")} />
+  <link rel="apple-touch-icon" href={url("apple-touch-icon.png")} />
   <slot name="head" />
 </head>
 <body class={bare ? "bare" : undefined}>

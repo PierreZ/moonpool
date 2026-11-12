@@ -4,6 +4,8 @@
 
 A simulation catches a process in a bad state. We have two choices: stop the run, or record the fact and keep going. Traditional tests stop. Moonpool records and continues.
 
+[Assertions that must fire](../techniques/assertions/) shows the accounting on the website: the checks of a small replicated register turn green seed after seed, and the run stops when the coverage is stable. With one fault family off, one check can never fire, and the run fails.
+
 ## Why Assertions Never Crash
 
 **The first thing that goes wrong is rarely the worst thing that goes wrong.** If a replica commits a stale value and the run aborts there, we never learn what the replication protocol does with it. Maybe two other nodes accept the stale value. Maybe the system looks healthy for another thousand steps before a user reads garbage. An early abort hides that cascade, and the cascade is where the damage is.

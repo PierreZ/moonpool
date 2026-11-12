@@ -50,7 +50,7 @@ let latency = source.histogram_with_buckets(
 served.inc();
 ```
 
-`counter`, `gauge`, `histogram`, `histogram_with_buckets` and `histogram_with_opts` are get-or-register. The vector forms `counter_vec`, `gauge_vec` and `histogram_vec` take label names and hand out children with `with_label_values`. Get-or-register matters because a source outlives process reboots. A rebooted process looks its metrics up instead of failing with `AlreadyReg`.
+`counter`, `gauge`, `histogram`, `histogram_with_buckets` and `histogram_with_opts` are get-or-register. The vector forms `counter_vec`, `gauge_vec` and `histogram_vec` take label names and hand out children with `with_label_values`. Get-or-register matters because a source outlives process reboots. A rebooted process looks its metrics up instead of failing with `AlreadyReg`. The lookup checks the shape. A second registration of a name with other label names, or a histogram with other buckets, returns an error, because the cached metric would record the values under the wrong labels or in the wrong buckets. A different help text is accepted, and the first one stays.
 
 To wrap a registry your application already built, use `PrometheusSource::new(registry)`.
 
@@ -195,6 +195,8 @@ no fill                   10 |    - |    - |   40 |    -
 
 Use a fill when the quantity holds between observations, or is zero when nothing happened. Use `.interpolate()` when it moves continuously: a queue depth, a replication lag. They compose in call order. The grid runs from bucket zero to the run's end, so with `Fill::Value(0.0)` every window sees every seed and `min` and `max` compare like with like.
 
+**Fill before you map.** A `.map` window spans several buckets, so its output has no grid. A `.fill` or an `.interpolate` after a `.map` does nothing.
+
 **Series identity is name plus label set.** Matching is by subset: a query naming `operation="write"` also matches a series carrying `instance="10.0.1.1"`. Every result row carries `seed` and `run_id` as moonpool fields, never injected into your labels.
 
 ### Percentiles That Mean Something
@@ -250,4 +252,4 @@ pub trait MetricsSource: Send + Sync + 'static {
 }
 ```
 
-`collect` alone makes a scrape-only adapter over any registry. The other three deliver an exact time series, with `SeriesRecorder` from `moonpool-core` doing the stamping and capping. An OpenTelemetry adapter slots in the same way, with no change to the runner.
+`collect` alone makes a scrape-only adapter over any registry. A scrape-only series becomes one point at the end of the run. A scrape-only **histogram** becomes nothing: its scrape holds bucket counts and a sum, not the observations, and a p99 of the sum is a wrong number. Record a histogram through an instrumented handle to query it. The other three deliver an exact time series, with `SeriesRecorder` from `moonpool-core` doing the stamping and capping. An OpenTelemetry adapter slots in the same way, with no change to the runner.

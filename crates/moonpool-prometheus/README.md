@@ -32,7 +32,7 @@ timer.stop_and_record();
 | Item | Role |
 |---|---|
 | `PrometheusSource` | A `prometheus::Registry` that implements moonpool's `MetricsSource` |
-| `counter`, `gauge`, `histogram`, `histogram_with_buckets`, `histogram_with_opts` | Get or register a metric; returns an instrumented handle |
+| `counter`, `gauge`, `histogram`, `histogram_with_buckets`, `histogram_with_opts` | Get or register a metric; returns an instrumented handle. A second registration of a name with other label names or buckets is an error |
 | `counter_vec`, `gauge_vec`, `histogram_vec` | Labelled families |
 | `SimCounter`, `SimGauge`, `SimHistogram` (and `Vec` variants) | Wrap the real metric (`inner()`) and record every mutation |
 | `SimHistogram::start_timer` / `SimTimer` | A latency timer on the provider clock, not the wall clock |

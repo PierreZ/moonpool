@@ -196,11 +196,17 @@ fn find_or_alloc_each_bucket(
     }
 }
 
+/// Largest quality value a key can hold. A larger value saturates to it.
+pub const MAX_QUALITY: i64 = 0xffff;
+
 /// Pack up to 4 quality key values into a single u64 for lexicographic comparison.
 ///
-/// First key gets the highest 16 bits (highest priority).
-/// Values are reduced to their low 16 bits (matching `v as u16` semantics) —
-/// callers should pre-scale values into the u16 range if higher fidelity is needed.
+/// First key gets the highest 16 bits (highest priority). Each value is
+/// clamped to `0..=`[`MAX_QUALITY`] before the pack: a negative value counts
+/// as 0 and a larger value saturates. A wrap to the low 16 bits would make a
+/// value above the limit look small and a negative value look large, so the
+/// best quality of a bucket would go wrong. Callers that need more fidelity
+/// must scale values into the range.
 /// The result is unsigned: a first key at or above `0x8000` must still compare
 /// greater than one below it, which a signed packing would reverse.
 fn pack_quality(quality: &[(&str, i64)]) -> u64 {
@@ -210,8 +216,8 @@ fn pack_quality(quality: &[(&str, i64)]) -> u64 {
         .enumerate()
         .fold(0u64, |packed, (i, &(_, v))| {
             let shift = (3 - i) * 16;
-            // Keep the low 16 bits (two's complement, `v as u16` semantics).
-            packed | ((v.cast_unsigned() & 0xffff) << shift)
+            // The clamp keeps the value in 0..=0xffff, so the cast is exact.
+            packed | (v.clamp(0, MAX_QUALITY).cast_unsigned() << shift)
         })
 }
 
@@ -415,6 +421,54 @@ mod tests {
             pack_quality(&[("a", 0xffff), ("b", 2)]) > pack_quality(&[("a", 0xffff), ("b", 1)])
         );
         assert_eq!(unpack_quality(score(0xffff), 1), vec![0xffff]);
+    }
+
+    /// Quality values out of `0..=MAX_QUALITY` saturate. They do not wrap
+    /// (#462 (quality wraps at 16 bits)).
+    #[test]
+    fn packed_quality_saturates_out_of_range_values() {
+        let score = |v: i64| unpack_quality(pack_quality(&[("q", v)]), 1);
+        assert_eq!(score(0), vec![0]);
+        assert_eq!(score(MAX_QUALITY), vec![MAX_QUALITY]);
+        assert_eq!(score(MAX_QUALITY + 1), vec![MAX_QUALITY]);
+        assert_eq!(score(70_000), vec![MAX_QUALITY]);
+        assert_eq!(score(i64::MAX), vec![MAX_QUALITY]);
+        assert_eq!(score(-1), vec![0]);
+        assert_eq!(score(i64::MIN), vec![0]);
+        // A saturated first key does not spill into the second key.
+        assert_eq!(
+            unpack_quality(pack_quality(&[("a", 70_000), ("b", 3)]), 2),
+            vec![MAX_QUALITY, 3]
+        );
+    }
+
+    /// Progress above the limit keeps the saturated best, and a negative
+    /// value never replaces a real best (#462).
+    #[test]
+    fn quality_watermark_saturates_and_ignores_negative_values() {
+        crate::region::init();
+        crate::region::reset();
+
+        let key = &[("key", 1)];
+        for value in [65_535, 65_536, 70_000] {
+            assertion_sometimes_each("large", key, &[("score", value)]);
+        }
+        for value in [5, -1] {
+            assertion_sometimes_each("negative", key, &[("score", value)]);
+        }
+
+        let best = |msg: &str| {
+            let buckets = each_bucket_read_all();
+            let bucket = buckets
+                .iter()
+                .find(|b| b.msg_str() == msg)
+                .expect("bucket exists");
+            unpack_quality(bucket.best_score, 1)
+        };
+        assert_eq!(best("large"), vec![MAX_QUALITY]);
+        assert_eq!(best("negative"), vec![5]);
+
+        crate::region::clear();
     }
 
     #[test]

@@ -13,7 +13,7 @@ use crate::format::{
 };
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
-use crate::recover::{Known, Located, Op, entry_matches, scan};
+use crate::recover::{BlockWrite, Known, Located, Op, entry_matches, plan_repair, scan};
 use crate::segment::{Segment, is_segment_leftover, named_batches, parse_segment_name};
 use crate::spare::{is_spare, spare_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
@@ -107,6 +107,9 @@ pub struct Recovery {
     pub torn: u32,
     /// Persist records rebuilt from their intact entries.
     pub rebuilt: u32,
+    /// The persist blocks of earlier batches that held a rebuilt record:
+    /// written again, or left damaged (see [`RecordRepair`]).
+    pub repair: RecordRepair,
     /// A metainfo copy was rewritten from its twin.
     pub meta_repaired: bool,
     /// Segment header copies rewritten from their twin.
@@ -119,6 +122,25 @@ pub struct Recovery {
     /// A dead segment's file an earlier open recycled, kept for the next
     /// roll.
     pub spare_kept: bool,
+}
+
+/// What a repair of the persist records did ([`Journal::repair_records`],
+/// and each open for the batches before the last one).
+///
+/// A record that is damaged while its entry is intact is rebuilt from the
+/// entry. A repair writes the rebuilt record back, so the damage is gone
+/// before a second fault on the same slot makes an open refuse. It writes a
+/// whole persist block, and only when the entry of each record in that
+/// block is intact: a crash that tears the write then leaves each record of
+/// the block rebuildable, as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecordRepair {
+    /// Persist blocks written again, each with every record encoded.
+    pub blocks_written: u32,
+    /// Persist blocks that hold a rebuilt record but were not written,
+    /// because the entry of another record in them is damaged: that
+    /// record is the only copy of its identity.
+    pub blocks_left: u32,
 }
 
 /// How this open of the journal rolled onto new segments.
@@ -280,6 +302,42 @@ async fn list_segments<P: LocalStorageProvider>(
     Ok(Some(Listing { firsts, spares }))
 }
 
+/// Whether `dir` holds a segment, read only: no sync, no delete. `false`
+/// when `dir` does not exist.
+async fn holds_segments<P: LocalStorageProvider>(provider: &P, dir: &str) -> std::io::Result<bool> {
+    match provider.list_dir(dir).await {
+        Ok(names) => Ok(names.iter().any(|name| parse_segment_name(name).is_some())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Make `dir`, which holds no meta file, ready for a new journal. A segment
+/// is a journal that lost its metainfo: [`OpenError::MetaLost`]. A spare or
+/// a segment that a crashed creation left is deleted: its old batches can
+/// carry a later open generation than the new journal, and a roll onto it
+/// would read them as evidence.
+async fn clear_for_create<P: LocalStorageProvider>(
+    provider: &P,
+    dir: &str,
+) -> Result<(), OpenError> {
+    let names = provider.list_dir(dir).await?;
+    if names.iter().any(|name| parse_segment_name(name).is_some()) {
+        return Err(OpenError::MetaLost);
+    }
+    let mut removed = false;
+    for name in names {
+        if is_spare(&name) || is_segment_leftover(&name) {
+            delete_if_present(provider, &format!("{dir}/{name}")).await?;
+            removed = true;
+        }
+    }
+    if removed {
+        provider.sync_dir(dir).await?;
+    }
+    Ok(())
+}
+
 /// Keep one whole spare of `spares` and delete the others (with their
 /// count). A spare is never evidence: no batch is written to it before it
 /// is renamed to a segment, so deleting one loses nothing. Kept, its old
@@ -333,21 +391,25 @@ async fn delete_if_present<P: LocalStorageProvider>(
     }
 }
 
-/// Write the last batch's verdicts down: the persist extent `writes`, in
-/// order, each durable before the next.
-async fn rewrite_last_batch<F: moonpool_core::LocalStorageFile>(
-    segment: &Segment<F>,
-    offset: u64,
-    writes: Vec<AlignedBuf>,
+/// Write persist blocks again: the last batch's verdicts and the repaired
+/// blocks of earlier batches, in order, each durable before the next.
+async fn write_persist<F: moonpool_core::LocalStorageFile>(
+    segments: &[Segment<F>],
+    writes: Vec<BlockWrite>,
 ) -> std::io::Result<()> {
     // A rebuilt record says its entry was persisted, and the entry it was
     // rebuilt from may be a predecessor's unsynced write still in the page
     // cache: the entry reaches the disk first, as in a commit. (A crash
     // between a rewrite and the entries' sync left records naming entries
     // that never landed: corruption from a crash alone.)
-    segment.sync().await?;
-    for bytes in writes {
-        segment.write_durable(offset, bytes).await?;
+    let mut synced: Vec<usize> = writes.iter().map(|(at, _, _)| *at).collect();
+    synced.sort_unstable();
+    synced.dedup();
+    for at in synced {
+        segments[at].sync().await?;
+    }
+    for (at, offset, bytes) in writes {
+        segments[at].write_durable(offset, bytes).await?;
     }
     Ok(())
 }
@@ -382,8 +444,15 @@ async fn begin_generation<F: moonpool_core::LocalStorageFile>(
 impl<P: LocalStorageProvider> Journal<P> {
     /// Create a journal in `dir` with the caller's first metainfo.
     ///
+    /// A directory with segments and no meta file is a journal that lost
+    /// its metainfo, not an empty one: `create` refuses it, as
+    /// [`Journal::open`] does. A spare or a file that a crashed creation
+    /// left is not a journal: `create` deletes it.
+    ///
     /// # Errors
-    /// [`OpenError::AlreadyExists`] if `dir` holds a journal; any I/O error.
+    /// [`OpenError::AlreadyExists`] if `dir` holds a meta file;
+    /// [`OpenError::MetaLost`] if `dir` holds segments and no meta file; any
+    /// I/O error.
     pub async fn create(
         provider: P,
         dir: &str,
@@ -402,6 +471,7 @@ impl<P: LocalStorageProvider> Journal<P> {
         if provider.exists(&format!("{dir}/{META_NAME}")).await? {
             return Err(OpenError::AlreadyExists);
         }
+        clear_for_create(&provider, dir).await?;
         let first = Meta {
             seq: 1,
             journal: id,
@@ -510,9 +580,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             segment.persist_next = *persist_next;
             segment.entry_next = *entry_next;
         }
-        if let Some((at, offset, writes)) = scanned.rewrite.take() {
-            rewrite_last_batch(&segments[at], offset, writes).await?;
-        }
+        write_persist(&segments, std::mem::take(&mut scanned.writes)).await?;
         // Whatever opening keeps must survive the next power loss.
         for segment in &segments {
             segment.sync().await?;
@@ -525,6 +593,7 @@ impl<P: LocalStorageProvider> Journal<P> {
         recovery.ambiguous = scanned.ambiguous;
         recovery.torn = scanned.voided;
         recovery.rebuilt = scanned.rebuilt;
+        recovery.repair = scanned.repair;
         let ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(scanned.last_batch);
         let mut journal = Self {
             tag,
@@ -557,19 +626,23 @@ impl<P: LocalStorageProvider> Journal<P> {
 
     /// The caller's metainfo of the journal in `dir`, read without opening
     /// it: no recovery, no repair, no sync, nothing created, so a probe never
-    /// changes what the next open finds. `Ok(None)` where there is no journal.
+    /// changes what the next open finds. `Ok(None)` where there is no journal:
+    /// no meta file and no segment.
     ///
     /// # Errors
-    /// [`OpenError::MetaLost`] when no copy is valid,
-    /// [`OpenError::WrongJournal`], or the provider's error.
+    /// [`OpenError::MetaLost`] when no copy is valid, or when the directory
+    /// holds segments and no meta file (the verdict of [`Journal::open`]);
+    /// [`OpenError::WrongJournal`]; or the provider's error.
     pub async fn peek_meta(
         provider: &P,
         dir: &str,
         id: JournalId,
     ) -> Result<Option<Vec<u8>>, OpenError> {
-        Ok(MetaFile::<P::File>::peek(provider, dir, id)
-            .await?
-            .map(|meta| meta.bytes))
+        match MetaFile::<P::File>::peek(provider, dir, id).await? {
+            Some(meta) => Ok(Some(meta.bytes)),
+            None if holds_segments(provider, dir).await? => Err(OpenError::MetaLost),
+            None => Ok(None),
+        }
     }
 
     // ---- what the journal knows, from memory ----
@@ -903,6 +976,34 @@ impl<P: LocalStorageProvider> Journal<P> {
         }
         mismatched.sort_unstable();
         Ok(mismatched)
+    }
+
+    /// Write back each persist record that is damaged while its entry is
+    /// intact, in every segment: the records of live positions, of
+    /// tombstones and of positions a later batch replaced, which a caller
+    /// cannot write again itself. See [`RecordRepair`] for the rule that
+    /// keeps a torn repair safe.
+    ///
+    /// Each open does the same for the batches before the last one, so a
+    /// scrub calls this between opens, after [`verify_records`](Self::verify_records)
+    /// found a mismatch or on its own schedule. It reads the whole persist
+    /// log, and the entries of each block it writes. A medium error reads
+    /// as damage, so a block that holds one is left.
+    ///
+    /// # Errors
+    /// [`OpenError::Io`] when the provider fails; an evidence variant of
+    /// [`OpenError`] when the persist log no longer reads as a log (damage
+    /// since the open that the next open refuses too).
+    pub async fn repair_records(&mut self) -> Result<RecordRepair, OpenError> {
+        let known = Known {
+            generation: self.generation,
+            last: self.meta.open_last,
+            mark: self.meta.last_batch,
+        };
+        let (writes, repair) =
+            plan_repair(&self.segments, self.tag, known, self.last_batch).await?;
+        write_persist(&self.segments, writes).await?;
+        Ok(repair)
     }
 
     /// Read every non-empty position in `range`, in order: a damaged entry

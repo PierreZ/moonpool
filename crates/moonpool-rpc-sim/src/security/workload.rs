@@ -670,6 +670,7 @@ impl Workload for SecurityWorkload {
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let ledger = Ledger::of(ctx.state());
+        let mut one_way_executed = false;
         for (id, issued, receipts, class) in ledger.all() {
             match class {
                 Some(Class::Replied | Class::Executed) => {
@@ -691,7 +692,14 @@ impl Workload for SecurityWorkload {
             if issued.minted.kind != Kind::Refreshing {
                 assert_always!(receipts <= 1, "an at-most-once request ran at most once");
             }
+            if issued.target == Target::Note && class == Some(Class::Maybe) && receipts == 1 {
+                one_way_executed = true;
+            }
         }
+        assert_sometimes!(
+            one_way_executed,
+            "rpc security one-way request executed exactly once"
+        );
         self.records
             .lock()
             .expect("Mutex poisoned: prior task panicked")

@@ -19,8 +19,11 @@
 //! **Oracles**, written outside the balancer: the receipt ledger (every
 //! handler run, by job id, written before the handler answers) and the
 //! workload's attempt ledger (fed by the balancer's observation hook). The
-//! workload checks that each job ran no more often than its permissions
-//! allow, that a reply comes from a server that ran the job, that "not
+//! workload checks that each job ran no more often than its policy allows
+//! (a limit from the policy alone, so a balancer that starts too many
+//! copies cannot raise it), that each call started no more attempts and
+//! copies than its policy allows and, without retry permission, nothing
+//! new after an ambiguous attempt, that a reply comes from a server that ran the job, that "not
 //! admitted" means no handler ran, that late losers stay within the
 //! model's bound, and at the end that every attempt started, ended,
 //! reserved and released exactly once.

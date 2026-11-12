@@ -129,7 +129,7 @@ Three builder settings describe the network rather than break it. They apply on 
 | `.tcp_send_window_bytes(n)` | 64 KiB | The end-to-end byte window per direction. Credit returns only when the peer's application reads. A small window makes a slow reader back its writer up early. |
 | `.accept_backlog_capacity(n)` | 128 | Unaccepted connections per listener. A full backlog parks `connect()` until an `accept()` returns. |
 
-Flow control is entropy-neutral: a `Pending` on a full window and the wake after a read draw nothing. Congestion control and retransmission are out of scope. The model is a reliable ordered byte stream with a bounded number of bytes outstanding.
+A writer parks only when the window is full. It wakes once the free window is half of what is still outstanding, a third of the window when it filled, the mark Linux uses for a blocked writer. If every byte a reader frees woke the writer, a stream that stays full would move one or two bytes per write and spend a few simulation events on every byte (**silly-window syndrome**). Flow control is entropy-neutral: a `Pending` on a full window and the wake after a read draw nothing. Congestion control and retransmission are out of scope. The model is a reliable ordered byte stream with a bounded number of bytes outstanding.
 
 ## Masks and Recovery
 

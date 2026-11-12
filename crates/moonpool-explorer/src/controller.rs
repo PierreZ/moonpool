@@ -49,6 +49,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+#[cfg(unix)]
+use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant};
 
 use crate::journal::{self, DiscoveryEvent};
@@ -165,6 +167,22 @@ pub struct ExploreJob {
     pub recipe: Recipe,
 }
 
+/// One timeline the explorer ran, kept when
+/// [`Explorer::record_timelines`] is on: the tree of an exploration, one node
+/// per timeline. The parent of a timeline is the one whose recipe is this
+/// recipe without its last segment; the root has an empty recipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineRecord {
+    /// The recipe it replayed: `(rng_call_count, seed)` segments from the
+    /// root. The last segment is the fork: the parent's state at that call
+    /// count, then fresh randomness.
+    pub recipe: Recipe,
+    /// The timeline failed (a bug) or its worker crashed.
+    pub failed: bool,
+    /// The globally new discoveries it made, in order.
+    pub discoveries: Vec<DiscoveryEvent>,
+}
+
 /// Per-seed exploration statistics.
 #[derive(Debug, Clone, Default)]
 pub struct ExplorationStats {
@@ -218,6 +236,9 @@ pub struct Explorer {
     continuation_round: u64,
     stats: ExplorationStats,
     bug_recipes: Vec<Recipe>,
+    /// Every timeline of the seed, when `record` is on.
+    timelines: Vec<TimelineRecord>,
+    record: bool,
 
     // --- worker pool (None = in-process mode) ---
     slots: Option<SlotPool>,
@@ -235,7 +256,13 @@ impl Drop for Explorer {
     /// A controller that unwinds (a panic in the policy code, an early return
     /// by the embedding harness) must not orphan workers that keep running
     /// full simulations while holding the shared assertion and sancov regions.
+    ///
+    /// A forked worker has a copy of the controller, with the pids of its
+    /// siblings. It did not fork them, so it must not kill or reap them.
     fn drop(&mut self) {
+        if worker::explorer_is_child() {
+            return;
+        }
         #[cfg(unix)]
         for (pid, _) in std::mem::take(&mut self.active) {
             let _ = worker::kill_worker(pid);
@@ -277,6 +304,8 @@ impl Explorer {
             continuation_round: 0,
             stats: ExplorationStats::default(),
             bug_recipes: Vec::new(),
+            timelines: Vec::new(),
+            record: false,
             slots,
             #[cfg(unix)]
             active: BTreeMap::new(),
@@ -290,6 +319,21 @@ impl Explorer {
     /// and its run recorded as a crash.
     pub fn set_worker_timeout(&mut self, timeout: Duration) {
         self.worker_timeout = timeout;
+    }
+
+    /// Keep a [`TimelineRecord`] of each timeline of a seed
+    /// ([`Self::timelines`]). Off by default: a campaign of many seeds runs
+    /// many timelines. With `workers > 0` the records come in the order the
+    /// workers finish; with `workers == 0` the order is deterministic.
+    pub fn record_timelines(&mut self, on: bool) {
+        self.record = on;
+    }
+
+    /// The timelines of the current seed, in the order they finished
+    /// (the root first), when [`Self::record_timelines`] is on.
+    #[must_use]
+    pub fn timelines(&self) -> &[TimelineRecord] {
+        &self.timelines
     }
 
     /// Reset per-seed state and prepare for the root run of `seed`.
@@ -306,6 +350,7 @@ impl Explorer {
         self.continuation_round = 0;
         self.stats = ExplorationStats::default();
         self.bug_recipes.clear();
+        self.timelines.clear();
         begin_run();
     }
 
@@ -452,14 +497,24 @@ impl Explorer {
                 worker::enter_worker();
                 begin_run();
                 crate::sancov::redirect_transfer_to_pool_slot(slot);
-                let failed = run_one(&job);
+                // A panic must not unwind out of the child: it would run the
+                // caller's code (the rest of `explore`, a test harness) in a
+                // process that must only run this one timeline. The panic is
+                // reported as a crash, and the controller records the recipe
+                // of the job.
+                let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| run_one(&job)));
                 let events = journal::take();
                 let slots = self.slots.as_ref().expect("worker mode has slots");
                 slots.write_slot(slot, &events, journal::rng_count());
                 crate::sancov::copy_counters_to_shared();
+                let code = match outcome {
+                    Ok(false) => worker::EXIT_OK,
+                    Ok(true) => worker::EXIT_FAILED,
+                    Err(_) => worker::EXIT_PANICKED,
+                };
                 // Safety: _exit is always safe; skips atexit/stdio flushing,
                 // which is what a forked worker wants.
-                unsafe { libc::_exit(if failed { 42 } else { 0 }) }
+                unsafe { libc::_exit(code) }
             }
             child_pid => {
                 self.active.insert(child_pid, (slot, job, Instant::now()));
@@ -578,6 +633,13 @@ impl Explorer {
         } = *run;
         self.stats.total_timelines += 1;
         self.stats.discoveries += events.len() as u64;
+        if self.record {
+            self.timelines.push(TimelineRecord {
+                recipe: job.recipe.clone(),
+                failed,
+                discoveries: events.to_vec(),
+            });
+        }
 
         if failed && from_exploration {
             self.stats.bug_found += 1;

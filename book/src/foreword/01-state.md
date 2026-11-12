@@ -55,6 +55,10 @@ These landed in the last cycle. Each has a chapter.
 
 Multi-process parallel exploration across CPU cores is not implemented. The explorer runs one controller and a bounded pool of short-lived forked workers. There is no deterministic hypervisor: code that bypasses the providers is not simulated.
 
+## The site
+
+This book is the Guide of the [moonpool site](https://pierrez.github.io/moonpool/). The site also has one page per technique, each with a live run: a real moonpool run, compiled to wasm, in your browser. The [playground](https://pierrez.github.io/moonpool/playground/) gives you every setting of that run: type a seed, turn fault families on and off, hunt for a failing seed and replay it. The [extras](https://pierrez.github.io/moonpool/extras/) describe `moonpool-journal` and `moonpool-rpc` in depth, byte by byte, from their code.
+
 ## How to read this book
 
 Part I is motivation. You can read it without touching code, and the ideas apply to any simulation framework. Parts II through VI follow the current API. Every example is adapted from a test or an example in the repository. Part VI describes the most novel piece, fork-based exploration. If you are evaluating whether exploration matters for your system, start there.

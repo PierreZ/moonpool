@@ -1,0 +1,65 @@
+---
+// Swarm testing (#418 (technique pages, part 2)): eight seeds, each with the
+// fault families it drew. The recorded runs are src/runs/swarm.json;
+// public/swarm.js draws the table from each run's families.
+import { Code } from "astro:components";
+import Technique from "../../../layouts/Technique.astro";
+import { url } from "../../../nav";
+import { constNames, excerpt, repoFile } from "../../../lib/source.mjs";
+import runs from "../../../runs/swarm.json";
+
+const engine = repoFile("crates/moonpool-wasm-demo/src/engine.rs");
+const families = { network: constNames(engine, "NETWORK_FAULTS"), storage: constNames(engine, "STORAGE_FAULTS") };
+const mode = excerpt(engine, "let mode = if swarm {", "out.push(Chaos::Storage(mode));", 1);
+---
+<Technique
+  title="Swarm testing"
+  description="Each seed draws its own set of faults. A lot of a few finds more than a little of each."
+  guide={[
+    "part3-building/28-swarm-testing.md",
+    "part3-building/07-chaos.md",
+    "appendix/04-fault-reference.md",
+  ]}
+>
+  <h2>The problem</h2>
+  <p>With every fault family on in every run, each family gets a small share of the run. Some bugs need one
+    fault many times, with no other fault in the way: a long partition and no reboot, or a disk that fails
+    again and again. When each run has a little of everything, these runs never come.</p>
+
+  <h2>The technique</h2>
+  <p>With <code>ChaosMode::Swarm</code>, each seed switches each fault family off with a probability of one
+    half. The families that stay on get all of the run. Over many seeds, each family is on in about half of
+    the runs, and alone or with few others in some of them. The seed decides the set, so the set replays
+    with the seed.</p>
+  <p>The simulator records the families of each seed in a <code>chaos_families</code> event. It is read-only:
+    it draws nothing and does not change the run.</p>
+
+  <h2>The live run</h2>
+  <p>Eight seeds of the same register, with network faults, storage faults and reboots in swarm mode. Each
+    row is one seed: a dot for each family that is on. Columns 1 to {families.network.length} are the
+    network families, columns a to {String.fromCharCode(96 + families.storage.length)} the storage families.
+    Hover a column for its name. Select a row to open its run in the player.</p>
+  <div class="breakout">
+    <section class="run" id="run" aria-label="A live run"></section>
+    <div class="run run-under">
+      <div class="run-head label"><span>the fault families of each seed</span></div>
+      <div class="table-wrap"><table class="run-table swarm-table" id="swarm-table"></table></div>
+      <p class="run-out" id="swarm-out" aria-live="polite"></p>
+      <ol class="fam-legend label">
+        {families.network.map((f, i) => <li><b>{i + 1}</b> {f}</li>)}
+        {families.storage.map((f, i) => <li><b>{String.fromCharCode(97 + i)}</b> {f}</li>)}
+      </ol>
+    </div>
+    <noscript><p>The live run needs JavaScript.</p></noscript>
+  </div>
+  <script is:inline type="application/json" id="runs" set:html={JSON.stringify(runs).replace(/</g, "\\u003c")} />
+  <script is:inline type="application/json" id="swarm-families" set:html={JSON.stringify(families)} />
+
+  <h2>The code</h2>
+  <p>One mode for each surface. The site's engine picks <code>Swarm</code> or <code>Random</code> for the
+    network and the storage:</p>
+  <Code theme="css-variables" lang="rust" code={mode} />
+  <p>A test can also remove families for each seed, with <code>network_fault_mask</code> and
+    <code>storage_fault_mask</code>: a mask applies after the swarm draw and draws nothing.</p>
+  <script is:inline type="module" src={url("swarm.js")}></script>
+</Technique>

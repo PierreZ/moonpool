@@ -47,3 +47,4 @@ semantics.
 - [API documentation](https://docs.rs/moonpool-rpc-derive)
 - [moonpool-rpc](https://docs.rs/moonpool-rpc)
 - [Admission, Security and Derive](https://pierrez.github.io/moonpool/part4-networking/04-rpc-operations.html) in the Sim Book
+- [moonpool-rpc, call by call](https://pierrez.github.io/moonpool/extras/rpc/) on the website

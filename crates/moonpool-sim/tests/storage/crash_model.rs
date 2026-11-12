@@ -470,6 +470,67 @@ fn the_eligibility_mask_shields_the_sectors_it_names() {
     });
 }
 
+/// Eight sectors, each filled with its index, then every sector read once:
+/// the index each read was served from.
+async fn served_sectors(provider: SimStorageProvider) -> Vec<u8> {
+    let file = provider
+        .open("indexed", OpenOptions::create_write().read(true))
+        .await
+        .expect("open failed");
+    let bytes: Vec<u8> = (0..8u8).flat_map(|index| sectors(1, index)).collect();
+    file.write_at(0, &bytes).await.expect("write");
+    file.sync_all().await.expect("sync");
+    let mut served = Vec::new();
+    for sector in 0..8u64 {
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        file.read_at(sector * SECTOR, &mut buf).await.expect("read");
+        served.push(buf[0]);
+    }
+    served
+}
+
+/// A misdirected read honours the immunity of the eligibility mask, on the
+/// range it aims at and on the range it would be served from (#473).
+#[test]
+fn a_misdirected_read_honours_the_eligibility_mask() {
+    local_runtime().block_on(async {
+        let config = StorageConfiguration {
+            misdirect_read_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        };
+
+        // Control: with no mask, every read comes from elsewhere.
+        let mut sim = sim_with(5, config.clone());
+        let served = run_on(&mut sim, served_sectors).await;
+        assert!(
+            served
+                .iter()
+                .enumerate()
+                .any(|(at, from)| at != usize::from(*from)),
+            "without a mask reads are misdirected: {served:?}"
+        );
+
+        // Every sector immune: every read is served from its own sector.
+        let mut sim = sim_with(5, config.clone());
+        sim.set_storage_eligibility_mask(Arc::new(|_path: &str, _sector: u64| false));
+        let served = run_on(&mut sim, served_sectors).await;
+        assert_eq!(served, (0..8u8).collect::<Vec<_>>());
+
+        // Only sector 0 immune: a read of it stays home, and no read of
+        // another sector is served from it.
+        for seed in 0..20_u64 {
+            let mut sim = sim_with(seed, config.clone());
+            sim.set_storage_eligibility_mask(Arc::new(|_path: &str, sector: u64| sector != 0));
+            let served = run_on(&mut sim, served_sectors).await;
+            assert_eq!(served[0], 0, "seed {seed}: {served:?}");
+            assert!(
+                !served[1..].contains(&0),
+                "seed {seed}: an immune sector served another read: {served:?}"
+            );
+        }
+    });
+}
+
 /// One seed, one post-crash image: the whole model is a pure function of the
 /// seed and the operation sequence.
 #[test]
