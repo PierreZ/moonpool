@@ -6,6 +6,7 @@
 //! new, so the certificates in force during the call decide it, and
 //! [`refusal`] says when it must not complete.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -30,7 +31,7 @@ use crate::streams::pause;
 /// The campaign's workload.
 #[derive(Debug, Default)]
 pub struct TlsWorkload {
-    next_id: u64,
+    next_id: AtomicU64,
 }
 
 struct Runtimes {
@@ -84,10 +85,9 @@ where
 }
 
 impl TlsWorkload {
-    fn probe(&mut self, sender: Sender) -> Probe {
-        self.next_id += 1;
+    fn probe(&self, sender: Sender) -> Probe {
         Probe {
-            id: self.next_id,
+            id: self.next_id.fetch_add(1, Ordering::Relaxed) + 1,
             sender: sender.tag(),
         }
     }
@@ -95,7 +95,7 @@ impl TlsWorkload {
     /// Send one probe from `sender` to `target` on `rpc`, recorded in the
     /// ledger, and judge what comes back.
     async fn send(
-        &mut self,
+        &self,
         ctx: &SimContext,
         rpc: &RpcHandle<SimProviders>,
         call_of: Call,
@@ -149,7 +149,7 @@ impl TlsWorkload {
 
     /// One call on a sender's long-lived runtime.
     async fn once(
-        &mut self,
+        &self,
         ctx: &SimContext,
         runtimes: &Runtimes,
         sender: Sender,
@@ -168,7 +168,7 @@ impl TlsWorkload {
     /// during the call, the oracle knows what the session met, and a call
     /// that the certificates must refuse never completes.
     async fn fresh(
-        &mut self,
+        &self,
         ctx: &SimContext,
         pki: &Pki,
         sender: Sender,
@@ -235,8 +235,40 @@ impl TlsWorkload {
         Ok(())
     }
 
+    /// Steady admitted traffic beside the drive, for as long as the script
+    /// runs: the member calls one of the server's endpoints every few tens
+    /// of milliseconds on its long-lived runtime.
+    ///
+    /// The drive spends most of the chaos window on calls that the
+    /// certificates refuse at the handshake or at authorization, or that
+    /// wait out a partition, so only about a dozen requests per seed reach
+    /// the server's admission. That is too few for the transport's own
+    /// fault sites behind admission (a spurious overload refusal fires on
+    /// 2% of admitted requests, in the quarter of seeds where it is
+    /// active), and the campaign reached them by luck. Every call here is
+    /// recorded in the ledger and judged like the drive's.
+    async fn steady(&self, ctx: &SimContext, runtimes: &Runtimes) {
+        while !ctx.state().contains(SCRIPT_DONE_KEY) && !ctx.shutdown().is_cancelled() {
+            let target = if ctx.random().random_bool(0.5) {
+                Target::Public
+            } else {
+                Target::Private
+            };
+            let _ = self.once(ctx, runtimes, Sender::Member, target).await;
+            if pause(
+                ctx,
+                Duration::from_millis(ctx.random().random_range(20..80)),
+            )
+            .await
+            .is_err()
+            {
+                return;
+            }
+        }
+    }
+
     async fn drive(
-        &mut self,
+        &self,
         ctx: &SimContext,
         runtimes: &Runtimes,
         pki: &Pki,
@@ -402,7 +434,13 @@ impl Workload for TlsWorkload {
             error = member_driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             error = stranger_driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
             error = anonymous_driver.run() => Err(SimulationError::IoError(format!("rpc driver: {error}"))),
-            result = self.drive(ctx, &runtimes, &pki) => result,
+            result = async {
+                let (result, ()) = futures::join!(
+                    self.drive(ctx, &runtimes, &pki),
+                    self.steady(ctx, &runtimes),
+                );
+                result
+            } => result,
             () = report => Ok(()),
         }
     }

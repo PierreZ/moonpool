@@ -18,7 +18,9 @@
 //! - **workload** ([`TlsWorkload`]): three client runtimes that trust the
 //!   real authority: a member presenting its certificate, a stranger
 //!   presenting one from the stray authority (or none), and an anonymous
-//!   client.
+//!   client. Beside its random calls, the member keeps a steady stream of
+//!   calls to the server while the script runs, so that enough requests
+//!   reach the server's admission for the transport's fault sites there.
 //!
 //! **Oracles.** A private endpoint only ever runs a request whose session
 //! proved the member's certificate; nothing that trusts the real authority
