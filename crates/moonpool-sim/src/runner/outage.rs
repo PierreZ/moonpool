@@ -261,10 +261,7 @@ impl OutageInjector {
                 assert_reachable!("outage: the harness's veto holds an outage back");
             }
             refused = true;
-            ctx.time()
-                .sleep(VETO_RETRY)
-                .await
-                .map_err(|error| sleep_failed(&error))?;
+            ctx.sleep(VETO_RETRY).await?;
         }
     }
 }
@@ -274,10 +271,6 @@ impl OutageInjector {
 fn draw_ms(range: &Range<Duration>) -> u64 {
     let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
     crate::sim::sim_random_range_or_default(ms(range.start)..ms(range.end))
-}
-
-fn sleep_failed(error: &moonpool_core::TimeError) -> crate::SimulationError {
-    crate::SimulationError::InvalidState(format!("sleep failed: {error}"))
 }
 
 #[async_trait]
@@ -292,10 +285,7 @@ impl FaultInjector for OutageInjector {
             return Ok(());
         }
         let start = draw_ms(&self.config.start);
-        ctx.time()
-            .sleep(Duration::from_millis(start))
-            .await
-            .map_err(|error| sleep_failed(&error))?;
+        ctx.sleep(Duration::from_millis(start)).await?;
         let Some(victims) = self.permitted_victims(ctx).await? else {
             return Ok(());
         };
@@ -324,10 +314,7 @@ impl FaultInjector for OutageInjector {
 
         // The kills run one tick from now; this timer, scheduled after them
         // for the same instant, fires once every one of them has.
-        ctx.time()
-            .sleep(Duration::from_nanos(1))
-            .await
-            .map_err(|error| sleep_failed(&error))?;
+        ctx.sleep(Duration::from_nanos(1)).await?;
         let straggler = straggler
             .filter(|at| landed[*at])
             .map(|at| victims[at].to_string());

@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, RandomProvider, SimulationError, SimulationResult, TimeProvider,
-    assert_reachable, buggify,
+    FaultContext, FaultInjector, RandomProvider, SimulationResult, assert_reachable, buggify,
 };
 
 use super::state::{Ledger, SCRIPT_DONE_KEY, WORKLOAD_IP_KEY};
@@ -19,10 +18,7 @@ pub struct BalanceFaults;
 
 async fn pause(ctx: &FaultContext, millis: std::ops::Range<u64>) -> SimulationResult<()> {
     let millis = ctx.random().random_range(millis);
-    ctx.time()
-        .sleep(Duration::from_millis(millis))
-        .await
-        .map_err(|error| SimulationError::InvalidState(format!("sleep failed: {error}")))
+    ctx.sleep(Duration::from_millis(millis)).await
 }
 
 /// How long a whole outage holds: `usual`, or, when buggified, long enough

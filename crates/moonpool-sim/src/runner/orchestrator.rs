@@ -30,6 +30,13 @@ use super::process_manager::{ProcessConfig, ProcessEnv, ProcessManager};
 use super::report::SimulationMetrics;
 use super::stall::{RunStallGuard, StallOutcome};
 
+/// How many events the settle phase may step before it fails the seed with
+/// [`SettleTimeout`](crate::SimulationError::SettleTimeout). With every
+/// process aborted and no task polled, only the engines' own chains of
+/// events (deliveries, buffered sends, storage completions) remain, and they
+/// end; a queue that is still busy after this many steps leaks work.
+const SETTLE_EVENT_LIMIT: u64 = 1_000_000;
+
 /// Orchestrates workload execution and event processing.
 pub(crate) struct WorkloadOrchestrator;
 
@@ -190,6 +197,8 @@ struct RunPhaseInputs<'a> {
     workload_collected: &'a mut [Option<WorkloadResult>],
     workload_ips: &'a [String],
     injector_handles: &'a mut InjectorHandleSlots,
+    /// The errors of the injectors that returned `Err` during the run.
+    injector_errors: &'a mut Vec<SimulationResult<()>>,
 }
 
 /// Inputs to [`WorkloadOrchestrator::orchestrate_workloads`].
@@ -390,7 +399,7 @@ impl WorkloadOrchestrator {
                 }
             };
 
-        let ((returned_workloads, results), injectors) = Self::do_chaos_and_run_phase(
+        let ((returned_workloads, mut results), injectors) = Self::do_chaos_and_run_phase(
             sim,
             &mut process_manager,
             env,
@@ -410,7 +419,7 @@ impl WorkloadOrchestrator {
             )
             .await;
         }
-        Self::abort_running_injectors(injectors);
+        results.extend(Self::stop_injectors(injectors).await);
         Self::finalize_orchestration(sim, &mut process_manager, env, returned_workloads, results)
             .await
     }
@@ -434,7 +443,7 @@ impl WorkloadOrchestrator {
                 .map_err(|()| env.deadlock())?;
         results.extend(check_results);
         Self::trigger_shutdown(sim, env.shutdown_signal);
-        Self::abort_running_injectors(injectors);
+        results.extend(Self::stop_injectors(injectors).await);
         process_manager.abort_all();
         for panic in process_manager.take_panics() {
             results.push(Err(crate::SimulationError::InvalidState(format!(
@@ -553,6 +562,7 @@ impl WorkloadOrchestrator {
         let mut workload_handles: WorkloadHandleSlots = handles.into_iter().map(Some).collect();
         let mut workload_collected: Vec<Option<WorkloadResult>> =
             (0..total_workloads).map(|_| None).collect();
+        let mut injector_errors = Vec::new();
         Self::drive_run_phase(
             sim,
             process_manager,
@@ -565,14 +575,18 @@ impl WorkloadOrchestrator {
                 workload_collected: &mut workload_collected,
                 workload_ips: &workload_ips,
                 injector_handles: &mut injector_handles,
+                injector_errors: &mut injector_errors,
             },
         )
         .await?;
 
-        let completed =
+        let (returned, mut results) =
             Self::collect_workload_results(workload_collected, total_workloads, &workload_ips)
                 .map_err(|()| env.deadlock())?;
-        Ok((completed, injector_handles))
+        // An injector that failed ran less chaos than its author asked for:
+        // the seed fails.
+        results.extend(injector_errors);
+        Ok(((returned, results), injector_handles))
     }
 
     /// Abort every process, settle the world, and run the check phase.
@@ -755,6 +769,7 @@ impl WorkloadOrchestrator {
             workload_collected,
             workload_ips,
             injector_handles,
+            injector_errors,
         } = inputs;
 
         let chaos_start = sim.current_time();
@@ -767,6 +782,39 @@ impl WorkloadOrchestrator {
         let mut loop_count: u64 = 0;
 
         loop {
+            // Collect first: a workload that returned in the last executor
+            // pass ends the loop now, before the next step can move time to
+            // a far event (a scheduled restart, a kill) after the run ended.
+            let initial_handle_count = workload_handles.iter().filter(|h| h.is_some()).count();
+            let any_finished = Self::collect_finished_workloads(
+                workload_handles,
+                workload_collected,
+                workload_ips,
+            )
+            .await
+            .map_err(|()| env.deadlock())?;
+
+            // A workload done early shuts its siblings down, unless chaos
+            // lasts until the last one returns.
+            if any_finished && !stall.shutdown_triggered && !chaos_until_run_ends {
+                Self::trigger_shutdown(sim, env.shutdown_signal);
+                stall.shutdown_triggered = true;
+                // While a sibling still runs, let every task see the
+                // cancelled token before the next step runs the `Shutdown`
+                // event: that event closes every listener and fails every
+                // pending accept, so a process that retries `accept` ahead
+                // of its shutdown check (a `biased` select) would spin on
+                // the error and never yield. Then collect again, since a
+                // sibling may have returned now. With no workload left the
+                // loop ends below and the processes are aborted unpolled.
+                if workload_handles.iter().any(Option::is_some) {
+                    crate::executor::until_stalled().await;
+                    continue;
+                }
+            }
+
+            Self::reap_finished_injectors(injector_handles, injector_errors).await;
+
             let active_workloads = workload_handles.iter().filter(|h| h.is_some()).count();
             if active_workloads == 0 {
                 break;
@@ -782,7 +830,6 @@ impl WorkloadOrchestrator {
                 );
             }
 
-            let initial_handle_count = active_workloads;
             let initial_event_count = sim.pending_event_count();
 
             if !chaos_ended && Self::should_end_chaos(sim, chaos_start, chaos_duration) {
@@ -792,37 +839,17 @@ impl WorkloadOrchestrator {
 
             Self::step_and_pump(sim, Some(&mut *process_manager), &env);
 
-            let any_finished = Self::collect_finished_workloads(
-                workload_handles,
-                workload_collected,
-                workload_ips,
-            )
-            .await
-            .map_err(|()| env.deadlock())?;
-
-            // A workload done early shuts its siblings down, unless chaos
-            // lasts until the last one returns.
-            if any_finished && !stall.shutdown_triggered && !chaos_until_run_ends {
-                Self::trigger_shutdown(sim, env.shutdown_signal);
-                stall.shutdown_triggered = true;
-            }
-
-            Self::reap_finished_injectors(injector_handles).await;
-
-            let current_active = workload_handles.iter().filter(|h| h.is_some()).count();
             if stall.deadlocked(
                 sim,
                 &env,
-                current_active,
+                active_workloads,
                 initial_handle_count,
                 initial_event_count,
             ) {
                 return Err(env.deadlock());
             }
 
-            if current_active > 0 {
-                crate::executor::until_stalled().await;
-            }
+            crate::executor::until_stalled().await;
         }
         // Chaos ends before `check()` in every mode: with the run when it
         // lasts until the run ends, and also when every workload returned
@@ -903,10 +930,7 @@ impl WorkloadOrchestrator {
             return;
         };
         for ip in &restart {
-            sim.schedule_event(
-                crate::sim::Event::ProcessRestart { ip: *ip },
-                Duration::from_nanos(1),
-            );
+            sim.schedule_process_restart(*ip, Duration::from_nanos(1));
         }
         for a in &healthy {
             sim.set_slowness(*a, crate::Slowness::HEALTHY);
@@ -967,11 +991,21 @@ impl WorkloadOrchestrator {
             let fault_ctx = new_fault_ctx();
             let reporter = env.task_panics.reporter("fault-injector");
             let handle = crate::executor::spawn("fault-injector", async move {
-                match AssertUnwindSafe(injector.inject(&fault_ctx))
+                let outcome = AssertUnwindSafe(injector.inject(&fault_ctx))
                     .catch_unwind()
-                    .await
-                {
-                    Ok(result) => result,
+                    .await;
+                match outcome {
+                    // The run ends (see `FaultContext::sleep`): kept as is,
+                    // so the reaper does not take it for a failure.
+                    Ok(Err(crate::SimulationError::SimulationShutdown)) => {
+                        Err(crate::SimulationError::SimulationShutdown)
+                    }
+                    Ok(result) => result.map_err(|error| {
+                        crate::SimulationError::InvalidState(format!(
+                            "fault injector '{}' failed: {error}",
+                            injector.name()
+                        ))
+                    }),
                     Err(payload) => {
                         reporter.record("root", payload.as_ref());
                         Ok(())
@@ -1096,8 +1130,12 @@ impl WorkloadOrchestrator {
     }
 
     /// Reap any fault-injector handles that have finished, dropping the
-    /// injectors with them. The remaining live handles stay in place.
-    async fn reap_finished_injectors(injector_handles: &mut InjectorHandleSlots) {
+    /// injectors with them, and keep the `Err` of each one that failed in
+    /// `errors`. The remaining live handles stay in place.
+    async fn reap_finished_injectors(
+        injector_handles: &mut InjectorHandleSlots,
+        errors: &mut Vec<SimulationResult<()>>,
+    ) {
         for handle_opt in injector_handles {
             let finished = handle_opt
                 .as_ref()
@@ -1105,23 +1143,33 @@ impl WorkloadOrchestrator {
             if finished {
                 let handle = handle_opt.take().expect("injector handle is finished");
                 match handle.await {
-                    Ok(_result) => {
-                        tracing::debug!("Fault injector completed");
+                    Ok(Ok(())) => tracing::debug!("Fault injector completed"),
+                    // A sleep the `Shutdown` event cut: the run ends.
+                    Ok(Err(crate::SimulationError::SimulationShutdown)) => {
+                        tracing::debug!("Fault injector stopped: the run ends");
                     }
-                    Err(_) => {
-                        tracing::error!("Fault injector task panicked");
+                    Ok(Err(error)) => {
+                        tracing::error!(%error, "fault injector failed");
+                        errors.push(Err(error));
                     }
+                    // The task's panic reporter recorded the panic.
+                    Err(_) => tracing::error!("Fault injector task panicked"),
                 }
             }
         }
     }
 
-    /// Abort every fault-injector task still running once the run phase is
-    /// over; finished ones were reaped on the loop.
-    fn abort_running_injectors(injector_handles: InjectorHandleSlots) {
+    /// Stop the fault injectors once the run phase is over: reap the ones
+    /// that finished (their errors are returned) and abort the others.
+    async fn stop_injectors(
+        mut injector_handles: InjectorHandleSlots,
+    ) -> Vec<SimulationResult<()>> {
+        let mut errors = Vec::new();
+        Self::reap_finished_injectors(&mut injector_handles, &mut errors).await;
         for handle in injector_handles.into_iter().flatten() {
             handle.abort();
         }
+        errors
     }
 
     /// Build the final workload return list when every task returned its
@@ -1271,21 +1319,36 @@ impl WorkloadOrchestrator {
     /// is the quiet tail between the `chaos_duration` cutoff and workload
     /// completion, while the processes are still alive.
     ///
+    /// The pending process lifecycle events (a scheduled restart, a
+    /// grace-period kill) are cancelled first: no process is left for them
+    /// to act on. The drain stops when only infrastructure events remain
+    /// (partition heals with no bytes held), because stepping them only
+    /// moves time. The limit counts events, not simulated time, so a single
+    /// far event does not fail a healthy seed.
+    ///
     /// Returns `Some(SettleTimeout)` if the queue does not converge within
-    /// the timeout, otherwise `None` on a clean drain.
+    /// [`SETTLE_EVENT_LIMIT`] events, otherwise `None` on a clean drain.
     fn settle_phase(sim: &mut SimWorld) -> Option<crate::SimulationError> {
         // Synchronous drain: process all remaining events without yielding.
         // No yield means no tasks can schedule new events, so the queue
         // converges to empty.
         let settle_start = sim.current_time();
-        let settle_timeout = Duration::from_mins(5);
+        let cancelled = sim.cancel_process_lifecycle_events();
+        if cancelled > 0 {
+            tracing::debug!(
+                cancelled,
+                "settle: dropped pending process lifecycle events"
+            );
+        }
 
-        while sim.pending_event_count() > 0 {
-            let elapsed = sim.current_time().saturating_sub(settle_start);
-            if elapsed > settle_timeout {
+        let mut steps: u64 = 0;
+        while sim.has_pending_events() && !sim.only_infrastructure_events_remain() {
+            if steps >= SETTLE_EVENT_LIMIT {
+                let elapsed = sim.current_time().saturating_sub(settle_start);
                 tracing::error!(
-                    "Settle timeout: {} events still pending after {:?}",
+                    "Settle timeout: {} events still pending after {} settle steps ({:?})",
                     sim.pending_event_count(),
+                    steps,
                     elapsed
                 );
                 return Some(crate::SimulationError::SettleTimeout {
@@ -1294,6 +1357,7 @@ impl WorkloadOrchestrator {
                 });
             }
             sim.step();
+            steps += 1;
         }
         None
     }
@@ -1361,7 +1425,11 @@ impl WorkloadOrchestrator {
                 ip,
                 grace_period_ms,
                 recovery_delay_ms,
+                generation,
             }) => {
+                if Self::is_stale(sim, ip, generation) {
+                    return;
+                }
                 assert_reachable!("event: ProcessGracefulShutdown");
                 let event = SimFaultEvent::ProcessGracefulShutdown {
                     ip: ip.to_string(),
@@ -1374,6 +1442,7 @@ impl WorkloadOrchestrator {
                         ip,
                         recovery_delay_ms: Some(recovery_delay_ms),
                         cause: ProcessKillKind::GracePeriodExpired,
+                        generation,
                     },
                     Duration::from_millis(grace_period_ms),
                 );
@@ -1382,7 +1451,11 @@ impl WorkloadOrchestrator {
                 ip,
                 recovery_delay_ms,
                 cause,
+                generation,
             }) => {
+                if Self::is_stale(sim, ip, generation) {
+                    return;
+                }
                 assert_reachable!("event: ProcessForceKill");
                 let event = SimFaultEvent::ProcessForceKill {
                     ip: ip.to_string(),
@@ -1401,7 +1474,10 @@ impl WorkloadOrchestrator {
                 // A held-down crash (None) schedules no restart: the process
                 // stays dead until a fault injector explicitly restarts it.
                 if let Some(recovery_delay_ms) = recovery_delay_ms {
-                    sim.schedule_process_restart(ip, Duration::from_millis(recovery_delay_ms));
+                    sim.schedule_event(
+                        crate::sim::Event::ProcessRestart { ip, generation },
+                        Duration::from_millis(recovery_delay_ms),
+                    );
                 }
             }
             Some(crate::sim::Event::ProcessSpawn { ip }) => {
@@ -1421,54 +1497,84 @@ impl WorkloadOrchestrator {
                 sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
                 sim.set_slowness(ip, crate::Slowness::HEALTHY);
             }
-            Some(crate::sim::Event::ProcessRestart { ip }) => {
-                assert_reachable!("event: ProcessRestart");
-                if crate::runner::shard::ShardBook::of(env.state)
-                    .is_some_and(|book| book.drops_restart(ip, process_manager.is_running(ip)))
-                {
-                    return;
-                }
-                if process_manager.is_running(ip) {
-                    // Restarting a running process is a kill, then a boot.
-                    // Killing cancels the root task, but the executor drops
-                    // a cancelled future only when it next runs it; booting
-                    // the replacement in the same step could poll it first,
-                    // beside the old boot's live state (a listener, a
-                    // registry, open connections). Kill now, like a force
-                    // kill, and boot one tick later, after the executor
-                    // has drained the old boot: two boots of one process
-                    // never overlap.
-                    // Recorded as a force kill so the aborted connections
-                    // have a cause in the fault timeline.
-                    obs.record_sim_fault(
-                        Self::sim_now_ms(sim),
-                        &SimFaultEvent::ProcessForceKill {
-                            ip: ip.to_string(),
-                            cause: ProcessKillKind::RestartInPlace,
-                        },
-                    );
-                    process_manager.abort_process(ip);
-                    sim.reset_cpu_owner(ip);
-                    sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
-                    sim.schedule_process_restart(ip, Duration::from_nanos(1));
-                    assert_reachable!(
-                        "process_manager: running process stopped before its restart"
-                    );
-                    return;
-                }
-                let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
-                obs.record_sim_fault(Self::sim_now_ms(sim), &event);
-                let weak_sim = sim.downgrade();
-                // The restarted process keeps its node's metrics source: the
-                // IP is unchanged, so counters survive the reboot exactly as a
-                // real node's do across a process restart on the same host.
-                process_manager.restart(ip, &env.process_env(&weak_sim));
-                if let Some(ledger) = crate::runner::wipe::WipeLedger::of(env.state) {
-                    ledger.note_restart(ip, sim.current_time());
-                }
+            Some(crate::sim::Event::ProcessRestart { ip, generation }) => {
+                Self::handle_restart(sim, process_manager, env, ip, generation);
             }
             _ => {}
         }
+    }
+
+    /// Handle a `ProcessRestart` of `generation`: boot the process at `ip`
+    /// again, or, when it still runs, kill it now and boot it one tick later.
+    fn handle_restart(
+        sim: &mut SimWorld,
+        process_manager: &mut ProcessManager<'_>,
+        env: &IterationEnv<'_>,
+        ip: std::net::IpAddr,
+        generation: u64,
+    ) {
+        let obs = env.obs;
+        if Self::is_stale(sim, ip, generation) {
+            return;
+        }
+        assert_reachable!("event: ProcessRestart");
+        if crate::runner::shard::ShardBook::of(env.state)
+            .is_some_and(|book| book.drops_restart(ip, process_manager.is_running(ip)))
+        {
+            return;
+        }
+        if process_manager.is_running(ip) {
+            // Restarting a running process is a kill, then a boot.
+            // Killing cancels the root task, but the executor drops
+            // a cancelled future only when it next runs it; booting
+            // the replacement in the same step could poll it first,
+            // beside the old boot's live state (a listener, a
+            // registry, open connections). Kill now, like a force
+            // kill, and boot one tick later, after the executor
+            // has drained the old boot: two boots of one process
+            // never overlap.
+            // Recorded as a force kill so the aborted connections
+            // have a cause in the fault timeline.
+            obs.record_sim_fault(
+                Self::sim_now_ms(sim),
+                &SimFaultEvent::ProcessForceKill {
+                    ip: ip.to_string(),
+                    cause: ProcessKillKind::RestartInPlace,
+                },
+            );
+            process_manager.abort_process(ip);
+            sim.reset_cpu_owner(ip);
+            sim.kill_connections_for_ip(ip, crate::network::sim::DeathNotice::Reset);
+            sim.schedule_event(
+                crate::sim::Event::ProcessRestart { ip, generation },
+                Duration::from_nanos(1),
+            );
+            assert_reachable!("process_manager: running process stopped before its restart");
+            return;
+        }
+        let event = SimFaultEvent::ProcessRestart { ip: ip.to_string() };
+        obs.record_sim_fault(Self::sim_now_ms(sim), &event);
+        let weak_sim = sim.downgrade();
+        // The restarted process keeps its node's metrics source: the
+        // IP is unchanged, so counters survive the reboot exactly as a
+        // real node's do across a process restart on the same host.
+        process_manager.restart(ip, &env.process_env(&weak_sim));
+        if let Some(ledger) = crate::runner::wipe::WipeLedger::of(env.state) {
+            ledger.note_restart(ip, sim.current_time());
+        }
+    }
+
+    /// Whether a lifecycle event decided in `generation` is stale: the
+    /// process at `ip` booted again, or was held down, after the decision.
+    /// A stale event is dropped, so a grace-period kill or a recovery
+    /// restart of an old boot never hits a newer boot.
+    fn is_stale(sim: &SimWorld, ip: std::net::IpAddr, generation: u64) -> bool {
+        let current = sim.process_generation(ip);
+        if generation == current {
+            return false;
+        }
+        tracing::debug!(%ip, generation, current, "dropped a stale process lifecycle event");
+        true
     }
 
     /// What the peers of a process killed by `cause` learn: a host that
