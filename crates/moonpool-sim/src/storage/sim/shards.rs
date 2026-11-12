@@ -110,26 +110,35 @@ impl StorageState {
         let Some(layout) = self.layouts.get(&ip) else {
             return false;
         };
+        // The files of `ip` that hold a damaged sector, found once. Damage
+        // is rare, so this is almost always empty, and the layout's regions
+        // are not walked at all. Looking each region's file up by its path
+        // allocated a key per region, per replica, per check: the cost that
+        // dominated a long simulation.
+        let damaged: Vec<(&str, Vec<u64>)> = self
+            .path_to_file
+            .range((ip, String::new())..)
+            .take_while(|((owner, _), _)| *owner == ip)
+            .filter_map(|((_, path), file_id)| {
+                let file = self.files.get(file_id)?;
+                file.image
+                    .has_damage()
+                    .then(|| (path.as_str(), file.image.damaged_sectors()))
+            })
+            .collect();
+        if damaged.is_empty() {
+            return false;
+        }
         let size = SECTOR_SIZE as u64;
         layout.sharded().any(|(path, bytes, name, key)| {
             if name != shard || (stripe.is_some() && key.is_some() && key != stripe) {
                 return false;
             }
-            let Some(file) = self
-                .path_to_file
-                .get(&(ip, path.to_string()))
-                .and_then(|file_id| self.files.get(file_id))
-            else {
-                return false;
-            };
-            if !file.image.has_damage() {
-                return false;
-            }
             let sectors = bytes.start / size..bytes.end.div_ceil(size);
-            file.image
-                .damaged_sectors()
-                .into_iter()
-                .any(|sector| sectors.contains(&sector))
+            damaged
+                .iter()
+                .filter(|(damaged_path, _)| *damaged_path == path)
+                .any(|(_, damaged)| damaged.iter().any(|sector| sectors.contains(sector)))
         })
     }
 
