@@ -297,9 +297,14 @@ fn at_its_place(record: &Record, entry_cursor: u64) -> bool {
 /// in this segment, if what lies after the boundary agrees: the first
 /// valid record there (`first_valid`, at slot `j`) is of a later batch,
 /// beyond the retired batch's persist blocks.
+///
+/// The retire records come from every segment, so a retired batch can be
+/// the first batch of a later segment. `end` is the last batch of this
+/// segment as the next segment's header records it (`None` for the last
+/// segment): a retired batch above it is not in this segment.
 fn batch_from_retire(
     retires: &Retires,
-    (last, first_batch): (u64, u64),
+    (last, first_batch, end): (u64, u64, Option<u64>),
     known: Known,
     (at, first_valid): (usize, Option<(usize, Record)>),
 ) -> Option<(u64, u16)> {
@@ -311,8 +316,8 @@ fn batch_from_retire(
         * (usize_of(BLOCK_U64) / RECORD_SIZE);
     let agrees =
         first_valid.is_none_or(|(j, record)| record.batch > retire.batch && j >= at + span);
-    (agrees && retire.batch >= first_batch && !known.is_stale(retire.batch))
-        .then_some((retire.batch, retire.count))
+    let in_segment = retire.batch >= first_batch && end.is_none_or(|end| retire.batch <= end);
+    (agrees && in_segment && !known.is_stale(retire.batch)).then_some((retire.batch, retire.count))
 }
 
 /// The batch at boundary `at` (slot index), with `first_valid` the first
@@ -320,11 +325,13 @@ fn batch_from_retire(
 /// boundary, else from its first entry (every record damaged), else from a
 /// retire record that names its first slot. `None` at the end of the log.
 /// `(last, entry_cursor)`: the batch before it, and where its entries
-/// start.
+/// start. `end`: the last batch of this segment, when a later segment
+/// records it.
 async fn locate_batch<F: LocalStorageFile>(
     segment: &Segment<F>,
     (at, first_valid): (usize, Option<(usize, Record)>),
     (last, entry_cursor): (u64, u64),
+    end: Option<u64>,
     context: Context<'_>,
 ) -> Result<Option<(u64, u16)>, OpenError> {
     let Context {
@@ -344,7 +351,7 @@ async fn locate_batch<F: LocalStorageFile>(
         Some(shape) => Some(shape),
         None => batch_from_retire(
             retires,
-            (last, segment.first_batch),
+            (last, segment.first_batch, end),
             known,
             (at, first_valid),
         ),
@@ -357,10 +364,12 @@ async fn locate_batch<F: LocalStorageFile>(
     Ok(shape)
 }
 
-/// Pass 1 over one segment. `prev` is the last batch before it.
+/// Pass 1 over one segment. `prev` is the last batch before it; `end`, its
+/// last batch as the next segment's header records it (`None` for the last
+/// segment).
 async fn scan_segment<F: LocalStorageFile>(
     segment: &Segment<F>,
-    prev: u64,
+    (prev, end): (u64, Option<u64>),
     context: Context<'_>,
 ) -> Result<(Vec<BatchScan>, u64, u64), OpenError> {
     let Context {
@@ -396,7 +405,14 @@ async fn scan_segment<F: LocalStorageFile>(
             Slot::Valid(record) => Some((j, record)),
             _ => None,
         });
-        let shape = locate_batch(segment, (at, first_valid), (last, entry_cursor), context).await?;
+        let shape = locate_batch(
+            segment,
+            (at, first_valid),
+            (last, entry_cursor),
+            end,
+            context,
+        )
+        .await?;
         let Some((seq, count)) = shape else {
             break;
         };
@@ -464,12 +480,15 @@ async fn pass_one<F: LocalStorageFile>(
     let known = context.known;
     let mut per_segment = Vec::with_capacity(segments.len());
     let mut last = segments.first().map_or(0, |s| s.prev_batch);
-    for segment in segments {
+    for (at, segment) in segments.iter().enumerate() {
         known.check_generation(segment.first_batch)?;
         if segment.prev_batch != last {
             return Err(OpenError::LostBatch { batch: last + 1 });
         }
-        let (batches, persist_next, entry_next) = scan_segment(segment, last, context).await?;
+        // The next segment's header records this segment's last batch.
+        let end = segments.get(at + 1).map(|next| next.prev_batch);
+        let (batches, persist_next, entry_next) =
+            scan_segment(segment, (last, end), context).await?;
         if let Some(batch) = batches.last() {
             last = batch.seq;
         }
