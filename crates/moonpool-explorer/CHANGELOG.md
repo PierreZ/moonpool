@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-13
+
+### 🚀 Features
+
+- **site**: Technique pages, playground, extras and the finished site ([#425](https://github.com/PierreZ/moonpool/pull/425))
+- **moonpool-explorer**: A run with new sancov edges earns one expansion ([#402](https://github.com/PierreZ/moonpool/pull/402))
+- **moonpool-sim**: SimulationBuilder::run returns Result
+- **explorer**: Strengthen semantic guidance ([#168](https://github.com/PierreZ/moonpool/pull/168))
+
+### 🐛 Bug Fixes
+
+- **moonpool-explorer**: Keep a panicking worker inside its own process ([#493](https://github.com/PierreZ/moonpool/pull/493))
+- **moonpool-explorer**: Bound, own and clean up forked workers
+- **moonpool-assertions**: Unsigned quality ordering and loud bucket overflow
+- **moonpool-explorer**: Merge sancov counter ranges independent of registration order
+- **moonpool-assertions**: Report slot table overflow ([#180](https://github.com/PierreZ/moonpool/pull/180))
+- **moonpool-sim**: Make replay lifecycle ordering deterministic ([#172](https://github.com/PierreZ/moonpool/pull/172))
+- **explorer**: Enforce reproducible exploration lifecycles
+
+### 📚 Documentation
+
+- Rewrite the README, the book and the crate docs for every feature
+- **moonpool-explorer**: Correct the sancov lifecycle and cleanup docs
+
+### 🚜 Refactor
+
+- **moonpool-explorer**: Pick the anchor with the journal's retention key
+- Simplify and factorize every crate ([#274](https://github.com/PierreZ/moonpool/pull/274))
+- Delete dead surface, stop the RNG rewind on restart, make numeric casts safe ([#200](https://github.com/PierreZ/moonpool/pull/200))
+- Simplify retained crate internals
+- Move rust crates under crates
+
+### 📦 Other
+
+- Close packaging metadata gaps across the publishable crates
+- One shared random stream, plus a madsim-style determinism canary ([#201](https://github.com/PierreZ/moonpool/pull/201))
+
+
 ## [0.8.0] - 2026-07-09
 
 ### 🚀 Features
