@@ -1715,3 +1715,125 @@ fn a_segment_of_format_version_3_is_refused() {
         );
     });
 }
+
+/// Where the persist log of a segment starts: after its two header blocks.
+const PERSIST_START: usize = 2 * 4096;
+const BLOCK: usize = 4096;
+
+/// The segment file that holds `position`.
+fn segment_of(journal: &J, position: u64) -> String {
+    journal
+        .layout(position)
+        .expect("a live position")
+        .record
+        .path
+}
+
+/// Read each position of `positions`, each with the payload of
+/// `(position, version, len)`.
+async fn read_all(sim: &mut SimWorld, mut journal: J, positions: &[(u64, u64, usize)]) -> J {
+    for &(position, version, len) in positions {
+        let (back, bytes) = read(sim, journal, position).await;
+        journal = back;
+        assert_eq!(
+            bytes.expect("intact"),
+            payload(position, version, len),
+            "position {position}"
+        );
+    }
+    journal
+}
+
+/// #485: the second persist block of a batch of 70 records written over
+/// the first persist block of the segment. Slot 0 then holds a valid record
+/// with index 64. The open must not compute a batch start below slot 0: it
+/// rebuilds the record of position 0 from its entry, in every build.
+#[test]
+fn a_record_whose_index_is_above_its_slot_is_rebuilt_not_a_panic() {
+    runtime().block_on(async {
+        let mut sim = sim(30);
+        let journal = create(&mut sim, Durability::Ordered).await;
+        let journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        let many: Vec<(u64, u64, usize)> = (100..170).map(|p| (p, 1, 8)).collect();
+        let journal = put(&mut sim, journal, &many).await;
+        let path = segment_of(&journal, 0);
+        drop(journal);
+        let mut bytes = file_bytes(&mut sim, path.clone()).await;
+        let second = PERSIST_START + 2 * BLOCK;
+        bytes.copy_within(second..second + BLOCK, PERSIST_START);
+        put_bytes(&mut sim, path, bytes).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        assert_eq!(recovery.rebuilt, 1, "{recovery:?}");
+        let journal = read_all(&mut sim, journal, &[(0, 1, 100)]).await;
+        read_all(&mut sim, journal, &many).await;
+    });
+}
+
+/// #487: the records block of batch 3 written at the place of batch 2 (a
+/// misdirected write), and its own place left zero. Each entry is intact:
+/// the open sees that the record at the place of batch 2 names an entry
+/// that is not the first entry of that place, and rebuilds both batches
+/// from their entries. (A batch whose record and entry are both gone is
+/// still `LostBatch`: `a_lost_batch_in_the_middle_is_refused_not_read_as_the_end`.)
+#[test]
+fn a_misdirected_records_block_is_rebuilt_from_the_entries() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(31);
+            let mut journal = create(&mut sim, durability).await;
+            for position in 0..4 {
+                journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+            }
+            let path = segment_of(&journal, 0);
+            drop(journal);
+            let mut bytes = file_bytes(&mut sim, path.clone()).await;
+            let (second, third) = (PERSIST_START + BLOCK, PERSIST_START + 2 * BLOCK);
+            bytes.copy_within(third..third + BLOCK, second);
+            bytes[third..third + BLOCK].fill(0);
+            put_bytes(&mut sim, path, bytes).await;
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+            assert_eq!(recovery.rebuilt, 2, "{durability:?}: {recovery:?}");
+            let all: Vec<(u64, u64, usize)> = (0..4).map(|p| (p, 1, 100)).collect();
+            read_all(&mut sim, journal, &all).await;
+        }
+    });
+}
+
+/// #484: a batch X of three persist blocks that one open did not see (its
+/// blocks did not read), then a smaller batch Y over its first block. When
+/// the other two blocks of X read again, they lie after Y and their batch
+/// number is below the number of Y: old bytes, at this open and at each
+/// later one.
+#[test]
+fn old_records_after_the_end_stay_old_at_every_later_open() {
+    runtime().block_on(async {
+        let mut sim = sim(32);
+        let journal = create(&mut sim, Durability::Ordered).await;
+        let journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        let path = segment_of(&journal, 0);
+        drop(journal);
+        let before = file_bytes(&mut sim, path.clone()).await;
+        let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        let x: Vec<(u64, u64, usize)> = (100..250).map(|p| (p, 1, 8)).collect();
+        drop(put(&mut sim, journal, &x).await);
+        let with_x = file_bytes(&mut sim, path.clone()).await;
+        // X is invisible to the next open.
+        put_bytes(&mut sim, path.clone(), before).await;
+        let (journal, _) = reopen(&mut sim, Durability::Ordered).await.expect("opens");
+        drop(put(&mut sim, journal, &[(500, 1, 100)]).await);
+        // The second and third persist blocks of X read again.
+        let mut bytes = file_bytes(&mut sim, path.clone()).await;
+        let at = PERSIST_START + 2 * BLOCK;
+        bytes[at..at + 2 * BLOCK].copy_from_slice(&with_x[at..at + 2 * BLOCK]);
+        put_bytes(&mut sim, path, bytes).await;
+        for open in 0..3 {
+            let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+                .await
+                .unwrap_or_else(|error| panic!("open {open}: {error:?}"));
+            assert_eq!(recovery, Recovery::default(), "open {open}");
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, vec![0, 500], "open {open}");
+            read_all(&mut sim, journal, &[(0, 1, 100), (500, 1, 100)]).await;
+        }
+    });
+}

@@ -81,6 +81,10 @@ journal.commit(batch).await?;
   that retires torn slots raises the high-water mark only once its retire
   batch is durable. The format is version 4: a segment of version 3 (with
   void records) is refused.
+- **A misplaced records block is rebuilt, not a lost batch.** A records
+  block written at the wrong place (a misdirected write) is found, because
+  the first record of a batch names the first entry of its own place. The
+  open rebuilds the batch from its entries.
 - **Two protocols.** `Durability::Batched` is the paper's protocol (`write
   entries; write records; fsync`): one sync, and the last batch's damaged
   entries are `Ambiguous`. `Durability::Ordered` syncs in between: two syncs,
@@ -125,8 +129,11 @@ for the next roll. A roll writes and syncs its headers, renames it to its
 segment name and syncs the directory. Its old batches stay in it, and they
 are never evidence: a segment named after its first batch only receives
 batches at or above that number, batch numbers never repeat, so every record
-or entry older than the segment reads as stale, like a never-written one. An
-open keeps one whole spare and deletes the others.
+or entry older than the segment reads as stale, like a never-written one.
+Inside a segment, batch numbers grow with the place in the persist log, so a
+record after a batch boundary whose batch is not above the batch before it
+is old bytes too, at every open. An open keeps one whole spare and deletes
+the others.
 
 A new segment reads as zeros without a byte written. Its first pass pays one
 small metadata change per block on each durable write (the extent goes from
