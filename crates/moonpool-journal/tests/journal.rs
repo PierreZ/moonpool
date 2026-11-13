@@ -2004,3 +2004,62 @@ fn old_records_after_the_end_stay_old_at_every_later_open() {
         }
     });
 }
+
+/// A crash tears one slot of the first batch of a new segment (its record
+/// and its entry), and the open retires that slot. The retire record then
+/// names slot 0 of a batch of the second segment. Later the record of the
+/// other slot rots, so no record locates the batch and the open reads the
+/// retire records again. The scan of the first segment must not take the
+/// retired batch as its own: the first segment ends where the header of the
+/// second segment says. (Found by paros: `sim-paros-hunt replay-main
+/// 12905164714279151799` on paros 77531f1 refused every open of an
+/// acceptor's journal with `LostBatch`.)
+#[test]
+fn a_retired_first_batch_of_a_segment_stays_in_its_segment() {
+    runtime().block_on(async {
+        let durability = Durability::Batched;
+        let mut sim = sim(32);
+        let mut journal = create(&mut sim, durability).await;
+        journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        let first = segment_of(&journal, 0);
+        // Batches of two large entries until one lands in a new segment:
+        // the entry log fills first, so the first segment's persist log
+        // still has room after its last batch.
+        let mut position = 1;
+        loop {
+            journal = put(
+                &mut sim,
+                journal,
+                &[(position, 1, 6000), (position + 1, 1, 6000)],
+            )
+            .await;
+            if segment_of(&journal, position) != first {
+                break;
+            }
+            position += 2;
+            assert!(position < 64, "the journal never rolled");
+        }
+        let (torn, other) = (position, position + 1);
+        let (torn_record, torn_entry) = spots(&journal, torn);
+        let (other_record, _) = spots(&journal, other);
+        drop(journal);
+        // The crash tore one slot of the new segment's first batch.
+        flip(&mut sim, torn_record.0, torn_record.1).await;
+        flip(&mut sim, torn_entry.0, torn_entry.1).await;
+        let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+        assert_eq!(recovery.torn, 1, "{recovery:?}");
+        assert_eq!(journal.state(torn), State::Empty);
+        let journal = put(&mut sim, journal, &[(other + 1, 1, 100)]).await;
+        drop(journal);
+        // One later fault: the record of the batch's other slot rots.
+        flip(&mut sim, other_record.0, other_record.1).await;
+        let expected: Vec<u64> = (0..torn).chain([other, other + 1]).collect();
+        for open in 0..3 {
+            let (journal, _) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("open {open}: {error}"));
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, expected, "open {open}");
+        }
+    });
+}
