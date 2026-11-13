@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-11-13
+
+### 🚀 Features
+
+- **site**: Technique pages, playground, extras and the finished site ([#425](https://github.com/PierreZ/moonpool/pull/425))
+- **moonpool-sim**: Shard replicas named by host, and store layouts from the provider ([#372](https://github.com/PierreZ/moonpool/pull/372))
+- **moonpool-sim**: Shards, the code declares its replication ([#369](https://github.com/PierreZ/moonpool/pull/369))
+- **moonpool-core,moonpool-sim**: StorageFile::drop_cache for fsyncgate ([#361](https://github.com/PierreZ/moonpool/pull/361))
+- **moonpool-core,moonpool-sim**: ThreadProviders, CompioResolver, SimContext::run_local ([#356](https://github.com/PierreZ/moonpool/pull/356))
+- **moonpool-core**: Local (non-Send) provider traits and a compio backend ([#347](https://github.com/PierreZ/moonpool/pull/347))
+- **moonpool-sim**: Disk capacity, ENOSPC and free bytes ([#343](https://github.com/PierreZ/moonpool/pull/343))
+- **moonpool-core**: SystemProvider for CPU and disk counters
+- **moonpool-sim**: Replicated fault patterns, minority and helical
+- **moonpool-core**: LayoutRegion, a format-neutral map for aimed faults
+- **moonpool-core**: StorageProvider::list_dir
+- **moonpool-sim**: SimulationBuilder::run returns Result
+- **moonpool-rpc**: Streams, balancing, security and qualification (P4–P7) ([#276](https://github.com/PierreZ/moonpool/pull/276))
+- **moonpool-rpc**: Typed dynamic-endpoint RPC, delivery contracts and interfaces across restarts (P1–P3) ([#275](https://github.com/PierreZ/moonpool/pull/275))
+- **storage**: Rebuild block I/O as a thin layer over the file provider ([#211](https://github.com/PierreZ/moonpool/pull/211))
+- **core**: Typed metric query and reporting layer ([#191](https://github.com/PierreZ/moonpool/pull/191))
+- **sim**: Report application metrics from a custom registry ([#190](https://github.com/PierreZ/moonpool/pull/190))
+- **storage**: BlockDevice — region-based block contract with a barrier-bounded crash model ([#185](https://github.com/PierreZ/moonpool/pull/185))
+
+### 🐛 Bug Fixes
+
+- **moonpool-sim**: Runner end-of-run and process lifecycle fixes (#453, #455, #456, #457) ([#520](https://github.com/PierreZ/moonpool/pull/520))
+- **moonpool-core**: Per-file RWF_DSYNC fallback, compio fallocate off the runtime ([#436](https://github.com/PierreZ/moonpool/pull/436)) ([#530](https://github.com/PierreZ/moonpool/pull/530))
+- **moonpool-core**: Make a Tokio stream write visible when it returns ([#521](https://github.com/PierreZ/moonpool/pull/521))
+- **moonpool-core**: Small fixes from the moonpool-core audit ([#511](https://github.com/PierreZ/moonpool/pull/511))
+- **moonpool-core**: Stop wrong metric query results for scraped histograms and map then fill ([#486](https://github.com/PierreZ/moonpool/pull/486))
+- **moonpool-core**: Validate OpenOptions in the shared open for every backend ([#489](https://github.com/PierreZ/moonpool/pull/489))
+- **moonpool-core**: Do not give a dropped compio stream write to the next write ([#497](https://github.com/PierreZ/moonpool/pull/497))
+- **moonpool-sim**: A seed must not pass on a stall, a cut sleep or a noisy check ([#392](https://github.com/PierreZ/moonpool/pull/392))
+- Instrument the mutating and fault-injecting entry points
+- **moonpool-core**: Keep an append handle's positioned descriptor on the same file off Linux
+- Address post-release simulation audit findings ([#241](https://github.com/PierreZ/moonpool/pull/241))
+- **moonpool-sim**: Refuse the open flags std refuses instead of truncating ([#232](https://github.com/PierreZ/moonpool/pull/232))
+
+### 📚 Documentation
+
+- Rewrite the README, the book and the crate docs for every feature
+- **moonpool,moonpool-core**: Fix a doubled word and stale spawn_local wording
+- Rebuild the Claude Code skills and agents for moonpool development ([#207](https://github.com/PierreZ/moonpool/pull/207))
+
+### ⚡ Performance
+
+- **moonpool-sim**: Scan sector bitsets by word, keep the trace level hint ([#401](https://github.com/PierreZ/moonpool/pull/401))
+- **moonpool-journal**: Recycle dead segments, never zero-fill one ([#352](https://github.com/PierreZ/moonpool/pull/352))
+- **moonpool-core**: Owned aligned transfers, no bounce buffer on O_DIRECT ([#341](https://github.com/PierreZ/moonpool/pull/341))
+- **moonpool-journal**: One durable write per ordered-commit step (RWF_DSYNC) ([#339](https://github.com/PierreZ/moonpool/pull/339))
+
+### 🚜 Refactor
+
+- **moonpool-journal**: Run the journal on the local traits, generic over its spawner ([#349](https://github.com/PierreZ/moonpool/pull/349))
+- Simplify and factorize every crate ([#274](https://github.com/PierreZ/moonpool/pull/274))
+- Delete dead surface, stop the RNG rewind on restart, make numeric casts safe ([#200](https://github.com/PierreZ/moonpool/pull/200))
+- Simplify retained crate internals
+- Move rust crates under crates
+
+### ⚙️ Miscellaneous Tasks
+
+- Bump toolchain, nix inputs and dependencies ([#371](https://github.com/PierreZ/moonpool/pull/371))
+
+### 📦 Other
+
+- **moonpool-core**: Drop the unused tokio/tracing feature from tokio-task
+- Close packaging metadata gaps across the publishable crates
+- One shared random stream, plus a madsim-style determinism canary ([#201](https://github.com/PierreZ/moonpool/pull/201))
+
+
 ## [0.8.0] - 2026-07-09
 
 ### 🚀 Features

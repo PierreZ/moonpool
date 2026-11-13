@@ -46,10 +46,10 @@ compio-providers = ["moonpool-core/compio-providers"]
 [dependencies]
 # Only the provider traits (plus the inert buggify macros). Never moonpool-sim or moonpool-explorer: the
 # simulation harness lives in the non-published moonpool-rpc-sim crate.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", default-features = false }
 # BUGGIFY call sites (zero dependencies, wasm-safe): inert outside a
 # simulation, where every site evaluates to `false` with no side effect.
-moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
+moonpool-buggify = { path = "../moonpool-buggify", version = "0.9.0" }
 
 futures = "0.3"
 # TLS 1.3 only (no `tls12`), ring provider, no logging feature. It re-exports
@@ -59,7 +59,7 @@ futures-rustls = { version = "0.26", default-features = false, features = ["ring
 # RUSTSEC-2023-0071 (a timing side channel in RSA *private-key* operations);
 # this crate only verifies signatures with public keys.
 jsonwebtoken = { version = "11.1", default-features = false, features = ["rust_crypto"], optional = true }
-moonpool-rpc-derive = { path = "../moonpool-rpc-derive", version = "0.8.0", optional = true }
+moonpool-rpc-derive = { path = "../moonpool-rpc-derive", version = "0.9.0", optional = true }
 # `tls-pki`: certificate making (ring, Ed25519) and reading an authority back.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring", "pem", "x509-parser"], optional = true }
 time = { version = "0.3", optional = true }
@@ -77,9 +77,9 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 [dev-dependencies]
 # The generated interface is tested next to the manual one (tests/derive.rs)
 # without turning the `derive` feature on for every test build.
-moonpool-rpc-derive = { path = "../moonpool-rpc-derive", version = "0.8.0" }
+moonpool-rpc-derive = { path = "../moonpool-rpc-derive", version = "0.9.0" }
 # Real TCP: the production providers on both Tokio runtime flavors.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", features = ["tokio-providers"] }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", features = ["tokio-providers"] }
 # The runtime `tests/compio.rs` drives the RPC runtime on.
 compio = { version = "0.19", default-features = false, features = ["runtime", "io-uring", "polling"] }
 # `#[derive(prost::Message)]` in tests expands to `::prost` paths.

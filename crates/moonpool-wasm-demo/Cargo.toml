@@ -24,7 +24,7 @@ path = "src/bin/site_run.rs"
 
 [dependencies]
 # The simulator without its production (tokio net/fs) features is wasm-able.
-moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", default-features = false }
+moonpool-sim = { path = "../moonpool-sim", version = "0.9.0", default-features = false }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -35,7 +35,7 @@ tracing = "0.1"
 [dev-dependencies]
 # The exploration tree of the site (tests/exploration_tree.rs) runs the
 # fork-based explorer natively; the library itself stays wasm-able.
-moonpool-sim = { path = "../moonpool-sim", version = "0.8.0", default-features = false, features = ["exploration"] }
+moonpool-sim = { path = "../moonpool-sim", version = "0.9.0", default-features = false, features = ["exploration"] }
 
 # wasm-only glue. The crate version MUST exactly match the flake's
 # wasm-bindgen-cli (0.2.129) — a mismatch is the #1 wasm-bindgen footgun and
