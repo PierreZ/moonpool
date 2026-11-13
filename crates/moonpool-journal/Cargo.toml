@@ -33,6 +33,8 @@ compio-providers = ["moonpool-core/compio-providers"]
 # The example and the real-filesystem tests run the journal on Tokio;
 # `tests/send.rs` pins that its futures stay `Send` there.
 moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-fs", "tokio-task"] }
+# The stream traits of the counting file wrapper in `tests/scrub.rs`.
+futures = "0.3"
 # The runtime `tests/compio_filesystem.rs` drives the journal on.
 compio = { version = "0.19", default-features = false, features = ["runtime", "io-uring", "polling"] }
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }

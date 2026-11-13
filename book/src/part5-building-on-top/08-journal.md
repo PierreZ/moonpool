@@ -345,14 +345,22 @@ A batch missing while later ones exist, or a log ending before the batch the
 metainfo proves durable, is `LostBatch`: that covers every record and the
 first entry of a witnessed last batch damaged, where nothing on disk even
 says the batch was there. A missing meta file beside segments, or two
-damaged copies, is `MetaLost`. Two faults can also roll the metainfo back:
+damaged copies, is `MetaLost`. But what if the bytes are intact and only
+the format version is not ours? That is a binary of another version, not a
+lost disk: `UnsupportedVersion { found, supported }`. Each checksum covers
+the version field, so damage never reads as another version. Two faults can also roll the metainfo back:
 the device loses both copy writes of one update, or loses one while the
 other rots, and the older value wins. Every batch number carries the open
 generation that wrote it, and every open raises the generation in both
 copies before it writes, so a batch of a later generation than the
 metainfo's proves the metainfo older than the log: `MetaRolledBack`. A
 rollback inside one open generation stays invisible to the journal; the
-caller can check its metainfo against its own entries. Opening returns a `Recovery` that says
+caller can check its metainfo against its own entries. A batch number
+holds the generation in its high 24 bits and the count in its low 40 bits,
+so both have a limit. The 16,777,215th open is the last: the next one is
+refused with `OpenError::InvalidConfig`. One open writes at most 2^40 - 1
+batches: the next commit is refused with `CommitError::BatchNumbersExhausted`
+before anything is written, and a reopen starts a new generation. Opening returns a `Recovery` that says
 what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`, `repair`
 (the persist blocks it wrote back, and those it left),
 `meta_repaired` (a metainfo copy rewritten from its twin),

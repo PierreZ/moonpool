@@ -68,6 +68,21 @@ pub enum OpenError {
         reason: &'static str,
     },
 
+    /// The bytes are intact but another version of this crate wrote them:
+    /// the magic and the checksum hold, and the format version is not the
+    /// one this build reads. This is not damage: open it with a build of
+    /// that version. Each structure's checksum covers its version field, so
+    /// damage never reads as another version.
+    #[error(
+        "the journal was written in format version {found}; this build reads version {supported}"
+    )]
+    UnsupportedVersion {
+        /// The format version on disk.
+        found: u16,
+        /// The format version this build reads and writes.
+        supported: u16,
+    },
+
     /// The directory holds another journal's files.
     #[error("the directory holds journal {found:#x}")]
     WrongJournal {
@@ -88,7 +103,9 @@ pub enum Durable {
     Unknown,
 }
 
-/// Why a commit failed. A failed commit poisons the journal.
+/// Why a commit failed. A failure after a write was issued
+/// ([`Io`](Self::Io)) poisons the journal; the others are refused before
+/// anything is written.
 #[derive(Debug, thiserror::Error)]
 pub enum CommitError {
     /// A position below the floor (after this batch's own truncation).
@@ -109,6 +126,11 @@ pub enum CommitError {
     /// [`MAX_BATCH_RECORDS`](crate::MAX_BATCH_RECORDS) records.
     #[error("the batch does not fit one segment")]
     BatchTooLarge,
+    /// This open used all the batch numbers of its open generation
+    /// (2^40 - 1 batches). Nothing was written: reopen the journal, which
+    /// starts a new generation, and commit again.
+    #[error("this open used all its batch numbers; reopen the journal")]
+    BatchNumbersExhausted,
     /// The storage provider failed.
     #[error("journal write failed ({durable:?}): {error}")]
     Io {

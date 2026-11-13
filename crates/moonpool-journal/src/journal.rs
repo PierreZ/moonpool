@@ -9,8 +9,9 @@ use moonpool_core::{AlignedBuf, DirectIo, LayoutRegion, LocalStorageFile, LocalS
 use crate::batch::{Batch, Write};
 use crate::format::{
     BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, MAX_BATCH_RECORDS,
-    META_COPY_B_AT, META_MAX, Meta, RECORD_SIZE, Record, Retire, SegmentHeader, Slot, align_up,
-    clear_id, entry_crc, first_batch_of, generation_of, journal_tag, u64_of, usize_of,
+    MAX_GENERATION, META_COPY_B_AT, META_MAX, Meta, RECORD_SIZE, Record, Retire, SegmentHeader,
+    Slot, align_up, clear_id, entry_crc, first_batch_of, generation_of, journal_tag, last_batch_of,
+    u64_of, usize_of,
 };
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
@@ -463,9 +464,13 @@ async fn begin_generation<F: moonpool_core::LocalStorageFile>(
     last_batch: u64,
     raise_mark: bool,
 ) -> Result<Meta, OpenError> {
+    // A batch number holds the generation in its bits above
+    // `GENERATION_SHIFT`: a generation past `MAX_GENERATION` would lose its
+    // high bits and number its batches below the ones before.
     let generation = meta
         .open_generation
         .checked_add(1)
+        .filter(|&generation| generation <= MAX_GENERATION)
         .ok_or(OpenError::InvalidConfig("open generations exhausted"))?;
     let meta = Meta {
         seq: meta.seq + 1,
@@ -951,8 +956,8 @@ impl<P: LocalStorageProvider> Journal<P> {
     }
 
     /// The live positions in `range` whose persist record on disk no longer
-    /// matches the record this open holds: read from disk, one record each,
-    /// and changes nothing.
+    /// matches the record this open holds, in position order: read from
+    /// disk, and changes nothing.
     ///
     /// After an open, nothing reads a persist record again: [`read`](Self::read)
     /// and [`replay`](Self::replay) judge an entry against the record held
@@ -961,26 +966,59 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// ([`OpenError::DoubleFault`]). A caller's scrub calls this to find
     /// such a record first, and repairs the position by writing it again in
     /// a new batch, as for a damaged entry. A medium error reads as a
-    /// mismatch.
+    /// mismatch for the records of the failed block only.
+    ///
+    /// The records are read in disk order: each persist block one time, and
+    /// blocks that follow each other in one segment together, at most
+    /// `REPLAY_READ` bytes per read.
     ///
     /// # Errors
     /// Only a provider failure that is not the medium's.
+    ///
+    /// # Panics
+    /// If a read returns fewer bytes than asked: a provider bug.
     pub async fn verify_records(
         &self,
         range: impl RangeBounds<u64>,
     ) -> Result<Vec<u64>, std::io::Error> {
+        let mut located: Vec<(u64, &Located)> =
+            self.index.range(range).map(|(&p, at)| (p, at)).collect();
+        located.sort_by_key(|(_, at)| (at.segment, at.record_at));
         let mut mismatched = Vec::new();
-        for (&position, at) in self.index.range(range) {
-            let segment = &self.segments[self.segment_index(at.segment)];
-            let bytes = segment.read_at(at.record_at, RECORD_SIZE).await?;
-            let intact = matches!(
-                Record::decode(&bytes),
-                Slot::Valid(on_disk) if on_disk == record_of(position, at)
-            );
-            if !intact {
-                mismatched.push(position);
+        let mut first = 0;
+        while first < located.len() {
+            // A run: the persist blocks that follow each other in one
+            // segment, read with one read of at most `REPLAY_READ` bytes.
+            let at = located[first].1;
+            let start = at.record_at / BLOCK_U64 * BLOCK_U64;
+            let mut end = align_up(at.record_at + u64_of(RECORD_SIZE), BLOCK_U64);
+            let mut stop = first + 1;
+            while let Some(&(_, next)) = located.get(stop) {
+                let next_start = next.record_at / BLOCK_U64 * BLOCK_U64;
+                let next_end = align_up(next.record_at + u64_of(RECORD_SIZE), BLOCK_U64);
+                if next.segment != at.segment || next_start > end || next_end - start > REPLAY_READ
+                {
+                    break;
+                }
+                end = end.max(next_end);
+                stop += 1;
             }
+            let segment = &self.segments[self.segment_index(at.segment)];
+            let bytes = segment.read_at(start, usize_of(end - start)).await?;
+            assert_eq!(u64_of(bytes.len()), end - start, "a run reads whole");
+            for &(position, at) in &located[first..stop] {
+                let from = usize_of(at.record_at - start);
+                let intact = matches!(
+                    Record::decode(&bytes[from..from + RECORD_SIZE]),
+                    Slot::Valid(on_disk) if on_disk == record_of(position, at)
+                );
+                if !intact {
+                    mismatched.push(position);
+                }
+            }
+            first = stop;
         }
+        mismatched.sort_unstable();
         Ok(mismatched)
     }
 
@@ -1079,12 +1117,13 @@ impl<P: LocalStorageProvider> Journal<P> {
     // ---- writes ----
 
     /// Make `batch` durable, then return. See [`Durability`] for the
-    /// protocol. Metainfo, when the batch changes it, is written copy A in
-    /// the first window and copy B in the second.
+    /// protocol. Metainfo, when the batch changes it, is written after the
+    /// last sync of the batch: copy A, durable, then copy B, durable.
     ///
     /// # Errors
-    /// [`CommitError::BelowFloor`], [`CommitError::MetaTooLarge`] and
-    /// [`CommitError::BatchTooLarge`] before anything is written; an I/O
+    /// [`CommitError::BelowFloor`], [`CommitError::MetaTooLarge`],
+    /// [`CommitError::BatchTooLarge`] and
+    /// [`CommitError::BatchNumbersExhausted`] before anything is written; an I/O
     /// failure poisons the journal ([`CommitError::Io`] says whether the
     /// batch may be durable anyway).
     pub async fn commit(&mut self, batch: Batch) -> Result<(), CommitError> {
@@ -1303,7 +1342,13 @@ impl<P: LocalStorageProvider> Journal<P> {
     }
 
     fn prepare(&self, batch: &Batch, retires: &[Retire]) -> Result<Prepared, CommitError> {
-        let seq = if generation_of(self.last_batch) == u64::from(self.generation) {
+        let generation = u64::from(self.generation);
+        let seq = if generation_of(self.last_batch) == generation {
+            // One more would be a batch of the next generation, which the
+            // next open reads as a metainfo rollback.
+            if self.last_batch == last_batch_of(generation) {
+                return Err(CommitError::BatchNumbersExhausted);
+            }
             self.last_batch + 1
         } else {
             first_batch_of(u64::from(self.generation))
@@ -1591,9 +1636,8 @@ impl<P: LocalStorageProvider> Journal<P> {
     }
 }
 
-/// The persist record a located entry was written under.
-/// The most bytes one replay read covers: a run of entries longer than
-/// this is read in several.
+/// The most bytes one replay or verify read covers: a run of entries (or
+/// of persist blocks) longer than this is read in several.
 const REPLAY_READ: u64 = 1 << 20;
 
 /// The most bytes between two entries a replay read covers rather than
@@ -1608,6 +1652,7 @@ fn entry_bytes(at: &Located) -> usize {
     RECORD_SIZE + usize_of(u64::from(at.len))
 }
 
+/// The persist record a located entry was written under.
 fn record_of(position: u64, at: &Located) -> Record {
     Record {
         kind: Kind::Put,
@@ -1790,8 +1835,106 @@ fn published(region: LayoutRegion, shard: &str, whole: bool) -> LayoutRegion {
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutRegion, ancestors_of, published};
-    use crate::Layout;
+    use std::future::Future;
+
+    use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
+
+    use super::{
+        Batch, CommitError, Journal, LayoutRegion, MAX_GENERATION, Meta, OpenError, ancestors_of,
+        first_batch_of, last_batch_of, published,
+    };
+    use crate::{Durability, Geometry, ID_SIZE, JournalConfig, JournalId, Layout};
+
+    const DIR: &str = "wal";
+    const ID: JournalId = JournalId(0x4900);
+
+    fn config() -> JournalConfig {
+        JournalConfig {
+            durability: Durability::Ordered,
+            geometry: Geometry::small(),
+            ..JournalConfig::default()
+        }
+    }
+
+    /// Run `f` on a fresh simulated disk, stepping the world until it ends.
+    fn on_sim<Fut, T>(f: impl FnOnce(SimStorageProvider) -> Fut) -> T
+    where
+        Fut: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let mut sim = SimWorld::new_with_seed(490);
+        sim.set_storage_config(StorageConfiguration::fast_local());
+        let provider = sim.storage_provider("10.0.0.1".parse().expect("valid IP"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let handle = tokio::spawn(f(provider));
+            while !handle.is_finished() {
+                while sim.pending_event_count() > 0 {
+                    sim.step();
+                }
+                tokio::task::yield_now().await;
+            }
+            handle.await.expect("task panicked")
+        })
+    }
+
+    fn one_put() -> Batch {
+        let mut batch = Batch::new();
+        batch.put(1, [1; ID_SIZE], vec![7; 10]);
+        batch
+    }
+
+    /// An open that would start a generation past `MAX_GENERATION` refuses:
+    /// its batch numbers would lose their high bits (#490).
+    #[test]
+    fn an_open_past_the_last_generation_refuses() {
+        let (last, past) = on_sim(|provider| async move {
+            let journal = Journal::create(provider.clone(), DIR, ID, config(), b"")
+                .await
+                .expect("create");
+            let meta = Meta {
+                open_generation: MAX_GENERATION - 1,
+                ..journal.meta.clone()
+            };
+            journal.meta_file.update(&meta).await.expect("meta");
+            drop(journal);
+            // The open of the last generation still works and writes.
+            let (mut journal, _) = Journal::open(provider.clone(), DIR, ID, config())
+                .await
+                .expect("open")
+                .expect("a journal");
+            journal.commit(one_put()).await.expect("first write");
+            let last = journal.last_batch;
+            drop(journal);
+            let past = Journal::open(provider, DIR, ID, config()).await.map(|_| ());
+            (last, past)
+        });
+        assert_eq!(last, first_batch_of(u64::from(MAX_GENERATION)));
+        assert!(matches!(past, Err(OpenError::InvalidConfig(_))), "{past:?}");
+    }
+
+    /// A write past the last batch number of its generation refuses before
+    /// anything is written, and does not poison the journal (#490).
+    #[test]
+    fn a_write_past_the_last_batch_number_refuses() {
+        let (refused, poisoned, kept) = on_sim(|provider| async move {
+            let mut journal = Journal::create(provider, DIR, ID, config(), b"")
+                .await
+                .expect("create");
+            let end = last_batch_of(u64::from(journal.generation));
+            journal.last_batch = end;
+            let refused = journal.commit(one_put()).await;
+            (refused, journal.poisoned, journal.last_batch == end)
+        });
+        assert!(
+            matches!(refused, Err(CommitError::BatchNumbersExhausted)),
+            "{refused:?}"
+        );
+        assert!(!poisoned, "a refusal before any write does not poison");
+        assert!(kept, "nothing was written");
+    }
 
     #[test]
     fn every_ancestor_from_the_root_down() {
