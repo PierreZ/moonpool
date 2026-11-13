@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use moonpool_sim::{
-    FaultContext, FaultInjector, RandomProvider, RebootKind, SimulationError, SimulationResult,
-    TimeProvider, assert_reachable,
+    FaultContext, FaultInjector, RandomProvider, RebootKind, SimulationResult, assert_reachable,
 };
 
 use super::state::{FAULTS_DONE_KEY, REBOOT_REQUESTS_KEY};
@@ -20,10 +19,7 @@ pub struct StreamsFaults {
 }
 
 async fn pause(ctx: &FaultContext, millis: u64) -> SimulationResult<()> {
-    ctx.time()
-        .sleep(Duration::from_millis(millis))
-        .await
-        .map_err(|error| SimulationError::InvalidState(format!("sleep failed: {error}")))
+    ctx.sleep(Duration::from_millis(millis)).await
 }
 
 impl StreamsFaults {

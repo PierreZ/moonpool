@@ -48,10 +48,12 @@
 //!         while !ctx.chaos_shutdown().is_cancelled() && ips.len() >= 2 {
 //!             if ctx.random().random_bool(self.probability) {
 //!                 ctx.partition(&ips[0], &ips[1])?;
-//!                 let _ = ctx.time().sleep(Duration::from_secs(5)).await;
+//!                 // A cut sleep (the run ends) returns an error that `?`
+//!                 // hands to the runner, which does not fail the seed.
+//!                 ctx.sleep(Duration::from_secs(5)).await?;
 //!                 ctx.heal_partition(&ips[0], &ips[1])?;
 //!             }
-//!             let _ = ctx.time().sleep(Duration::from_secs(1)).await;
+//!             ctx.sleep(Duration::from_secs(1)).await?;
 //!         }
 //!         Ok(())
 //!     }
@@ -398,6 +400,22 @@ impl FaultContext {
         &self.time
     }
 
+    /// Sleep for `duration`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimulationError::SimulationShutdown`](crate::SimulationError::SimulationShutdown)
+    /// when the run ends first: the runner's `Shutdown` event cut the sleep,
+    /// because a workload returned or a stall guard fired. Propagate it with
+    /// `?`: the runner takes an injector that stops with this error as one
+    /// that stopped because the run ends, not as a failure.
+    pub async fn sleep(&self, duration: Duration) -> SimulationResult<()> {
+        self.time
+            .sleep(duration)
+            .await
+            .map_err(|_| crate::SimulationError::SimulationShutdown)
+    }
+
     /// Get the chaos-phase shutdown token.
     ///
     /// This token is cancelled at the chaos→recovery boundary,
@@ -519,6 +537,7 @@ impl FaultContext {
                         ip: ip_addr,
                         grace_period_ms: grace_ms,
                         recovery_delay_ms: recovery_ms,
+                        generation: self.sim.process_generation(ip_addr),
                     },
                     Duration::from_nanos(1),
                 );
@@ -556,6 +575,7 @@ impl FaultContext {
                         ip: ip_addr,
                         recovery_delay_ms: Some(delay_ms),
                         cause,
+                        generation: self.sim.process_generation(ip_addr),
                     },
                     Duration::from_nanos(1),
                 );
@@ -592,11 +612,15 @@ impl FaultContext {
         };
         assert_reachable!("crash: hold-down path");
         self.mark_dead(ip_addr);
+        // A hold-down starts a new generation: a restart still pending from
+        // an earlier reboot, or the kill of a grace period, must not end it.
+        let generation = self.sim.advance_process_generation(ip_addr);
         self.sim.schedule_event(
             crate::sim::Event::ProcessForceKill {
                 ip: ip_addr,
                 recovery_delay_ms: None,
                 cause: kill_cause(kind),
+                generation,
             },
             Duration::from_nanos(1),
         );
@@ -641,6 +665,7 @@ impl FaultContext {
                 ip: ip_addr,
                 recovery_delay_ms: Some(u64::try_from(down.as_millis()).unwrap_or(u64::MAX)),
                 cause: kill_cause(kind),
+                generation: self.sim.process_generation(ip_addr),
             },
             Duration::from_nanos(1),
         );
@@ -792,10 +817,8 @@ impl FaultContext {
             return Ok(());
         }
         assert_reachable!("restart: explicit restart path");
-        self.sim.schedule_event(
-            crate::sim::Event::ProcessRestart { ip: ip_addr },
-            Duration::from_nanos(1),
-        );
+        self.sim
+            .schedule_process_restart(ip_addr, Duration::from_nanos(1));
         tracing::info!("Explicitly restarting process at IP {}", ip);
         Ok(())
     }
@@ -1356,11 +1379,7 @@ impl FaultInjector for AttritionInjector {
                 }
                 _ => delay,
             };
-            ctx.time()
-                .sleep(delay)
-                .await
-                .map_err(|e| crate::SimulationError::InvalidState(format!("sleep failed: {e}")))?;
-
+            ctx.sleep(delay).await?;
             if ctx.chaos_shutdown().is_cancelled() {
                 break;
             }

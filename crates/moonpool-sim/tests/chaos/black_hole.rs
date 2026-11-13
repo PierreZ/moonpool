@@ -134,8 +134,10 @@ fn an_abort_still_crosses_a_black_hole() {
         let mut buf = [0_u8; 64];
         assert!(poll_read_once(&mut server, &mut buf).is_pending());
 
-        // A process kill aborts its connections; the peer must find out.
+        // A process kill aborts its connections; the peer must find out,
+        // once the RST has crossed the link.
         sim.close_connection_abort(client.connection_id());
+        sim.run_until_empty();
         assert!(
             poll_read_once(&mut server, &mut buf).is_ready(),
             "an abort is not a send and is never swallowed"

@@ -135,12 +135,34 @@ impl std::fmt::Debug for GuardSlot {
     }
 }
 
+/// Reject a configuration the engine cannot run: a value that would panic
+/// deep inside a send or a delivery, or park every writer for good.
+///
+/// # Panics
+///
+/// Panics with the name of the first invalid field.
+fn validate_config(config: &NetworkConfiguration) {
+    assert!(
+        config.accept_backlog_capacity > 0,
+        "accept backlog capacity must be positive"
+    );
+    assert!(
+        config.tcp_send_window_bytes > 0,
+        "tcp_send_window_bytes must be positive: a zero window parks every write"
+    );
+    assert!(
+        config.chaos.partial_write_max_bytes > 0,
+        "partial_write_max_bytes must be positive: a partial write sends at least one byte"
+    );
+    assert!(
+        config.chaos.bit_flip_min_bits <= config.chaos.bit_flip_max_bits,
+        "bit_flip_min_bits must not exceed bit_flip_max_bits"
+    );
+}
+
 impl NetworkSimulation {
     pub(crate) fn new(config: NetworkConfiguration) -> Self {
-        assert!(
-            config.accept_backlog_capacity > 0,
-            "accept backlog capacity must be positive"
-        );
+        validate_config(&config);
         Self {
             state: NetworkState::new(config),
             waiters: NetworkWaiters::default(),
@@ -164,6 +186,7 @@ impl NetworkSimulation {
         &self.state.config
     }
 
+    /// Endpoints the table still holds (two per pair).
     #[cfg(test)]
     pub(crate) fn connection_count(&self) -> usize {
         self.state.connections.len()
@@ -174,10 +197,7 @@ impl NetworkSimulation {
         config: NetworkConfiguration,
         now: Duration,
     ) -> (NetworkActions, WakeBatch) {
-        assert!(
-            config.accept_backlog_capacity > 0,
-            "accept backlog capacity must be positive"
-        );
+        validate_config(&config);
         let schedule_maintenance =
             config.chaos.partition_rate > 0.0 || config.chaos.clog_rate > 0.0;
         let backlog_grew =
@@ -580,6 +600,46 @@ impl NetworkSimulation {
             .pending_connections
             .retain(|_, queue| !queue.is_empty());
         wakes
+    }
+
+    /// The application dropped its stream on `id` (after the close that the
+    /// drop makes). Remove the pair once nothing can use it any more.
+    pub(crate) fn release_endpoint(&mut self, id: ConnectionId) -> WakeBatch {
+        if let Some(connection) = self.state.connections.get_mut(&id) {
+            connection.flags.set_app_released(true);
+        }
+        self.reap_if_finished(id)
+    }
+
+    /// Remove `id` and its peer from the table once the pair is finished:
+    /// both endpoints closed and released by their application, and nothing
+    /// queued, pending or in flight in either direction. Without this, every
+    /// closed pair stays for the whole run, and each scan of the table
+    /// (partition, clog, idle drop, heal, kill) grows with the total number
+    /// of connections ever made.
+    ///
+    /// Draws nothing and changes no behavior: every scan already skips a
+    /// closed endpoint with an empty flight, and the events still scheduled
+    /// for the pair find no connection and do nothing. An endpoint that no
+    /// application ever accepted is never released, so it stays.
+    pub(super) fn reap_if_finished(&mut self, id: ConnectionId) -> WakeBatch {
+        let finished = |connection: &ConnectionState| {
+            connection.flags.is_closed()
+                && connection.flags.app_released()
+                && !connection.flags.graceful_close_pending()
+                && connection.send_buffer.is_empty()
+                && connection.in_flight.is_empty()
+        };
+        let Some(peer) = self.paired(id) else {
+            return WakeBatch::default();
+        };
+        if [id, peer]
+            .iter()
+            .all(|endpoint| self.connection(*endpoint).is_some_and(finished))
+        {
+            return self.discard_connection_pair(id);
+        }
+        WakeBatch::default()
     }
 
     pub(crate) fn register_read(&mut self, id: ConnectionId, waker: &Waker) -> bool {
@@ -1005,9 +1065,11 @@ impl NetworkSimulation {
             }
             NetworkEvent::Delivery { connection_id, seq } => {
                 self.handle_delivery(connection_id, seq, now, &mut actions, &mut wakes);
+                wakes.append(self.reap_if_finished(connection_id));
             }
             NetworkEvent::ProcessSendBuffer { connection_id } => {
                 self.handle_process_send_buffer(connection_id, now, &mut actions, &mut wakes);
+                wakes.append(self.reap_if_finished(connection_id));
             }
         }
         (actions, wakes)
@@ -1275,6 +1337,7 @@ impl NetworkSimulation {
         }
         if let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_send_closed(true);
+            c.flags.set_fin_queued(true);
             if send_in_progress || !queue_empty {
                 c.flags.set_graceful_close_pending(true);
             }
@@ -1314,15 +1377,22 @@ impl NetworkSimulation {
         if is_closed {
             return (actions, wakes);
         }
-        // A send side already shut (`shutdown_send`) has its FIN on the wire
-        // or pending behind the queue; the close adds the receive half and
-        // must not send a second FIN.
-        let fin_sent = send_closed;
+        // A send side already shut by `shutdown_send` has its FIN on the
+        // wire or pending behind the queue; the close adds the receive half
+        // and must not send a second FIN. A send side that a random close
+        // cut has no FIN, and the bytes it discarded are lost: a FIN now
+        // would let the peer take a cut stream as complete, so the close
+        // sends an RST instead, as a kernel does for a socket that lost data.
+        let fin_sent = self.connection(id).is_some_and(|c| c.flags.fin_queued());
+        let cut = send_closed && !fin_sent;
         if let Some(c) = self.state.connections.get_mut(&id) {
             c.flags.set_is_closed(true);
             c.flags.set_send_closed(true);
             c.close_reason = CloseReason::Graceful;
-            if !fin_sent && (send_in_progress || !queue_empty) {
+            if !cut {
+                c.flags.set_fin_queued(true);
+            }
+            if !fin_sent && !cut && (send_in_progress || !queue_empty) {
                 c.flags.set_graceful_close_pending(true);
             }
         }
@@ -1332,7 +1402,10 @@ impl NetworkSimulation {
         self.discard_receive_buffer(id, &mut wakes);
         // The FIN goes on the wire behind whatever is already in flight; it
         // can never overtake the stream's last bytes.
-        if !fin_sent && !send_in_progress && queue_empty {
+        if cut {
+            crate::assert_reachable!("network: a close after a send-side cut sends an RST");
+            self.put_rst_in_flight(id, now, &mut actions);
+        } else if !fin_sent && !send_in_progress && queue_empty {
             self.put_fin_in_flight(id, now, &mut actions);
         }
         (actions, wakes)
@@ -1405,7 +1478,9 @@ impl NetworkSimulation {
     /// - the bytes it had on the wire still land, so the last reply that it
     ///   wrote before it died can still arrive;
     /// - what it had queued but not sent, and what it had received but not
-    ///   read, is gone;
+    ///   read, is gone, except on an endpoint the application had closed
+    ///   already: under [`DeathNotice::Reset`] the host's kernel still owns
+    ///   that one, and its queued bytes and FIN still go out;
     /// - [`DeathNotice::Reset`] puts an RST on the wire behind those bytes,
     ///   which honors the link latency and partitions;
     ///   [`DeathNotice::Silent`] sends nothing, and the endpoint answers the
@@ -1435,28 +1510,21 @@ impl NetworkSimulation {
                 wakes.append(self.close_aborted(id));
                 continue;
             }
-            let Some(c) = self.state.connections.get_mut(&id) else {
+            let Some(c) = self.state.connections.get(&id) else {
                 continue;
             };
             if c.close_reason == CloseReason::Aborted {
                 continue;
             }
-            // A side that the application closed already sent its FIN (or
-            // queued it): the host has nothing more to say on it.
-            let notify = !c.flags.is_closed();
-            c.flags.set_is_closed(true);
-            c.flags.set_send_closed(true);
-            c.flags.set_recv_closed(true);
-            c.flags.set_send_in_progress(false);
-            c.flags.set_send_stalled(false);
-            c.flags.set_graceful_close_pending(false);
-            c.close_reason = CloseReason::Aborted;
-            self.discard_send_queue(id);
-            self.discard_receive_buffer(id, &mut wakes);
-            self.wake_all_waiters(id, &mut wakes);
+            // A side that the application closed belongs to the kernel now:
+            // a host that lives on still sends its queued bytes and the FIN
+            // (or RST) behind them, so the death changes nothing on it.
+            if notice == DeathNotice::Reset && c.flags.is_closed() {
+                continue;
+            }
+            self.close_endpoint_locally(id, &mut wakes);
             match notice {
-                DeathNotice::Reset if notify => self.put_rst_in_flight(id, now, &mut actions),
-                DeathNotice::Reset => {}
+                DeathNotice::Reset => self.put_rst_in_flight(id, now, &mut actions),
                 DeathNotice::Silent => {
                     if let Some(c) = self.state.connections.get_mut(&id) {
                         c.flags.set_reset_on_arrival(true);
@@ -1464,6 +1532,58 @@ impl NetworkSimulation {
                 }
             }
         }
+        (actions, wakes)
+    }
+
+    /// Close `id` on its own side with RST semantics: what it queued and
+    /// what it received but never read are gone, and every task parked on
+    /// it wakes to the error. Bytes it already put on the wire stay there
+    /// and still land. Its peer is untouched: it learns of the close only
+    /// through the network.
+    fn close_endpoint_locally(&mut self, id: ConnectionId, wakes: &mut WakeBatch) {
+        let Some(c) = self.state.connections.get_mut(&id) else {
+            return;
+        };
+        c.flags.set_is_closed(true);
+        c.flags.set_send_closed(true);
+        c.flags.set_recv_closed(true);
+        c.flags.set_send_in_progress(false);
+        c.flags.set_send_stalled(false);
+        c.flags.set_graceful_close_pending(false);
+        c.close_reason = CloseReason::Aborted;
+        self.discard_send_queue(id);
+        self.discard_receive_buffer(id, wakes);
+        self.wake_all_waiters(id, wakes);
+    }
+
+    /// The application aborted `id` (`SO_LINGER` 0, or a drop with unread
+    /// bytes): this side is reset now, and an RST goes on the wire to the
+    /// peer behind the bytes already in flight. The RST takes the link
+    /// latency and a partition holds it, as the RST of a dead process does,
+    /// so a peer never learns of the abort at the same instant or across a
+    /// cut.
+    ///
+    /// A connection that no application accepted yet is reset at once on
+    /// both sides: it lives only in a listener backlog, and a backlog must
+    /// never hold a dead endpoint.
+    pub(crate) fn abort_endpoint(
+        &mut self,
+        id: ConnectionId,
+        now: Duration,
+    ) -> (NetworkActions, WakeBatch) {
+        let mut actions = NetworkActions::default();
+        if self.is_unaccepted(id) || self.paired(id).is_some_and(|peer| self.is_unaccepted(peer)) {
+            return (actions, self.close_aborted(id));
+        }
+        let mut wakes = WakeBatch::default();
+        if self
+            .connection(id)
+            .is_none_or(|c| c.close_reason == CloseReason::Aborted)
+        {
+            return (actions, wakes);
+        }
+        self.close_endpoint_locally(id, &mut wakes);
+        self.put_rst_in_flight(id, now, &mut actions);
         (actions, wakes)
     }
 

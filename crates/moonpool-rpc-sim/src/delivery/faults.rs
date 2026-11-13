@@ -32,10 +32,7 @@ pub struct DeliveryFaults {
 }
 
 async fn pause(ctx: &FaultContext, duration: Duration) -> SimulationResult<()> {
-    ctx.time()
-        .sleep(duration)
-        .await
-        .map_err(|error| SimulationError::InvalidState(format!("sleep failed: {error}")))
+    ctx.sleep(duration).await
 }
 
 impl DeliveryFaults {

@@ -460,11 +460,14 @@ impl SelfCrash {
         crate::assert_reachable!("crash: a process crashed itself");
         let recovery_delay_ms =
             recovery_delay.map(|delay| u64::try_from(delay.as_millis()).unwrap_or(u64::MAX));
-        self.sim.upgrade()?.schedule_event(
+        let sim = self.sim.upgrade()?;
+        let generation = sim.process_generation(self.ip);
+        sim.schedule_event(
             crate::sim::Event::ProcessForceKill {
                 ip: self.ip,
                 recovery_delay_ms,
                 cause,
+                generation,
             },
             std::time::Duration::from_nanos(1),
         );

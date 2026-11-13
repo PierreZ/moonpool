@@ -30,7 +30,7 @@ fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
         // sync, and buggify drops replies.
         ("same-code", vec![seed(56)]),
         // Network faults: a partition, clogs and a black hole.
-        ("network", vec![seed(631)]),
+        ("network", vec![seed(168)]),
         // Storage faults: crash damage only, so each crash decides the fate
         // of the unsynced sectors; this seed loses one.
         (
@@ -74,7 +74,7 @@ fn pages() -> Vec<(&'static str, Vec<RunConfig>)> {
             "debugging",
             vec![RunConfig {
                 bug: true,
-                ..seed(21)
+                ..seed(37)
             }],
         ),
     ]

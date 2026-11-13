@@ -17,7 +17,7 @@ use moonpool_buggify::shard::Replication;
 
 use super::state::StorageState;
 use crate::runner::shard::{Requirements, ShardLosses, replica_ip};
-use crate::storage::faults::SECTOR_SIZE;
+use crate::storage::image::FileImage;
 
 /// For one file: whether damage may land on each `(shard, stripe)` key of
 /// its regions inside a shard.
@@ -103,33 +103,43 @@ impl StorageState {
         (!requirements.is_empty()).then_some(requirements)
     }
 
-    /// Whether `ip`'s copy of `(shard, stripe)` holds a damaged sector: a
+    /// Whether `ip`'s copy of `(shard, stripe)` holds a damaged byte: a
     /// region of that key, or a stripe-less region of the shard. With
-    /// `stripe` `None`, any region of the shard counts.
+    /// `stripe` `None`, any region of the shard counts. A sector an
+    /// out-of-band corruption changed only in part is damaged only in the
+    /// bytes it changed, the unit the gate judged it by
+    /// ([`FileImage::damage_overlaps`](crate::storage::image::FileImage::damage_overlaps)).
     pub(crate) fn copy_damaged(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {
         let Some(layout) = self.layouts.get(&ip) else {
             return false;
         };
-        let size = SECTOR_SIZE as u64;
+        // The files of `ip` that hold a damaged sector, found once. Damage
+        // is rare, so this is almost always empty, and the layout's regions
+        // are not walked at all. Looking each region's file up by its path
+        // allocated a key per region, per replica, per check: the cost that
+        // dominated a long simulation.
+        let damaged: Vec<(&str, &FileImage)> = self
+            .path_to_file
+            .range((ip, String::new())..)
+            .take_while(|((owner, _), _)| *owner == ip)
+            .filter_map(|((_, path), file_id)| {
+                let file = self.files.get(file_id)?;
+                file.image
+                    .has_damage()
+                    .then_some((path.as_str(), &file.image))
+            })
+            .collect();
+        if damaged.is_empty() {
+            return false;
+        }
         layout.sharded().any(|(path, bytes, name, key)| {
             if name != shard || (stripe.is_some() && key.is_some() && key != stripe) {
                 return false;
             }
-            let Some(file) = self
-                .path_to_file
-                .get(&(ip, path.to_string()))
-                .and_then(|file_id| self.files.get(file_id))
-            else {
-                return false;
-            };
-            if !file.image.has_damage() {
-                return false;
-            }
-            let sectors = bytes.start / size..bytes.end.div_ceil(size);
-            file.image
-                .damaged_sectors()
-                .into_iter()
-                .any(|sector| sectors.contains(&sector))
+            damaged
+                .iter()
+                .filter(|(damaged_path, _)| *damaged_path == path)
+                .any(|(_, image)| image.damage_overlaps(bytes.clone()))
         })
     }
 
