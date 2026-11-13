@@ -344,3 +344,30 @@ fn a_send_partition_stalls_the_stream_until_it_clears() {
         "the bytes waited for the send partition to clear"
     );
 }
+
+/// A short partition on a pair, a sender or a receiver that a long one
+/// already cuts never shortens it: the later deadline stays in force, as
+/// clogs already do (FDB `clogPairFor`: `u = max(u, now + t)`).
+#[test]
+fn a_short_partition_never_shortens_a_long_one() {
+    let long = Duration::from_mins(1);
+    let short = Duration::from_secs(2);
+    for cut in [
+        |sim: &SimWorld, duration| sim.partition_pair(ip(1), ip(2), duration),
+        |sim: &SimWorld, duration| sim.partition_send_from(ip(1), duration),
+        |sim: &SimWorld, duration| sim.partition_recv_to(ip(2), duration),
+    ] {
+        let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
+        cut(&sim, long);
+        cut(&sim, short);
+        let timer = sim.sleep(Duration::from_secs(3));
+        drive(&mut sim, timer).expect("sleep");
+        assert!(
+            sim.is_partitioned(ip(1), ip(2)),
+            "the 60 s cut is still in force after the 2 s one would have ended"
+        );
+        sim.run_until_empty();
+        assert_eq!(sim.now(), long, "the cut heals at its own deadline");
+        assert!(!sim.is_partitioned(ip(1), ip(2)));
+    }
+}

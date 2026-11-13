@@ -13,7 +13,8 @@ use crate::sync_drive::drive;
 use futures::io::AsyncReadExt;
 use moonpool_sim::{
     DeathNotice, LatencyDistribution, NetworkConfiguration, NetworkProvider, SimWorld,
-    TcpListenerTrait, buggify_reset, network::sim::SimTcpStream,
+    TcpListenerTrait, buggify_init, buggify_reset, network::sim::SimTcpStream,
+    reset_rng_call_count, rng_call_count,
 };
 use std::{io, net::IpAddr, task::Poll, time::Duration};
 
@@ -207,4 +208,162 @@ fn no_idle_drop_without_black_holes() {
     let timer = sim.sleep(Duration::from_secs(1));
     drive(&mut sim, timer).expect("the timer fires");
     assert!(!sim.is_send_black_holed(client.connection_id()));
+}
+
+/// A write parked on a write clog is a no-progress poll: polling it again
+/// and again (a `select!` loop) draws nothing from the simulation stream,
+/// as a parked read already does. The chaos rolls run only once the write
+/// can make progress.
+#[test]
+fn a_clogged_write_draws_nothing_however_often_it_is_polled() {
+    let (sim, mut client, _server) = connected();
+    let mut config = NetworkConfiguration::fast_local();
+    config.chaos.random_close_probability = 1e-9;
+    config.chaos.random_close_cooldown = Duration::ZERO;
+    config.chaos.black_hole_probability = 1e-9;
+    config.chaos.black_hole_cooldown = Duration::ZERO;
+    config.chaos.idle_drop_rate = 0.0;
+    config.chaos.clog_duration = Duration::from_secs(1)..Duration::from_secs(2);
+    let mut sim = sim;
+    sim.set_network_config(config);
+    buggify_init(1.0);
+
+    sim.clog_write(client.connection_id());
+    assert!(sim.is_write_clogged(client.connection_id()));
+    reset_rng_call_count();
+    for _ in 0..10 {
+        assert!(poll_write_once(&mut client, b"parked").is_pending());
+    }
+    let draws = rng_call_count();
+    buggify_reset();
+    assert_eq!(draws, 0, "a clogged write is not an I/O operation yet");
+}
+
+/// Make 4 bytes from the server land, unread, at the client, so that a drop
+/// of the client stream is an abort (an RST, not a FIN).
+fn unread_bytes_at_the_client(
+    sim: &mut SimWorld,
+    client: &SimTcpStream,
+    server: &mut SimTcpStream,
+) {
+    put_on_the_wire(sim, server, b"left");
+    sim.run_until_empty();
+    assert_eq!(sim.unread_bytes(client.connection_id()), 4);
+}
+
+/// An abort from a live endpoint reaches its peer through the network: the
+/// peer sees the reset one link latency later, never at the same instant.
+#[test]
+fn an_abort_resets_the_peer_after_the_link_latency() {
+    let (mut sim, client, mut server) = connected();
+    unread_bytes_at_the_client(&mut sim, &client, &mut server);
+    let aborted_at = sim.now();
+    drop(client);
+    let mut byte = [0_u8; 1];
+    assert!(
+        poll_read_once(&mut server, &mut byte).is_pending(),
+        "the peer cannot know of the abort yet"
+    );
+    assert_eq!(time_of_reset(&mut sim, &mut server), aborted_at + LATENCY);
+}
+
+/// The RST of an abort is on the wire like data: a partition holds it until
+/// the heal.
+#[test]
+fn a_partition_holds_the_reset_of_an_abort() {
+    let (mut sim, client, mut server) = connected();
+    unread_bytes_at_the_client(&mut sim, &client, &mut server);
+    let aborted_at = sim.now();
+    sim.partition_pair(client_ip(), server_ip(), Duration::from_hours(1));
+    sim.partition_pair(server_ip(), client_ip(), Duration::from_hours(1));
+    drop(client);
+    assert!(
+        time_of_reset(&mut sim, &mut server) >= aborted_at + Duration::from_hours(1),
+        "the reset crosses only after the heal"
+    );
+}
+
+/// `SimWorld::close_connection_abort` follows the same rule, and the bytes
+/// the aborting side already put on the wire still land before the RST.
+#[test]
+fn a_scripted_abort_lets_the_bytes_on_the_wire_land_first() {
+    const LAST: &[u8] = b"on-the-wire";
+    let (mut sim, mut client, mut server) = connected();
+    put_on_the_wire(&mut sim, &mut client, LAST);
+    let aborted_at = sim.now();
+    sim.close_connection_abort(client.connection_id());
+    let mut received = vec![0_u8; LAST.len()];
+    drive(&mut sim, server.read_exact(&mut received)).expect("the bytes on the wire land");
+    assert_eq!(received, LAST);
+    assert!(time_of_reset(&mut sim, &mut server) > aborted_at);
+}
+
+/// A random close that cut only the send side put nothing on the wire, and
+/// the bytes it discarded are lost. When the application then drops the
+/// stream, the peer must still learn of it: the close sends an RST (a FIN
+/// would let the peer take the cut stream as complete), and the RST takes
+/// the link latency like data.
+#[test]
+fn a_drop_after_a_send_side_cut_resets_the_peer() {
+    let (mut sim, client, mut server) = connected();
+    sim.close_connection_asymmetric(client.connection_id(), true, false);
+    let dropped_at = sim.now();
+    drop(client);
+    let mut byte = [0_u8; 1];
+    assert!(
+        poll_read_once(&mut server, &mut byte).is_pending(),
+        "the peer cannot know of the drop yet"
+    );
+    assert_eq!(time_of_reset(&mut sim, &mut server), dropped_at + LATENCY);
+    assert!(
+        matches!(poll_write_once(&mut server, b"late"), Poll::Ready(Err(_))),
+        "a write after the reset fails"
+    );
+}
+
+/// A process that closed a stream with bytes still queued (a partition
+/// stalls them) and then dies with its host alive: the kernel owns the
+/// closed socket, so the queued bytes and the FIN still go out after the
+/// heal. The peer reads them, then EOF, and never waits forever.
+#[test]
+fn a_kill_after_a_close_still_delivers_the_queued_bytes_and_the_fin() {
+    let (mut sim, mut client, mut server) = connected();
+    sim.partition_pair(client_ip(), server_ip(), CUT);
+    assert_eq!(
+        poll_write_once(&mut client, b"abc").map(|result| result.expect("write is accepted")),
+        Poll::Ready(3)
+    );
+    assert!(sim.step(), "the queued send stalls under the cut");
+    assert_eq!(sim.queued_send_bytes(client.connection_id()), 3);
+    drop(client);
+    sim.kill_connections_for_ip(client_ip(), DeathNotice::Reset);
+
+    let mut received = [0_u8; 3];
+    drive(&mut sim, server.read_exact(&mut received)).expect("the queued bytes land");
+    assert_eq!(&received, b"abc");
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        drive(&mut sim, server.read(&mut byte)).expect("then the FIN"),
+        0
+    );
+}
+
+/// A host that lost power takes the closed socket with it: the queued bytes
+/// and the FIN are gone, and the peer learns of the death only when its own
+/// segment draws the RST.
+#[test]
+fn a_power_loss_after_a_close_drops_the_queued_bytes() {
+    let (mut sim, mut client, mut server) = connected();
+    sim.partition_pair(client_ip(), server_ip(), CUT);
+    assert_eq!(
+        poll_write_once(&mut client, b"abc").map(|result| result.expect("write is accepted")),
+        Poll::Ready(3)
+    );
+    assert!(sim.step(), "the queued send stalls under the cut");
+    drop(client);
+    sim.kill_connections_for_ip(client_ip(), DeathNotice::Silent);
+    sim.run_until_empty();
+    assert_eq!(sim.unread_bytes(server.connection_id()), 0);
+    let mut byte = [0_u8; 1];
+    assert!(poll_read_once(&mut server, &mut byte).is_pending());
 }

@@ -42,7 +42,7 @@ Each family is one `NetworkFault` variant, one bit of the swarm mask, and a few 
 | `Clog` | `clog_rate` (clogs per simulated second), `clog_duration` (100 to 300 ms) | Code that assumes a write lands promptly. One IP's sends, receives or both stall on every connection, then resume in order (FoundationDB's `RandomClogging`). |
 | `Partition` | `partition_rate` (partitions per simulated second), `partition_duration`, `partition_strategy` | Split brain, quorum loss, failure detectors. See below. |
 | `BitFlip` | `bit_flip_probability`, `bit_flip_min_bits`/`max_bits` (1 to 32), `bit_flip_cooldown` | Missing checksums. The flip count follows a power law. |
-| `RandomClose` | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` (30%) | Reconnection and redelivery. 30% of closes return an error, 70% go silent, FoundationDB's ratio. A close that cuts the receive side discards the unread bytes, so the next read fails with `ConnectionReset`, never a clean EOF: a protocol that frames by EOF must not take a cut message as complete. |
+| `RandomClose` | `random_close_probability`, `random_close_cooldown`, `random_close_explicit_ratio` (30%) | Reconnection and redelivery. 30% of closes return an error, 70% go silent, FoundationDB's ratio. A close that cuts the receive side discards the unread bytes, so the next read fails with `ConnectionReset`, never a clean EOF: a protocol that frames by EOF must not take a cut message as complete. A close that cuts the send side puts nothing on the wire; when the application then closes the stream, the close sends an RST, never a FIN, for the same reason. |
 | `ConnectFailure` | `connect_failure_mode` (`Disabled`, `AlwaysFail`, `Probabilistic`), `connect_failure_probability` | Missing connect timeouts. In `Probabilistic` mode a buggified connect fails with `ConnectionRefused` (or, one time in five, `HostUnreachable`). A small share of the others (one in ten) hangs like an unanswered SYN: after 127 simulated seconds it fails with `TimedOut`, as Linux does. |
 | `ClockDrift` | `clock_drift_enabled`, `clock_drift_max` (100 ms) | Leases, TTLs, anything that compares clocks across nodes. |
 | `BuggifiedDelay` | `buggified_delay_enabled`, `buggified_delay_max`, `buggified_delay_probability` (25%) | Timeouts. `TimeProvider::sleep` stretches by a power-law delay, only inside the chaos window. |
@@ -86,7 +86,7 @@ if ctx.time().sleep(Duration::from_secs(2)).await.is_err() {
 ctx.heal_partition(&leader, &follower)?;
 ```
 
-`FaultContext::partition` cuts both directions. `FaultContext::heal_partition` and `is_partitioned` complete the set. On `SimWorld`, `partition_pair(from, to, duration)` adds one directed entry, `restore_partition(from, to)` removes both, and `partition_send_from(ip, duration)` / `partition_recv_to(ip, duration)` are the one-way cuts.
+`FaultContext::partition` cuts both directions. `FaultContext::heal_partition` and `is_partitioned` complete the set. On `SimWorld`, `partition_pair(from, to, duration)` adds one directed entry, `restore_partition(from, to)` removes both, and `partition_send_from(ip, duration)` / `partition_recv_to(ip, duration)` are the one-way cuts. A new cut on a pair, a sender or a receiver that is already cut keeps the later of the two deadlines, as clogs do: a short random partition never shortens a long scripted one.
 
 ## Black Holes
 
@@ -108,9 +108,9 @@ Moonpool models three ways a connection ends, and your protocol must survive all
 
 - **Graceful close**: the closer's FIN goes behind every queued byte. The peer reads everything, then EOF. Dropping a drained stream does this.
 - **Write shutdown**: `AsyncWrite::close` sends the FIN, further writes fail with `BrokenPipe`, and the read half stays open. The reply to an EOF-delimited request still arrives.
-- **Abort**: no FIN, no drain. The peer gets a reset on its next read or write. Dropping a stream with unread bytes does this.
+- **Abort**: no FIN, no drain. The aborting side is reset at once, and an RST goes on the wire behind the bytes it already sent. The RST takes the link latency and a partition holds it, so the peer gets the reset on its next read or write after the RST lands, never at the same instant. Dropping a stream with unread bytes does this, and so does `SimWorld::close_connection_abort`.
 
-A process death is not an instant reset of both ends. The dead side's bytes already on the wire still land, so the last reply that a process wrote before it died can still arrive. What it queued but did not send, and what it received but did not read, is gone. Then the peer learns of the death through the network:
+A process death is not an instant reset of both ends. The dead side's bytes already on the wire still land, so the last reply that a process wrote before it died can still arrive. What it queued but did not send, and what it received but did not read, is gone. A stream the process had already closed is the exception when the host lives on: the kernel owns that socket, so its queued bytes and its FIN still go out. Then the peer learns of the death through the network:
 
 - **The host lives on** (a kill, an expired grace period, a restart in place, `RebootKind::KillKeepCache`, a retired process): the host sends an RST behind those bytes. The RST takes the link latency, and a partition holds it until the heal.
 - **The host lost power** (`RebootKind::Crash`, `RebootKind::CrashAndWipe`, an outage): nothing is sent. A peer that only reads waits until its own deadline. A peer that writes gets an RST back one round trip later.

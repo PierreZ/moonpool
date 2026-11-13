@@ -331,3 +331,50 @@ fn a_black_hole_opened_mid_flight_swallows_the_chunk() {
     assert_eq!(sim.in_flight_bytes(client.connection_id()), 0);
     assert_nothing_readable(&sim, &mut server);
 }
+
+/// Every chunk of a write burst pays the write latency, not only the last
+/// one: two writes made before the engine drains the queue land one link
+/// latency later, in order, never 1 ns after they leave.
+#[test]
+fn every_chunk_of_a_write_burst_pays_the_write_latency() {
+    let (mut sim, mut client, mut server) = connected();
+    let sent_at = sim.now();
+    for chunk in [&b"first"[..], &b"second"[..]] {
+        assert_eq!(
+            poll_write_once(&mut client, chunk).map(|result| result.expect("write is accepted")),
+            Poll::Ready(chunk.len())
+        );
+    }
+    let mut first = [0_u8; 5];
+    drive(&mut sim, server.read_exact(&mut first)).expect("the first chunk lands");
+    assert_eq!(&first, b"first");
+    assert_eq!(
+        sim.now(),
+        sent_at + LATENCY,
+        "the first chunk crossed the link like the last one"
+    );
+    let mut second = [0_u8; 6];
+    drive(&mut sim, server.read_exact(&mut second)).expect("the second chunk lands");
+    assert_eq!(&second, b"second");
+    assert!(
+        sim.now() > sent_at + LATENCY,
+        "and it lands behind the first"
+    );
+}
+
+/// The slices of one vectored write are chunks too: each pays the latency.
+#[test]
+fn every_slice_of_a_vectored_write_pays_the_write_latency() {
+    let (mut sim, mut client, mut server) = connected();
+    let sent_at = sim.now();
+    let slices = [io::IoSlice::new(b"head"), io::IoSlice::new(b"tail")];
+    let waker = noop_waker();
+    let written = Pin::new(&mut client)
+        .poll_write_vectored(&mut Context::from_waker(&waker), &slices)
+        .map(|result| result.expect("write is accepted"));
+    assert_eq!(written, Poll::Ready(8));
+    let mut head = [0_u8; 4];
+    drive(&mut sim, server.read_exact(&mut head)).expect("the first slice lands");
+    assert_eq!(&head, b"head");
+    assert_eq!(sim.now(), sent_at + LATENCY);
+}
