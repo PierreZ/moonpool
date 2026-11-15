@@ -34,7 +34,7 @@ Enable the `derive` feature of `moonpool-rpc`. Do not depend on this crate
 directly:
 
 ```toml
-moonpool-rpc = { version = "0.8", features = ["derive"] }
+moonpool-rpc = { version = "0.9", features = ["derive"] }
 ```
 
 Everything the attribute generates can be written by hand with the manual

@@ -77,7 +77,7 @@ full framework, which is what tests use. Production opts out:
 
 ```toml
 [dependencies]
-moonpool = { version = "0.8", default-features = false, features = ["tokio"] }
+moonpool = { version = "0.9", default-features = false, features = ["tokio"] }
 ```
 
 That stanza gives you the provider traits, `TokioProviders` and
@@ -109,7 +109,7 @@ charge names work that costs time. All three come from `moonpool-buggify`, a
 crate with zero dependencies, so production code depends on it directly:
 
 ```toml
-moonpool-buggify = "0.8"
+moonpool-buggify = "0.9"
 ```
 
 ```rust

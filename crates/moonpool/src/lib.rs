@@ -123,7 +123,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! moonpool = { version = "0.8", default-features = false, features = ["tokio"] }
+//! moonpool = { version = "0.9", default-features = false, features = ["tokio"] }
 //! ```
 //!
 //! ## Which crate to use

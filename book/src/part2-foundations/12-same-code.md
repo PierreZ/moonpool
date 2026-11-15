@@ -53,12 +53,12 @@ Determinism costs nothing at runtime in production, and the build must cost noth
 
 ```toml
 [dependencies]
-moonpool-core = { version = "0.8.0", default-features = false }
-moonpool-buggify = "0.8.0"
+moonpool-core = { version = "0.9.0", default-features = false }
+moonpool-buggify = "0.9.0"
 
 [dev-dependencies]
-moonpool-core = { version = "0.8.0", default-features = false, features = ["tokio-fs"] }
-moonpool-sim = "0.8.0"
+moonpool-core = { version = "0.9.0", default-features = false, features = ["tokio-fs"] }
+moonpool-sim = "0.9.0"
 ```
 
 `default-features = false` on moonpool-core drops the tokio providers and the `select!` passthrough, so the library compiles with no tokio at all. The simulator enters only as a dev-dependency. The tests get `SimStorageProvider`; the release gets nothing.
@@ -68,7 +68,7 @@ moonpool-sim = "0.8.0"
 **The facade has a lean configuration.** The `moonpool` crate's default features are `["sim", "tokio"]`, the full framework. A production build opts out:
 
 ```toml
-moonpool = { version = "0.8.0", default-features = false, features = ["tokio"] }
+moonpool = { version = "0.9.0", default-features = false, features = ["tokio"] }
 ```
 
 `tokio` enables core's `tokio-providers` and `select`, so `TokioProviders` and `moonpool::select!` are there. `sim` is off, so moonpool-sim and moonpool-explorer are absent from the dependency tree. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt` are opt-in on top of either configuration.
