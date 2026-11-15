@@ -16,7 +16,6 @@ ledger, and the workload judges its own outcomes against that ledger.
 | `sim-rpc-foundations` | `foundations` | Typed request/reply between two process groups and a surviving workload. The corruption suite: it alone draws bit flips |
 | `sim-rpc-delivery` | `delivery` | Every delivery mode, lost replies, crashes, simultaneous connects, bootstrap names, failure-monitor transitions |
 | `sim-rpc-interfaces` | `interfaces` | Interfaces published, stored, recruited and forwarded across same-address restarts |
-| `sim-rpc-balance` | `balance` | Balanced calls under separate retry and duplicate permissions, hedging, cancellation, late losers |
 | `sim-rpc-streams` | `streams` | Reply streams with consumption credit, abandonment, saturation, bounded admission, producer reboots |
 | `sim-rpc-security` | `security` | Credentials and access under key rotation, UTC transitions, crashes and mixed protocol versions |
 | `sim-rpc-tls` | `tls` | TLS 1.3 sessions, mutual or not, with certificates from the production authority, under UTC steps, certificate rotation and bit flips |
@@ -63,7 +62,6 @@ The same RPC code on `TokioProviders` over localhost TCP:
 ```sh
 cargo run -p moonpool-rpc-sim --example tcp_echo
 cargo run --release -p moonpool-rpc-sim --example tcp_latency
-cargo run --release -p moonpool-rpc-sim --example balance_latency
 cargo run --release -p moonpool-rpc-sim --example rpc_soak -- --smoke
 ```
 

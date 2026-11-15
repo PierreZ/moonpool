@@ -97,13 +97,6 @@ const REQUIRED: &[&str] = &[
     "rpc qual producer exhausted credit and resumed",
     "rpc qual stream ended by a disconnect mid-stream",
     "rpc qual stream failed by a graceful shutdown",
-    // Balancing.
-    "rpc qual balanced call fell back to another alternative",
-    "rpc qual balanced call hedged",
-    "rpc qual hedge budget exhausted",
-    "rpc qual late loser completed after its call returned",
-    "rpc qual stale incarnation skipped for a healthy one",
-    "rpc qual credentialed balanced call served",
     // Credentials and versions.
     "rpc qual expired credential denied before dispatch",
     "rpc qual rotated key denied then new key accepted",

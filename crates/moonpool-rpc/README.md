@@ -60,9 +60,8 @@ client from one trait.
 | `WellKnownId` / `WellKnownRef<M>` / `BootstrapClient<P, R>` / `RetryPolicy` | Bootstrap endpoints that survive restarts, hostname resolution, explicit retries |
 | `ResourceLimits` / `StreamPolicy` / `EndpointQueue` | Admission and buffering budgets per runtime, connection and endpoint. An endpoint can have its own admission queue |
 | `RpcError` = `ErrorReason` + `Execution` | The failure reason and what it proves: `NotAdmitted`, `MaybeExecuted`, `Executed` |
-| `balance::{AlternativeSet, BalancedClient, BalancePolicy, QueueModel}` | Load balancing over a versioned set of references: locality, queue model, penalties, separate retry and hedge permissions |
 | `Connector` / `Acceptor` / `Plaintext` / `PeerContext` | The session upgrade seam (plaintext by default, TLS with the `tls` feature) |
-| `security::{SecurityConfig, RequestVerifier, AccessPolicy, Credential, IpAllowList, UtcClock}` | Who may call what. Private endpoints fail closed by default |
+| `security::{SecurityConfig, RequestVerifier, AccessPolicy, Credential, UtcClock}` | Who may call what. Private endpoints fail closed by default |
 | `observability::RpcMetrics` / `RpcStats` | Counters and gauges as a bounded-label `MetricsSource` |
 
 Contracts:
@@ -85,7 +84,6 @@ Contracts:
 | `derive` | off | `#[moonpool_rpc::service]` (`moonpool-rpc-derive`) |
 | `tls` | off | TLS 1.3 sessions, server-authenticated or mutual (`ClientAuth`), via `futures-rustls` (rustls with `ring`). Native only |
 | `tls-pki` | off | A small Ed25519 certificate authority (`security::tls::pki`): roots and leaves with explicit UTC validity, keys from OS entropy or seed bytes. Native only |
-| `jwt` | off | JWT/JWKS request verification (`jsonwebtoken`, pure-Rust backend). Native only |
 
 With `--no-default-features` the transport still builds, also for
 `wasm32-unknown-unknown`; applications implement `Wire` themselves. The
@@ -116,8 +114,6 @@ non-published `moonpool-rpc-sim` crate.
 ```sh
 # Publish, restart and recruit interfaces on real TCP with the manual API.
 cargo run -p moonpool-rpc --example recruitment
-# What retry and hedge permissions do to a mutation whose reply is lost.
-cargo run -p moonpool-rpc --example balanced_mutation
 # Stream throughput by window, unary latency beside saturated streams.
 cargo run --release -p moonpool-rpc --example stream_saturation
 ```

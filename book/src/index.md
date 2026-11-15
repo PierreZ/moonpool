@@ -81,7 +81,7 @@ This page is a map of the book. Each entry links to one chapter and says what it
 - [Numeric Assertions](./part3-building/15-numeric-assertions.md): the two numeric macros and watermarks.
 - [Compound Assertions](./part3-building/16-compound-assertions.md): `assert_sometimes_all!` and `assert_sometimes_each!`.
 - [Events and Invariants](./part3-building/17-events-and-invariants.md): plain `tracing` events, the `Invariant` trait, the fault timeline.
-- [Application Metrics](./part3-building/25-metrics.md): per-node Prometheus metrics, metric queries, a metastable failure.
+- [Application Metrics](./part3-building/25-metrics.md): per-node Prometheus metrics in the report, a metastable failure.
 - [Designing Workloads That Find Bugs](./part3-building/19-designing-workloads.md): operation alphabets, swarm, invariant patterns.
 - [Debugging a Failing Seed](./part3-building/20-debugging.md): the workflow.
 - [Reproducing with FixedCount](./part3-building/21-reproducing.md): pin the seed, turn up the logs.
@@ -104,8 +104,8 @@ This page is a map of the book. Each entry links to one chapter and says what it
 
 - [Simulating the Network](./part4-networking/01-simulating-network.md): TCP, not packets; who owns what.
 - [Typed RPC with moonpool-rpc](./part4-networking/02-rpc.md): driver, endpoints, delivery modes, reply streams, failure monitor.
-- [What moonpool-rpc Promises](./part4-networking/03-rpc-guarantees.md): the promises and the seven campaigns that check them.
-- [Admission, Security and Derive](./part4-networking/04-rpc-operations.md): admission queues, buggify points, TLS, JWT, the derive macro.
+- [What moonpool-rpc Promises](./part4-networking/03-rpc-guarantees.md): the promises and the six campaigns that check them.
+- [Admission, Security and Derive](./part4-networking/04-rpc-operations.md): admission queues, buggify points, security, TLS, the derive macro.
 
 ## Part VI: Building on Top
 

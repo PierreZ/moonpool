@@ -19,7 +19,7 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 
 | Crate | Depend on it for | Features |
 |-------|------------------|----------|
-| `moonpool` | The facade. `moonpool_core::*`, `moonpool_sim::*` under `sim`, modules `hyper`, `prometheus`, `rpc`. | `default = ["sim", "tokio"]`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt` |
+| `moonpool` | The facade. `moonpool_core::*`, `moonpool_sim::*` under `sim`, modules `hyper`, `prometheus`, `rpc`. | `default = ["sim", "tokio"]`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki` |
 | `moonpool-core` | Provider traits and core types. | `default = ["tokio-providers", "select"]`, `compio-providers`, `deterministic-select` |
 | `moonpool-sim` | The runtime, builder, chaos, assertions, observability. | `default = ["tokio-providers", "exploration"]` |
 | `moonpool-assertions`, `moonpool-buggify` | Probes and fault sites for libraries. Zero dependencies. | none |
@@ -111,7 +111,7 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `max_spawns(n)` | Cap on processes workloads spawn per run through `ctx.deployment()`. Default 16. |
 | `spawnable_group(name)` | Declare a group a workload starts later with `spawn_group`, so a `GrayFailure` or `Outage` may name it (else refused as unregistered). A gray window on it picks its victim when it starts. Draws nothing. |
 | `invariant(i)`, `invariant_fn(name, \|q, t\| ..)`, `trace_level(level)` | Invariants run after every step. |
-| `metrics_factory(\|ip\| Arc<S>)`, `metric(MetricQuery::select("m").label(k, v).rate().bucketize(d, Mean).reduce(Mean).named("x"))` | App metrics in the report. |
+| `metrics_factory(\|ip\| Arc<S>)` | App metrics in the report. |
 | `set_iterations(n)`, `until_coverage_stable(10, 1000)` (default), `set_debug_seeds(seeds)`, `run_time_budget(d)` (1 h), `wall_clock_budget(d)` (stop between seeds; `report.wall_clock_budget_spent`), `corpus_file(path)` (replay seeds first, write the seeds that grew coverage, keep the corpus seeds not replayed; `report.corpus_seeds`) | Campaign control. |
 | `enable_exploration(ExplorationConfig)`, `record_exploration_tree()`, `replay_timeline(seed, recipe)`, `check_determinism()` | Exploration, replay, canary. |
 
@@ -125,7 +125,7 @@ No builder method accepts a `NetworkConfiguration` or `StorageConfiguration`. Wi
 | `assertion_results`, `assertion_details`, `bucket_summaries`, `assertion_violations`, `coverage_violations`, `dropped_assertion_allocations` | Assertion accounting. With `.require_declared_sites(["my_crate"])` (and `.exempt_declared_sites([..])`) every literal-message assertion site of those modules gets a slot before seed 1, so a site no seed reaches is reported as "never reached". |
 | `saturation: Option<SaturationReport { signal, edges_covered, edges_total, sometimes_hit, sometimes_total, plateau_seeds }>`, `convergence_timeout` | How `UntilCoverageStable` stopped. |
 | `exploration: Option<ExplorationReport { total_timelines, expansions, edge_expansions, discoveries, bugs_found, bug_recipes, max_active_workers, sancov_edges_total, sancov_edges_covered, converged, per_seed_timelines, timelines }>` | Exploration. `timelines` is empty unless `record_exploration_tree()`: then each `ExploredTimeline { seed, recipe, failed, discoveries }` in run order. |
-| `metrics`, `individual_metrics`, `app_metrics`, `metric_queries`, `run_id` | Timing and application metrics. |
+| `metrics`, `individual_metrics`, `app_metrics`, `run_id` | Timing and application metrics. |
 
 `report.eprint()` prints it. `success_rate()`, `average_wall_time()`, `average_simulated_time()`.
 
@@ -258,7 +258,7 @@ For provider tests without the runner: `SimWorld::new_with_seed(seed)`, `new_wit
 | Storage faults and crash model | `crates/moonpool-sim/tests/storage.rs`, `crates/moonpool-sim-examples/src/journal.rs` |
 | CPU and gray failure | `crates/moonpool-sim/tests/cpu.rs` |
 | Exploration | `crates/moonpool-sim-examples/src/maze.rs`, `dungeon.rs`, `crates/moonpool-sim/tests/exploration.rs` |
-| Metrics | `crates/moonpool-sim/tests/metric_queries.rs`, `crates/moonpool-sim-examples/src/metrics_service.rs` |
+| Metrics | `crates/moonpool-prometheus/tests/simulation.rs`, `crates/moonpool-sim-examples/src/metrics_service.rs` |
 | HTTP and gRPC | `crates/moonpool-sim-examples/src/axum_web.rs`, `tonic_grpc.rs` |
 | Determinism | `crates/moonpool-sim/tests/determinism.rs`, `determinism_canary.rs` |
 | RPC campaigns | `crates/moonpool-rpc-sim/src/` |

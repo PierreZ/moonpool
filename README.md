@@ -156,7 +156,7 @@ and under the simulator in its own `#[test]`.
 - `check_determinism` runs each seed twice and fails it when the draw
   sequences differ.
 - `SimulationReport` with failing seeds, assertion and coverage violations,
-  exploration results, application metrics and metric queries.
+  exploration results and application metrics.
 
 ### Chaos and faults
 
@@ -241,9 +241,9 @@ and under the simulator in its own `#[test]`.
 
 - Raw TCP over `NetworkProvider`: test your own protocol byte for byte.
 - `moonpool-rpc`: typed dynamic endpoints, delivery modes, reply streams,
-  balancing, per-endpoint admission queues, buggify points inside the
-  runtime, `#[service]` derive, TLS (mutual TLS included, simulated by
-  `sim-rpc-tls`) and JWT features.
+  per-endpoint admission queues, buggify points inside the runtime,
+  `#[service]` derive and TLS (mutual TLS included, simulated by
+  `sim-rpc-tls`).
   `moonpool-rpc-sim` holds its simulation campaigns.
 - `moonpool-hyper`: hyper 1.x, tonic gRPC and axum on the providers, with a
   reconnecting h2 channel and a per-connection server.
@@ -274,8 +274,8 @@ and under the simulator in its own `#[test]`.
 
 - `metrics_factory` gives each node a `MetricsSource`. `PrometheusSource`
   records every change on the simulated clock.
-- `metric` with `MetricQuery` asks questions of the series: rate,
-  bucketize, fill, map, reduce and percentiles.
+- The report folds every node's counters, gauges and histograms across
+  the successful seeds, and keeps each seed's exact series.
 
 ### WebAssembly
 
@@ -295,7 +295,7 @@ and under the simulator in its own `#[test]`.
 
 | Crate | Purpose | Published |
 |-------|---------|-----------|
-| `moonpool` | Facade: features `sim`, `tokio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki`, `rpc-jwt` | yes |
+| `moonpool` | Facade: features `sim`, `tokio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki` | yes |
 | `moonpool-core` | Provider traits, `TokioProviders`, storage and metrics types | yes |
 | `moonpool-sim` | Simulator, runner, chaos, assertion macros | yes |
 | `moonpool-buggify` | `buggify!`, `hint!`, `cpu_charge`; zero dependencies | yes |

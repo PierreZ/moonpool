@@ -112,7 +112,8 @@ reaches a fresh incarnation behind the caller's back. Learning the new
 reference is the application's job.
 
 `attempt(&req)` returns a `ReplyAttempt`, one attempt as a future. Keep it
-after the caller moved on (the loser of a hedged pair) and it still yields
+after the caller moved on (the slower of two copies an application sent)
+and it still yields
 the late outcome. Drop it and a late reply is counted in `late_replies` and
 discarded. `cancel()` reports what is known now: `NotAdmitted` if it never
 left, or possibly executed.
@@ -250,42 +251,6 @@ durable state behind it is the one we were talking to.
 A `ReplyHandle` is bound to the session its request arrived on and has no
 byte form, so it cannot be forwarded. A callback a third party may call is an
 ordinary registered endpoint whose `ServiceRef` travels in the request.
-
-## Balancing Across Alternatives
-
-A read that three replicas can serve should go to the fastest one, skip the
-one that just crashed, and maybe try a second one when the first is slow.
-`moonpool_rpc::balance` keeps FoundationDB's `loadBalance` mechanics and
-makes the permissions explicit, because **sending one request twice is only
-safe if the application says so**:
-
-```rust,ignore
-let model = QueueModel::new(ModelConfig::default())?;
-let balanced = BalancedClient::new(&rpc, set, model.clone(), BalanceConfig {
-    locality: Locality::new("m1", "dc1"),
-    ..BalanceConfig::default()
-})?;
-spawn(model.collect_lagging()); // late losers still update the model
-
-// An idempotent read: retry after an ambiguous attempt, hedge a slow one.
-let policy = BalancePolicy {
-    retry: Retry::AfterAmbiguous,
-    duplicates: Duplicates::hedged(),
-    ..BalancePolicy::default()
-};
-let read = balanced.call(Get { key }, &policy).await?;
-```
-
-The input is an `AlternativeSet<M>`: typed references to specific
-incarnations, each with a `Locality`, under a `SetVersion` the application
-chooses. The balancer never refreshes a reference. The application installs
-a newer set with `replace`, and a call whose every alternative is gone fails
-with `StaleAlternatives`. Two permissions are independent and off by default:
-`Retry::AfterAmbiguous` and `Duplicates::Permitted`. Failing over after an
-attempt proven `NotAdmitted` needs no permission. The `balanced_mutation`
-example shows the difference on a deposit whose reply is lost: at most once
-reports `MaybeExecuted` and stops, a blind retry deposits twice, a deposit
-keyed by id applies once.
 
 ## Shutting Down
 

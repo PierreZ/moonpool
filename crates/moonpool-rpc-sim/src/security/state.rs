@@ -416,7 +416,7 @@ pub fn consistent_denial(
         | (Kind::UnknownKey | Kind::RotatedOut, CredentialError::UnknownKey)
         | (Kind::WrongAudience, CredentialError::WrongAudience)
         | (Kind::WrongIssuer, CredentialError::WrongIssuer)
-        | (Kind::Symmetric, CredentialError::UnsupportedAlgorithm)
+        | (Kind::WrongAlgorithm, CredentialError::UnsupportedAlgorithm)
         | (Kind::Garbage, CredentialError::Malformed) => true,
         // Only if servers lacked the time at some moment between the
         // sending and the outcome, and only once the signature verified.
@@ -431,7 +431,7 @@ pub fn consistent_denial(
         // audience are checked: any token naming a key that is no longer
         // published (two rotations can pass while a request waits for its
         // session) meets this first. Only the algorithm comes earlier.
-        (kind, CredentialError::UnknownKey) if kind != Kind::Symmetric => minted
+        (kind, CredentialError::UnknownKey) if kind != Kind::WrongAlgorithm => minted
             .key
             .is_some_and(|key| !trust.published_between(key, generation, generation)),
         _ => false,

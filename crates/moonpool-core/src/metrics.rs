@@ -21,19 +21,43 @@
 //! noise and vary run to run. Record durations from the simulated clock
 //! (`ctx.time()`) if you want a metric that is stable across replays of a seed.
 //!
-//! # Asking questions of the recorded series
-//!
-//! [`query`] turns the points a run recorded into numbers a report can print:
-//! a small typed SELECT / RATE / BUCKETIZE / FILL / MAP / REDUCE model,
-//! evaluated against one run's [`query::MetricSnapshot`].
-//!
 //! Adapters must emit samples in a deterministic order — sort by
 //! [`MetricSample::sort_key`] if the backing registry does not already
 //! guarantee one — so that two replays of the same seed produce byte-identical
 //! reports.
 
-pub mod query;
-pub use query::f64_to_u64;
+mod series_key;
+pub use series_key::SeriesKey;
+
+/// Truncate an `f64` toward zero into a `u64`, saturating.
+///
+/// NaN, negatives and everything below `1.0` become `0`; anything at or above
+/// `2^64` (infinity included) becomes `u64::MAX`. In between, the IEEE-754
+/// fields are decoded by hand, which is exact and keeps the conversion free
+/// of both `unsafe` and a lossy primitive cast. This is the one float-to-int
+/// conversion the workspace uses; every renderer and query goes through it.
+#[must_use]
+pub fn f64_to_u64(v: f64) -> u64 {
+    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
+    const MANTISSA_BITS: u32 = 52;
+    const EXPONENT_BIAS: u32 = 1023;
+    if v.is_nan() || v < 1.0 {
+        return 0;
+    }
+    if v >= TWO_POW_64 {
+        return u64::MAX;
+    }
+    let bits = v.to_bits();
+    let biased = u32::try_from((bits >> MANTISSA_BITS) & 0x7FF).unwrap_or(0);
+    // `1.0 <= v < 2^64` pins the unbiased exponent to `0..=63`.
+    let exponent = biased.saturating_sub(EXPONENT_BIAS).min(63);
+    let mantissa = (bits & ((1 << MANTISSA_BITS) - 1)) | (1 << MANTISSA_BITS);
+    if exponent >= MANTISSA_BITS {
+        mantissa << (exponent - MANTISSA_BITS)
+    } else {
+        mantissa >> (MANTISSA_BITS - exponent)
+    }
+}
 
 /// Widen a `u64` to `f64`, exactly for every value below `2^53`.
 ///
@@ -200,12 +224,12 @@ impl MetricSample {
 }
 
 /// The canonical `name{key="value",...}` form of a series, shared by
-/// [`MetricSample::sort_key`] and [`query::SeriesKey`]'s `Display` so the two
+/// [`MetricSample::sort_key`] and [`SeriesKey`]'s `Display` so the two
 /// stay byte-identical.
 ///
 /// Label values are escaped as in the Prometheus text format (`\\`, `\"`,
 /// `\n`), so a value that contains `"` or `,` cannot make two different label
-/// sets give the same key. [`query::SeriesKey::parse`] reverses the escapes.
+/// sets give the same key. [`SeriesKey::parse`] reverses the escapes.
 fn series_identity(name: &str, labels: &[(String, String)]) -> String {
     if labels.is_empty() {
         return name.to_owned();
@@ -528,6 +552,21 @@ mod tests {
         fn now_ms(&self) -> u64 {
             self.0.load(std::sync::atomic::Ordering::Relaxed)
         }
+    }
+
+    #[test]
+    fn f64_to_u64_truncates_and_saturates() {
+        assert_eq!(f64_to_u64(f64::NAN), 0);
+        assert_eq!(f64_to_u64(-3.0), 0);
+        assert_eq!(f64_to_u64(0.0), 0);
+        assert_eq!(f64_to_u64(0.999), 0);
+        assert_eq!(f64_to_u64(1.0), 1);
+        assert_eq!(f64_to_u64(1.999), 1);
+        assert_eq!(f64_to_u64(4_294_967_296.5), 4_294_967_296);
+        assert_eq!(f64_to_u64(9_007_199_254_740_992.0), 1 << 53);
+        assert_eq!(f64_to_u64(1e19), 10_000_000_000_000_000_000);
+        assert_eq!(f64_to_u64(18_446_744_073_709_551_616.0), u64::MAX);
+        assert_eq!(f64_to_u64(f64::INFINITY), u64::MAX);
     }
 
     #[test]

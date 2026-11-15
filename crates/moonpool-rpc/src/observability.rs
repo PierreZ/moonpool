@@ -124,10 +124,6 @@ impl MetricsSource for RpcMetrics {
             counter("credentials_attached", stats.credentials_attached),
             counter("connections_opened", stats.connections_opened),
             counter("connections_rejected", stats.connections_rejected),
-            counter(
-                "connections_refused_by_policy",
-                stats.connections_refused_by_policy,
-            ),
             counter("accept_errors", stats.accept_errors),
             counter("dials", stats.dials),
             counter("protocol_violations", stats.protocol_violations),

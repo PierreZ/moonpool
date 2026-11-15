@@ -766,15 +766,6 @@ impl<P: RpcProviders> Shared<P> {
         if self.is_closing() {
             return None;
         }
-        if !self.config.security.allow_list().allows_peer(&peer) {
-            Counters::bump(&self.counters.connections_refused_by_policy);
-            tracing::warn!(
-                target: "moonpool_rpc::audit",
-                from = %peer,
-                "rpc_connection_refused"
-            );
-            return None;
-        }
         let mut state = self.lock();
         if state.connections.len() >= self.config.max_connections {
             drop(state);

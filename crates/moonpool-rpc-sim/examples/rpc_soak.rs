@@ -7,7 +7,7 @@
 //!
 //! Calls are offered open loop at their scheduled instants (the generator
 //! never waits for replies); latency is measured from the moment a call
-//! actually starts, as in `balance_latency`, and the generator's own lag
+//! actually starts, and the generator's own lag
 //! behind the schedule (Tokio's timer has millisecond granularity) is
 //! reported beside it. Every scenario ends by dropping its runtimes
 //! and requires every resource probe back at its baseline

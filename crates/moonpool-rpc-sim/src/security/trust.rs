@@ -1,28 +1,28 @@
 //! The run's trust material, outside every runtime: the scripted UTC, the
-//! rotating Ed25519 key ring and its published JWKS, and token issuance.
+//! rotating key ring, token issuance and the verifier servers use.
 //!
-//! Keys are derived from fixed seeds and `EdDSA` signs deterministically, so
-//! a seed replays the same tokens byte for byte. None of this is secret or
-//! secure: it is a deterministic stand-in for an identity provider, used
-//! to drive the production verifier through key and time transitions.
+//! The tokens are the campaign's own format, not a standard one:
+//! `alg.kid.sub.iss.aud.nbf.exp.mac`, where `mac` is a keyed XXH3-64 of
+//! everything before it under the secret of the key that signed it. None of
+//! this is secret or secure: it is a deterministic stand-in for an identity
+//! provider, used to drive the runtime's credential path (the
+//! [`RequestVerifier`] seam, denials, audit, metrics) through key and time
+//! transitions. A seed replays the same tokens byte for byte.
 //!
-//! **Keep simulated signing deterministic.** `EdDSA` (and HMAC) signatures
-//! are functions of the key and the message; `jsonwebtoken`'s ECDSA signer
-//! uses RFC 6979 nonces as well, but its RSA (`RS*`/`PS*`) signing draws
-//! from `thread_rng`, the host's entropy: a seed would no longer replay the
-//! same tokens and the determinism canary would trip. Never sign with RSA
-//! here.
+//! The verifier checks in the order a signed-token verifier does: the
+//! format, the algorithm, the key id against the published keys, the
+//! signature, the issuer and the audience, then the time. The oracle in
+//! [`super::state`] relies on that order.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::lock;
-use jsonwebtoken::jwk::{Jwk, JwkSet};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use moonpool_rpc::security::jwt::{JwksKeys, JwtConfig, JwtVerifier};
-use moonpool_rpc::security::{FixedUtc, UtcTime};
-use moonpool_sim::{SimulationError, SimulationResult, StateHandle};
+use moonpool_rpc::security::{
+    AccessRequest, CredentialError, FixedUtc, Principal, RequestVerifier, UtcTime,
+};
+use moonpool_sim::{SimulationResult, StateHandle};
 
 const TRUST_KEY: &str = "rpc.security.trust";
 
@@ -36,6 +36,8 @@ pub const START_UTC: u64 = 1_893_456_000;
 const PUBLISHED_KEYS: usize = 2;
 /// The index of a key that is never published.
 const STRANGER: u32 = u32::MAX;
+/// The one algorithm the verifier accepts.
+const ALGORITHM: &str = "sim-mac";
 
 /// The key id of key `index`.
 #[must_use]
@@ -47,37 +49,53 @@ pub fn kid(index: u32) -> String {
     }
 }
 
-/// Key `index`: an Ed25519 key from a fixed seed (PKCS#8 v1 DER).
-fn signing_key(index: u32) -> EncodingKey {
-    let mut der = vec![
-        0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
-        0x20,
-    ];
-    let mut seed = [0x5e_u8; 32];
-    seed[..4].copy_from_slice(&index.to_le_bytes());
-    der.extend_from_slice(&seed);
-    EncodingKey::from_ed_der(&der)
+/// The key index a key id names, if it names one.
+fn index_of(kid: &str) -> Option<u32> {
+    if kid == "stranger" {
+        return Some(STRANGER);
+    }
+    kid.strip_prefix('k')?.parse().ok()
 }
 
-fn install_provider() {
-    let _ = jsonwebtoken::crypto::CryptoProvider::install_default(
-        &jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER,
-    );
+/// Key `index`'s secret: a fixed function of the index.
+fn secret(index: u32) -> u64 {
+    0x5e5e_5e5e_0000_0000 ^ u64::from(index).wrapping_mul(0x9e37_79b9_7f4a_7c15)
 }
 
-fn public_jwk(index: u32) -> Option<Jwk> {
-    install_provider();
-    let mut jwk = Jwk::from_encoding_key(&signing_key(index), Algorithm::EdDSA).ok()?;
-    jwk.common.key_id = Some(kid(index));
-    Some(jwk)
+/// The signature of `payload` under key `index`.
+fn mac(payload: &str, index: u32) -> String {
+    format!(
+        "{:016x}",
+        xxhash_rust::xxh3::xxh3_64_with_seed(payload.as_bytes(), secret(index))
+    )
 }
 
-fn jwks(indices: &[u32]) -> JwkSet {
-    JwkSet {
-        keys: indices
-            .iter()
-            .filter_map(|index| public_jwk(*index))
-            .collect(),
+/// One token's fields, before signing.
+struct Claims<'a> {
+    algorithm: &'a str,
+    kid: String,
+    subject: &'a str,
+    issuer: &'a str,
+    audience: &'a str,
+    not_before: u64,
+    expires: u64,
+}
+
+impl Claims<'_> {
+    /// The token, signed by key `signer`.
+    fn sign(&self, signer: u32) -> Vec<u8> {
+        let payload = format!(
+            "{}.{}.{}.{}.{}.{}.{}",
+            self.algorithm,
+            self.kid,
+            self.subject,
+            self.issuer,
+            self.audience,
+            self.not_before,
+            self.expires
+        );
+        let signature = mac(&payload, signer);
+        format!("{payload}.{signature}").into_bytes()
     }
 }
 
@@ -102,8 +120,8 @@ pub enum Kind {
     WrongAudience,
     /// From another issuer.
     WrongIssuer,
-    /// HS256 with the newest key's id: algorithm confusion.
-    Symmetric,
+    /// Names the newest key under an algorithm the verifier refuses.
+    WrongAlgorithm,
     /// Not a token at all.
     Garbage,
     /// Minted afresh by the caller's credential source for every attempt.
@@ -122,7 +140,7 @@ impl Kind {
         Self::UnknownKey,
         Self::WrongAudience,
         Self::WrongIssuer,
-        Self::Symmetric,
+        Self::WrongAlgorithm,
         Self::Garbage,
     ];
 
@@ -157,12 +175,14 @@ pub struct Minted {
 }
 
 struct Ring {
+    /// The key set's generation: bumped by every rotation.
+    generation: u64,
     /// Published key indices, oldest first.
     published: Vec<u32>,
     /// Keys ever retired.
     retired: Vec<u32>,
     next: u32,
-    /// Published key indices per JWKS generation.
+    /// Published key indices per generation.
     history: BTreeMap<u64, Vec<u32>>,
 }
 
@@ -176,7 +196,6 @@ pub struct Trust {
     /// The clock epoch: incremented at each forget and each restore, so
     /// the servers have no UTC exactly when it is odd.
     clock_epoch: Arc<AtomicU64>,
-    keys: JwksKeys,
     ring: Arc<Mutex<Ring>>,
     /// Every token minted in the run, by any caller or source.
     tokens: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -188,24 +207,23 @@ impl Trust {
     ///
     /// # Errors
     ///
-    /// If the fixed key 0 cannot be published (a broken dependency).
+    /// Never: kept fallible so callers need not change if creation ever
+    /// can fail.
     pub fn of(state: &StateHandle) -> SimulationResult<Self> {
         if let Some(trust) = state.get::<Self>(TRUST_KEY) {
             return Ok(trust);
         }
-        let keys = JwksKeys::from_set(&jwks(&[0]))
-            .map_err(|error| SimulationError::InvalidState(format!("key 0: {error}")))?;
         let trust = Self {
             utc: Arc::new(AtomicU64::new(START_UTC)),
             clock: FixedUtc::new(UtcTime::from_unix_seconds(START_UTC)),
             clock_epoch: Arc::new(AtomicU64::new(0)),
             ring: Arc::new(Mutex::new(Ring {
+                generation: 1,
                 published: vec![0],
                 retired: Vec::new(),
                 next: 1,
-                history: BTreeMap::from([(keys.generation(), vec![0])]),
+                history: BTreeMap::from([(1, vec![0])]),
             })),
-            keys,
             tokens: Arc::new(Mutex::new(Vec::new())),
         };
         state.publish(TRUST_KEY, trust.clone());
@@ -224,23 +242,18 @@ impl Trust {
         self.clock.clone()
     }
 
-    /// The current JWKS generation.
+    /// The current key set generation.
     #[must_use]
     pub fn generation(&self) -> u64 {
-        self.keys.generation()
+        lock(&self.ring).generation
     }
 
     /// A verifier over the shared, rotating key set.
-    ///
-    /// # Errors
-    ///
-    /// If the fixed configuration is refused (a broken dependency).
-    pub fn verifier(&self, cache_capacity: usize) -> SimulationResult<JwtVerifier> {
-        let mut config = JwtConfig::new(ISSUER, AUDIENCE);
-        config.algorithms = vec![Algorithm::EdDSA];
-        config.cache_capacity = cache_capacity;
-        JwtVerifier::new(self.keys.clone(), config)
-            .map_err(|error| SimulationError::InvalidState(error.to_string()))
+    #[must_use]
+    pub fn verifier(&self) -> Verifier {
+        Verifier {
+            ring: Arc::clone(&self.ring),
+        }
     }
 
     /// Move UTC `seconds` later (servers see it unless it is forgotten).
@@ -284,11 +297,13 @@ impl Trust {
     }
 
     /// Publish a fresh key and retire the oldest ones, so at most two keys
-    /// stay published; returns the new generation.
+    /// stay published; returns the new generation. Like `FoundationDB`'s
+    /// `applyPublicKeySet`, a rotation replaces the whole set: a key left
+    /// out is refused for every later request.
     ///
     /// # Errors
     ///
-    /// If a fixed key cannot be published (a broken dependency).
+    /// Never: kept fallible for the callers' sake.
     pub fn rotate(&self) -> SimulationResult<u64> {
         let mut ring = lock(&self.ring);
         let fresh = ring.next;
@@ -298,10 +313,8 @@ impl Trust {
             let retired = ring.published.remove(0);
             ring.retired.push(retired);
         }
-        let generation = self
-            .keys
-            .replace_set(&jwks(&ring.published))
-            .map_err(|error| SimulationError::InvalidState(format!("rotation: {error}")))?;
+        ring.generation += 1;
+        let generation = ring.generation;
         let published = ring.published.clone();
         ring.history.insert(generation, published);
         Ok(generation)
@@ -334,8 +347,8 @@ impl Trust {
         minted
     }
 
-    /// Every token minted so far in the run: each caller's, each one a
-    /// refreshing source made, each one the balancer's source made.
+    /// Every token minted so far in the run: each caller's and each one a
+    /// refreshing source made.
     #[must_use]
     pub fn tokens(&self) -> Vec<Vec<u8>> {
         lock(&self.tokens).clone()
@@ -360,22 +373,20 @@ impl Trust {
         let plan = match kind {
             Kind::Anonymous => return unsigned(None),
             Kind::Garbage => return unsigned(Some(b"not a token".to_vec())),
-            Kind::Symmetric => {
-                let mut header = Header::new(Algorithm::HS256);
-                header.kid = Some(kid(newest));
-                let token = EncodingKey::from_secret(b"not-a-public-key")
-                    .and_then(|key| {
-                        encode(
-                            &header,
-                            &claims(subject, ISSUER, AUDIENCE, now - 5, now + 300),
-                            &key,
-                        )
-                    })
-                    .ok()
-                    .map(String::into_bytes);
+            Kind::WrongAlgorithm => {
+                let token = Claims {
+                    algorithm: "none",
+                    kid: kid(newest),
+                    subject,
+                    issuer: ISSUER,
+                    audience: AUDIENCE,
+                    not_before: now - 5,
+                    expires: now + 300,
+                }
+                .sign(newest);
                 return Minted {
                     kind,
-                    token,
+                    token: Some(token),
                     key: Some(newest),
                     not_before: now - 5,
                     expires: now + 300,
@@ -383,24 +394,19 @@ impl Trust {
             }
             _ => Plan::of(kind, now, newest, retired, ttl, delay),
         };
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.kid = Some(kid(plan.named));
-        let token = encode(
-            &header,
-            &claims(
-                subject,
-                plan.issuer,
-                plan.audience,
-                plan.not_before,
-                plan.expires,
-            ),
-            &signing_key(plan.signer),
-        )
-        .ok()
-        .map(String::into_bytes);
+        let token = Claims {
+            algorithm: ALGORITHM,
+            kid: kid(plan.named),
+            subject,
+            issuer: plan.issuer,
+            audience: plan.audience,
+            not_before: plan.not_before,
+            expires: plan.expires,
+        }
+        .sign(plan.signer);
         Minted {
             kind: plan.kind,
-            token,
+            token: Some(token),
             key: Some(plan.named),
             not_before: plan.not_before,
             expires: plan.expires,
@@ -408,7 +414,7 @@ impl Trust {
     }
 }
 
-/// How an `EdDSA` token of some kind is signed and what it says.
+/// How a token of some kind is signed and what it says.
 struct Plan {
     kind: Kind,
     signer: u32,
@@ -478,23 +484,75 @@ impl Plan {
                 issuer: "mallory",
                 ..proper
             },
-            Kind::Anonymous | Kind::Garbage | Kind::Symmetric => proper,
+            Kind::Anonymous | Kind::Garbage | Kind::WrongAlgorithm => proper,
         }
     }
 }
 
-fn claims(
-    subject: &str,
-    issuer: &str,
-    audience: &str,
-    not_before: u64,
-    expires: u64,
-) -> serde_json::Value {
-    serde_json::json!({
-        "sub": subject,
-        "iss": issuer,
-        "aud": audience,
-        "nbf": not_before,
-        "exp": expires,
-    })
+/// The servers' verifier: the campaign's tokens against the key set in
+/// force at the moment of the check. Clones share the key ring.
+#[derive(Clone)]
+pub struct Verifier {
+    ring: Arc<Mutex<Ring>>,
+}
+
+impl Verifier {
+    fn published(&self) -> BTreeSet<u32> {
+        lock(&self.ring).published.iter().copied().collect()
+    }
+}
+
+impl RequestVerifier for Verifier {
+    fn verify(
+        &self,
+        request: &AccessRequest<'_>,
+        credential: &[u8],
+    ) -> Result<Principal, CredentialError> {
+        let token = std::str::from_utf8(credential).map_err(|_| CredentialError::Malformed)?;
+        let fields: Vec<&str> = token.split('.').collect();
+        let [
+            algorithm,
+            kid,
+            subject,
+            issuer,
+            audience,
+            not_before,
+            expires,
+            signature,
+        ] = fields[..]
+        else {
+            return Err(CredentialError::Malformed);
+        };
+        let not_before: u64 = not_before.parse().map_err(|_| CredentialError::Malformed)?;
+        let expires: u64 = expires.parse().map_err(|_| CredentialError::Malformed)?;
+        if algorithm != ALGORITHM {
+            return Err(CredentialError::UnsupportedAlgorithm);
+        }
+        let key = index_of(kid)
+            .filter(|index| self.published().contains(index))
+            .ok_or(CredentialError::UnknownKey)?;
+        let payload = &token[..token.len() - signature.len() - 1];
+        if mac(payload, key) != signature {
+            return Err(CredentialError::BadSignature);
+        }
+        if issuer != ISSUER {
+            return Err(CredentialError::WrongIssuer);
+        }
+        if audience != AUDIENCE {
+            return Err(CredentialError::WrongAudience);
+        }
+        let now = request
+            .now
+            .ok_or(CredentialError::ClockUnavailable)?
+            .unix_seconds();
+        if now >= expires {
+            return Err(CredentialError::Expired);
+        }
+        if now < not_before {
+            return Err(CredentialError::NotYetValid);
+        }
+        Ok(Principal::new(subject)
+            .with_issuer(issuer)
+            .with_expiry(UtcTime::from_unix_seconds(expires)))
+    }
 }

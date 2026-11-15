@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use moonpool_core::TimeProvider;
-use moonpool_core::metrics::query::SeriesKey;
+use moonpool_core::metrics::SeriesKey;
 use moonpool_core::metrics::{SeriesRecorder, u64_to_f64_exact};
 use prometheus::{Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec};
 

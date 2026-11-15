@@ -109,7 +109,7 @@ Types: `fix` (bugfix), `feat` (new feature), `build`, `chore`, `ci`, `docs`, `st
 ```
 crates/
 ├── moonpool/              - Facade crate; features: sim/tokio/hyper/prometheus/rpc
-│                            (rpc-derive/rpc-tls/rpc-jwt).
+│                            (rpc-derive/rpc-tls).
 ├── moonpool-core/         - Provider traits (Time, Task, Network, Random, Storage) + core types.
 │                            One feature per backend: `tokio-providers` (default) and, for the
 │                            local (non-Send) traits, `compio-providers` (off by default).

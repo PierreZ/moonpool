@@ -113,112 +113,9 @@ async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
 }
 ```
 
-## Asking Questions: Metric Queries
+## Turning Series into Answers
 
-A raw series is data, not an answer. After five hundred seeds the question is "what throughput did this hold, and which seed was worst?" So the **runner declares what it wants to know**, and the report answers:
-
-```rust,ignore
-use std::time::Duration;
-use moonpool_sim::{Fill, Mean, MetricQuery, Percentile};
-
-let report = SimulationBuilder::new()
-    .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
-    .metric(
-        MetricQuery::select("requests_total")
-            .label("operation", "write")
-            .rate()
-            .bucketize(Duration::from_secs(60), Mean)
-            // A minute with no requests is zero per second, not missing data.
-            .fill(Fill::Value(0.0))
-            .reduce(Mean)
-            .named("write_throughput"),
-    )
-    .metric(
-        MetricQuery::select("request_latency_seconds")
-            .bucketize(Duration::from_secs(60), Percentile(0.99))
-            .named("write_p99"),
-    )
-    .processes(3, || Box::new(MyNode::new()))
-    .workload(MyWorkload::default())
-    .set_iterations(500)
-    .run()?;
-```
-
-```text
-━━━ Metric Queries (2) ━━━━━━━━━━━━━━━━━━━━━━━━━━
-  write_throughput
-    requests_total{operation="write"} → rate → 60s buckets (mean) → reduce (mean)  ·  scalar per run  ·  runs: 500
-    min            5,421   seed=9182
-    mean           5,973
-    max            6,102   seed=224
-    across runs:  p50 5,991  p95 6,071  p99 6,094
-```
-
-`min` and `max` name the seed, so the worst run goes straight into `set_debug_seeds(vec![9182])`. Results travel with the report in `SimulationReport::metric_queries`, one `MetricQueryReport` per query, with every per-seed `MetricQueryRow`.
-
-### The Operations
-
-| Op | What it does |
-|----|--------------|
-| `select(name)` + `.label(k, v)` | pick series by name and label subset |
-| `.rate()` | monotonic counter to per-second rate, on simulated time |
-| `.bucketize(width, agg)` | regularize into fixed simulated-time buckets |
-| `.fill(policy)` | repeat an existing value into empty buckets |
-| `.interpolate()` | compute empty buckets from their neighbours |
-| `.map(window, agg)` | rolling window over one series |
-| `.reduce(agg)` / `.reduce_by(label, agg)` | combine across series |
-| `.named(name)` | finish the plan |
-
-The aggregators are `Min`, `Mean`, `Max` and `Percentile(p)`. Nothing else.
-
-**Counter semantics are explicit.** `.rate()` is the only place a series is read as a counter. `bucketize(_, Mean)` on a raw counter reports the mean cumulative value, not a throughput. A drop in a counter is read as a reset, Prometheus style. Every counter starts at zero at simulated time zero, so the first increment is rated too.
-
-### Empty Buckets
-
-`bucketize` omits a bucket nothing landed in, because a gap and a zero are different facts. Two ops say which one you mean, the way Warp 10 splits them. `.fill` **repeats a value the series has**. `.interpolate` **computes one it never had**.
-
-| Op | Gives empty buckets | Leaves empty |
-|----|---------------------|--------------|
-| `.fill(Fill::Previous)` | the last known value | leading gaps |
-| `.fill(Fill::Next)` | the next known value | trailing gaps |
-| `.fill(Fill::Value(v))` | `v`, no neighbour needed | nothing |
-| `.interpolate()` | a point on the line between neighbours | leading and trailing gaps |
-
-```text
-bucket                     0 |    1 |    2 |    3 |    4
-no fill                   10 |    - |    - |   40 |    -
-.fill(Fill::Previous)     10 |   10 |   10 |   40 |   40
-.fill(Fill::Next)         10 |   40 |   40 |   40 |    -
-.fill(Fill::Value(0.0))   10 |    0 |    0 |   40 |    0
-.interpolate()            10 |   20 |   30 |   40 |    -
-```
-
-Use a fill when the quantity holds between observations, or is zero when nothing happened. Use `.interpolate()` when it moves continuously: a queue depth, a replication lag. They compose in call order. The grid runs from bucket zero to the run's end, so with `Fill::Value(0.0)` every window sees every seed and `min` and `max` compare like with like.
-
-**Fill before you map.** A `.map` window spans several buckets, so its output has no grid. A `.fill` or an `.interpolate` after a `.map` does nothing.
-
-**Series identity is name plus label set.** Matching is by subset: a query naming `operation="write"` also matches a series carrying `instance="10.0.1.1"`. Every result row carries `seed` and `run_id` as moonpool fields, never injected into your labels.
-
-### Percentiles That Mean Something
-
-`mean(p99(node_a), p99(node_b))` is not a p99, and neither is `p99(p99(a), p99(b))`. Once observations collapse into a percentile, a percentile of that has no meaning.
-
-The builder enforces this at compile time. Each stage tracks what its values are, and `Percentile` applies only where the observations survive:
-
-```rust,ignore
-// Compiles: the raw histogram observations are still there.
-MetricQuery::select("request_latency_seconds")
-    .bucketize(Duration::from_secs(60), Percentile(0.99))
-    .named("p99");
-
-// Does NOT compile: p99 of per-bucket p99s.
-MetricQuery::select("request_latency_seconds")
-    .bucketize(Duration::from_secs(60), Percentile(0.99))
-    .reduce(Percentile(0.99))
-    .named("nonsense");
-```
-
-`Min`, `Mean` and `Max` apply anywhere. "The mean of each node's p99" is a useful number as long as nobody calls it a p99, which is why the report prints each query's provenance: `observations`, `scalar` or `percentile-derived`. The `p50`, `p95` and `p99` in the summary block are a different dimension, taken **across runs** with one value per seed.
+After five hundred seeds the question is "what throughput did this hold, and which seed was worst?" The report already answers the first part: `report.app_metrics` folds every series across the successful seeds. For anything finer, the series are plain data. `individual_metrics` keeps each seed's `app_series`, keyed by the series identity (`SeriesKey` parses it back into a name and labels), so a test or a tool computes the rate, bucket or percentile it needs in ordinary Rust, and names the seed it came from.
 
 ## Worked Example: a Metastable Failure
 
@@ -229,7 +126,7 @@ cargo run --release --example metastable_grpc_retry_storm \
     --features hyper,prometheus -- --seed 0
 ```
 
-It runs query pipelines over the recorded series and prints the buckets as an ASCII graph, one column per simulated second. The slowdown lasts 650 ms. The service never recovers: retries from that window keep the server saturated for the remaining 29 seconds at the same offered load it carried before. The trigger is gone, the bad state is not.
+It buckets the recorded series (a rate for each counter, a mean for each gauge) and prints them as an ASCII graph, one column per simulated second. The slowdown lasts 650 ms. The service never recovers: retries from that window keep the server saturated for the remaining 29 seconds at the same offered load it carried before. The trigger is gone, the bad state is not.
 
 `--search 0..64` runs a range of seeds and prints one line each. Some seeds absorb the trigger and others fall into the storm. Same code, same configuration, different seed. That is the evidence that the bad state is a second stable operating point.
 

@@ -4,15 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use moonpool_rpc::balance::{
-    AlternativeSet, AttemptEvent, AttemptKind, BalanceConfig, BalanceHooks, BalancedClient,
-    Feedback, HedgeBudget, Locality, ModelConfig, QueueModel, SetVersion, Verdict,
-};
 use moonpool_rpc::{
     AccessClass, BootstrapAddress, ErrorReason, Execution, RpcConfig, RpcDriver, RpcError,
     RpcHandle, WellKnownRef,
@@ -22,7 +18,7 @@ use moonpool_sim::{
     assert_always, assert_sometimes,
 };
 
-use super::messages::{DIRECTORY_ID, Directory, Done, Lookup, Publication, Work};
+use super::messages::{DIRECTORY_ID, Directory, Lookup, Publication};
 use super::state::{
     Instance, LANES_STOPPED_KEY, LaneRecord, QUIESCED_KEY, QualLedger, SCRIPT_DONE_KEY,
     VERSION1_LABEL, WORKLOAD_IP_KEY, WORKLOAD_LABEL, lane_key,
@@ -52,8 +48,6 @@ pub enum QualOp {
     /// A reply stream: eager, slow, abandoned before or after its first
     /// item, or read until the caller gives up.
     Stream,
-    /// A balanced call over the servers' current publications.
-    Balanced,
     /// A credentialed call to a server's private endpoint.
     Auth,
     /// A call to a stored interface of an ended boot.
@@ -79,13 +73,12 @@ pub enum QualOp {
 }
 
 impl QualOp {
-    const ALL: [Self; 16] = [
+    const ALL: [Self; 15] = [
         Self::Unary,
         Self::Reliable,
         Self::UnlessFailed,
         Self::OneWay,
         Self::Stream,
-        Self::Balanced,
         Self::Auth,
         Self::Stale,
         Self::Lookup,
@@ -106,7 +99,7 @@ pub struct QualificationConfig {
     /// the fault script is done (its operations all run under the faults).
     pub operations: usize,
     /// Relative weight per [`QualOp`], in declaration order.
-    pub weights: [u32; 16],
+    pub weights: [u32; 15],
     /// Pause between operations, in milliseconds (half-open range).
     pub gap_ms: (u64, u64),
     /// Run the reboot-storm script (one server restarted ten times or
@@ -122,7 +115,7 @@ impl QualificationConfig {
     pub fn campaign() -> Self {
         Self {
             operations: 400,
-            weights: [12, 9, 5, 3, 14, 12, 14, 5, 5, 4, 5, 3, 2, 3, 2, 3],
+            weights: [12, 9, 5, 3, 14, 14, 5, 5, 4, 5, 3, 2, 3, 2, 3],
             gap_ms: (10, 150),
             storm: false,
             jitter: HostJitter::Off,
@@ -191,107 +184,18 @@ pub(crate) struct CallRecord {
     pub(crate) class: Class,
 }
 
-/// The balanced-attempt ledger, fed by the observation hook.
-#[derive(Default)]
-pub(crate) struct Observer {
-    pub(crate) started: AtomicU64,
-    pub(crate) ended: AtomicU64,
-    pub(crate) ended_late: AtomicU64,
-    pub(crate) primaries: AtomicU64,
-    pub(crate) copies: AtomicU64,
-}
-
-impl Observer {
-    pub(crate) fn load(counter: &AtomicU64) -> u64 {
-        counter.load(Ordering::Relaxed)
-    }
-}
-
-struct Hooks {
-    observer: Arc<Observer>,
-}
-
-impl BalanceHooks<Work> for Hooks {
-    fn classify(&self, _reply: &Done) -> Verdict {
-        Verdict::Accept(Feedback::default())
-    }
-
-    fn observe(&self, event: &AttemptEvent) {
-        match event {
-            AttemptEvent::Started { kind, .. } => {
-                self.observer.started.fetch_add(1, Ordering::Relaxed);
-                let class = match kind {
-                    AttemptKind::First | AttemptKind::Retry => &self.observer.primaries,
-                    _ => &self.observer.copies,
-                };
-                class.fetch_add(1, Ordering::Relaxed);
-            }
-            AttemptEvent::Ended { late, .. } => {
-                self.observer.ended.fetch_add(1, Ordering::Relaxed);
-                if *late {
-                    self.observer.ended_late.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
-    }
-}
-
-/// Mints a valid token (newest key, current scripted UTC) for every
-/// balanced attempt.
-struct Minting {
-    trust: Trust,
-}
-
-impl moonpool_rpc::security::CredentialSource for Minting {
-    fn credential(
-        &self,
-        _target: &moonpool_rpc::Endpoint,
-    ) -> Option<moonpool_rpc::security::Credential> {
-        self.trust
-            .mint(crate::security::trust::Kind::Valid, "balancer", 300, 0)
-            .token
-            .map(moonpool_rpc::security::Credential::bearer)
-    }
-}
-
-/// The balancer's queue model: a small hedge budget so it runs out, a
-/// small late-loser bound, short exclusions.
-pub(crate) fn model_config() -> ModelConfig {
-    ModelConfig {
-        hedge_budget: HedgeBudget {
-            initial: 2.0,
-            growth: 0.1,
-            max: 3.0,
-        },
-        max_lagging: 8,
-        lagging_timeout: Duration::from_secs(1),
-        exclusion: moonpool_rpc::balance::Backoff {
-            initial: Duration::from_millis(300),
-            max: Duration::from_secs(2),
-            growth: 2.0,
-            jitter: 0.25,
-        },
-        ..ModelConfig::default()
-    }
-}
-
 /// The workload's runtimes and clients.
 pub(crate) struct Runtimes {
     /// Speaks versions 1 and 2, sends credentials over plaintext.
     pub(crate) rpc: RpcHandle<SimProviders>,
     /// Speaks version 1 only.
     pub(crate) version1: RpcHandle<SimProviders>,
-    /// Balanced calls over `Work`.
-    pub(crate) balanced: BalancedClient<SimProviders, Work>,
-    /// The same set and model, every attempt carrying a freshly minted
-    /// valid credential (`BalancedClient::with_credentials`).
-    pub(crate) credentialed: BalancedClient<SimProviders, Work>,
     /// Credentialed calls, judged by the security campaign's ledger.
     pub(crate) auth: Caller,
 }
 
 /// The campaign's workload: one lane of it. Lanes run the operation mix
-/// concurrently, each with its own runtimes and balancer, sharing the
+/// concurrently, each with its own runtimes, sharing the
 /// ledgers; lane 0 (the lead) also probes draining servers, runs the
 /// recovery phase and the idle-baseline checks, and assembles the run's
 /// record.
@@ -311,11 +215,6 @@ pub struct QualificationWorkload {
     pub(crate) stored: Vec<Publication>,
     pub(crate) calls: Vec<CallRecord>,
     pub(crate) streams: Vec<super::ops::StreamCheck>,
-    pub(crate) balanced: Vec<super::ops::BalancedCheck>,
-    pub(crate) set_version: u64,
-    /// The instances of the installed alternative set.
-    pub(crate) set_instances: Vec<Instance>,
-    pub(crate) observer: Arc<Observer>,
     /// A credential from a retired key was refused; waiting for a fresh
     /// key's acceptance.
     pub(crate) retired_refused: bool,
@@ -348,10 +247,6 @@ impl QualificationWorkload {
             stored: Vec::new(),
             calls: Vec::new(),
             streams: Vec::new(),
-            balanced: Vec::new(),
-            set_version: 0,
-            set_instances: Vec::new(),
-            observer: Arc::new(Observer::default()),
             retired_refused: false,
             recovered_ms: None,
             baseline: false,
@@ -527,64 +422,6 @@ impl QualificationWorkload {
         Some(servers[ctx.random().random_range(0..servers.len())].clone())
     }
 
-    /// Install a newer alternative set from the servers' known
-    /// publications (looked up when unknown): the only way the balancer
-    /// learns a new incarnation.
-    pub(crate) async fn refresh(&mut self, ctx: &SimContext, runtimes: &Runtimes) {
-        let mut alternatives = Vec::new();
-        let mut instances = Vec::new();
-        for server in ctx.topology().ips_in_group("server") {
-            let Some(publication) = self.publication(ctx, &runtimes.rpc, &server).await else {
-                continue;
-            };
-            let Ok(target) = moonpool_rpc::ServiceRef::<Work>::from_bytes(&publication.work) else {
-                continue;
-            };
-            let datacenter = server
-                .rsplit('.')
-                .next()
-                .and_then(|octet| octet.parse::<u8>().ok())
-                .map_or(0, |octet| octet % 2);
-            alternatives.push(moonpool_rpc::balance::Alternative::new(
-                target,
-                Locality::new(server.clone(), format!("dc{datacenter}")),
-            ));
-            instances.push(Instance {
-                process: server,
-                boot: publication.boot,
-                configuration: 0,
-            });
-        }
-        self.set_version += 1;
-        match AlternativeSet::new(SetVersion::new(self.set_version), alternatives) {
-            Ok(set) => {
-                let replaced = runtimes
-                    .credentialed
-                    .replace(set.clone())
-                    .and(runtimes.balanced.replace(set));
-                assert_always!(
-                    replaced.is_ok(),
-                    "a newer alternative set is always installed"
-                );
-                self.set_instances = instances;
-                self.history.push(format!(
-                    "refresh v{} {}",
-                    self.set_version,
-                    self.set_instances
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ));
-            }
-            Err(error) => {
-                assert_always!(false, "published references form a valid set", {
-                    "error" => error.to_string()
-                });
-            }
-        }
-    }
-
     async fn drive(&mut self, ctx: &SimContext, runtimes: &Runtimes) -> SimulationResult<()> {
         let mut ips = ctx
             .state()
@@ -616,7 +453,6 @@ impl QualificationWorkload {
             super::recovery::cut_short("operations");
             return Ok(());
         }
-        self.drain_balancer(ctx, runtimes).await;
         let lanes_stopped = ctx.state().get::<u64>(LANES_STOPPED_KEY).unwrap_or(0);
         ctx.state().publish(LANES_STOPPED_KEY, lanes_stopped + 1);
         if self.is_lead() {
@@ -692,37 +528,6 @@ impl Workload for QualificationWorkload {
             },
         )
         .map_err(config_error)?;
-        let model = QueueModel::new(model_config())
-            .map_err(|error| SimulationError::InvalidState(format!("model: {error}")))?;
-        let balanced = BalancedClient::new(
-            &rpc,
-            AlternativeSet::empty(SetVersion::new(0)),
-            model.clone(),
-            BalanceConfig {
-                locality: Locality::in_datacenter("dc0"),
-                ..BalanceConfig::default()
-            },
-        )
-        .map_err(|error| SimulationError::InvalidState(format!("balance: {error}")))?
-        .with_hooks(Hooks {
-            observer: Arc::clone(&self.observer),
-        });
-        let credentialed = BalancedClient::new(
-            &rpc,
-            AlternativeSet::empty(SetVersion::new(0)),
-            model.clone(),
-            BalanceConfig {
-                locality: Locality::in_datacenter("dc0"),
-                ..BalanceConfig::default()
-            },
-        )
-        .map_err(|error| SimulationError::InvalidState(format!("balance: {error}")))?
-        .with_hooks(Hooks {
-            observer: Arc::clone(&self.observer),
-        })
-        .with_credentials(Minting {
-            trust: Trust::of(ctx.state())?,
-        });
         let board = Board::of(ctx.state());
         let probes = [rpc.probe(), version1.probe()];
         let label = format!("{WORKLOAD_LABEL}-{}", self.lane);
@@ -740,8 +545,6 @@ impl Workload for QualificationWorkload {
         let runtimes = Runtimes {
             rpc: rpc.clone(),
             version1,
-            balanced,
-            credentialed,
             auth,
         };
         let result = moonpool_sim::select! {
@@ -750,7 +553,6 @@ impl Workload for QualificationWorkload {
                 Err(SimulationError::IoError(format!("rpc driver: {error}")))
             }
             result = self.drive(ctx, &runtimes) => result,
-            () = model.collect_lagging() => Ok(()),
             () = report_stats(&rpc, &board, &label, ctx) => Ok(()),
         };
         drop(runtimes);

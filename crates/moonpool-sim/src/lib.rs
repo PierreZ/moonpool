@@ -325,8 +325,8 @@
 //!
 //! [`metrics_factory`](SimulationBuilder::metrics_factory) gives every node
 //! its own [`MetricsSource`] (for example a `PrometheusSource` from
-//! `moonpool-prometheus`), and [`metric`](SimulationBuilder::metric)
-//! declares a [`MetricQuery`] the runner evaluates on every seed.
+//! `moonpool-prometheus`). The runner scrapes every source at the end of each
+//! seed and folds the samples into the report's application metrics.
 //!
 //! # Feature flags
 //!
@@ -425,17 +425,8 @@ pub use runner::{
 // concrete registry (moonpool-prometheus, and OpenTelemetry later) implement
 // `MetricsSource` against these types.
 pub use moonpool_core::metrics::{
-    HistogramValue, MetricClock, MetricPoint, MetricSample, MetricValue, MetricsSource,
+    HistogramValue, MetricClock, MetricPoint, MetricSample, MetricValue, MetricsSource, SeriesKey,
     SeriesRecorder, f64_to_u64, u64_to_f64_exact,
-};
-
-// The metric query/report vocabulary, so a runner declaring
-// `.metric(MetricQuery::select(...))` imports from one place. `Min`, `Mean`,
-// `Max` and `Percentile` are the aggregator markers the builder accepts;
-// `Percentile` deliberately only applies where the observations survive.
-pub use moonpool_core::metrics::query::{
-    Aggregator, Fill, Max, Mean, MetricQuery, MetricQueryPlan, MetricQueryReport, MetricQueryRow,
-    MetricSnapshot, MetricWindowSummary, Min, Percentile, Provenance, SeriesKey, WHOLE_RUN_MS,
 };
 
 // Buggify macros live in the standalone zero-dependency moonpool-buggify

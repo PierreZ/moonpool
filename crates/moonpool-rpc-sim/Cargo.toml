@@ -13,19 +13,15 @@ description = "Deterministic-simulation harness, oracles and campaigns for moonp
 [dependencies]
 # `derive`: the interfaces campaign serves its role interface through the
 # generated dispatcher, next to hand-written well-known endpoints.
-# `jwt`: the security campaign verifies real signed tokens (EdDSA, which
-# signs deterministically) with the production JWT/JWKS adapter, under an
-# injected UTC; the simulation is never built for wasm.
 # `tls-pki`: the TLS campaign runs the production TLS layer and makes its
 # certificates with the production authority, from seeded key bytes.
-moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0", features = ["derive", "jwt", "tls-pki"] }
+moonpool-rpc = { path = "../moonpool-rpc", version = "0.8.0", features = ["derive", "tls-pki"] }
 moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
 
 async-trait = "0.1"
 futures = "0.3"
-# Token issuance in the security campaign (the verifier is moonpool-rpc's).
-jsonwebtoken = { version = "12.0", default-features = false, features = ["rust_crypto"] }
-serde_json = "1"
+# The security campaign's token signatures (a keyed XXH3-64).
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # `#[derive(prost::Message)]` expands to `::prost` paths.
 prost = "0.14"
 tracing = "0.1"
@@ -46,10 +42,6 @@ path = "src/bin/sim/rpc_delivery.rs"
 [[bin]]
 name = "sim-rpc-interfaces"
 path = "src/bin/sim/rpc_interfaces.rs"
-
-[[bin]]
-name = "sim-rpc-balance"
-path = "src/bin/sim/rpc_balance.rs"
 
 [[bin]]
 name = "sim-rpc-streams"

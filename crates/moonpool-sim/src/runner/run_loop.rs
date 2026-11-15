@@ -213,7 +213,7 @@ impl RunState {
         let run_id = iteration_manager.run_id();
         Self {
             iteration_manager,
-            metrics_collector: MetricsCollector::new(run_id, builder.metric_queries.clone()),
+            metrics_collector: MetricsCollector::new(run_id),
             progress_milestone,
             pending_return_map: Vec::new(),
             #[cfg(feature = "exploration")]
@@ -1082,7 +1082,6 @@ impl SimulationBuilder {
             saturation: None,
             app_metrics: Vec::new(),
             run_id: 0,
-            metric_queries: Vec::new(),
         }
     }
 

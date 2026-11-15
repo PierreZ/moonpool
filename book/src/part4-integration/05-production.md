@@ -95,7 +95,6 @@ them creeps back in.
 | `rpc` | `moonpool::rpc`, typed dynamic-endpoint RPC | Processes call each other through moonpool-rpc |
 | `rpc-derive` | the `#[moonpool_rpc::service]` attribute | Generated service interfaces |
 | `rpc-tls` | rustls session upgrade (native only) | Server-authenticated RPC sessions |
-| `rpc-jwt` | JWT and JWKS verification (native only) | Per-request credential checks |
 | `sim` | the simulation runtime and the explorer | Tests, benchmarks, local runs (default) |
 
 Keep `sim` on in `[dev-dependencies]` and off in the release build. The tests

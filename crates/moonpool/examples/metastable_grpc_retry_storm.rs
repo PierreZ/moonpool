@@ -84,8 +84,8 @@ use moonpool::hyper::{ChannelConfig, H2Server, H2ServerConfig, ReconnectingChann
 use moonpool::prelude::*;
 use moonpool::prometheus::{PrometheusSource, SimCounter, SimGauge};
 use moonpool::{
-    Fill, Mean, MetricQuery, MetricQueryPlan, MetricSnapshot, SimProviders, SimTimeProvider,
-    SimulationError, SimulationMetrics, SimulationResult, TimeError,
+    MetricPoint, SeriesKey, SimProviders, SimTimeProvider, SimulationError, SimulationMetrics,
+    SimulationResult, TimeError,
 };
 use tonic::codegen::{BoxFuture, Context as TaskContext, Poll, StdError, http};
 use tonic::server::UnaryService;
@@ -666,62 +666,133 @@ fn run_seed(seed: u64) -> Result<SimulationMetrics, String> {
     }
 }
 
-/// The bucketed series the graph draws, in the order they are printed.
+/// How a panel reads its metric.
+#[derive(Clone, Copy)]
+enum Read {
+    /// A counter, read as a per-second rate. A second with no events really
+    /// is zero per second.
+    Rate,
+    /// A gauge, read as its mean in each bucket. A gauge nobody touched still
+    /// holds its last value.
+    Level,
+}
+
+/// The panels the graph draws, in the order they are printed: a title, a
+/// short name, the metric and how to read it.
 ///
-/// Every one is a query over the series the application already recorded — the
-/// same Prometheus counters and gauges a production deployment would scrape.
-fn plans() -> Vec<(&'static str, MetricQueryPlan)> {
-    let rate = |metric: &str, name: &str| {
-        MetricQuery::select(metric)
-            .rate()
-            .bucketize(BUCKET, Mean)
-            // A second with no events really is zero per second.
-            .fill(Fill::Value(0.0))
-            .reduce(Mean)
-            .named(name.to_owned())
-    };
-    let level = |metric: &str, name: &str| {
-        MetricQuery::select(metric)
-            .bucketize(BUCKET, Mean)
-            // A gauge nobody touched still holds its last value.
-            .fill(Fill::Previous)
-            .reduce(Mean)
-            .named(name.to_owned())
-    };
-    vec![
-        (
-            "server busyness   busy workers / 4",
-            level("work_busy_fraction", "busyness"),
-        ),
-        (
-            "server queue      seconds a new request waits",
-            level("work_backlog_seconds", "backlog"),
-        ),
-        (
-            "offered load      logical arrivals/s  (never changes)",
-            rate("client_arrivals_total", "arrivals"),
-        ),
-        (
-            "rpc attempts      first tries + retries/s",
-            rate("client_attempts_total", "attempts"),
-        ),
-        (
-            "retries           retry attempts/s",
-            rate("client_retries_total", "retries"),
-        ),
-        (
-            "timeouts          attempts that hit the deadline/s",
-            rate("client_timeouts_total", "timeouts"),
-        ),
-        (
-            "goodput           logical requests completed/s",
-            rate("client_goodput_total", "goodput"),
-        ),
-        (
-            "client in-flight  logical requests unresolved",
-            level("client_in_flight", "in_flight"),
-        ),
-    ]
+/// Each one reads the series the application already recorded: the same
+/// Prometheus counters and gauges a production deployment would scrape.
+const PLANS: [(&str, &str, &str, Read); 8] = [
+    (
+        "server busyness   busy workers / 4",
+        "busyness",
+        "work_busy_fraction",
+        Read::Level,
+    ),
+    (
+        "server queue      seconds a new request waits",
+        "backlog",
+        "work_backlog_seconds",
+        Read::Level,
+    ),
+    (
+        "offered load      logical arrivals/s  (never changes)",
+        "arrivals",
+        "client_arrivals_total",
+        Read::Rate,
+    ),
+    (
+        "rpc attempts      first tries + retries/s",
+        "attempts",
+        "client_attempts_total",
+        Read::Rate,
+    ),
+    (
+        "retries           retry attempts/s",
+        "retries",
+        "client_retries_total",
+        Read::Rate,
+    ),
+    (
+        "timeouts          attempts that hit the deadline/s",
+        "timeouts",
+        "client_timeouts_total",
+        Read::Rate,
+    ),
+    (
+        "goodput           logical requests completed/s",
+        "goodput",
+        "client_goodput_total",
+        Read::Rate,
+    ),
+    (
+        "client in-flight  logical requests unresolved",
+        "in_flight",
+        "client_in_flight",
+        Read::Level,
+    ),
+];
+
+/// One series bucketed into `columns` buckets of `bucket_ms`.
+fn bucketize(
+    points: &[MetricPoint],
+    read: Read,
+    columns: usize,
+    bucket_ms: u64,
+) -> Vec<Option<f64>> {
+    let seconds = moonpool::u64_to_f64_exact(bucket_ms) / 1000.0;
+    let mut values = Vec::with_capacity(columns);
+    let mut previous: Option<f64> = None;
+    let mut next = 0;
+    for column in 0..columns {
+        let end_ms = (u64::try_from(column).unwrap_or(u64::MAX) + 1) * bucket_ms;
+        let start = next;
+        while next < points.len() && points[next].time_ms < end_ms {
+            next += 1;
+        }
+        let inside = &points[start..next];
+        let value = match read {
+            Read::Rate => {
+                let before = previous.unwrap_or(0.0);
+                let after = inside.last().map_or(before, |point| point.value);
+                previous = Some(after);
+                Some((after - before).max(0.0) / seconds)
+            }
+            Read::Level => {
+                if !inside.is_empty() {
+                    let count = moonpool::u64_to_f64_exact(inside.len() as u64);
+                    previous = Some(inside.iter().map(|point| point.value).sum::<f64>() / count);
+                }
+                previous
+            }
+        };
+        values.push(value);
+    }
+    values
+}
+
+/// The mean of `metric` across every series that carries it (one per node),
+/// bucket by bucket.
+fn panel_values(
+    metrics: &SimulationMetrics,
+    metric: &str,
+    read: Read,
+    columns: usize,
+    bucket_ms: u64,
+) -> Vec<Option<f64>> {
+    let series: Vec<Vec<Option<f64>>> = metrics
+        .app_series
+        .iter()
+        .filter(|(key, _)| SeriesKey::parse(key).metric == metric)
+        .map(|(_, points)| bucketize(points, read, columns, bucket_ms))
+        .collect();
+    (0..columns)
+        .map(|column| {
+            let known: Vec<f64> = series.iter().filter_map(|values| values[column]).collect();
+            (!known.is_empty())
+                .then(|| known.iter().sum::<f64>() / moonpool::u64_to_f64_exact(known.len() as u64))
+        })
+        .collect()
 }
 
 /// One row of the graph: a title and one value per time bucket.
@@ -730,32 +801,21 @@ struct Panel {
     title: String,
     /// Short name, used by the phase table.
     name: String,
-    /// One value per time bucket; `None` where the query had nothing to say.
+    /// One value per time bucket; `None` where the series had nothing to say.
     values: Vec<Option<f64>>,
 }
 
 /// Turn one run's recorded series into the panels the graph draws.
-fn panels(metrics: &SimulationMetrics, seed: u64) -> (Vec<Panel>, usize) {
+fn panels(metrics: &SimulationMetrics) -> (Vec<Panel>, usize) {
     let end_ms = ms(metrics.simulated_time);
     let bucket_ms = ms(BUCKET);
     let columns = usize::try_from(end_ms / bucket_ms).unwrap_or(0);
-    let snapshot = MetricSnapshot::from_run(&metrics.app_metrics, &metrics.app_series, end_ms);
-
-    let panels = plans()
-        .into_iter()
-        .map(|(title, plan)| {
-            let mut values = vec![None; columns];
-            for row in plan.evaluate(&snapshot, 0, seed) {
-                let index = usize::try_from(row.bucket_start_ms / bucket_ms).unwrap_or(usize::MAX);
-                if let Some(slot) = values.get_mut(index) {
-                    *slot = Some(row.value);
-                }
-            }
-            Panel {
-                title: title.to_owned(),
-                name: plan.name().to_owned(),
-                values,
-            }
+    let panels = PLANS
+        .iter()
+        .map(|&(title, name, metric, read)| Panel {
+            title: title.to_owned(),
+            name: name.to_owned(),
+            values: panel_values(metrics, metric, read, columns, bucket_ms),
         })
         .collect();
     (panels, columns)
@@ -979,7 +1039,7 @@ fn search(from: u64, to: u64) {
             println!("{seed:>6}  (failed)");
             continue;
         };
-        let (panels, _columns) = panels(&metrics, seed);
+        let (panels, _columns) = panels(&metrics);
         let pre = column_of(TRIGGER_START);
         let (tail, tail_end) = tail_window();
         let series = |name, from, to| series_mean(&panels, name, from, to);
@@ -1030,7 +1090,7 @@ fn main() {
 /// Returns the seed's failure message when the simulation did not complete.
 fn graph_with_panels(seed: u64) -> Result<(Vec<Panel>, String), String> {
     let metrics = run_seed(seed)?;
-    let (panels, columns) = panels(&metrics, seed);
+    let (panels, columns) = panels(&metrics);
     let graph = render(seed, &panels, columns);
     Ok((panels, graph))
 }

@@ -28,7 +28,7 @@ Inside the Nix shell the command is `nix develop --command cargo xtask sim run m
 | `topology` | `moonpool-sim-examples` | `moonpool_sim_examples` |
 | `tonic-grpc` | `moonpool-sim-examples` | `moonpool_sim_examples` |
 | `journal` | `moonpool-sim-examples` | `moonpool_sim_examples,moonpool_journal` |
-| `rpc-foundations`, `rpc-delivery`, `rpc-interfaces`, `rpc-balance`, `rpc-streams`, `rpc-security`, `rpc-qualification` | `moonpool-rpc-sim` | `moonpool_rpc,moonpool_rpc_sim` |
+| `rpc-foundations`, `rpc-delivery`, `rpc-interfaces`, `rpc-streams`, `rpc-security`, `rpc-qualification` | `moonpool-rpc-sim` | `moonpool_rpc,moonpool_rpc_sim` |
 
 The list is the `SIM_BINARIES` constant in `crates/xtask/src/main.rs`.
 

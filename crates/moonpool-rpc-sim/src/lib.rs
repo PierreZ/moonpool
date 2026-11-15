@@ -6,8 +6,7 @@
 //! on `moonpool-sim`, even through a feature.
 //!
 //! Each campaign runs the **same** `moonpool-rpc` code that runs on real
-//! TCP. The examples (`tcp_echo`, `tcp_latency`, `balance_latency`,
-//! `rpc_soak`) run that code on `TokioProviders`. The oracles never read the
+//! TCP. The examples (`tcp_echo`, `tcp_latency`, `rpc_soak`) run that code on `TokioProviders`. The oracles never read the
 //! transport: handlers record what they executed in a ledger kept in the
 //! run's state, and the workload judges its own outcomes against it.
 //!
@@ -45,7 +44,6 @@
 //! | [`foundations`] | `sim-rpc-foundations` | Typed request/reply between two process groups and a surviving workload, judged by a handler receipt ledger. The corruption suite: it alone draws bit flips |
 //! | [`delivery`] | `sim-rpc-delivery` | Every delivery mode, lost replies, crashes, simultaneous connects, bootstrap names and failure-monitor transitions, judged by an execution ledger |
 //! | [`interfaces`] | `sim-rpc-interfaces` | Interfaces published, stored, recruited and forwarded to a third participant across same-address restarts |
-//! | [`balance`] | `sim-rpc-balance` | Balanced calls under separate retry and duplicate permissions, hedging, cancellation, late losers and outages of every alternative |
 //! | [`streams`] | `sim-rpc-streams` | Reply streams with consumption credit, abandonment, saturation, bounded admission and producer reboots |
 //! | [`security`] | `sim-rpc-security` | Credentials and endpoint access under key rotation, UTC transitions, crashes, graceful shutdowns and mixed protocol versions: no unauthorized execution, ever |
 //! | [`tls`] | `sim-rpc-tls` | TLS 1.3 sessions, mutual or not, with certificates from the production authority, under UTC steps, certificate rotation, an impostor server and bit flips |
@@ -77,14 +75,14 @@
 //!
 //! # Feature flags
 //!
-//! None. The crate enables the `derive`, `jwt` and `tls-pki` features of
+//! None. The crate enables the `derive` and `tls-pki` features of
 //! `moonpool-rpc`: the interfaces campaign serves a generated interface,
-//! the security campaign verifies real signed tokens, and the tls campaign
-//! makes its certificates with the production authority.
+//! and the tls campaign makes its certificates with the production
+//! authority. The security campaign verifies its own deterministic
+//! tokens with a `RequestVerifier` of its own (see `security::trust`).
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
-pub mod balance;
 pub mod delivery;
 pub mod foundations;
 pub mod interfaces;

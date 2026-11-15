@@ -1,12 +1,9 @@
-//! Who may call what: request verification, endpoint access policy,
-//! address allow lists, key rotation, the UTC validation clock and, behind
-//! features, the TLS and JWT adapters.
+//! Who may call what: request verification, endpoint access policy, the
+//! UTC validation clock and, behind feature `tls`, the TLS adapter.
 //!
 //! # Trust model
 //!
-//! - A TCP address or an endpoint token is **not** an identity. An
-//!   [`IpAllowList`] restricts which peers can open a session; it grants
-//!   nothing.
+//! - A TCP address or an endpoint token is **not** an identity.
 //! - TLS (the `tls` module, behind feature `tls`) authenticates the
 //!   **server** to its clients, and, when the server asks for it
 //!   (`tls::ClientAuth`), the **client** to the server (mutual TLS). A
@@ -15,8 +12,8 @@
 //!   [`SecurityConfig::admit_authenticated_peers`].
 //! - A **client** is identified per request, by a credential it attaches
 //!   ([`Credential`], from a [`CredentialSource`]) and the server verifies
-//!   ([`RequestVerifier`], for example the JWT/JWKS adapter in the `jwt`
-//!   module, behind feature `jwt`) into a [`Principal`].
+//!   ([`RequestVerifier`], which the application supplies: a token
+//!   format is the application's choice) into a [`Principal`].
 //! - An [`AccessPolicy`] decides, per request, whether that principal (or
 //!   an anonymous caller) may call the endpoint. The default
 //!   ([`DefaultPolicy`]) lets anyone who passes verification call a
@@ -38,8 +35,8 @@
 //! Validation time is a [`UtcClock`], never the runtime's scheduling time;
 //! the default [`NoUtc`] knows no time, so expiring credentials fail closed
 //! until a clock is chosen ([`SystemUtc`] in production, [`FixedUtc`] in
-//! tests and simulation). Cryptographic entropy belongs to the TLS and JWT
-//! dependencies; the runtime's `RandomProvider` only draws protocol values
+//! tests and simulation). Cryptographic entropy belongs to the TLS
+//! dependency; the runtime's `RandomProvider` only draws protocol values
 //! (incarnations, jitter).
 //!
 //! # Redaction
@@ -54,22 +51,16 @@
 //! [`RpcMetrics`](crate::observability::RpcMetrics), and rate-limit a noisy peer in the
 //! tracing subscriber.
 
-mod allow;
 mod clock;
-mod keys;
 
-#[cfg(feature = "jwt")]
-pub mod jwt;
 #[cfg(feature = "tls")]
 pub mod tls;
 
 use std::sync::Arc;
 
-pub use self::allow::{InvalidSubnet, IpAllowList, Subnet};
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub use self::clock::SystemUtc;
 pub use self::clock::{FixedUtc, NoUtc, UtcClock, UtcTime};
-pub use self::keys::{KeySet, RotatingKeys};
 use crate::endpoint::{AccessClass, Endpoint, EndpointToken};
 use crate::interface::InterfaceId;
 use crate::protocol::{MethodId, SchemaVersion};
@@ -81,7 +72,7 @@ pub(crate) const CREDENTIAL_ERRORS: usize = 13;
 /// The default bound of one request's credential section, in bytes.
 pub const DEFAULT_MAX_CREDENTIAL_BYTES: usize = 8 * 1024;
 
-/// A bearer credential attached to requests (for example a signed JWT).
+/// A bearer credential attached to requests (for example a signed token).
 ///
 /// Its bytes never appear in `Debug` output, traces or metrics.
 #[derive(Clone, PartialEq, Eq)]
@@ -472,7 +463,6 @@ pub struct SecurityConfig {
     verifier: Option<Arc<dyn RequestVerifier>>,
     policy: Arc<dyn AccessPolicy>,
     clock: Arc<dyn UtcClock>,
-    allow_list: IpAllowList,
     credentials: Option<Arc<dyn CredentialSource>>,
     max_credential_bytes: usize,
     plaintext_credentials: bool,
@@ -502,7 +492,6 @@ impl Default for SecurityConfig {
             verifier: None,
             policy: Arc::new(DefaultPolicy),
             clock: Arc::new(NoUtc),
-            allow_list: IpAllowList::allow_all(),
             credentials: None,
             max_credential_bytes: DEFAULT_MAX_CREDENTIAL_BYTES,
             plaintext_credentials: false,
@@ -529,8 +518,7 @@ impl SecurityConfig {
     ///
     /// This makes **no** confidentiality, peer-authentication or
     /// client-authentication claim. Use it for simulations and closed,
-    /// trusted networks only; combine it with an [`IpAllowList`] to at
-    /// least restrict who can connect.
+    /// trusted networks only.
     #[must_use]
     pub fn trusted_network() -> Self {
         Self {
@@ -550,14 +538,6 @@ impl SecurityConfig {
     #[must_use]
     pub fn with_clock(mut self, clock: impl UtcClock) -> Self {
         self.clock = Arc::new(clock);
-        self
-    }
-
-    /// Accept sessions only from these peers (checked when a connection is
-    /// accepted, before any byte is read).
-    #[must_use]
-    pub fn with_allow_list(mut self, allow_list: IpAllowList) -> Self {
-        self.allow_list = allow_list;
         self
     }
 
@@ -651,12 +631,6 @@ impl SecurityConfig {
         !self.trusted && self.verifier.is_some()
     }
 
-    /// The configured allow list.
-    #[must_use]
-    pub fn allow_list(&self) -> &IpAllowList {
-        &self.allow_list
-    }
-
     /// The configured bound of one credential section.
     #[must_use]
     pub fn max_credential_bytes(&self) -> usize {
@@ -731,7 +705,6 @@ impl std::fmt::Debug for SecurityConfig {
         f.debug_struct("SecurityConfig")
             .field("trusted_network", &self.trusted)
             .field("verifies_credentials", &self.verifier.is_some())
-            .field("allow_list", &self.allow_list)
             .field("attaches_credentials", &self.credentials.is_some())
             .field("max_credential_bytes", &self.max_credential_bytes)
             .field("plaintext_credentials", &self.plaintext_credentials)
@@ -756,7 +729,6 @@ impl PartialEq for SecurityConfig {
             }
             && same(&self.policy, &other.policy)
             && same(&self.clock, &other.clock)
-            && self.allow_list == other.allow_list
             && match (&self.credentials, &other.credentials) {
                 (Some(a), Some(b)) => same(a, b),
                 (None, None) => true,

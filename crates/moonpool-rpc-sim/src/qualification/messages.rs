@@ -16,8 +16,7 @@ pub const FORWARDER_ID: WellKnownId = WellKnownId::new(3);
 pub const ADOPTER_ID: WellKnownId = WellKnownId::new(4);
 
 /// A unit of work, carrying who the caller expects to run it: the
-/// identities of the publication its reference came from (empty server:
-/// any, for a balanced call over a set).
+/// identities of the publication its reference came from.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Job {
     /// Workload-generated id, unique per run.
@@ -142,7 +141,7 @@ macro_rules! method {
 }
 
 method!(
-    /// A work instance: unary, one-way, reliable and balanced calls.
+    /// A work instance: unary, one-way and reliable calls.
     Work, Job, Done, 0x0219_0001, "qualification.work"
 );
 method!(

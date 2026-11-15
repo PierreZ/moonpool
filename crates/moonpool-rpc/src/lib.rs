@@ -93,13 +93,11 @@
 //!   idle close, jittered reconnect backoff.
 //! - **Bootstrap endpoints.** [`WellKnownRef`] and [`BootstrapClient`]
 //!   survive restarts and resolve hostnames.
-//! - **Load balancing.** [`balance`]: locality, a queue model, penalties,
-//!   retry and hedge permissions kept apart.
 //! - **Bounded resources.** [`ResourceLimits`], [`StreamPolicy`] and
 //!   per-endpoint admission queues ([`EndpointQueue`]) push back with
 //!   [`ErrorReason::Overloaded`] instead of dropping admitted work.
-//! - **Security.** Per-request credentials, access classes, allow lists
-//!   and key rotation ([`security`]); TLS and JWT behind features.
+//! - **Security.** Per-request credentials and access classes
+//!   ([`security`]); TLS behind a feature.
 //! - **Protocol versions and graceful shutdown.**
 //!   [`RpcConfig::protocol_versions`] and [`RpcHandle::shutdown`].
 //! - **Metrics.** [`observability::RpcMetrics`] and [`RpcStats`].
@@ -113,7 +111,6 @@
 //! | `prost` | on | Protobuf bodies: every `prost::Message + Default` type is [`Wire`] |
 //! | `derive` | off | `#[moonpool_rpc::service]`: interfaces, dispatchers and clients from a trait (`moonpool-rpc-derive`) |
 //! | `tls` | off | Server-authenticated TLS 1.3 sessions (`security::tls`, rustls with `ring`); native only |
-//! | `jwt` | off | JWT/JWKS request verification (`security::jwt`, `jsonwebtoken`); native only |
 //!
 //! The frame envelope is hand-written and codec-independent. With
 //! `--no-default-features` the transport still works, applications
@@ -196,11 +193,6 @@
 //! [`Resolver`](moonpool_core::Resolver) and an explicit [`RetryPolicy`]);
 //! dynamic references are never re-resolved or refreshed.
 //!
-//! [`balance`] spreads calls of one method over an explicit, versioned set
-//! of alternatives (locality, a queue model, penalties, temporary
-//! exclusion), with a retry permission and a duplicate (hedge) permission
-//! kept apart and both off by default.
-//!
 //! Sessions go through an upgrade seam ([`Connector`] / [`Acceptor`],
 //! [`Plaintext`] by default, server-authenticated TLS with the `tls`
 //! feature) that yields the session stream and a [`PeerContext`], then a
@@ -210,8 +202,7 @@
 //!
 //! Every request passes a security check in admission, locally as
 //! remotely: its credential ([`security::Credential`], verified by a
-//! [`security::RequestVerifier`], for example the JWT/JWKS adapter behind
-//! the `jwt` feature) and the endpoint's [`AccessClass`] under an
+//! [`security::RequestVerifier`] the application supplies) and the endpoint's [`AccessClass`] under an
 //! [`security::AccessPolicy`]. **Private endpoints fail closed** by
 //! default; [`security::SecurityConfig::trusted_network`] opts out
 //! explicitly and claims nothing. See [`security`].
@@ -294,7 +285,6 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
-pub mod balance;
 pub mod codec;
 mod config;
 mod endpoint;
@@ -354,10 +344,6 @@ pub use transport::{
 /// `Send + Sync` (the values, not their futures), because handles,
 /// clients and reply routes hold the runtime's shared state behind weak
 /// references. Every bundle in moonpool is.
-///
-/// [`BalancedClient`](crate::balance::BalancedClient) still needs a `Send`
-/// [`Providers`](moonpool_core::Providers) bundle: it keeps its attempts as
-/// boxed `Send` futures.
 pub trait RpcProviders:
     moonpool_core::LocalProviders<Network: Send + Sync, Time: Send + Sync> + Send + Sync
 {

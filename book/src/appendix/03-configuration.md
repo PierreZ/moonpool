@@ -30,7 +30,6 @@ Every value on this page is read from the current source. The code wins when the
 | `invariant_fn(name, \|q, time_ms\| ..)` | | Closure form of `invariant`. |
 | `trace_level(LevelFilter)` | `INFO` | Capture level for the timeline. |
 | `metrics_factory(..)` | | One `MetricsSource` per node. |
-| `metric(MetricQueryPlan)` | | A metric query reported per campaign. |
 | `set_iterations(n)` | | `IterationControl::FixedCount(n)`. |
 | `until_coverage_stable(plateau_seeds, max_iterations)` | `10, 1000` | `IterationControl::UntilCoverageStable`. This is the default. |
 | `set_debug_seeds(Vec<u64>)` | | Pin seeds. They run first. |

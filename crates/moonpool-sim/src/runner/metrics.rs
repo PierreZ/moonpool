@@ -3,10 +3,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use moonpool_core::metrics::query::{
-    MetricQueryPlan, MetricQueryReport, MetricQueryRow, MetricSnapshot,
-};
-
 use crate::chaos::AssertionStats;
 use crate::{SimulationError, SimulationResult};
 
@@ -26,17 +22,13 @@ pub(crate) struct MetricsCollector {
     stalled_seeds: Vec<u64>,
     /// Application-metric series folded across seeds, keyed by series identity.
     app_metrics: BTreeMap<String, MetricAggregate>,
-    /// Identity of this `run()` invocation, stamped onto every query row.
+    /// Identity of this `run()` invocation (its base seed).
     run_id: u64,
-    /// Queries registered on the builder, evaluated once per successful seed.
-    metric_queries: Vec<MetricQueryPlan>,
-    /// Rows produced so far, parallel to `metric_queries`.
-    metric_query_rows: Vec<Vec<MetricQueryRow>>,
     /// The cause of each failing seed, as the report shows it.
     failure_causes: BTreeMap<u64, String>,
     /// The seed whose successful iteration is the last entry of
     /// `individual_metrics` and whose samples are not yet folded into
-    /// `app_metrics` and `metric_query_rows`. A second pass over the seed
+    /// `app_metrics`. A second pass over the seed
     /// (the determinism replay, exploration) can still fail it; its samples
     /// are folded in only when the next iteration starts or the report is
     /// made.
@@ -44,10 +36,8 @@ pub(crate) struct MetricsCollector {
 }
 
 impl MetricsCollector {
-    /// Create an empty metrics collector for run `run_id`, evaluating
-    /// `metric_queries` against every successful iteration.
-    pub(crate) fn new(run_id: u64, metric_queries: Vec<MetricQueryPlan>) -> Self {
-        let metric_query_rows = vec![Vec::new(); metric_queries.len()];
+    /// Create an empty metrics collector for run `run_id`.
+    pub(crate) fn new(run_id: u64) -> Self {
         Self {
             successful_runs: 0,
             failed_runs: 0,
@@ -57,8 +47,6 @@ impl MetricsCollector {
             stalled_seeds: Vec::new(),
             app_metrics: BTreeMap::new(),
             run_id,
-            metric_queries,
-            metric_query_rows,
             failure_causes: BTreeMap::new(),
             uncommitted_success: None,
         }
@@ -101,16 +89,15 @@ impl MetricsCollector {
         self.uncommitted_success = Some(seed);
     }
 
-    /// Fold the samples of the last successful seed into `app_metrics` and
-    /// the query rows, once no second pass can fail it any more.
+    /// Fold the samples of the last successful seed into `app_metrics`, once no second pass can fail it any more.
     ///
     /// Only successful seeds contribute: a failed iteration's counters
     /// describe a run that did not finish, so folding them into the totals
     /// would misreport the system's steady-state behavior.
     fn commit_success(&mut self) {
-        let Some(seed) = self.uncommitted_success.take() else {
+        if self.uncommitted_success.take().is_none() {
             return;
-        };
+        }
         let Some(Ok(metrics)) = self.individual_metrics.last() else {
             return;
         };
@@ -119,37 +106,6 @@ impl MetricsCollector {
             &metrics.app_metrics,
             &metrics.app_series,
         );
-        Self::evaluate_queries(
-            &self.metric_queries,
-            &mut self.metric_query_rows,
-            self.run_id,
-            seed,
-            metrics,
-        );
-    }
-
-    /// Evaluate every registered query against one iteration's metrics.
-    ///
-    /// Done here rather than in the orchestrator because this is where the
-    /// seed and the iteration's metrics meet, and because only successful
-    /// iterations should contribute: a run that deadlocked describes a system
-    /// that never reached steady state.
-    fn evaluate_queries(
-        queries: &[MetricQueryPlan],
-        rows: &mut [Vec<MetricQueryRow>],
-        run_id: u64,
-        seed: u64,
-        metrics: &SimulationMetrics,
-    ) {
-        if queries.is_empty() {
-            return;
-        }
-        let end_time_ms = u64::try_from(metrics.simulated_time.as_millis()).unwrap_or(u64::MAX);
-        let snapshot =
-            MetricSnapshot::from_run(&metrics.app_metrics, &metrics.app_series, end_time_ms);
-        for (plan, rows) in queries.iter().zip(rows.iter_mut()) {
-            rows.extend(plan.evaluate(&snapshot, run_id, seed));
-        }
     }
 
     fn record_failure(&mut self, seed: u64, cause: String) {
@@ -229,14 +185,6 @@ impl MetricsCollector {
         let app_metrics = std::mem::take(&mut self.app_metrics)
             .into_values()
             .collect::<Vec<_>>();
-        // Registration order, so the report reads the way the runner declared
-        // its queries rather than in some incidental map order.
-        let metric_queries = self
-            .metric_queries
-            .iter()
-            .zip(std::mem::take(&mut self.metric_query_rows))
-            .map(|(plan, rows)| MetricQueryReport::from_rows(plan, rows))
-            .collect();
         SimulationReport {
             iterations: inputs.iteration_count,
             successful_runs: self.successful_runs,
@@ -260,7 +208,6 @@ impl MetricsCollector {
             saturation: inputs.saturation,
             app_metrics,
             run_id: self.run_id,
-            metric_queries,
         }
     }
 }

@@ -19,7 +19,6 @@ use crate::runner::workload::Workload;
 use super::app_metrics::SourceFactory;
 pub use super::config::{Chaos, ChaosMode, IterationControl, ProcessCount, WorkloadCount};
 use moonpool_core::metrics::MetricsSource;
-use moonpool_core::metrics::query::MetricQueryPlan;
 
 /// Client identity information for a single workload instance.
 #[derive(Debug, Clone, Copy)]
@@ -181,7 +180,6 @@ pub struct SimulationBuilder {
     /// iteration so counters start from zero on every seed.
     pub(super) metrics_factory: Option<SourceFactory>,
     /// Metric queries the runner evaluates against every successful seed.
-    pub(super) metric_queries: Vec<MetricQueryPlan>,
     pub(super) chaos_duration: Option<Duration>,
     /// When the chaos phase ends ([`Self::chaos_until_run_ends`]).
     pub(super) chaos_end: ChaosEnd,
@@ -263,7 +261,6 @@ impl SimulationBuilder {
             invariants: Vec::new(),
             fault_factories: Vec::new(),
             metrics_factory: None,
-            metric_queries: Vec::new(),
             chaos_duration: None,
             chaos_end: ChaosEnd::AtDuration,
             exploration_config: None,
@@ -864,47 +861,6 @@ impl SimulationBuilder {
                 source as std::sync::Arc<dyn std::any::Any + Send + Sync>,
             )
         }));
-        self
-    }
-
-    /// Declare a metric query the runner evaluates after every successful
-    /// seed.
-    ///
-    /// The runner — not the report, not the CLI — decides what is worth
-    /// watching. Queries are declared once, before `run()`, and their results
-    /// travel with the report in
-    /// [`SimulationReport::metric_queries`](super::report::SimulationReport::metric_queries),
-    /// each row stamped with the seed that produced it so a bad number is
-    /// immediately replayable.
-    ///
-    /// ```ignore
-    /// use std::time::Duration;
-    /// use moonpool_core::metrics::query::{Mean, MetricQuery, Percentile};
-    ///
-    /// SimulationBuilder::new()
-    ///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
-    ///     .metric(
-    ///         MetricQuery::select("requests_total")
-    ///             .label("operation", "write")
-    ///             .rate()
-    ///             .bucketize(Duration::from_secs(60), Mean)
-    ///             .named("write_throughput"),
-    ///     )
-    ///     .metric(
-    ///         MetricQuery::select("request_latency_seconds")
-    ///             .bucketize(Duration::from_secs(60), Percentile(0.99))
-    ///             .named("write_p99"),
-    ///     )
-    ///     .workload(MyWorkload::default())
-    ///     .run()?;
-    /// ```
-    ///
-    /// Queries read the same data the report already collects, so this needs a
-    /// [`metrics_factory`](Self::metrics_factory); without one there are no
-    /// series to select and every query reports zero runs.
-    #[must_use]
-    pub fn metric(mut self, query: MetricQueryPlan) -> Self {
-        self.metric_queries.push(query);
         self
     }
 

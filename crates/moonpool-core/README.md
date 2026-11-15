@@ -54,8 +54,7 @@ from `moonpool-sim` or `moonpool`, not `tokio::select!`.
   can tell a fault injector where its bytes live.
 - **System**: `SystemSample` and `DiskCounters`, with the `/proc` parsers.
 - **Metrics**: `MetricsSource`, the registry-agnostic seam the simulation
-  report scrapes, and the `metrics::query` engine (rate, bucketize, fill,
-  map, reduce, percentiles).
+  report scrapes, and `SeriesKey`, the identity of a recorded series.
 - **Errors**: `SimulationError`, `TimeError` and `JoinError`.
 
 ## Features
