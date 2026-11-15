@@ -22,13 +22,13 @@ use super::{DiskCounters, DiskSpace, SystemProvider, SystemSample};
 ///   busy time when the worker parks, so a reader must clamp the ratio.
 /// - `cores`: [`std::thread::available_parallelism`], which honours the
 ///   cgroup CPU quota and the affinity mask.
-#[cfg(feature = "tokio-system")]
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug, Clone)]
 pub struct TokioSystemProvider {
     start: std::time::Instant,
 }
 
-#[cfg(feature = "tokio-system")]
+#[cfg(feature = "tokio-providers")]
 impl TokioSystemProvider {
     /// Create a system provider. Its [`SystemSample::at`] counts from now.
     #[must_use]
@@ -39,14 +39,14 @@ impl TokioSystemProvider {
     }
 }
 
-#[cfg(feature = "tokio-system")]
+#[cfg(feature = "tokio-providers")]
 impl Default for TokioSystemProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "tokio-system")]
+#[cfg(feature = "tokio-providers")]
 impl SystemProvider for TokioSystemProvider {
     fn sample(&self, data_dir: &str) -> io::Result<SystemSample> {
         sample(self.start, data_dir, run_loop_busy())
@@ -65,13 +65,13 @@ impl SystemProvider for TokioSystemProvider {
 ///
 /// It reads only process and kernel counters, so it is `Send` and needs no
 /// runtime: it serves a thread-per-core application as it is.
-#[cfg(feature = "compio-system")]
+#[cfg(feature = "compio-providers")]
 #[derive(Debug, Clone)]
 pub struct CompioSystemProvider {
     start: std::time::Instant,
 }
 
-#[cfg(feature = "compio-system")]
+#[cfg(feature = "compio-providers")]
 impl CompioSystemProvider {
     /// Create a system provider. Its [`SystemSample::at`] counts from now.
     #[must_use]
@@ -82,14 +82,14 @@ impl CompioSystemProvider {
     }
 }
 
-#[cfg(feature = "compio-system")]
+#[cfg(feature = "compio-providers")]
 impl Default for CompioSystemProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "compio-system")]
+#[cfg(feature = "compio-providers")]
 impl SystemProvider for CompioSystemProvider {
     fn sample(&self, data_dir: &str) -> io::Result<SystemSample> {
         sample(self.start, data_dir, thread_cpu())
@@ -97,7 +97,7 @@ impl SystemProvider for CompioSystemProvider {
 }
 
 /// The CPU time of the calling thread, user plus system.
-#[cfg(all(feature = "compio-system", unix))]
+#[cfg(all(feature = "compio-providers", unix))]
 fn thread_cpu() -> Option<Duration> {
     // SAFETY: `clock_gettime` only writes into the zeroed struct we own.
     let mut now: libc::timespec = unsafe { std::mem::zeroed() };
@@ -112,7 +112,7 @@ fn thread_cpu() -> Option<Duration> {
     ))
 }
 
-#[cfg(all(feature = "compio-system", not(unix)))]
+#[cfg(all(feature = "compio-providers", not(unix)))]
 fn thread_cpu() -> Option<Duration> {
     None
 }
@@ -225,7 +225,7 @@ fn disk_space(_data_dir: &str) -> Option<DiskSpace> {
     None
 }
 
-#[cfg(all(feature = "tokio-system", target_has_atomic = "64"))]
+#[cfg(all(feature = "tokio-providers", target_has_atomic = "64"))]
 fn run_loop_busy() -> Option<Duration> {
     let handle = tokio::runtime::Handle::try_current().ok()?;
     let metrics = handle.metrics();
@@ -234,12 +234,12 @@ fn run_loop_busy() -> Option<Duration> {
         .max()
 }
 
-#[cfg(all(feature = "tokio-system", not(target_has_atomic = "64")))]
+#[cfg(all(feature = "tokio-providers", not(target_has_atomic = "64")))]
 fn run_loop_busy() -> Option<Duration> {
     None
 }
 
-#[cfg(all(test, feature = "tokio-system"))]
+#[cfg(all(test, feature = "tokio-providers"))]
 mod tests {
     use super::*;
 

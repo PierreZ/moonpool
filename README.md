@@ -115,7 +115,7 @@ and under the simulator in its own `#[test]`.
 - Six provider traits: `TimeProvider`, `TaskProvider`, `NetworkProvider`,
   `RandomProvider`, `StorageProvider` and `SystemProvider`, bundled by
   `Providers`.
-- `TokioProviders` for production, with granular `tokio-*` features.
+- `TokioProviders` for production, behind the `tokio-providers` feature.
   `SimProviders` for simulation.
 - Local (non-`Send`) forms of the traits for thread-per-core runtimes:
   `LocalStorageProvider`, `LocalNetworkProvider`, `LocalTimeProvider`,

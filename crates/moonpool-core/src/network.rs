@@ -23,7 +23,7 @@
 
 use futures::io::{AsyncRead, AsyncWrite};
 use std::io;
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 /// Provider trait for creating TCP connections and listeners.
@@ -171,11 +171,11 @@ impl<L: TcpListenerTrait> LocalTcpListener for L {
 /// socket its peer already reset) leaves the connection as it is, and the
 /// next read or write reports the real error. The simulator models no Nagle
 /// delay, so simulated and production timing agree on this point.
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug, Clone, Default)]
 pub struct TokioNetworkProvider;
 
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 impl TokioNetworkProvider {
     /// Create a Tokio network provider.
     #[must_use]
@@ -184,7 +184,7 @@ impl TokioNetworkProvider {
     }
 }
 
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 impl NetworkProvider for TokioNetworkProvider {
     type TcpStream = Compat<tokio::net::TcpStream>;
     type TcpListener = TokioTcpListener;
@@ -205,7 +205,7 @@ impl NetworkProvider for TokioNetworkProvider {
 
 /// Disable Nagle's algorithm on `stream`, best-effort (see
 /// [`TokioNetworkProvider`]).
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 fn disable_nagle(stream: &tokio::net::TcpStream) {
     if let Err(error) = stream.set_nodelay(true) {
         tracing::debug!(%error, "TCP_NODELAY not set; the connection is used as it is");
@@ -214,13 +214,13 @@ fn disable_nagle(stream: &tokio::net::TcpStream) {
 
 /// The listener [`TokioNetworkProvider::bind`](NetworkProvider::bind) returns: a
 /// Tokio `TcpListener` whose accepted streams have `TCP_NODELAY` set.
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug)]
 pub struct TokioTcpListener {
     inner: tokio::net::TcpListener,
 }
 
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 impl TcpListenerTrait for TokioTcpListener {
     type TcpStream = Compat<tokio::net::TcpStream>;
 
@@ -248,11 +248,11 @@ impl TcpListenerTrait for TokioTcpListener {
 ///
 /// As [`TokioNetworkProvider`] does, every connected and accepted stream has
 /// Nagle's algorithm disabled (`TCP_NODELAY`), best-effort.
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 #[derive(Debug, Clone, Default)]
 pub struct CompioNetworkProvider;
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 impl CompioNetworkProvider {
     /// Create a compio network provider.
     #[must_use]
@@ -263,13 +263,13 @@ impl CompioNetworkProvider {
 
 /// The stream type of [`CompioNetworkProvider`]: a compio `TcpStream` behind
 /// compio's `AsyncStream` adapter, boxed so that the stream is `Unpin`.
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 #[derive(Debug)]
 pub struct CompioTcpStream(
     std::pin::Pin<Box<compio::io::compat::AsyncStream<compio::net::TcpStream>>>,
 );
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 fn compio_stream(stream: compio::net::TcpStream) -> CompioTcpStream {
     if let Err(error) = stream.set_nodelay(true) {
         tracing::debug!(%error, "TCP_NODELAY not set; the connection is used as it is");
@@ -277,7 +277,7 @@ fn compio_stream(stream: compio::net::TcpStream) -> CompioTcpStream {
     CompioTcpStream(Box::pin(compio::io::compat::AsyncStream::new(stream)))
 }
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 impl AsyncRead for CompioTcpStream {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
@@ -288,7 +288,7 @@ impl AsyncRead for CompioTcpStream {
     }
 }
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 impl AsyncWrite for CompioTcpStream {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
@@ -313,7 +313,7 @@ impl AsyncWrite for CompioTcpStream {
     }
 }
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 impl LocalNetworkProvider for CompioNetworkProvider {
     type TcpStream = CompioTcpStream;
     type TcpListener = CompioTcpListener;
@@ -332,13 +332,13 @@ impl LocalNetworkProvider for CompioNetworkProvider {
 /// The listener [`CompioNetworkProvider::bind`](LocalNetworkProvider::bind)
 /// returns: a compio `TcpListener` whose accepted streams have `TCP_NODELAY`
 /// set.
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 #[derive(Debug)]
 pub struct CompioTcpListener {
     inner: compio::net::TcpListener,
 }
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 impl LocalTcpListener for CompioTcpListener {
     type TcpStream = CompioTcpStream;
 

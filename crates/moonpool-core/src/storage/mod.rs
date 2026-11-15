@@ -46,14 +46,14 @@
 //! [`AsyncSeek`]: futures::io::AsyncSeek
 
 mod align;
-#[cfg(feature = "compio-fs")]
+#[cfg(feature = "compio-providers")]
 mod compio_impl;
 mod layout;
 mod local;
-#[cfg(any(feature = "tokio-fs", feature = "compio-fs"))]
+#[cfg(any(feature = "tokio-providers", feature = "compio-providers"))]
 mod native;
 mod options;
-#[cfg(feature = "tokio-fs")]
+#[cfg(feature = "tokio-providers")]
 mod tokio_impl;
 
 use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
@@ -79,9 +79,9 @@ pub fn stream_io_unsupported() -> io::Error {
          use read_at and write_at",
     )
 }
-#[cfg(feature = "compio-fs")]
+#[cfg(feature = "compio-providers")]
 pub use compio_impl::{CompioStorageFile, CompioStorageProvider};
-#[cfg(feature = "tokio-fs")]
+#[cfg(feature = "tokio-providers")]
 pub use tokio_impl::{TokioStorageFile, TokioStorageProvider};
 
 /// An [`io::ErrorKind::InvalidInput`] error: the class of failure a kernel

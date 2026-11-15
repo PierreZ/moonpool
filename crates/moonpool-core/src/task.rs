@@ -128,7 +128,7 @@ pub trait LocalTaskProvider: Clone + 'static {
 /// `tracing` span at trace level named `task`, with the task name in its
 /// `name` field, so every event from inside the task carries the name. The
 /// name is not attached to the tokio task itself.
-#[cfg(feature = "tokio-task")]
+#[cfg(feature = "tokio-providers")]
 #[derive(Clone, Debug)]
 pub struct TokioTaskProvider;
 
@@ -137,11 +137,11 @@ pub struct TokioTaskProvider;
 /// Wraps tokio's `JoinHandle<()>` and converts the runtime-specific
 /// `tokio::task::JoinError` into the runtime-agnostic [`JoinError`] variants
 /// when polled.
-#[cfg(feature = "tokio-task")]
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug)]
 pub struct TokioJoinHandle(tokio::task::JoinHandle<()>);
 
-#[cfg(feature = "tokio-task")]
+#[cfg(feature = "tokio-providers")]
 impl Future for TokioJoinHandle {
     type Output = Result<(), JoinError>;
 
@@ -159,7 +159,7 @@ impl Future for TokioJoinHandle {
     }
 }
 
-#[cfg(feature = "tokio-task")]
+#[cfg(feature = "tokio-providers")]
 impl Detach for TokioJoinHandle {
     fn detach(self) {
         // tokio join handles already detach on drop; consuming self is all
@@ -167,7 +167,7 @@ impl Detach for TokioJoinHandle {
     }
 }
 
-#[cfg(feature = "tokio-task")]
+#[cfg(feature = "tokio-providers")]
 impl TaskProvider for TokioTaskProvider {
     type JoinHandle = TokioJoinHandle;
 
@@ -213,7 +213,7 @@ impl TaskProvider for TokioTaskProvider {
 ///     handle.await.expect("task completed");
 /// });
 /// ```
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CompioTaskProvider;
 
@@ -224,11 +224,11 @@ pub struct CompioTaskProvider;
 /// own handle cancels its task when dropped; this one detaches it instead,
 /// as Tokio's and the simulator's handles do, so dropping a handle never
 /// cancels work.
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 #[derive(Debug)]
 pub struct CompioJoinHandle(Option<compio::runtime::JoinHandle<()>>);
 
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 impl Future for CompioJoinHandle {
     type Output = Result<(), JoinError>;
 
@@ -249,7 +249,7 @@ impl Future for CompioJoinHandle {
     }
 }
 
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 impl Detach for CompioJoinHandle {
     fn detach(mut self) {
         if let Some(handle) = self.0.take() {
@@ -258,7 +258,7 @@ impl Detach for CompioJoinHandle {
     }
 }
 
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 impl Drop for CompioJoinHandle {
     fn drop(&mut self) {
         // Detach on drop (Tokio parity); compio's handle would cancel.
@@ -268,7 +268,7 @@ impl Drop for CompioJoinHandle {
     }
 }
 
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 impl LocalTaskProvider for CompioTaskProvider {
     type JoinHandle = CompioJoinHandle;
 
@@ -292,10 +292,10 @@ impl LocalTaskProvider for CompioTaskProvider {
 
 /// Pends once, waking itself, then completes: one trip through the run
 /// queue. Compio has no `yield_now` of its own.
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 struct YieldOnce(bool);
 
-#[cfg(feature = "compio-task")]
+#[cfg(feature = "compio-providers")]
 impl Future for YieldOnce {
     type Output = ();
 
@@ -312,7 +312,7 @@ impl Future for YieldOnce {
     }
 }
 
-#[cfg(all(test, feature = "tokio-task"))]
+#[cfg(all(test, feature = "tokio-providers"))]
 mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};

@@ -14,8 +14,8 @@ browser demo and the no-default-features simulation use.
   application boundary with a narrow trait when a consumer needs `dyn`.
 - **Streams are `futures::io`**, never `tokio::io`. hyper integration lives in
   `moonpool-hyper` (`HyperIo`), not here.
-- **Every feature is granular and documented in `Cargo.toml`.** `tokio-providers`
-  is the production umbrella over `tokio-task`/`-time`/`-net`/`-fs`/`-random`;
+- **One feature per backend, documented in `Cargo.toml`.** `tokio-providers`
+  is the whole Tokio backend and `compio-providers` the whole compio backend;
   `select` re-exports tokio's macro verbatim; `deterministic-select` (enabled
   by moonpool-sim) swaps in the seeded-offset expansion in `select.rs` +
   `select_support.rs`. A new feature must keep the all-off build wasm-clean and
