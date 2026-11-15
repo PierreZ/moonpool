@@ -4,7 +4,7 @@
 //! for various failure modes.
 
 use crate::{fast_sim, local_runtime, run_storage_test, step_until_done, test_ip};
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimFaultEvent, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
@@ -21,18 +21,22 @@ fn test_read_corruption_fault() {
 
         let result: std::io::Result<bool> = run_storage_test(sim, |provider| async move {
             // Write known data
-            let mut file = provider
-                .open("corrupt.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("corrupt.txt", OpenOptions::create_write())
+                    .await?,
+            );
             let original = b"hello world!";
             file.write_all(original).await?;
             file.sync_all().await?;
             drop(file);
 
             // Read it back - with 100% corruption, data should be different
-            let mut file = provider
-                .open("corrupt.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("corrupt.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = vec![0u8; original.len()];
             file.read_exact(&mut buf).await?;
 
@@ -62,18 +66,22 @@ fn test_write_corruption_fault() {
 
         let result: std::io::Result<bool> = run_storage_test(sim, |provider| async move {
             // Write data
-            let mut file = provider
-                .open("write_corrupt.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("write_corrupt.txt", OpenOptions::create_write())
+                    .await?,
+            );
             let original = b"test data for write corruption";
             file.write_all(original).await?;
             file.sync_all().await?;
             drop(file);
 
             // Read without corruption (set a new file with no read faults)
-            let mut file = provider
-                .open("write_corrupt.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("write_corrupt.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = vec![0u8; original.len()];
             file.read_exact(&mut buf).await?;
 
@@ -104,9 +112,11 @@ fn test_misdirected_write_fault() {
 
         let result: std::io::Result<Vec<u8>> = run_storage_test(sim, |provider| async move {
             // Create a file and write sequentially
-            let mut file = provider
-                .open("misdirect.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("misdirect.txt", OpenOptions::create_write())
+                    .await?,
+            );
 
             // Write known pattern
             for i in 0..10u8 {
@@ -116,9 +126,11 @@ fn test_misdirected_write_fault() {
             drop(file);
 
             // Read back
-            let mut file = provider
-                .open("misdirect.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("misdirect.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
 
@@ -155,17 +167,21 @@ fn test_misdirected_read_fault() {
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
             // Create a file with known data pattern
-            let mut file = provider
-                .open("misdirect_read.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("misdirect_read.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"AABBCCDDEE").await?;
             file.sync_all().await?;
             drop(file);
 
             // Read back with misdirection
-            let mut file = provider
-                .open("misdirect_read.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("misdirect_read.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = [0; 2];
             file.read_exact(&mut buf).await?;
 
@@ -198,17 +214,21 @@ fn test_phantom_write_fault() {
 
         let result: std::io::Result<Vec<u8>> = run_storage_test(sim, |provider| async move {
             // Write data that should be "lost"
-            let mut file = provider
-                .open("phantom.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("phantom.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"this data should be lost").await?;
             file.sync_all().await?;
             drop(file);
 
             // Read back - with phantom writes, data may be zeros or missing
-            let mut file = provider
-                .open("phantom.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("phantom.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
 
@@ -243,9 +263,11 @@ fn test_sync_failure_fault() {
         sim.set_storage_config(config);
 
         let result: std::io::Result<()> = run_storage_test(sim, |provider| async move {
-            let mut file = provider
-                .open("sync_fail.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("sync_fail.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"test").await?;
 
             // This should fail with 100% sync failure probability
@@ -276,10 +298,12 @@ fn test_crash_torn_writes() {
         // Write data but don't sync, then simulate crash
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("crash.txt", OpenOptions::create_write())
-                .await
-                .expect("open failed");
+            let mut file = FileCursor::new(
+                provider
+                    .open("crash.txt", OpenOptions::create_write())
+                    .await
+                    .expect("open failed"),
+            );
             file.write_all(b"unsynced data")
                 .await
                 .expect("write failed");
@@ -329,9 +353,11 @@ fn test_uninitialized_reads() {
                 drop(file);
 
                 // Read the uninitialized region
-                let mut file = provider
-                    .open("uninit.txt", OpenOptions::read_only())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open("uninit.txt", OpenOptions::read_only())
+                        .await?,
+                );
                 let mut buf = Vec::new();
                 file.read_to_end(&mut buf).await?;
 
@@ -377,9 +403,11 @@ fn test_mixed_low_fault_probabilities() {
 
             // Try write
             let handle = tokio::spawn(async move {
-                let mut file = provider
-                    .open(&filename, OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open(&filename, OpenOptions::create_write())
+                        .await?,
+                );
                 file.write_all(b"test data").await?;
                 file.sync_all().await?;
                 drop(file);
@@ -396,7 +424,8 @@ fn test_mixed_low_fault_probabilities() {
                 let provider2 = sim.storage_provider(test_ip());
                 let filename = format!("mixed_{i}.txt");
                 let handle2 = tokio::spawn(async move {
-                    let mut file = provider2.open(&filename, OpenOptions::read_only()).await?;
+                    let mut file =
+                        FileCursor::new(provider2.open(&filename, OpenOptions::read_only()).await?);
                     let mut buf = Vec::new();
                     file.read_to_end(&mut buf).await?;
                     Ok::<_, std::io::Error>(())
@@ -462,9 +491,11 @@ fn test_combined_fault_types() {
 
                 // Write
                 let write_result = async {
-                    let mut file = provider
-                        .open(&filename, OpenOptions::create_write())
-                        .await?;
+                    let mut file = FileCursor::new(
+                        provider
+                            .open(&filename, OpenOptions::create_write())
+                            .await?,
+                    );
                     file.write_all(format!("Data {i}").as_bytes()).await?;
                     file.sync_all().await?;
                     Ok::<_, std::io::Error>(())
@@ -474,7 +505,9 @@ fn test_combined_fault_types() {
                 // Read back if write succeeded
                 let read_result = if write_result.is_ok() {
                     async {
-                        let mut file = provider.open(&filename, OpenOptions::read_only()).await?;
+                        let mut file = FileCursor::new(
+                            provider.open(&filename, OpenOptions::read_only()).await?,
+                        );
                         let mut buf = Vec::new();
                         file.read_to_end(&mut buf).await?;
                         Ok::<_, std::io::Error>(buf)
@@ -532,17 +565,20 @@ fn test_fault_determinism_same_seed() {
                 let filename = format!("det_{i}.txt");
 
                 // Create file first
-                let mut file = provider
-                    .open(&filename, OpenOptions::create_write())
-                    .await
-                    .expect("create failed");
+                let mut file = FileCursor::new(
+                    provider
+                        .open(&filename, OpenOptions::create_write())
+                        .await
+                        .expect("create failed"),
+                );
                 file.write_all(b"test").await.expect("write failed");
                 file.sync_all().await.expect("sync failed");
                 drop(file);
 
                 // Read back
                 let result = async {
-                    let mut file = provider.open(&filename, OpenOptions::read_only()).await?;
+                    let mut file =
+                        FileCursor::new(provider.open(&filename, OpenOptions::read_only()).await?);
                     let mut buf = Vec::new();
                     file.read_to_end(&mut buf).await?;
                     Ok::<_, std::io::Error>(buf)
@@ -568,16 +604,19 @@ fn test_fault_determinism_same_seed() {
             for i in 0..10 {
                 let filename = format!("det_{i}.txt");
 
-                let mut file = provider
-                    .open(&filename, OpenOptions::create_write())
-                    .await
-                    .expect("create failed");
+                let mut file = FileCursor::new(
+                    provider
+                        .open(&filename, OpenOptions::create_write())
+                        .await
+                        .expect("create failed"),
+                );
                 file.write_all(b"test").await.expect("write failed");
                 file.sync_all().await.expect("sync failed");
                 drop(file);
 
                 let result = async {
-                    let mut file = provider.open(&filename, OpenOptions::read_only()).await?;
+                    let mut file =
+                        FileCursor::new(provider.open(&filename, OpenOptions::read_only()).await?);
                     let mut buf = Vec::new();
                     file.read_to_end(&mut buf).await?;
                     Ok::<_, std::io::Error>(buf)
@@ -624,19 +663,23 @@ fn test_fault_injection_produces_mixed_results() {
             for i in 0..20 {
                 let filename = format!("mixed_{i}.txt");
 
-                let mut file = provider
-                    .open(&filename, OpenOptions::create_write())
-                    .await
-                    .expect("create failed");
+                let mut file = FileCursor::new(
+                    provider
+                        .open(&filename, OpenOptions::create_write())
+                        .await
+                        .expect("create failed"),
+                );
                 file.write_all(original_data).await.expect("write failed");
                 file.sync_all().await.expect("sync failed");
                 drop(file);
 
                 // Read back and check if corrupted
-                let mut file = provider
-                    .open(&filename, OpenOptions::read_only())
-                    .await
-                    .expect("open failed");
+                let mut file = FileCursor::new(
+                    provider
+                        .open(&filename, OpenOptions::read_only())
+                        .await
+                        .expect("open failed"),
+                );
                 let mut buf = vec![0u8; original_data.len()];
                 file.read_exact(&mut buf).await.expect("read failed");
 
@@ -686,17 +729,21 @@ fn test_corruption_content_deterministic() {
             let provider = sim.storage_provider(test_ip());
             let handle = tokio::spawn(async move {
                 // Write known data
-                let mut file = provider
-                    .open("corrupt.txt", OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open("corrupt.txt", OpenOptions::create_write())
+                        .await?,
+                );
                 file.write_all(b"ABCDEFGH").await?;
                 file.sync_all().await?;
                 drop(file);
 
                 // Read - will be corrupted
-                let mut file = provider
-                    .open("corrupt.txt", OpenOptions::read_only())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open("corrupt.txt", OpenOptions::read_only())
+                        .await?,
+                );
                 let mut buf = vec![0u8; 8];
                 file.read_exact(&mut buf).await?;
                 Ok::<_, std::io::Error>(buf)
@@ -750,32 +797,40 @@ fn test_per_process_storage_config_isolation() {
         // Write known data through both providers (different paths per IP)
         let handle = tokio::spawn(async move {
             // Write via IP1
-            let mut file1 = provider1
-                .open("ip1_data.txt", OpenOptions::create_write())
-                .await?;
+            let mut file1 = FileCursor::new(
+                provider1
+                    .open("ip1_data.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file1.write_all(original).await?;
             file1.sync_all().await?;
             drop(file1);
 
             // Write via IP2
-            let mut file2 = provider2
-                .open("ip2_data.txt", OpenOptions::create_write())
-                .await?;
+            let mut file2 = FileCursor::new(
+                provider2
+                    .open("ip2_data.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file2.write_all(original).await?;
             file2.sync_all().await?;
             drop(file2);
 
             // Read via IP1 - should be corrupted
-            let mut file1 = provider1
-                .open("ip1_data.txt", OpenOptions::read_only())
-                .await?;
+            let mut file1 = FileCursor::new(
+                provider1
+                    .open("ip1_data.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf1 = vec![0u8; original.len()];
             file1.read_exact(&mut buf1).await?;
 
             // Read via IP2 - should be intact
-            let mut file2 = provider2
-                .open("ip2_data.txt", OpenOptions::read_only())
-                .await?;
+            let mut file2 = FileCursor::new(
+                provider2
+                    .open("ip2_data.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf2 = vec![0u8; original.len()];
             file2.read_exact(&mut buf2).await?;
 
@@ -811,16 +866,20 @@ fn test_simulate_crash_for_process_isolation() {
 
         // Write and sync data through both providers (different paths per IP)
         let handle = tokio::spawn(async move {
-            let mut file1 = provider1
-                .open("ip1_crash.txt", OpenOptions::create_write())
-                .await?;
+            let mut file1 = FileCursor::new(
+                provider1
+                    .open("ip1_crash.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file1.write_all(b"ip1 data").await?;
             file1.sync_all().await?;
             drop(file1);
 
-            let mut file2 = provider2
-                .open("ip2_crash.txt", OpenOptions::create_write())
-                .await?;
+            let mut file2 = FileCursor::new(
+                provider2
+                    .open("ip2_crash.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file2.write_all(b"ip2 data").await?;
             file2.sync_all().await?;
             drop(file2);
@@ -836,9 +895,11 @@ fn test_simulate_crash_for_process_isolation() {
         // IP2 should still be able to read its file
         let provider2_after = sim.storage_provider(ip2);
         let handle2 = tokio::spawn(async move {
-            let mut file = provider2_after
-                .open("ip2_crash.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider2_after
+                    .open("ip2_crash.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok::<_, std::io::Error>(buf)
@@ -874,16 +935,20 @@ fn test_wipe_storage_for_process() {
 
         // Write files through both providers (different paths per IP)
         let handle = tokio::spawn(async move {
-            let mut file1 = provider1
-                .open("ip1_wipe.txt", OpenOptions::create_write())
-                .await?;
+            let mut file1 = FileCursor::new(
+                provider1
+                    .open("ip1_wipe.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file1.write_all(b"ip1 data").await?;
             file1.sync_all().await?;
             drop(file1);
 
-            let mut file2 = provider2
-                .open("ip2_wipe.txt", OpenOptions::create_write())
-                .await?;
+            let mut file2 = FileCursor::new(
+                provider2
+                    .open("ip2_wipe.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file2.write_all(b"ip2 data").await?;
             file2.sync_all().await?;
             drop(file2);
@@ -918,9 +983,11 @@ fn test_wipe_storage_for_process() {
         let handle2 = tokio::spawn(async move {
             let exists = provider2_after.exists("ip2_wipe.txt").await?;
             if exists {
-                let mut file = provider2_after
-                    .open("ip2_wipe.txt", OpenOptions::read_only())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider2_after
+                        .open("ip2_wipe.txt", OpenOptions::read_only())
+                        .await?,
+                );
                 let mut buf = Vec::new();
                 file.read_to_end(&mut buf).await?;
                 Ok::<_, std::io::Error>((true, buf))
@@ -969,16 +1036,20 @@ fn test_per_process_sync_failure_isolation() {
 
         let handle = tokio::spawn(async move {
             // IP1: sync should fail
-            let mut file1 = provider1
-                .open("ip1_sync.txt", OpenOptions::create_write())
-                .await?;
+            let mut file1 = FileCursor::new(
+                provider1
+                    .open("ip1_sync.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file1.write_all(b"data").await?;
             let sync_result1 = file1.sync_all().await;
 
             // IP2: sync should succeed
-            let mut file2 = provider2
-                .open("ip2_sync.txt", OpenOptions::create_write())
-                .await?;
+            let mut file2 = FileCursor::new(
+                provider2
+                    .open("ip2_sync.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file2.write_all(b"data").await?;
             let sync_result2 = file2.sync_all().await;
 
@@ -1024,16 +1095,20 @@ fn test_per_process_phantom_write_isolation() {
 
         // Write and sync through both
         let handle = tokio::spawn(async move {
-            let mut file1 = provider1
-                .open("ip1_phantom.txt", OpenOptions::create_write())
-                .await?;
+            let mut file1 = FileCursor::new(
+                provider1
+                    .open("ip1_phantom.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file1.write_all(b"phantom data").await?;
             file1.sync_all().await?;
             drop(file1);
 
-            let mut file2 = provider2
-                .open("ip2_phantom.txt", OpenOptions::create_write())
-                .await?;
+            let mut file2 = FileCursor::new(
+                provider2
+                    .open("ip2_phantom.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file2.write_all(b"real data").await?;
             file2.sync_all().await?;
             drop(file2);
@@ -1052,15 +1127,19 @@ fn test_per_process_phantom_write_isolation() {
         let provider2 = sim.storage_provider(ip2);
 
         let handle = tokio::spawn(async move {
-            let mut file1 = provider1
-                .open("ip1_phantom.txt", OpenOptions::read_only())
-                .await?;
+            let mut file1 = FileCursor::new(
+                provider1
+                    .open("ip1_phantom.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf1 = Vec::new();
             file1.read_to_end(&mut buf1).await?;
 
-            let mut file2 = provider2
-                .open("ip2_phantom.txt", OpenOptions::read_only())
-                .await?;
+            let mut file2 = FileCursor::new(
+                provider2
+                    .open("ip2_phantom.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf2 = Vec::new();
             file2.read_to_end(&mut buf2).await?;
 
@@ -1100,16 +1179,20 @@ fn test_default_config_fallback() {
         let original = b"test data here";
 
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("fallback.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("fallback.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(original).await?;
             file.sync_all().await?;
             drop(file);
 
-            let mut file = provider
-                .open("fallback.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("fallback.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = vec![0u8; original.len()];
             file.read_exact(&mut buf).await?;
 
@@ -1136,9 +1219,11 @@ fn test_wipe_then_recreate() {
 
         // Create and write a file
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("recoverable.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("recoverable.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"original").await?;
             file.sync_all().await?;
             drop(file);
@@ -1158,17 +1243,21 @@ fn test_wipe_then_recreate() {
             assert!(!exists, "File should not exist after wipe");
 
             // Create new file at same path
-            let mut file = provider
-                .open("recoverable.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("recoverable.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"recreated").await?;
             file.sync_all().await?;
             drop(file);
 
             // Read it back
-            let mut file = provider
-                .open("recoverable.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("recoverable.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
 
@@ -1202,7 +1291,8 @@ fn test_dynamic_config_change() {
         // Write data with clean config
         let p = provider.clone();
         let handle = tokio::spawn(async move {
-            let mut file = p.open("dynamic.txt", OpenOptions::create_write()).await?;
+            let mut file =
+                FileCursor::new(p.open("dynamic.txt", OpenOptions::create_write()).await?);
             file.write_all(original).await?;
             file.sync_all().await?;
             drop(file);
@@ -1218,9 +1308,11 @@ fn test_dynamic_config_change() {
 
         // Read with the new faulty config — should see corruption
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("dynamic.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("dynamic.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = vec![0u8; original.len()];
             file.read_exact(&mut buf).await?;
             Ok::<_, std::io::Error>(buf)

@@ -4,7 +4,7 @@
 //! and nothing else. These tests pin exactly that — including the things it
 //! must *not* do, which is most of what the region-based block device used to.
 
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{BlockFile, DirectIo, OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
@@ -274,16 +274,19 @@ fn block_writes_are_visible_through_the_file_apis() {
             assert_eq!(&buf, b"stamp");
 
             // And through the stream cursor.
-            let mut streamed = provider.open("shared.db", OpenOptions::read_only()).await?;
+            let mut streamed =
+                FileCursor::new(provider.open("shared.db", OpenOptions::read_only()).await?);
             streamed.seek(SeekFrom::Start(BLOCK as u64)).await?;
             let mut head = [0u8; 5];
             streamed.read_exact(&mut head).await?;
             assert_eq!(&head, b"stamp");
 
             // A stream write lands under the block layer just as readily.
-            let mut writer = provider
-                .open("shared.db", OpenOptions::new().write(true))
-                .await?;
+            let mut writer = FileCursor::new(
+                provider
+                    .open("shared.db", OpenOptions::new().write(true))
+                    .await?,
+            );
             writer.seek(SeekFrom::Start(0)).await?;
             writer.write_all(b"header").await?;
             let mut first = blocks.buffer(1).expect("buffer allocation");

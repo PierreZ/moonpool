@@ -226,7 +226,7 @@ impl Future for AllocateFuture {
 /// Future for one positioned read (`read_at`).
 ///
 /// Same schedule → wait → complete pattern as [`SyncFuture`], but the
-/// completion carries bytes and the handle's stream cursor is never touched.
+/// completion carries bytes.
 pub struct ReadAtFuture {
     op: PendingOperation,
     handle_id: HandleId,
@@ -251,7 +251,7 @@ impl Future for ReadAtFuture {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.op.poll(
             cx,
-            |sim| Ok(sim.schedule_positioned_read(self.handle_id, self.offset, self.len)?),
+            |sim| Ok(sim.schedule_read(self.handle_id, self.offset, self.len)?),
             |completion| match completion {
                 StorageCompletion::Read(data) => Some(data),
                 _ => None,
@@ -291,10 +291,10 @@ impl Future for WriteAtFuture {
                 let Some(data) = self.data.take() else {
                     return Err(io::Error::other("positioned write polled after completion"));
                 };
-                Ok(sim.schedule_positioned_write(self.handle_id, self.offset, data)?)
+                Ok(sim.schedule_write(self.handle_id, self.offset, data)?)
             },
             |completion| match completion {
-                StorageCompletion::Write { len, .. } => Some(len),
+                StorageCompletion::Write { len } => Some(len),
                 _ => None,
             },
             "write operation returned a non-write completion",

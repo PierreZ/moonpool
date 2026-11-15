@@ -4,7 +4,7 @@
 //! and file management (create, delete, rename).
 
 use crate::{fast_sim, local_runtime, run_storage_test};
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use std::io::SeekFrom;
 
@@ -13,15 +13,18 @@ fn test_create_write_read() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
             // Create and write to a file
-            let mut file = provider
-                .open("test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"hello world").await?;
             file.sync_all().await?;
             drop(file);
 
             // Re-open for reading and verify
-            let mut file = provider.open("test.txt", OpenOptions::read_only()).await?;
+            let mut file =
+                FileCursor::new(provider.open("test.txt", OpenOptions::read_only()).await?);
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             assert_eq!(&buf, b"hello world");
@@ -39,17 +42,21 @@ fn test_seek_operations() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
             // Create a file with known content
-            let mut file = provider
-                .open("seek_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("seek_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"0123456789").await?;
             file.sync_all().await?;
             drop(file);
 
             // Test seek operations
-            let mut file = provider
-                .open("seek_test.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("seek_test.txt", OpenOptions::read_only())
+                    .await?,
+            );
 
             // SeekFrom::Start
             let pos = file.seek(SeekFrom::Start(5)).await?;
@@ -83,9 +90,11 @@ fn test_file_size() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
             // Create empty file
-            let mut file = provider
-                .open("size_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("size_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             assert_eq!(file.size().await?, 0);
 
             // Write data
@@ -110,9 +119,11 @@ fn test_set_len() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
             // Create file with content
-            let mut file = provider
-                .open("truncate_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("truncate_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"hello world").await?;
             assert_eq!(file.size().await?, 11);
 
@@ -128,9 +139,11 @@ fn test_set_len() {
             drop(file);
 
             // Verify content after truncate/extend
-            let mut file = provider
-                .open("truncate_test.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("truncate_test.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = [0u8; 5];
             file.read_exact(&mut buf).await?;
             assert_eq!(&buf, b"hello");
@@ -147,9 +160,11 @@ fn test_set_len() {
 fn test_sync_operations() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut file = provider
-                .open("sync_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("sync_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"data to sync").await?;
 
             // Test sync_data (just data, not metadata)
@@ -217,9 +232,11 @@ fn test_delete_and_rename() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
             // Create a file
-            let mut file = provider
-                .open("original.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("original.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"test content").await?;
             file.sync_all().await?;
             drop(file);
@@ -235,9 +252,11 @@ fn test_delete_and_rename() {
             assert!(provider.exists("renamed.txt").await?);
 
             // Verify content is preserved
-            let mut file = provider
-                .open("renamed.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("renamed.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             assert_eq!(&buf, b"test content");
@@ -265,9 +284,11 @@ fn deleted_path_can_be_reused_as_rename_target() {
             drop(target);
             provider.delete("target.txt").await?;
 
-            let mut source = provider
-                .open("source.txt", OpenOptions::create_write())
-                .await?;
+            let mut source = FileCursor::new(
+                provider
+                    .open("source.txt", OpenOptions::create_write())
+                    .await?,
+            );
             source.write_all(b"replacement").await?;
             source.sync_all().await?;
             drop(source);
@@ -276,9 +297,11 @@ fn deleted_path_can_be_reused_as_rename_target() {
             assert!(!provider.exists("source.txt").await?);
             assert!(provider.exists("target.txt").await?);
 
-            let mut target = provider
-                .open("target.txt", OpenOptions::read_only())
-                .await?;
+            let mut target = FileCursor::new(
+                provider
+                    .open("target.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut contents = Vec::new();
             target.read_to_end(&mut contents).await?;
             assert_eq!(contents, b"replacement");
@@ -296,15 +319,19 @@ fn deleted_path_can_be_reused_as_rename_target() {
 fn rename_replaces_existing_target_and_keeps_its_open_handles() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut old_target = provider
-                .open("target.txt", OpenOptions::create_write().read(true))
-                .await?;
+            let mut old_target = FileCursor::new(
+                provider
+                    .open("target.txt", OpenOptions::create_write().read(true))
+                    .await?,
+            );
             old_target.write_all(b"old").await?;
             old_target.sync_all().await?;
 
-            let mut source = provider
-                .open("source.txt", OpenOptions::create_write())
-                .await?;
+            let mut source = FileCursor::new(
+                provider
+                    .open("source.txt", OpenOptions::create_write())
+                    .await?,
+            );
             source.write_all(b"new").await?;
             source.sync_all().await?;
             drop(source);
@@ -320,9 +347,11 @@ fn rename_replaces_existing_target_and_keeps_its_open_handles() {
             old_target.read_to_end(&mut old_contents).await?;
             assert_eq!(old_contents, b"old");
 
-            let mut target = provider
-                .open("target.txt", OpenOptions::read_only())
-                .await?;
+            let mut target = FileCursor::new(
+                provider
+                    .open("target.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut contents = Vec::new();
             target.read_to_end(&mut contents).await?;
             assert_eq!(contents, b"new");

@@ -7,18 +7,10 @@
 //! directory sync that makes a delete durable. Recovery mode lifts
 //! every capacity, and nothing here draws from the random stream.
 
-use std::{
-    future::Future,
-    io::ErrorKind,
-    net::IpAddr,
-    pin::pin,
-    task::Poll,
-};
+use std::{future::Future, io::ErrorKind, net::IpAddr, pin::pin, task::Poll};
 
 use moonpool_core::{DiskSpace, OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{DiskCapacity, SimFaultEvent, SimWorld, StorageConfiguration, rng_call_count};
-
-/// How many events a driven future may consume before it is declared stuck.
 
 fn ip(last_octet: u8) -> IpAddr {
     format!("10.0.1.{last_octet}")

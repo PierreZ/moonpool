@@ -21,11 +21,9 @@
 ///
 /// Direct I/O comes with alignment requirements; read them off the opened file
 /// with [`StorageFile::constraints`](super::StorageFile::constraints) rather
-/// than assuming a value. Because those requirements cannot be expressed
-/// through a shared cursor, a direct-I/O file serves
-/// [`read_at`](super::StorageFile::read_at) /
-/// [`write_at`](super::StorageFile::write_at) and refuses the stream API —
-/// see [`StorageFile`](super::StorageFile).
+/// than assuming a value. Every transfer
+/// ([`read_at`](super::StorageFile::read_at) /
+/// [`write_at`](super::StorageFile::write_at)) must satisfy them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DirectIo {
     /// Ordinary buffered I/O.
@@ -91,7 +89,6 @@ impl OpenOptions {
     const FLAG_CREATE: u8 = 1 << 2;
     const FLAG_CREATE_NEW: u8 = 1 << 3;
     const FLAG_TRUNCATE: u8 = 1 << 4;
-    const FLAG_APPEND: u8 = 1 << 5;
 
     /// Create new open options with all flags set to false.
     #[must_use]
@@ -147,13 +144,6 @@ flag_setters! {
     create_new => FLAG_CREATE_NEW,
     /// Set the truncate flag.
     truncate => FLAG_TRUNCATE,
-    /// Set the append flag.
-    ///
-    /// Append mode moves the *stream cursor* to the end of the file before
-    /// every stream write. It has no effect on positioned I/O
-    /// ([`StorageFile::write_at`](super::StorageFile::write_at)), which
-    /// always writes exactly where it is told.
-    append => FLAG_APPEND,
 }
 
 macro_rules! flag_getters {
@@ -181,8 +171,6 @@ flag_getters! {
     is_create_new => FLAG_CREATE_NEW,
     /// Returns true if the file will be truncated to zero length on open.
     is_truncate => FLAG_TRUNCATE,
-    /// Returns true if stream writes will be appended to the end of the file.
-    is_append => FLAG_APPEND,
 }
 
 /// An [`OpenOptions`] whose flags contradict each other.
@@ -214,21 +202,22 @@ impl OpenOptions {
     /// The rules, which every provider must refuse alike so that simulated
     /// code cannot depend on an open production rejects:
     ///
-    /// - one of `read`, `write` or `append` must be set;
-    /// - `truncate`, `create` and `create_new` need `write` or `append`;
-    /// - `append` and `truncate` contradict each other, unless `create_new`
-    ///   makes the truncation moot.
+    /// - `read` or `write` must be set;
+    /// - `truncate`, `create` and `create_new` need `write`.
+    ///
+    /// There is no append flag: every write names its offset
+    /// ([`StorageFile::write_at`](super::StorageFile::write_at)).
     ///
     /// # Errors
     ///
     /// Returns [`InvalidOpenOptions`] naming the contradiction.
     pub fn validate(&self) -> Result<(), InvalidOpenOptions> {
-        if !self.is_read() && !self.is_write() && !self.is_append() {
+        if !self.is_read() && !self.is_write() {
             return Err(InvalidOpenOptions(
-                "open options must set at least one of read, write or append",
+                "open options must set at least one of read or write",
             ));
         }
-        if !self.is_write() && !self.is_append() {
+        if !self.is_write() {
             if self.is_truncate() {
                 return Err(InvalidOpenOptions(
                     "truncate requires write access: a read-only open cannot truncate",
@@ -236,14 +225,9 @@ impl OpenOptions {
             }
             if self.is_create() || self.is_create_new() {
                 return Err(InvalidOpenOptions(
-                    "create and create_new require write or append access",
+                    "create and create_new require write access",
                 ));
             }
-        }
-        if self.is_append() && self.is_truncate() && !self.is_create_new() {
-            return Err(InvalidOpenOptions(
-                "append and truncate contradict each other",
-            ));
         }
         Ok(())
     }
@@ -289,13 +273,8 @@ mod tests {
             OpenOptions::read_write(),
             OpenOptions::create_write(),
             OpenOptions::create_new_write(),
-            OpenOptions::new().append(true),
-            OpenOptions::new().append(true).create(true),
-            OpenOptions::new()
-                .append(true)
-                .truncate(true)
-                .create_new(true),
-            OpenOptions::new().read(true).append(true),
+            OpenOptions::new().write(true),
+            OpenOptions::new().write(true).truncate(true),
         ] {
             assert_eq!(options.validate(), Ok(()), "{options:?}");
         }
@@ -309,8 +288,6 @@ mod tests {
             OpenOptions::read_only().truncate(true),
             OpenOptions::read_only().create(true),
             OpenOptions::read_only().create_new(true),
-            OpenOptions::new().append(true).truncate(true),
-            OpenOptions::new().write(true).append(true).truncate(true),
         ] {
             let error = options.validate().expect_err("must be refused");
             let io_error: std::io::Error = error.into();
@@ -324,14 +301,14 @@ mod tests {
 
     #[test]
     fn flags_round_trip() {
-        let options = OpenOptions::new().read(true).write(true).append(true);
+        let options = OpenOptions::new().read(true).write(true).truncate(true);
         assert!(options.is_read());
         assert!(options.is_write());
-        assert!(options.is_append());
+        assert!(options.is_truncate());
         assert!(!options.is_create());
 
-        let cleared = options.append(false);
-        assert!(!cleared.is_append());
+        let cleared = options.truncate(false);
+        assert!(!cleared.is_truncate());
         assert!(cleared.is_read());
     }
 

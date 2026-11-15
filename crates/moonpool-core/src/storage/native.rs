@@ -1,6 +1,5 @@
 //! The open policy both real-filesystem backends share: direct I/O
-//! (`Disabled`, `Optional`, `Required`), discovering the alignment it needs,
-//! and reopening the file a descriptor already holds.
+//! (`Disabled`, `Optional`, `Required`) and discovering the alignment it needs.
 //!
 //! The policy is subtle, and the Tokio and compio backends must answer every
 //! open alike, so it is written once here, generic over [`NativeFs`]: the
@@ -206,60 +205,6 @@ pub(super) fn direct_io_constraints<F: Descriptor>(file: &F) -> Option<IoConstra
     }
 }
 
-/// Open `file` — the file this descriptor already holds — a second time with
-/// `options`, never whatever `path` happens to name by now.
-///
-/// Where the system has descriptor paths (Linux with `/proc` mounted) the
-/// reopen goes through [`descriptor_path`] and cannot pick up another file.
-/// Elsewhere it has to go by name, so on Unix it then checks that both
-/// descriptors hold the same inode (device and inode number) and fails with
-/// [`io::ErrorKind::Other`] if a concurrent rename replaced the file between
-/// the two opens: one handle must never silently read and write two files.
-///
-/// On a platform that is neither (Windows), the standard library exposes no
-/// stable file identity, so the reopen by name is unchecked. That is a known
-/// limitation: a rename over `path` racing the open itself can leave the
-/// stream and positioned sides of one append handle on different files.
-pub(super) async fn reopen_same_file<N: NativeFs>(
-    fs: &N,
-    file: &N::File,
-    path: &str,
-    options: &OpenOptions,
-    direct: bool,
-) -> io::Result<N::File> {
-    if descriptor_paths_available() {
-        return fs.open(&descriptor_path(file, path), options, direct).await;
-    }
-    let reopened = fs.open(Path::new(path), options, direct).await?;
-    if !same_file(file, &reopened)? {
-        return Err(io::Error::other(format!(
-            "{path} was replaced while it was being opened; \
-             the positioned descriptor would address a different file"
-        )));
-    }
-    Ok(reopened)
-}
-
-/// Whether two descriptors hold the same file (device and inode number).
-///
-/// Asked of a duplicate of each descriptor, so it works for any runtime's
-/// file type without knowing its metadata API.
-#[cfg(unix)]
-fn same_file<A: Descriptor, B: Descriptor>(a: &A, b: &B) -> io::Result<bool> {
-    use std::os::unix::fs::MetadataExt as _;
-    let identity = |file: std::os::fd::BorrowedFd<'_>| -> io::Result<(u64, u64)> {
-        let metadata = std::fs::File::from(file.try_clone_to_owned()?).metadata()?;
-        Ok((metadata.dev(), metadata.ino()))
-    };
-    Ok(identity(a.as_fd())? == identity(b.as_fd())?)
-}
-
-/// No stable file identity outside Unix: see [`reopen_same_file`].
-#[cfg(not(unix))]
-fn same_file<A, B>(_a: &A, _b: &B) -> io::Result<bool> {
-    Ok(true)
-}
-
 /// The path that reopens *this exact file*, rather than whatever the original
 /// path happens to name by the time the upgrade runs.
 ///
@@ -313,7 +258,6 @@ pub(super) fn access_only(options: &OpenOptions) -> OpenOptions {
     OpenOptions::new()
         .read(options.is_read())
         .write(options.is_write())
-        .append(options.is_append())
 }
 
 /// Open `path`, honoring the requested direct-I/O policy.
@@ -348,7 +292,7 @@ pub(super) fn access_only(options: &OpenOptions) -> OpenOptions {
 /// The simulator refuses the same shapes, so production must not accept one.
 /// `std` cannot do this check here: a `Required` open removes the lifecycle
 /// flags before the OS sees them (see [`access_only`]), so `read + create`
-/// would open, and `append + truncate` would truncate the file.
+/// would open.
 pub(super) async fn open_file<N: NativeFs>(
     fs: &N,
     path: &str,
@@ -645,7 +589,6 @@ mod tests {
         let requested = OpenOptions::new()
             .read(true)
             .write(true)
-            .append(true)
             .create(true)
             .create_new(true)
             .truncate(true);
@@ -653,7 +596,6 @@ mod tests {
 
         assert!(access.is_read());
         assert!(access.is_write());
-        assert!(access.is_append());
         assert!(!access.is_create());
         assert!(!access.is_create_new());
         assert!(!access.is_truncate());

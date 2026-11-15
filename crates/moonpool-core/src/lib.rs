@@ -162,8 +162,8 @@ pub use resolver::CompioResolver;
 pub use resolver::TokioResolver;
 pub use resolver::{Resolver, split_host_port};
 pub use storage::{
-    AlignedBuf, DirectIo, InvalidOpenOptions, IoConstraints, LayoutRegion, LocalStorageFile,
-    LocalStorageProvider, OpenOptions, StorageFile, StorageProvider, stream_io_unsupported,
+    AlignedBuf, DirectIo, FileCursor, InvalidOpenOptions, IoConstraints, LayoutRegion,
+    LocalStorageFile, LocalStorageProvider, OpenOptions, StorageFile, StorageProvider,
 };
 #[cfg(feature = "compio-providers")]
 pub use storage::{CompioStorageFile, CompioStorageProvider};

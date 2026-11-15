@@ -18,7 +18,6 @@ use futures::task::noop_waker;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration, storage::SimStorageFile};
 
-
 fn owner() -> IpAddr {
     "10.0.1.1".parse().expect("valid test IP")
 }

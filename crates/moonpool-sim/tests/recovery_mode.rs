@@ -16,10 +16,11 @@
 //! Every test here pins probabilities to 0.0 or 1.0 so the interesting path is
 //! taken deterministically rather than sampled.
 
+use moonpool_core::FileCursor;
 use std::{io::SeekFrom, net::IpAddr, pin::pin, task::Poll, time::Duration};
 
 use async_trait::async_trait;
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
     Event, FaultContext, FaultInjector, LatencyDistribution, NetworkConfiguration, NetworkEvent,
@@ -276,14 +277,16 @@ fn storage_damage_survives_recovery_mode_while_new_faults_stop() {
 
     let damaged = vec![0xAA_u8; SECTOR_SIZE];
     let clean = vec![0xBB_u8; SECTOR_SIZE];
-    let mut file = drive(
-        &mut sim,
-        provider.open(
-            "damaged.bin",
-            OpenOptions::new().read(true).write(true).create(true),
-        ),
-    )
-    .expect("open");
+    let mut file = FileCursor::new(
+        drive(
+            &mut sim,
+            provider.open(
+                "damaged.bin",
+                OpenOptions::new().read(true).write(true).create(true),
+            ),
+        )
+        .expect("open"),
+    );
 
     // --- chaos phase: the write lands but its sectors are faulted ---
     let corrupted = drive(&mut sim, async {
@@ -343,11 +346,13 @@ fn a_failed_disk_outlives_the_boundary_and_no_other_disk_fails() {
     let mut sim = SimWorld::new_with_seed(20_260_901);
     sim.set_storage_config(config);
     let provider = sim.storage_provider(ip(1));
-    let mut file = drive(
-        &mut sim,
-        provider.open("hung.bin", OpenOptions::create_write()),
-    )
-    .expect("open");
+    let mut file = FileCursor::new(
+        drive(
+            &mut sim,
+            provider.open("hung.bin", OpenOptions::create_write()),
+        )
+        .expect("open"),
+    );
 
     // --- chaos phase: the first I/O fails disk 1 and parks ---
     let mut parked = pin!(file.write_all(b"never"));
@@ -380,10 +385,12 @@ fn a_failed_disk_outlives_the_boundary_and_no_other_disk_fails() {
     // --- quiet tail: the budget is free, and still nobody's disk fails ---
     let provider = sim.storage_provider(ip(2));
     drive(&mut sim, async {
-        let mut file = provider
-            .open("quiet.bin", OpenOptions::create_write())
-            .await
-            .expect("open");
+        let mut file = FileCursor::new(
+            provider
+                .open("quiet.bin", OpenOptions::create_write())
+                .await
+                .expect("open"),
+        );
         file.write_all(b"ok").await.expect("write");
         file.sync_all().await.expect("sync");
     });
@@ -415,14 +422,16 @@ fn an_active_disk_throttle_outlives_the_boundary_then_expires() {
     sim.set_storage_config(config);
     let provider = sim.storage_provider(ip(1));
 
-    let mut file = drive(
-        &mut sim,
-        provider.open(
-            "throttled.bin",
-            OpenOptions::new().read(true).write(true).create(true),
-        ),
-    )
-    .expect("open");
+    let mut file = FileCursor::new(
+        drive(
+            &mut sim,
+            provider.open(
+                "throttled.bin",
+                OpenOptions::new().read(true).write(true).create(true),
+            ),
+        )
+        .expect("open"),
+    );
     drive(&mut sim, file.write_all(b"tick")).expect("write");
 
     let expires_at = sim
@@ -706,13 +715,15 @@ fn set_storage_config_cannot_rearm_faults_after_recovery() {
     let provider = sim.storage_provider(ip(1));
     let payload = vec![0x77_u8; SECTOR_SIZE];
     let read_back = drive(&mut sim, async {
-        let mut file = provider
-            .open(
-                "rearmed.bin",
-                OpenOptions::new().read(true).write(true).create(true),
-            )
-            .await
-            .expect("open");
+        let mut file = FileCursor::new(
+            provider
+                .open(
+                    "rearmed.bin",
+                    OpenOptions::new().read(true).write(true).create(true),
+                )
+                .await
+                .expect("open"),
+        );
         file.write_all(&payload).await.expect("write");
         file.sync_all().await.expect("sync");
         file.seek(SeekFrom::Start(0)).await.expect("seek");
@@ -754,13 +765,15 @@ fn per_process_storage_setters_cannot_rearm_faults_after_recovery() {
         let provider = sim.storage_provider(host);
         let path = format!("rearmed-{host}.bin");
         let read_back = drive(&mut sim, async {
-            let mut file = provider
-                .open(
-                    &path,
-                    OpenOptions::new().read(true).write(true).create(true),
-                )
-                .await
-                .expect("open");
+            let mut file = FileCursor::new(
+                provider
+                    .open(
+                        &path,
+                        OpenOptions::new().read(true).write(true).create(true),
+                    )
+                    .await
+                    .expect("open"),
+            );
             file.write_all(&payload).await.expect("write");
             file.sync_all().await.expect("sync");
             file.seek(SeekFrom::Start(0)).await.expect("seek");

@@ -5,7 +5,7 @@
 //! that punishes an engine which forgets the second half.
 
 use crate::{local_runtime, run_on, step_until_done, test_ip};
-use futures::io::AsyncWriteExt;
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
     CrashOutcome, EioTarget, SimFaultEvent, SimWorld, StorageConfiguration, StorageFaultKind,
@@ -71,10 +71,12 @@ fn file_sync_does_not_make_the_directory_entry_durable() {
         run_on(&mut sim, |provider| async move {
             provider.create_dir_all("db").await.expect("create db");
             provider.sync_dir(".").await.expect("durable db");
-            let mut file = provider
-                .open("db/wal", OpenOptions::create_write())
-                .await
-                .expect("open failed");
+            let mut file = FileCursor::new(
+                provider
+                    .open("db/wal", OpenOptions::create_write())
+                    .await
+                    .expect("open failed"),
+            );
             file.write_all(b"committed").await.expect("write failed");
             file.sync_all().await.expect("sync failed");
             // Deliberately no sync_dir.
@@ -147,10 +149,12 @@ fn a_synced_directory_entry_survives() {
         run_on(&mut sim, |provider| async move {
             provider.create_dir_all("db").await.expect("create db");
             provider.sync_dir(".").await.expect("durable db");
-            let mut file = provider
-                .open("db/wal", OpenOptions::create_write())
-                .await
-                .expect("open failed");
+            let mut file = FileCursor::new(
+                provider
+                    .open("db/wal", OpenOptions::create_write())
+                    .await
+                    .expect("open failed"),
+            );
             file.write_all(b"committed").await.expect("write failed");
             file.sync_all().await.expect("sync failed");
             provider.sync_dir("db").await.expect("sync_dir failed");
@@ -465,10 +469,12 @@ fn rename_durability_needs_the_directory_sync() {
         run_on(&mut sim, |provider| async move {
             provider.create_dir_all("db").await.expect("create db");
             provider.sync_dir(".").await.expect("durable db");
-            let mut file = provider
-                .open("db/manifest.tmp", OpenOptions::create_write())
-                .await
-                .expect("open failed");
+            let mut file = FileCursor::new(
+                provider
+                    .open("db/manifest.tmp", OpenOptions::create_write())
+                    .await
+                    .expect("open failed"),
+            );
             file.write_all(b"v2").await.expect("write failed");
             file.sync_all().await.expect("sync failed");
             drop(file);

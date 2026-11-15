@@ -5,8 +5,7 @@
 //!
 //! - [`StorageProvider`] owns the filesystem *namespace*: opening a path,
 //!   asking whether it exists, deleting, renaming.
-//! - [`StorageFile`] is one already-open file: stream I/O
-//!   ([`AsyncRead`]/[`AsyncWrite`]/[`AsyncSeek`]), positioned I/O
+//! - [`StorageFile`] is one already-open file: positioned I/O
 //!   ([`read_at`](StorageFile::read_at) / [`write_at`](StorageFile::write_at)),
 //!   a durable positioned write
 //!   ([`write_at_durable`](StorageFile::write_at_durable)), the zero-copy
@@ -35,19 +34,23 @@
 //!
 //! ## One file state
 //!
-//! Every access path reaches the same bytes. A positioned write is visible to
-//! a subsequent stream read, a stream write is visible to a subsequent
-//! positioned read, and two handles on one path observe one file. The
-//! simulation upholds this the same way a real filesystem does: there is one
-//! authoritative image per file, never one per API.
+//! Every access path reaches the same bytes. A write through one handle is
+//! visible to a read through another, and two handles on one path observe one
+//! file. The simulation upholds this the same way a real filesystem does:
+//! there is one authoritative image per file, never one per API.
 //!
-//! [`AsyncRead`]: futures::io::AsyncRead
-//! [`AsyncWrite`]: futures::io::AsyncWrite
-//! [`AsyncSeek`]: futures::io::AsyncSeek
+//! ## No stream I/O on a file
+//!
+//! A file has no cursor of its own: every transfer names its offset. Code
+//! that wants sequential reads and writes wraps the file in a [`FileCursor`],
+//! which keeps the position and loops over short transfers. It is one small
+//! type over any file, as [`BlockFile`](crate::BlockFile) is, so no backend
+//! implements a cursor.
 
 mod align;
 #[cfg(feature = "compio-providers")]
 mod compio_impl;
+mod cursor;
 mod layout;
 mod local;
 #[cfg(any(feature = "tokio-providers", feature = "compio-providers"))]
@@ -56,29 +59,14 @@ mod options;
 #[cfg(feature = "tokio-providers")]
 mod tokio_impl;
 
-use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use std::io;
 
 pub use align::{AlignedBuf, IoConstraints};
+pub use cursor::FileCursor;
 pub use layout::LayoutRegion;
 pub use local::{LocalStorageFile, LocalStorageProvider};
 pub use options::{DirectIo, InvalidOpenOptions, OpenOptions};
 
-/// The error a file with I/O constraints returns from the stream API.
-///
-/// Shared so every backend — and every out-of-tree [`StorageFile`] — refuses
-/// it identically, rather than each producing its own wording or, worse,
-/// leaving the kernel to produce one.
-///
-/// See [`StorageFile`] for why the stream API and alignment do not mix.
-#[must_use]
-pub fn stream_io_unsupported() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "this file has I/O alignment constraints, which the stream API cannot honour; \
-         use read_at and write_at",
-    )
-}
 #[cfg(feature = "compio-providers")]
 pub use compio_impl::{CompioStorageFile, CompioStorageProvider};
 #[cfg(feature = "tokio-providers")]
@@ -227,23 +215,6 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
 /// timeout on [`write_at`](Self::write_at) must expect that the write can
 /// land later, and must not reuse the range as if it never happened.
 ///
-/// ## Stream I/O and alignment do not mix
-///
-/// The [`AsyncRead`] / [`AsyncWrite`] half of this trait is available only on
-/// a file with no I/O constraints. A file that has them — a direct-I/O file —
-/// **must** refuse stream reads and writes with
-/// [`stream_io_unsupported`], because the stream API cannot honour an
-/// alignment: it transfers from wherever the shared cursor happens to be, in
-/// whatever length the caller passed, and a short transfer then leaves the
-/// cursor somewhere no subsequent request may start from. There is no answer
-/// to that within the API's own semantics, so the honest contract is that the
-/// two are mutually exclusive rather than one accidentally working until it
-/// does not.
-///
-/// [`read_at`](Self::read_at) and [`write_at`](Self::write_at) are what such a
-/// file offers instead, and they are what a storage engine wants anyway.
-/// Seeking stays available: it moves a cursor, it does not transfer anything.
-///
 /// ## Borrowed or owned buffers
 ///
 /// Each positioned transfer comes in two forms: borrowed (`&[u8]`,
@@ -254,7 +225,7 @@ pub trait StorageProvider: Clone + Send + Sync + 'static {
 /// — a journal building its batch in place — uses the owned form and the
 /// bytes are never copied between it and the kernel; any other caller keeps
 /// the borrowed form. Neither is a different kind of file.
-pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync + 'static {
+pub trait StorageFile: Send + Sync + 'static {
     /// Flush this file's data *and* metadata to the device.
     ///
     /// On success every write completed before the call is durable, as is the
@@ -287,14 +258,12 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
     /// [`DirectIo::Optional`](crate::DirectIo::Optional) fell back.
     fn is_direct_io(&self) -> bool;
 
-    /// Read into `buf` starting at `offset`, without touching the stream
-    /// cursor.
+    /// Read into `buf` starting at `offset`.
     ///
     /// Returns the number of bytes read, which may be **fewer** than
     /// `buf.len()`: this is `read`, not `read_exact`. A return of `0` means
     /// end of file. Positioned reads take `&self`, so non-overlapping ranges
-    /// of one file may be read concurrently, and they observe the same bytes
-    /// stream reads do.
+    /// of one file may be read concurrently.
     ///
     /// A caller that needs the whole range must loop, or use a layer that
     /// loops for it (see [`BlockFile`](crate::BlockFile)).
@@ -304,12 +273,11 @@ pub trait StorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + Send + Sync 
         buf: &mut [u8],
     ) -> impl std::future::Future<Output = io::Result<usize>> + Send;
 
-    /// Write `buf` starting at `offset`, without touching the stream cursor.
+    /// Write `buf` starting at `offset`.
     ///
     /// Returns the number of bytes written, which may be **fewer** than
     /// `buf.len()`: this is `write`, not `write_all`. Writing past the end of
-    /// the file extends it. Append mode does not apply — a positioned write
-    /// goes exactly where it is told.
+    /// the file extends it.
     ///
     /// Completion means the bytes are *visible*, not durable; only a
     /// subsequent [`sync_all`](Self::sync_all) / [`sync_data`](Self::sync_data)

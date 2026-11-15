@@ -307,9 +307,7 @@ fn test_connect_failure_existing_connections() {
         let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // Establish connection before enabling chaos
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
 
         sim.run_until_empty();
 

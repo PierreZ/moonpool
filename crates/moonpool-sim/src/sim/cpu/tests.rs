@@ -3,6 +3,7 @@
 //! Each test drives a raw world and the executor by hand, with exact costs,
 //! so every expected number is computed, not measured.
 
+use moonpool_core::FileCursor;
 use std::{
     net::{IpAddr, Ipv4Addr},
     sync::{Arc, Mutex},
@@ -219,10 +220,12 @@ fn sampled_run(seed: u64) -> (Vec<SystemSample>, Vec<SystemSample>) {
     Executor::new(seed).block_on(async {
         let worker_time = time.clone();
         let _worker = spawn_owned("worker", SERVER, async move {
-            let mut file = storage
-                .open("load.dat", OpenOptions::create_write())
-                .await
-                .expect("open");
+            let mut file = FileCursor::new(
+                storage
+                    .open("load.dat", OpenOptions::create_write())
+                    .await
+                    .expect("open"),
+            );
             for round in 0..200_u32 {
                 let pause = Duration::from_micros(u64::from(round % 7) * 50);
                 worker_time.sleep(pause).await.expect("sleep");
@@ -381,10 +384,12 @@ fn a_slow_machine_pays_its_factor_for_the_same_work() {
             let storage = sim.storage_provider(ip);
             let time = sim.time_provider();
             let _work = spawn_owned("work", ip, async move {
-                let mut file = storage
-                    .open("work.dat", OpenOptions::create_write())
-                    .await
-                    .expect("open");
+                let mut file = FileCursor::new(
+                    storage
+                        .open("work.dat", OpenOptions::create_write())
+                        .await
+                        .expect("open"),
+                );
                 for round in 0..20_u64 {
                     moonpool_buggify::cpu_charge(Duration::from_nanos(700 * round));
                     file.write_all(&[7_u8; 1_000]).await.expect("write");
@@ -440,10 +445,12 @@ fn gray_factors_multiply_disk_and_network_latency() {
             let time = sim.time_provider();
             let writes = Arc::clone(&writes);
             let _write = spawn_owned("write", ip, async move {
-                let mut file = storage
-                    .open("gray.dat", OpenOptions::create_write())
-                    .await
-                    .expect("open");
+                let mut file = FileCursor::new(
+                    storage
+                        .open("gray.dat", OpenOptions::create_write())
+                        .await
+                        .expect("open"),
+                );
                 let started = time.now();
                 file.write_all(&[1_u8; 64]).await.expect("write");
                 lock(&writes).push((ip, time.now().saturating_sub(started)));

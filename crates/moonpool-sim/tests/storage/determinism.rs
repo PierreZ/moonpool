@@ -4,7 +4,7 @@
 //! behavior when run with the same seed.
 
 use crate::{local_runtime, run_and_measure_time, run_storage_test};
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 
@@ -17,14 +17,17 @@ fn test_same_seed_same_timing() {
         for _ in 0..3 {
             let sim = SimWorld::new_with_seed(seed);
             let time = run_and_measure_time(sim, |provider| async move {
-                let mut file = provider
-                    .open("test.txt", OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open("test.txt", OpenOptions::create_write())
+                        .await?,
+                );
                 file.write_all(b"hello world").await?;
                 file.sync_all().await?;
                 drop(file);
 
-                let mut file = provider.open("test.txt", OpenOptions::read_only()).await?;
+                let mut file =
+                    FileCursor::new(provider.open("test.txt", OpenOptions::read_only()).await?);
                 let mut buf = Vec::new();
                 file.read_to_end(&mut buf).await?;
 
@@ -67,10 +70,12 @@ fn test_same_seed_same_corruption() {
             // Collect multiple read results to capture corruption pattern
             let read_results: Vec<Vec<u8>> = run_storage_test(sim, |provider| async move {
                 // Write known data
-                let mut file = provider
-                    .open("corrupt.txt", OpenOptions::create_write())
-                    .await
-                    .expect("open failed");
+                let mut file = FileCursor::new(
+                    provider
+                        .open("corrupt.txt", OpenOptions::create_write())
+                        .await
+                        .expect("open failed"),
+                );
                 file.write_all(b"0123456789").await.expect("write failed");
                 file.sync_all().await.expect("sync failed");
                 drop(file);
@@ -78,10 +83,12 @@ fn test_same_seed_same_corruption() {
                 // Read multiple times to capture corruption
                 let mut reads = Vec::new();
                 for _ in 0..5 {
-                    let mut file = provider
-                        .open("corrupt.txt", OpenOptions::read_only())
-                        .await
-                        .expect("open failed");
+                    let mut file = FileCursor::new(
+                        provider
+                            .open("corrupt.txt", OpenOptions::read_only())
+                            .await
+                            .expect("open failed"),
+                    );
                     let mut buf = Vec::new();
                     // Ignore read errors - we're just capturing what we can
                     let _ = file.read_to_end(&mut buf).await;
@@ -119,9 +126,11 @@ fn test_different_seeds_different_timing() {
         for seed in [1u64, 2, 3, 4, 5] {
             let sim = SimWorld::new_with_seed(seed);
             let time = run_and_measure_time(sim, |provider| async move {
-                let mut file = provider
-                    .open("test.txt", OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open("test.txt", OpenOptions::create_write())
+                        .await?,
+                );
                 file.write_all(b"hello world").await?;
                 file.sync_all().await?;
                 Ok(())
@@ -166,10 +175,12 @@ fn test_deterministic_misdirection() {
 
             let data: Vec<u8> = run_storage_test(sim, |provider| async move {
                 // Write some data
-                let mut file = provider
-                    .open("misdirect.txt", OpenOptions::create_write())
-                    .await
-                    .expect("open failed");
+                let mut file = FileCursor::new(
+                    provider
+                        .open("misdirect.txt", OpenOptions::create_write())
+                        .await
+                        .expect("open failed"),
+                );
                 for i in 0..10u8 {
                     file.write_all(&[i]).await.expect("write failed");
                 }
@@ -177,10 +188,12 @@ fn test_deterministic_misdirection() {
                 drop(file);
 
                 // Read it back
-                let mut file = provider
-                    .open("misdirect.txt", OpenOptions::read_only())
-                    .await
-                    .expect("open failed");
+                let mut file = FileCursor::new(
+                    provider
+                        .open("misdirect.txt", OpenOptions::read_only())
+                        .await
+                        .expect("open failed"),
+                );
                 let mut buf = Vec::new();
                 file.read_to_end(&mut buf).await.expect("read failed");
                 buf

@@ -142,76 +142,32 @@ impl SimWorld {
         self.inner.read().storage.list_dir(path, owner_ip)
     }
 
+    /// Schedule a read of `len` bytes at `offset`.
     pub(crate) fn schedule_read(
         &self,
         handle_id: HandleId,
         offset: u64,
         len: usize,
     ) -> Result<OperationId, StorageError> {
-        self.schedule_read_inner(handle_id, offset, len, false)
-    }
-
-    /// Schedule a positioned read: it addresses `offset` literally and leaves
-    /// the handle's stream cursor alone.
-    pub(crate) fn schedule_positioned_read(
-        &self,
-        handle_id: HandleId,
-        offset: u64,
-        len: usize,
-    ) -> Result<OperationId, StorageError> {
-        self.schedule_read_inner(handle_id, offset, len, true)
-    }
-
-    fn schedule_read_inner(
-        &self,
-        handle_id: HandleId,
-        offset: u64,
-        len: usize,
-        positioned: bool,
-    ) -> Result<OperationId, StorageError> {
         self.try_storage_transition(|inner| {
             let now = inner.now();
-            inner
-                .storage
-                .schedule_read(handle_id, offset, len, positioned, now)
+            inner.storage.schedule_read(handle_id, offset, len, now)
         })
     }
 
+    /// Schedule a write of `data` at `offset`.
     pub(crate) fn schedule_write(
         &self,
         handle_id: HandleId,
         offset: u64,
         data: Vec<u8>,
     ) -> Result<OperationId, StorageError> {
-        self.schedule_write_inner(handle_id, offset, data, false)
-    }
-
-    /// Schedule a positioned write: it lands at `offset` whatever the handle's
-    /// append flag says, and leaves the stream cursor alone.
-    pub(crate) fn schedule_positioned_write(
-        &self,
-        handle_id: HandleId,
-        offset: u64,
-        data: Vec<u8>,
-    ) -> Result<OperationId, StorageError> {
-        self.schedule_write_inner(handle_id, offset, data, true)
-    }
-
-    fn schedule_write_inner(
-        &self,
-        handle_id: HandleId,
-        offset: u64,
-        data: Vec<u8>,
-        positioned: bool,
-    ) -> Result<OperationId, StorageError> {
         self.try_storage_transition(|inner| {
             // Writing costs CPU time under the CPU model; the write is
             // submitted at the writer's local clock after that cost.
             inner.cpu_charge_written(data.len());
             let now = inner.now();
-            inner
-                .storage
-                .schedule_write(handle_id, offset, data, positioned, now)
+            inner.storage.schedule_write(handle_id, offset, data, now)
         })
     }
 
@@ -250,21 +206,6 @@ impl SimWorld {
 
     pub(crate) fn cancel_storage_operation(&self, operation_id: OperationId) {
         self.storage_transition(|inner| ((), inner.storage.cancel_operation(operation_id)));
-    }
-
-    pub(crate) fn file_position(&self, handle_id: HandleId) -> Result<u64, StorageError> {
-        self.inner.read().storage.file_position(handle_id)
-    }
-
-    pub(crate) fn set_file_position(
-        &self,
-        handle_id: HandleId,
-        position: u64,
-    ) -> Result<(), StorageError> {
-        self.inner
-            .write()
-            .storage
-            .set_file_position(handle_id, position)
     }
 
     pub(crate) fn drop_file_cache(&self, handle_id: HandleId) -> Result<(), StorageError> {

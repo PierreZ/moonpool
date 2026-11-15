@@ -255,7 +255,8 @@ and under the simulator in its own `#[test]`.
   `pwritev2(RWF_DSYNC)` on Linux), `sync_dir`, and `OpenOptions::direct_io` with `IoConstraints`
   and `AlignedBuf`. Zero-copy positioned I/O: the `*_aligned` methods move an
   owned `AlignedBuf` to the kernel and back, where the borrowed form copies
-  through a bounce buffer. `BlockFile` adds block addressing.
+  through a bounce buffer. `BlockFile` adds block addressing, and `FileCursor`
+  adds sequential reads and writes: a file has no stream I/O of its own.
 - `moonpool-journal`: a position-keyed CLSTORE journal that tells a crash
   from corruption and names the damaged entry. Positions in any order,
   `Batch::fits` / `fits_another`, `Journal::peek_meta`, metadata repair,

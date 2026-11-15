@@ -5,7 +5,7 @@
 //! connections work independently.
 
 use crate::{fast_sim, local_runtime, step_until_done, test_ip};
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 
 /// Test opening multiple files simultaneously
@@ -46,12 +46,16 @@ fn test_interleaved_writes() {
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
             // Open two files
-            let mut file_a = provider
-                .open("file_a.txt", OpenOptions::create_write())
-                .await?;
-            let mut file_b = provider
-                .open("file_b.txt", OpenOptions::create_write())
-                .await?;
+            let mut file_a = FileCursor::new(
+                provider
+                    .open("file_a.txt", OpenOptions::create_write())
+                    .await?,
+            );
+            let mut file_b = FileCursor::new(
+                provider
+                    .open("file_b.txt", OpenOptions::create_write())
+                    .await?,
+            );
 
             // Interleave writes
             file_a.write_all(b"A1").await?;
@@ -68,60 +72,25 @@ fn test_interleaved_writes() {
             drop(file_b);
 
             // Verify file A content
-            let mut file_a = provider
-                .open("file_a.txt", OpenOptions::read_only())
-                .await?;
+            let mut file_a = FileCursor::new(
+                provider
+                    .open("file_a.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf_a = Vec::new();
             file_a.read_to_end(&mut buf_a).await?;
             assert_eq!(&buf_a, b"A1A2A3", "File A should have correct content");
 
             // Verify file B content
-            let mut file_b = provider
-                .open("file_b.txt", OpenOptions::read_only())
-                .await?;
+            let mut file_b = FileCursor::new(
+                provider
+                    .open("file_b.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf_b = Vec::new();
             file_b.read_to_end(&mut buf_b).await?;
             assert_eq!(&buf_b, b"B1B2B3", "File B should have correct content");
 
-            Ok::<_, std::io::Error>(())
-        });
-
-        step_until_done(&mut sim, handle).await.expect("io error");
-    });
-}
-
-/// Concurrent append handles resolve EOF in completion order, so neither write
-/// overwrites the other even when both operations have the same deadline.
-#[test]
-fn concurrent_append_handles_preserve_both_writes() {
-    local_runtime().block_on(async {
-        let mut sim = fast_sim();
-        let provider = sim.storage_provider(test_ip());
-        let handle = tokio::spawn(async move {
-            let verify_provider = provider.clone();
-            let left_provider = provider.clone();
-            let left = async move {
-                let mut file = left_provider
-                    .open("append.txt", OpenOptions::new().append(true).create(true))
-                    .await?;
-                file.write_all(b"A").await
-            };
-            let right = async move {
-                let mut file = provider
-                    .open("append.txt", OpenOptions::new().append(true).create(true))
-                    .await?;
-                file.write_all(b"B").await
-            };
-            let (left_result, right_result) = futures::join!(left, right);
-            left_result?;
-            right_result?;
-
-            let mut file = verify_provider
-                .open("append.txt", OpenOptions::read_only())
-                .await?;
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents).await?;
-            assert_eq!(contents, b"AB", "same-time appends must complete FIFO");
             Ok::<_, std::io::Error>(())
         });
 
@@ -137,19 +106,25 @@ fn read_completion_precedes_later_write_before_repoll() {
         let mut sim = fast_sim();
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut initial = provider
-                .open("ordered.txt", OpenOptions::create_write())
-                .await?;
+            let mut initial = FileCursor::new(
+                provider
+                    .open("ordered.txt", OpenOptions::create_write())
+                    .await?,
+            );
             initial.write_all(b"old").await?;
             initial.sync_all().await?;
             drop(initial);
 
-            let mut reader = provider
-                .open("ordered.txt", OpenOptions::read_only())
-                .await?;
-            let mut writer = provider
-                .open("ordered.txt", OpenOptions::new().write(true))
-                .await?;
+            let mut reader = FileCursor::new(
+                provider
+                    .open("ordered.txt", OpenOptions::read_only())
+                    .await?,
+            );
+            let mut writer = FileCursor::new(
+                provider
+                    .open("ordered.txt", OpenOptions::new().write(true))
+                    .await?,
+            );
             let read = async move {
                 let mut bytes = [0; 3];
                 reader.read_exact(&mut bytes).await?;
@@ -175,20 +150,26 @@ fn test_write_one_read_another() {
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
             // Create the source file first
-            let mut source = provider
-                .open("read_source.txt", OpenOptions::create_write())
-                .await?;
+            let mut source = FileCursor::new(
+                provider
+                    .open("read_source.txt", OpenOptions::create_write())
+                    .await?,
+            );
             source.write_all(b"source data for reading").await?;
             source.sync_all().await?;
             drop(source);
 
             // Now write to target while reading from source
-            let mut write_file = provider
-                .open("write_target.txt", OpenOptions::create_write())
-                .await?;
-            let mut read_file = provider
-                .open("read_source.txt", OpenOptions::read_only())
-                .await?;
+            let mut write_file = FileCursor::new(
+                provider
+                    .open("write_target.txt", OpenOptions::create_write())
+                    .await?,
+            );
+            let mut read_file = FileCursor::new(
+                provider
+                    .open("read_source.txt", OpenOptions::read_only())
+                    .await?,
+            );
 
             // Interleave read and write operations
             let mut buf = [0u8; 6];
@@ -203,9 +184,11 @@ fn test_write_one_read_another() {
             drop(read_file);
 
             // Verify the write target
-            let mut verify_file = provider
-                .open("write_target.txt", OpenOptions::read_only())
-                .await?;
+            let mut verify_file = FileCursor::new(
+                provider
+                    .open("write_target.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut result = Vec::new();
             verify_file.read_to_end(&mut result).await?;
             assert_eq!(&result, b"source data ");
@@ -226,17 +209,21 @@ fn test_sequential_opens_same_file() {
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
             // Write initial content
-            let mut file = provider
-                .open("reopen.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("reopen.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"initial").await?;
             file.sync_all().await?;
             drop(file);
 
             // Reopen and append (using read_write with append)
-            let mut file = provider
-                .open("reopen.txt", OpenOptions::new().read(true).write(true))
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("reopen.txt", OpenOptions::new().read(true).write(true))
+                    .await?,
+            );
             // Seek to end
             file.seek(std::io::SeekFrom::End(0)).await?;
             file.write_all(b"_appended").await?;
@@ -244,9 +231,11 @@ fn test_sequential_opens_same_file() {
             drop(file);
 
             // Read back
-            let mut file = provider
-                .open("reopen.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("reopen.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             assert_eq!(&buf, b"initial_appended");
@@ -268,9 +257,11 @@ fn test_file_independence() {
         let handle = tokio::spawn(async move {
             // Create three files with different content
             for i in 0..3 {
-                let mut file = provider
-                    .open(&format!("independent_{i}.txt"), OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open(&format!("independent_{i}.txt"), OpenOptions::create_write())
+                        .await?,
+                );
                 let content = format!("Content for file {i}");
                 file.write_all(content.as_bytes()).await?;
                 file.sync_all().await?;
@@ -307,9 +298,11 @@ fn test_file_independence() {
             );
 
             // Verify content of unchanged file
-            let mut file = provider
-                .open("independent_2.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("independent_2.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             assert_eq!(&buf, b"Content for file 2");
@@ -331,15 +324,18 @@ fn test_independent_file_positions() {
         let handle = tokio::spawn(async move {
             // Create two files with same content
             for name in &["pos_a.txt", "pos_b.txt"] {
-                let mut file = provider.open(name, OpenOptions::create_write()).await?;
+                let mut file =
+                    FileCursor::new(provider.open(name, OpenOptions::create_write()).await?);
                 file.write_all(b"0123456789").await?;
                 file.sync_all().await?;
                 drop(file);
             }
 
             // Open both for reading
-            let mut file_a = provider.open("pos_a.txt", OpenOptions::read_only()).await?;
-            let mut file_b = provider.open("pos_b.txt", OpenOptions::read_only()).await?;
+            let mut file_a =
+                FileCursor::new(provider.open("pos_a.txt", OpenOptions::read_only()).await?);
+            let mut file_b =
+                FileCursor::new(provider.open("pos_b.txt", OpenOptions::read_only()).await?);
 
             // Seek to different positions
             file_a.seek(std::io::SeekFrom::Start(2)).await?;
@@ -373,9 +369,11 @@ fn test_many_files() {
 
             // Create many files
             for i in 0..file_count {
-                let mut file = provider
-                    .open(&format!("many_{i:03}.txt"), OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open(&format!("many_{i:03}.txt"), OpenOptions::create_write())
+                        .await?,
+                );
                 file.write_all(format!("File number {i}").as_bytes())
                     .await?;
                 file.sync_all().await?;
@@ -421,25 +419,31 @@ fn test_sequential_reads_same_file() {
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
             // Create the file
-            let mut file = provider
-                .open("shared_read.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("shared_read.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"shared content for reading").await?;
             file.sync_all().await?;
             drop(file);
 
             // First read
-            let mut reader1 = provider
-                .open("shared_read.txt", OpenOptions::read_only())
-                .await?;
+            let mut reader1 = FileCursor::new(
+                provider
+                    .open("shared_read.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf1 = Vec::new();
             reader1.read_to_end(&mut buf1).await?;
             drop(reader1);
 
             // Second read (re-open)
-            let mut reader2 = provider
-                .open("shared_read.txt", OpenOptions::read_only())
-                .await?;
+            let mut reader2 = FileCursor::new(
+                provider
+                    .open("shared_read.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf2 = Vec::new();
             reader2.read_to_end(&mut buf2).await?;
             drop(reader2);
@@ -462,19 +466,25 @@ fn same_file_handles_have_independent_positions() {
         let mut sim = fast_sim();
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut writer = provider
-                .open("shared_positions.txt", OpenOptions::create_write())
-                .await?;
+            let mut writer = FileCursor::new(
+                provider
+                    .open("shared_positions.txt", OpenOptions::create_write())
+                    .await?,
+            );
             writer.write_all(b"0123456789").await?;
             writer.sync_all().await?;
             drop(writer);
 
-            let mut first = provider
-                .open("shared_positions.txt", OpenOptions::read_only())
-                .await?;
-            let mut second = provider
-                .open("shared_positions.txt", OpenOptions::read_only())
-                .await?;
+            let mut first = FileCursor::new(
+                provider
+                    .open("shared_positions.txt", OpenOptions::read_only())
+                    .await?,
+            );
+            let mut second = FileCursor::new(
+                provider
+                    .open("shared_positions.txt", OpenOptions::read_only())
+                    .await?,
+            );
             first.seek(std::io::SeekFrom::Start(1)).await?;
             second.seek(std::io::SeekFrom::Start(7)).await?;
 
@@ -505,54 +515,32 @@ fn concurrent_same_file_writes_keep_operation_identity() {
         let mut sim = fast_sim();
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut initial = provider
-                .open("shared_writes.txt", OpenOptions::create_write())
-                .await?;
+            let mut initial = FileCursor::new(
+                provider
+                    .open("shared_writes.txt", OpenOptions::create_write())
+                    .await?,
+            );
             initial.write_all(b"............").await?;
             drop(initial);
 
             let options = OpenOptions::new().read(true).write(true);
-            let mut first = provider.open("shared_writes.txt", options.clone()).await?;
-            let mut second = provider.open("shared_writes.txt", options).await?;
+            let mut first =
+                FileCursor::new(provider.open("shared_writes.txt", options.clone()).await?);
+            let mut second = FileCursor::new(provider.open("shared_writes.txt", options).await?);
             first.seek(std::io::SeekFrom::Start(1)).await?;
             second.seek(std::io::SeekFrom::Start(8)).await?;
             futures::future::try_join(first.write_all(b"AAA"), second.write_all(b"BB")).await?;
 
             drop(first);
             drop(second);
-            let mut reader = provider
-                .open("shared_writes.txt", OpenOptions::read_only())
-                .await?;
+            let mut reader = FileCursor::new(
+                provider
+                    .open("shared_writes.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut contents = Vec::new();
             reader.read_to_end(&mut contents).await?;
             assert_eq!(&contents, b".AAA....BB..");
-            Ok::<_, std::io::Error>(())
-        });
-
-        step_until_done(&mut sim, handle).await.expect("io error");
-    });
-}
-
-/// Closing one handle invalidates that handle without closing the persistent
-/// file or another independently opened handle.
-#[test]
-fn close_is_handle_local_and_enforced() {
-    local_runtime().block_on(async {
-        let mut sim = fast_sim();
-        let provider = sim.storage_provider(test_ip());
-        let handle = tokio::spawn(async move {
-            let mut closed = provider
-                .open("close_handle.txt", OpenOptions::create_write())
-                .await?;
-            closed.write_all(b"data").await?;
-            let survivor = provider
-                .open("close_handle.txt", OpenOptions::read_only())
-                .await?;
-
-            closed.close().await?;
-            let error = closed.size().await.expect_err("closed handle must fail");
-            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
-            assert_eq!(survivor.size().await?, 4);
             Ok::<_, std::io::Error>(())
         });
 
@@ -585,7 +573,7 @@ async fn seed_file(
     path: &str,
     len: usize,
 ) -> std::io::Result<()> {
-    let mut file = provider.open(path, OpenOptions::create_write()).await?;
+    let mut file = FileCursor::new(provider.open(path, OpenOptions::create_write()).await?);
     file.write_all(&vec![7u8; len]).await?;
     file.sync_all().await
 }
@@ -630,30 +618,5 @@ fn test_positioned_read_past_truncation_is_eof() {
         reader.read_at(4096, &mut buf).await
     })
     .expect("a read wholly past the new end of file is EOF, not an error");
-    assert_eq!(read, 0);
-}
-
-#[test]
-fn test_stream_read_shortened_by_truncation() {
-    let read = race_read_against_truncation(1000, |mut reader| async move {
-        let mut buf = vec![0u8; 8192];
-        let first = reader.read(&mut buf).await?;
-        // The cursor advanced by what was read, so the next read is EOF.
-        let second = reader.read(&mut buf).await?;
-        assert_eq!(second, 0, "the cursor sits at the new end of file");
-        Ok(first)
-    })
-    .expect("a truncation shortens a stream read, it is not an I/O error");
-    assert_eq!(read, 1000);
-}
-
-#[test]
-fn test_stream_read_past_truncation_is_eof() {
-    let read = race_read_against_truncation(100, |mut reader| async move {
-        reader.seek(std::io::SeekFrom::Start(4096)).await?;
-        let mut buf = vec![0u8; 4096];
-        reader.read(&mut buf).await
-    })
-    .expect("a stream read wholly past the new end of file is EOF");
     assert_eq!(read, 0);
 }

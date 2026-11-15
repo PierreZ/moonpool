@@ -187,14 +187,16 @@ Where generics hurt, erase at an application boundary with a narrowly scoped tra
 ## Storage Layering
 One provider, one file abstraction, one simulated file image. `StorageProvider`
 owns the filesystem *namespace* (open, exists, delete, rename, `sync_dir`);
-`StorageFile` owns already-open bytes (stream I/O, positioned `read_at` /
+`StorageFile` owns already-open bytes (positioned `read_at` /
 `write_at`, `sync_all` / `sync_data`, `size` / `set_len`, plus `constraints()`
 and `is_direct_io()`). Database-shaped needs are **options on opening an
 ordinary file** — `OpenOptions::direct_io(DirectIo::{Disabled,Optional,Required})`
 — never a parallel provider stack: there is no `BlockProvider`, no
 `DirectIoProvider`, and no region-addressed device. `BlockFile<F>` wraps exactly
 one already-open file to add block arithmetic and whole-transfer loops; it never
-takes, stores, or resolves a path.
+takes, stores, or resolves a path. A file has **no stream I/O, no cursor and no
+append flag**: `FileCursor<F>` is the one cursor, a wrapper over any open file,
+so no backend implements `AsyncRead`/`AsyncWrite`/`AsyncSeek` for a file.
 
 Keep these distinctions: direct I/O is not durability; the caller's block size
 is not the file's I/O alignment and neither is a crash-atomicity unit; growing a

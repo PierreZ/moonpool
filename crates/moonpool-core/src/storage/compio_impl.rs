@@ -9,20 +9,13 @@
 //! `posix_fadvise` ([`LocalStorageFile::drop_cache`]). Those can block for a
 //! long time, so they must not stop the runtime thread.
 
-use std::future::Future;
-use std::io::{self, SeekFrom};
-use std::pin::Pin;
-use std::task::{Context, Poll, ready};
+use std::io;
 
 use compio::buf::BufResult;
 use compio::io::{AsyncReadAt, AsyncWriteAt};
-use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 use super::native::{self, NativeFs, OpenedFile};
-use super::{
-    AlignedBuf, IoConstraints, LocalStorageFile, LocalStorageProvider, OpenOptions,
-    stream_io_unsupported,
-};
+use super::{AlignedBuf, IoConstraints, LocalStorageFile, LocalStorageProvider, OpenOptions};
 
 /// Compio storage provider: files on the real filesystem, driven by compio.
 ///
@@ -41,17 +34,6 @@ use super::{
 /// fails rather than fall back and never creates a file, and a direct file
 /// advertises the alignment the kernel reports (`statx`), or the page size
 /// when it will not say. Direct I/O is Linux only, as there.
-///
-/// ## Append
-///
-/// On Linux an append file's stream descriptor carries `O_APPEND`, so each
-/// stream write lands at the end of the file atomically, as with any other
-/// writer. Positioned I/O runs on a second descriptor of the same file
-/// without it, because a positioned write on an `O_APPEND` descriptor ignores
-/// its offset on Linux. Elsewhere a positioned write honours its offset even
-/// under `O_APPEND`, which is no help to the stream, so there the stream
-/// itself writes at the end of the file as it is when the write starts: not
-/// atomic against other writers.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompioStorageProvider;
 
@@ -62,10 +44,6 @@ impl CompioStorageProvider {
         Self
     }
 }
-
-/// Whether the kernel appends a positioned write to an `O_APPEND`
-/// descriptor, so the stream can append atomically with `O_APPEND`.
-const NATIVE_APPEND: bool = cfg!(target_os = "linux");
 
 /// Compio's half of the shared open policy (see [`native`]).
 #[derive(Debug, Clone, Copy)]
@@ -83,23 +61,13 @@ impl NativeFs for CompioFs {
         let mut builder = compio::fs::OpenOptions::new();
         builder
             .read(options.is_read())
-            .write(options.is_write() || options.is_append())
+            .write(options.is_write())
             .create(options.is_create())
             .create_new(options.is_create_new())
             .truncate(options.is_truncate());
-        #[cfg(unix)]
-        {
-            let mut flags = 0;
-            if options.is_append() && NATIVE_APPEND {
-                flags |= libc::O_APPEND;
-            }
-            #[cfg(target_os = "linux")]
-            if direct {
-                flags |= libc::O_DIRECT;
-            }
-            if flags != 0 {
-                builder.custom_flags(flags);
-            }
+        #[cfg(target_os = "linux")]
+        if direct {
+            builder.custom_flags(libc::O_DIRECT);
         }
         #[cfg(not(target_os = "linux"))]
         let _ = direct;
@@ -111,49 +79,20 @@ impl NativeFs for CompioFs {
     }
 }
 
-/// How stream writes of a file reach its end.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Append {
-    /// Not an append file: stream writes go to the cursor.
-    No,
-    /// The stream descriptor has `O_APPEND`: the kernel appends.
-    Native,
-    /// The stream writes at the size it reads first (see the provider docs).
-    Emulated,
-}
-
 impl LocalStorageProvider for CompioStorageProvider {
     type File = CompioStorageFile;
 
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
         let opened = native::open_file(&CompioFs, path, &options).await?;
-        let append = match (options.is_append(), NATIVE_APPEND) {
-            (false, _) => Append::No,
-            (true, true) => Append::Native,
-            (true, false) => Append::Emulated,
-        };
-        let file = if append == Append::Native {
-            // A separate open without O_APPEND, of the file this descriptor
-            // holds: see the provider docs.
-            let positioned = OpenOptions::new().read(options.is_read()).write(true);
-            native::reopen_same_file(&CompioFs, &opened.file, path, &positioned, opened.direct)
-                .await?
-        } else {
-            opened.file.clone()
-        };
         let OpenedFile {
-            file: stream,
+            file,
             constraints,
             direct,
         } = opened;
         Ok(CompioStorageFile {
             file,
-            stream,
-            append,
             constraints,
             direct,
-            cursor: Some(0),
-            pending: None,
         })
     }
 
@@ -266,244 +205,20 @@ fn not_a_directory() -> io::Error {
 
 /// One open file of [`CompioStorageProvider`].
 ///
-/// Positioned I/O ([`read_at`](LocalStorageFile::read_at) and its siblings)
-/// takes `&self` and never touches the stream cursor. The owned forms
+/// Every transfer is positioned and takes `&self`. The owned forms
 /// (`*_aligned`) hand the caller's [`AlignedBuf`] to the kernel itself; the
 /// borrowed forms copy through an aligned buffer of their own, because a
 /// completion operation must own its memory until the kernel is done with it.
-///
-/// The stream half ([`AsyncRead`], [`AsyncWrite`], [`AsyncSeek`]) keeps its
-/// own cursor and runs one operation at a time. A started operation stays in
-/// the file: polling again resumes it, so a dropped read or write future
-/// loses nothing. A stream write that is pending when another stream call is
-/// polled is finished first, and its bytes count, as a dropped write does on
-/// the other backends. A pending write resumes only for a write whose buffer
-/// starts with its bytes (the same call, polled again); a write of other
-/// bytes is a new call, which must not get the result of the old one. The
-/// error of a write that nobody collected goes to the next stream call that
-/// finishes it, or to `flush`. A file with alignment
-/// constraints (a direct-I/O file) refuses stream reads and writes with
-/// [`stream_io_unsupported`], as the contract requires.
+#[derive(Debug)]
 pub struct CompioStorageFile {
-    /// Positioned I/O, syncs and size queries.
     file: compio::fs::File,
-    /// Stream writes. The same descriptor as `file`, except for a
-    /// [`Append::Native`] file, where this one has `O_APPEND`.
-    stream: compio::fs::File,
-    append: Append,
     /// What this open requires of callers (see [`IoConstraints`]).
     constraints: IoConstraints,
     /// Whether the open got uncached I/O.
     direct: bool,
-    /// The stream cursor. `None` after a native append: the end of the file,
-    /// whose position is read when something needs it.
-    cursor: Option<u64>,
-    /// The stream operation in flight, if any.
-    pending: Option<Pending>,
-}
-
-impl std::fmt::Debug for CompioStorageFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CompioStorageFile")
-            .field("file", &self.file)
-            .field("append", &self.append)
-            .field("constraints", &self.constraints)
-            .field("direct", &self.direct)
-            .field("cursor", &self.cursor)
-            .field("pending", &self.pending.as_ref().map(Pending::kind))
-            .finish_non_exhaustive()
-    }
-}
-
-/// The kind of a stream operation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Read,
-    Write,
-    Seek,
-}
-
-type LocalFuture<T> = Pin<Box<dyn Future<Output = T>>>;
-
-/// A stream read's outcome: where it started, how much it read, the bytes.
-type ReadOutcome = io::Result<(u64, usize, Vec<u8>)>;
-
-/// A stream write's outcome: the cursor after it, and the bytes written.
-type WriteOutcome = io::Result<(Option<u64>, usize)>;
-
-/// A stream operation in flight. Each owns clones of the file handles and
-/// its buffer, so it outlives any one poll.
-enum Pending {
-    Read(LocalFuture<ReadOutcome>),
-    /// A write, with a copy of its bytes: a later `poll_write` resumes it
-    /// only when it is the same call (see [`CompioStorageFile`]).
-    Write {
-        op: LocalFuture<WriteOutcome>,
-        bytes: Vec<u8>,
-    },
-    /// A seek that needs the file's size; resolves to the new cursor.
-    Seek(LocalFuture<io::Result<u64>>),
-}
-
-/// A finished stream operation.
-enum Done {
-    Read(ReadOutcome),
-    Write(WriteOutcome),
-    Seek(io::Result<u64>),
-}
-
-impl Pending {
-    fn kind(&self) -> Kind {
-        match self {
-            Self::Read(_) => Kind::Read,
-            Self::Write { .. } => Kind::Write,
-            Self::Seek(_) => Kind::Seek,
-        }
-    }
-
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Done> {
-        match self {
-            Self::Read(op) => op.as_mut().poll(cx).map(Done::Read),
-            Self::Write { op, .. } => op.as_mut().poll(cx).map(Done::Write),
-            Self::Seek(op) => op.as_mut().poll(cx).map(Done::Seek),
-        }
-    }
-}
-
-/// The stream position `cursor` names: itself, or the current end of the
-/// file.
-async fn resolve(file: &compio::fs::File, cursor: Option<u64>) -> io::Result<u64> {
-    match cursor {
-        Some(position) => Ok(position),
-        None => Ok(file.metadata().await?.len()),
-    }
 }
 
 impl CompioStorageFile {
-    /// Poll the stream operation of kind `want`: an operation of another kind
-    /// still in flight is finished and applied first, then `start` begins
-    /// one unless it is already running.
-    ///
-    /// # Errors
-    ///
-    /// The error of a write in flight that nobody collected.
-    fn poll_op(
-        &mut self,
-        cx: &mut Context<'_>,
-        want: Kind,
-        start: impl FnOnce(&Self) -> Pending,
-    ) -> Poll<io::Result<Done>> {
-        if !self.pending_is(want) {
-            ready!(self.poll_idle(cx))?;
-        }
-        let mut pending = match self.pending.take() {
-            Some(pending) => pending,
-            None => start(self),
-        };
-        match pending.poll(cx) {
-            Poll::Ready(done) => Poll::Ready(Ok(done)),
-            Poll::Pending => {
-                self.pending = Some(pending);
-                Poll::Pending
-            }
-        }
-    }
-
-    fn pending_is(&self, kind: Kind) -> bool {
-        self.pending
-            .as_ref()
-            .is_some_and(|pending| pending.kind() == kind)
-    }
-
-    /// Finish any stream operation in flight, applying its effect on the
-    /// cursor. Its result is dropped, because whoever started it stopped
-    /// polling, except the error of a write: the bytes the caller gave did
-    /// not land, so the next stream call reports it.
-    fn poll_idle(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if let Some(pending) = self.pending.as_mut() {
-            let done = ready!(pending.poll(cx));
-            self.pending = None;
-            if let Done::Write(Err(error)) = done {
-                return Poll::Ready(Err(error));
-            }
-            self.apply(&done);
-        }
-        Poll::Ready(Ok(()))
-    }
-
-    /// The cursor effect of a finished operation. A read moves nothing: its
-    /// bytes were never handed to anyone.
-    fn apply(&mut self, done: &Done) {
-        match *done {
-            Done::Write(Ok((cursor, _))) => self.cursor = cursor,
-            Done::Seek(Ok(cursor)) => self.cursor = Some(cursor),
-            Done::Read(_) | Done::Write(Err(_)) | Done::Seek(Err(_)) => {}
-        }
-    }
-
-    /// Stream I/O cannot honour an alignment: refused on a constrained file.
-    fn check_stream(&self) -> io::Result<()> {
-        if self.constraints.is_unconstrained() {
-            Ok(())
-        } else {
-            Err(stream_io_unsupported())
-        }
-    }
-
-    fn start_read(&self, len: usize) -> Pending {
-        let file = self.file.clone();
-        let cursor = self.cursor;
-        Pending::Read(Box::pin(async move {
-            let start = resolve(&file, cursor).await?;
-            let BufResult(result, buf) = file.read_at(Vec::with_capacity(len), start).await;
-            Ok((start, result?, buf))
-        }))
-    }
-
-    fn start_write(&self, bytes: Vec<u8>) -> Pending {
-        let file = self.file.clone();
-        let stream = self.stream.clone();
-        let cursor = self.cursor;
-        let append = self.append;
-        let copy = bytes.clone();
-        let op = Box::pin(async move {
-            if append == Append::Native {
-                // O_APPEND: the kernel ignores the offset and appends.
-                let BufResult(result, _) = (&stream).write_at(bytes, 0).await;
-                return Ok((None, result?));
-            }
-            let at = if append == Append::Emulated {
-                file.metadata().await?.len()
-            } else {
-                resolve(&file, cursor).await?
-            };
-            let BufResult(result, _) = (&stream).write_at(bytes, at).await;
-            let written = result?;
-            Ok((Some(at + written as u64), written))
-        });
-        Pending::Write { op, bytes: copy }
-    }
-
-    fn start_seek_from_end(&self, offset: i64) -> Pending {
-        let file = self.file.clone();
-        Pending::Seek(Box::pin(async move {
-            let size = file.metadata().await?.len();
-            size.checked_add_signed(offset).ok_or_else(invalid_seek)
-        }))
-    }
-
-    /// Seek relative to the end of the file, which needs its size.
-    fn poll_seek_from_end(&mut self, cx: &mut Context<'_>, offset: i64) -> Poll<io::Result<u64>> {
-        match ready!(self.poll_op(cx, Kind::Seek, |file| file.start_seek_from_end(offset)))? {
-            Done::Seek(result) => {
-                let position = result?;
-                self.cursor = Some(position);
-                Poll::Ready(Ok(position))
-            }
-            Done::Read(_) | Done::Write(_) => unreachable!("poll_op returns a seek"),
-        }
-    }
-
     /// A bounce buffer for `len` bytes, aligned the way this file's transfers
     /// must be.
     fn bounce(&self, len: usize) -> AlignedBuf {
@@ -529,13 +244,6 @@ impl CompioStorageFile {
         let BufResult(result, buf) = (&self.file).write_at(buf, offset).await;
         Ok((result?, buf))
     }
-}
-
-fn invalid_seek() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "invalid seek to a negative or overflowing position",
-    )
 }
 
 impl LocalStorageFile for CompioStorageFile {
@@ -630,107 +338,6 @@ impl LocalStorageFile for CompioStorageFile {
     }
 }
 
-impl AsyncRead for CompioStorageFile {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        this.check_stream()?;
-        if buf.is_empty() {
-            ready!(this.poll_idle(cx))?;
-            return Poll::Ready(Ok(0));
-        }
-        let len = buf.len();
-        match ready!(this.poll_op(cx, Kind::Read, |file| file.start_read(len)))? {
-            Done::Read(result) => {
-                let (start, read_len, read) = result?;
-                // A resumed read may hand a shorter buffer than it started
-                // with: the cursor moves by what the caller received.
-                let copied = read_len.min(buf.len());
-                buf[..copied].copy_from_slice(&read[..copied]);
-                this.cursor = Some(start + copied as u64);
-                Poll::Ready(Ok(copied))
-            }
-            Done::Write(_) | Done::Seek(_) => unreachable!("poll_op returns a read"),
-        }
-    }
-}
-
-impl AsyncWrite for CompioStorageFile {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        this.check_stream()?;
-        let resumes = matches!(
-            &this.pending,
-            Some(Pending::Write { bytes, .. }) if !buf.is_empty() && buf.starts_with(bytes)
-        );
-        if !resumes {
-            // A write in flight for other bytes belongs to a call that was
-            // dropped: finish it, then write these bytes.
-            ready!(this.poll_idle(cx))?;
-        }
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        match ready!(this.poll_op(cx, Kind::Write, |file| file.start_write(buf.to_vec())))? {
-            Done::Write(result) => {
-                let (cursor, written) = result?;
-                this.cursor = cursor;
-                Poll::Ready(Ok(written))
-            }
-            Done::Read(_) | Done::Seek(_) => unreachable!("poll_op returns a write"),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // A write nobody collected still reports its error here.
-        self.get_mut().poll_idle(cx)
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_flush(cx)
-    }
-}
-
-impl AsyncSeek for CompioStorageFile {
-    fn poll_seek(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        pos: SeekFrom,
-    ) -> Poll<io::Result<u64>> {
-        let this = self.get_mut();
-        // A seek already in flight is this call, resumed: finishing it as
-        // idle work would apply its offset twice.
-        if this.pending_is(Kind::Seek)
-            && let SeekFrom::End(offset) | SeekFrom::Current(offset) = pos
-        {
-            return this.poll_seek_from_end(cx, offset);
-        }
-        ready!(this.poll_idle(cx))?;
-        match (pos, this.cursor) {
-            (SeekFrom::Start(position), _) => {
-                this.cursor = Some(position);
-                Poll::Ready(Ok(position))
-            }
-            (SeekFrom::Current(offset), Some(cursor)) => {
-                let position = cursor.checked_add_signed(offset).ok_or_else(invalid_seek)?;
-                this.cursor = Some(position);
-                Poll::Ready(Ok(position))
-            }
-            // After a native append the cursor is the end of the file.
-            (SeekFrom::Current(offset), None) | (SeekFrom::End(offset), _) => {
-                this.poll_seek_from_end(cx, offset)
-            }
-        }
-    }
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::os::fd::AsRawFd as _;
@@ -770,8 +377,7 @@ mod tests {
     }
 
     /// The flags reach the kernel whichever driver opens the file: a direct
-    /// file's descriptor really has `O_DIRECT`, and an append file's stream
-    /// descriptor has `O_APPEND` while its positioned one does not.
+    /// file's descriptor really has `O_DIRECT`.
     #[test]
     fn open_flags_reach_the_kernel_on_every_driver() {
         for driver in [DriverType::IoUring, DriverType::Poll] {
@@ -794,14 +400,6 @@ mod tests {
                 if !direct {
                     eprintln!("note: no direct I/O on this filesystem ({driver:?})");
                 }
-                drop(file);
-
-                let log = storage
-                    .open(&path, OpenOptions::new().read(true).append(true))
-                    .await
-                    .expect("open append");
-                assert_ne!(status_flags(&log.stream) & libc::O_APPEND, 0, "{driver:?}");
-                assert_eq!(status_flags(&log.file) & libc::O_APPEND, 0, "{driver:?}");
             });
         }
     }

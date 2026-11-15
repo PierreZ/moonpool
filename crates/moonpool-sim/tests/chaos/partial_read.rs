@@ -32,9 +32,7 @@ async fn drain_with_partial_reads(seed: u64, max_bytes: usize, payload: &[u8]) -
 
     let addr = "partial-read-server";
     let listener = sim.drive(provider.bind(addr)).await.unwrap();
-    let mut client = sim.drive(provider.connect(addr))
-        .await
-        .unwrap();
+    let mut client = sim.drive(provider.connect(addr)).await.unwrap();
     let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
     client.write_all(payload).await.unwrap();
@@ -114,9 +112,7 @@ fn test_partial_read_disabled_without_buggify() {
 
         let addr = "no-partial-read-server";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         let payload: Vec<u8> = (0u8..100).collect();

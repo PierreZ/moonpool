@@ -19,10 +19,9 @@
 //! truncation on the way to a successful open.
 
 use crate::{local_runtime, run_storage_test};
-use futures::io::{AsyncSeekExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{DirectIo, OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
-use std::io::SeekFrom;
 use tempfile::TempDir;
 
 /// What one step did, in terms both backends can report.
@@ -337,14 +336,16 @@ async fn flag_contract<P: StorageProvider>(
     prefix: String,
 ) -> std::io::Result<Vec<FlagStep>> {
     let path = format!("{prefix}flags.db");
-    let mut seed = provider
-        .open(&path, OpenOptions::create_new_write())
-        .await?;
+    let mut seed = FileCursor::new(
+        provider
+            .open(&path, OpenOptions::create_new_write())
+            .await?,
+    );
     seed.write_all(SEED_BYTES).await?;
     seed.sync_all().await?;
     drop(seed);
 
-    let shapes: [(&'static str, OpenOptions); 7] = [
+    let shapes: [(&'static str, OpenOptions); 6] = [
         ("read-only", OpenOptions::read_only()),
         (
             "read-only + truncate",
@@ -356,10 +357,6 @@ async fn flag_contract<P: StorageProvider>(
             OpenOptions::read_only().create_new(true),
         ),
         ("no access mode", OpenOptions::new()),
-        (
-            "append + truncate",
-            OpenOptions::new().append(true).truncate(true),
-        ),
         ("read-write", OpenOptions::read_write()),
     ];
 
@@ -765,90 +762,6 @@ fn simulated_listings_match_tokio() {
     });
 }
 
-/// What one seek answered, and where the cursor stood afterwards.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SeekStep {
-    label: &'static str,
-    result: Result<u64, std::io::ErrorKind>,
-    position_after: u64,
-}
-
-/// Seeks that land before byte zero, with a legal control between them,
-/// against a file of [`SEED_BYTES`].
-async fn seek_contract<P: StorageProvider>(
-    provider: P,
-    prefix: String,
-) -> std::io::Result<Vec<SeekStep>> {
-    let path = format!("{prefix}seek.db");
-    let mut file = provider
-        .open(&path, OpenOptions::create_new_write())
-        .await?;
-    file.write_all(SEED_BYTES).await?;
-    file.sync_all().await?;
-    drop(file);
-
-    let mut file = provider.open(&path, OpenOptions::read_only()).await?;
-    // Only seeks *before byte zero* are asked of both backends: how far past
-    // the end a file may be positioned is the filesystem's ceiling, not the
-    // contract's (ext4 refuses an offset past its maximum file size where
-    // others accept it), so overflow stays a simulator-only refusal.
-    let seeks: [(&'static str, SeekFrom); 5] = [
-        ("start 5", SeekFrom::Start(5)),
-        ("current -10 from 5", SeekFrom::Current(-10)),
-        ("end -3", SeekFrom::End(-3)),
-        ("end -100", SeekFrom::End(-100)),
-        ("current +3 from 9", SeekFrom::Current(3)),
-    ];
-    let mut log = Vec::with_capacity(seeks.len());
-    for (label, pos) in seeks {
-        let result = file.seek(pos).await.map_err(|e| e.kind());
-        let position_after = file.stream_position().await?;
-        log.push(SeekStep {
-            label,
-            result,
-            position_after,
-        });
-    }
-    Ok(log)
-}
-
-/// `lseek` refuses a negative or overflowing result with `EINVAL` and leaves
-/// the cursor alone. The simulator used to clamp the target to zero and
-/// report success, so a seek arithmetic bug stayed invisible until the
-/// production filesystem.
-#[test]
-fn the_simulator_refuses_the_seeks_production_refuses() {
-    local_runtime().block_on(async {
-        let dir = TempDir::new().expect("temp dir");
-        let prefix = format!("{}/", dir.path().to_str().expect("temp path is UTF-8"));
-        let production = seek_contract(TokioStorageProvider::new(), prefix)
-            .await
-            .expect("the production scenarios must run");
-
-        let mut sim = SimWorld::new();
-        sim.set_storage_config(StorageConfiguration::fast_local());
-        let simulated = run_storage_test(sim, |provider| seek_contract(provider, String::new()))
-            .await
-            .expect("the simulated scenarios must run");
-
-        assert_eq!(
-            production, simulated,
-            "the simulated provider must refuse exactly the seeks production refuses"
-        );
-        for step in &production {
-            match step.label {
-                "current -10 from 5" | "end -100" => assert_eq!(
-                    step.result,
-                    Err(std::io::ErrorKind::InvalidInput),
-                    "at {:?}",
-                    step.label
-                ),
-                _ => assert_eq!(step.result, Ok(step.position_after), "at {:?}", step.label),
-            }
-        }
-    });
-}
-
 /// One step of the open-file contract: what a read through a handle, or a
 /// namespace query, answered.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -885,9 +798,11 @@ async fn open_file_contract<P: StorageProvider>(
 
     // unlink: the open handle outlives the name.
     let alpha = format!("{prefix}alpha.db");
-    let mut writer = provider
-        .open(&alpha, OpenOptions::create_new_write())
-        .await?;
+    let mut writer = FileCursor::new(
+        provider
+            .open(&alpha, OpenOptions::create_new_write())
+            .await?,
+    );
     writer.write_all(b"alpha-bytes").await?;
     writer.sync_all().await?;
     drop(writer);
@@ -915,15 +830,19 @@ async fn open_file_contract<P: StorageProvider>(
     // rename over: the handle on the replaced file keeps the replaced image.
     let bravo = format!("{prefix}bravo.db");
     let charlie = format!("{prefix}charlie.db");
-    let mut writer = provider
-        .open(&bravo, OpenOptions::create_new_write())
-        .await?;
+    let mut writer = FileCursor::new(
+        provider
+            .open(&bravo, OpenOptions::create_new_write())
+            .await?,
+    );
     writer.write_all(b"bravo-bytes").await?;
     writer.sync_all().await?;
     drop(writer);
-    let mut writer = provider
-        .open(&charlie, OpenOptions::create_new_write())
-        .await?;
+    let mut writer = FileCursor::new(
+        provider
+            .open(&charlie, OpenOptions::create_new_write())
+            .await?,
+    );
     writer.write_all(b"charlie").await?;
     writer.sync_all().await?;
     drop(writer);
@@ -1062,9 +981,11 @@ async fn read_only_metadata_contract<P: StorageProvider>(
     prefix: String,
 ) -> std::io::Result<Vec<(&'static str, bool, u64)>> {
     let path = format!("{prefix}read-only-metadata.db");
-    let mut seed = provider
-        .open(&path, OpenOptions::create_new_write())
-        .await?;
+    let mut seed = FileCursor::new(
+        provider
+            .open(&path, OpenOptions::create_new_write())
+            .await?,
+    );
     seed.write_all(SEED_BYTES).await?;
     seed.sync_all().await?;
     drop(seed);
