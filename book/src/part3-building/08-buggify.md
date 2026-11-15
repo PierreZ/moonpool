@@ -178,7 +178,7 @@ Buggify is gated on simulation state. Outside a run, every macro evaluates to `f
 
 ```toml
 [dependencies]
-moonpool-buggify = "0.8"
+moonpool-buggify = "0.9"
 ```
 
 The crate is pure `std` with zero dependencies, so sans-I/O and production crates depend on it directly, and it compiles for `wasm32-unknown-unknown`. It owns the disabled-by-default state, the macros, `hint!` and `cpu_charge`. When a run starts, `moonpool-sim` installs its seeded random source with `set_random_source`, calls `buggify_init`, and installs the hint and CPU sinks. When the run ends, `buggify_reset` makes everything inert again.

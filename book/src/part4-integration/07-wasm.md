@@ -65,7 +65,7 @@ rule is to keep the non-portable features out:
 
 ```toml
 [dependencies]
-moonpool-sim = { version = "0.8", default-features = false }
+moonpool-sim = { version = "0.9", default-features = false }
 futures = "0.3"
 ```
 

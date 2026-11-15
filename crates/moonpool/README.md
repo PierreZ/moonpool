@@ -60,7 +60,7 @@ Keep the simulator and the explorer out of the release binary:
 
 ```toml
 [dependencies]
-moonpool = { version = "0.8", default-features = false, features = ["tokio"] }
+moonpool = { version = "0.9", default-features = false, features = ["tokio"] }
 ```
 
 ## Examples
