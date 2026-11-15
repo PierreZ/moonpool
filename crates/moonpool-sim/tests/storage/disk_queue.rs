@@ -18,7 +18,6 @@ use futures::task::noop_waker;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration, storage::SimStorageFile};
 
-const MAX_STEPS: usize = 100_000;
 
 fn owner() -> IpAddr {
     "10.0.1.1".parse().expect("valid test IP")
@@ -48,19 +47,7 @@ fn namespace_disk(namespace: Duration) -> StorageConfiguration {
 /// Poll `future` and step the world until it is ready or nothing is left
 /// to run.
 fn settle<F: Future>(sim: &mut SimWorld, future: F) -> Poll<F::Output> {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for _ in 0..MAX_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return Poll::Ready(output);
-        }
-        if !sim.has_pending_events() {
-            return Poll::Pending;
-        }
-        sim.step();
-    }
-    Poll::Pending
+    sim.settle(pin!(future))
 }
 
 fn ready<T>(poll: Poll<T>, what: &str) -> T {

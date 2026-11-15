@@ -67,15 +67,13 @@ Provider-level tests drive the future and the world together on the
 executor:
 
 ```rust
-let mut executor = moonpool_sim::executor::Executor::new(seed);
-executor.block_on(async move {
-    let provider = sim.storage_provider(ip);
-    drive(&mut sim, async move { /* open, write_all, sync_all */ }).await
-})?;
+let provider = sim.storage_provider(ip);
+sim.block_on(seed, async move { /* open, write_at, sync_all */ })?;
 ```
 
-with the `drive` helper from the root `AGENTS.md` (`poll` → on `Pending`,
-`sim.step()` while `has_pending_events()`). Subsystem tests live in
+`SimWorld::block_on`, `drive` and `settle` live in `src/sim/drive.rs` (`poll` → on
+`Pending`, `sim.step()` while `has_pending_events()`). Do not write that loop
+again. Subsystem tests live in
 `tests/{network,storage,sim,executor}.rs` plus their directories;
 `tests/flow_control.rs`, `raw_network_characterization.rs`,
 `h2_partition_integrity.rs` pin the network's observable behaviour. After a

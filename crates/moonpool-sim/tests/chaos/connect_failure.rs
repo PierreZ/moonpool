@@ -16,23 +16,16 @@ use moonpool_sim::{
     buggify_reset,
 };
 use std::future::Future;
-use std::task::{Context, Poll, Waker};
+use std::task::Poll;
 use std::time::Duration;
 
 /// Drive `future` against `sim` until it resolves or the world runs out of
 /// events. `None` means the future is still pending with nothing left that
 /// could wake it — a hang, reported instead of blocking the test forever.
 fn settle<F: Future>(sim: &mut SimWorld, future: F) -> Option<F::Output> {
-    let mut future = std::pin::pin!(future);
-    let mut cx = Context::from_waker(Waker::noop());
-    loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-            return Some(output);
-        }
-        if !sim.has_pending_events() {
-            return None;
-        }
-        sim.step();
+    match sim.settle(std::pin::pin!(future)) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
     }
 }
 
@@ -49,11 +42,11 @@ fn test_connect_failure_mode_disabled() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "test-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // All connections should succeed with Disabled mode
         for i in 0..10 {
-            let result = super::drive(&mut sim, provider.connect(addr)).await;
+            let result = sim.drive(provider.connect(addr)).await;
             assert!(
                 result.is_ok(),
                 "Connection {} should succeed with Disabled mode, got {:?}",
@@ -80,13 +73,13 @@ fn test_connect_failure_mode_always_fail() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "fail-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // With AlwaysFail and buggify enabled, connections should fail
         // (depending on buggify activation for this location)
         let mut failure_count = 0;
         for _ in 0..10 {
-            let result = super::drive(&mut sim, provider.connect(addr)).await;
+            let result = sim.drive(provider.connect(addr)).await;
             if result.is_err() {
                 failure_count += 1;
             }
@@ -200,11 +193,11 @@ fn test_connect_failure_requires_buggify() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "no-buggify-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // Without buggify, all connections should succeed
         for i in 0..10 {
-            let result = super::drive(&mut sim, provider.connect(addr)).await;
+            let result = sim.drive(provider.connect(addr)).await;
             assert!(
                 result.is_ok(),
                 "Connection {} should succeed without buggify, got {:?}",
@@ -232,7 +225,7 @@ fn test_connect_failure_mode_probabilistic_with_timeout() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "hang-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // Use select! with a timeout to avoid actual hanging
         // This simulates how production code should handle potential hangs
@@ -274,11 +267,11 @@ fn test_connect_failure_deterministic() {
             let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
             let addr = "det-server";
-            let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+            let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
             let mut results = Vec::new();
             for _ in 0..10 {
-                let result = super::drive(&mut sim, provider.connect(addr)).await;
+                let result = sim.drive(provider.connect(addr)).await;
                 results.push(result.is_ok());
             }
 
@@ -311,10 +304,10 @@ fn test_connect_failure_existing_connections() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "existing-conn-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // Establish connection before enabling chaos
-        let mut client = super::drive(&mut sim, provider.connect(addr))
+        let mut client = sim.drive(provider.connect(addr))
             .await
             .unwrap();
 
@@ -347,11 +340,11 @@ fn test_connect_failure_error_message_always_fail() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "error-msg-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // Try to get a failure to check error message
         for _ in 0..10 {
-            if let Err(e) = super::drive(&mut sim, provider.connect(addr)).await {
+            if let Err(e) = sim.drive(provider.connect(addr)).await {
                 assert!(
                     e.to_string().contains("AlwaysFail mode"),
                     "Error should mention AlwaysFail mode, got: {e}"
@@ -382,11 +375,11 @@ fn test_connect_failure_error_message_probabilistic() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "error-msg-server-2";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // Try to get a failure to check error message
         for _ in 0..10 {
-            if let Err(e) = super::drive(&mut sim, provider.connect(addr)).await {
+            if let Err(e) = sim.drive(provider.connect(addr)).await {
                 assert!(
                     e.to_string().contains("Probabilistic mode"),
                     "Error should mention Probabilistic mode, got: {e}"
@@ -426,7 +419,7 @@ fn test_connect_failure_random_config() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
 
         let addr = "random-config-server";
-        let _listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
+        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // Just verify it doesn't crash with random config
         let mut success = 0;

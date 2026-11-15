@@ -62,8 +62,8 @@ coverage mode still works without the fork explorer. Keep that build green
 Integration tests live in `tests/` with one file per subsystem plus a
 directory of the same name for its cases (`network.rs` + `network/`,
 `storage.rs` + `storage/`, `chaos.rs` + `chaos/`, ...). Low-level provider
-tests drive the future and the world together on the executor (the `drive`
-helper in the root `AGENTS.md`). `determinism.rs` / `determinism_canary.rs`
+tests drive the future and the world together with `SimWorld::block_on`,
+`SimWorld::drive` or `SimWorld::settle` (`src/sim/drive.rs`). `determinism.rs` / `determinism_canary.rs`
 are the replay contracts; `leader_election.rs` is the canonical invariant
 example; `swarm_op_alphabet.rs`, `process_groups.rs`, `scripted_faults.rs`,
 `recovery_mode.rs` pin the builder features by name. A change to the draw

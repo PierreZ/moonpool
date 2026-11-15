@@ -13,15 +13,14 @@ use std::{
     future::Future,
     net::IpAddr,
     pin::pin,
-    task::{Context, Poll},
+    task::Poll,
 };
 
-use futures::{io::AsyncWriteExt, task::noop_waker};
+use futures::io::AsyncWriteExt;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimFaultEvent, SimWorld, StorageConfiguration, rng_call_count};
 
 /// How many events a driven future may consume before it is declared stuck.
-const MAX_STEPS: usize = 10_000;
 
 fn ip(last_octet: u8) -> IpAddr {
     format!("10.0.1.{last_octet}")
@@ -47,20 +46,9 @@ fn settle<F: Future>(sim: &mut SimWorld, future: F) -> Poll<F::Output> {
 
 fn settle_pinned<F: Future + ?Sized>(
     sim: &mut SimWorld,
-    mut future: std::pin::Pin<&mut F>,
+    future: std::pin::Pin<&mut F>,
 ) -> Poll<F::Output> {
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for _ in 0..MAX_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return Poll::Ready(output);
-        }
-        if !sim.has_pending_events() {
-            return Poll::Pending;
-        }
-        sim.step();
-    }
-    panic!("simulation-backed future exceeded {MAX_STEPS} events")
+    sim.settle(future)
 }
 
 fn ready<T>(poll: Poll<T>, what: &str) -> T {

@@ -33,7 +33,7 @@ mod driver;
 #[path = "common/poll_io.rs"]
 mod poll_io;
 
-use driver::{drive, settle};
+use driver::drive;
 use poll_io::{poll_read_once, poll_write_once};
 
 fn ip(last_octet: u8) -> IpAddr {
@@ -352,7 +352,7 @@ fn a_failed_disk_outlives_the_boundary_and_no_other_disk_fails() {
     // --- chaos phase: the first I/O fails disk 1 and parks ---
     let mut parked = pin!(file.write_all(b"never"));
     assert!(
-        settle(&mut sim, parked.as_mut()).is_pending(),
+        sim.settle(parked.as_mut()).is_pending(),
         "the chaos phase must actually fail the disk, or the test proves nothing"
     );
     assert!(sim.is_disk_failed(ip(1)));
@@ -365,14 +365,14 @@ fn a_failed_disk_outlives_the_boundary_and_no_other_disk_fails() {
         "recovery mode must not replace a disk that already failed"
     );
     assert!(
-        settle(&mut sim, parked.as_mut()).is_pending(),
+        sim.settle(parked.as_mut()).is_pending(),
         "an operation parked before the boundary stays parked"
     );
 
     // --- only the process reboot replaces the disk ---
     sim.simulate_crash_for_process(ip(1), true);
     assert!(
-        matches!(settle(&mut sim, parked.as_mut()), Poll::Ready(Err(_))),
+        matches!(sim.settle(parked.as_mut()), Poll::Ready(Err(_))),
         "the crash fails the operations the disk parked"
     );
     assert!(!sim.is_disk_failed(ip(1)));

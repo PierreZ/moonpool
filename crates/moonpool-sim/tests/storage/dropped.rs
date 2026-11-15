@@ -46,20 +46,10 @@ fn world(seed: u64, discard: f64) -> SimWorld {
 
 /// Poll `future` until it resolves, stepping the world between polls.
 fn settle<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for _ in 0..MAX_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return output;
-        }
-        assert!(
-            sim.has_pending_events(),
-            "future parked with an empty world"
-        );
-        sim.step();
+    match sim.settle(pin!(future)) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("future parked with an empty world"),
     }
-    panic!("simulation-backed future exceeded {MAX_STEPS} events")
 }
 
 /// Poll `future` exactly once, so its operation is submitted, then drop it.

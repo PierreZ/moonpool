@@ -9,12 +9,10 @@ use futures::io::AsyncWriteExt;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{
     CrashOutcome, EioTarget, SimFaultEvent, SimWorld, StorageConfiguration, StorageFaultKind,
-    executor::Executor,
 };
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::task::Poll;
 
 /// A world whose crashes always lose an unsynced directory entry, so the
 /// distinction is deterministic rather than statistical.
@@ -29,20 +27,7 @@ fn losing_sim() -> SimWorld {
 /// Drive a low-level provider future and its scheduled storage events on
 /// Moonpool's executor, without a Tokio runtime inside the simulation.
 fn drive_on<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    let mut executor = Executor::new(7);
-    executor.block_on(async {
-        futures::pin_mut!(future);
-        futures::future::poll_fn(|cx| match future.as_mut().poll(cx) {
-            Poll::Ready(output) => Poll::Ready(output),
-            Poll::Pending if sim.has_pending_events() => {
-                sim.step();
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Poll::Pending => Poll::Pending,
-        })
-        .await
-    })
+    sim.block_on(7, future)
 }
 
 /// A crash profile that makes the fault-coordinate path observable: the first

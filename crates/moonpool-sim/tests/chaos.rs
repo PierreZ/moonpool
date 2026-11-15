@@ -2,12 +2,9 @@
 //!
 //! Contains tests for chaos injection and fault tolerance.
 
-#[path = "common/async_drive.rs"]
-mod async_drive;
 #[path = "common/runtime.rs"]
 mod runtime;
 
-use async_drive::drive;
 use runtime::local_runtime;
 
 #[path = "chaos/bit_flip.rs"]

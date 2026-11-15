@@ -41,11 +41,11 @@ fn a_black_holed_send_side_accepts_writes_and_delivers_nothing() {
         let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-send";
-        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
-        let mut client = super::drive(&mut sim, provider.connect(addr))
+        let listener = sim.drive(provider.bind(addr)).await.unwrap();
+        let mut client = sim.drive(provider.connect(addr))
             .await
             .unwrap();
-        let (mut server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
+        let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         sim.black_hole_connection(client.connection_id(), true, false);
         assert!(sim.is_send_black_holed(client.connection_id()));
@@ -90,11 +90,11 @@ fn a_black_holed_recv_side_swallows_the_peers_sends() {
         let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-recv";
-        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
-        let mut client = super::drive(&mut sim, provider.connect(addr))
+        let listener = sim.drive(provider.bind(addr)).await.unwrap();
+        let mut client = sim.drive(provider.connect(addr))
             .await
             .unwrap();
-        let (mut server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
+        let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // "recv" on the client is "send" on the server endpoint.
         sim.black_hole_connection(client.connection_id(), false, true);
@@ -122,11 +122,11 @@ fn an_abort_still_crosses_a_black_hole() {
         let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-abort";
-        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
-        let mut client = super::drive(&mut sim, provider.connect(addr))
+        let listener = sim.drive(provider.bind(addr)).await.unwrap();
+        let mut client = sim.drive(provider.connect(addr))
             .await
             .unwrap();
-        let (mut server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
+        let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         sim.black_hole_connection(client.connection_id(), true, true);
         client.write_all(b"lost").await.expect("write");
@@ -155,11 +155,11 @@ fn the_coin_black_holes_a_connection_and_records_it_once() {
         let mut sim = SimWorld::new_with_network_config_and_seed(config, 20_260_904);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-coin";
-        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
-        let mut client = super::drive(&mut sim, provider.connect(addr))
+        let listener = sim.drive(provider.bind(addr)).await.unwrap();
+        let mut client = sim.drive(provider.connect(addr))
             .await
             .unwrap();
-        let (server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
+        let (server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // The operation that draws the fault proceeds normally.
         client
@@ -191,11 +191,11 @@ fn the_family_off_holes_nothing() {
         let mut sim = SimWorld::new_with_network_config(NetworkConfiguration::fast_local());
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-off";
-        let listener = super::drive(&mut sim, provider.bind(addr)).await.unwrap();
-        let mut client = super::drive(&mut sim, provider.connect(addr))
+        let listener = sim.drive(provider.bind(addr)).await.unwrap();
+        let mut client = sim.drive(provider.connect(addr))
             .await
             .unwrap();
-        let (mut server, _) = super::drive(&mut sim, listener.accept()).await.unwrap();
+        let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         for i in 0..50_u8 {
             client.write_all(&[i]).await.expect("write");
