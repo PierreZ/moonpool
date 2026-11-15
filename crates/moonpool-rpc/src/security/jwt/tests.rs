@@ -180,7 +180,7 @@ fn wrong_claims_signatures_keys_and_algorithms_are_refused() {
         // Symmetric-key confusion: HS256 is never allowed.
         (
             token(
-                &EncodingKey::from_secret(b"a"),
+                &EncodingKey::from_secret(b"a").expect("secret"),
                 Algorithm::HS256,
                 Some("a"),
                 &claims(NOW + 60),

@@ -363,13 +363,16 @@ impl Trust {
             Kind::Symmetric => {
                 let mut header = Header::new(Algorithm::HS256);
                 header.kid = Some(kid(newest));
-                let token = encode(
-                    &header,
-                    &claims(subject, ISSUER, AUDIENCE, now - 5, now + 300),
-                    &EncodingKey::from_secret(b"not-a-public-key"),
-                )
-                .ok()
-                .map(String::into_bytes);
+                let token = EncodingKey::from_secret(b"not-a-public-key")
+                    .and_then(|key| {
+                        encode(
+                            &header,
+                            &claims(subject, ISSUER, AUDIENCE, now - 5, now + 300),
+                            &key,
+                        )
+                    })
+                    .ok()
+                    .map(String::into_bytes);
                 return Minted {
                     kind,
                     token,
