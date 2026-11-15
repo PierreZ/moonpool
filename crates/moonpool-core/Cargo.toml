@@ -13,50 +13,40 @@ categories.workspace = true
 
 [features]
 default = ["tokio-providers", "select"]
-# Umbrella: the full production bundle (TokioProviders needs all five slots).
+# The Tokio backend: every production provider and `TokioProviders`.
+# tokio/rt also serves spawn_blocking (positioned file I/O runs on the blocking
+# pool) and the runtime metrics of TokioSystemProvider; libc supplies O_DIRECT,
+# getrusage and sysconf; rand/thread_rng backs TokioRandomProvider.
 tokio-providers = [
-    "tokio-task",
-    "tokio-time",
-    "tokio-net",
-    "tokio-fs",
-    "tokio-random",
-    "tokio-system",
+    "dep:tokio",
+    "tokio/rt",
+    "tokio/time",
+    "tokio/net",
+    "tokio/fs",
+    "tokio/io-util",
+    "dep:tokio-util",
+    "dep:libc",
+    "rand/thread_rng",
 ]
-# Granular per-provider features. A consumer that only needs one provider (e.g.
-# moonpool-sim bundles the real TokioTaskProvider) enables just that one and stays
-# free of net/fs/time — keeping the crate wasm-clean where those aren't used.
-tokio-task = ["dep:tokio", "tokio/rt"]
-tokio-time = ["dep:tokio", "tokio/time"]
-tokio-net = ["dep:tokio", "tokio/net", "tokio/io-util", "dep:tokio-util"]
-# tokio/rt is needed for spawn_blocking (positioned file I/O runs on the
-# blocking pool); libc supplies O_DIRECT for direct-I/O opens.
-tokio-fs = ["dep:tokio", "tokio/fs", "tokio/io-util", "tokio/rt", "dep:tokio-util", "dep:libc"]
-# TokioSystemProvider: getrusage and sysconf from libc, the runtime metrics
-# (worker busy time, stable since tokio 1.45) from tokio/rt.
-tokio-system = ["dep:tokio", "tokio/rt", "dep:libc"]
-# TokioRandomProvider uses rand's ThreadRng; no tokio involved.
-tokio-random = ["rand/thread_rng"]
-# Compio backend: a thread-per-core, completion-based runtime (io_uring on
+# The compio backend: a thread-per-core, completion-based runtime (io_uring on
 # Linux, IOCP on Windows, polling elsewhere). Its types are not `Send`, so it
 # implements the local provider traits only. The driver features pick io_uring
 # where the kernel allows it and fall back to polling where it does not
-# (a seccomp profile, an old kernel).
+# (a seccomp profile, an old kernel). libc supplies O_DIRECT, O_APPEND, the
+# statx alignment query and the OS counters; rand/thread_rng backs the random
+# provider, which is the same type as the Tokio one and needs no Tokio.
 compio-providers = [
-    "compio-task",
-    "compio-time",
-    "compio-net",
-    "compio-fs",
-    "compio-system",
-    "tokio-random",
+    "dep:compio",
+    "compio/runtime",
+    "compio/time",
+    "compio/net",
+    "compio/io-compat",
+    "compio/fs",
+    "compio/io-uring",
+    "compio/polling",
+    "dep:libc",
+    "rand/thread_rng",
 ]
-compio-task = ["dep:compio", "compio/runtime", "compio/io-uring", "compio/polling"]
-compio-time = ["dep:compio", "compio/time", "compio/io-uring", "compio/polling"]
-compio-net = ["dep:compio", "compio/net", "compio/io-compat", "compio/io-uring", "compio/polling"]
-# libc supplies O_DIRECT, O_APPEND and the statx alignment query.
-compio-fs = ["dep:compio", "dep:libc", "compio/fs", "compio/io-uring", "compio/polling"]
-# CompioSystemProvider: the same getrusage, /proc and statvfs counters as
-# TokioSystemProvider, without Tokio's runtime metrics.
-compio-system = ["dep:libc"]
 # `moonpool_core::select!` as a verbatim re-export of tokio's macro (production).
 select = ["dep:tokio", "tokio/macros"]
 # Deterministic `select!`: replaces the passthrough with tokio's expansion

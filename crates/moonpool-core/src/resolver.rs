@@ -71,11 +71,11 @@ pub fn split_host_port(target: &str) -> io::Result<(&str, u16)> {
 
 /// Production resolver: the operating system's lookup through
 /// `tokio::net::lookup_host`.
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TokioResolver;
 
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 impl TokioResolver {
     /// Create an operating-system resolver.
     #[must_use]
@@ -84,7 +84,7 @@ impl TokioResolver {
     }
 }
 
-#[cfg(feature = "tokio-net")]
+#[cfg(feature = "tokio-providers")]
 impl Resolver for TokioResolver {
     async fn resolve(&self, target: &str) -> io::Result<Vec<SocketAddr>> {
         let addresses: Vec<SocketAddr> = tokio::net::lookup_host(target).await?.collect();
@@ -105,11 +105,11 @@ impl Resolver for TokioResolver {
 /// The lookup blocks, so it must not run on the runtime's own thread. The
 /// answer comes back over a channel, thus the future is `Send` and does not
 /// need a runtime of its own. It runs under compio, Tokio or any executor.
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompioResolver;
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 impl CompioResolver {
     /// Create an operating-system resolver.
     #[must_use]
@@ -118,7 +118,7 @@ impl CompioResolver {
     }
 }
 
-#[cfg(feature = "compio-net")]
+#[cfg(feature = "compio-providers")]
 impl Resolver for CompioResolver {
     async fn resolve(&self, target: &str) -> io::Result<Vec<SocketAddr>> {
         use std::net::ToSocketAddrs as _;
@@ -177,7 +177,7 @@ mod tests {
         assert!(split_host_port("[[::1]]:80").is_err(), "nested brackets");
     }
 
-    #[cfg(feature = "compio-net")]
+    #[cfg(feature = "compio-providers")]
     #[test]
     fn compio_resolver_answers_a_literal_without_a_lookup() {
         use super::{CompioResolver, Resolver};
@@ -188,7 +188,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "tokio-net")]
+    #[cfg(feature = "tokio-providers")]
     #[tokio::test]
     async fn tokio_resolver_answers_literals_and_localhost() {
         use super::{Resolver, TokioResolver};

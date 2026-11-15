@@ -1,7 +1,7 @@
 //! The Tokio network provider disables Nagle's algorithm on both ends of
 //! every connection, as `FoundationDB`'s `Net2` does (`FLOW_TCP_NODELAY`).
 
-#![cfg(feature = "tokio-net")]
+#![cfg(feature = "tokio-providers")]
 
 use moonpool_core::{NetworkProvider, TcpListenerTrait, TokioNetworkProvider};
 

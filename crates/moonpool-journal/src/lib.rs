@@ -137,7 +137,7 @@
 //!
 //! This crate has no cargo features. It depends on `moonpool-core` with
 //! `default-features = false`, so it pulls in no production provider. Add
-//! `moonpool-core` with the `tokio-fs` feature to run it on a real
+//! `moonpool-core` with the `tokio-providers` feature to run it on a real
 //! filesystem.
 //!
 //! # Files

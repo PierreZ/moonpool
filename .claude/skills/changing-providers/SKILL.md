@@ -1,6 +1,6 @@
 ---
 name: changing-providers
-description: Add or change a moonpool provider trait method or a whole provider - the AFIT trait in moonpool-core (Send futures, Clone + Send + Sync + 'static), the Tokio implementation behind its granular feature in the same file, the sim implementation under crates/moonpool-sim/src/providers or the network/storage engines, the Providers bundle macro, the select! passthrough vs deterministic expansion, and the wasm / lean-tree / book gates. Use when touching TimeProvider, TaskProvider, NetworkProvider, RandomProvider, StorageProvider, block devices, or moonpool-core features.
+description: Add or change a moonpool provider trait method or a whole provider - the AFIT trait in moonpool-core (Send futures, Clone + Send + Sync + 'static), the Tokio implementation behind the tokio-providers feature in the same file, the sim implementation under crates/moonpool-sim/src/providers or the network/storage engines, the Providers bundle macro, the select! passthrough vs deterministic expansion, and the wasm / lean-tree / book gates. Use when touching TimeProvider, TaskProvider, NetworkProvider, RandomProvider, StorageProvider, block devices, or moonpool-core features.
 ---
 
 # Changing providers
@@ -19,7 +19,7 @@ chapter and a compatibility checklist attached.
 | Layer | Where | Rules |
 |---|---|---|
 | trait | `crates/moonpool-core/src/{time,task,network,random,storage,block}.rs` | native AFIT: `fn f(&self, ..) -> impl Future<Output = ..> + Send`; supertraits `Clone + Send + Sync + 'static`; associated types for streams and files (`futures::io`, never `tokio::io`) |
-| tokio impl | the same file, `#[cfg(feature = "tokio-<slot>")]` (`TokioTimeProvider`, `TokioTaskProvider`, `TokioNetworkProvider`, `TokioRandomProvider`, `TokioStorageProvider`, `TokioBlockDeviceProvider` in `block_tokio.rs`); `TokioProviders` in `providers.rs` | plain `async fn`; each slot has its own feature so a consumer can take one without net/fs/time |
+| tokio impl | the same file, `#[cfg(feature = "tokio-providers")]` (`TokioTimeProvider`, `TokioTaskProvider`, `TokioNetworkProvider`, `TokioRandomProvider`, `TokioStorageProvider`, `TokioBlockDeviceProvider` in `block_tokio.rs`); `TokioProviders` in `providers.rs` | plain `async fn`; one feature for the whole backend |
 | sim impl | `crates/moonpool-sim/src/providers/{time,task,random}.rs`, `network/sim/provider.rs`, `storage/provider.rs`, `storage/block/`; `SimProviders` in `providers/sim_providers.rs` | every random choice from `SIM_RNG`; every wait through the `Scheduler`; storage and network completions as scheduled events, never inline |
 | bundle | `impl_providers_bundle!` in `providers.rs` | `Providers` has one associated type and accessor per slot; extend the macro, not the two structs by hand |
 
@@ -45,7 +45,7 @@ keeping both shapes and the `moonpool-core --features select` test job green.
 3. Features: the all-off `moonpool-core` build stays wasm-clean; the lean
    production tree (`moonpool --no-default-features --features tokio`) stays
    free of sim, explorer, hyper and prometheus; a new dependency goes behind
-   the granular feature that needs it.
+   the backend feature that needs it.
 4. Tests: the provider's file under `crates/moonpool-sim/tests/` driven with
    the `drive` helper; `tests/conformance.rs` compares sim and tokio behaviour
    where both can run.

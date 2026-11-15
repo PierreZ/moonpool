@@ -61,8 +61,8 @@ from `moonpool-sim` or `moonpool`, not `tokio::select!`.
 
 | Feature | Default | Adds |
 |---------|---------|------|
-| `tokio-providers` | yes | `TokioProviders`: all six `tokio-*` features |
-| `tokio-task`, `tokio-time`, `tokio-net`, `tokio-fs`, `tokio-random`, `tokio-system` | via umbrella | One production provider each (`tokio-net` also adds `TokioResolver`) |
+| `tokio-providers` | yes | The Tokio backend: `TokioProviders`, its six providers and `TokioResolver` |
+| `compio-providers` | no | The compio backend: `CompioProviders`, its providers and `CompioResolver` (local traits only) |
 | `select` | yes | `select!` as tokio's macro, unchanged |
 | `deterministic-select` | no | `select!` with a seeded branch offset (enabled by `moonpool-sim`) |
 

@@ -147,7 +147,7 @@ unwritten to written); a recycled segment pays none.
 ## Feature flags
 
 None. The crate depends on `moonpool-core` with `default-features = false`.
-Enable `moonpool-core/tokio-fs` in your application to use the real
+Enable `moonpool-core/tokio-providers` in your application to use the real
 filesystem.
 
 ## Testing

@@ -7,7 +7,7 @@
 //! injectors use, so one seed replays every choice. A draw from
 //! `rand::rng()` or the OS breaks that replay.
 
-#[cfg(feature = "tokio-random")]
+#[cfg(any(feature = "tokio-providers", feature = "compio-providers"))]
 use rand::RngExt as _;
 use rand::distr::{Distribution, StandardUniform, uniform::SampleUniform};
 use std::ops::Range;
@@ -67,11 +67,11 @@ pub trait RandomProvider: Clone + Send + Sync + 'static {
 /// let value: u64 = random.random();
 /// let in_range = random.random_range(1..100);
 /// ```
-#[cfg(feature = "tokio-random")]
+#[cfg(any(feature = "tokio-providers", feature = "compio-providers"))]
 #[derive(Clone, Debug, Default)]
 pub struct TokioRandomProvider;
 
-#[cfg(feature = "tokio-random")]
+#[cfg(any(feature = "tokio-providers", feature = "compio-providers"))]
 impl TokioRandomProvider {
     /// Create a new production random provider.
     #[must_use]
@@ -80,7 +80,7 @@ impl TokioRandomProvider {
     }
 }
 
-#[cfg(feature = "tokio-random")]
+#[cfg(any(feature = "tokio-providers", feature = "compio-providers"))]
 impl RandomProvider for TokioRandomProvider {
     fn random<T>(&self) -> T
     where
@@ -97,7 +97,7 @@ impl RandomProvider for TokioRandomProvider {
     }
 }
 
-#[cfg(all(test, feature = "tokio-random"))]
+#[cfg(all(test, any(feature = "tokio-providers", feature = "compio-providers")))]
 mod tests {
     use super::{RandomProvider, TokioRandomProvider};
 

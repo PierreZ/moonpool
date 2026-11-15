@@ -242,14 +242,14 @@ where
 /// [`now`](TimeProvider::now) counts from the creation of the provider, and
 /// [`timer`](TimeProvider::timer) equals it. Sleeps and timeouts need a
 /// running Tokio runtime with the time driver enabled.
-#[cfg(feature = "tokio-time")]
+#[cfg(feature = "tokio-providers")]
 #[derive(Debug, Clone)]
 pub struct TokioTimeProvider {
     /// Start time for calculating elapsed duration
     start_time: std::time::Instant,
 }
 
-#[cfg(feature = "tokio-time")]
+#[cfg(feature = "tokio-providers")]
 impl TokioTimeProvider {
     /// Create a Tokio time provider whose clock starts at zero now.
     #[must_use]
@@ -260,14 +260,14 @@ impl TokioTimeProvider {
     }
 }
 
-#[cfg(feature = "tokio-time")]
+#[cfg(feature = "tokio-providers")]
 impl Default for TokioTimeProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "tokio-time")]
+#[cfg(feature = "tokio-providers")]
 impl TimeProvider for TokioTimeProvider {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
         tokio::time::sleep(duration).await;
@@ -298,13 +298,13 @@ impl TimeProvider for TokioTimeProvider {
 /// counts from the creation of the provider, and
 /// [`timer`](LocalTimeProvider::timer) equals it. Sleeps and timeouts need a
 /// running compio runtime.
-#[cfg(feature = "compio-time")]
+#[cfg(feature = "compio-providers")]
 #[derive(Debug, Clone)]
 pub struct CompioTimeProvider {
     start_time: std::time::Instant,
 }
 
-#[cfg(feature = "compio-time")]
+#[cfg(feature = "compio-providers")]
 impl CompioTimeProvider {
     /// Create a compio time provider whose clock starts at zero now.
     #[must_use]
@@ -315,14 +315,14 @@ impl CompioTimeProvider {
     }
 }
 
-#[cfg(feature = "compio-time")]
+#[cfg(feature = "compio-providers")]
 impl Default for CompioTimeProvider {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(feature = "compio-time")]
+#[cfg(feature = "compio-providers")]
 impl LocalTimeProvider for CompioTimeProvider {
     async fn sleep(&self, duration: Duration) -> Result<(), TimeError> {
         compio::time::sleep(duration).await;

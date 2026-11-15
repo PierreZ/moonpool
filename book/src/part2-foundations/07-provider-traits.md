@@ -210,16 +210,16 @@ Every `Send` backend implements the local traits through the blanket impls, so t
 
 `LocalProviders` leaves the task slot out so that it can be a blanket impl over `Providers`: every existing bundle is a `LocalProviders`. Code that spawns local tasks takes a `LocalTaskProvider` beside the bundle, or a `ThreadProviders` bundle: a `LocalProviders` with a local task slot (`local_task()`). `SimProviders` is one (through a blanket impl over every `Providers` whose task provider is also local) and `CompioProviders` is one. `TokioProviders` is not. Random and system keep their `Send` traits: their methods are synchronous, so a thread-per-core runtime backs them with the same types Tokio uses.
 
-**The compio backend.** The `compio-*` features (umbrella `compio-providers`, off by default) add a production backend on [compio](https://github.com/compio-rs/compio), a completion-based, thread-per-core runtime: io_uring on Linux (polling where the kernel refuses io_uring), IOCP on Windows. It implements only the local traits:
+**The compio backend.** The `compio-providers` feature (off by default) adds a production backend on [compio](https://github.com/compio-rs/compio), a completion-based, thread-per-core runtime: io_uring on Linux (polling where the kernel refuses io_uring), IOCP on Windows. It implements only the local traits:
 
-| Feature | Type | Notes |
-|---------|------|-------|
-| `compio-task` | `CompioTaskProvider` | `compio::runtime::spawn`; the handle detaches on drop, as Tokio's does |
-| `compio-time` | `CompioTimeProvider` | compio's timer; `timer()` equals `now()` |
-| `compio-net` | `CompioNetworkProvider` | compio TCP behind compio's `AsyncStream` adapter (`futures::io`), `TCP_NODELAY` set |
-| `compio-fs` | `CompioStorageProvider` | each positioned transfer, sync and size query is one driver operation; the `*_aligned` forms hand the caller's `AlignedBuf` to the kernel |
-| `compio-system` | `CompioSystemProvider` | the Tokio provider's OS counters; `run_loop_busy` is the CPU time of the calling thread (sample from the runtime's thread) |
-| `compio-providers` | `CompioProviders` | a `LocalProviders` and `ThreadProviders` bundle (random: the thread-local RNG) |
+| Type | Notes |
+|------|-------|
+| `CompioTaskProvider` | `compio::runtime::spawn`; the handle detaches on drop, as Tokio's does |
+| `CompioTimeProvider` | compio's timer; `timer()` equals `now()` |
+| `CompioNetworkProvider` | compio TCP behind compio's `AsyncStream` adapter (`futures::io`), `TCP_NODELAY` set |
+| `CompioStorageProvider` | each positioned transfer, sync and size query is one driver operation; the `*_aligned` forms hand the caller's `AlignedBuf` to the kernel |
+| `CompioSystemProvider` | the Tokio provider's OS counters; `run_loop_busy` is the CPU time of the calling thread (sample from the runtime's thread) |
+| `CompioProviders` | a `LocalProviders` and `ThreadProviders` bundle (random: the thread-local RNG) |
 
 Every call needs a compio runtime on the current thread. Storage opens follow the Tokio backend's direct-I/O policy, from the same code: `DirectIo::Optional` upgrades to `O_DIRECT` where the filesystem allows it, `DirectIo::Required` fails rather than fall back and never creates a file, and a direct file advertises the alignment the kernel reports. The owned `*_aligned` transfers hand the caller's `AlignedBuf` straight to `io_uring`. On Linux an append file's stream writes go through an `O_APPEND` descriptor, so they are atomic against other writers, and positioned I/O uses a second descriptor of the same file without the flag. Elsewhere `pwrite` honours its offset under `O_APPEND`, so the stream appends at the size it reads first, which is not atomic against other writers.
 
@@ -241,7 +241,7 @@ pub trait Resolver: Clone + Send + Sync + 'static {
 
 The target is the same `host:port` string `connect` takes. A numeric target resolves to itself. An `Ok` answer is never empty: a name with no address is a `NotFound` error, so a caller can tell a failed lookup from a failed connection. Caching and time-to-live belong to the caller.
 
-**Production**: `TokioResolver` (feature `tokio-net`) calls `tokio::net::lookup_host`. `CompioResolver` (feature `compio-net`) runs the operating system's lookup on a helper thread and answers over a channel, so its future is `Send` and runs on any executor.
+**Production**: `TokioResolver` (feature `tokio-providers`) calls `tokio::net::lookup_host`. `CompioResolver` (feature `compio-providers`) runs the operating system's lookup on a helper thread and answers over a channel, so its future is `Send` and runs on any executor.
 
 **Simulation**: `ScriptedResolver` answers from a shared table that a fault injector or workload edits while the run goes. Answers are immediate and draw no randomness.
 

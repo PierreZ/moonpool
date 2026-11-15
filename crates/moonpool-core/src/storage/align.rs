@@ -316,21 +316,21 @@ impl DerefMut for AlignedBuf {
 /// itself in the compio backend's zero-copy transfers. The buffer has a fixed
 /// length and every byte is initialized, like `[u8; N]`: a read fills it from
 /// its start and never changes its length.
-#[cfg(feature = "compio-fs")]
+#[cfg(feature = "compio-providers")]
 impl compio::buf::IoBuf for AlignedBuf {
     fn as_init(&self) -> &[u8] {
         self.as_slice()
     }
 }
 
-#[cfg(feature = "compio-fs")]
+#[cfg(feature = "compio-providers")]
 impl compio::buf::SetLen for AlignedBuf {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.len());
     }
 }
 
-#[cfg(feature = "compio-fs")]
+#[cfg(feature = "compio-providers")]
 impl compio::buf::IoBufMut for AlignedBuf {
     fn as_uninit(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
         let bytes = self.as_mut_slice();
