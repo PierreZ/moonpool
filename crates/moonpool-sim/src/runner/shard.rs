@@ -1296,13 +1296,13 @@ mod tests {
             );
         }
         assert_eq!(requirements(&book).len(), 2);
-        book.switch_off(Some("orders"));
+        book.switch_off("orders");
         let left: Vec<String> = requirements(&book)
             .into_iter()
             .map(|(name, _)| name)
             .collect();
         assert_eq!(left, vec!["users".to_string()]);
-        book.switch_off(None);
+        book.switch_off("users");
         assert!(requirements(&book).is_empty());
         assert!(ShardFaults::default().off_all().is_off("anything"));
         assert!(ShardFaults::default().judges_progress());
