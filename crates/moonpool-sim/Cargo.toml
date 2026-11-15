@@ -76,9 +76,13 @@ tokio = { version = "1", features = ["full", "tracing"] }
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
-# Dev-only, for the hyper integration test's IO bridge. Not a cycle:
-# moonpool-hyper depends on moonpool-core, never on moonpool-sim.
-moonpool-hyper = { path = "../moonpool-hyper", version = "0.8.0" }
+# Dev-only, for the hyper integration test's IO bridge. No build cycle:
+# moonpool-hyper depends on moonpool-core, never on moonpool-sim. Path only,
+# no version: moonpool-hyper's tests depend on this crate in return, and a
+# versioned dev-dependency in both directions cannot be published (neither
+# new version is on crates.io when the other one is packaged). cargo leaves
+# a path-only dev-dependency out of the published manifest.
+moonpool-hyper = { path = "../moonpool-hyper" }
 tempfile = "3"
 # The h2 tests speak to moonpool-hyper's server/channel, which take and return
 # tower services.
