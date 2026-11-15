@@ -27,7 +27,7 @@ pub struct LayoutRegion {
 
 ## The Eligibility Mask
 
-The coarsest control is a veto: `(path, sector) -> bool`. `SimWorld::set_storage_eligibility_mask(mask)` installs one, and `clear_storage_eligibility_mask()` removes it. The random families and the damaging crash outcomes (`Lost`, `LatentFault`, `Shorn`) consult it. An ineligible sector falls back to the always-legal old-or-new resolution.
+The coarsest control is a veto: `(path, sector) -> bool`. `SimWorld::set_storage_eligibility_mask(mask)` installs one. The random families and the damaging crash outcomes (`Lost`, `LatentFault`, `Shorn`) consult it. An ineligible sector falls back to the always-legal old-or-new resolution.
 
 ```rust
 // Never damage sector 0 of any file: the superblock stays readable.

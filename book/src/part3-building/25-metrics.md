@@ -90,7 +90,7 @@ let response = client.request(req).await?;
 timer.stop_and_record();
 ```
 
-`prometheus::Histogram::start_timer()` reads the wall clock. Inside a simulation that records how fast your laptop was, and it differs on every replay of the same seed. `SimHistogram::start_timer` takes any `TimeProvider` and reads the simulated clock. `stop_and_discard()` drops a timing you do not want, and `observe_duration(d)` records a `Duration` you measured yourself.
+`prometheus::Histogram::start_timer()` reads the wall clock. Inside a simulation that records how fast your laptop was, and it differs on every replay of the same seed. `SimHistogram::start_timer` takes any `TimeProvider` and reads the simulated clock.
 
 Pick bucket bounds that bracket what the simulation produces. Prometheus's defaults are tuned for real HTTP latency. A distribution that lands in one bucket tells you nothing.
 

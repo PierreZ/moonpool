@@ -4,9 +4,9 @@
 
 Terms are listed alphabetically. Cross-references are in **bold**. Type and macro names are the ones in the current source.
 
-**Always assertion** -- An assertion that must hold on every evaluation (`assert_always!`, `assert_always_or_unreachable!`, the four `assert_always_*` numeric macros). A violation is recorded, never a panic, and fails the **seed** in the report.
+**Always assertion** -- An assertion that must hold on every evaluation (`assert_always!`, `assert_always_or_unreachable!`, the numeric `assert_always_less_than_or_equal_to!`). A violation is recorded, never a panic, and fails the **seed** in the report.
 
-**Antithesis principle** -- Assertions never crash the program. Violations are recorded and reported, so the run continues and finds cascading failures. All 15 macros follow it.
+**Antithesis principle** -- Assertions never crash the program. Violations are recorded and reported, so the run continues and finds cascading failures. All 9 macros follow it.
 
 **Attrition** -- The built-in reboot regime (`Attrition`, `Chaos::Attrition`). Picks victims by **scope** and **victims** filter, keeps at most `max_dead` down, and chooses graceful, crash or crash-and-wipe reboots by weight. Also the regime that decides whether a **hint** may reboot.
 

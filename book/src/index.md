@@ -75,10 +75,10 @@ This page is a map of the book. Each entry links to one chapter and says what it
 - [Aiming Storage Faults](./part3-building/33-aimed-faults.md): `LayoutRegion`, fault focus, targeted injection, replicated fault patterns.
 - [CPU Time and Gray Failures](./part3-building/26-cpu-and-gray-failure.md): the CPU gate, `cpu_charge`, `SystemProvider`, `Chaos::GrayFailure`, slow machines.
 - [Custom Fault Injectors](./part3-building/31-custom-faults.md): `FaultInjector`, `fault_factory`, the `FaultContext` methods.
-- [Assertions: Finding Bugs](./part3-building/12-assertions.md): the fifteen macros, where counts live, how assertions decide when to stop.
+- [Assertions: Finding Bugs](./part3-building/12-assertions.md): the nine macros, where counts live, how assertions decide when to stop.
 - [Invariants vs Discovery vs Guidance](./part3-building/13-assertion-concepts.md): three jobs, and what each kind does in the runner and the explorer.
 - [Always and Sometimes](./part3-building/14-always-sometimes.md): the five boolean macros.
-- [Numeric Assertions](./part3-building/15-numeric-assertions.md): the eight numeric macros and watermarks.
+- [Numeric Assertions](./part3-building/15-numeric-assertions.md): the two numeric macros and watermarks.
 - [Compound Assertions](./part3-building/16-compound-assertions.md): `assert_sometimes_all!` and `assert_sometimes_each!`.
 - [Events and Invariants](./part3-building/17-events-and-invariants.md): plain `tracing` events, the `Invariant` trait, the fault timeline.
 - [Application Metrics](./part3-building/25-metrics.md): per-node Prometheus metrics, metric queries, a metastable failure.

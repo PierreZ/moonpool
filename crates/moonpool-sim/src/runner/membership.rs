@@ -75,12 +75,6 @@ impl DeploymentChanges {
         self.spawned.is_empty() && self.retired.is_empty()
     }
 
-    /// How many processes were spawned, all groups together.
-    #[must_use]
-    pub fn spawned_count(&self) -> usize {
-        self.spawned.values().map(Vec::len).sum()
-    }
-
     /// How many processes were retired, all groups together.
     #[must_use]
     pub fn retired_count(&self) -> usize {

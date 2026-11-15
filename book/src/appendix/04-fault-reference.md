@@ -90,7 +90,7 @@ A crash (any `RebootKind::Crash`, `CrashAndWipe`, `crash_self`, or a disk crash 
 | `wipe_storage_for_process(ip)` | `SimWorld` | Delete every file the process owns. |
 | `fail_disk_for_process(ip)` | `SimWorld` | Permanent disk failure. `is_disk_failed(ip)` queries. |
 | `set_disk_capacity(ip, Option<DiskCapacity>)`, `disk_capacity(ip)`, `disk_space(ip)` | `SimWorld`, `FaultContext` | A disk size limit: growth past it fails with `ENOSPC` (`StorageFaultKind::DiskFull`, a `storage_write_fault` with `write_kind = "full"`). Recovery mode lifts it. |
-| `set_storage_eligibility_mask(mask)`, `clear_storage_eligibility_mask()` | `SimWorld` | Gate the random families by `(path, sector)`. |
+| `set_storage_eligibility_mask(mask)` | `SimWorld` | Gate the random families by `(path, sector)`. |
 | `set_fault_focus(focus)`, `clear_fault_focus()`, `publish_layout(..)` | `SimWorld` | Weight the random families by byte range or `LayoutRegion`. |
 | `draw_replicated_faults(config, localities)` | `SimWorld` | Draw a `FaultPattern` for a replicated group. |
 | `take_storage_fault_records()` | `SimWorld` | Drain `StorageFaultRecord { path, kind, .. }` entries. |

@@ -272,15 +272,6 @@ impl<M: RpcMethod> ReplyHandle<M> {
             .is_some_and(|context| !matches!(context.route, ReplyRoute::Discard))
     }
 
-    /// Whether the caller opened a reply stream (the method is
-    /// [`STREAMING`](RpcMethod::STREAMING)).
-    #[must_use]
-    pub fn is_stream(&self) -> bool {
-        self.context
-            .as_ref()
-            .is_some_and(|context| context.stream.is_some())
-    }
-
     /// Answer with a reply stream: the producer of the stream the caller
     /// opened. Returns the handle back for a request that did not open
     /// one (a unary method's).

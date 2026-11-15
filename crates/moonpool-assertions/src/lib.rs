@@ -4,7 +4,7 @@
 //! This crate counts. It keeps a fixed-size table of assertion sites and a
 //! table of per-value buckets, and it tells an exploration backend when
 //! something globally new happens. It has no dependencies and compiles on
-//! `wasm32-unknown-unknown`, macOS and Linux. The fifteen `assert_*!` macros
+//! `wasm32-unknown-unknown`, macOS and Linux. The nine `assert_*!` macros
 //! that tests use live in `moonpool-sim`, which records here and turns the
 //! counts into a report.
 //!
@@ -13,7 +13,7 @@
 //! | Accounting | Backing function | `moonpool-sim` macros |
 //! |------------|------------------|-----------------------|
 //! | Boolean | [`assertion_bool`] | `assert_always!`, `assert_always_or_unreachable!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!` |
-//! | Numeric, with a best-value watermark | [`assertion_numeric`] | `assert_always_greater_than!` and the seven other numeric comparisons |
+//! | Numeric, with a best-value watermark | [`assertion_numeric`] | `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!` |
 //! | Compound, with a frontier | [`assertion_sometimes_all`] | `assert_sometimes_all!` |
 //! | Per-value buckets, with a quality watermark | [`assertion_sometimes_each`] | `assert_sometimes_each!` |
 //!

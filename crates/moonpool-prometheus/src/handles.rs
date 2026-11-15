@@ -179,11 +179,6 @@ impl SimHistogram {
         self.recorder.record(&self.key, value);
     }
 
-    /// Observe a duration, in seconds — Prometheus' convention for latency.
-    pub fn observe_duration(&self, duration: Duration) {
-        self.observe(duration.as_secs_f64());
-    }
-
     /// Start a timer driven by the **simulated** clock.
     ///
     /// `prometheus`' own `start_timer()` reads the wall clock, which in a
@@ -261,11 +256,6 @@ impl<T: TimeProvider> SimTimer<T> {
     /// Observe the elapsed simulated time and return it, in seconds.
     pub fn stop_and_record(mut self) -> f64 {
         self.record()
-    }
-
-    /// Drop the timer without observing.
-    pub fn stop_and_discard(mut self) {
-        self.recorded = true;
     }
 
     /// Simulated time elapsed so far.

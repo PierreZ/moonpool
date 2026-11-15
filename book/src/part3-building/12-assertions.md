@@ -28,18 +28,18 @@ Every assertion does two jobs.
 
 You write the assertion once, for correctness. The framework gets the guidance for free.
 
-## The Fifteen Macros
+## The Nine Macros
 
-`moonpool_sim` exports fifteen assertion macros. They fall into four families.
+`moonpool_sim` exports nine assertion macros. They fall into four families.
 
 | Family | Macros | Chapter |
 |--------|--------|---------|
 | Boolean | `assert_always!`, `assert_always_or_unreachable!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!` | [Always and Sometimes](./14-always-sometimes.md) |
-| Numeric, always | `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_always_less_than!`, `assert_always_less_than_or_equal_to!` | [Numeric Assertions](./15-numeric-assertions.md) |
-| Numeric, sometimes | `assert_sometimes_greater_than!`, `assert_sometimes_greater_than_or_equal_to!`, `assert_sometimes_less_than!`, `assert_sometimes_less_than_or_equal_to!` | [Numeric Assertions](./15-numeric-assertions.md) |
+| Numeric, always | `assert_always_less_than_or_equal_to!` | [Numeric Assertions](./15-numeric-assertions.md) |
+| Numeric, sometimes | `assert_sometimes_greater_than!` | [Numeric Assertions](./15-numeric-assertions.md) |
 | Compound | `assert_sometimes_all!`, `assert_sometimes_each!` | [Compound Assertions](./16-compound-assertions.md) |
 
-The next chapter sorts the same fifteen by **purpose**: invariant, discovery or guidance. The [Assertion Reference](../appendix/01-assertion-reference.md) has every signature in one table.
+The next chapter sorts the same nine by **purpose**: invariant, discovery or guidance. The [Assertion Reference](../appendix/01-assertion-reference.md) has every signature in one table.
 
 ## Where the Counts Live
 

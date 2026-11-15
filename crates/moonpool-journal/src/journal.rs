@@ -739,12 +739,6 @@ impl<P: LocalStorageProvider> Journal<P> {
             .map(|(&position, at)| (position, self.state_of(at)))
     }
 
-    /// The highest non-empty position.
-    #[must_use]
-    pub fn last_position(&self) -> Option<u64> {
-        self.index.keys().next_back().copied()
-    }
-
     /// Where `position`'s persist record and entry live, for aiming a
     /// storage fault at one of them. `None` when the position is empty.
     #[must_use]

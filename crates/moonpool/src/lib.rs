@@ -101,7 +101,7 @@
 //!   invariants, iteration control and a [`SimulationReport`].
 //! - **Chaos**: [`Chaos`] surfaces (network, storage, attrition, outage, CPU,
 //!   gray failure, buggified knobs), each sampled per seed by [`ChaosMode`].
-//! - **Assertions**: fifteen Antithesis-style macros, from `assert_always!`
+//! - **Assertions**: nine Antithesis-style macros, from `assert_always!`
 //!   to `assert_sometimes_each!`. They record, they never panic.
 //! - **Exploration**: frontier-based multiverse exploration through
 //!   `moonpool-explorer` (native targets).

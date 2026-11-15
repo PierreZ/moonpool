@@ -13,14 +13,8 @@ All macros live in `moonpool_sim` (also through the `moonpool` facade with the `
 | `assert_sometimes!` | `(cond, msg)` | `Sometimes` | coverage miss: ran, never true | Yes: first pass |
 | `assert_reachable!` | `(msg)` | `Reachable` | coverage miss: never reached | Yes: first pass |
 | `assert_unreachable!` | `(msg)` or `(msg, {..})` | `Unreachable` | reached at all | No |
-| `assert_always_greater_than!` | `(val, thresh, msg [, {..}])` | `NumericAlways` | `val > thresh` is false | No |
-| `assert_always_greater_than_or_equal_to!` | same | `NumericAlways` | `val >= thresh` is false | No |
-| `assert_always_less_than!` | same | `NumericAlways` | `val < thresh` is false | No |
-| `assert_always_less_than_or_equal_to!` | same | `NumericAlways` | `val <= thresh` is false | No |
+| `assert_always_less_than_or_equal_to!` | `(val, thresh, msg [, {..}])` | `NumericAlways` | `val <= thresh` is false | No |
 | `assert_sometimes_greater_than!` | `(val, thresh, msg)` | `NumericSometimes` | coverage miss: `val > thresh` never true | Yes: watermark |
-| `assert_sometimes_greater_than_or_equal_to!` | same | `NumericSometimes` | coverage miss | Yes: watermark |
-| `assert_sometimes_less_than!` | same | `NumericSometimes` | coverage miss | Yes: watermark |
-| `assert_sometimes_less_than_or_equal_to!` | same | `NumericSometimes` | coverage miss | Yes: watermark |
 | `assert_sometimes_all!` | `(msg, [(name, bool), ..])` | `BooleanSometimesAll` | coverage miss: never all true at once | Yes: frontier, combination |
 | `assert_sometimes_each!` | `(msg, [(key, val), ..])` or `(msg, [identity..], [quality..])` | bucket table | never (no contract) | Yes: bucket, quality |
 
@@ -35,12 +29,10 @@ Rules that apply to every macro:
 
 Every numeric site keeps one watermark, the best value seen for its direction:
 
-| Macro family | Watermark tracks |
+| Macro | Watermark tracks |
 |--------------|------------------|
-| `assert_always_greater_than[_or_equal_to]!` | the minimum value (the worst case) |
-| `assert_always_less_than[_or_equal_to]!` | the maximum value (the worst case) |
-| `assert_sometimes_greater_than[_or_equal_to]!` | the maximum value |
-| `assert_sometimes_less_than[_or_equal_to]!` | the minimum value |
+| `assert_always_less_than_or_equal_to!` | the maximum value (the worst case) |
+| `assert_sometimes_greater_than!` | the maximum value |
 
 Always-style watermarks are reporting only. An improvement on a `NumericSometimes` watermark is a `WatermarkImprovement` discovery, so the explorer branches from it.
 
@@ -123,7 +115,7 @@ Bucket a coarse vocabulary (phase, role, floor), not identifiers (node id, slot 
 | An invariant on a path that may never run under some seeds | `assert_always_or_unreachable!` |
 | A branch the chaos must reach (retry, timeout, recovery) | `assert_sometimes!` or `assert_reachable!` |
 | A branch that must never run | `assert_unreachable!` |
-| A bound (queue depth, latency, replica lag) | `assert_always_less_than!` and friends |
+| A bound (queue depth, latency, replica lag) | `assert_always_less_than_or_equal_to!` |
 | Depth the explorer should push (level reached, slots decided) | `assert_sometimes_greater_than!` |
 | Several facts that must coincide at least once | `assert_sometimes_all!` |
 | Coverage per identity with a quality value | `assert_sometimes_each!` |

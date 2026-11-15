@@ -56,7 +56,7 @@ Every feature below has a chapter. This is the map.
 
 **Custom fault injectors.** `fault_factory` builds a fresh `FaultInjector` per timeline, with a `FaultContext` that can crash, restart, read `durable_bytes` and read workload state. See [Custom Fault Injectors](../part3-building/31-custom-faults.md).
 
-**Fifteen assertion macros.** `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, `assert_always_or_unreachable!`, eight numeric forms, `assert_sometimes_all!` and `assert_sometimes_each!`. See [Assertions: Finding Bugs](../part3-building/12-assertions.md) and the [Assertion Reference](../appendix/01-assertion-reference.md).
+**Nine assertion macros.** `assert_always!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!`, `assert_always_or_unreachable!`, two numeric forms, `assert_sometimes_all!` and `assert_sometimes_each!`. See [Assertions: Finding Bugs](../part3-building/12-assertions.md) and the [Assertion Reference](../appendix/01-assertion-reference.md).
 
 **Events and invariants.** Correctness facts are plain `tracing` events. `SimulationLayer` captures them into a timeline, and an `Invariant` reads them through `TraceQuery` after every step. The same events feed production observability. See [Events and Invariants](../part3-building/17-events-and-invariants.md).
 

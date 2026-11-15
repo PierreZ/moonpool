@@ -12,7 +12,7 @@ The workspace holds sixteen crates. Eleven are published to crates.io. Five are 
 |---|---|---|
 | `moonpool` | The facade. Features `sim` and `tokio` are on by default. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt` are opt-in. A lean production build uses `default-features = false, features = ["tokio"]`. | Stable |
 | `moonpool-core` | The six provider traits (`TimeProvider`, `TaskProvider`, `NetworkProvider`, `RandomProvider`, `StorageProvider`, `SystemProvider`), `TokioProviders`, `select!`, `LayoutRegion`, storage types. Granular `tokio-*` features keep it wasm-clean. | Stable. `SystemProvider` and `LayoutRegion` are new. |
-| `moonpool-sim` | The simulation engine: `SimWorld`, the deterministic executor, `SimulationBuilder`, chaos, the 15 assertion macros, events and invariants. Compiles to `wasm32-unknown-unknown` with `--no-default-features`. | Stable core. See the new features below. |
+| `moonpool-sim` | The simulation engine: `SimWorld`, the deterministic executor, `SimulationBuilder`, chaos, the 9 assertion macros, events and invariants. Compiles to `wasm32-unknown-unknown` with `--no-default-features`. | Stable core. See the new features below. |
 | `moonpool-buggify` | `buggify!`, `buggify_with_prob!`, `buggify_named!`, `hint!` and `cpu_charge`. Pure std, zero dependencies, inert outside a simulation. | Stable. `hint!`, `buggify_named!`, `set_activation` and `cpu_charge` are new. |
 | `moonpool-assertions` | Antithesis-style assertion accounting: 8192 slots, 256 buckets, the heap table the explorer overlays with shared memory. Pure std, wasm-able. | Stable |
 | `moonpool-explorer` | Fork-based frontier exploration: recipes, the frontier controller, bounded workers, sancov edge coverage. Linux and macOS only. | Stable. Multi-process parallel exploration is still on the list. |
@@ -33,7 +33,7 @@ The **simulation engine** is the oldest and most exercised part. One OS thread, 
 
 **Chaos** covers the network (partitions, latency, close, corruption, partial writes), storage (corruption, torn writes, misdirection, sync failures, stalls, the barrier-bounded crash model) and process attrition (graceful reboots and crashes). `ChaosMode::Swarm` enables a random subset of fault families per seed. `buggify_knob!` pushes configuration knobs to extremes.
 
-The **assertion suite** has the 15 macros of the Antithesis taxonomy: always, sometimes, reachable, unreachable, eight numeric forms, `assert_sometimes_all!` and `assert_sometimes_each!`. The explorer forks a child at every discovery and keeps the accounting in shared memory.
+The **assertion suite** has 9 macros from the Antithesis taxonomy: always, sometimes, reachable, unreachable, always-or-unreachable, two numeric forms, `assert_sometimes_all!` and `assert_sometimes_each!`. The explorer forks a child at every discovery and keeps the accounting in shared memory.
 
 **Events and invariants** are plain `tracing` events. `SimulationLayer` captures them, and invariants read them through `TraceQuery` after every step.
 

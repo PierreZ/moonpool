@@ -5,7 +5,7 @@ with zero dependencies.
 
 This crate counts. It keeps a fixed-size table of assertion sites and a
 table of per-value buckets, and it tells an exploration backend when
-something globally new happens. The fifteen `assert_*!` macros that tests use
+something globally new happens. The nine `assert_*!` macros that tests use
 live in `moonpool-sim`, which records here and turns the counts into a
 report.
 
