@@ -214,10 +214,10 @@ and under the simulator in its own `#[test]`.
 
 ### Assertions and invariants (`moonpool-assertions`)
 
-- Fifteen Antithesis-style macros. Boolean: `assert_always!`,
+- Nine Antithesis-style macros. Boolean: `assert_always!`,
   `assert_always_or_unreachable!`, `assert_sometimes!`, `assert_reachable!`,
-  `assert_unreachable!`. Numeric: four `assert_always_*` and four
-  `assert_sometimes_*` comparisons. Compound: `assert_sometimes_all!` and
+  `assert_unreachable!`. Numeric: `assert_always_less_than_or_equal_to!` and
+  `assert_sometimes_greater_than!`. Compound: `assert_sometimes_all!` and
   `assert_sometimes_each!`.
 - They record and never panic. Always-failures are bugs. Sometimes-sites
   that never fire are coverage gaps.

@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-You know the fifteen macros. You know `buggify!` and `hint!`. The hard question with a fresh process and workload is not **how** to assert. It is **what** to assert, and **where** a fault would hurt most.
+You know the nine macros. You know `buggify!` and `hint!`. The hard question with a fresh process and workload is not **how** to assert. It is **what** to assert, and **where** a fault would hurt most.
 
 One read through the code finds the obvious properties. The ones that catch real bugs hide from a single viewpoint. The fix is to read the same code several times, each time through one lens.
 
@@ -26,7 +26,7 @@ Each focus has a question, the moonpool tools that test it, and the assertion it
 
 **5. Timing and scheduling.** An election timeout that overlaps a heartbeat timeout. Logic that assumes a timer fires before a message arrives. Tools: `buggify!` to stretch a delay, `moonpool_sim::select!` so branch order is seeded, `Chaos::GrayFailure` and `SimContext::slowness` for a slow machine. Assert with `assert_sometimes!` that the late branch won at least once.
 
-**6. Resource boundaries.** A queue that grows forever under load. No backpressure. Tools: the numeric macros. `assert_always_less_than!` guards the bound. Its `assert_sometimes_greater_than!` twin makes the explorer push toward it. `SystemProvider` counters and [application metrics](./25-metrics.md) show the shape of the pressure.
+**6. Resource boundaries.** A queue that grows forever under load. No backpressure. Tools: the numeric macros. `assert_always_less_than_or_equal_to!` guards the bound. Its `assert_sometimes_greater_than!` twin makes the explorer push toward it. `SystemProvider` counters and [application metrics](./25-metrics.md) show the shape of the pressure.
 
 **7. Protocol contracts.** A doc comment says "returns an error if missing" and the code returns a default. An ordering rule between two RPCs that nothing checks. Tools: `assert_always!` at the boundary, and `assert_unreachable!` on the branch the contract says cannot happen.
 

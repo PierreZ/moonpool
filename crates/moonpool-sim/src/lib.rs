@@ -257,16 +257,13 @@
 //!
 //! ## Assertions
 //!
-//! Fifteen Antithesis-style macros (see [`chaos::assertions`]). They never
+//! Nine Antithesis-style macros (see [`chaos::assertions`]). They never
 //! panic: a failed `always` is recorded and fails the seed at the end.
 //!
 //! - Boolean: [`assert_always!`], [`assert_always_or_unreachable!`],
 //!   [`assert_sometimes!`], [`assert_reachable!`], [`assert_unreachable!`].
-//! - Numeric: [`assert_always_greater_than!`],
-//!   [`assert_always_greater_than_or_equal_to!`], [`assert_always_less_than!`],
-//!   [`assert_always_less_than_or_equal_to!`], [`assert_sometimes_greater_than!`],
-//!   [`assert_sometimes_greater_than_or_equal_to!`],
-//!   [`assert_sometimes_less_than!`], [`assert_sometimes_less_than_or_equal_to!`].
+//! - Numeric: [`assert_always_less_than_or_equal_to!`],
+//!   [`assert_sometimes_greater_than!`].
 //! - Compound: [`assert_sometimes_all!`], [`assert_sometimes_each!`].
 //!
 //! [`assertion_results`] and [`validate_assertion_contracts`] read the

@@ -133,13 +133,13 @@ lost-synced-write oracle checks that nothing synced is ever lost.
 
 ## Assertions
 
-Fifteen Antithesis-style macros. They never panic: a failed `always` fails
+Nine Antithesis-style macros. They never panic: a failed `always` fails
 the seed at the end of the iteration.
 
 | Kind | Macros |
 |------|--------|
 | Boolean | `assert_always!`, `assert_always_or_unreachable!`, `assert_sometimes!`, `assert_reachable!`, `assert_unreachable!` |
-| Numeric | `assert_always_greater_than!`, `assert_always_greater_than_or_equal_to!`, `assert_always_less_than!`, `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!`, `assert_sometimes_greater_than_or_equal_to!`, `assert_sometimes_less_than!`, `assert_sometimes_less_than_or_equal_to!` |
+| Numeric | `assert_always_less_than_or_equal_to!`, `assert_sometimes_greater_than!` |
 | Compound | `assert_sometimes_all!`, `assert_sometimes_each!` |
 
 If an error handler exists but its `assert_sometimes!` never fires, it was

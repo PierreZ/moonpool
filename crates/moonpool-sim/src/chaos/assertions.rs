@@ -1,6 +1,6 @@
 //! Antithesis-style assertion macros and result tracking for simulation testing.
 //!
-//! This module provides 15 assertion macros for testing distributed system
+//! This module provides 9 assertion macros for testing distributed system
 //! properties. Assertions are tracked by `moonpool-assertions` (a dependency-free
 //! accounting layer). When the `exploration` feature is on, that table lives in
 //! `MAP_SHARED` memory so counts are visible across forked exploration timelines;
@@ -21,14 +21,8 @@
 //! | `assert_sometimes!` | yes | no | on first success |
 //! | `assert_reachable!` | yes | no | on first reach |
 //! | `assert_unreachable!` | yes | no | no |
-//! | `assert_always_greater_than!` | yes | no | no |
-//! | `assert_always_greater_than_or_equal_to!` | yes | no | no |
-//! | `assert_always_less_than!` | yes | no | no |
 //! | `assert_always_less_than_or_equal_to!` | yes | no | no |
 //! | `assert_sometimes_greater_than!` | yes | no | on watermark improvement |
-//! | `assert_sometimes_greater_than_or_equal_to!` | yes | no | on watermark improvement |
-//! | `assert_sometimes_less_than!` | yes | no | on watermark improvement |
-//! | `assert_sometimes_less_than_or_equal_to!` | yes | no | on watermark improvement |
 //! | `assert_sometimes_all!` | yes | no | on frontier advance |
 //! | `assert_sometimes_each!` | yes | no | on discovery/quality |
 
@@ -620,7 +614,7 @@ macro_rules! assert_unreachable {
     }};
 }
 
-/// Shared expansion of the four `assert_always_*` numeric comparisons:
+/// Expansion of an `assert_always_*` numeric comparison:
 /// record the evaluation with its comparison and maximize direction, and on
 /// failure record the violation (printing the details when given).
 #[doc(hidden)]
@@ -668,7 +662,7 @@ macro_rules! __assert_always_numeric {
     }};
 }
 
-/// Shared expansion of the four `assert_sometimes_*` numeric comparisons.
+/// Expansion of an `assert_sometimes_*` numeric comparison.
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __assert_sometimes_numeric {
@@ -680,54 +674,6 @@ macro_rules! __assert_sometimes_numeric {
             $crate::chaos::assertions::to_i64_saturating($thresh),
             $crate::chaos::assertions::_re_export::AssertKind::NumericSometimes,
             $maximize,
-        );
-    }};
-}
-
-/// Assert that `val > threshold` always holds.
-///
-/// Does **not** panic on failure — records the violation and logs at ERROR level.
-#[macro_export]
-macro_rules! assert_always_greater_than {
-    ($val:expr, $thresh:expr, $message:literal $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
-        $crate::__declare_site!(NumericAlways, true, false, $message);
-        $crate::assert_always_greater_than!($val, $thresh, ($message) $(, { $($key => $dval),+ })?)
-    }};
-    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
-        $crate::__assert_always_numeric!(
-            Gt, >, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
-        );
-    }};
-}
-
-/// Assert that `val >= threshold` always holds.
-///
-/// Does **not** panic on failure — records the violation and logs at ERROR level.
-#[macro_export]
-macro_rules! assert_always_greater_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:literal $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
-        $crate::__declare_site!(NumericAlways, true, false, $message);
-        $crate::assert_always_greater_than_or_equal_to!($val, $thresh, ($message) $(, { $($key => $dval),+ })?)
-    }};
-    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
-        $crate::__assert_always_numeric!(
-            Ge, >=, false, $val, $thresh, $message $(, { $($key => $dval),+ })?
-        );
-    }};
-}
-
-/// Assert that `val < threshold` always holds.
-///
-/// Does **not** panic on failure — records the violation and logs at ERROR level.
-#[macro_export]
-macro_rules! assert_always_less_than {
-    ($val:expr, $thresh:expr, $message:literal $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
-        $crate::__declare_site!(NumericAlways, true, true, $message);
-        $crate::assert_always_less_than!($val, $thresh, ($message) $(, { $($key => $dval),+ })?)
-    }};
-    ($val:expr, $thresh:expr, $message:expr $(, { $($key:expr => $dval:expr),+ $(,)? })?) => {{
-        $crate::__assert_always_numeric!(
-            Lt, <, true, $val, $thresh, $message $(, { $($key => $dval),+ })?
         );
     }};
 }
@@ -757,42 +703,6 @@ macro_rules! assert_sometimes_greater_than {
     }};
     ($val:expr, $thresh:expr, $message:expr) => {{
         $crate::__assert_sometimes_numeric!(Gt, true, $val, $thresh, $message);
-    }};
-}
-
-/// Assert that `val >= threshold` sometimes holds. Guides on watermark improvement.
-#[macro_export]
-macro_rules! assert_sometimes_greater_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:literal) => {{
-        $crate::__declare_site!(NumericSometimes, true, true, $message);
-        $crate::assert_sometimes_greater_than_or_equal_to!($val, $thresh, ($message))
-    }};
-    ($val:expr, $thresh:expr, $message:expr) => {{
-        $crate::__assert_sometimes_numeric!(Ge, true, $val, $thresh, $message);
-    }};
-}
-
-/// Assert that `val < threshold` sometimes holds. Guides on watermark improvement.
-#[macro_export]
-macro_rules! assert_sometimes_less_than {
-    ($val:expr, $thresh:expr, $message:literal) => {{
-        $crate::__declare_site!(NumericSometimes, true, false, $message);
-        $crate::assert_sometimes_less_than!($val, $thresh, ($message))
-    }};
-    ($val:expr, $thresh:expr, $message:expr) => {{
-        $crate::__assert_sometimes_numeric!(Lt, false, $val, $thresh, $message);
-    }};
-}
-
-/// Assert that `val <= threshold` sometimes holds. Guides on watermark improvement.
-#[macro_export]
-macro_rules! assert_sometimes_less_than_or_equal_to {
-    ($val:expr, $thresh:expr, $message:literal) => {{
-        $crate::__declare_site!(NumericSometimes, true, false, $message);
-        $crate::assert_sometimes_less_than_or_equal_to!($val, $thresh, ($message))
-    }};
-    ($val:expr, $thresh:expr, $message:expr) => {{
-        $crate::__assert_sometimes_numeric!(Le, false, $val, $thresh, $message);
     }};
 }
 

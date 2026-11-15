@@ -14,7 +14,7 @@
 //!
 //! | Module | Contents |
 //! |--------|----------|
-//! | [`assertions`] | The fifteen `assert_*` macros and their result tables |
+//! | [`assertions`] | The nine `assert_*` macros and their result tables |
 //! | [`buggify`] | Simulation wiring for `moonpool-buggify` and the [`buggify_knob!`](crate::buggify_knob) macro |
 //! | [`fault_events`] | [`SimFaultEvent`]: every injected fault, on the trace timeline |
 //! | [`state_handle`] | [`StateHandle`]: typed values shared inside one run |

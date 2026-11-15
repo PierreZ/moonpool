@@ -30,7 +30,7 @@ What does it take to move from prevention to discovery? Three principles, each b
 
 **Sometimes assertions.** This is the subtle one. Prevention uses assertions that say "this must always be true." Discovery needs a second kind: "this should **sometimes** be true." A sometimes assertion on a retry path does not check that retries work every time. It checks that the simulation reached the retry path at all. Without it, you can run a million simulations and never know whether they explored the interesting parts of the state space or repeated the happy path a million times.
 
-In moonpool these are `assert_always!` and `assert_sometimes!`, two of the 15 macros in [Assertions: Finding Bugs](../part3-building/12-assertions.md).
+In moonpool these are `assert_always!` and `assert_sometimes!`, two of the 9 macros in [Assertions: Finding Bugs](../part3-building/12-assertions.md).
 
 ## The feedback loop
 

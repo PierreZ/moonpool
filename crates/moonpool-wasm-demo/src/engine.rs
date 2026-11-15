@@ -715,9 +715,3 @@ pub fn run_json(config: &str) -> String {
 fn error_json(message: &str) -> String {
     serde_json::json!({ "error": message }).to_string()
 }
-
-/// The message of the invariant that the planted bug breaks.
-#[must_use]
-pub fn invariant_message() -> &'static str {
-    INVARIANT
-}

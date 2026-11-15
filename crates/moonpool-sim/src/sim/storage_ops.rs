@@ -475,16 +475,6 @@ impl SimWorld {
         self.inner.write().storage.set_fault_focus(ip, None);
     }
 
-    /// Remove the eligibility mask: every sector becomes eligible again.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the simulation lock is poisoned by a prior task panic.
-    #[instrument(level = "debug", skip(self))]
-    pub fn clear_storage_eligibility_mask(&self) {
-        self.inner.write().storage.set_eligibility_mask(None);
-    }
-
     /// Drain the storage faults injected so far, oldest first.
     ///
     /// # Panics

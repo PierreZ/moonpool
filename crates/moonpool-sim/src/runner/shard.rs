@@ -217,12 +217,6 @@ impl ShardFaults {
         self.edge
     }
 
-    /// The core, if set.
-    #[must_use]
-    pub fn core_config(&self) -> Option<Core> {
-        self.core
-    }
-
     /// Whether the shard `name` is out of the gate.
     #[must_use]
     pub fn is_off(&self, name: &str) -> bool {
@@ -526,14 +520,8 @@ impl ShardBook {
 
     /// Take `name` (or, with `None`, every shard) out of the gate for the
     /// rest of the run.
-    fn switch_off(&self, name: Option<&str>) {
-        let mut book = self.lock();
-        match name {
-            Some(name) => {
-                book.config.off.insert(name.to_string());
-            }
-            None => book.config.all_off = true,
-        }
+    fn switch_off(&self, name: &str) {
+        self.lock().config.off.insert(name.to_string());
     }
 
     /// Record one declaration from `declarer` at `at`. `activate` draws a
@@ -938,13 +926,7 @@ impl Shards {
     /// the shard's tolerance on purpose. Its declarations are still
     /// recorded.
     pub fn switch_off(&self, name: &str) {
-        self.book.switch_off(Some(name));
-    }
-
-    /// [`switch_off`](Self::switch_off) for every shard, those declared
-    /// later included.
-    pub fn switch_off_all(&self) {
-        self.book.switch_off(None);
+        self.book.switch_off(name);
     }
 
     /// Whether the gate is off for `name`: switched off, or off in the
