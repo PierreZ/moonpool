@@ -509,14 +509,25 @@ async fn cancelled_caller_releases_its_route_and_the_late_reply_is_discarded() {
         .expect("register");
     let held = service.bind(&client);
 
-    let cancelled =
-        tokio::time::timeout(Duration::from_millis(50), held.try_get_reply(&ping(1))).await;
-    assert!(cancelled.is_err(), "the caller gave up");
+    // The caller gives up once the server holds the request. A fixed
+    // deadline here raced the dial: on a slow host the call was dropped
+    // before its request left, so nothing ever arrived.
+    let request = ping(1);
+    let call = Box::pin(held.try_get_reply(&request));
+    let arrived = Box::pin(stream.recv());
+    let (incoming, call) = match futures::future::select(call, arrived).await {
+        futures::future::Either::Left((outcome, _)) => {
+            panic!("a held request got an outcome: {outcome:?}")
+        }
+        futures::future::Either::Right((incoming, call)) => (incoming, call),
+    };
+    // Dropping the call is the caller abandoning it.
+    drop(call);
+    let incoming = incoming.expect("request arrives");
     assert_eq!(client.stats().expect("running").pending_calls, 0);
     assert_eq!(client.stats().expect("running").calls_abandoned, 1);
 
     // The server still executes it: cancellation is not retraction.
-    let incoming = stream.recv().await.expect("request arrives anyway");
     assert_eq!(incoming.request.id, 1);
     assert!(incoming.reply.send(&Pong {
         id: 1,
