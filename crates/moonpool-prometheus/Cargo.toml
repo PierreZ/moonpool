@@ -21,7 +21,9 @@ moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features
 prometheus = { version = "0.14", default-features = false }
 
 [dev-dependencies]
-moonpool-sim = { path = "../moonpool-sim", version = "0.8.0" }
+# Path only, no version: moonpool-sim is a test-only dependency here, and a
+# versioned one breaks publishing (see the note in moonpool-sim/Cargo.toml).
+moonpool-sim = { path = "../moonpool-sim" }
 async-trait = "0.1"
 
 [lints]
