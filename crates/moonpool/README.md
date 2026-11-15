@@ -9,7 +9,7 @@ the `moonpool::hyper`, `moonpool::prometheus` and `moonpool::rpc` modules.
 
 Moonpool follows [FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html).
 
-> **Note:** This is a hobby-grade project under active development.
+> **Note:** Moonpool is under active development. It is used to find real bugs in distributed systems, and its API still changes between releases.
 
 ## Same code in production and simulation
 

@@ -10,7 +10,7 @@ One seed gives one exact execution, so every failure replays bit for bit.
 Moonpool follows [FoundationDB's simulation testing](https://apple.github.io/foundationdb/testing.html),
 with assertion and exploration ideas from [Antithesis](https://antithesis.com/).
 
-> **Note:** This is a hobby-grade project under active development.
+> **Note:** Moonpool is under active development. It is used to find real bugs in distributed systems, and its API still changes between releases.
 
 ## Same code in production and simulation
 

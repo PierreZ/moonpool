@@ -2,11 +2,11 @@
 
 <!-- toc -->
 
-Moonpool is a hobby project under active development. It is not production-ready. There is no backward-compatibility policy: when an API changes, the old one is deleted, not deprecated. The workspace is at version `0.8.0`. This book documents the framework as it exists today and marks what is new.
+Moonpool is under active development. It is used to find real bugs in distributed systems, and its API is not stable. There is no backward-compatibility policy: when an API changes, the old one is deleted, not deprecated. The workspace is at version `0.9.0`. This book documents the framework as it exists today and marks what is new.
 
 ## The crates
 
-The workspace holds sixteen crates. Ten are published to crates.io. Six are tools and examples that stay in the repository. The [Crate Map](../appendix/02-crate-map.md) has the dependency graph.
+The workspace holds sixteen crates. Eleven are published to crates.io. Five are tools and examples that stay in the repository. The [Crate Map](../appendix/02-crate-map.md) has the dependency graph.
 
 | Crate | What it is | Status |
 |---|---|---|
