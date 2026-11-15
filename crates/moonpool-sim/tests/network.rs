@@ -2,8 +2,6 @@
 //!
 //! Contains tests for network simulation and configuration.
 
-#[path = "common/async_drive.rs"]
-mod async_drive;
 #[path = "common/poll_io.rs"]
 mod poll_io;
 #[path = "common/runtime.rs"]

@@ -398,7 +398,7 @@ impl StorageState {
 
 #[cfg(test)]
 mod tests {
-    use std::{future::Future, net::IpAddr, task::Poll, time::Duration};
+    use std::{net::IpAddr, time::Duration};
 
     use moonpool_buggify::shard::{Declaration, Replica, Replication};
     use moonpool_core::{LayoutRegion, OpenOptions, StorageFile, StorageProvider};
@@ -412,20 +412,6 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().expect("test IP")
-    }
-
-    async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-        futures::pin_mut!(future);
-        futures::future::poll_fn(|cx| match future.as_mut().poll(cx) {
-            Poll::Ready(output) => Poll::Ready(output),
-            Poll::Pending if sim.has_pending_events() => {
-                sim.step();
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-            Poll::Pending => Poll::Pending,
-        })
-        .await
     }
 
     /// A world whose crashes lose every unsynced sector, and a book with one
@@ -474,7 +460,7 @@ mod tests {
 
     fn write_unsynced(sim: &mut SimWorld, owner: &str, path: &'static str) {
         let provider = sim.storage_provider(ip(owner));
-        crate::executor::Executor::new(0).block_on(drive(sim, async move {
+        crate::executor::Executor::new(0).block_on(sim.drive(async move {
             let file = provider
                 .open(path, OpenOptions::create_write())
                 .await

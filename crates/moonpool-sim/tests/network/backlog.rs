@@ -1,7 +1,7 @@
 //! A listener's pending and reserved accept slots are bounded. Parked
 //! connects resume in poll order and belong to one listener generation.
 
-use crate::sync_drive::{drive, settle};
+use crate::sync_drive::drive;
 use futures::task::noop_waker;
 use moonpool_sim::{
     LatencyDistribution, NetworkConfiguration, NetworkProvider, SimWorld, SimulationBuilder,
@@ -78,11 +78,11 @@ fn full_backlog_parks_connect_until_accept_returns() {
     let listener = drive(&mut sim, server.bind(SERVER)).expect("bind");
     let first = drive(&mut sim, client.connect(SERVER)).expect("first connect");
     let mut second = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, second.as_mut()).is_pending());
+    assert!(sim.settle(second.as_mut()).is_pending());
     assert!(!sim.has_pending_events(), "a full backlog parks connect");
 
     let (accepted, _) = drive(&mut sim, listener.accept()).expect("first accept");
-    let Poll::Ready(Ok(second)) = settle(&mut sim, second.as_mut()) else {
+    let Poll::Ready(Ok(second)) = sim.settle(second.as_mut()) else {
         panic!("second connect should resume");
     };
     let (accepted_second, _) = drive(&mut sim, listener.accept()).expect("second accept");
@@ -108,7 +108,7 @@ fn reserved_accept_counts_until_its_delayed_future_returns() {
         "accept reserves endpoint"
     );
     let mut second = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, second.as_mut()).is_pending());
+    assert!(sim.settle(second.as_mut()).is_pending());
     assert!(
         !sim.has_pending_events(),
         "accept delay has elapsed without a repoll"
@@ -117,7 +117,7 @@ fn reserved_accept_counts_until_its_delayed_future_returns() {
     let Poll::Ready(Ok((accepted, _))) = poll_once(accepting.as_mut()) else {
         panic!("delayed accept should now return");
     };
-    let Poll::Ready(Ok(second)) = settle(&mut sim, second.as_mut()) else {
+    let Poll::Ready(Ok(second)) = sim.settle(second.as_mut()) else {
         panic!("second connect should resume after return");
     };
     drop((first, accepted, second));
@@ -153,7 +153,7 @@ fn a_dropped_accept_does_not_restart_the_connections_latency() {
         let mut first = pin!(listener.accept());
         assert!(poll_once(first.as_mut()).is_pending(), "accept reserves");
         let mut nap = pin!(time.sleep(Duration::from_millis(4)));
-        assert!(settle(&mut sim, nap.as_mut()).is_ready());
+        assert!(sim.settle(nap.as_mut()).is_ready());
         assert_eq!(sim.current_time(), queued_at + Duration::from_millis(4));
     }
 
@@ -188,7 +188,7 @@ fn an_accept_recreated_every_millisecond_still_completes_on_time() {
         }
         // The sibling arm wins the pass; `select!` drops the accept arm.
         let mut tick = pin!(time.sleep(Duration::from_millis(1)));
-        assert!(settle(&mut sim, tick.as_mut()).is_ready());
+        assert!(sim.settle(tick.as_mut()).is_ready());
     }
     let (accepted, _) = accepted.expect("accept starved behind a 1 ms sibling arm");
     assert!(
@@ -221,8 +221,8 @@ fn growing_capacity_wakes_multiple_parked_connects_after_queue_and_reservation_f
     );
     let mut fourth = pin!(client.connect(SERVER));
     let mut fifth = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, fourth.as_mut()).is_pending());
-    assert!(settle(&mut sim, fifth.as_mut()).is_pending());
+    assert!(sim.settle(fourth.as_mut()).is_pending());
+    assert!(sim.settle(fifth.as_mut()).is_pending());
     assert!(
         !sim.has_pending_events(),
         "two queued plus one reserved fill all slots"
@@ -263,7 +263,7 @@ fn growing_capacity_wakes_multiple_parked_connects_after_queue_and_reservation_f
     // The raised capacity is now full: four queued endpoints plus the
     // delayed accept reservation. It frees a slot only when accept returns.
     let mut sixth = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, sixth.as_mut()).is_pending());
+    assert!(sim.settle(sixth.as_mut()).is_pending());
     let Poll::Ready(Ok((accepted_first, _))) = poll_once(accepting.as_mut()) else {
         panic!("reserved accept should return after delay");
     };
@@ -282,19 +282,19 @@ fn parked_connects_resume_fifo_and_cancelled_one_leaves_no_endpoint() {
     let first = drive(&mut sim, client.connect(SERVER)).expect("first connect");
     let mut second = pin!(client.connect(SERVER));
     let mut third = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, second.as_mut()).is_pending());
-    assert!(settle(&mut sim, third.as_mut()).is_pending());
+    assert!(sim.settle(second.as_mut()).is_pending());
+    assert!(sim.settle(third.as_mut()).is_pending());
 
     let (accepted_first, _) = drive(&mut sim, listener.accept()).expect("accept first");
     assert!(
-        settle(&mut sim, third.as_mut()).is_pending(),
+        sim.settle(third.as_mut()).is_pending(),
         "third remains behind second"
     );
-    let Poll::Ready(Ok(second)) = settle(&mut sim, second.as_mut()) else {
+    let Poll::Ready(Ok(second)) = sim.settle(second.as_mut()) else {
         panic!("oldest connect should resume first");
     };
     let (accepted_second, _) = drive(&mut sim, listener.accept()).expect("accept second");
-    let Poll::Ready(Ok(third)) = settle(&mut sim, third.as_mut()) else {
+    let Poll::Ready(Ok(third)) = sim.settle(third.as_mut()) else {
         panic!("third connect should resume next");
     };
     let (accepted_third, _) = drive(&mut sim, listener.accept()).expect("accept third");
@@ -312,12 +312,12 @@ fn parked_connects_resume_fifo_and_cancelled_one_leaves_no_endpoint() {
     let first = drive(&mut sim, client.connect(SERVER)).expect("fill backlog again");
     let mut cancelled = Box::pin(client.connect(SERVER));
     let mut survivor = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, cancelled.as_mut()).is_pending());
-    assert!(settle(&mut sim, survivor.as_mut()).is_pending());
+    assert!(sim.settle(cancelled.as_mut()).is_pending());
+    assert!(sim.settle(survivor.as_mut()).is_pending());
     drop(cancelled);
     let (accepted_first, _) =
         drive(&mut sim, listener.accept()).expect("accept after cancellation");
-    let Poll::Ready(Ok(survivor)) = settle(&mut sim, survivor.as_mut()) else {
+    let Poll::Ready(Ok(survivor)) = sim.settle(survivor.as_mut()) else {
         panic!("surviving connect should resume");
     };
     let (accepted_survivor, _) = drive(&mut sim, listener.accept()).expect("no ghost endpoint");
@@ -332,7 +332,7 @@ fn dropping_listener_fails_parked_connect_even_after_same_address_rebind() {
     let listener = drive(&mut sim, server.bind(SERVER)).expect("bind old listener");
     let first = drive(&mut sim, client.connect(SERVER)).expect("fill old backlog");
     let mut old_connect = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, old_connect.as_mut()).is_pending());
+    assert!(sim.settle(old_connect.as_mut()).is_pending());
     drop(listener);
     let replacement = drive(&mut sim, server.bind(SERVER)).expect("rebind address");
     assert!(matches!(
@@ -352,7 +352,7 @@ fn aborting_parked_unpublished_pair_fails_connect_instead_of_publishing_it() {
     let listener = drive(&mut sim, server.bind(SERVER)).expect("bind");
     let first = drive(&mut sim, client.connect(SERVER)).expect("fill backlog");
     let mut parked = Box::pin(client.connect(SERVER));
-    assert!(settle(&mut sim, parked.as_mut()).is_pending());
+    assert!(sim.settle(parked.as_mut()).is_pending());
     let wake_count = Arc::new(AtomicUsize::new(0));
     assert!(poll_with(parked.as_mut(), &counting_waker(&wake_count)).is_pending());
 
@@ -386,9 +386,9 @@ fn cancelled_accept_reservation_keeps_the_slot_occupied() {
     assert!(poll_once(accepting.as_mut()).is_pending());
     drop(accepting);
     let mut second = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, second.as_mut()).is_pending());
+    assert!(sim.settle(second.as_mut()).is_pending());
     let (accepted, _) = drive(&mut sim, listener.accept()).expect("returned reservation accepts");
-    let Poll::Ready(Ok(second)) = settle(&mut sim, second.as_mut()) else {
+    let Poll::Ready(Ok(second)) = sim.settle(second.as_mut()) else {
         panic!("second connect should resume after accept");
     };
     drop((first, accepted, second));
@@ -402,10 +402,10 @@ fn aborting_a_queued_endpoint_frees_its_slot_without_accept() {
     let listener = drive(&mut sim, server.bind(SERVER)).expect("bind");
     let first = drive(&mut sim, client.connect(SERVER)).expect("fill backlog");
     let mut second = pin!(client.connect(SERVER));
-    assert!(settle(&mut sim, second.as_mut()).is_pending());
+    assert!(sim.settle(second.as_mut()).is_pending());
 
     sim.close_connection_abort(first.connection_id());
-    let Poll::Ready(Ok(second)) = settle(&mut sim, second.as_mut()) else {
+    let Poll::Ready(Ok(second)) = sim.settle(second.as_mut()) else {
         panic!("reset queued endpoint must release slot");
     };
     let (accepted, _) = drive(&mut sim, listener.accept()).expect("accept surviving endpoint");

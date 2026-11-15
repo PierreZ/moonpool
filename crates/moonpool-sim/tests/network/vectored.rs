@@ -1,4 +1,3 @@
-use crate::async_drive::drive;
 use crate::runtime::local_runtime;
 use futures::io::{AsyncRead, AsyncWriteExt};
 use moonpool_sim::{NetworkConfiguration, NetworkProvider, SimWorld, TcpListenerTrait};
@@ -22,13 +21,13 @@ fn vectored_write_preserves_slice_boundaries_as_delivery_events() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "vectored-write-test";
 
-        let listener = drive(&mut sim, provider.bind(addr))
+        let listener = sim.drive(provider.bind(addr))
             .await
             .expect("bind should succeed");
-        let mut client = drive(&mut sim, provider.connect(addr))
+        let mut client = sim.drive(provider.connect(addr))
             .await
             .expect("connect should succeed");
-        let (mut server, _peer_addr) = drive(&mut sim, listener.accept())
+        let (mut server, _peer_addr) = sim.drive(listener.accept())
             .await
             .expect("accept should succeed");
 

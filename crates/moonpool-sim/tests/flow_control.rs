@@ -44,7 +44,7 @@ mod driver;
 #[path = "common/poll_io.rs"]
 mod poll_io;
 
-use driver::{MAX_DRIVER_STEPS, drive};
+use driver::drive;
 use poll_io::{poll_read_once, poll_write_once};
 
 fn client_ip() -> IpAddr {
@@ -400,7 +400,7 @@ fn the_outstanding_budget_stays_bounded_under_latency_and_a_cut() {
             sim.step();
         }
         steps += 1;
-        assert!(steps < MAX_DRIVER_STEPS, "the transfer stalled");
+        assert!(steps < SimWorld::MAX_SETTLE_STEPS, "the transfer stalled");
     }
     assert_eq!(received, payload, "the stream arrives intact and in order");
     assert_eq!(max_outstanding, WINDOW, "the writer ran up to the window");

@@ -233,7 +233,7 @@ Any `Err` from `inject()` other than `SimulationShutdown` fails the seed.
 
 ## Low-Level SimWorld
 
-For provider tests without the runner: `SimWorld::new_with_seed(seed)`, `new_with_network_config(cfg)`, `set_storage_config`, `set_process_storage_config(ip, cfg)`, `storage_provider(ip)`, `network_provider(ip)`, `time_provider()`, `step()`, `has_pending_events()`, `run_until_empty()`, `take_faults()`, `partition_pair(from, to, d)`, `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, EioTarget)`, `simulate_crash_for_process(ip, close_files)`, `set_fault_focus`, `publish_layout`. Drive futures with `moonpool_sim::executor::Executor::new(seed).block_on(..)` and step the world on `Pending` (the `drive` helper in the root `AGENTS.md`).
+For provider tests without the runner: `SimWorld::new_with_seed(seed)`, `new_with_network_config(cfg)`, `set_storage_config`, `set_process_storage_config(ip, cfg)`, `storage_provider(ip)`, `network_provider(ip)`, `time_provider()`, `step()`, `has_pending_events()`, `run_until_empty()`, `take_faults()`, `partition_pair(from, to, d)`, `corrupt_file(path, sectors)`, `fail_file_with_eio(path, sectors, EioTarget)`, `simulate_crash_for_process(ip, close_files)`, `set_fault_focus`, `publish_layout`. Drive a future with `sim.block_on(seed, future)`. It runs the future on a new executor and steps the world on `Pending`. Inside a `block_on` you already have, use `sim.drive(future).await`. `sim.settle(pinned)` polls without an executor.
 
 ## Staged Adoption
 

@@ -1,4 +1,3 @@
-use crate::async_drive::drive;
 use crate::runtime::local_runtime;
 use futures::io::AsyncWriteExt;
 use moonpool_sim::{
@@ -52,10 +51,10 @@ fn cancelled_accept_returns_its_fifo_reservation() {
         config.accept_latency = uniform(Duration::from_millis(9), Duration::from_millis(9));
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid IP"));
-        let listener = drive(&mut sim, provider.bind("cancel-accept"))
+        let listener = sim.drive(provider.bind("cancel-accept"))
             .await
             .expect("bind");
-        let _client = drive(&mut sim, provider.connect("cancel-accept"))
+        let _client = sim.drive(provider.connect("cancel-accept"))
             .await
             .expect("connect");
         let before_accept = sim.current_time();
@@ -67,7 +66,7 @@ fn cancelled_accept_returns_its_fifo_reservation() {
         }
 
         assert_eq!(sim.pending_event_count(), 0);
-        let (_server, _) = drive(&mut sim, listener.accept())
+        let (_server, _) = sim.drive(listener.accept())
             .await
             .expect("reservation returned to backlog");
         assert_eq!(sim.current_time(), before_accept + Duration::from_millis(9));
@@ -78,9 +77,9 @@ async fn simple_network_test<P>(sim: &mut SimWorld, provider: P, addr: &str) -> 
 where
     P: NetworkProvider + Clone,
 {
-    let listener = drive(sim, provider.bind(addr)).await?;
-    let _client = drive(sim, provider.connect(addr)).await?;
-    let (mut stream, _peer_addr) = drive(sim, listener.accept()).await?;
+    let listener = sim.drive(provider.bind(addr)).await?;
+    let _client = sim.drive(provider.connect(addr)).await?;
+    let (mut stream, _peer_addr) = sim.drive(listener.accept()).await?;
 
     // Write some data to exercise the write latency
     let test_data = b"test data for latency measurement";
@@ -306,11 +305,11 @@ fn test_client_initiated_connection_records_pair_latency() {
         let server_addr = "10.0.1.2:8080";
 
         let provider = sim.network_provider(client_ip);
-        let listener = drive(&mut sim, provider.bind(server_addr)).await.unwrap();
-        let _client = drive(&mut sim, provider.connect(server_addr))
+        let listener = sim.drive(provider.bind(server_addr)).await.unwrap();
+        let _client = sim.drive(provider.connect(server_addr))
             .await
             .unwrap();
-        let (_server, _peer_addr) = drive(&mut sim, listener.accept()).await.unwrap();
+        let (_server, _peer_addr) = sim.drive(listener.accept()).await.unwrap();
 
         sim.run_until_empty();
 
@@ -377,13 +376,13 @@ fn memoized_pair_latency(
         let server_addr = "10.0.1.2:8080";
 
         let provider = sim.network_provider(client_ip);
-        let listener = drive(&mut sim, provider.bind(server_addr))
+        let listener = sim.drive(provider.bind(server_addr))
             .await
             .expect("bind");
-        let _client = drive(&mut sim, provider.connect(server_addr))
+        let _client = sim.drive(provider.connect(server_addr))
             .await
             .expect("connect");
-        let (_server, _) = drive(&mut sim, listener.accept()).await.expect("accept");
+        let (_server, _) = sim.drive(listener.accept()).await.expect("accept");
 
         sim.run_until_empty();
         sim.pair_latency(client_ip, server_ip)

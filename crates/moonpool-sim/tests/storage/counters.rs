@@ -16,7 +16,6 @@ use futures::{io::AsyncWriteExt, task::noop_waker};
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider, SystemProvider};
 use moonpool_sim::{LatencyDistribution, SimSystemProvider, SimWorld, StorageConfiguration};
 
-const MAX_STEPS: usize = 10_000;
 
 fn ip(last_octet: u8) -> IpAddr {
     format!("10.0.1.{last_octet}")
@@ -46,19 +45,7 @@ fn ten_ms_disk() -> StorageConfiguration {
 }
 
 fn settle<F: Future>(sim: &mut SimWorld, future: F) -> Poll<F::Output> {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    for _ in 0..MAX_STEPS {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
-            return Poll::Ready(output);
-        }
-        if !sim.has_pending_events() {
-            return Poll::Pending;
-        }
-        sim.step();
-    }
-    panic!("simulation-backed future exceeded {MAX_STEPS} events")
+    sim.settle(pin!(future))
 }
 
 fn ready<T>(poll: Poll<T>, what: &str) -> T {

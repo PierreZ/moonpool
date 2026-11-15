@@ -209,35 +209,23 @@ are delayed too. Established stream I/O is buffer-driven and may complete on the
 current poll when data or capacity is already available.
 
 `SimulationBuilder::run()` drives the scheduler and executor for process and
-workload tests. Low-level provider tests must drive the future and `SimWorld`
-together on Moonpool's executor:
+workload tests. A low-level provider test drives its future and the `SimWorld`
+together with the methods in `crates/moonpool-sim/src/sim/drive.rs`. Do not
+write the poll-and-step loop again:
 
 ```rust
-async fn drive<F: Future>(sim: &mut SimWorld, future: F) -> F::Output {
-    futures::pin_mut!(future);
-    futures::future::poll_fn(|cx| match future.as_mut().poll(cx) {
-        Poll::Ready(output) => Poll::Ready(output),
-        Poll::Pending if sim.has_pending_events() => {
-            sim.step();
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        }
-        Poll::Pending => Poll::Pending,
-    })
-    .await
-}
-
-let mut executor = moonpool_sim::executor::Executor::new(seed);
-executor.block_on(async move {
-    let provider = sim.storage_provider(ip);
-    drive(&mut sim, async move {
-        let mut file = provider.open("test.txt", OpenOptions::create_write()).await?;
-        file.write_all(b"hello").await?;
-        file.sync_all().await
-    })
-    .await
+let provider = sim.storage_provider(ip);
+sim.block_on(seed, async move {
+    let file = provider.open("test.txt", OpenOptions::create_write()).await?;
+    file.write_at(0, b"hello").await?;
+    file.sync_all().await
 })?;
 ```
+
+- `sim.block_on(seed, future)` - run the future to completion on a new executor
+- `sim.drive(future).await` - the same loop, inside a `block_on` you already have
+- `sim.settle(pinned)` - poll without an executor; `Poll::Pending` means the
+  future is parked on an empty world
 
 **Key functions**:
 - `sim.step()` - Process one simulation event

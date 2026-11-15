@@ -26,6 +26,7 @@
 
 pub mod clock;
 pub mod cpu;
+mod drive;
 pub mod events;
 pub mod rng;
 pub mod sleep;

@@ -1576,24 +1576,6 @@ mod tests {
         (sim, crate::sim::rng_call_count())
     }
 
-    /// Drive `future` and the world together until it finishes.
-    async fn drive_storage<F: std::future::Future>(
-        sim: &mut crate::sim::SimWorld,
-        future: F,
-    ) -> F::Output {
-        futures::pin_mut!(future);
-        std::future::poll_fn(|context| match future.as_mut().poll(context) {
-            std::task::Poll::Ready(output) => std::task::Poll::Ready(output),
-            std::task::Poll::Pending if sim.has_pending_events() => {
-                sim.step();
-                context.waker().wake_by_ref();
-                std::task::Poll::Pending
-            }
-            std::task::Poll::Pending => std::task::Poll::Pending,
-        })
-        .await
-    }
-
     /// moonpool#292's acceptance: masking a storage family after Swarm and
     /// `BuggifyKnobs` sampling keeps it out of every seed — its
     /// probabilities are zero in the world, and a write load records none
@@ -1632,7 +1614,7 @@ mod tests {
             let provider = masked.storage_provider(std::net::IpAddr::from([10, 0, 1, 1]));
             let block = vec![0xA5u8; 4096];
             let written = crate::executor::Executor::new(seed).block_on(async {
-                drive_storage(&mut masked, async move {
+                masked.drive(async move {
                     let file = provider
                         .open("mask.dat", OpenOptions::create_write().read(true))
                         .await?;
