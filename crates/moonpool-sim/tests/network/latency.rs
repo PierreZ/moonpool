@@ -51,10 +51,12 @@ fn cancelled_accept_returns_its_fifo_reservation() {
         config.accept_latency = uniform(Duration::from_millis(9), Duration::from_millis(9));
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid IP"));
-        let listener = sim.drive(provider.bind("cancel-accept"))
+        let listener = sim
+            .drive(provider.bind("cancel-accept"))
             .await
             .expect("bind");
-        let _client = sim.drive(provider.connect("cancel-accept"))
+        let _client = sim
+            .drive(provider.connect("cancel-accept"))
             .await
             .expect("connect");
         let before_accept = sim.current_time();
@@ -66,7 +68,8 @@ fn cancelled_accept_returns_its_fifo_reservation() {
         }
 
         assert_eq!(sim.pending_event_count(), 0);
-        let (_server, _) = sim.drive(listener.accept())
+        let (_server, _) = sim
+            .drive(listener.accept())
             .await
             .expect("reservation returned to backlog");
         assert_eq!(sim.current_time(), before_accept + Duration::from_millis(9));
@@ -306,9 +309,7 @@ fn test_client_initiated_connection_records_pair_latency() {
 
         let provider = sim.network_provider(client_ip);
         let listener = sim.drive(provider.bind(server_addr)).await.unwrap();
-        let _client = sim.drive(provider.connect(server_addr))
-            .await
-            .unwrap();
+        let _client = sim.drive(provider.connect(server_addr)).await.unwrap();
         let (_server, _peer_addr) = sim.drive(listener.accept()).await.unwrap();
 
         sim.run_until_empty();
@@ -376,10 +377,9 @@ fn memoized_pair_latency(
         let server_addr = "10.0.1.2:8080";
 
         let provider = sim.network_provider(client_ip);
-        let listener = sim.drive(provider.bind(server_addr))
-            .await
-            .expect("bind");
-        let _client = sim.drive(provider.connect(server_addr))
+        let listener = sim.drive(provider.bind(server_addr)).await.expect("bind");
+        let _client = sim
+            .drive(provider.connect(server_addr))
             .await
             .expect("connect");
         let (_server, _) = sim.drive(listener.accept()).await.expect("accept");

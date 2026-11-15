@@ -72,11 +72,11 @@ tokio's macro verbatim in the lean production build. Same syntax, including
 
 ## Gotcha 1: the I/O traits move to `futures::io`
 
-This one surprises people. The tokio network and storage providers wrap
-`tokio::net::TcpStream` and `tokio::fs::File` in `tokio_util::compat::Compat`,
-which exposes the runtime-agnostic `futures::io::{AsyncRead, AsyncWrite,
-AsyncSeek}` traits instead of `tokio::io::*`. The socket is still a real socket.
-Only the extension trait you import changes.
+This one surprises people. The tokio network provider wraps
+`tokio::net::TcpStream` in `tokio_util::compat::Compat`, which exposes the
+runtime-agnostic `futures::io::{AsyncRead, AsyncWrite}` traits instead of
+`tokio::io::*`. The socket is still a real socket. Only the extension trait
+you import changes.
 
 ```rust
 // Before: tokio's extension traits.
@@ -90,7 +90,10 @@ let n = stream.read(&mut buf).await?;
 ```
 
 `write_all`, `read`, `read_exact` and `read_to_end` all exist on the futures
-traits. Seeking comes from `futures::io::AsyncSeekExt`. The tokio-only
+traits. A file is different: it has no stream traits at all. Call `read_at`
+and `write_at` with an offset, or wrap the file in `moonpool_core::FileCursor`
+for the same `write_all`, `read_exact`, `read_to_end` and `seek` names. The
+tokio-only
 `read_buf` and `AsyncBufRead` have no direct equivalent, so a read loop built
 on them needs a small restructure into plain `read` calls. For hyper, axum and
 tonic, `moonpool_hyper::HyperIo` does the adaptation

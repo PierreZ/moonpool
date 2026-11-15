@@ -5,7 +5,7 @@
 //! `total_latency = base_latency + 1/iops + size/bandwidth`
 
 use crate::{local_runtime, run_and_measure_time, step_until_done, test_ip};
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration};
 use std::time::Duration;
@@ -46,9 +46,11 @@ fn test_low_iops_increases_latency() {
         sim_high.set_storage_config(high_iops_config);
 
         let high_time = run_and_measure_time(sim_high, |provider| async move {
-            let mut file = provider
-                .open("iops_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("iops_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             // Many small writes
             for _ in 0..10 {
                 file.write_all(b"x").await?;
@@ -62,9 +64,11 @@ fn test_low_iops_increases_latency() {
         sim_low.set_storage_config(low_iops_config);
 
         let low_time = run_and_measure_time(sim_low, |provider| async move {
-            let mut file = provider
-                .open("iops_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("iops_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             // Same many small writes
             for _ in 0..10 {
                 file.write_all(b"x").await?;
@@ -124,9 +128,11 @@ fn test_low_bandwidth_increases_latency() {
 
         let data_clone = data.clone();
         let high_time = run_and_measure_time(sim_high, |provider| async move {
-            let mut file = provider
-                .open("bw_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("bw_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&data_clone).await?;
             Ok(())
         })
@@ -137,9 +143,11 @@ fn test_low_bandwidth_increases_latency() {
         sim_low.set_storage_config(low_bw_config);
 
         let low_time = run_and_measure_time(sim_low, |provider| async move {
-            let mut file = provider
-                .open("bw_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("bw_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&data).await?;
             Ok(())
         })
@@ -183,9 +191,11 @@ fn test_large_file_bandwidth_constraint() {
         let data = vec![0u8; 10 * 1024];
 
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("large.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("large.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&data).await?;
             Ok(())
         })
@@ -228,9 +238,11 @@ fn test_iops_and_bandwidth_combine() {
         let data = vec![0u8; 1024];
 
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("combined.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("combined.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&data).await?;
             Ok(())
         })
@@ -267,9 +279,11 @@ fn test_read_bandwidth_constraint() {
         // First create the file
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("read_bw.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("read_bw.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&vec![b'x'; 5 * 1024]).await?; // 5KB
             file.sync_all().await?;
             Ok::<_, std::io::Error>(())
@@ -283,9 +297,11 @@ fn test_read_bandwidth_constraint() {
         // Now read 5KB - should take ~100ms at 50KB/s
         let provider2 = sim.storage_provider(test_ip());
         let handle2 = tokio::spawn(async move {
-            let mut file = provider2
-                .open("read_bw.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider2
+                    .open("read_bw.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok::<_, std::io::Error>(buf.len())
@@ -330,9 +346,11 @@ fn test_sequential_small_ops_iops_limited() {
 
         // 5 write operations
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("seq_ops.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("seq_ops.txt", OpenOptions::create_write())
+                    .await?,
+            );
             for i in 0..5 {
                 file.write_all(&[i]).await?;
             }
@@ -361,9 +379,11 @@ fn test_fast_local_minimal_overhead() {
         let data = vec![0u8; 100 * 1024]; // 100KB
 
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("fast.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("fast.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&data).await?;
             file.sync_all().await?;
             Ok(())
@@ -409,9 +429,11 @@ fn test_hdd_vs_ssd_performance() {
         sim_hdd.set_storage_config(hdd_config);
 
         let hdd_time = run_and_measure_time(sim_hdd, |provider| async move {
-            let mut file = provider
-                .open("random.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("random.txt", OpenOptions::create_write())
+                    .await?,
+            );
             for i in 0..10u8 {
                 file.write_all(&[i]).await?;
             }
@@ -424,9 +446,11 @@ fn test_hdd_vs_ssd_performance() {
         sim_ssd.set_storage_config(ssd_config);
 
         let ssd_time = run_and_measure_time(sim_ssd, |provider| async move {
-            let mut file = provider
-                .open("random.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("random.txt", OpenOptions::create_write())
+                    .await?,
+            );
             for i in 0..10u8 {
                 file.write_all(&[i]).await?;
             }

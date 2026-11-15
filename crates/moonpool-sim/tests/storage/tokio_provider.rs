@@ -5,7 +5,7 @@
 //! for `TokioNetworkProvider`.
 
 use crate::local_runtime;
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider, TokioStorageProvider};
 use std::io::SeekFrom;
 use tempfile::TempDir;
@@ -20,10 +20,12 @@ fn test_tokio_provider_basic_write_read() {
         let provider = TokioStorageProvider::new();
 
         // Create and write
-        let mut file = provider
-            .open(file_path_str, OpenOptions::create_write())
-            .await
-            .expect("Failed to create file");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::create_write())
+                .await
+                .expect("Failed to create file"),
+        );
 
         let data = b"Hello, TokioStorageProvider!";
         file.write_all(data).await.expect("Failed to write");
@@ -31,10 +33,12 @@ fn test_tokio_provider_basic_write_read() {
         drop(file);
 
         // Read back
-        let mut file = provider
-            .open(file_path_str, OpenOptions::read_only())
-            .await
-            .expect("Failed to open for read");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::read_only())
+                .await
+                .expect("Failed to open for read"),
+        );
 
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.expect("Failed to read");
@@ -114,10 +118,12 @@ fn test_tokio_provider_rename() {
         let provider = TokioStorageProvider::new();
 
         // Create file with data
-        let mut file = provider
-            .open(old_path_str, OpenOptions::create_write())
-            .await
-            .expect("Failed to create file");
+        let mut file = FileCursor::new(
+            provider
+                .open(old_path_str, OpenOptions::create_write())
+                .await
+                .expect("Failed to create file"),
+        );
         file.write_all(b"rename test data")
             .await
             .expect("Failed to write");
@@ -140,10 +146,12 @@ fn test_tokio_provider_rename() {
         );
 
         // Verify data is preserved
-        let mut file = provider
-            .open(new_path_str, OpenOptions::read_only())
-            .await
-            .expect("Failed to open renamed file");
+        let mut file = FileCursor::new(
+            provider
+                .open(new_path_str, OpenOptions::read_only())
+                .await
+                .expect("Failed to open renamed file"),
+        );
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.expect("Failed to read");
         assert_eq!(&buf, b"rename test data");
@@ -160,20 +168,24 @@ fn test_tokio_provider_seek_operations() {
         let provider = TokioStorageProvider::new();
 
         // Create file with known content
-        let mut file = provider
-            .open(file_path_str, OpenOptions::create_write())
-            .await
-            .expect("Failed to create file");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::create_write())
+                .await
+                .expect("Failed to create file"),
+        );
         file.write_all(b"0123456789")
             .await
             .expect("Failed to write");
         drop(file);
 
         // Open for reading and test seeks
-        let mut file = provider
-            .open(file_path_str, OpenOptions::read_only())
-            .await
-            .expect("Failed to open for read");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::read_only())
+                .await
+                .expect("Failed to open for read"),
+        );
 
         // SeekFrom::Start
         let pos = file.seek(SeekFrom::Start(5)).await.expect("seek failed");
@@ -206,10 +218,12 @@ fn test_tokio_provider_set_len_truncate() {
         let provider = TokioStorageProvider::new();
 
         // Create file with content
-        let mut file = provider
-            .open(file_path_str, OpenOptions::create_write())
-            .await
-            .expect("Failed to create file");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::create_write())
+                .await
+                .expect("Failed to create file"),
+        );
         file.write_all(b"0123456789")
             .await
             .expect("Failed to write");
@@ -226,10 +240,12 @@ fn test_tokio_provider_set_len_truncate() {
         drop(file);
 
         // Verify content is truncated
-        let mut file = provider
-            .open(file_path_str, OpenOptions::read_only())
-            .await
-            .expect("Failed to open");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::read_only())
+                .await
+                .expect("Failed to open"),
+        );
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.expect("read failed");
         assert_eq!(&buf, b"01234");
@@ -246,10 +262,12 @@ fn test_tokio_provider_set_len_extend() {
         let provider = TokioStorageProvider::new();
 
         // Create file with content
-        let mut file = provider
-            .open(file_path_str, OpenOptions::create_write())
-            .await
-            .expect("Failed to create file");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::create_write())
+                .await
+                .expect("Failed to create file"),
+        );
         file.write_all(b"hello").await.expect("Failed to write");
         file.sync_all().await.expect("Failed to sync");
 
@@ -260,10 +278,12 @@ fn test_tokio_provider_set_len_extend() {
         drop(file);
 
         // Verify extended content (should have zeros in extended region)
-        let mut file = provider
-            .open(file_path_str, OpenOptions::read_only())
-            .await
-            .expect("Failed to open");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::read_only())
+                .await
+                .expect("Failed to open"),
+        );
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.expect("read failed");
         assert_eq!(buf.len(), 10);
@@ -282,10 +302,12 @@ fn test_tokio_provider_sync_data() {
 
         let provider = TokioStorageProvider::new();
 
-        let mut file = provider
-            .open(file_path_str, OpenOptions::create_write())
-            .await
-            .expect("Failed to create file");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::create_write())
+                .await
+                .expect("Failed to create file"),
+        );
         file.write_all(b"sync data test")
             .await
             .expect("Failed to write");
@@ -295,10 +317,12 @@ fn test_tokio_provider_sync_data() {
         drop(file);
 
         // Verify data is persisted
-        let mut file = provider
-            .open(file_path_str, OpenOptions::read_only())
-            .await
-            .expect("Failed to open");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::read_only())
+                .await
+                .expect("Failed to open"),
+        );
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.expect("read failed");
         assert_eq!(&buf, b"sync data test");
@@ -359,18 +383,22 @@ fn test_tokio_provider_clone() {
         let cloned_provider = provider.clone();
 
         // Create with original provider
-        let mut file = provider
-            .open(file_path_str, OpenOptions::create_write())
-            .await
-            .expect("Failed to create file");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::create_write())
+                .await
+                .expect("Failed to create file"),
+        );
         file.write_all(b"original").await.expect("Failed to write");
         drop(file);
 
         // Read with cloned provider
-        let mut file = cloned_provider
-            .open(file_path_str, OpenOptions::read_only())
-            .await
-            .expect("Failed to open with cloned provider");
+        let mut file = FileCursor::new(
+            cloned_provider
+                .open(file_path_str, OpenOptions::read_only())
+                .await
+                .expect("Failed to open with cloned provider"),
+        );
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).await.expect("read failed");
         assert_eq!(&buf, b"original");
@@ -404,13 +432,13 @@ async fn write_and_read_generic<P: StorageProvider>(
     data: &[u8],
 ) -> std::io::Result<Vec<u8>> {
     // Write
-    let mut file = provider.open(path, OpenOptions::create_write()).await?;
+    let mut file = FileCursor::new(provider.open(path, OpenOptions::create_write()).await?);
     file.write_all(data).await?;
     file.sync_all().await?;
     drop(file);
 
     // Read
-    let mut file = provider.open(path, OpenOptions::read_only()).await?;
+    let mut file = FileCursor::new(provider.open(path, OpenOptions::read_only()).await?);
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).await?;
     Ok(buf)
@@ -434,8 +462,8 @@ fn test_tokio_provider_generic_trait_usage() {
     });
 }
 
-/// The production provider's positioned I/O: real `pread`/`pwrite`, sharing
-/// the file with the stream API and leaving its cursor alone.
+/// The production provider's positioned I/O: real `pread`/`pwrite`, which
+/// leave a `FileCursor` over the file alone.
 #[test]
 fn test_tokio_provider_positioned_io() {
     local_runtime().block_on(async move {
@@ -444,10 +472,12 @@ fn test_tokio_provider_positioned_io() {
         let file_path_str = file_path.to_str().expect("temp path is valid UTF-8");
 
         let provider = TokioStorageProvider::new();
-        let mut file = provider
-            .open(file_path_str, OpenOptions::create_write().read(true))
-            .await
-            .expect("open failed");
+        let mut file = FileCursor::new(
+            provider
+                .open(file_path_str, OpenOptions::create_write().read(true))
+                .await
+                .expect("open failed"),
+        );
 
         file.write_all(b"0123456789").await.expect("write failed");
         let cursor = file.seek(SeekFrom::Start(4)).await.expect("seek failed");
@@ -466,7 +496,7 @@ fn test_tokio_provider_positioned_io() {
         assert_eq!(
             file.seek(SeekFrom::Current(0)).await.expect("seek failed"),
             4,
-            "positioned I/O moved the stream cursor"
+            "positioned I/O moved the cursor"
         );
 
         // Reading past the end is EOF, not an error.

@@ -203,13 +203,7 @@ impl StorageEngine {
             .ok_or(StorageError::InvalidFileHandle {
                 handle_id: pending.handle_id,
             })?;
-        // Append mode is the stream cursor's business: a positioned write was
-        // already told exactly where it goes.
-        let offset = if pending.append {
-            file_size
-        } else {
-            pending.offset
-        };
+        let offset = pending.offset;
         // A full disk refuses growth before the disk has any other say, so a
         // disk with room draws exactly what it drew before (see
         // `storage::capacity`).
@@ -276,12 +270,7 @@ impl StorageEngine {
             });
         }
         let len = data.len();
-        if !pending.positioned
-            && let Some(handle) = self.state.handles.get_mut(&pending.handle_id)
-        {
-            handle.position = offset + len as u64;
-        }
-        Ok(StorageCompletion::Write { offset, len })
+        Ok(StorageCompletion::Write { len })
     }
 
     /// Decide what the disk does with one write: refuse it, swallow it, or

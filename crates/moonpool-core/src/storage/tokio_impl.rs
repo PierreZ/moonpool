@@ -1,19 +1,13 @@
 //! Production [`StorageProvider`] / [`StorageFile`] over the real filesystem.
 
-use std::io::{self, SeekFrom};
-use std::pin::Pin;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::task::{Context, Poll, ready};
 
-use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use tracing::instrument;
 
-use super::native::{self, NativeFs, OpenedFile};
-use super::{
-    AlignedBuf, IoConstraints, OpenOptions, StorageFile, StorageProvider, stream_io_unsupported,
-};
+use super::native::{self, NativeFs};
+use super::{AlignedBuf, IoConstraints, OpenOptions, StorageFile, StorageProvider};
 
 /// Real Tokio storage implementation.
 #[derive(Debug, Clone, Default)]
@@ -33,14 +27,11 @@ impl StorageProvider for TokioStorageProvider {
     #[instrument(skip(self))]
     async fn open(&self, path: &str, options: OpenOptions) -> io::Result<Self::File> {
         let opened = native::open_file(&TokioFs, path, &options).await?;
-        let positioned = positioned_descriptor(&opened, path, &options).await?;
         Ok(TokioStorageFile {
-            inner: opened.file.compat(),
-            positioned: Arc::new(positioned),
+            file: Arc::new(opened.file.into_std().await),
             constraints: opened.constraints,
             direct: opened.direct,
             dsync_refused: Arc::new(AtomicBool::new(false)),
-            in_flight: None,
         })
     }
 
@@ -149,8 +140,7 @@ fn open_options(options: &OpenOptions, direct: bool) -> tokio::fs::OpenOptions {
         .write(options.is_write())
         .create(options.is_create())
         .create_new(options.is_create_new())
-        .truncate(options.is_truncate())
-        .append(options.is_append());
+        .truncate(options.is_truncate());
     #[cfg(target_os = "linux")]
     if direct {
         builder.custom_flags(libc::O_DIRECT);
@@ -160,75 +150,13 @@ fn open_options(options: &OpenOptions, direct: bool) -> tokio::fs::OpenOptions {
     builder
 }
 
-/// The descriptor positioned I/O runs on.
+/// One open file of [`TokioStorageProvider`].
 ///
-/// `read_at`/`write_at` must not disturb the stream cursor, and the OS
-/// positioned calls need a blocking `std::fs::File`, so they get a descriptor
-/// of their own.
-///
-/// # Why an append file cannot simply clone
-///
-/// `try_clone` is `dup`, which shares the *open file description* and
-/// therefore its status flags — `O_APPEND` among them. On Linux a `pwrite` to
-/// an `O_APPEND` descriptor ignores the supplied offset and appends, so a
-/// cloned descriptor would make `write_at` do the one thing its contract says
-/// it never does. Clearing the flag is not an option either: `F_SETFL` acts on
-/// the shared description, so it would disable append for the stream writes
-/// that asked for it.
-///
-/// An append file therefore gets a genuinely separate open, without
-/// `O_APPEND`, of unambiguously the same file (see [`native::reopen_same_file`]).
-/// Without append the clone carries identical flags and is exactly
-/// equivalent, so it is kept — one fewer open, and no dependency on the
-/// descriptor path.
-async fn positioned_descriptor(
-    opened: &OpenedFile<tokio::fs::File>,
-    path: &str,
-    options: &OpenOptions,
-) -> io::Result<std::fs::File> {
-    if !options.is_append() {
-        return Ok(opened.file.try_clone().await?.into_std().await);
-    }
-    // Append implies write access; the read side is carried over as asked for,
-    // so a file opened without read still refuses `read_at`.
-    let positioned = OpenOptions::new().read(options.is_read()).write(true);
-    let reopened =
-        native::reopen_same_file(&TokioFs, &opened.file, path, &positioned, opened.direct).await?;
-    Ok(reopened.into_std().await)
-}
-
-/// Wrapper for Tokio File to implement our trait.
-///
-/// Holds the underlying `tokio::fs::File` inside `tokio_util::compat::Compat`
-/// so the `futures::io` trait impls come through automatically. The four custom
-/// methods on [`StorageFile`] reach the inner [`tokio::fs::File`] via
-/// [`Compat::get_ref`] / [`Compat::get_mut`] to call tokio-specific APIs
-/// (`sync_all`, `sync_data`, `metadata`, `set_len`) that `Compat` itself
-/// does not expose.
-///
-/// # A stream write returns when the OS write is done
-///
-/// `tokio::fs::File` accepts a write into its own buffer and returns before
-/// the OS write on the blocking pool is done. `size` and the positioned
-/// methods do not wait for that write, so they could see the file without
-/// it. This breaks "one file state" (see the [module docs](super)), which
-/// the simulation keeps. Thus `poll_write` gives the bytes to Tokio, then
-/// waits for the OS write (a flush of the inner file) before it returns the
-/// count. An error of the OS write goes to that write call.
-///
-/// A write future dropped while its OS write runs leaves the write in
-/// flight. The write still lands, as a dropped write does on the other
-/// backends. The next stream call finishes it first. A `poll_write` whose
-/// buffer starts with the bytes in flight is the same call, polled again,
-/// and gets their count. A `poll_write` of other bytes is a new call: it
-/// writes its own bytes, and it does not get the count of the old write.
+/// Every transfer is positioned and runs on the blocking pool against the
+/// descriptor. No transfer uses the descriptor's cursor.
 #[derive(Debug)]
 pub struct TokioStorageFile {
-    inner: Compat<tokio::fs::File>,
-    /// Duplicated descriptor for positioned I/O. It shares the open file
-    /// description (and therefore the file's contents and open flags) with
-    /// `inner`, but positioned calls use neither descriptor's cursor.
-    positioned: Arc<std::fs::File>,
+    file: Arc<std::fs::File>,
     constraints: IoConstraints,
     direct: bool,
     /// Set once the filesystem of this file refused a durable write with
@@ -236,9 +164,6 @@ pub struct TokioStorageFile {
     /// write and a sync. Other files keep their own flag, because they can
     /// be on another filesystem.
     dsync_refused: Arc<AtomicBool>,
-    /// The bytes of the stream write that Tokio accepted and whose OS write
-    /// is not yet known to be done.
-    in_flight: Option<Vec<u8>>,
 }
 
 /// One positioned read against the OS.
@@ -441,7 +366,7 @@ impl TokioStorageFile {
             return Ok((0, buf));
         }
         self.constraints.check(offset, buf.as_slice())?;
-        let file = Arc::clone(&self.positioned);
+        let file = Arc::clone(&self.file);
         run_blocking(move || {
             let mut buf = buf;
             let read = read_at_blocking(&file, offset, buf.as_mut_slice())?;
@@ -462,7 +387,7 @@ impl TokioStorageFile {
             return Ok((0, buf));
         }
         self.constraints.check(offset, buf.as_slice())?;
-        let file = Arc::clone(&self.positioned);
+        let file = Arc::clone(&self.file);
         let dsync_refused = Arc::clone(&self.dsync_refused);
         run_blocking(move || {
             let written = match kind {
@@ -493,11 +418,13 @@ impl TokioStorageFile {
 
 impl StorageFile for TokioStorageFile {
     async fn sync_all(&self) -> io::Result<()> {
-        self.inner.get_ref().sync_all().await
+        let file = Arc::clone(&self.file);
+        run_blocking(move || file.sync_all()).await
     }
 
     async fn sync_data(&self) -> io::Result<()> {
-        self.inner.get_ref().sync_data().await
+        let file = Arc::clone(&self.file);
+        run_blocking(move || file.sync_data()).await
     }
 
     fn constraints(&self) -> IoConstraints {
@@ -552,16 +479,17 @@ impl StorageFile for TokioStorageFile {
     }
 
     async fn size(&self) -> io::Result<u64> {
-        let metadata = self.inner.get_ref().metadata().await?;
-        Ok(metadata.len())
+        let file = Arc::clone(&self.file);
+        run_blocking(move || Ok(file.metadata()?.len())).await
     }
 
     async fn set_len(&self, size: u64) -> io::Result<()> {
-        self.inner.get_ref().set_len(size).await
+        let file = Arc::clone(&self.file);
+        run_blocking(move || file.set_len(size)).await
     }
 
     async fn allocate(&self, len: u64) -> io::Result<()> {
-        let file = Arc::clone(&self.positioned);
+        let file = Arc::clone(&self.file);
         run_blocking(move || allocate_blocking(&file, len)).await
     }
 
@@ -569,91 +497,8 @@ impl StorageFile for TokioStorageFile {
         if self.direct {
             return Ok(());
         }
-        let file = Arc::clone(&self.positioned);
+        let file = Arc::clone(&self.file);
         run_blocking(move || native::drop_cache(&*file)).await
-    }
-}
-
-impl TokioStorageFile {
-    /// Wait for the OS write of the stream write in flight, if any. The
-    /// error of that write is returned: its bytes did not land.
-    fn poll_in_flight(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if self.in_flight.is_none() {
-            return Poll::Ready(Ok(()));
-        }
-        let result = ready!(Pin::new(&mut self.inner).poll_flush(cx));
-        self.in_flight = None;
-        Poll::Ready(result)
-    }
-}
-
-impl AsyncRead for TokioStorageFile {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        // Refused here rather than left to the kernel's EINVAL, so the
-        // contract is the same one the simulation enforces.
-        if !this.constraints.is_unconstrained() {
-            return Poll::Ready(Err(stream_io_unsupported()));
-        }
-        ready!(this.poll_in_flight(cx))?;
-        Pin::new(&mut this.inner).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for TokioStorageFile {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        if !this.constraints.is_unconstrained() {
-            return Poll::Ready(Err(stream_io_unsupported()));
-        }
-        if let Some(bytes) = &this.in_flight {
-            // The same call, polled again: its bytes are already accepted.
-            let resumes = !bytes.is_empty() && buf.starts_with(bytes);
-            let accepted = bytes.len();
-            ready!(this.poll_in_flight(cx))?;
-            if resumes {
-                return Poll::Ready(Ok(accepted));
-            }
-        }
-        if buf.is_empty() {
-            return Poll::Ready(Ok(0));
-        }
-        let accepted = ready!(Pin::new(&mut this.inner).poll_write(cx, buf))?;
-        this.in_flight = Some(buf[..accepted].to_vec());
-        ready!(this.poll_in_flight(cx))?;
-        Poll::Ready(Ok(accepted))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        ready!(this.poll_in_flight(cx))?;
-        Pin::new(&mut this.inner).poll_flush(cx)
-    }
-
-    fn poll_close(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        ready!(this.poll_in_flight(cx))?;
-        Pin::new(&mut this.inner).poll_close(cx)
-    }
-}
-
-impl AsyncSeek for TokioStorageFile {
-    fn poll_seek(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        pos: SeekFrom,
-    ) -> Poll<io::Result<u64>> {
-        let this = self.get_mut();
-        ready!(this.poll_in_flight(cx))?;
-        Pin::new(&mut this.inner).poll_seek(cx, pos)
     }
 }
 

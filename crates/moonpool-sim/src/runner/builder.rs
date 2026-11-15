@@ -1614,21 +1614,22 @@ mod tests {
             let provider = masked.storage_provider(std::net::IpAddr::from([10, 0, 1, 1]));
             let block = vec![0xA5u8; 4096];
             let written = crate::executor::Executor::new(seed).block_on(async {
-                masked.drive(async move {
-                    let file = provider
-                        .open("mask.dat", OpenOptions::create_write().read(true))
-                        .await?;
-                    let mut written = 0;
-                    for at in 0..400u64 {
-                        // A fault is an outcome here, not a failure.
-                        written += usize::from(file.write_at(at * 4096, &block).await.is_ok());
-                        if at % 8 == 7 {
-                            let _ = file.sync_data().await;
+                masked
+                    .drive(async move {
+                        let file = provider
+                            .open("mask.dat", OpenOptions::create_write().read(true))
+                            .await?;
+                        let mut written = 0;
+                        for at in 0..400u64 {
+                            // A fault is an outcome here, not a failure.
+                            written += usize::from(file.write_at(at * 4096, &block).await.is_ok());
+                            if at % 8 == 7 {
+                                let _ = file.sync_data().await;
+                            }
                         }
-                    }
-                    Ok::<_, std::io::Error>(written)
-                })
-                .await
+                        Ok::<_, std::io::Error>(written)
+                    })
+                    .await
             });
             writes += written.expect("open the file");
             let records = masked.take_storage_fault_records();

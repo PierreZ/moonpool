@@ -5,7 +5,7 @@
 //! `FoundationDB`'s crash consistency testing.
 
 use crate::{fast_sim, local_runtime, step_until_done, test_ip};
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 
@@ -19,9 +19,11 @@ fn test_write_sync_crash_recovery() {
         // Write and sync data
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("synced_recovery.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("synced_recovery.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(data).await?;
             file.sync_all().await?;
             drop(file);
@@ -37,9 +39,11 @@ fn test_write_sync_crash_recovery() {
         // Recover and verify data is intact
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("synced_recovery.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("synced_recovery.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok::<_, std::io::Error>(buf)
@@ -67,9 +71,11 @@ fn test_write_nosync_crash_recovery() {
         // Write WITHOUT sync
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("unsynced_recovery.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("unsynced_recovery.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(original_data).await?;
             // NO sync_all() here!
             drop(file);
@@ -88,9 +94,11 @@ fn test_write_nosync_crash_recovery() {
             if !provider.exists("unsynced_recovery.txt").await? {
                 return Ok::<_, std::io::Error>(None);
             }
-            let mut file = provider
-                .open("unsynced_recovery.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("unsynced_recovery.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok(Some(buf))
@@ -119,9 +127,11 @@ fn test_partial_sync_crash_recovery() {
         // Write two pieces of data, only sync the first
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("partial_sync.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("partial_sync.txt", OpenOptions::create_write())
+                    .await?,
+            );
 
             // First write - synced
             file.write_all(b"SYNCED_DATA|").await?;
@@ -144,9 +154,11 @@ fn test_partial_sync_crash_recovery() {
         // Recover
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("partial_sync.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("partial_sync.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok::<_, std::io::Error>(buf)
@@ -176,9 +188,11 @@ fn test_append_multiple_syncs_crash_recovery() {
         // Append and sync multiple times
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("append.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("append.txt", OpenOptions::create_write())
+                    .await?,
+            );
 
             for i in 1..=5 {
                 file.write_all(format!("Entry {i}\n").as_bytes()).await?;
@@ -198,9 +212,11 @@ fn test_append_multiple_syncs_crash_recovery() {
         // Recover
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("append.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("append.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok::<_, std::io::Error>(buf)
@@ -232,9 +248,11 @@ fn test_overwrite_crash_recovery() {
         // Create file with initial synced content
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("overwrite.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("overwrite.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"ORIGINAL_CONTENT").await?;
             file.sync_all().await?;
             drop(file);
@@ -247,12 +265,14 @@ fn test_overwrite_crash_recovery() {
         // Overwrite without sync
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open(
-                    "overwrite.txt",
-                    OpenOptions::new().write(true).truncate(true),
-                )
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open(
+                        "overwrite.txt",
+                        OpenOptions::new().write(true).truncate(true),
+                    )
+                    .await?,
+            );
             file.write_all(b"NEW_CONTENT").await?;
             // NO sync!
             drop(file);
@@ -268,9 +288,11 @@ fn test_overwrite_crash_recovery() {
         // Recover - should see some content
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("overwrite.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("overwrite.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok::<_, std::io::Error>(buf)
@@ -296,9 +318,11 @@ fn test_rename_crash_recovery() {
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
             // Write to temp
-            let mut file = provider
-                .open("data.tmp", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("data.tmp", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"Important data").await?;
             file.sync_all().await?;
             drop(file);
@@ -344,9 +368,11 @@ fn test_delete_crash_recovery() {
         // Create and sync file
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("to_delete.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("to_delete.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"delete me").await?;
             file.sync_all().await?;
             drop(file);
@@ -384,25 +410,31 @@ fn test_multiple_files_crash_recovery() {
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
             // File 1 - fully synced
-            let mut file = provider
-                .open("file1.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("file1.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"File 1 content").await?;
             file.sync_all().await?;
             drop(file);
 
             // File 2 - fully synced
-            let mut file = provider
-                .open("file2.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("file2.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"File 2 content").await?;
             file.sync_all().await?;
             drop(file);
 
             // File 3 - NOT synced
-            let mut file = provider
-                .open("file3.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("file3.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"File 3 content").await?;
             // NO sync!
             drop(file);
@@ -447,17 +479,21 @@ fn test_seek_overwrite_crash_recovery() {
         // Create file with known content
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("seek_test.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("seek_test.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"AAAAAAAAAA").await?; // 10 A's
             file.sync_all().await?;
             drop(file);
 
             // Reopen, seek, overwrite middle
-            let mut file = provider
-                .open("seek_test.txt", OpenOptions::new().read(true).write(true))
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("seek_test.txt", OpenOptions::new().read(true).write(true))
+                    .await?,
+            );
             file.seek(std::io::SeekFrom::Start(4)).await?;
             file.write_all(b"BB").await?;
             file.sync_all().await?; // Sync this change
@@ -475,9 +511,11 @@ fn test_seek_overwrite_crash_recovery() {
         // Verify the change persisted
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("seek_test.txt", OpenOptions::read_only())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("seek_test.txt", OpenOptions::read_only())
+                    .await?,
+            );
             let mut buf = Vec::new();
             file.read_to_end(&mut buf).await?;
             Ok::<_, std::io::Error>(buf)
@@ -549,9 +587,11 @@ fn test_truncate_crash_recovery() {
         // Create large file
         let provider = sim.storage_provider(test_ip());
         let handle = tokio::spawn(async move {
-            let mut file = provider
-                .open("truncate.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("truncate.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&vec![b'x'; 1000]).await?;
             file.sync_all().await?;
 

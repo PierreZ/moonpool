@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use futures::{io::AsyncWriteExt, task::noop_waker};
+use futures::task::noop_waker;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{Event, SimWorld, StorageConfiguration, storage::SimStorageFile};
 
@@ -233,10 +233,10 @@ fn a_wipe_before_a_dropped_write_lands_fails_it() {
 }
 
 #[test]
-fn closing_a_handle_lets_its_in_flight_stream_write_land() {
+fn closing_a_handle_lets_its_in_flight_write_land() {
     let mut sim = world(5, 0.0);
-    let mut file = open(&mut sim, "stream.bin", OpenOptions::create_write());
-    start_and_drop(file.write(NEW));
+    let file = open(&mut sim, "stream.bin", OpenOptions::create_write());
+    start_and_drop(file.write_at(0, NEW));
     drop(file);
     assert!(
         sim.has_pending_events(),

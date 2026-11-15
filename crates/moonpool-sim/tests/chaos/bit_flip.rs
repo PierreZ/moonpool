@@ -27,9 +27,7 @@ fn test_bit_flip_disabled_with_zero_probability() {
         // Send multiple messages
         let addr = "test-server";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Send data multiple times
@@ -66,9 +64,7 @@ fn test_bit_flip_injection_with_high_probability() {
 
         let addr = "chaos-server";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut _server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Send many small messages to increase chance of corruption
@@ -106,9 +102,7 @@ fn test_bit_flip_cooldown() {
 
         let addr = "cooldown-server";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut _server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // First message might trigger bit flip
@@ -140,9 +134,7 @@ fn test_peer_checksum_error_recovery() {
 
         let addr = "recovery-server";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut _server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Send messages - some may be corrupted, but peer should not crash

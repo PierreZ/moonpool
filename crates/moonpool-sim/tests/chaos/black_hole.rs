@@ -91,9 +91,7 @@ fn a_black_holed_recv_side_swallows_the_peers_sends() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-recv";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // "recv" on the client is "send" on the server endpoint.
@@ -123,9 +121,7 @@ fn an_abort_still_crosses_a_black_hole() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-abort";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         sim.black_hole_connection(client.connection_id(), true, true);
@@ -156,9 +152,7 @@ fn the_coin_black_holes_a_connection_and_records_it_once() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-coin";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // The operation that draws the fault proceeds normally.
@@ -192,9 +186,7 @@ fn the_family_off_holes_nothing() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "hole-off";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         for i in 0..50_u8 {

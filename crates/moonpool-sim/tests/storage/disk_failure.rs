@@ -9,18 +9,10 @@
 //! at most one disk fails at a time, and a crash or wipe of the owning process
 //! replaces it.
 
-use std::{
-    future::Future,
-    net::IpAddr,
-    pin::pin,
-    task::Poll,
-};
+use std::{future::Future, net::IpAddr, pin::pin, task::Poll};
 
-use futures::io::AsyncWriteExt;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimFaultEvent, SimWorld, StorageConfiguration, rng_call_count};
-
-/// How many events a driven future may consume before it is declared stuck.
 
 fn ip(last_octet: u8) -> IpAddr {
     format!("10.0.1.{last_octet}")
@@ -73,7 +65,7 @@ fn write_and_sync(
     file: &mut moonpool_sim::storage::SimStorageFile,
 ) -> Poll<()> {
     settle(sim, async {
-        file.write_all(b"payload").await.expect("write");
+        file.write_at(0, b"payload").await.expect("write");
         file.sync_all().await.expect("sync");
     })
 }
@@ -82,11 +74,11 @@ fn write_and_sync(
 fn a_failed_disk_parks_every_later_operation() {
     let mut sim = SimWorld::new_with_seed(20_260_904);
     sim.set_storage_config(failing_disk());
-    let mut file = open(&mut sim, ip(1), "hung.bin");
+    let file = open(&mut sim, ip(1), "hung.bin");
 
     // The first I/O draws the coin, fails the disk, and is itself parked.
     assert!(
-        settle(&mut sim, file.write_all(b"never")).is_pending(),
+        settle(&mut sim, file.write_at(0, b"never")).is_pending(),
         "the write that failed the disk must never complete"
     );
     assert!(sim.is_disk_failed(ip(1)));
@@ -119,10 +111,10 @@ fn a_failed_disk_parks_every_later_operation() {
 fn the_coin_fails_one_disk_at_a_time() {
     let mut sim = SimWorld::new_with_seed(20_260_904);
     sim.set_storage_config(failing_disk());
-    let mut first = open(&mut sim, ip(1), "first.bin");
+    let first = open(&mut sim, ip(1), "first.bin");
     let mut second = open(&mut sim, ip(2), "second.bin");
 
-    assert!(settle(&mut sim, first.write_all(b"never")).is_pending());
+    assert!(settle(&mut sim, first.write_at(0, b"never")).is_pending());
     assert!(sim.is_disk_failed(ip(1)));
 
     // Disk 2 would fail on its first operation too, but the budget is spent.
@@ -137,10 +129,10 @@ fn the_coin_fails_one_disk_at_a_time() {
 fn a_crash_replaces_the_disk_and_frees_the_budget() {
     let mut sim = SimWorld::new_with_seed(20_260_904);
     sim.set_storage_config(failing_disk());
-    let mut first = open(&mut sim, ip(1), "first.bin");
+    let first = open(&mut sim, ip(1), "first.bin");
     let mut second = open(&mut sim, ip(2), "second.bin");
 
-    let mut parked = pin!(first.write_all(b"never"));
+    let mut parked = pin!(first.write_at(0, b"never"));
     assert!(settle_pinned(&mut sim, parked.as_mut()).is_pending());
     assert!(sim.is_disk_failed(ip(1)));
     assert!(write_and_sync(&mut sim, &mut second).is_ready());
@@ -159,7 +151,7 @@ fn a_crash_replaces_the_disk_and_frees_the_budget() {
 
     // The budget is free again, so the next disk to draw the coin fails.
     assert!(
-        settle(&mut sim, second.write_all(b"never")).is_pending(),
+        settle(&mut sim, second.write_at(0, b"never")).is_pending(),
         "once the first failure is cleared another disk may fail"
     );
     assert!(sim.is_disk_failed(ip(2)));

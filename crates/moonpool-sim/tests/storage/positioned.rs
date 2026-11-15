@@ -5,7 +5,7 @@
 //! cursor and no pretence of being `read_exact`/`write_all`.
 
 use crate::{fast_sim, local_runtime, run_storage_test, step_until_done, test_ip};
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{AlignedBuf, DirectIo, OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimWorld, StorageConfiguration};
 use std::io::SeekFrom;
@@ -34,46 +34,17 @@ fn positioned_write_then_positioned_read() {
     });
 }
 
-/// Positioned operations must not move the stream cursor, in either direction.
+/// One file image: a positioned write is visible to a cursor read, and a
+/// cursor write is visible to a positioned read.
 #[test]
-fn positioned_operations_leave_the_stream_cursor_alone() {
+fn positioned_and_cursor_io_share_one_file_image() {
     local_runtime().block_on(async {
         let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut file = provider
-                .open("cursor.db", OpenOptions::create_write().read(true))
-                .await?;
-            file.write_all(b"0123456789").await?;
-            let before = file.seek(SeekFrom::Start(3)).await?;
-            assert_eq!(before, 3);
-
-            file.write_at(6, b"XY").await?;
-            let mut buf = [0u8; 2];
-            file.read_at(0, &mut buf).await?;
-
-            // The cursor is still where the seek left it, so a stream read
-            // starts at byte 3.
-            let after = file.seek(SeekFrom::Current(0)).await?;
-            assert_eq!(after, 3, "positioned I/O moved the stream cursor");
-
-            let mut rest = vec![0u8; 3];
-            file.read_exact(&mut rest).await?;
-            assert_eq!(&rest, b"345");
-            Ok(())
-        })
-        .await;
-        result.expect("cursor test failed");
-    });
-}
-
-/// One file image: a positioned write is visible to a stream read, and a
-/// stream write is visible to a positioned read.
-#[test]
-fn positioned_and_stream_io_share_one_file_image() {
-    local_runtime().block_on(async {
-        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut file = provider
-                .open("shared.db", OpenOptions::create_write().read(true))
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("shared.db", OpenOptions::create_write().read(true))
+                    .await?,
+            );
 
             // Stream write, positioned read.
             file.write_all(b"streamed").await?;
@@ -81,7 +52,7 @@ fn positioned_and_stream_io_share_one_file_image() {
             assert_eq!(file.read_at(0, &mut buf).await?, 8);
             assert_eq!(&buf, b"streamed");
 
-            // Positioned write, stream read.
+            // Positioned write, cursor read.
             file.write_at(0, b"POSITION").await?;
             file.seek(SeekFrom::Start(0)).await?;
             let mut streamed = vec![0u8; 8];
@@ -186,39 +157,6 @@ fn short_transfers_are_injected_deterministically() {
             read < written.max(2) && read > 0,
             "a short read must move a non-empty prefix, moved {read}"
         );
-    });
-}
-
-/// Positioned writes ignore append mode: they land where they are told.
-#[test]
-fn positioned_writes_ignore_append_mode() {
-    local_runtime().block_on(async {
-        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut file = provider
-                .open(
-                    "append.db",
-                    OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .append(true)
-                        .read(true),
-                )
-                .await?;
-            file.write_all(b"tail").await?;
-            file.write_at(0, b"HEAD").await?;
-
-            let mut buf = vec![0u8; 4];
-            assert_eq!(file.read_at(0, &mut buf).await?, 4);
-            assert_eq!(&buf, b"HEAD");
-            assert_eq!(
-                file.size().await?,
-                4,
-                "the positioned write overwrote in place"
-            );
-            Ok(())
-        })
-        .await;
-        result.expect("append test failed");
     });
 }
 
@@ -431,69 +369,6 @@ fn direct_io_policy_does_not_weaken_create_new() {
             Some(std::io::ErrorKind::Unsupported),
             "a Required open on a disk without direct I/O fails for that reason"
         );
-    });
-}
-
-/// The simulated backend enforces the same stream contract the production one
-/// does: a file with I/O constraints refuses stream reads and writes outright,
-/// rather than accepting the aligned ones and failing the rest.
-#[test]
-fn a_direct_io_file_refuses_stream_io() {
-    local_runtime().block_on(async {
-        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut file = open_direct(&provider, "stream.db", OpenOptions::read_write()).await?;
-            let constraints = file.constraints();
-            let mut aligned =
-                AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
-
-            // Aligned or not, the stream API is unavailable: it is the shared
-            // cursor that cannot be kept aligned.
-            assert_eq!(
-                file.write(aligned.as_slice())
-                    .await
-                    .expect_err("stream writes must be refused")
-                    .kind(),
-                std::io::ErrorKind::Unsupported
-            );
-            assert_eq!(
-                file.read(aligned.as_mut_slice())
-                    .await
-                    .expect_err("stream reads must be refused")
-                    .kind(),
-                std::io::ErrorKind::Unsupported
-            );
-
-            // Seeking transfers nothing, so it stays available.
-            assert_eq!(file.seek(SeekFrom::Start(0)).await?, 0);
-
-            // Positioned I/O is what this file is for.
-            assert_eq!(file.write_at(0, aligned.as_slice()).await?, aligned.len());
-            Ok(())
-        })
-        .await;
-        result.expect("direct stream test failed");
-    });
-}
-
-/// And a buffered file keeps ordinary stream semantics.
-#[test]
-fn a_buffered_file_keeps_stream_io() {
-    local_runtime().block_on(async {
-        let result: std::io::Result<()> = run_storage_test(fast_sim(), |provider| async move {
-            let mut file = provider
-                .open("buffered.db", OpenOptions::create_write().read(true))
-                .await?;
-            assert!(file.constraints().is_unconstrained());
-
-            file.write_all(b"streamed").await?;
-            file.seek(SeekFrom::Start(0)).await?;
-            let mut buf = [0u8; 8];
-            file.read_exact(&mut buf).await?;
-            assert_eq!(&buf, b"streamed");
-            Ok(())
-        })
-        .await;
-        result.expect("buffered stream test failed");
     });
 }
 

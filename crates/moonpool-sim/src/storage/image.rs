@@ -1,6 +1,6 @@
 //! The one authoritative image of one simulated file.
 //!
-//! Every access path — stream reads and writes, positioned reads and writes,
+//! Every access path — positioned reads and writes, block transfers,
 //! syncs, truncation, crash resolution, targeted fault injection — reaches
 //! these bytes. There is deliberately no second byte store for a second API.
 //!

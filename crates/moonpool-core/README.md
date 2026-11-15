@@ -49,7 +49,8 @@ from `moonpool-sim` or `moonpool`, not `tokio::select!`.
   I/O and sync barriers, `IoConstraints` and `AlignedBuf` for direct I/O
   (the `*_aligned` methods move an owned `AlignedBuf` to the kernel and back:
   zero-copy, where a borrowed slice goes through a bounce buffer),
-  `BlockFile` for block addressing, and `LayoutRegion` so a storage format
+  `BlockFile` for block addressing, `FileCursor` for sequential reads and
+  writes (a file has no stream I/O of its own), and `LayoutRegion` so a storage format
   can tell a fault injector where its bytes live.
 - **System**: `SystemSample` and `DiskCounters`, with the `/proc` parsers.
 - **Metrics**: `MetricsSource`, the registry-agnostic seam the simulation

@@ -28,9 +28,7 @@ fn test_random_close_disabled_with_zero_probability() {
         // Send multiple messages
         let addr = "test-server";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Send data multiple times - should never fail
@@ -66,9 +64,7 @@ fn test_random_close_injection_with_high_probability() {
 
         let addr = "chaos-server";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut _server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Send many messages - some should trigger random close
@@ -103,9 +99,7 @@ fn test_random_close_asymmetric_behavior() {
 
         let addr = "asymmetric-test";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (_server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Test 1: Close send side only
@@ -119,9 +113,7 @@ fn test_random_close_asymmetric_behavior() {
         );
 
         // Test 2: Set up new connection for receive-only test
-        let mut client2 = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client2 = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut _server2, _) = sim.drive(listener.accept()).await.unwrap();
 
         sim.run_until_empty();
@@ -159,18 +151,14 @@ fn test_random_close_cooldown() {
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
 
         // First connection might trigger random close
-        let mut client1 = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client1 = sim.drive(provider.connect(addr)).await.unwrap();
         let (_server1, _) = sim.drive(listener.accept()).await.unwrap();
 
         let _ = client1.write_all(b"Message 1").await;
         sim.run_until_empty();
 
         // Second connection should NOT trigger random close (in cooldown)
-        let mut client2 = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client2 = sim.drive(provider.connect(addr)).await.unwrap();
         let (_server2, _) = sim.drive(listener.accept()).await.unwrap();
 
         let result2 = client2.write_all(b"Message 2").await;
@@ -204,9 +192,7 @@ fn test_random_close_explicit_vs_silent() {
 
         // Try a few operations to observe the behavior
         // With 5% probability and 30% explicit ratio, we should see some activity
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (_server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Send multiple messages - may trigger random close
@@ -238,9 +224,7 @@ fn test_random_close_paired_connection_coordination() {
 
         let addr = "paired-test";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         sim.run_until_empty();
@@ -271,9 +255,7 @@ fn test_random_close_buffer_clearing() {
 
         let addr = "buffer-test";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (server, _) = sim.drive(listener.accept()).await.unwrap();
 
         // Queue some data
@@ -307,9 +289,7 @@ fn test_random_close_bidirectional_communication() {
 
         let addr = "bidirectional-test";
         let listener = sim.drive(provider.bind(addr)).await.unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (mut server, _) = sim.drive(listener.accept()).await.unwrap();
 
         sim.run_until_empty();
@@ -364,12 +344,8 @@ fn test_random_close_with_partitions() {
         let provider = sim.network_provider("10.0.1.1".parse().expect("valid ip"));
 
         let addr = "partition-test";
-        let listener = sim.drive(server_provider.bind(addr))
-            .await
-            .unwrap();
-        let mut client = sim.drive(provider.connect(addr))
-            .await
-            .unwrap();
+        let listener = sim.drive(server_provider.bind(addr)).await.unwrap();
+        let mut client = sim.drive(provider.connect(addr)).await.unwrap();
         let (_server, _) = sim.drive(listener.accept()).await.unwrap();
         let _ = sim.take_faults();
 

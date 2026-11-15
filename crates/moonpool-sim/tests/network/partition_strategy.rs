@@ -72,24 +72,30 @@ fn run_rotation(
 
     let faults = runtime.block_on(async {
         let first = sim.network_provider(ip(1));
-        let listener_two = sim.drive(first.bind("10.0.1.2:8080"))
+        let listener_two = sim
+            .drive(first.bind("10.0.1.2:8080"))
             .await
             .expect("bind .2");
-        let _client_one = sim.drive(first.connect("10.0.1.2:8080"))
+        let _client_one = sim
+            .drive(first.connect("10.0.1.2:8080"))
             .await
             .expect("connect .1->.2");
-        let (_server_two, _) = sim.drive(listener_two.accept())
+        let (_server_two, _) = sim
+            .drive(listener_two.accept())
             .await
             .expect("accept on .2");
 
         let third = sim.network_provider(ip(3));
-        let listener_four = sim.drive(third.bind("10.0.1.4:8080"))
+        let listener_four = sim
+            .drive(third.bind("10.0.1.4:8080"))
             .await
             .expect("bind .4");
-        let _client_three = sim.drive(third.connect("10.0.1.4:8080"))
+        let _client_three = sim
+            .drive(third.connect("10.0.1.4:8080"))
             .await
             .expect("connect .3->.4");
-        let (_server_four, _) = sim.drive(listener_four.accept())
+        let (_server_four, _) = sim
+            .drive(listener_four.accept())
             .await
             .expect("accept on .4");
 

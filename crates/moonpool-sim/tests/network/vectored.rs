@@ -21,13 +21,16 @@ fn vectored_write_preserves_slice_boundaries_as_delivery_events() {
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
         let addr = "vectored-write-test";
 
-        let listener = sim.drive(provider.bind(addr))
+        let listener = sim
+            .drive(provider.bind(addr))
             .await
             .expect("bind should succeed");
-        let mut client = sim.drive(provider.connect(addr))
+        let mut client = sim
+            .drive(provider.connect(addr))
             .await
             .expect("connect should succeed");
-        let (mut server, _peer_addr) = sim.drive(listener.accept())
+        let (mut server, _peer_addr) = sim
+            .drive(listener.accept())
             .await
             .expect("accept should succeed");
 

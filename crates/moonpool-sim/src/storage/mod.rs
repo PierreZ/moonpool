@@ -22,7 +22,7 @@
 //!
 //! There is exactly one simulated file implementation ([`FileImage`]) and
 //! one engine driving it ([`sim::StorageEngine`]). Every way to reach a file
-//! (stream I/O, positioned I/O, sync, truncation) lands on those bytes, and
+//! (positioned I/O, sync, truncation) lands on those bytes, and
 //! every fault names a file and a flat sector offset inside it. Layers that
 //! give the bytes meaning (a block layer such as `moonpool_core::BlockFile`,
 //! a pager, a journal) sit above the provider and inherit its fault model.

@@ -1,13 +1,21 @@
 //! Storage provider contract: the invariants any drop-in for `tokio::fs` must hold.
 //!
-//! Like the network streams, files implement the `futures::io` traits via
-//! `Compat`, so seeking/reading/writing go through `futures::io` extension
-//! traits while durability/size live on [`StorageFile`].
+//! A file has positioned I/O, durability and size on [`StorageFile`]. The
+//! sequential reads and writes here go through a [`FileCursor`] over it.
 
 use crate::fixtures::Fixtures;
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use moonpool_core::{OpenOptions, Providers, StorageFile, StorageProvider};
+use moonpool_core::{FileCursor, OpenOptions, Providers, StorageFile, StorageProvider};
 use std::io::SeekFrom;
+
+/// Open `path` and wrap the file in a cursor at offset zero.
+async fn cursor<S: StorageProvider>(
+    storage: &S,
+    path: &str,
+    options: OpenOptions,
+    what: &str,
+) -> FileCursor<S::File> {
+    FileCursor::new(storage.open(path, options).await.expect(what))
+}
 
 /// Assert the [`StorageProvider`] round-trips data and reports filesystem errors.
 pub(crate) async fn storage_contract<P: Providers, F: Fixtures>(p: &P, fixtures: &F) {
@@ -15,18 +23,18 @@ pub(crate) async fn storage_contract<P: Providers, F: Fixtures>(p: &P, fixtures:
 
     // write -> sync -> reopen -> read round-trip.
     let path = fixtures.path("roundtrip.txt");
-    let mut file = storage
-        .open(&path, OpenOptions::create_write())
-        .await
-        .expect("create for write");
+    let mut file = cursor(
+        storage,
+        &path,
+        OpenOptions::create_write(),
+        "create for write",
+    )
+    .await;
     file.write_all(b"hello world").await.expect("write");
     file.sync_all().await.expect("sync_all");
     drop(file);
 
-    let mut file = storage
-        .open(&path, OpenOptions::read_only())
-        .await
-        .expect("reopen for read");
+    let mut file = cursor(storage, &path, OpenOptions::read_only(), "reopen for read").await;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).await.expect("read_to_end");
     assert_eq!(buf, b"hello world", "round-tripped bytes must match");
@@ -43,10 +51,13 @@ pub(crate) async fn storage_contract<P: Providers, F: Fixtures>(p: &P, fixtures:
     // rename moves content; the source disappears.
     let from = fixtures.path("from.txt");
     let to = fixtures.path("to.txt");
-    let mut file = storage
-        .open(&from, OpenOptions::create_write())
-        .await
-        .expect("create rename source");
+    let mut file = cursor(
+        storage,
+        &from,
+        OpenOptions::create_write(),
+        "create rename source",
+    )
+    .await;
     file.write_all(b"payload").await.expect("write source");
     file.sync_all().await.expect("sync source");
     drop(file);
@@ -63,10 +74,13 @@ pub(crate) async fn storage_contract<P: Providers, F: Fixtures>(p: &P, fixtures:
 
     // seek + partial read, plus set_len truncate/extend reflected by size().
     let path = fixtures.path("seek.txt");
-    let mut file = storage
-        .open(&path, OpenOptions::create_write())
-        .await
-        .expect("create seek file");
+    let mut file = cursor(
+        storage,
+        &path,
+        OpenOptions::create_write(),
+        "create seek file",
+    )
+    .await;
     file.write_all(b"0123456789").await.expect("write digits");
     file.sync_all().await.expect("sync digits");
     assert_eq!(file.size().await.expect("size"), 10, "size after write");
@@ -75,10 +89,7 @@ pub(crate) async fn storage_contract<P: Providers, F: Fixtures>(p: &P, fixtures:
     assert_eq!(file.size().await.expect("size"), 5, "size after truncate");
     drop(file);
 
-    let mut file = storage
-        .open(&path, OpenOptions::read_only())
-        .await
-        .expect("reopen seek file");
+    let mut file = cursor(storage, &path, OpenOptions::read_only(), "reopen seek file").await;
     let pos = file.seek(SeekFrom::Start(2)).await.expect("seek");
     assert_eq!(pos, 2, "seek must report the new position");
     let mut one = [0u8; 1];

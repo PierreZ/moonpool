@@ -1324,22 +1324,27 @@ mod tests {
         crate::executor::Executor::new(0).block_on(async {
             let mut sim = SimWorld::new();
             let provider = sim.network_provider(IpAddr::from([127, 0, 0, 1]));
-            let _old_listener = sim.drive(provider.bind("after-shutdown"))
+            let _old_listener = sim
+                .drive(provider.bind("after-shutdown"))
                 .await
                 .expect("initial bind");
-            let _unaccepted = sim.drive(provider.connect("after-shutdown"))
+            let _unaccepted = sim
+                .drive(provider.connect("after-shutdown"))
                 .await
                 .expect("initial connect");
             sim.schedule_event(Event::Shutdown, Duration::ZERO);
             assert!(!sim.step());
 
-            let listener = sim.drive(provider.bind("after-shutdown"))
+            let listener = sim
+                .drive(provider.bind("after-shutdown"))
                 .await
                 .expect("bind after shutdown");
-            let mut client = sim.drive(provider.connect("after-shutdown"))
+            let mut client = sim
+                .drive(provider.connect("after-shutdown"))
                 .await
                 .expect("connect after shutdown");
-            let (mut server, _) = sim.drive(listener.accept())
+            let (mut server, _) = sim
+                .drive(listener.accept())
                 .await
                 .expect("accept after shutdown");
             client.write_all(b"ok").await.expect("write after shutdown");
@@ -1359,11 +1364,10 @@ mod tests {
         crate::executor::Executor::new(0).block_on(async {
             let mut sim = SimWorld::new();
             let provider = sim.network_provider(IpAddr::from([127, 0, 0, 1]));
-            let listener = sim.drive(provider.bind("reaped"))
-                .await
-                .expect("bind");
+            let listener = sim.drive(provider.bind("reaped")).await.expect("bind");
             for round in 0..3 {
-                let mut client = sim.drive(provider.connect("reaped"))
+                let mut client = sim
+                    .drive(provider.connect("reaped"))
                     .await
                     .expect("connect");
                 let (mut server, _) = sim.drive(listener.accept()).await.expect("accept");
@@ -1383,10 +1387,7 @@ mod tests {
                     "round {round}: the server still holds its stream"
                 );
                 let mut byte = [0; 1];
-                assert_eq!(
-                    sim.drive(server.read(&mut byte)).await.expect("EOF"),
-                    0
-                );
+                assert_eq!(sim.drive(server.read(&mut byte)).await.expect("EOF"), 0);
                 drop(server);
                 sim.run_until_empty();
                 assert_eq!(
@@ -1405,10 +1406,9 @@ mod tests {
         crate::executor::Executor::new(0).block_on(async {
             let mut sim = SimWorld::new();
             let provider = sim.network_provider(IpAddr::from([127, 0, 0, 1]));
-            let listener = sim.drive(provider.bind("in-flight"))
-                .await
-                .expect("bind");
-            let mut client = sim.drive(provider.connect("in-flight"))
+            let listener = sim.drive(provider.bind("in-flight")).await.expect("bind");
+            let mut client = sim
+                .drive(provider.connect("in-flight"))
                 .await
                 .expect("connect");
             let (server, _) = sim.drive(listener.accept()).await.expect("accept");

@@ -7,7 +7,7 @@
 //! replication and crash tests did not model independent storage.
 
 use crate::{local_runtime, run_as};
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
 use std::net::IpAddr;
@@ -34,13 +34,13 @@ async fn write_file(
     path: &str,
     bytes: &[u8],
 ) -> std::io::Result<()> {
-    let mut file = provider.open(path, OpenOptions::create_new_write()).await?;
+    let mut file = FileCursor::new(provider.open(path, OpenOptions::create_new_write()).await?);
     file.write_all(bytes).await?;
     file.sync_all().await
 }
 
 async fn read_file(provider: &SimStorageProvider, path: &str) -> std::io::Result<Vec<u8>> {
-    let mut file = provider.open(path, OpenOptions::read_only()).await?;
+    let mut file = FileCursor::new(provider.open(path, OpenOptions::read_only()).await?);
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).await?;
     Ok(bytes)

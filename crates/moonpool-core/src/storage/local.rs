@@ -35,8 +35,6 @@
 use std::future::Future;
 use std::io;
 
-use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
-
 use super::{AlignedBuf, IoConstraints, LayoutRegion, OpenOptions, StorageFile, StorageProvider};
 
 /// Local (non-`Send`) form of [`StorageProvider`]: the filesystem namespace.
@@ -95,8 +93,8 @@ pub trait LocalStorageProvider: Clone + 'static {
 
 /// Local (non-`Send`) form of [`StorageFile`]: one already-open file.
 ///
-/// The same contract as [`StorageFile`] (durability, stream I/O versus
-/// alignment, borrowed versus owned buffers), method by method, without any
+/// The same contract as [`StorageFile`] (durability, borrowed versus
+/// owned buffers), method by method, without any
 /// `Send` or `Sync` bound. Every [`StorageFile`] implements it through a
 /// blanket impl, which forwards every method, the defaults included; a
 /// thread-per-core backend implements it directly.
@@ -108,7 +106,7 @@ pub trait LocalStorageProvider: Clone + 'static {
 /// A concrete [`StorageFile`] has both traits' methods under the same names.
 /// With both traits in scope, `file.read_at(..)` is ambiguous: import one
 /// trait per module, or call `LocalStorageFile::read_at(&file, ..)`.
-pub trait LocalStorageFile: AsyncRead + AsyncWrite + AsyncSeek + Unpin + 'static {
+pub trait LocalStorageFile: 'static {
     /// Flush this file's data and metadata to the device. See
     /// [`StorageFile::sync_all`].
     fn sync_all(&self) -> impl Future<Output = io::Result<()>>;

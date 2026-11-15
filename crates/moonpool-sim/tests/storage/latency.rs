@@ -6,7 +6,7 @@
 use crate::{
     local_runtime, run_and_measure_time, run_and_measure_time_on, step_until_done, test_ip,
 };
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_sim::storage::sim::DiskEpisodeKind;
 use moonpool_sim::{LatencyDistribution, SimWorld, StorageConfiguration};
@@ -25,9 +25,11 @@ fn test_fast_storage_config() {
         sim.set_storage_config(StorageConfiguration::fast_local());
 
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("fast.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("fast.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"quick test").await?;
             file.sync_all().await?;
             Ok(())
@@ -51,9 +53,11 @@ fn test_default_storage_config() {
         let sim = SimWorld::new(); // Uses default config
 
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("default.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("default.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"test").await?;
             file.sync_all().await?;
             Ok(())
@@ -98,9 +102,11 @@ fn test_custom_latency_ranges() {
         sim.set_storage_config(config);
 
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("custom.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("custom.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(b"test").await?;
             file.sync_all().await?;
             Ok(())
@@ -151,9 +157,11 @@ fn test_latency_formula() {
         let data = vec![0u8; data_size];
 
         let time = run_and_measure_time(sim, |provider| async move {
-            let mut file = provider
-                .open("formula.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("formula.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&data).await?;
             file.sync_all().await?;
             Ok(())
@@ -202,9 +210,11 @@ fn test_read_latency_scales_with_size() {
         sim1.set_storage_config(config.clone());
 
         let _ = run_and_measure_time(sim1, |provider| async move {
-            let mut file = provider
-                .open("read_scale.txt", OpenOptions::create_write())
-                .await?;
+            let mut file = FileCursor::new(
+                provider
+                    .open("read_scale.txt", OpenOptions::create_write())
+                    .await?,
+            );
             file.write_all(&vec![0u8; 10_000]).await?; // 10KB
             file.sync_all().await?;
             Ok(())
@@ -222,9 +232,11 @@ fn test_read_latency_scales_with_size() {
             // Pre-create file
             let provider = sim.storage_provider(test_ip());
             let handle = tokio::spawn(async move {
-                let mut file = provider
-                    .open("read_scale.txt", OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open("read_scale.txt", OpenOptions::create_write())
+                        .await?,
+                );
                 file.write_all(&vec![b'x'; 10_000]).await?;
                 file.sync_all().await?;
                 Ok::<_, std::io::Error>(())
@@ -236,9 +248,11 @@ fn test_read_latency_scales_with_size() {
 
             let provider2 = sim.storage_provider(test_ip());
             let handle2 = tokio::spawn(async move {
-                let mut file = provider2
-                    .open("read_scale.txt", OpenOptions::read_only())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider2
+                        .open("read_scale.txt", OpenOptions::read_only())
+                        .await?,
+                );
                 let mut buf = vec![0u8; size];
                 file.read_exact(&mut buf).await?;
                 Ok::<_, std::io::Error>(())
@@ -302,9 +316,11 @@ fn test_write_latency_scales_with_size() {
 
             let data = vec![b'x'; size];
             let time = run_and_measure_time(sim, |provider| async move {
-                let mut file = provider
-                    .open("write_scale.txt", OpenOptions::create_write())
-                    .await?;
+                let mut file = FileCursor::new(
+                    provider
+                        .open("write_scale.txt", OpenOptions::create_write())
+                        .await?,
+                );
                 file.write_all(&data).await?;
                 // No sync - just measure write latency
                 Ok(())
@@ -340,9 +356,11 @@ async fn write_sync_workload(
     provider: moonpool_sim::SimStorageProvider,
     n: usize,
 ) -> std::io::Result<()> {
-    let mut file = provider
-        .open("episodes.txt", OpenOptions::create_write())
-        .await?;
+    let mut file = FileCursor::new(
+        provider
+            .open("episodes.txt", OpenOptions::create_write())
+            .await?,
+    );
     for _ in 0..n {
         file.write_all(b"x").await?;
         file.sync_all().await?;
@@ -485,12 +503,16 @@ fn test_disk_episode_correlated_per_owner() {
         let opened = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let opened_flag = opened.clone();
         let handle = tokio::spawn(async move {
-            let mut a1 = provider_a
-                .open("a1.txt", OpenOptions::create_write())
-                .await?;
-            let mut a2 = provider_a
-                .open("a2.txt", OpenOptions::create_write())
-                .await?;
+            let mut a1 = FileCursor::new(
+                provider_a
+                    .open("a1.txt", OpenOptions::create_write())
+                    .await?,
+            );
+            let mut a2 = FileCursor::new(
+                provider_a
+                    .open("a2.txt", OpenOptions::create_write())
+                    .await?,
+            );
             opened_flag.store(true, std::sync::atomic::Ordering::SeqCst);
             // Write both files concurrently: both ops are scheduled in the same
             // window, so they share the owner's single episode.

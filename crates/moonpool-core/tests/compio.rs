@@ -8,10 +8,10 @@ use std::io::SeekFrom;
 use std::rc::Rc;
 use std::time::Duration;
 
-use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use futures::io::{AsyncReadExt, AsyncWriteExt};
 use moonpool_core::{
     AlignedBuf, CompioNetworkProvider, CompioProviders, CompioStorageProvider,
-    CompioSystemProvider, CompioTaskProvider, CompioTimeProvider, Detach, DirectIo,
+    CompioSystemProvider, CompioTaskProvider, CompioTimeProvider, Detach, DirectIo, FileCursor,
     LocalNetworkProvider, LocalProviders, LocalStorageFile, LocalStorageProvider,
     LocalTaskProvider, LocalTcpListener, LocalTimeProvider, OpenOptions, Resolver, SystemProvider,
     ThreadProviders, TimeError,
@@ -77,17 +77,18 @@ fn positioned_io_round_trips() {
 }
 
 #[test]
-fn stream_io_shares_one_cursor() {
+fn a_cursor_reads_and_writes_in_sequence() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = scratch(&dir, "stream.bin");
     run(async {
         let storage = CompioStorageProvider::new();
-        let mut file = storage
-            .open(&path, OpenOptions::create_write().read(true))
-            .await
-            .expect("open");
+        let mut file = FileCursor::new(
+            storage
+                .open(&path, OpenOptions::create_write().read(true))
+                .await
+                .expect("open"),
+        );
         file.write_all(b"hello stream").await.expect("write_all");
-        file.flush().await.expect("flush");
         assert_eq!(file.seek(SeekFrom::Current(0)).await.expect("seek"), 12);
 
         assert_eq!(file.seek(SeekFrom::Start(6)).await.expect("seek"), 6);
@@ -100,87 +101,13 @@ fn stream_io_shares_one_cursor() {
         file.read_to_end(&mut all).await.expect("read_to_end");
         assert_eq!(all, b"hello stream");
 
-        // A positioned write is visible to the stream, and moves no cursor.
+        // A positioned write is visible to the cursor, and does not move it.
         file.write_at(0, b"J").await.expect("write_at");
         file.seek(SeekFrom::Start(0)).await.expect("seek");
         let mut first = [0_u8; 5];
         file.read_exact(&mut first).await.expect("read_exact");
         assert_eq!(&first, b"Jello");
         assert!(file.seek(SeekFrom::Current(-6)).await.is_err());
-    });
-}
-
-/// A stream write whose future is dropped while it is in flight still lands,
-/// and the next write writes its own bytes and reports its own count. The
-/// defect this pins: the next write resumed the dropped one, so it returned
-/// the count of the dropped write and its own bytes were never written.
-#[test]
-fn a_dropped_stream_write_does_not_answer_the_next_write() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = scratch(&dir, "dropped.bin");
-    run(async {
-        let storage = CompioStorageProvider::new();
-        let mut file = storage
-            .open(&path, OpenOptions::create_write().read(true))
-            .await
-            .expect("open");
-        {
-            let dropped = file.write(&[b'A'; 8]);
-            futures::pin_mut!(dropped);
-            assert!(
-                futures::poll!(dropped.as_mut()).is_pending(),
-                "the write must be in flight when it is dropped"
-            );
-        }
-        let written = file.write(b"BB").await.expect("write");
-        assert!(
-            written <= 2,
-            "a write reported {written} bytes of a 2-byte buffer"
-        );
-        file.write_all(&b"BB"[written..]).await.expect("write_all");
-        file.flush().await.expect("flush");
-        let mut all = vec![0_u8; 16];
-        let read = file.read_at(0, &mut all).await.expect("read");
-        assert_eq!(&all[..read], b"AAAAAAAABB");
-
-        // The same future polled again resumes its write: the bytes land
-        // one time.
-        {
-            let resumed = file.write(b"CCC");
-            futures::pin_mut!(resumed);
-            let _ = futures::poll!(resumed.as_mut());
-            assert_eq!(resumed.await.expect("resumed write"), 3);
-        }
-        file.flush().await.expect("flush");
-        let read = file.read_at(0, &mut all).await.expect("read");
-        assert_eq!(&all[..read], b"AAAAAAAABBCCC");
-    });
-}
-
-#[test]
-fn append_streams_to_the_end_and_positions_stay_exact() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = scratch(&dir, "append.log");
-    run(async {
-        let storage = CompioStorageProvider::new();
-        let seed = storage
-            .open(&path, OpenOptions::create_write())
-            .await
-            .expect("create");
-        seed.write_at(0, b"0123").await.expect("seed");
-        drop(seed);
-
-        let mut log = storage
-            .open(&path, OpenOptions::new().read(true).append(true))
-            .await
-            .expect("open append");
-        log.write_all(b"ab").await.expect("append");
-        // A positioned write on an append file goes where it is told.
-        log.write_at(1, b"X").await.expect("positioned");
-        log.write_all(b"cd").await.expect("append");
-        let mut all = vec![0_u8; 16];
-        let read = log.read_at(0, &mut all).await.expect("read");
-        assert_eq!(&all[..read], b"0X23abcd");
     });
 }
 
@@ -287,7 +214,7 @@ fn direct_io_transfers_at_the_reported_alignment() {
     let path = scratch(&dir, "direct.db");
     run(async {
         let storage = CompioStorageProvider::new();
-        let Some(mut file) = open_direct(&storage, &path).await else {
+        let Some(file) = open_direct(&storage, &path).await else {
             return;
         };
         assert!(file.is_direct_io());
@@ -334,17 +261,6 @@ fn direct_io_transfers_at_the_reported_alignment() {
                 .expect_err("a misaligned offset is refused");
             assert_eq!(misaligned.kind(), std::io::ErrorKind::InvalidInput);
         }
-        let stream = file
-            .write_all(b"x")
-            .await
-            .expect_err("a direct file refuses stream writes");
-        assert_eq!(stream.kind(), std::io::ErrorKind::Unsupported);
-        let mut byte = [0_u8; 1];
-        let stream = file
-            .read(&mut byte)
-            .await
-            .expect_err("a direct file refuses stream reads");
-        assert_eq!(stream.kind(), std::io::ErrorKind::Unsupported);
     });
 }
 
@@ -382,84 +298,6 @@ fn truncation_is_applied_once_under_every_policy() {
                 }
             }
         }
-    });
-}
-
-/// Two append handles interleaving stream writes lose nothing: every write
-/// lands whole at the end, which needs the kernel's `O_APPEND`. Positioned
-/// writes on the same handles still go where they are told.
-#[cfg(target_os = "linux")]
-#[test]
-fn appends_from_two_handles_never_overwrite_each_other() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = scratch(&dir, "shared.log");
-    run(async {
-        let storage = CompioStorageProvider::new();
-        let append = || OpenOptions::new().read(true).append(true).create(true);
-        let mut first = storage.open(&path, append()).await.expect("open");
-        let mut second = storage.open(&path, append()).await.expect("open");
-        for round in 0..8_u8 {
-            first.write_all(&[b'a' + round; 3]).await.expect("append");
-            second.write_all(&[b'A' + round; 2]).await.expect("append");
-        }
-        first.flush().await.expect("flush");
-        second.flush().await.expect("flush");
-        assert_eq!(first.size().await.expect("size"), 8 * 5);
-
-        // The stream cursor of an append handle is the end of the file.
-        assert_eq!(first.seek(SeekFrom::Current(0)).await.expect("seek"), 40);
-        assert_eq!(second.seek(SeekFrom::Current(-2)).await.expect("seek"), 38);
-        let mut tail = Vec::new();
-        second.read_to_end(&mut tail).await.expect("read_to_end");
-        assert_eq!(tail, b"HH");
-
-        first.write_at(0, b"!").await.expect("positioned");
-        let mut all = vec![0_u8; 64];
-        let read = first.read_at(0, &mut all).await.expect("read");
-        all.truncate(read);
-        let mut expected = Vec::new();
-        for round in 0..8_u8 {
-            expected.extend_from_slice(&[b'a' + round; 3]);
-            expected.extend_from_slice(&[b'A' + round; 2]);
-        }
-        expected[0] = b'!';
-        assert_eq!(all, expected);
-    });
-}
-
-/// The stream and positioned sides of one append handle stay on the file it
-/// opened, even after a replacement is renamed over its path.
-#[test]
-fn an_append_handle_stays_on_one_file_across_a_rename() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = scratch(&dir, "append.db");
-    let replacement = scratch(&dir, "replacement.db");
-    run(async {
-        let storage = CompioStorageProvider::new();
-        let seed = storage
-            .open(&path, OpenOptions::create_write())
-            .await
-            .expect("create");
-        seed.write_at(0, b"AAAA").await.expect("seed");
-        drop(seed);
-        let mut file = storage
-            .open(&path, OpenOptions::new().read(true).append(true))
-            .await
-            .expect("open");
-        let other = storage
-            .open(&replacement, OpenOptions::create_write())
-            .await
-            .expect("create");
-        other.write_at(0, b"ZZZZ").await.expect("write");
-        drop(other);
-        storage.rename(&replacement, &path).await.expect("rename");
-
-        file.write_all(b"SS").await.expect("append");
-        file.write_at(0, b"P").await.expect("positioned");
-        let mut buf = [0_u8; 8];
-        let read = file.read_at(0, &mut buf).await.expect("read");
-        assert_eq!(&buf[..read], b"PAAASS");
-        assert_eq!(std::fs::read(&path).expect("read"), b"ZZZZ");
     });
 }
 

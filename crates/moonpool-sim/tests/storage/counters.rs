@@ -12,10 +12,9 @@ use std::{
     time::Duration,
 };
 
-use futures::{io::AsyncWriteExt, task::noop_waker};
+use futures::task::noop_waker;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider, SystemProvider};
 use moonpool_sim::{LatencyDistribution, SimSystemProvider, SimWorld, StorageConfiguration};
-
 
 fn ip(last_octet: u8) -> IpAddr {
     format!("10.0.1.{last_octet}")
@@ -69,9 +68,9 @@ fn sequential_io_is_busy_the_whole_time() {
     let mut sim = SimWorld::new();
     sim.set_storage_config(ten_ms_disk());
     let owner = ip(1);
-    let mut file = open(&mut sim, owner, "data");
+    let file = open(&mut sim, owner, "data");
     let start = sim.now();
-    ready(settle(&mut sim, file.write_all(b"four")), "write").expect("write");
+    ready(settle(&mut sim, file.write_at(0, b"four")), "write").expect("write");
     ready(settle(&mut sim, file.sync_all()), "sync").expect("sync");
     let elapsed = sim.now().checked_sub(start).expect("time moves forward");
     // Two 10 ms operations, plus the nanosecond of the IOPS term each.
@@ -95,10 +94,10 @@ fn overlapping_io_counts_wall_time_once() {
     let mut sim = SimWorld::new();
     sim.set_storage_config(ten_ms_disk());
     let owner = ip(1);
-    let mut a = open(&mut sim, owner, "a");
-    let mut b = open(&mut sim, owner, "b");
+    let a = open(&mut sim, owner, "a");
+    let b = open(&mut sim, owner, "b");
     let start = sim.now();
-    let both = futures::future::join(a.write_all(b"one"), b.write_all(b"two"));
+    let both = futures::future::join(a.write_at(0, b"one"), b.write_at(0, b"two"));
     let (first, second) = ready(settle(&mut sim, both), "writes");
     first.expect("write a");
     second.expect("write b");
@@ -122,10 +121,10 @@ fn an_operation_in_flight_counts_up_to_the_sample() {
     let mut sim = SimWorld::new();
     sim.set_storage_config(ten_ms_disk());
     let owner = ip(1);
-    let mut file = open(&mut sim, owner, "data");
+    let file = open(&mut sim, owner, "data");
     sim.fail_disk_for_process(owner);
     let start = sim.now();
-    let mut write = pin!(file.write_all(b"hung"));
+    let mut write = pin!(file.write_at(0, b"hung"));
     let waker = noop_waker();
     assert!(
         write
@@ -163,8 +162,8 @@ fn the_system_provider_reports_the_disk_counters() {
     let mut sim = SimWorld::new();
     sim.set_storage_config(ten_ms_disk());
     let owner = ip(1);
-    let mut file = open(&mut sim, owner, "data");
-    ready(settle(&mut sim, file.write_all(b"four")), "write").expect("write");
+    let file = open(&mut sim, owner, "data");
+    ready(settle(&mut sim, file.write_at(0, b"four")), "write").expect("write");
 
     let provider = SimSystemProvider::new(sim.downgrade(), owner);
     let sample = provider.sample("ignored").expect("sample");
@@ -181,8 +180,8 @@ fn the_world_remembers_the_samples_it_handed_out() {
     let owner = ip(1);
     let provider = SimSystemProvider::new(sim.downgrade(), owner);
     let first = provider.sample("").expect("sample");
-    let mut file = open(&mut sim, owner, "data");
-    ready(settle(&mut sim, file.write_all(b"four")), "write").expect("write");
+    let file = open(&mut sim, owner, "data");
+    ready(settle(&mut sim, file.write_at(0, b"four")), "write").expect("write");
     let second = provider.sample("").expect("sample");
     assert_eq!(sim.system_samples(owner), vec![first, second]);
     assert!(sim.system_samples(ip(2)).is_empty());

@@ -56,8 +56,8 @@ pub(crate) struct StorageActions {
 pub(crate) enum StorageCompletion {
     /// Bytes observed when a read event was handled.
     Read(Vec<u8>),
-    /// Location and length committed by a write event.
-    Write { offset: u64, len: usize },
+    /// Length committed by a write event.
+    Write { len: usize },
     /// The handle a namespace open created.
     Opened(HandleId),
     /// Completion for operations without a value.
@@ -266,14 +266,6 @@ impl StorageEngine {
             file_id
         };
 
-        let position = if options.is_append() {
-            self.state
-                .files
-                .get(&file_id)
-                .map_or(0, |file| file.image.size())
-        } else {
-            0
-        };
         let reporting = self.state.config_for(owner_ip).writeback_error_reporting;
         let seen = self
             .state
@@ -284,7 +276,7 @@ impl StorageEngine {
         self.state.next_handle_id += 1;
         self.state.handles.insert(
             handle_id,
-            HandleState::new(file_id, position, options, constraints, direct_io, seen),
+            HandleState::new(file_id, options, constraints, direct_io, seen),
         );
         Ok(handle_id)
     }
@@ -913,7 +905,6 @@ impl StorageEngine {
         handle_id: HandleId,
         offset: u64,
         len: usize,
-        positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
         self.set_clock(now);
@@ -928,8 +919,6 @@ impl StorageEngine {
             offset,
             len,
             data: None,
-            append: false,
-            positioned,
             owner_ip,
             issued_at: Duration::ZERO,
             wait: Wait::Awaited,
@@ -952,14 +941,11 @@ impl StorageEngine {
         handle_id: HandleId,
         offset: u64,
         mut data: Vec<u8>,
-        positioned: bool,
         now: Duration,
     ) -> Result<(OperationId, StorageActions), StorageError> {
         self.set_clock(now);
         self.ensure_writable(handle_id, "write")?;
         let file_id = self.open_file_id(handle_id)?;
-        // Append mode moves the stream cursor, never a positioned write.
-        let append = !positioned && self.open_handle(handle_id)?.options.is_append();
         let owner_ip = self.owner_ip(file_id)?;
         data.truncate(self.shorten_transfer(owner_ip, data.len()));
         let len = data.len();
@@ -970,8 +956,6 @@ impl StorageEngine {
             offset,
             len,
             data: Some(data),
-            append,
-            positioned,
             owner_ip,
             issued_at: Duration::ZERO,
             wait: Wait::Awaited,
@@ -1009,8 +993,6 @@ impl StorageEngine {
             offset,
             len,
             data: None,
-            append: false,
-            positioned: false,
             owner_ip,
             issued_at: Duration::ZERO,
             wait: Wait::Awaited,
@@ -1094,8 +1076,6 @@ impl StorageEngine {
             offset,
             len: 0,
             data: None,
-            append: false,
-            positioned: false,
             owner_ip,
             issued_at: Duration::ZERO,
             wait: Wait::Awaited,
@@ -1546,19 +1526,6 @@ impl StorageEngine {
         wakes
     }
 
-    pub(crate) fn file_position(&self, handle_id: HandleId) -> Result<u64, StorageError> {
-        Ok(self.open_handle(handle_id)?.position)
-    }
-
-    pub(crate) fn set_file_position(
-        &mut self,
-        handle_id: HandleId,
-        position: u64,
-    ) -> Result<(), StorageError> {
-        self.open_handle_mut(handle_id)?.position = position;
-        Ok(())
-    }
-
     /// Drop the clean cached pages of the file `handle_id` names
     /// ([`FileImage::drop_cache`]). A direct-I/O handle drops them too: the
     /// image strands a failed writeback whatever the handle.
@@ -1872,7 +1839,7 @@ impl StorageEngine {
         operation: &'static str,
     ) -> Result<(), StorageError> {
         let options = &self.open_handle(handle_id)?.options;
-        if options.is_write() || options.is_append() {
+        if options.is_write() {
             Ok(())
         } else {
             Err(StorageError::PermissionDenied {

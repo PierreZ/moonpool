@@ -5,6 +5,7 @@
 //! turn any other failure into a success, weaken `create_new`, or create a
 //! file the caller did not ask it to create.
 
+use moonpool_core::FileCursor;
 use moonpool_core::{
     AlignedBuf, DirectIo, OpenOptions, StorageFile, StorageProvider, TokioStorageProvider,
 };
@@ -334,80 +335,19 @@ async fn owned_transfers_move_the_callers_buffer() {
     }
 }
 
-/// The stream API and alignment are mutually exclusive, and a direct-I/O file
-/// says so itself rather than letting the kernel answer with `EINVAL` on some
-/// requests and succeed on others.
+/// A `FileCursor` gives sequential reads and writes over a real file.
 #[tokio::test]
-async fn a_direct_io_file_refuses_stream_io() {
-    use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-
-    let dir = TempDir::new().expect("temp dir");
-    let path = &scratch_file(&dir, "stream.db");
-    let provider = TokioStorageProvider::new();
-
-    let mut file = match provider
-        .open(
-            path,
-            OpenOptions::create_write()
-                .read(true)
-                .direct_io(DirectIo::Required),
-        )
-        .await
-    {
-        Ok(file) => file,
-        // A filesystem without direct I/O has nothing to say here.
-        Err(error) if error.kind() == std::io::ErrorKind::Unsupported => return,
-        Err(error) => panic!("open failed: {error}"),
-    };
-
-    let constraints = file.constraints();
-    let mut aligned = AlignedBuf::for_constraints(constraints.length_alignment(), constraints);
-
-    // Even a perfectly aligned buffer is refused: it is the shared cursor
-    // that cannot be kept aligned, not this particular transfer.
-    let error = file
-        .write(aligned.as_slice())
-        .await
-        .expect_err("stream writes must be refused");
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-
-    let error = file
-        .read(aligned.as_mut_slice())
-        .await
-        .expect_err("stream reads must be refused");
-    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-
-    // Seeking moves a cursor; it transfers nothing, so it stays available.
-    assert_eq!(
-        file.seek(std::io::SeekFrom::Start(0))
-            .await
-            .expect("seeking must stay available"),
-        0
-    );
-
-    // And positioned I/O works throughout.
-    assert_eq!(
-        file.write_at(0, aligned.as_slice())
-            .await
-            .expect("positioned writes are what this file is for"),
-        aligned.len()
-    );
-}
-
-/// A buffered file keeps the ordinary stream semantics; nothing here narrows
-/// what a file without constraints can do.
-#[tokio::test]
-async fn a_buffered_file_keeps_stream_io() {
-    use futures::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-
+async fn a_cursor_reads_and_writes_a_real_file_in_sequence() {
     let dir = TempDir::new().expect("temp dir");
     let path = &scratch_file(&dir, "buffered.db");
     let provider = TokioStorageProvider::new();
 
-    let mut file = provider
-        .open(path, OpenOptions::create_write().read(true))
-        .await
-        .expect("open failed");
+    let mut file = FileCursor::new(
+        provider
+            .open(path, OpenOptions::create_write().read(true))
+            .await
+            .expect("open failed"),
+    );
     assert!(file.constraints().is_unconstrained());
 
     file.write_all(b"streamed").await.expect("write failed");
@@ -415,198 +355,6 @@ async fn a_buffered_file_keeps_stream_io() {
     let mut buf = [0u8; 8];
     file.read_exact(&mut buf).await.expect("read failed");
     assert_eq!(&buf, b"streamed");
-}
-
-/// A stream write is visible to `size` and `read_at` when it returns, with
-/// no flush, as in the simulation ("one file state"). The defect this pins:
-/// the stream write returned when Tokio had copied the bytes, before the OS
-/// write, so `size` read a stale length on a multi-thread runtime.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_stream_write_is_visible_without_a_flush() {
-    use futures::io::AsyncWriteExt;
-
-    let dir = TempDir::new().expect("temp dir");
-    let provider = TokioStorageProvider::new();
-    for round in 0..200 {
-        let path = &scratch_file(&dir, &format!("visible-{round}.db"));
-        let mut file = provider
-            .open(path, OpenOptions::create_write().read(true))
-            .await
-            .expect("open failed");
-        file.write_all(&[7u8; 4096]).await.expect("write failed");
-        assert_eq!(
-            file.size().await.expect("size failed"),
-            4096,
-            "round {round}"
-        );
-        let mut buf = [0u8; 4096];
-        assert_eq!(file.read_at(0, &mut buf).await.expect("read failed"), 4096);
-        assert!(buf.iter().all(|&byte| byte == 7), "round {round}");
-    }
-}
-
-/// A stream write whose future is dropped still lands, and the next write
-/// writes its own bytes and reports its own count. The same future polled
-/// again writes its bytes one time.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_dropped_stream_write_does_not_answer_the_next_write() {
-    use futures::io::AsyncWriteExt;
-
-    let dir = TempDir::new().expect("temp dir");
-    let provider = TokioStorageProvider::new();
-    for round in 0..50 {
-        let path = &scratch_file(&dir, &format!("dropped-{round}.db"));
-        let mut file = provider
-            .open(path, OpenOptions::create_write().read(true))
-            .await
-            .expect("open failed");
-        {
-            let dropped = file.write(&[b'A'; 8]);
-            futures::pin_mut!(dropped);
-            let _ = futures::poll!(dropped.as_mut());
-        }
-        let written = file.write(b"BB").await.expect("write failed");
-        assert!(written <= 2, "a write reported {written} bytes of 2");
-        file.write_all(&b"BB"[written..])
-            .await
-            .expect("write failed");
-        {
-            let resumed = file.write(b"CCC");
-            futures::pin_mut!(resumed);
-            let written = match futures::poll!(resumed.as_mut()) {
-                std::task::Poll::Ready(result) => result,
-                std::task::Poll::Pending => resumed.await,
-            };
-            assert_eq!(written.expect("write failed"), 3);
-        }
-        file.flush().await.expect("flush failed");
-        let mut buf = [0u8; 16];
-        let read = file.read_at(0, &mut buf).await.expect("read failed");
-        assert_eq!(&buf[..read], b"AAAAAAAABBCCC", "round {round}");
-    }
-}
-
-/// `write_at` is positioned even on a file opened for appending.
-///
-/// The two halves of such a file mean different things: a stream write goes to
-/// the end because that is what append is for, and a positioned write goes
-/// exactly where it is told because that is what `write_at` promises. Sharing
-/// one descriptor between them cannot deliver both — `pwrite` to an
-/// `O_APPEND` descriptor appends and ignores the offset — so this is the test
-/// that the two are actually separate.
-#[tokio::test]
-async fn positioned_writes_ignore_append_on_a_real_file() {
-    use futures::io::AsyncWriteExt;
-
-    let dir = TempDir::new().expect("temp dir");
-    let path = &scratch_file(&dir, "append.db");
-    let provider = TokioStorageProvider::new();
-
-    let seed = provider
-        .open(path, OpenOptions::create_write())
-        .await
-        .expect("open failed");
-    seed.write_at(0, b"AAAAAAAA").await.expect("seed write");
-    seed.sync_all().await.expect("sync failed");
-    drop(seed);
-
-    let mut file = provider
-        .open(path, OpenOptions::new().read(true).write(true).append(true))
-        .await
-        .expect("open failed");
-
-    // Positioned: exactly at the offset, overwriting in place.
-    assert_eq!(file.write_at(0, b"BB").await.expect("write_at failed"), 2);
-    let mut buf = [0u8; 8];
-    assert_eq!(file.read_at(0, &mut buf).await.expect("read_at failed"), 8);
-    assert_eq!(
-        &buf, b"BBAAAAAA",
-        "a positioned write on an append file must not append"
-    );
-    assert_eq!(
-        file.size().await.expect("size failed"),
-        8,
-        "and must not extend the file"
-    );
-
-    // Stream: at the end, because that is what append means.
-    file.write_all(b"CC").await.expect("stream write failed");
-    file.flush().await.expect("flush failed");
-
-    let mut all = [0u8; 10];
-    assert_eq!(file.read_at(0, &mut all).await.expect("read_at failed"), 10);
-    assert_eq!(
-        &all, b"BBAAAAAACC",
-        "an ordinary stream write on an append file must append"
-    );
-}
-
-/// The stream and positioned sides of one append handle address the *same*
-/// file, even after another process renames a replacement over its path.
-///
-/// An append handle holds two descriptors (see `positioned_descriptor`), and
-/// the second must be a reopen of the file the first holds, never of whatever
-/// the name points at: otherwise stream writes would go to one file while
-/// `read_at` / `write_at` target its replacement.
-#[tokio::test]
-async fn an_append_handle_stays_on_one_file_across_a_rename_over_its_path() {
-    use futures::io::AsyncWriteExt;
-
-    let dir = TempDir::new().expect("temp dir");
-    let path = &scratch_file(&dir, "append.db");
-    let replacement = &scratch_file(&dir, "replacement.db");
-    let provider = TokioStorageProvider::new();
-
-    let seed = provider
-        .open(path, OpenOptions::create_write())
-        .await
-        .expect("open failed");
-    seed.write_at(0, b"AAAA").await.expect("seed write");
-    drop(seed);
-
-    let mut file = provider
-        .open(path, OpenOptions::new().read(true).write(true).append(true))
-        .await
-        .expect("open failed");
-
-    // Someone renames a different file over the name.
-    let other = provider
-        .open(replacement, OpenOptions::create_write())
-        .await
-        .expect("open failed");
-    other.write_at(0, b"ZZZZ").await.expect("write failed");
-    drop(other);
-    provider
-        .rename(replacement, path)
-        .await
-        .expect("rename failed");
-
-    // Both sides of the handle keep working on the original file.
-    file.write_all(b"SS").await.expect("stream write failed");
-    file.flush().await.expect("flush failed");
-    assert_eq!(file.write_at(0, b"P").await.expect("write_at failed"), 1);
-    let mut buf = [0u8; 6];
-    assert_eq!(file.read_at(0, &mut buf).await.expect("read_at failed"), 6);
-    assert_eq!(
-        &buf, b"PAAASS",
-        "stream and positioned writes landed in the same file"
-    );
-
-    // And the replacement at the path was touched by neither.
-    let now_at_path = provider
-        .open(path, OpenOptions::read_only())
-        .await
-        .expect("open failed");
-    let mut replaced = [0u8; 4];
-    assert_eq!(
-        now_at_path
-            .read_at(0, &mut replaced)
-            .await
-            .expect("read_at failed"),
-        4
-    );
-    assert_eq!(&replaced, b"ZZZZ");
-    assert_eq!(now_at_path.size().await.expect("size failed"), 4);
 }
 
 /// `Required` opens a file that already exists, and applies the lifecycle it
@@ -801,8 +549,7 @@ async fn allocate_grows_never_shrinks_and_reads_zeros() {
 /// Every contradictory flag set is refused with `InvalidInput` under every
 /// direct-I/O policy, as the simulator refuses it, and the file does not
 /// change. The defect this pins: a `Required` open used the access flags
-/// only, so `std` did not see the contradiction, and `append + truncate`
-/// then truncated the file.
+/// only, so `std` did not see the contradiction.
 #[tokio::test]
 async fn every_policy_refuses_contradictory_open_options() {
     let dir = TempDir::new().expect("temp dir");
@@ -823,8 +570,6 @@ async fn every_policy_refuses_contradictory_open_options() {
         OpenOptions::read_only().truncate(true),
         OpenOptions::read_only().create(true),
         OpenOptions::read_only().create_new(true),
-        OpenOptions::new().append(true).truncate(true),
-        OpenOptions::new().write(true).append(true).truncate(true),
     ] {
         for policy in [DirectIo::Disabled, DirectIo::Optional, DirectIo::Required] {
             let options = options.clone().direct_io(policy);

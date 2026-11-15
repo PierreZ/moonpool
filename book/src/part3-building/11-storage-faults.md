@@ -15,7 +15,7 @@ Before the faults, the API they land on. Moonpool has **one provider, one file a
 | Layer | Owns | Methods |
 |-------|------|---------|
 | `StorageProvider` | The filesystem **namespace** | `open`, `exists`, `delete`, `rename`, `create_dir_all`, `list_dir`, `sync_dir` |
-| `StorageFile` | Already-open **bytes** | `AsyncRead`/`AsyncWrite`/`AsyncSeek`, `read_at`, `write_at`, `write_at_durable` and their zero-copy `*_aligned` forms, `sync_all`, `sync_data`, `size`, `set_len`, `allocate`, `constraints`, `is_direct_io` |
+| `StorageFile` | Already-open **bytes** | `read_at`, `write_at`, `write_at_durable` and their zero-copy `*_aligned` forms, `sync_all`, `sync_data`, `size`, `set_len`, `allocate`, `constraints`, `is_direct_io` |
 | `BlockFile<F>` | Block arithmetic over one open file | `read_blocks`, `write_blocks`, `write_blocks_durable` and their `*_aligned` forms, `sync`, `sync_data`, `grow_to_blocks`, `size_in_blocks`, `buffer` |
 
 Database needs are **options on opening an ordinary file**, never a second provider stack. There is no `BlockProvider`, no `DirectIoProvider` and no region-addressed device:
@@ -39,7 +39,7 @@ Keep four distinctions, because code hides behind their opposites:
 3. **Growing a file is not preallocation.**
 4. **File durability is not directory-entry durability.** `sync_all` makes the bytes and the length survive. Only `StorageProvider::sync_dir(parent)` makes the **name** survive.
 
-A file with alignment constraints refuses the stream API with `ErrorKind::Unsupported`, on both backends, because a shared cursor cannot stay aligned. `read_at` and `write_at` are what such a file offers. Both return the count moved, which may be short. `BlockFile` exists to loop over short transfers so a pager does not.
+A file has no stream API and no cursor. `read_at` and `write_at` name their offset. Both return the count moved, which may be short. `BlockFile` exists to loop over short transfers so a pager does not, and `FileCursor` does the same for code that reads or writes a file in sequence.
 
 ### Zero copy: owned buffers
 

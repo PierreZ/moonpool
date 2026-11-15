@@ -91,7 +91,6 @@ impl WritebackErrors {
 #[derive(Debug)]
 pub(crate) struct HandleState {
     pub(crate) file_id: FileId,
-    pub(crate) position: u64,
     pub(crate) options: OpenOptions,
     /// Alignment this handle enforces, fixed when the file was opened.
     pub(crate) constraints: IoConstraints,
@@ -106,7 +105,6 @@ pub(crate) struct HandleState {
 impl HandleState {
     pub(crate) fn new(
         file_id: FileId,
-        position: u64,
         options: OpenOptions,
         constraints: IoConstraints,
         direct_io: bool,
@@ -114,7 +112,6 @@ impl HandleState {
     ) -> Self {
         Self {
             file_id,
-            position,
             options,
             constraints,
             direct_io,
@@ -151,10 +148,6 @@ pub(crate) struct PendingStorageOp {
     pub(crate) offset: u64,
     pub(crate) len: usize,
     pub(crate) data: Option<Vec<u8>>,
-    pub(crate) append: bool,
-    /// A positioned operation (`read_at` / `write_at`): it addresses `offset`
-    /// literally and never moves the handle's stream cursor.
-    pub(crate) positioned: bool,
     /// The process whose disk serves the operation.
     pub(crate) owner_ip: IpAddr,
     /// When the operation entered the disk; set at registration.

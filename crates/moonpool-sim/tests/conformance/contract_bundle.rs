@@ -2,6 +2,7 @@
 
 use crate::fixtures::Fixtures;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
+use moonpool_core::FileCursor;
 use moonpool_core::{
     NetworkProvider, OpenOptions, Providers, RandomProvider, StorageFile, StorageProvider,
     TaskProvider, TcpListenerTrait, TimeProvider,
@@ -25,11 +26,12 @@ pub(crate) async fn bundle_contract<P: Providers, F: Fixtures>(p: &P, fixtures: 
 
     // storage slot: write something durably.
     let path = fixtures.path("bundle.txt");
-    let mut file = p
-        .storage()
-        .open(&path, OpenOptions::create_write())
-        .await
-        .expect("storage slot");
+    let mut file = FileCursor::new(
+        p.storage()
+            .open(&path, OpenOptions::create_write())
+            .await
+            .expect("storage slot"),
+    );
     file.write_all(b"bundle").await.expect("write");
     file.sync_all().await.expect("sync");
     drop(file);

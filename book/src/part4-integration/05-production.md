@@ -116,7 +116,7 @@ moonpool-buggify = "0.9"
 use moonpool_buggify::{buggify, cpu_charge, hint};
 
 async fn commit(batch: &Batch) -> io::Result<()> {
-    storage.write_all(batch.bytes()).await?;
+    storage.write_at(batch.offset(), batch.bytes()).await?;
     storage.sync_all().await?;
 
     // Durable but not acknowledged. A crash here is the interesting one.

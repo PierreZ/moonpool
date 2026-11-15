@@ -4,12 +4,9 @@
 
 use std::future::Future;
 use std::io;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::{Context, Poll};
 
-use futures::io::{AsyncRead, AsyncSeek, AsyncWrite};
 use moonpool_core::{
     AlignedBuf, IoConstraints, LocalStorageFile, LocalStorageProvider, OpenOptions, StorageFile,
     StorageProvider,
@@ -68,44 +65,6 @@ impl<P: LocalStorageProvider> LocalStorageProvider for Counting<P> {
 
     async fn sync_dir(&self, path: &str) -> io::Result<()> {
         self.inner.sync_dir(path).await
-    }
-}
-
-impl<F: LocalStorageFile> AsyncRead for CountingFile<F> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl<F: LocalStorageFile> AsyncWrite for CountingFile<F> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_close(cx)
-    }
-}
-
-impl<F: LocalStorageFile> AsyncSeek for CountingFile<F> {
-    fn poll_seek(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        pos: io::SeekFrom,
-    ) -> Poll<io::Result<u64>> {
-        Pin::new(&mut self.inner).poll_seek(cx, pos)
     }
 }
 
