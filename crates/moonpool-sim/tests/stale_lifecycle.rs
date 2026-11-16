@@ -253,7 +253,7 @@ fn the_chaos_end_cuts_a_pending_grace_period_short() {
         .expect("Mutex poisoned: prior task panicked")
         .clone();
     assert_eq!(boots.len(), 2, "the first boot and one restart: {boots:?}");
-    let restart = boots[1] - boots[0];
+    let restart = boots[1].saturating_sub(boots[0]);
     assert!(
         restart < Duration::from_secs(4),
         "the restart follows the chaos end, not the 10 s grace: {restart:?}"

@@ -314,7 +314,8 @@ fn a_replica_without_a_region_of_the_stripe_is_no_copy() {
         "damage would leave stripe 0 one real copy"
     );
     // Stripe 1 has three copies: one may go.
-    let sector = (1 + 0 * 3) % STRIPES;
+    // Rank 0 keeps stripe `s` at sector `s`.
+    let sector = 1;
     assert!(
         first
             .corrupt_bytes("replica", sector * SECTOR..sector * SECTOR + 8)
