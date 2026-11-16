@@ -44,7 +44,7 @@ pub mod messages;
 mod server;
 pub mod state;
 pub mod trust;
-mod workload;
+pub(crate) mod workload;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

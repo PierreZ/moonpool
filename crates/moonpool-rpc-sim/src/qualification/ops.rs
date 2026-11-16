@@ -1,6 +1,8 @@
 //! The workload's operations. Each judges what it can on the spot and
 //! records what must be judged again once every late request has landed.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -22,9 +24,10 @@ use super::messages::{
 use super::state::{CUT_REQUESTS_KEY, Instance, QualLedger, instance_code};
 use super::workload::{Class, QualOp, QualificationWorkload, Runtimes, describe};
 use super::{CALL_TIMEOUT, RPC_PORT, pause};
-use crate::security::messages::PrivateEcho;
+use crate::security::messages::{PrivateEcho, Probe};
 use crate::security::state::Target;
 use crate::security::trust::Kind;
+use crate::security::workload::Refresher;
 use crate::streams::messages::{End, SHUTDOWN_CODE, Scan, ScanItems};
 
 /// How a stream is consumed.
@@ -134,7 +137,8 @@ impl QualificationWorkload {
                     Kind::Anonymous,
                     Kind::Forged,
                     Kind::WrongAudience,
-                ][ctx.random().random_range(0..9)];
+                    Kind::Refreshing,
+                ][ctx.random().random_range(0..10)];
                 let _ = self.auth(ctx, runtimes, None, kind).await;
                 // The rotation scenario needs a retired key refused and then
                 // a current one accepted. Left to the draw, that pair is
@@ -592,6 +596,53 @@ impl QualificationWorkload {
         }
     }
 
+    /// A reliable credentialed call whose source mints a fresh token for
+    /// every transmission: the run's redaction check then also searches
+    /// tokens minted after the first one of a call. Returns whether it
+    /// replied.
+    async fn auth_refreshing(
+        &mut self,
+        ctx: &SimContext,
+        runtimes: &Runtimes,
+        target: &ServiceRef<PrivateEcho>,
+    ) -> bool {
+        let caller = &runtimes.auth;
+        let (id, _) = caller.issue(Kind::Refreshing, Target::Private, 120, 0);
+        let subject = caller
+            .ledger
+            .issued(id)
+            .map(|issued| issued.subject)
+            .unwrap_or_default();
+        let asks = Arc::new(AtomicU32::new(0));
+        let client = target.bind(&runtimes.rpc).with_credentials(Refresher {
+            trust: caller.trust.clone(),
+            ledger: caller.ledger.clone(),
+            id,
+            subject,
+            asks: Arc::clone(&asks),
+        });
+        let probe = Probe { id, hold_ms: 0 };
+        let outcome = moonpool_sim::select! {
+            outcome = client.get_reply(&probe) => Some(outcome),
+            _ = pause(ctx, Duration::from_secs(15)) => None,
+        };
+        let line = match &outcome {
+            None => {
+                caller
+                    .ledger
+                    .outcome(id, crate::security::state::Class::Maybe);
+                format!("{id} Auth Refreshing abandoned")
+            }
+            Some(outcome) => {
+                let _ = caller.judge(id, &outcome.clone().map(Some));
+                format!("{id} Auth Refreshing {}", describe(outcome))
+            }
+        };
+        tracing::info!(line = %line, "rpc_qual_event");
+        self.history.push(line);
+        matches!(outcome, Some(Ok(_)))
+    }
+
     /// A credentialed call to a server's private endpoint, judged by the
     /// security campaign's oracle; returns whether it replied.
     pub(crate) async fn auth(
@@ -611,6 +662,9 @@ impl QualificationWorkload {
             return false;
         };
         let caller = &runtimes.auth;
+        if kind == Kind::Refreshing {
+            return self.auth_refreshing(ctx, runtimes, &target).await;
+        }
         let (id, _) = caller.issue(
             kind,
             Target::Private,
