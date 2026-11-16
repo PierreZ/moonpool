@@ -143,15 +143,28 @@ impl StorageState {
         })
     }
 
+    /// Whether `ip` holds a copy of `(shard, stripe)` at all: its layout
+    /// has a region of that key, or a stripe-less region of the shard. A
+    /// replica the shard declares but that publishes no such region (one
+    /// that never received the stripe) is no copy.
+    fn holds_copy(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {
+        self.layouts
+            .get(&ip)
+            .is_some_and(|layout| layout.holds(shard, stripe))
+    }
+
     /// Whether `ip`'s copy of `(shard, stripe)` is clean on its disk now:
-    /// disk not failed and no damaged sector (wipes are the book's).
+    /// the replica holds a copy, its disk has not failed and no byte of
+    /// the copy is damaged (wipes are the book's).
     pub(crate) fn copy_intact(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {
-        !self.failed_disks.contains(&ip) && !self.copy_damaged(ip, shard, stripe)
+        self.holds_copy(ip, shard, stripe)
+            && !self.failed_disks.contains(&ip)
+            && !self.copy_damaged(ip, shard, stripe)
     }
 
     /// Whether losing `owner`'s copy of `(shard, stripe)` keeps `durable` of
     /// every replication the shard requires, judged on the other copies
-    /// still clean.
+    /// still clean. A replica that holds no copy of the key does not count.
     fn stripe_survives(
         &self,
         requirements: &Requirements,
@@ -168,6 +181,7 @@ impl StorageState {
                 replica_ip(replica).is_none_or(|ip| {
                     ip != owner
                         && !not_intact.lost(ip, shard)
+                        && self.holds_copy(ip, shard, stripe)
                         && !self.copy_damaged(ip, shard, stripe)
                 })
             })

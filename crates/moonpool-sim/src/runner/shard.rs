@@ -966,10 +966,12 @@ impl Shards {
     }
 
     /// The replicas of `shard` whose copy of `stripe` is clean now, from the
-    /// disks' ground truth: not wiped (or healed), disk not failed, and no
-    /// damaged byte in a region the replica publishes for
-    /// `(shard, stripe)` (an out-of-band `corrupt_bytes` damages only the
-    /// bytes it changed, not the rest of their sector). Sorted.
+    /// disks' ground truth: the replica publishes a region of
+    /// `(shard, stripe)` or a stripe-less region of the shard (a replica
+    /// that never held the stripe is no copy), it is not wiped (or healed),
+    /// its disk has not failed, and no byte of those regions is damaged (an
+    /// out-of-band `corrupt_bytes` damages only the bytes it changed, not
+    /// the rest of their sector). Sorted.
     #[must_use]
     pub fn clean_copies(&self, shard: &str, stripe: u64) -> Vec<Replica> {
         let Some(state) = self.get(shard) else {

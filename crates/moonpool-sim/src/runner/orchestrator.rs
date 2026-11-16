@@ -26,7 +26,7 @@ use crate::runner::workload::Workload;
 use crate::sim::{ProcessKillKind, SimWorld};
 use crate::{SimulationResult, assert_reachable};
 
-use super::process_manager::{ProcessConfig, ProcessEnv, ProcessManager};
+use super::process_manager::{PendingGrace, ProcessConfig, ProcessEnv, ProcessManager};
 use super::report::SimulationMetrics;
 use super::stall::{RunStallGuard, StallOutcome};
 
@@ -902,12 +902,36 @@ impl WorkloadOrchestrator {
     ) {
         chaos_shutdown.cancel();
         sim.enter_recovery_mode();
+        Self::cut_pending_graces(sim, process_manager);
         Self::enter_shard_core(sim, process_manager, state);
         // Disruptive buggify sites (`buggify_fault_with_prob!`) stop with the
         // rest of the chaos; ordinary sites keep firing.
         moonpool_buggify::buggify_enter_recovery();
         moonpool_buggify::hint::clear_sink();
         crate::chaos::window::set_chaos_ended_at(Some(sim.current_time()));
+    }
+
+    /// Force-kill now every process whose graceful reboot still waits out
+    /// its grace period. Its restart then follows after the reboot's own
+    /// recovery delay, as after a crash, so a graceful reboot decided just
+    /// before the chaos end is not down for `grace + recovery` into the
+    /// quiet tail. `FoundationDB` has no grace period at all: its
+    /// `rebootProcess` reboots at once (`sim2.actor.cpp`, `doReboot`).
+    /// The grace's own kill, when it arrives later, finds the grace ended
+    /// and is dropped. This draws nothing.
+    fn cut_pending_graces(sim: &SimWorld, process_manager: &ProcessManager<'_>) {
+        for (ip, grace) in process_manager.pending_graces() {
+            tracing::debug!(%ip, "chaos end: the grace period of a graceful reboot is cut short");
+            sim.schedule_event(
+                crate::sim::Event::ProcessForceKill {
+                    ip,
+                    recovery_delay_ms: Some(grace.recovery_delay_ms),
+                    cause: ProcessKillKind::GracePeriodExpired,
+                    generation: grace.generation,
+                },
+                Duration::ZERO,
+            );
+        }
     }
 
     /// The liveness core, when the run asks for one (see
@@ -1437,6 +1461,13 @@ impl WorkloadOrchestrator {
                 };
                 obs.record_sim_fault(Self::sim_now_ms(sim), &event);
                 process_manager.signal_graceful_shutdown(ip);
+                process_manager.begin_grace(
+                    ip,
+                    PendingGrace {
+                        generation,
+                        recovery_delay_ms,
+                    },
+                );
                 sim.schedule_event(
                     crate::sim::Event::ProcessForceKill {
                         ip,
@@ -1454,6 +1485,15 @@ impl WorkloadOrchestrator {
                 generation,
             }) => {
                 if Self::is_stale(sim, ip, generation) {
+                    return;
+                }
+                // Any kill ends a pending grace of this boot. The grace's
+                // own kill is dropped when an earlier kill ended it: the
+                // chaos end cut the grace short, or a crash came first.
+                if !process_manager.end_grace(ip, generation)
+                    && cause == ProcessKillKind::GracePeriodExpired
+                {
+                    tracing::debug!(%ip, generation, "dropped the kill of a grace already ended");
                     return;
                 }
                 assert_reachable!("event: ProcessForceKill");

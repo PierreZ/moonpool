@@ -20,10 +20,12 @@
 //!
 //! Four vetoes stand between a hint and a fault. None of them commands:
 //!
-//! 1. The point is a disruptive buggify location of its own. It is activated
-//!    once per run, fires at a low rate per call ([`POINT_PROB`], or a rate
-//!    literal at the site), and stays silent once the run entered its
-//!    recovery tail.
+//! 1. The point is a disruptive buggify location keyed by its label. It is
+//!    activated once per run, fires at a low rate per call ([`POINT_PROB`],
+//!    or a rate literal at the site), and stays silent once the run entered
+//!    its recovery tail. Because the key is the label, a harness can force
+//!    the activation for one seed with [`set_activation`](crate::set_activation),
+//!    as for a [`buggify_named!`](crate::buggify_named) site.
 //! 2. The seed's chaos: the simulator asks the first attrition regime whose
 //!    victim filter admits the caller. A seed whose regime never reboots
 //!    never reboots on a hint either.
@@ -85,9 +87,12 @@ pub fn clear_sink() {
 /// call. Low, because a point on a hot path is reached often.
 pub const POINT_PROB: f64 = 0.05;
 
-/// Report the moment `label` at `location`, firing at `prob` per call while
-/// the location is active. Use [`hint!`](crate::hint!), which names the
-/// location.
+/// Report the moment `label`, firing at `prob` per call while the label's
+/// location is active. Use [`hint!`](crate::hint!).
+///
+/// The activation is keyed by `label`, not by the call site, so
+/// [`set_activation(label, active)`](crate::set_activation) decides it for a
+/// run. Two sites with one label share one activation: keep labels unique.
 ///
 /// The hint is taken when this function is called, not when the future is
 /// polled. If the sink kills the caller, the returned future never resolves:
@@ -95,8 +100,8 @@ pub const POINT_PROB: f64 = 0.05;
 /// write not yet synced resolves by crash physics. Otherwise the future
 /// resolves at once.
 #[must_use = "await the hint, so no code after the moment runs once the process is killed"]
-pub fn at(label: &'static str, prob: f64, location: &'static str) -> Hinted {
-    let strike = if crate::buggify_fault_internal(prob, location) {
+pub fn at(label: &'static str, prob: f64) -> Hinted {
+    let strike = if crate::buggify_fault_internal(prob, label) {
         SINK.with(|slot| {
             slot.borrow()
                 .as_ref()
@@ -219,6 +224,42 @@ mod tests {
             });
             assert_eq!(labels, ["staged"]);
         }
+    }
+
+    /// A source that always draws 0.99: no location activates on its own
+    /// coin at 0.5, and an active one still fires at rate 1.0.
+    fn high() -> f64 {
+        0.99
+    }
+
+    #[test]
+    fn set_activation_forces_a_hint_by_its_label() {
+        let labels = Rc::new(RefCell::new(Vec::new()));
+        crate::set_random_source(high);
+        crate::buggify_init(0.5);
+        set_sink(Box::new(Recording {
+            labels: Rc::clone(&labels),
+            answer: Strike::Struck,
+        }));
+        assert_eq!(
+            poll_once(crate::hint!("coin says no", 1.0)),
+            Poll::Ready(())
+        );
+        crate::set_activation("forced on", true);
+        assert_eq!(poll_once(crate::hint!("forced on", 1.0)), Poll::Ready(()));
+        clear_sink();
+        crate::buggify_reset();
+        crate::clear_random_source();
+        assert_eq!(labels.take(), ["forced on"], "only the forced label fires");
+    }
+
+    #[test]
+    fn set_activation_can_switch_a_hint_off() {
+        let labels = with_sink(Strike::Killed, || {
+            crate::set_activation("forced off", false);
+            assert_eq!(poll_once(crate::hint!("forced off", 1.0)), Poll::Ready(()));
+        });
+        assert!(labels.is_empty(), "a hint switched off never asks the sink");
     }
 
     #[test]

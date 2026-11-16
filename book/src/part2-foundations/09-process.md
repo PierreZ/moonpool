@@ -103,7 +103,7 @@ async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
 
 `RebootKind` has three variants:
 
-**Graceful.** The runner cancels `ctx.shutdown()`. The process has a grace period to finish in-flight work and close connections. Send buffers drain, so peers see a clean FIN. If the process does not return in time, it is force-killed.
+**Graceful.** The runner cancels `ctx.shutdown()`. The process has a grace period to finish in-flight work and close connections. Send buffers drain, so peers see a clean FIN. If the process does not return in time, it is force-killed. A grace period that is still running when the chaos phase ends is cut short, so the process restarts within its recovery delay of the chaos end.
 
 **Crash.** Instant death. The task is cancelled at the crash instant. Connections reset, so peers see `ConnectionReset`. Unsynced storage data may be lost.
 

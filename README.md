@@ -205,7 +205,8 @@ and under the simulator in its own `#[test]`.
 - `buggify!`, `buggify_with_prob!`, `buggify_fault_with_prob!`,
   `buggify_pick!` and `buggify_range!`: two-phase activation, once per run
   and then per call. `buggify_knob!` (in `moonpool-sim`) for tunables.
-- `buggify_named!` with `set_activation` for per-seed scenarios.
+- `buggify_named!` with `set_activation` for per-seed scenarios. A `hint!`
+  is keyed by its label too, so `set_activation` forces it for a seed.
 - `cpu_charge` reports CPU work to the CPU model, inert elsewhere.
 - Swarm testing: each seed enables a random subset of fault families and
   workload operations (`ChaosMode::Swarm`, `network_fault_mask`,

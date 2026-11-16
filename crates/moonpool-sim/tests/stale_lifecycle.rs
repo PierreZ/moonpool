@@ -160,3 +160,102 @@ fn a_graceful_reboot_still_restarts() {
     let boots = boots_after(vec![(Duration::ZERO, Step::GracefulReboot)]);
     assert_eq!(boots, 2, "the first boot and the restart after the grace");
 }
+
+/// A process that records the simulated time of each boot, then waits
+/// for its shutdown token.
+struct TimedIdle {
+    boots: Arc<std::sync::Mutex<Vec<Duration>>>,
+}
+
+#[async_trait]
+impl Process for TimedIdle {
+    fn name(&self) -> &'static str {
+        "timed_idle"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        self.boots
+            .lock()
+            .expect("Mutex poisoned: prior task panicked")
+            .push(ctx.time().now());
+        ctx.shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+/// Ticks every 100 ms for 30 s, then returns: the run goes on long past
+/// the chaos end, and the chaos end check runs close to its time (it runs
+/// between steps, so a run with no event near it would jump past it).
+struct ThirtySeconds;
+
+#[async_trait]
+impl Workload for ThirtySeconds {
+    fn name(&self) -> &'static str {
+        "thirty_seconds"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        for _ in 0..300 {
+            ctx.time()
+                .sleep(Duration::from_millis(100))
+                .await
+                .map_err(|error| SimulationError::InvalidState(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+/// A graceful reboot of process 0 at 1.5 s with a 10 s grace period and a
+/// 1 s recovery delay.
+struct LateGracefulReboot;
+
+#[async_trait]
+impl FaultInjector for LateGracefulReboot {
+    fn name(&self) -> &'static str {
+        "late_graceful_reboot"
+    }
+
+    async fn inject(&mut self, ctx: &FaultContext) -> SimulationResult<()> {
+        let ip = ctx.process_ips()[0].clone();
+        ctx.time()
+            .sleep(Duration::from_millis(1500))
+            .await
+            .map_err(|error| SimulationError::InvalidState(error.to_string()))?;
+        ctx.reboot_with_delays(&ip, RebootKind::Graceful, &(1000..1001), &(10_000..10_001))?;
+        Ok(())
+    }
+}
+
+/// #342: a graceful reboot decided just before the chaos end does not keep
+/// the process down for its whole grace period into the quiet tail. The
+/// chaos end at 2 s force-kills it, the restart follows 1 s later, and the
+/// grace's own kill at 11.5 s is dropped: two boots, no third.
+#[test]
+fn the_chaos_end_cuts_a_pending_grace_period_short() {
+    let boots = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let process_boots = Arc::clone(&boots);
+    let report = SimulationBuilder::new()
+        .processes(1, move || {
+            Box::new(TimedIdle {
+                boots: Arc::clone(&process_boots),
+            })
+        })
+        .workload(ThirtySeconds)
+        .fault_factory(|| Box::new(LateGracefulReboot))
+        .chaos_duration(Duration::from_secs(2))
+        .set_iterations(1)
+        .set_debug_seeds(vec![42])
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "{:?}", report.seeds_failing);
+    let boots = boots
+        .lock()
+        .expect("Mutex poisoned: prior task panicked")
+        .clone();
+    assert_eq!(boots.len(), 2, "the first boot and one restart: {boots:?}");
+    let restart = boots[1].saturating_sub(boots[0]);
+    assert!(
+        restart < Duration::from_secs(4),
+        "the restart follows the chaos end, not the 10 s grace: {restart:?}"
+    );
+}
