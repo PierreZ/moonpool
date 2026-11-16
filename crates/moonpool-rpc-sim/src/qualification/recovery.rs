@@ -12,9 +12,7 @@ use moonpool_sim::{SimContext, SimProviders, TimeProvider, assert_always, assert
 use super::messages::{Job, Work};
 use super::ops::{StreamOutcome, StreamShape};
 use super::state::{Instance, QualLedger, SCRIPT_DONE_KEY, instance_code};
-use super::workload::{
-    CallRecord, Class, Observer, QualOp, QualificationWorkload, Runtimes, describe, model_config,
-};
+use super::workload::{CallRecord, Class, QualOp, QualificationWorkload, Runtimes, describe};
 use super::{CALL_TIMEOUT, RECOVERY_BOUND, RELEASE_BOUND, pause};
 use crate::foundations::state::Board;
 use crate::security::state::{Class as AuthClass, Ledger as AuthLedger};
@@ -114,7 +112,6 @@ enum Service {
     Unary(String),
     Stream(String),
     Auth(String),
-    Balanced,
     Legacy,
     Recruit,
     Callback,
@@ -146,12 +143,7 @@ impl QualificationWorkload {
             missing.insert(Service::Stream(server.clone()));
             missing.insert(Service::Auth(server));
         }
-        missing.extend([
-            Service::Balanced,
-            Service::Legacy,
-            Service::Recruit,
-            Service::Callback,
-        ]);
+        missing.extend([Service::Legacy, Service::Recruit, Service::Callback]);
         while !missing.is_empty() && ctx.time().now().saturating_sub(start) < RECOVERY_BOUND {
             for service in missing.clone() {
                 if self.regain(ctx, runtimes, &service).await {
@@ -204,10 +196,6 @@ impl QualificationWorkload {
                 self.auth(ctx, runtimes, Some(server.clone()), Kind::Valid)
                     .await
             }
-            Service::Balanced => {
-                self.refresh(ctx, runtimes).await;
-                self.recovery_balanced(ctx, runtimes).await
-            }
             Service::Legacy => self.legacy(ctx, runtimes).await,
             Service::Recruit => self.recruit(ctx, runtimes).await,
             Service::Callback => {
@@ -215,85 +203,6 @@ impl QualificationWorkload {
                 self.callback(ctx, runtimes, server, false).await
             }
         }
-    }
-
-    /// A balanced call with retry permission over the fresh set.
-    async fn recovery_balanced(&mut self, ctx: &SimContext, runtimes: &Runtimes) -> bool {
-        let id = self.id();
-        let request = Job {
-            id,
-            server: String::new(),
-            boot: 0,
-            configuration: 0,
-            hold_ms: 0,
-        };
-        let policy = moonpool_rpc::balance::BalancePolicy {
-            retry: moonpool_rpc::balance::Retry::AfterAmbiguous,
-            attempt_timeout: Some(Duration::from_millis(1500)),
-            ..moonpool_rpc::balance::BalancePolicy::default()
-        };
-        let primaries = Observer::load(&self.observer.primaries);
-        let copies = Observer::load(&self.observer.copies);
-        let outcome = runtimes.balanced.call(request, &policy).await;
-        let check = super::ops::BalancedCheck {
-            id,
-            policy_cap: super::ops::policy_cap(&policy),
-            permitted: Observer::load(&self.observer.primaries) - primaries
-                + Observer::load(&self.observer.copies)
-                - copies,
-            not_admitted: matches!(&outcome, Err(error) if error.execution() == Execution::NotAdmitted),
-            instances: self.set_instances.clone(),
-        };
-        check.verify(&QualLedger::of(ctx.state()));
-        self.balanced.push(check);
-        let line = match &outcome {
-            Ok(done) => format!(
-                "{id} Balanced recovery ok {}#{}",
-                done.reply.server, done.reply.boot
-            ),
-            Err(error) => format!("{id} Balanced recovery err {:?}", error.execution()),
-        };
-        tracing::info!(line = %line, "rpc_qual_event");
-        self.history.push(line);
-        outcome.is_ok()
-    }
-
-    /// Every late loser of this lane's balancer ends within its bounds;
-    /// then its attempt ledger and its queue model agree.
-    pub(crate) async fn drain_balancer(&self, ctx: &SimContext, runtimes: &Runtimes) {
-        let model = runtimes.balanced.model();
-        for _ in 0..200 {
-            let stats = model.stats();
-            if stats.in_flight == 0 && stats.lagging == 0 {
-                break;
-            }
-            if pause(ctx, Duration::from_millis(50)).await.is_err() {
-                cut_short("draining the balancer");
-                return;
-            }
-        }
-        let stats = model.stats();
-        let started = Observer::load(&self.observer.started);
-        let ended = Observer::load(&self.observer.ended);
-        assert_always!(
-            stats.in_flight == 0 && stats.lagging == 0 && started == ended,
-            "rpc qual every late loser ended within its bounds",
-            { "in_flight" => stats.in_flight, "lagging" => stats.lagging, "started" => started, "ended" => ended }
-        );
-        assert_always!(
-            stats.reservations == started && stats.releases == stats.reservations,
-            "rpc qual the queue model released each reservation once",
-            { "reservations" => stats.reservations, "releases" => stats.releases, "started" => started }
-        );
-        assert_always!(
-            stats.lagging <= model_config().max_lagging,
-            "late losers stay within the model's bound"
-        );
-        assert_sometimes!(
-            stats.lagging_completed > 0 && Observer::load(&self.observer.ended_late) > 0,
-            "rpc qual late loser completed after its call returned"
-        );
-        assert_sometimes!(stats.copies_denied > 0, "rpc qual hedge budget exhausted");
     }
 
     /// This lane's client runtime is idle: no call, retained request,
@@ -351,7 +260,7 @@ impl QualificationWorkload {
             "rpc qual no stream outlived its consumer beyond the bound",
             { "open" => format!("{still:?}") }
         );
-        // Requests of cancelled calls and dropped late losers may still land.
+        // Requests of cancelled calls may still land.
         if pause(ctx, Duration::from_secs(3)).await.is_err() {
             cut_short("settling before the baseline");
             return;
@@ -378,7 +287,7 @@ impl QualificationWorkload {
         }
     }
 
-    /// Judge every recorded call, stream, balanced call and credentialed
+    /// Judge every recorded call, stream and credentialed
     /// request against the independent ledgers.
     pub(crate) fn judge_all(&self, ctx: &SimContext) {
         let ledger = QualLedger::of(ctx.state());
@@ -431,9 +340,6 @@ impl QualificationWorkload {
             one_way_executed,
             "rpc qual a one-way request executed exactly once"
         );
-        for check in &self.balanced {
-            check.verify(&ledger);
-        }
         let streams = StreamLedger::of(ctx.state());
         for check in &self.streams {
             judge_stream(&streams, check);
@@ -556,8 +462,7 @@ fn judge_stream(ledger: &StreamLedger, check: &super::ops::StreamCheck) {
 
 /// No credential minted in the run appears in any field of any captured
 /// event: the secrets are each token the run made (a caller's first
-/// token, each one a refreshing source minted, each one the balancer's
-/// source minted), and the search reads every event, whatever its name.
+/// token and each one a refreshing source minted), and the search reads every event, whatever its name.
 pub(crate) fn check_redaction(ctx: &SimContext, trace: &super::CapturedTrace) {
     let Ok(trust) = Trust::of(ctx.state()) else {
         return;

@@ -124,11 +124,10 @@ closed.** The default `SecurityConfig` verifies nothing, so public endpoints
 answer anyone and private ones refuse everyone:
 
 ```rust,ignore
-use moonpool_rpc::security::jwt::{JwksKeys, JwtConfig, JwtVerifier};  // feature `jwt`
 use moonpool_rpc::security::{Credential, SecurityConfig, SystemUtc};
 
-let keys = JwksKeys::from_json(&jwks_document)?;
-let verifier = JwtVerifier::new(keys.clone(), JwtConfig::new("issuer", "rpc"))?;
+// `MyTokens` implements `RequestVerifier`: the token format is ours to choose.
+let verifier = MyTokens::load(&key_file)?;
 let config = RpcConfig {
     security: SecurityConfig::enforced(verifier).with_clock(SystemUtc),
     ..RpcConfig::default()
@@ -142,9 +141,7 @@ Three starting points exist. `SecurityConfig::default()` verifies nothing.
 `SecurityConfig::enforced(verifier)` verifies credentials and authorizes
 with `DefaultPolicy`, or your own `with_policy`. `SecurityConfig::trusted_network()`
 admits everything and claims nothing, FoundationDB's plaintext default, here
-a choice and never an accident. An `IpAllowList` (`with_allow_list`) refuses
-connections before a byte is read, but it restricts reachability only: an
-allowed address still needs a credential for a private endpoint.
+a choice and never an accident.
 
 A refusal is `Unauthenticated(CredentialError)` or `PermissionDenied`. The
 `CredentialError` names what is wrong: `Missing`, `Malformed`, `TooLarge`,
@@ -158,12 +155,14 @@ change. The handler sees the verified caller through
 the credential, and the `moonpool_rpc_requests_denied_total{reason}` counter
 aggregates them.
 
-**JWT and JWKS** (feature `jwt`). `JwtVerifier` checks, in order: size,
-header and algorithm allow list (public-key algorithms only, so the classic
-HS256 confusion is refused), the key id in the **current** key set, the
-signature, issuer and audience, then `exp` and `nbf`. `JwksKeys::replace_json`
-swaps the whole set, as FoundationDB's `applyPublicKeySet` does: a key left
-out is revoked at once.
+**The verifier is the application's.** The crate ships no token format.
+A `RequestVerifier` turns the credential bytes into a `Principal` or a
+`CredentialError`, synchronously, in admission. The runtime bounds the
+credential's size before it calls the verifier. A verifier that rotates its
+keys should swap the whole set, as FoundationDB's `applyPublicKeySet` does: a
+key left out is then refused at once. The `rpc-security` campaign drives this
+seam with a deterministic token format of its own, under key rotations and
+UTC steps.
 
 **Credentials never leave on a session that cannot protect them.** A request
 carrying a credential goes out only on an encrypted session, or when the
@@ -223,9 +222,8 @@ in them fails the handshake on every run alike.
 credential and certificate validity read a separate `UtcClock`: `SystemUtc`
 in production, a scripted `FixedUtc` in tests and simulation. The default
 `NoUtc` knows no time, so an expiring credential fails closed until a clock
-is chosen. The TLS and JWT adapters are native-only features. The policy
-itself (`SecurityConfig`, `AccessPolicy`, `RequestVerifier`, allow lists, key
-rotation, the clocks) is always compiled, so simulations and wasm builds
+is chosen. The TLS adapter is a native-only feature. The policy
+itself (`SecurityConfig`, `AccessPolicy`, `RequestVerifier`, the clocks) is always compiled, so simulations and wasm builds
 exercise the same trust decisions.
 
 ## Protocol Versions and Rolling Upgrades
@@ -283,4 +281,4 @@ interchangeable with the generated one: `tests/derive.rs` serves a derived
 server to a manual client and a manual server to a derived client. The
 `derive` feature is off by default, so a production tree stays free of
 proc-macro dependencies unless asked for. Through the facade crate, the
-features are `moonpool`'s `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt`.
+features are `moonpool`'s `rpc`, `rpc-derive`, `rpc-tls` and `rpc-tls-pki`.

@@ -66,7 +66,7 @@ Every feature below has a chapter. This is the map.
 
 **HTTP and gRPC.** `moonpool-hyper` supplies `HyperExecutor`, `HyperTimer` and `HyperIo`, so axum, tonic and plain hyper run unchanged on the providers. See [The hyper Stack](../part4-integration/08-hyper-stack.md) and [Wiring a Web Service](../part4-integration/03-wiring-a-web-service.md).
 
-**Typed RPC.** `moonpool-rpc` is FoundationDB's `fdbrpc` without its wire format: interfaces as data, delivery modes, streams, per-endpoint `EndpointQueue` admission, buggify sites inside the runtime, and `derive`, `tls` and `jwt` features. `moonpool-rpc-sim` runs six campaigns in CI. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.md) and [Admission, Security and Derive](../part4-networking/04-rpc-operations.md).
+**Typed RPC.** `moonpool-rpc` is FoundationDB's `fdbrpc` without its wire format: interfaces as data, delivery modes, streams, per-endpoint `EndpointQueue` admission, buggify sites inside the runtime, and `derive` and `tls` features. `moonpool-rpc-sim` runs seven campaigns in CI. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.md) and [Admission, Security and Derive](../part4-networking/04-rpc-operations.md).
 
 **Production and the browser.** The lean build `default-features = false, features = ["tokio"]` keeps the simulator out of your release binary. The simulator itself compiles to `wasm32-unknown-unknown`, and the book embeds a browser demo. See [Using Providers in Production](../part4-integration/05-production.md) and [Simulation in the Browser](../part4-integration/07-wasm.md).
 

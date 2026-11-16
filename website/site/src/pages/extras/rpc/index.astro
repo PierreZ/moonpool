@@ -109,7 +109,6 @@ const H = [
   ["delivery", "Delivery"],
   ["reply-streams", "Reply streams"],
   ["sessions-peers-and-failure", "Sessions, peers and failure"],
-  ["load-balancing", "Load balancing"],
   ["security", "Security"],
   ["shutdown", "Shutdown"],
   ["how-it-is-tested", "How it is tested"],
@@ -228,9 +227,6 @@ const toc = tocHtml(H);
   <Fragment set:html={await md(docSection(transportDoc, "Sessions and peers"))} />
   <h3>The failure monitor</h3>
   <Fragment set:html={await md(moduleDoc(src("failure/mod.rs")), 2)} />
-
-  <h2 id="load-balancing">Load balancing</h2>
-  <Fragment set:html={await md(moduleDoc(src("balance/mod.rs")), 2)} />
 
   <h2 id="security">Security</h2>
   <Fragment set:html={await md(moduleDoc(src("security/mod.rs")), 2)} />

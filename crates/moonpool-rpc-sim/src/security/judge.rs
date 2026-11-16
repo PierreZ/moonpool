@@ -276,8 +276,8 @@ fn denial_gate(kind: Kind, reason: CredentialError) {
         (Kind::RotatedOut, _) => assert_sometimes!(true, "rpc security retired key refused"),
         (Kind::WrongAudience, _) => assert_sometimes!(true, "rpc security wrong audience refused"),
         (Kind::WrongIssuer, _) => assert_sometimes!(true, "rpc security wrong issuer refused"),
-        (Kind::Symmetric, _) => {
-            assert_sometimes!(true, "rpc security symmetric algorithm confusion refused");
+        (Kind::WrongAlgorithm, _) => {
+            assert_sometimes!(true, "rpc security unsupported algorithm refused");
         }
         (Kind::Garbage, _) => assert_sometimes!(true, "rpc security malformed credential refused"),
         (_, CredentialError::Expired) => {

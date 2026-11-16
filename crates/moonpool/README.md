@@ -52,7 +52,6 @@ and a `Workload`.
 | `rpc-derive` | no | the `#[moonpool_rpc::service]` attribute |
 | `rpc-tls` | no | TLS sessions for `rpc`, server-authenticated or mutual (native only) |
 | `rpc-tls-pki` | no | Certificate making for those sessions (`security::tls::pki`, native only) |
-| `rpc-jwt` | no | JWT/JWKS request verification for `rpc` (native only) |
 
 ## Using in production
 

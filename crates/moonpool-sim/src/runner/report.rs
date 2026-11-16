@@ -19,7 +19,6 @@ use std::fmt;
 use std::time::Duration;
 
 use moonpool_assertions::AssertKind;
-use moonpool_core::metrics::query::MetricQueryReport;
 use moonpool_core::metrics::{
     HistogramValue, MetricPoint, MetricSample, MetricValue, u64_to_f64_exact,
 };
@@ -423,22 +422,12 @@ pub struct SimulationReport {
     /// series key. Empty unless the simulation registered a
     /// [`metrics_factory`](super::builder::SimulationBuilder::metrics_factory).
     pub app_metrics: Vec<MetricAggregate>,
-    /// Identity of this `run()` invocation, carried on every
-    /// [`MetricQueryRow`](moonpool_core::metrics::query::MetricQueryRow) so a
-    /// value can be traced back to the execution that produced it.
+    /// Identity of this `run()` invocation: its base seed.
     ///
     /// Distinct from a seed: the seed identifies one replayable iteration,
     /// the run id identifies the whole exploration invocation those
     /// iterations belonged to.
     pub run_id: u64,
-    /// Evaluated metric queries, one per query registered with
-    /// [`metric`](super::builder::SimulationBuilder::metric), in registration
-    /// order.
-    ///
-    /// Each carries every per-seed row it produced plus the across-run
-    /// summary the report prints. Empty unless the simulation registered
-    /// queries.
-    pub metric_queries: Vec<MetricQueryReport>,
 }
 
 impl SimulationReport {
@@ -578,15 +567,6 @@ pub(crate) fn fmt_duration(d: Duration) -> String {
     }
 }
 
-/// Simulated milliseconds as the shortest exact label, e.g. `60s` or `1500ms`.
-pub(crate) fn fmt_sim_ms(ms: u64) -> String {
-    if ms.is_multiple_of(1000) {
-        format!("{}s", ms / 1000)
-    } else {
-        format!("{ms}ms")
-    }
-}
-
 /// Short human-readable label for an assertion kind.
 pub(crate) fn kind_label(kind: AssertKind) -> &'static str {
     match kind {
@@ -653,7 +633,6 @@ mod tests {
             saturation: None,
             app_metrics: Vec::new(),
             run_id: 0,
-            metric_queries: Vec::new(),
         }
     }
 

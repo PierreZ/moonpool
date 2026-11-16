@@ -1,6 +1,6 @@
-//! The verifying server: one runtime per boot whose security verifies JWTs
-//! with the production adapter against the shared, rotating JWKS and the
-//! scripted UTC. Every handler writes the receipt ledger the moment it gets
+//! The verifying server: one runtime per boot whose security verifies the
+//! campaign's tokens (`trust::Verifier`) against the shared, rotating key
+//! set and the scripted UTC. Every handler writes the receipt ledger the moment it gets
 //! a request and asserts the oracle allows it. A local caller inside the
 //! same runtime sends its own requests through the same check. On a
 //! graceful shutdown the runtime drains within a short deadline while the
@@ -81,7 +81,7 @@ impl Process for SecurityServer {
             ledger: Ledger::of(&state),
             trust: trust.clone(),
         };
-        let security = SecurityConfig::enforced(trust.verifier(4)?)
+        let security = SecurityConfig::enforced(trust.verifier())
             .accept_credentials_over_plaintext()
             .with_clock(trust.clock());
         let config = RpcConfig {

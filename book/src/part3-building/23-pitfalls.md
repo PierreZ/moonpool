@@ -78,7 +78,7 @@ A list of mistakes we have made ourselves when building simulations with Moonpoo
 
 ## Metrics Steered by the Wall Clock
 
-**Symptom**: a metric query gives different numbers for the same seed.
+**Symptom**: a metric in the report gives different numbers for the same seed.
 
 **Cause**: a histogram observed from `Instant::now()`. The wall clock is not deterministic.
 

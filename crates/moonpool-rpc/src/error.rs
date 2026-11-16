@@ -297,10 +297,9 @@ impl RpcError {
     /// withheld from an unauthenticated session), or the local runtime
     /// gone or misused (shut down, not listening, already registered).
     ///
-    /// The one list [`RetryPolicy`](crate::RetryPolicy) and the balancer
-    /// consult: a security refusal is the caller's credential or the
-    /// service's policy, both expected to be the same for every
-    /// alternative and every retry, so repeating the call only burns
+    /// The one list [`RetryPolicy`](crate::RetryPolicy) consults: a
+    /// security refusal is the caller's credential or the service's
+    /// policy, both expected to be the same for every retry, so repeating the call only burns
     /// budget. A refusal is never remembered as an endpoint failure:
     /// fixing the credential makes the next call succeed.
     #[must_use]

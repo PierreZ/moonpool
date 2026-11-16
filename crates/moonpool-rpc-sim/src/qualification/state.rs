@@ -12,9 +12,7 @@
 //! Streams are judged by the streams campaign's producer/consumer ledger
 //! ([`crate::streams::state::StreamLedger`]) and credentials by the
 //! security campaign's issue/receipt ledger
-//! ([`crate::security::state::Ledger`]); balanced calls by the executions
-//! their policy allows (the observation hook, the balancer's own account,
-//! only tightens that bound).
+//! ([`crate::security::state::Ledger`]).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -34,7 +32,7 @@ pub const CUT_REQUESTS_KEY: &str = "rpc.qual.cuts";
 /// Servers a lane asked to be shut down gracefully, as `Vec<String>`
 /// (appended; the script serves each once, during the chaos window).
 pub const SHUTDOWN_REQUESTS_KEY: &str = "rpc.qual.shutdowns";
-/// How many lanes stopped issuing work and drained their balancers.
+/// How many lanes stopped issuing work.
 pub const LANES_STOPPED_KEY: &str = "rpc.qual.lanes.stopped";
 /// Set by the lead lane once the idle baseline was checked: every lane
 /// may judge its calls.

@@ -83,7 +83,7 @@ fn bounded_campaign_hits_every_required_scenario() {
         "rpc security retired key refused",
         "rpc security wrong audience refused",
         "rpc security wrong issuer refused",
-        "rpc security symmetric algorithm confusion refused",
+        "rpc security unsupported algorithm refused",
         "rpc security malformed credential refused",
         "rpc security expired token refused",
         "rpc security not-yet-valid token refused",

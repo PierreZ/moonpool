@@ -6,11 +6,10 @@
 //!
 //! - **server** ([`QualServer`], three of them, in two datacenters by
 //!   address): one verifying runtime per boot at the same `ip:port`. It
-//!   serves a base `Work` instance (unary, one-way, reliable and balanced
-//!   calls), recruits a fresh `Work` instance per configuration, produces
+//!   serves a base `Work` instance (unary, one-way and reliable calls), recruits a fresh `Work` instance per configuration, produces
 //!   the streams campaign's reply streams, answers the security
-//!   campaign's credential-protected endpoint (JWT/JWKS over a rotating key
-//!   set and a scripted UTC; a local caller goes through the same check),
+//!   campaign's credential-protected endpoint (its own deterministic tokens
+//!   over a rotating key set and a scripted UTC; a local caller goes through the same check),
 //!   forwards calls to callbacks owned by a third process, and publishes
 //!   everything through a well-known directory, possibly late after a boot.
 //! - **third** ([`Third`]): adopts recruited members whose interfaces
@@ -20,12 +19,11 @@
 //! - **legacy** ([`Legacy`]): a runtime pinned to protocol version 1 (the
 //!   previous build in a rolling upgrade).
 //! - **workload** ([`QualificationWorkload`]): a client runtime speaking
-//!   versions 1 and 2, a version 1 only runtime and a load balancer. It
+//!   versions 1 and 2 and a version 1 only runtime. It
 //!   learns interfaces only through directories and recruiters, keeps every
 //!   publication it learned stored as bytes, and mixes at-most-once,
 //!   reliable, sustained-failure-bounded and one-way calls, reply streams
-//!   (eager, slow, abandoned before and after the first item), balanced
-//!   calls (at most once, retried with permission, hedged, cancelled),
+//!   (eager, slow, abandoned before and after the first item),
 //!   credentialed calls (valid, expired, from a retired key, forged,
 //!   anonymous), calls to stored interfaces of ended boots, recruitment
 //!   through the third participant, callbacks, legacy and version 1 calls,
@@ -35,23 +33,20 @@
 //! **Oracles** (written by application code only, never read from the
 //! transport): the qualification ledger ([`state::QualLedger`]: boots,
 //! publications, executions), the streams campaign's producer/consumer
-//! ledger and the security campaign's issue/receipt ledger; a balanced
-//! call is judged against the executions its policy alone allows (the
-//! attempts the balancer reports through its observation hook only
-//! tighten that bound). Handlers
+//! ledger and the security campaign's issue/receipt ledger. Handlers
 //! assert on the spot that a request ran only in the boot and instance its
 //! reference named and that no handler of an ended boot runs: a stale I1
 //! never reaches I2, whatever carried it (a retained reliable call, a
-//! stream, a balanced set, a forwarded or stored interface). At the end
-//! every call is judged against the ledgers after late losers drained.
+//! stream, a forwarded or stored interface). At the end every call is
+//! judged against the ledgers after late requests landed.
 //!
 //! **Recovery and baselines.** After the script stops, the workload must
 //! regain every service (fresh publications, unary, a new stream, a
-//! balanced call, a credentialed call, the legacy peer, recruitment and a
+//! credentialed call, the legacy peer, recruitment and a
 //! callback through the third participant) within [`RECOVERY_BOUND`];
 //! then every stream a current boot produced must end within
-//! [`RELEASE_BOUND`] and the client runtime and the queue model must be
-//! back at their idle baseline. Every boot checks that the runtimes of its
+//! [`RELEASE_BOUND`] and the client runtime must be back at its idle
+//! baseline. Every boot checks that the runtimes of its
 //! process's earlier boots returned to their baseline
 //! ([`ResourceProbe::is_at_baseline`](moonpool_rpc::ResourceProbe::is_at_baseline)),
 //! and the end of the run checks them all.
@@ -103,8 +98,7 @@ pub(crate) use crate::streams::pause;
 
 /// How long after the fault script stopped every service must be back:
 /// the longest reconnect backoff the knobs allow (3 s), a failed session's
-/// ping timeout (6 s), the balancer's longest exclusion (2 s) and its
-/// all-alternatives probe wait, a directory lookup and a stream per server
+/// ping timeout (6 s), a directory lookup and a stream per server
 /// on a fresh session, with margin.
 pub const RECOVERY_BOUND: Duration = Duration::from_secs(30);
 

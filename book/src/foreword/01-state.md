@@ -10,14 +10,14 @@ The workspace holds sixteen crates. Eleven are published to crates.io. Five are 
 
 | Crate | What it is | Status |
 |---|---|---|
-| `moonpool` | The facade. Features `sim` and `tokio` are on by default. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-jwt` are opt-in. A lean production build uses `default-features = false, features = ["tokio"]`. | Stable |
+| `moonpool` | The facade. Features `sim` and `tokio` are on by default. `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls` and `rpc-tls-pki` are opt-in. A lean production build uses `default-features = false, features = ["tokio"]`. | Stable |
 | `moonpool-core` | The six provider traits (`TimeProvider`, `TaskProvider`, `NetworkProvider`, `RandomProvider`, `StorageProvider`, `SystemProvider`), `TokioProviders`, `select!`, `LayoutRegion`, storage types. Granular `tokio-*` features keep it wasm-clean. | Stable. `SystemProvider` and `LayoutRegion` are new. |
 | `moonpool-sim` | The simulation engine: `SimWorld`, the deterministic executor, `SimulationBuilder`, chaos, the 9 assertion macros, events and invariants. Compiles to `wasm32-unknown-unknown` with `--no-default-features`. | Stable core. See the new features below. |
 | `moonpool-buggify` | `buggify!`, `buggify_with_prob!`, `buggify_named!`, `hint!` and `cpu_charge`. Pure std, zero dependencies, inert outside a simulation. | Stable. `hint!`, `buggify_named!`, `set_activation` and `cpu_charge` are new. |
 | `moonpool-assertions` | Antithesis-style assertion accounting: 8192 slots, 256 buckets, the heap table the explorer overlays with shared memory. Pure std, wasm-able. | Stable |
 | `moonpool-explorer` | Fork-based frontier exploration: recipes, the frontier controller, bounded workers, sancov edge coverage. Linux and macOS only. | Stable. Multi-process parallel exploration is still on the list. |
 | `moonpool-hyper` | hyper 1.x on the providers: `HyperExecutor`, `HyperTimer`, `HyperIo`, `TowerToHyperService`. Runs tonic, axum and plain hyper unchanged. | Stable |
-| `moonpool-rpc` | Typed dynamic-endpoint RPC in the style of FoundationDB's `fdbrpc`: interfaces as data, delivery modes, streams, per-endpoint admission queues, buggify points inside the runtime. Features `prost`, `derive`, `tls`, `jwt`. | New |
+| `moonpool-rpc` | Typed dynamic-endpoint RPC in the style of FoundationDB's `fdbrpc`: interfaces as data, delivery modes, streams, per-endpoint admission queues, buggify points inside the runtime. Features `prost`, `derive`, `tls`, `tls-pki`. | New |
 | `moonpool-rpc-derive` | The `#[moonpool_rpc::service]` attribute. | New |
 | `moonpool-prometheus` | `PrometheusSource`: the metrics your code already keeps, reported per node and across seeds. | Stable |
 | `moonpool-journal` | A CLSTORE journal: positions in any order, crash told apart from corruption, damage identified for repair from peers. | New. Rewritten this cycle. |
@@ -49,7 +49,7 @@ These landed in the last cycle. Each has a chapter.
 - **CPU time and gray failures**: `Chaos::Cpu`, `Chaos::GrayFailure`, `cpu_charge` and `SimContext::slowness`. A machine stays alive but slow. `SystemProvider` exposes CPU and disk counters to the code under test. See [CPU Time and Gray Failures](../part3-building/26-cpu-and-gray-failure.md).
 - **Aimed storage faults**: `storage_fault_mask`, owner-scoped and byte-range targeted injection, `LayoutRegion`, `FaultContext::durable_bytes`, and the replicated patterns `Minority`, `Striped` and `Rolling` per process group. See [Aiming Storage Faults](../part3-building/33-aimed-faults.md).
 - **`moonpool-journal` v2**: a position-keyed CLSTORE journal with `Batch::fits` and `fits_another`, `Journal::peek_meta`, an `Ambiguous` tail and hints inside a commit. See [A Crash-Aware Journal](../part5-building-on-top/08-journal.md).
-- **`moonpool-rpc`**: admission queues per endpoint, the `derive`, `tls` and `jwt` features, and the `moonpool-rpc-sim` campaigns. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.md).
+- **`moonpool-rpc`**: admission queues per endpoint, the `derive` and `tls` features, and the `moonpool-rpc-sim` campaigns. See [Typed RPC with moonpool-rpc](../part4-networking/02-rpc.md).
 
 ## What is missing
 

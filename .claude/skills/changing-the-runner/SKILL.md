@@ -65,7 +65,7 @@ replayable and the recipe format of the explorer stays valid.
 - Report: a new fact is a field on `SimulationReport` printed by
   `runner/display.rs`, never a log line someone has to grep.
 - Tests: `tests/sim.rs`, `process_groups.rs`, `topology.rs`, `reboot.rs`,
-  `swarm_op_alphabet.rs`, `run_time_budget.rs`, `metric_queries.rs` pin the
+  `swarm_op_alphabet.rs`, `run_time_budget.rs` pin the
   builder features by name; add one.
 - Book: `part3-building/04-simulation-builder.md`, `05-running.md`,
   `appendix/03-configuration.md`, and `llms.md` (`/update-the-book`).

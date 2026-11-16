@@ -1,14 +1,12 @@
 //! The workload's operations. Each judges what it can on the spot and
 //! records what must be judged again once every late request has landed.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 use futures::StreamExt;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
-use moonpool_rpc::balance::{
-    AttemptKind, AttemptOutcome, BalanceError, BalanceFailure, BalancePolicy, Balanced,
-    DuplicatePolicy, Duplicates, HedgeTiming, Retry,
-};
 use moonpool_rpc::protocol::stream_item_frame_len;
 use moonpool_rpc::{
     AccessClass, BootstrapAddress, ErrorReason, Execution, ReplyStream, RpcError, RpcHandle,
@@ -24,11 +22,12 @@ use super::messages::{
     RECRUITER_ID, Recruit, Recruiter, Relayed, Work,
 };
 use super::state::{CUT_REQUESTS_KEY, Instance, QualLedger, instance_code};
-use super::workload::{Class, Observer, QualOp, QualificationWorkload, Runtimes, describe};
+use super::workload::{Class, QualOp, QualificationWorkload, Runtimes, describe};
 use super::{CALL_TIMEOUT, RPC_PORT, pause};
-use crate::security::messages::PrivateEcho;
+use crate::security::messages::{PrivateEcho, Probe};
 use crate::security::state::Target;
 use crate::security::trust::Kind;
+use crate::security::workload::Refresher;
 use crate::streams::messages::{End, SHUTDOWN_CODE, Scan, ScanItems};
 
 /// How a stream is consumed.
@@ -69,104 +68,6 @@ pub(crate) struct StreamCheck {
     /// The instance code of the boot its reference named.
     pub(crate) expected: u64,
     pub(crate) outcome: StreamOutcome,
-}
-
-/// One balanced call to judge against the execution ledger.
-#[derive(Debug, Clone)]
-pub(crate) struct BalancedCheck {
-    pub(crate) id: u64,
-    /// Executions its policy alone allows, whatever the balancer did:
-    /// at most one sequential attempt may run without retry permission
-    /// (`max_attempts` with it), plus `max_copies` concurrent copies.
-    pub(crate) policy_cap: u64,
-    /// A tighter bound from the attempts the observation hook reported
-    /// (the balancer's own account, so only an additional check).
-    pub(crate) permitted: u64,
-    /// It reported that nothing ran.
-    pub(crate) not_admitted: bool,
-    /// The set's instances: the only ones that may run it.
-    pub(crate) instances: Vec<Instance>,
-}
-
-/// The executions `policy` allows one balanced call, from the policy alone.
-pub(crate) fn policy_cap(policy: &BalancePolicy) -> u64 {
-    let sequential = match policy.retry {
-        Retry::AtMostOnce => 1,
-        Retry::AfterAmbiguous => u64::from(policy.max_attempts.max(1)),
-    };
-    let copies = match &policy.duplicates {
-        Duplicates::Permitted(copies) => u64::from(copies.max_copies),
-        Duplicates::Forbidden => 0,
-    };
-    sequential + copies
-}
-
-impl BalancedCheck {
-    pub(crate) fn verify(&self, ledger: &QualLedger) {
-        let runs = ledger.executions(self.id);
-        let executed = u64::try_from(runs.len()).unwrap_or(u64::MAX);
-        assert_always!(
-            executed <= self.policy_cap,
-            "rpc qual a balanced job ran at most as often as its policy allows",
-            { "id" => self.id, "executed" => executed, "cap" => self.policy_cap }
-        );
-        assert_always!(
-            executed <= self.permitted,
-            "rpc qual a balanced job ran at most as often as permitted",
-            { "id" => self.id, "executed" => executed, "permitted" => self.permitted }
-        );
-        if self.not_admitted {
-            assert_always!(
-                executed == 0,
-                "rpc qual a not-admitted call never executed",
-                { "id" => self.id }
-            );
-        }
-        for run in &runs {
-            assert_always!(
-                self.instances.contains(run),
-                "rpc qual a balanced job ran only in an incarnation of its set",
-                { "id" => self.id, "ran" => run.to_string() }
-            );
-        }
-    }
-}
-
-/// Balanced call permissions, as drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Permission {
-    AtMostOnce,
-    Retry,
-    Hedged,
-    Cancel,
-    /// Hedged, through the client that carries credentials.
-    Credentialed,
-}
-
-impl Permission {
-    fn policy(self) -> BalancePolicy {
-        let timeout = Some(Duration::from_millis(1500));
-        match self {
-            Self::AtMostOnce => BalancePolicy {
-                attempt_timeout: timeout,
-                ..BalancePolicy::default()
-            },
-            Self::Retry => BalancePolicy {
-                retry: Retry::AfterAmbiguous,
-                attempt_timeout: timeout,
-                ..BalancePolicy::default()
-            },
-            Self::Hedged | Self::Cancel | Self::Credentialed => BalancePolicy {
-                duplicates: Duplicates::Permitted(DuplicatePolicy {
-                    max_copies: 1,
-                    hedge: Some(HedgeTiming::default()),
-                    compare_within: Duration::from_secs(1),
-                }),
-                attempt_timeout: Some(Duration::from_secs(2)),
-                ..BalancePolicy::default()
-            },
-        }
-    }
 }
 
 fn instance_of(publication: &Publication) -> Instance {
@@ -225,17 +126,6 @@ impl QualificationWorkload {
                 ][ctx.random().random_range(0..5)];
                 let _ = self.stream(ctx, runtimes, None, shape).await;
             }
-            QualOp::Balanced => {
-                let permission = [
-                    Permission::AtMostOnce,
-                    Permission::Retry,
-                    Permission::Hedged,
-                    Permission::Hedged,
-                    Permission::Cancel,
-                    Permission::Credentialed,
-                ][ctx.random().random_range(0..6)];
-                let _ = self.balanced_call(ctx, runtimes, permission).await;
-            }
             QualOp::Auth => {
                 let kind = [
                     Kind::Valid,
@@ -247,7 +137,8 @@ impl QualificationWorkload {
                     Kind::Anonymous,
                     Kind::Forged,
                     Kind::WrongAudience,
-                ][ctx.random().random_range(0..9)];
+                    Kind::Refreshing,
+                ][ctx.random().random_range(0..10)];
                 let _ = self.auth(ctx, runtimes, None, kind).await;
                 // The rotation scenario needs a retired key refused and then
                 // a current one accepted. Left to the draw, that pair is
@@ -705,128 +596,51 @@ impl QualificationWorkload {
         }
     }
 
-    /// A balanced call over the installed set; returns whether it replied.
-    async fn balanced_call(
+    /// A reliable credentialed call whose source mints a fresh token for
+    /// every transmission: the run's redaction check then also searches
+    /// tokens minted after the first one of a call. Returns whether it
+    /// replied.
+    async fn auth_refreshing(
         &mut self,
         ctx: &SimContext,
         runtimes: &Runtimes,
-        permission: Permission,
+        target: &ServiceRef<PrivateEcho>,
     ) -> bool {
-        if self.set_version == 0
-            || runtimes.balanced.status().stale
-            || ctx.random().random_bool(0.2)
-        {
-            self.refresh(ctx, runtimes).await;
-        }
-        let id = self.id();
-        let request = Job {
+        let caller = &runtimes.auth;
+        let (id, _) = caller.issue(Kind::Refreshing, Target::Private, 120, 0);
+        let subject = caller
+            .ledger
+            .issued(id)
+            .map(|issued| issued.subject)
+            .unwrap_or_default();
+        let asks = Arc::new(AtomicU32::new(0));
+        let client = target.bind(&runtimes.rpc).with_credentials(Refresher {
+            trust: caller.trust.clone(),
+            ledger: caller.ledger.clone(),
             id,
-            server: String::new(),
-            boot: 0,
-            configuration: 0,
-            hold_ms: 0,
+            subject,
+            asks: Arc::clone(&asks),
+        });
+        let probe = Probe { id, hold_ms: 0 };
+        let outcome = moonpool_sim::select! {
+            outcome = client.get_reply(&probe) => Some(outcome),
+            _ = pause(ctx, Duration::from_secs(15)) => None,
         };
-        let policy = permission.policy();
-        let observer = &self.observer;
-        let primaries_before = Observer::load(&observer.primaries);
-        let copies_before = Observer::load(&observer.copies);
-        let client = if permission == Permission::Credentialed {
-            &runtimes.credentialed
-        } else {
-            &runtimes.balanced
-        };
-        let outcome = if permission == Permission::Cancel {
-            let give_up = Duration::from_millis(ctx.random().random_range(1..400));
-            moonpool_sim::select! {
-                outcome = client.call(request, &policy) => Some(outcome),
-                _ = pause(ctx, give_up) => None,
+        let line = match &outcome {
+            None => {
+                caller
+                    .ledger
+                    .outcome(id, crate::security::state::Class::Maybe);
+                format!("{id} Auth Refreshing abandoned")
             }
-        } else {
-            Some(client.call(request, &policy).await)
+            Some(outcome) => {
+                let _ = caller.judge(id, &outcome.clone().map(Some));
+                format!("{id} Auth Refreshing {}", describe(outcome))
+            }
         };
-        if permission == Permission::Credentialed && matches!(outcome, Some(Ok(_))) {
-            assert_sometimes!(true, "rpc qual credentialed balanced call served");
-        }
-        let primaries = Observer::load(&observer.primaries) - primaries_before;
-        let copies = Observer::load(&observer.copies) - copies_before;
-        let sequential = match policy.retry {
-            Retry::AtMostOnce => primaries.min(1),
-            Retry::AfterAmbiguous => primaries,
-        };
-        let check = BalancedCheck {
-            id,
-            policy_cap: policy_cap(&policy),
-            permitted: sequential + copies,
-            not_admitted: matches!(
-                &outcome,
-                Some(Err(error)) if error.execution() == Execution::NotAdmitted
-            ),
-            instances: self.set_instances.clone(),
-        };
-        check.verify(&QualLedger::of(ctx.state()));
-        self.balanced.push(check);
-        let summary = match &outcome {
-            None => "cancelled".to_string(),
-            Some(Ok(done)) => self.judge_balanced(done),
-            Some(Err(error)) => self.judge_balance_error(ctx, runtimes, error).await,
-        };
-        let line = format!("{id} Balanced {permission:?} {summary}");
         tracing::info!(line = %line, "rpc_qual_event");
         self.history.push(line);
         matches!(outcome, Some(Ok(_)))
-    }
-
-    fn judge_balanced(&self, done: &Balanced<Done>) -> String {
-        let reply = &done.reply;
-        assert_always!(
-            self.set_instances
-                .iter()
-                .any(|instance| instance.process == reply.server && instance.boot == reply.boot),
-            "rpc qual a balanced reply came from an incarnation of its set"
-        );
-        let failed_first = done.attempts.iter().any(|attempt| {
-            matches!(&attempt.outcome, AttemptOutcome::Failed(_))
-                && attempt.alternative != done.alternative
-        });
-        if failed_first {
-            assert_sometimes!(
-                true,
-                "rpc qual balanced call fell back to another alternative"
-            );
-        }
-        if done.attempts.iter().any(|attempt| {
-            matches!(&attempt.outcome, AttemptOutcome::Failed(error) if *error.reason() == ErrorReason::StaleIncarnation)
-        }) {
-            assert_sometimes!(true, "rpc qual stale incarnation skipped for a healthy one");
-        }
-        if done
-            .attempts
-            .iter()
-            .any(|attempt| attempt.kind == AttemptKind::Hedge)
-        {
-            assert_sometimes!(true, "rpc qual balanced call hedged");
-        }
-        format!("ok {}#{} v{}", reply.server, reply.boot, done.version.get())
-    }
-
-    async fn judge_balance_error(
-        &mut self,
-        ctx: &SimContext,
-        runtimes: &Runtimes,
-        error: &BalanceError,
-    ) -> String {
-        if matches!(error.failure(), BalanceFailure::StaleAlternatives) {
-            assert_sometimes!(true, "rpc qual balanced set went stale and was replaced");
-            for server in ctx.topology().ips_in_group("server") {
-                self.forget(&server);
-            }
-            self.refresh(ctx, runtimes).await;
-        }
-        let reason = match error.failure() {
-            BalanceFailure::Rejected(rejected) => format!("rejected {:?}", rejected.reason()),
-            other => format!("{other:?}"),
-        };
-        format!("err {reason} {:?}", error.execution())
     }
 
     /// A credentialed call to a server's private endpoint, judged by the
@@ -848,6 +662,9 @@ impl QualificationWorkload {
             return false;
         };
         let caller = &runtimes.auth;
+        if kind == Kind::Refreshing {
+            return self.auth_refreshing(ctx, runtimes, &target).await;
+        }
         let (id, _) = caller.issue(
             kind,
             Target::Private,

@@ -97,12 +97,12 @@ impl SecurityConfig {
 
 /// Mints a fresh, valid token (current key, current UTC) for every attempt
 /// and counts how often it was asked.
-struct Refresher {
-    trust: Trust,
-    ledger: Ledger,
-    id: u64,
-    subject: String,
-    asks: Arc<AtomicU32>,
+pub(crate) struct Refresher {
+    pub(crate) trust: Trust,
+    pub(crate) ledger: Ledger,
+    pub(crate) id: u64,
+    pub(crate) subject: String,
+    pub(crate) asks: Arc<AtomicU32>,
 }
 
 impl CredentialSource for Refresher {

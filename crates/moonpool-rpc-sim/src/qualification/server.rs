@@ -1,11 +1,11 @@
 //! A server: one verifying runtime per boot at the same `ip:port`, serving
 //! everything the other campaigns tested apart, at once:
 //!
-//! - a base `Work` instance (unary, one-way, reliable and balanced calls),
+//! - a base `Work` instance (unary, one-way and reliable calls),
 //!   and a fresh `Work` instance per recruited configuration;
 //! - the streams campaign's `ScanItems` producer, writing its ledger;
 //! - the security campaign's credential-protected `PrivateEcho`, verified
-//!   by the production JWT/JWKS adapter over the rotating key set and the
+//!   by the campaign's token verifier over the rotating key set and the
 //!   scripted UTC;
 //! - well-known directory, recruiter and forwarder endpoints (the
 //!   forwarder calls a callback owned by a third process).
@@ -70,21 +70,17 @@ impl Recorder {
             boot: self.boot,
             configuration,
         };
-        // An empty server is a balanced call over a set: the workload judges
-        // it against the set's instances.
-        if !job.server.is_empty() {
-            assert_always!(
-                job.server == instance.process
-                    && job.boot == instance.boot
-                    && job.configuration == instance.configuration,
-                "rpc qual a request ran only in the instance it named",
-                {
-                    "id" => job.id,
-                    "expected" => format!("{}#{}/{}", job.server, job.boot, job.configuration),
-                    "ran" => instance.to_string()
-                }
-            );
-        }
+        assert_always!(
+            job.server == instance.process
+                && job.boot == instance.boot
+                && job.configuration == instance.configuration,
+            "rpc qual a request ran only in the instance it named",
+            {
+                "id" => job.id,
+                "expected" => format!("{}#{}/{}", job.server, job.boot, job.configuration),
+                "ran" => instance.to_string()
+            }
+        );
         assert_always!(
             self.ledger.current_boot(&self.me) == self.boot,
             "rpc qual no handler of an ended boot ran"
@@ -159,7 +155,7 @@ impl Process for QualServer {
         let board = Board::of(&state);
         let label = check_previous_boots(&board, "server", &me, boot);
         let trust = Trust::of(&state)?;
-        let security = SecurityConfig::enforced(trust.verifier(4)?)
+        let security = SecurityConfig::enforced(trust.verifier())
             .accept_credentials_over_plaintext()
             .with_clock(trust.clock());
         let config = RpcConfig {
@@ -366,13 +362,7 @@ async fn serve(
             }
             (configuration, IncomingRequest { request, reply }) = instances.next() => {
                 let done = recorder.run(&request, configuration);
-                // A balanced job names no instance; this server is slow on
-                // some of them, so hedges and late losers happen.
-                let hold = if request.server.is_empty() && ctx.random().random_bool(0.2) {
-                    ctx.random().random_range(100..600)
-                } else {
-                    request.hold_ms
-                };
+                let hold = request.hold_ms;
                 if reply.expects_reply() {
                     pending.push(Box::pin(hold_and_reply(ctx, reply, hold, done)));
                 }

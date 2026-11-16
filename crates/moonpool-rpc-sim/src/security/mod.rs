@@ -4,8 +4,8 @@
 //!
 //! Roles:
 //!
-//! - **server** ([`SecurityServer`]): a verifying runtime (the production
-//!   JWT/JWKS adapter over the shared rotating key set, the scripted UTC)
+//! - **server** ([`SecurityServer`]): a verifying runtime (the campaign's
+//!   token verifier over the shared rotating key set, the scripted UTC)
 //!   serving a private and a public unary endpoint, a private stream and a
 //!   private one-way endpoint, plus a local caller that sends its own
 //!   requests through the same admission check. Crashed, rebooted and shut
@@ -16,7 +16,7 @@
 //!   versions and one pinned to version 1; every request carries a drawn
 //!   credential: none, valid, short-lived, not yet valid, from a retired
 //!   key, forged, from an unknown key, for the wrong audience or issuer,
-//!   symmetric (algorithm confusion) or garbage; reliable calls mint a
+//!   under an unsupported algorithm or garbage; reliable calls mint a
 //!   fresh token for every retransmission.
 //!
 //! **Oracle.** An independent ledger ([`state::Ledger`]): callers record
@@ -44,7 +44,7 @@ pub mod messages;
 mod server;
 pub mod state;
 pub mod trust;
-mod workload;
+pub(crate) mod workload;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

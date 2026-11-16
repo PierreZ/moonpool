@@ -185,8 +185,6 @@ pub struct RpcStats {
     pub requests_unauthenticated: u64,
     /// Requests refused by the access policy (authenticated, not allowed).
     pub requests_permission_denied: u64,
-    /// Accepted connections refused by the address allow list.
-    pub connections_refused_by_policy: u64,
     /// Requests of this runtime that left (or reached local admission)
     /// carrying a credential.
     pub credentials_attached: u64,
@@ -276,7 +274,6 @@ pub(crate) struct Counters {
     /// Unauthenticated refusals by [`CredentialError`] code (index code − 1):
     /// a fixed, bounded label set.
     pub(crate) denials_by_reason: [AtomicU64; crate::security::CREDENTIAL_ERRORS],
-    pub(crate) connections_refused_by_policy: AtomicU64,
     pub(crate) credentials_attached: AtomicU64,
     pub(crate) shutdown_refusals: AtomicU64,
     pub(crate) calls_ended_by_shutdown: AtomicU64,
@@ -396,7 +393,6 @@ impl Counters {
             requests_authenticated: load(&self.requests_authenticated),
             requests_unauthenticated: self.denials_by_reason.iter().map(load).sum(),
             requests_permission_denied: load(&self.requests_permission_denied),
-            connections_refused_by_policy: load(&self.connections_refused_by_policy),
             credentials_attached: load(&self.credentials_attached),
             shutdown_refusals: load(&self.shutdown_refusals),
             calls_ended_by_shutdown: load(&self.calls_ended_by_shutdown),

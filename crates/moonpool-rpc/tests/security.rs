@@ -14,8 +14,8 @@ use moonpool_core::TokioProviders;
 use moonpool_core::metrics::MetricsSource;
 use moonpool_rpc::observability::RpcMetrics;
 use moonpool_rpc::security::{
-    AccessPolicy, AccessRequest, Credential, CredentialError, CredentialSource, Denial,
-    IpAllowList, Principal, RequestVerifier, SecurityConfig,
+    AccessPolicy, AccessRequest, Credential, CredentialError, CredentialSource, Denial, Principal,
+    RequestVerifier, SecurityConfig,
 };
 use moonpool_rpc::{
     AccessClass, ErrorReason, Execution, IncomingRequest, MethodId, RequestStream, RpcConfig,
@@ -548,53 +548,6 @@ async fn stream_requests_are_checked_before_a_producer_exists() {
     handler.abort();
 }
 
-/// An allow list restricts who can connect, before any byte is read; it
-/// authenticates nothing: an allowed address still needs a valid
-/// credential for a private endpoint.
-#[tokio::test(flavor = "current_thread")]
-async fn an_allow_list_restricts_reachability_but_is_not_authentication() {
-    let blocked = SecurityConfig::enforced(Tokens)
-        .accept_credentials_over_plaintext()
-        .with_allow_list(IpAllowList::parse("10.0.0.0/8").expect("list"));
-    let (server, server_driver) = self::server(blocked).await;
-    let receipts = Receipts::default();
-    let (private, stream) = server.register::<Echo>(AccessClass::Private).expect("reg");
-    let handler = serve(stream, &receipts);
-    let (remote, remote_driver) = client(SecurityConfig::default());
-    let refused = call(&remote, &private, Some(SECRET))
-        .await
-        .expect_err("not reachable");
-    assert_ne!(refused.execution(), Execution::Executed);
-    assert!(
-        server
-            .stats()
-            .expect("running")
-            .connections_refused_by_policy
-            >= 1
-    );
-    server_driver.abort();
-    handler.abort();
-    remote_driver.abort();
-
-    let allowed = SecurityConfig::enforced(Tokens)
-        .accept_credentials_over_plaintext()
-        .with_allow_list(IpAllowList::parse("127.0.0.0/8").expect("list"));
-    let (server, server_driver) = self::server(allowed).await;
-    let (private, stream) = server.register::<Echo>(AccessClass::Private).expect("reg");
-    let handler = serve(stream, &receipts);
-    let (remote, remote_driver) = client(SecurityConfig::default());
-    assert_eq!(
-        denied(&call(&remote, &private, Some("forged")).await),
-        Some(ErrorReason::Unauthenticated(CredentialError::BadSignature)),
-        "an allowed address is not an identity"
-    );
-    assert_eq!(denied(&call(&remote, &private, Some(SECRET)).await), None);
-    assert_eq!(receipts.executed(), 1);
-    remote_driver.abort();
-    server_driver.abort();
-    handler.abort();
-}
-
 /// A writer the redaction test captures traces into.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -690,111 +643,4 @@ async fn denials_are_audited_and_credentials_never_leak() {
     }
     server_driver.abort();
     handler.abort();
-}
-
-#[cfg(feature = "jwt")]
-mod jwt {
-    //! Signed tokens with the JWT/JWKS adapter, over real TCP.
-
-    use jsonwebtoken::jwk::{Jwk, JwkSet};
-    use jsonwebtoken::{EncodingKey, Header, encode};
-    use moonpool_rpc::security::jwt::{Algorithm, JwksKeys, JwtConfig, JwtVerifier};
-    use moonpool_rpc::security::{CredentialError, FixedUtc, SecurityConfig, UtcTime};
-    use moonpool_rpc::{AccessClass, ErrorReason};
-
-    use super::{Receipts, call, client, denied, serve, server};
-
-    const NOW: u64 = 1_900_000_000;
-
-    fn key(kid: &str) -> (EncodingKey, Jwk) {
-        let pair = rcgen::KeyPair::generate().expect("key");
-        let key = EncodingKey::from_ec_der(&pair.serialize_der());
-        let mut jwk = Jwk::from_encoding_key(&key, Algorithm::ES256).expect("jwk");
-        jwk.common.key_id = Some(kid.into());
-        (key, jwk)
-    }
-
-    fn token(key: &EncodingKey, kid: &str, audience: &str, exp: u64) -> String {
-        let mut header = Header::new(Algorithm::ES256);
-        header.kid = Some(kid.into());
-        let claims = serde_json::json!({
-            "sub": "worker-7", "iss": "issuer", "aud": audience, "exp": exp,
-        });
-        encode(&header, &claims, key).expect("sign")
-    }
-
-    /// Successful signed-token calls, wrong client credentials, key
-    /// rotation and expiry against the injected UTC clock.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn signed_tokens_rotation_and_expiry_over_real_tcp() {
-        let (_, _) = key("warm-up");
-        let (old, old_jwk) = key("old");
-        let (new, new_jwk) = key("new");
-        let keys = JwksKeys::from_set(&JwkSet {
-            keys: vec![old_jwk],
-        })
-        .expect("keys");
-        let verifier =
-            JwtVerifier::new(keys.clone(), JwtConfig::new("issuer", "rpc")).expect("verifier");
-        let clock = FixedUtc::new(UtcTime::from_unix_seconds(NOW));
-        let security = SecurityConfig::enforced(verifier)
-            .accept_credentials_over_plaintext()
-            .with_clock(clock.clone());
-        let (server, server_driver) = server(security).await;
-        let receipts = Receipts::default();
-        let (private, stream) = server
-            .register::<super::Echo>(AccessClass::Private)
-            .expect("reg");
-        let handler = serve(stream, &receipts);
-        let (remote, remote_driver) = client(SecurityConfig::default());
-
-        let old_token = token(&old, "old", "rpc", NOW + 60);
-        assert_eq!(
-            denied(&call(&remote, &private, Some(&old_token)).await),
-            None
-        );
-        assert_eq!(
-            denied(
-                &call(
-                    &remote,
-                    &private,
-                    Some(&token(&old, "old", "other", NOW + 60))
-                )
-                .await
-            ),
-            Some(ErrorReason::Unauthenticated(CredentialError::WrongAudience))
-        );
-        let new_token = token(&new, "new", "rpc", NOW + 60);
-        assert_eq!(
-            denied(&call(&remote, &private, Some(&new_token)).await),
-            Some(ErrorReason::Unauthenticated(CredentialError::UnknownKey))
-        );
-        let rotated = serde_json::to_string(&JwkSet {
-            keys: vec![new_jwk],
-        })
-        .expect("json");
-        keys.replace_json(&rotated).expect("rotate");
-        assert_eq!(
-            denied(&call(&remote, &private, Some(&old_token)).await),
-            Some(ErrorReason::Unauthenticated(CredentialError::UnknownKey)),
-            "the rotated-out key is revoked, cached or not"
-        );
-        assert_eq!(
-            denied(&call(&remote, &private, Some(&new_token)).await),
-            None
-        );
-        clock.advance(60);
-        assert_eq!(
-            denied(&call(&remote, &private, Some(&new_token)).await),
-            Some(ErrorReason::Unauthenticated(CredentialError::Expired))
-        );
-        assert_eq!(receipts.executed(), 2);
-        assert_eq!(
-            receipts.subjects(),
-            [Some("worker-7".to_string()), Some("worker-7".to_string())]
-        );
-        remote_driver.abort();
-        server_driver.abort();
-        handler.abort();
-    }
 }

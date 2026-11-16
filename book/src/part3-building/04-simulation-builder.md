@@ -152,7 +152,6 @@ SimulationBuilder::new()
 | `invariant(i)` | Register an `Invariant`, run after every step. | [Events and Invariants](./17-events-and-invariants.md) |
 | `invariant_fn(name, f)` | Closure invariant over `&dyn TraceQuery`. | [Events and Invariants](./17-events-and-invariants.md) |
 | `metrics_factory(f)` | One `MetricsSource` per node IP per seed, scraped into the report. | [Application Metrics](./25-metrics.md) |
-| `metric(query)` | A `MetricQuery` evaluated after every successful seed. | [Application Metrics](./25-metrics.md) |
 | `fault_factory(f)` | A fresh custom `FaultInjector` per timeline. Requires `chaos_duration`. | [Custom Fault Injectors](./31-custom-faults.md) |
 | `chaos_duration(d)` | The window in which new faults may be injected. | [Chaos in Moonpool](./07-chaos.md) |
 | `enable_chaos(surfaces)` | Enable `Chaos` surfaces with a `ChaosMode` each. | this chapter, [Swarm Testing](./28-swarm-testing.md) |

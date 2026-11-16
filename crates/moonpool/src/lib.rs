@@ -117,7 +117,6 @@
 //! | `rpc` | no | `moonpool::rpc`: typed dynamic-endpoint RPC |
 //! | `rpc-derive` | no | the `#[moonpool_rpc::service]` attribute |
 //! | `rpc-tls` | no | TLS sessions for `rpc` (native only) |
-//! | `rpc-jwt` | no | JWT/JWKS request verification for `rpc` (native only) |
 //!
 //! A production binary keeps the simulator out of its dependency tree:
 //!
@@ -208,7 +207,7 @@ pub mod prometheus {
 ///
 /// The module holds the `moonpool-rpc` runtime (`RpcDriver`, `RpcHandle`),
 /// serialisable endpoint references, delivery modes, reply streams,
-/// balancing, per-endpoint admission queues, security and graceful shutdown.
+/// per-endpoint admission queues, security and graceful shutdown.
 /// It runs over the same providers as everything else.
 ///
 /// ```rust
@@ -218,8 +217,7 @@ pub mod prometheus {
 /// The optional parts have their own features. `rpc-derive` adds the
 /// `#[moonpool_rpc::service]` attribute. Its generated code names the
 /// `moonpool_rpc` crate, so a crate that uses it depends on `moonpool-rpc`
-/// directly. `rpc-tls` adds the TLS session upgrade and `rpc-jwt` the JWT
-/// verifier. Both are native-only.
+/// directly. `rpc-tls` adds the TLS session upgrade, which is native-only.
 #[cfg(feature = "rpc")]
 pub mod rpc {
     pub use moonpool_rpc::*;

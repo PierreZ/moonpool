@@ -84,7 +84,7 @@
 //! - System: [`SystemSample`] and [`DiskCounters`], with the
 //!   [`parse_proc_stat`] and [`parse_diskstats`] parsers.
 //! - Metrics: [`MetricsSource`], the registry-agnostic seam the simulation
-//!   report scrapes, and the [`metrics::query`] engine.
+//!   report scrapes, and [`metrics::SeriesKey`], the series identity.
 //! - Errors: [`SimulationError`], [`TimeError`] and [`JoinError`].
 //!
 //! ## Cargo features
