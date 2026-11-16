@@ -182,6 +182,20 @@ pub(crate) struct ProcessManager<'a> {
     panics: ProcessPanics,
     /// Records panics from detached tasks spawned by process providers.
     task_panics: TaskPanicTracker,
+    /// The graceful reboots whose grace period runs: per process, the
+    /// generation the reboot was decided in and its recovery delay. The
+    /// force kill that ends the grace takes the entry; a second force kill
+    /// for the same grace finds none and is dropped.
+    graces: BTreeMap<std::net::IpAddr, PendingGrace>,
+}
+
+/// A graceful reboot waiting for the end of its grace period.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PendingGrace {
+    /// The process generation the reboot was decided in.
+    pub(crate) generation: u64,
+    /// The recovery delay before the restart, after the force kill.
+    pub(crate) recovery_delay_ms: u64,
 }
 
 impl<'a> ProcessManager<'a> {
@@ -202,6 +216,7 @@ impl<'a> ProcessManager<'a> {
             dead: Arc::new(Mutex::new(BTreeSet::new())),
             panics: Arc::default(),
             task_panics,
+            graces: BTreeMap::new(),
         }
     }
 
@@ -224,6 +239,7 @@ impl<'a> ProcessManager<'a> {
             dead: Arc::new(Mutex::new(BTreeSet::new())),
             panics: ProcessPanics::default(),
             task_panics,
+            graces: BTreeMap::new(),
         }
     }
 
@@ -323,6 +339,35 @@ impl<'a> ProcessManager<'a> {
             assert_reachable!("process_manager: graceful shutdown signaled");
             tracing::info!(%ip, index, "signaled graceful process shutdown");
         }
+    }
+
+    /// Note that the process at `ip` entered a grace period: a force kill
+    /// of `grace.generation` ends it.
+    pub(crate) fn begin_grace(&mut self, ip: std::net::IpAddr, grace: PendingGrace) {
+        self.graces.insert(ip, grace);
+    }
+
+    /// End the grace period of `ip` for a force kill of `generation`.
+    /// Returns `false` when no grace of that generation is pending: an
+    /// earlier force kill already ended it (the chaos end cut it short, or
+    /// a crash came first).
+    pub(crate) fn end_grace(&mut self, ip: std::net::IpAddr, generation: u64) -> bool {
+        if self
+            .graces
+            .get(&ip)
+            .is_some_and(|grace| grace.generation == generation)
+        {
+            self.graces.remove(&ip);
+            return true;
+        }
+        false
+    }
+
+    /// The graceful reboots whose grace period still runs, in IP order.
+    pub(crate) fn pending_graces(
+        &self,
+    ) -> impl Iterator<Item = (std::net::IpAddr, PendingGrace)> + '_ {
+        self.graces.iter().map(|(ip, grace)| (*ip, *grace))
     }
 
     /// Whether a boot of the process at `ip` is live (neither killed nor

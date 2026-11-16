@@ -12,7 +12,7 @@ simulation runtime.
 | `buggify_fault_with_prob!(p)` | a site that makes an operation fail; silent after `buggify_enter_recovery` |
 | `buggify_named!("label", p)` | a site a harness switches per seed with `set_activation` |
 | `buggify_pick!(p, n)`, `buggify_range!(p, range)` | `Option<usize>` in `0..n`, `Option<u64>` in `range` |
-| `hint!("moment"[, p])` (`hint` module) | the code names a moment; the sim's `HintSink` decides (a reboot under the seed's attrition regime) |
+| `hint!("moment"[, p])` (`hint` module) | the code names a moment; the sim's `HintSink` decides (a reboot under the seed's attrition regime). Its activation is keyed by the label, so `set_activation` forces it per seed |
 | `shard!(name, current = r1[, next = r2])` (`shard` module) | the code declares its replication; the sim's shard book and gate keep faults survivable |
 | `cpu_charge(duration)` (`cpu` module) | shipped code reports work it did; a simulator with a CPU model makes it take time |
 | `set_random_source`, `clear_random_source`, `buggify_init`, `buggify_reset`, `is_simulated` | the state that moonpool-sim installs per run |
@@ -26,7 +26,8 @@ simulation runtime.
   removing every site leaves the program unchanged. moonpool-sim
   installs its seeded source per run (`buggify_init`) and uninstalls it
   after (`buggify_reset`).
-- **The model is two-phase and per location**: a location (`file:line`) is
+- **The model is two-phase and per location**: a location (`file:line`, or
+  the label for `buggify_named!` and `hint!`) is
   activated once per run with the installed activation probability (0.5 in
   the runner), then fires per call at 25% (`buggify!`) or the caller's rate.
   Do not add a global "always fire" switch; per-seed activation is what lets

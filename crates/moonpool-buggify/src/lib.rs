@@ -369,8 +369,10 @@ macro_rules! buggify_named {
 ///
 /// `hint!("label")` fires at [`hint::POINT_PROB`] (5%) per call while its
 /// location is active, and `hint!("label", 0.2)` at a site rate. The label is
-/// a string literal. It reaches the simulator's sink and any harness veto, so
-/// keep it stable. See [`hint::at`] for the full contract.
+/// a string literal. It keys the point's activation, so a harness can force
+/// it per seed with [`set_activation`], and it reaches the simulator's sink
+/// and any harness veto: keep it stable and unique. See [`hint::at`] for the
+/// full contract.
 ///
 /// ```rust
 /// # async fn demo() {
@@ -383,14 +385,10 @@ macro_rules! buggify_named {
 #[macro_export]
 macro_rules! hint {
     ($label:literal) => {
-        $crate::hint::at(
-            $label,
-            $crate::hint::POINT_PROB,
-            concat!(file!(), ":", line!()),
-        )
+        $crate::hint::at($label, $crate::hint::POINT_PROB)
     };
     ($label:literal, $prob:expr) => {
-        $crate::hint::at($label, $prob as f64, concat!(file!(), ":", line!()))
+        $crate::hint::at($label, $prob as f64)
     };
 }
 

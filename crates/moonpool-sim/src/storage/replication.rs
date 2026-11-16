@@ -359,6 +359,10 @@ pub(crate) struct LayoutIndex {
     /// grows: a bound that is too long costs a longer scan, not a wrong
     /// answer.
     longest: u64,
+    /// Per shard, per stripe (`None` for a stripe-less region): how many
+    /// regions the layout holds for that key. It answers
+    /// [`holds`](Self::holds) without a walk over the regions.
+    held: BTreeMap<Arc<str>, BTreeMap<Option<u64>, usize>>,
 }
 
 impl LayoutIndex {
@@ -378,11 +382,18 @@ impl LayoutIndex {
     pub(crate) fn replace_store(&mut self, store: &str, regions: &[LayoutRegion]) {
         let name: Arc<str> = Arc::from(store);
         let old = self.store_paths.remove(&name).unwrap_or_default();
+        let Self { by_path, held, .. } = self;
         for path in &old {
-            if let Some(ranges) = self.by_path.get_mut(path) {
-                ranges.retain(|region| region.store.as_deref() != Some(store));
+            if let Some(ranges) = by_path.get_mut(path) {
+                ranges.retain(|region| {
+                    let keep = region.store.as_deref() != Some(store);
+                    if !keep && let Some(shard) = &region.shard {
+                        Self::forget(held, shard, region.stripe);
+                    }
+                    keep
+                });
                 if ranges.is_empty() {
-                    self.by_path.remove(path);
+                    by_path.remove(path);
                 }
             }
         }
@@ -412,16 +423,55 @@ impl LayoutIndex {
                 last = Some((region.path.as_str(), normal.clone()));
                 normal
             });
+            let shard: Option<Arc<str>> = region.shard.as_deref().map(Arc::from);
+            if let Some(shard) = &shard {
+                *self
+                    .held
+                    .entry(Arc::clone(shard))
+                    .or_default()
+                    .entry(region.stripe)
+                    .or_default() += 1;
+            }
             let ranges = self.by_path.entry(path.clone()).or_default();
             ranges.push(Region {
                 bytes: region.bytes.clone(),
                 stripe: region.stripe,
-                shard: region.shard.as_deref().map(Arc::from),
+                shard,
                 store: store.cloned(),
             });
             touched.insert(path);
         }
         touched
+    }
+
+    /// Count one region of `(shard, stripe)` gone from `held`.
+    fn forget(
+        held: &mut BTreeMap<Arc<str>, BTreeMap<Option<u64>, usize>>,
+        shard: &str,
+        stripe: Option<u64>,
+    ) {
+        let Some(stripes) = held.get_mut(shard) else {
+            return;
+        };
+        if let Some(count) = stripes.get_mut(&stripe) {
+            *count -= 1;
+            if *count == 0 {
+                stripes.remove(&stripe);
+            }
+        }
+        if stripes.is_empty() {
+            held.remove(shard);
+        }
+    }
+
+    /// Whether the layout holds a copy of `(shard, stripe)`: a region of
+    /// that key, or a stripe-less region of the shard. With `stripe`
+    /// `None`, any region of the shard. A replica that publishes no such
+    /// region holds no copy, whatever its replication declares.
+    pub(crate) fn holds(&self, shard: &str, stripe: Option<u64>) -> bool {
+        self.held.get(shard).is_some_and(|stripes| {
+            stripe.is_none() || stripes.contains_key(&None) || stripes.contains_key(&stripe)
+        })
     }
 
     /// Sort the regions of each path in `paths` by range start.
@@ -525,6 +575,41 @@ mod tests {
             stripe,
             shard: None,
         }
+    }
+
+    fn sharded(bytes: Range<u64>, shard: &str, stripe: Option<u64>) -> LayoutRegion {
+        LayoutRegion {
+            shard: Some(shard.to_string()),
+            ..region(bytes, stripe)
+        }
+    }
+
+    #[test]
+    fn holds_follows_the_published_regions_of_each_store() {
+        let mut layout = LayoutIndex::default();
+        assert!(!layout.holds("s", None));
+        layout.replace_store(
+            "a",
+            &[
+                sharded(0..512, "s", Some(0)),
+                sharded(512..1024, "s", Some(0)),
+            ],
+        );
+        layout.replace_store("b", &[sharded(1024..1536, "t", None)]);
+        assert!(layout.holds("s", Some(0)));
+        assert!(layout.holds("s", None), "any region of the shard");
+        assert!(!layout.holds("s", Some(1)), "no region of stripe 1");
+        assert!(
+            layout.holds("t", Some(7)),
+            "a stripe-less region holds every stripe"
+        );
+        // Store `a` publishes again without stripe 0: both regions go.
+        layout.replace_store("a", &[sharded(0..512, "s", Some(1))]);
+        assert!(!layout.holds("s", Some(0)));
+        assert!(layout.holds("s", Some(1)));
+        layout.replace_store("a", &[]);
+        assert!(!layout.holds("s", None), "the shard is gone");
+        assert!(layout.holds("t", None), "store b is untouched");
     }
 
     #[test]

@@ -114,7 +114,7 @@ The stripe key comes from `LayoutRegion::stripe` (the journal uses the entry pos
 
 | Fault | Source | What happens |
 |-------|--------|--------------|
-| Graceful reboot | `Attrition` (`prob_graceful`), `FaultContext::reboot(ip, RebootKind::Graceful)` | The shutdown token is cancelled. After the grace period the process is force killed, then restarted after the recovery delay. |
+| Graceful reboot | `Attrition` (`prob_graceful`), `FaultContext::reboot(ip, RebootKind::Graceful)` | The shutdown token is cancelled. After the grace period the process is force killed, then restarted after the recovery delay. A grace period still running when the chaos ends is cut short: the force kill comes at once, and the restart follows after the recovery delay. |
 | Crash | `prob_crash`, `RebootKind::Crash`, `FaultContext::crash(ip)` | Tasks aborted, storage through crash resolution. The host lost power, so its connections send nothing: a peer learns of the death when its own data draws an RST. A kill with the host alive puts an RST in flight instead. |
 | Crash and wipe | `prob_wipe`, `RebootKind::CrashAndWipe` | Crash plus deletion of every owned file. |
 | Timed crash | `FaultContext::crash_for(ip, down)` | Crash, restart after `down`. |

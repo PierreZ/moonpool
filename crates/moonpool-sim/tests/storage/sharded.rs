@@ -268,6 +268,61 @@ fn in_process_damage_and_replica_loss_ask_the_gate() {
     moonpool_sim::shard::clear_sink();
 }
 
+/// A replica the shard declares but that publishes no region of a stripe
+/// holds no copy of it: it does not count as a clean copy, so the gate
+/// refuses damage that would leave the stripe one real copy (#380).
+#[test]
+fn a_replica_without_a_region_of_the_stripe_is_no_copy() {
+    let nodes = ips(3);
+    let mut sim = SimWorld::new_with_seed(13);
+    let book = sim.install_shard_book(ShardFaults::default());
+    moonpool_sim::shard!(
+        "s",
+        current = Replication::tolerates(replicas(&nodes), 1, 1)
+    );
+    for (rank, ip) in (0u64..).zip(&nodes) {
+        let mut regions = layout(rank, &["s"]);
+        // The third replica never received stripe 0.
+        if rank == 2 {
+            regions.retain(|region| region.stripe != Some(0));
+        }
+        local_runtime().block_on(async {
+            run_as(&mut sim, *ip, move |provider| async move {
+                provider.publish_layout(&regions).expect("publish");
+                let file = provider
+                    .open("replica", OpenOptions::create_write().read(true))
+                    .await
+                    .expect("open");
+                let len = usize::try_from(STRIPES).expect("small") * SECTOR_SIZE;
+                file.write_at(0, &vec![0x5A; len]).await.expect("write");
+                file.sync_all().await.expect("sync");
+            })
+            .await;
+        });
+    }
+    assert_eq!(
+        book.clean_copies("s", 0),
+        replicas(&nodes[..2]),
+        "the third replica holds no copy of stripe 0"
+    );
+    assert_eq!(book.clean_copies("s", 1).len(), 3);
+    // Stripe 0's sector on the first replica: two real copies, and the
+    // shard needs two, so its damage is refused.
+    let first = sim.storage_provider(nodes[0]);
+    assert!(
+        !first.corrupt_bytes("replica", 0..8).expect("corrupt"),
+        "damage would leave stripe 0 one real copy"
+    );
+    // Stripe 1 has three copies: one may go.
+    let sector = (1 + 0 * 3) % STRIPES;
+    assert!(
+        first
+            .corrupt_bytes("replica", sector * SECTOR..sector * SECTOR + 8)
+            .expect("corrupt")
+    );
+    moonpool_sim::shard::clear_sink();
+}
+
 /// A replica the process found lost for good is lost to the gate too, even
 /// when the gate let the fault land on clean bytes: the next loss in the
 /// shard is refused.

@@ -110,6 +110,7 @@ Everything the script reads is per-iteration simulated state, so the crash targe
 Each process has a **lifecycle generation** (`SimWorld::process_generation(ip)`). It moves on at every boot and at every `crash` (hold-down). Every lifecycle event (a graceful shutdown, a force kill, a restart) carries the generation it was decided in, and the runner drops an event whose generation is old. So a decision for one boot never reaches a later one:
 
 - A `restart` during a grace period boots the process again; the force kill at the end of the old grace period is dropped and does not kill the new boot.
+- A grace period still running when the chaos ends is cut short: the runner force-kills the process at once, and it restarts after its recovery delay, the same as a crash. So the quiet tail never waits out a long grace (FoundationDB has no grace at all: `rebootProcess` reboots at once).
 - A `crash` after a timed reboot holds the process down; the recovery restart of the reboot is dropped and does not end the hold-down.
 - A `restart` before a timed reboot's recovery restart boots the process; the recovery restart is dropped and does not restart the new boot in place.
 

@@ -171,7 +171,7 @@ Capture rule: INFO and above, constant message, inside a process or workload tas
 | `buggify_named!("label", p)` + `set_activation("label", bool)` | Named sites a harness can mask. |
 | `buggify_pick!(p, n)`, `buggify_range!(p, range)` | `Option<usize>`, `Option<u64>`. |
 | `buggify_knob!(default, lo..hi)` | A knob value in range on some seeds (`moonpool-sim`). The first call of a site decides for the whole run. |
-| `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it, and a per-process regime's timed reboots too (label `TIMED_REBOOT_LABEL`). |
+| `hint!("label")`, `hint!("label", p)` | A crash moment. The attrition regime decides. Activation is keyed by the label, so `set_activation("label", true)` forces it for a seed. `HintVeto::new(\|ip, label\| bool).publish(ctx.state())` budgets it, and a per-process regime's timed reboots too (label `TIMED_REBOOT_LABEL`). |
 | `cpu_charge(Duration)` | Explicit CPU work under `Chaos::Cpu`. |
 
 All are no-ops in production. `moonpool-journal` shows the pattern: four `hint!` moments per batched commit (one after a failed sync writes the batch again) (an ordered commit's two durable writes are named inside the simulated `write_at_durable`, "storage: durable write landed, not synced"), and two per roll onto a recycled spare segment.
@@ -180,7 +180,7 @@ All are no-ops in production. `moonpool-journal` shows the pattern: four `hint!`
 
 | Type | Construction |
 |------|--------------|
-| `Attrition` | `{ max_dead, prob_graceful, prob_crash, prob_wipe, recovery_delay_ms: None (1–10 s), grace_period_ms: None (2–5 s), scope: AttritionScope::PerProcess, victims: AttritionVictims::Any, wipe_budget: None }`. `AttritionVictims::group("name")`, `::tagged("key", "value")`. `.wipe_budget(max_unhealed, WipeHeal::Signal \| WipeHeal::After(d))` makes wipes roll: a wiped process is unhealed until `WipeLedger::heal(ctx.state(), ip)` (or `d` after its restart), and a drawn wipe past `max_unhealed` unhealed in the pool becomes a crash. No extra draws. |
+| `Attrition` | `{ max_dead, prob_graceful, prob_crash, prob_wipe, recovery_delay_ms: None (1–10 s), grace_period_ms: None (2–5 s; a grace still running at the chaos end is cut short), scope: AttritionScope::PerProcess, victims: AttritionVictims::Any, wipe_budget: None }`. `AttritionVictims::group("name")`, `::tagged("key", "value")`. `.wipe_budget(max_unhealed, WipeHeal::Signal \| WipeHeal::After(d))` makes wipes roll: a wiped process is unhealed until `WipeLedger::heal(ctx.state(), ip)` (or `d` after its restart), and a drawn wipe past `max_unhealed` unhealed in the pool becomes a crash. No extra draws. |
 | `Outage` | `Outage::groups(["acceptors"])`: probability 1.0, start 0–10 s, down 1–10 s, no straggler. `OutageVeto::new(\|victims\| bool).publish(ctx.state())`. |
 | `GrayFailure` | `GrayFailure::new(max_slow)`: window 0.3–1.0 of the chaos window, cpu 10–1000, disk 5–100, network 2–20, `GrayKinds::ALL`. |
 | `CpuModel` | Drawn per seed under `Chaos::Cpu`; `SimWorld::set_cpu_model` by hand. |
