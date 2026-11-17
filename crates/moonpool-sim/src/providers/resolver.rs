@@ -80,6 +80,15 @@ impl ScriptedResolver {
         }
     }
 
+    /// Whether the table knows `name` with no address: a lookup fails with
+    /// [`io::ErrorKind::NotFound`] and no process serves it. The shard
+    /// book counts a replica named so as down and not intact
+    /// (`Shards::resolve_names`). An unknown name is not such a name.
+    #[must_use]
+    pub fn reaches_nothing(&self, name: &str) -> bool {
+        matches!(self.table().names.get(name), Some(Answer::Addresses(addresses)) if addresses.is_empty())
+    }
+
     /// Lookups answered so far (numeric targets included).
     #[must_use]
     pub fn lookups(&self) -> u64 {

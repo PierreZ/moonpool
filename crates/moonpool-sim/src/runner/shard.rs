@@ -57,9 +57,14 @@
 //! is not wiped (until it heals, see [`moonpool_buggify::shard::caught_up`]),
 //! its disk has not failed, and, per stripe, no sector of its copy is
 //! damaged. An address the simulator does not know counts as up and intact.
+//! A host the name table knows with no address
+//! ([`ScriptedResolver::reaches_nothing`]) counts as down and not intact: no
+//! process serves it.
 //!
 //! Under [`ShardFaults::durable_only`] the gate judges `durable` alone, and
-//! kills, outages and partitions are never downgraded.
+//! kills, outages and partitions are never downgraded. A hold-down crash
+//! (no scheduled restart) counts as a lost copy until its restart: one that
+//! would break `durable` becomes a clean restart in place.
 //!
 //! The gate draws no randomness: it reads the book, the dead set, the
 //! network and the disks. Every gate evaluation asserts it.
@@ -186,12 +191,20 @@ impl ShardFaults {
         self
     }
 
-    /// Judge only each shard's `durable` need: kills, hold-downs, outages
-    /// and partitions are never downgraded for `progress`, while wipes,
-    /// disk failures, a crash's dirty sectors and damage still are. For a
-    /// system whose chaos takes a whole quorum down on purpose and checks
-    /// that it recovers: unavailability is a fault it must survive, lost
-    /// data is not.
+    /// Judge only each shard's `durable` need: kills, outages and
+    /// partitions are never downgraded for `progress`, while wipes, disk
+    /// failures, a crash's dirty sectors and damage still are. For a system
+    /// whose chaos takes a whole quorum down on purpose and checks that it
+    /// recovers: unavailability is a fault it must survive, lost data is
+    /// not.
+    ///
+    /// A hold-down crash (no scheduled restart) is a loss for as long as it
+    /// lasts, and the run may end before a restart: it is judged against
+    /// `durable` like a wipe, and becomes a clean restart in place when it
+    /// would break a need. Until it restarts, a held-down replica counts
+    /// as not intact for every later judgement (`FoundationDB`'s
+    /// `canKillProcesses` counts a process it killed for good the same
+    /// way).
     #[must_use]
     pub fn durable_only(mut self) -> Self {
         self.durable_only = true;
@@ -367,8 +380,15 @@ fn replicas_of(replication: &Replication) -> BTreeSet<Replica> {
 }
 
 /// The process address of `replica`: an IP, or the IP of an `ip:port`.
+/// `None` for a replica no process serves, among them one whose name the
+/// table knows with no address ([`unreachable`]).
 #[must_use]
 pub fn replica_ip(replica: &Replica) -> Option<IpAddr> {
+    address_ip(replica).filter(|ip| !ip.is_unspecified())
+}
+
+/// The IP a replica's address names, the unspecified one included.
+fn address_ip(replica: &Replica) -> Option<IpAddr> {
     let address = replica.address();
     address.parse::<IpAddr>().ok().or_else(|| {
         address
@@ -376,6 +396,15 @@ pub fn replica_ip(replica: &Replica) -> Option<IpAddr> {
             .ok()
             .map(|addr| addr.ip())
     })
+}
+
+/// Whether `replica` is a name the table knows with no address
+/// ([`ScriptedResolver::reaches_nothing`]), resolved to the unspecified IP:
+/// no process serves it, so it is down and its copy is not intact. In
+/// production such a name reaches nothing (the old name of a machine that
+/// came back under another one).
+fn unreachable(replica: &Replica) -> bool {
+    address_ip(replica).is_some_and(|ip| ip.is_unspecified())
 }
 
 /// The per-site aim state.
@@ -411,6 +440,9 @@ struct Book {
     /// Crashes the gate let through that have not landed yet
     /// ([`ShardBook::note_pending_crash`]).
     pending_crashes: BTreeSet<IpAddr>,
+    /// Processes held down with no scheduled restart
+    /// ([`ShardBook::note_held`]).
+    held: BTreeSet<IpAddr>,
     /// The name table a replica named by `host:port` is resolved through
     /// ([`ShardBook::resolve_names`]).
     names: Option<ScriptedResolver>,
@@ -431,6 +463,9 @@ impl Book {
         };
         match names.addresses(host).and_then(|ips| ips.first().copied()) {
             Some(ip) => Replica::new(std::net::SocketAddr::new(ip, port).to_string()),
+            None if names.reaches_nothing(host) => Replica::new(
+                std::net::SocketAddr::new(IpAddr::from([0, 0, 0, 0]), port).to_string(),
+            ),
             None => replica.clone(),
         }
     }
@@ -715,6 +750,23 @@ impl ShardBook {
     /// The crashes decided and not landed yet.
     pub(crate) fn pending_crashes(&self) -> BTreeSet<IpAddr> {
         self.lock().pending_crashes.clone()
+    }
+
+    /// The process at `ip` is held down with no scheduled restart: under
+    /// [`ShardFaults::durable_only`] its copies count as lost until it
+    /// restarts ([`clear_held`](Self::clear_held)).
+    pub(crate) fn note_held(&self, ip: IpAddr) {
+        self.lock().held.insert(ip);
+    }
+
+    /// The process at `ip` restarts: it is no longer held down.
+    pub(crate) fn clear_held(&self, ip: IpAddr) {
+        self.lock().held.remove(&ip);
+    }
+
+    /// The processes held down now.
+    pub(crate) fn held(&self) -> BTreeSet<IpAddr> {
+        self.lock().held.clone()
     }
 
     pub(crate) fn wiped(&self) -> BTreeSet<IpAddr> {
@@ -1075,9 +1127,12 @@ fn ips_of(replication: &Replication) -> Vec<IpAddr> {
 }
 
 /// Whether `need` holds when the replicas `unavailable` names are missing;
-/// an address the simulator does not know is always available.
+/// an address the simulator does not know is always available, and a name
+/// that reaches nothing ([`unreachable`]) never is.
 fn holds_without(need: &Need, unavailable: &dyn Fn(IpAddr) -> bool) -> bool {
-    need.holds(&|replica| replica_ip(replica).is_none_or(|ip| !unavailable(ip)))
+    need.holds(&|replica| {
+        !unreachable(replica) && replica_ip(replica).is_none_or(|ip| !unavailable(ip))
+    })
 }
 
 /// Whether taking `victims` down keeps `progress` of every replication that
@@ -1532,6 +1587,46 @@ mod tests {
         );
         assert!(book.caught_up("s", &replica));
         assert!(book.wiped().is_empty());
+    }
+
+    #[test]
+    fn a_name_that_reaches_nothing_is_down_and_not_intact() {
+        let book = ShardBook::new(ShardFaults::default());
+        let table = ScriptedResolver::new();
+        table.set("db-1", vec![ip("10.0.0.1")]);
+        table.set("db-2", vec![]);
+        assert!(table.reaches_nothing("db-2"));
+        assert!(!table.reaches_nothing("db-1"));
+        assert!(!table.reaches_nothing("db-3"), "an unknown name is not one");
+        book.lock().names = Some(table);
+        let named = Replication::tolerates(
+            ["db-1", "db-2", "10.0.0.3"]
+                .iter()
+                .map(|h| Replica::new(format!("{h}:4500")))
+                .collect(),
+            1,
+            1,
+        );
+        book.declare(
+            None,
+            Duration::ZERO,
+            declaration("s", Some(named), None, "s:1"),
+            || true,
+        );
+        let reqs = requirements(&book);
+        let replicas = reqs[0].1[0].replicas.clone();
+        assert_eq!(replicas[1], Replica::new("0.0.0.0:4500"));
+        assert_eq!(replica_ip(&replicas[1]), None, "no process serves it");
+        let none = BTreeSet::new();
+        // db-2 already counts as lost: losing db-1 too breaks `durable`,
+        // and taking it down breaks `progress`.
+        assert!(!lose_ok(
+            &reqs,
+            &none,
+            &ShardLosses::new(),
+            &[ip("10.0.0.1")]
+        ));
+        assert!(!down_ok(&reqs, &none, &[ip("10.0.0.1")], &|_, _| false));
     }
 
     #[test]
