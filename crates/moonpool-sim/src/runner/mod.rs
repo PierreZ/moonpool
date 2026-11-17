@@ -48,6 +48,7 @@ pub mod process;
 pub(crate) mod process_manager;
 pub mod report;
 mod run_loop;
+pub mod seed_plan;
 pub mod shard;
 pub(crate) mod stall;
 pub mod tags;
@@ -72,6 +73,7 @@ pub use membership::{DeploymentChanges, DomainSpec, Membership};
 pub use outage::{OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, VETO_RETRY};
 pub use process::{Attrition, AttritionScope, AttritionVictims, Process, RebootKind};
 pub use report::{SimulationMetrics, SimulationReport};
+pub use seed_plan::SeedPlan;
 pub use shard::{
     Aim, Core, Downgrade, SHARD_BOOK_KEY, ShardBook, ShardCounts, ShardEvent, ShardFaults,
     ShardState, ShardView, Shards, replica_ip,

@@ -141,7 +141,8 @@ and under the simulator in its own `#[test]`.
   `Workload` (the test driver, with `setup`, `run` and `check`).
 - `SimulationBuilder`: `processes` with fixed or random counts, `cluster`
   with datacenter, zone and machine locality, `tags`, `workload`,
-  `workload_factory` and `workloads`.
+  `workload_factory` and `workloads`; `seed_plan`, one hook per seed that
+  sets a group's count, its attrition budget and its outages together.
 - `ctx.deployment()`: a workload changes the deployment mid-run. `spawn`,
   `spawn_in` and `spawn_group` boot new processes, `retire` stops one for
   good, and topology queries and chaos victim pools follow the live

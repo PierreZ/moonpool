@@ -157,6 +157,40 @@ Domain ids are `dc1`, `dc1-z2`, `dc1-z2-m3`: globally unique, so two datacenters
 
 `.processes()` and `.cluster()` mix on one builder, so a consensus tier can be clustered while its clients stay flat.
 
+## One Draw for Several Surfaces
+
+A group's count is a range and an attrition's `max_dead` is one number, so on their own they never follow each other. A campaign that draws a shape (a larger cluster on a share of the seeds, with a dead budget that matches what that cluster promises to lose) registers a **seed plan**:
+
+```rust
+SimulationBuilder::new()
+    .processes(1..=4, || Box::new(Machine))
+    .enable_chaos([Chaos::Attrition {
+        config: Attrition { victims: AttritionVictims::group("machine"), ..base },
+        mode: ChaosMode::Swarm,
+    }])
+    .seed_plan(|plan: &mut SeedPlan| {
+        if moonpool_sim::sim_random_bool(0.25) {
+            let survive = moonpool_sim::sim_random_range(1..3);
+            plan.set_count("machine", 2 * survive + 1);
+            plan.set_max_dead("machine", survive);
+            plan.publish("survive", survive as u64);
+        } else {
+            plan.calm("machine");
+        }
+    })
+```
+
+The hook runs once per seed, before the groups resolve, and draws from the same configuration stream as the counts. What a plan can set:
+
+| Method | Effect on this seed |
+|---|---|
+| `set_count(group, n)` | The group runs `n` processes, in place of its own draw. A `.cluster()` group's topology owns its count, so naming one panics. |
+| `set_max_dead(group, n)` | Every attrition regime whose victims are `AttritionVictims::group(group)` gets `max_dead = n` before `ChaosMode::Swarm` draws its regime, so a swarm seed may still draw the never-reboot regime. |
+| `calm(group)` | No outage that names the group strikes, and it makes no draw. |
+| `publish(key, value)` | The run's `StateHandle` holds `value: u64` under `key` before any process starts: `ctx.state().get::<u64>(key)`. |
+
+A builder without a seed plan makes no draw for it, and a group the plan does not name keeps its own draw.
+
 ## Choosing Between Them
 
 | Question | Tool |

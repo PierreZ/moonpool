@@ -140,6 +140,7 @@ SimulationBuilder::new()
 | `workload_factory(f)` | One fresh instance per seed and per explored timeline. | [Multiverse Exploration](../part5-building-on-top/01-exploration.md) |
 | `workloads(count, f)` | `WorkloadCount::Fixed(n)` or `Random(range)` fresh instances per seed, indexed. | [Writing a Workload](./03-writing-workload.md#one-instance-or-many) |
 | `processes(count, f)` | One process group; `usize` or `RangeInclusive<usize>` drawn per seed. Panics on a duplicate group name. | [Process Groups](./27-process-groups.md) |
+| `seed_plan(hook)` | One hook per seed sets a group's count, its attrition `max_dead`, whether its outages strike, and values in the run's state. | [Process Groups](./27-process-groups.md#one-draw-for-several-surfaces) |
 | `cluster(config, f)` | One group laid out over `LocalityConfig` failure domains; the topology sets the count. | [Process Groups](./27-process-groups.md#cluster-failure-domains) |
 | `tags(dims)` | Round-robin tag dimensions over the last group. Returns `Result`. | [Process Groups](./27-process-groups.md#tags) |
 | `link_latency(config)` | Distance-dependent latency between `.cluster()` domains. | [Process Groups](./27-process-groups.md#cluster-failure-domains) |

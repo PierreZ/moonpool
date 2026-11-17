@@ -414,8 +414,8 @@ pub use runner::{
     GrayKinds, GroupRegistry, HINT_VETO_KEY, HintVeto, INSTANCE_LABEL, IterationControl, LiveClock,
     LiveSimulation, LiveStatus, LocalityConfig, MachineRegistry, Membership, MetricsHandle,
     OUTAGE_STATE_KEY, OUTAGE_VETO_KEY, Outage, OutageLanded, OutageVeto, Process, ProcessTags,
-    RebootKind, SHARD_BOOK_KEY, SelfCrash, ShardBook, ShardCounts, ShardEvent, ShardFaults,
-    ShardState, ShardView, Shards, SimContext, SimulationBuilder, SimulationMetrics,
+    RebootKind, SHARD_BOOK_KEY, SeedPlan, SelfCrash, ShardBook, ShardCounts, ShardEvent,
+    ShardFaults, ShardState, ShardView, Shards, SimContext, SimulationBuilder, SimulationMetrics,
     SimulationReport, TIMED_REBOOT_LABEL, TagRegistry, VETO_RETRY, WIPE_LEDGER_KEY, WipeBudget,
     WipeHeal, WipeLedger, Workload, WorkloadCount, WorkloadTopology,
 };

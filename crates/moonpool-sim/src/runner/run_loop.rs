@@ -42,6 +42,7 @@ pub(super) struct RunOrchestratorInputs<'a> {
     run_time_budget: Duration,
     max_spawns: usize,
     shard_faults: crate::runner::shard::ShardFaults,
+    seed_values: Vec<(String, u64)>,
 }
 
 impl RunOrchestratorInputs<'_> {
@@ -367,6 +368,7 @@ impl SimulationBuilder {
             run_time_budget,
             max_spawns,
             shard_faults,
+            seed_values,
         } = inputs;
         async move {
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
@@ -385,6 +387,7 @@ impl SimulationBuilder {
                 run_time_budget,
                 max_spawns,
                 shard_faults,
+                seed_values: &seed_values,
                 task_panics: tracker,
             })
             .await
@@ -500,6 +503,64 @@ impl SimulationBuilder {
             sim.note_fault(event);
         }
         sim
+    }
+
+    /// This seed's attrition regimes and outages, in registration order,
+    /// with the seed plan applied: its `max_dead` for a regime's victims
+    /// replaces the base before the swarm draw, and an outage it calms makes
+    /// no draw.
+    fn regimes_for_seed(
+        &self,
+        plan: &super::SeedPlan,
+        process_config: Option<&super::process_manager::ProcessConfig<'static>>,
+    ) -> (Vec<Attrition>, Vec<crate::runner::outage::Outage>) {
+        // Derive the per-seed attrition regimes, in registration order: `Swarm`
+        // draws a fresh reboot regime from the simulation stream (after the
+        // reset and the breakpoints — the draw-order contract on
+        // `ChaosMode::resolve`); `Random` uses the configured weights as
+        // written. An attrition entry is always enabled, so `off` never runs.
+        let attritions: Vec<Attrition> = self
+            .attritions
+            .iter()
+            .map(|(base, mode)| {
+                // A plan's budget for the victims replaces the base before
+                // the swarm draw.
+                let mut base = base.clone();
+                if let Some(max_dead) = plan.max_dead(&base.victims) {
+                    base.max_dead = max_dead;
+                }
+                ChaosMode::resolve(
+                    Some(*mode),
+                    || base.clone(),
+                    || base.clone(),
+                    || {
+                        base.swarm_for_seed_with_topology(
+                            process_config.map(|config| &config.machine_registry),
+                        )
+                    },
+                )
+            })
+            .collect();
+        // Then the outages, in registration order: `Swarm` keeps or drops each
+        // one (and its straggler) with two draws; `Random` keeps it as written.
+        let outages: Vec<crate::runner::outage::Outage> = self
+            .outages
+            .iter()
+            .filter_map(|(base, mode)| {
+                // An outage the plan calms is dropped before its draws: it
+                // makes none on this seed.
+                if !plan.strikes(&base.groups) {
+                    return None;
+                }
+                ChaosMode::resolve(
+                    Some(*mode),
+                    || Some(base.clone()),
+                    || Some(base.clone()),
+                    || base.swarm_for_seed(),
+                )
+            })
+            .collect();
+        (attritions, outages)
     }
 
     /// Resolve this seed's CPU model (installed on `sim`) and gray-failure
@@ -933,7 +994,16 @@ impl SimulationBuilder {
     /// historical `10.0.1.x` addresses.
     fn resolve_process_config(
         entries: &[ProcessEntry],
+        plan: &super::SeedPlan,
     ) -> Option<super::process_manager::ProcessConfig<'static>> {
+        for group in plan.counted_groups() {
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.name == group && entry.locality.is_none()),
+                "a seed plan sets the count of {group:?}, which is not a .processes() group"
+            );
+        }
         if entries.is_empty() {
             return None;
         }
@@ -945,7 +1015,9 @@ impl SimulationBuilder {
         let mut ips = Vec::new();
         let mut info = Vec::new();
         for (group, entry) in entries.iter().enumerate() {
-            let (count, localities) = entry.resolve_shape();
+            let (count, localities) = plan
+                .count(&entry.name)
+                .map_or_else(|| entry.resolve_shape(), |count| (count, None));
             let base_name = &entry.name;
             // Listed even when this seed drew zero members.
             group_registry.declare(base_name);
@@ -1503,7 +1575,13 @@ impl SimulationBuilder {
             .map(|(i, w)| (w.name().to_string(), format!("10.0.0.{}", i + 1)))
             .collect();
 
-        let process_config = Self::resolve_process_config(&self.process_entries);
+        // The seed plan draws before the groups resolve, on the same
+        // configuration stream: a count it sets replaces that group's draw.
+        let mut plan = super::SeedPlan::default();
+        if let Some(hook) = &self.seed_plan {
+            hook(&mut plan);
+        }
+        let process_config = Self::resolve_process_config(&self.process_entries, &plan);
 
         let mut sim = self.build_sim_for_iteration(seed);
         // `SimWorld` construction reset and reseeded the stream, so the run's
@@ -1525,43 +1603,7 @@ impl SimulationBuilder {
         if let Some(config) = &process_config {
             sim.set_localities(config.machine_registry.locality_map());
         }
-        // Derive the per-seed attrition regimes, in registration order: `Swarm`
-        // draws a fresh reboot regime from the simulation stream (after the
-        // reset and the breakpoints — the draw-order contract on
-        // `ChaosMode::resolve`); `Random` uses the configured weights as
-        // written. An attrition entry is always enabled, so `off` never runs.
-        let attritions: Vec<Attrition> = self
-            .attritions
-            .iter()
-            .map(|(base, mode)| {
-                ChaosMode::resolve(
-                    Some(*mode),
-                    || base.clone(),
-                    || base.clone(),
-                    || {
-                        base.swarm_for_seed_with_topology(
-                            process_config
-                                .as_ref()
-                                .map(|config| &config.machine_registry),
-                        )
-                    },
-                )
-            })
-            .collect();
-        // Then the outages, in registration order: `Swarm` keeps or drops each
-        // one (and its straggler) with two draws; `Random` keeps it as written.
-        let outages: Vec<crate::runner::outage::Outage> = self
-            .outages
-            .iter()
-            .filter_map(|(base, mode)| {
-                ChaosMode::resolve(
-                    Some(*mode),
-                    || Some(base.clone()),
-                    || Some(base.clone()),
-                    || base.swarm_for_seed(),
-                )
-            })
-            .collect();
+        let (attritions, outages) = self.regimes_for_seed(&plan, process_config.as_ref());
         // The replicated fault pattern draws last, after every draw a run
         // without it makes, so opting in shifts no other surface's sample.
         if self.storage_chaos.is_some() {
@@ -1609,6 +1651,10 @@ impl SimulationBuilder {
             run_time_budget: self.run_time_budget,
             max_spawns: self.max_spawns,
             shard_faults: self.shard_faults.clone(),
+            seed_values: plan
+                .values()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
         }
     }
 
