@@ -76,6 +76,7 @@ use crate::SimulationResult;
 use crate::locality::DomainLevel;
 use crate::providers::{SimRandomProvider, SimTimeProvider};
 use crate::runner::groups::GroupRegistry;
+use crate::runner::kill_policy::{KillAsk, KillPolicy, KillVerdict};
 use crate::runner::locality::MachineRegistry;
 use crate::runner::membership::Membership;
 use crate::runner::process::{AttritionScope, AttritionVictims, RebootKind};
@@ -518,7 +519,7 @@ impl FaultContext {
             tracing::debug!("Skipped reboot of already-dead process at IP {}", ip);
             return Ok(());
         }
-        let Some(kind) = self.gate_reboot(ip_addr, kind) else {
+        let Some(kind) = self.gate_reboot(ip_addr, kind, false) else {
             return self.restart(ip);
         };
 
@@ -607,7 +608,7 @@ impl FaultContext {
         if self.retired(ip_addr) {
             return Ok(());
         }
-        let Some(kind) = self.gate_reboot(ip_addr, RebootKind::Crash) else {
+        let Some(kind) = self.gate_reboot(ip_addr, RebootKind::Crash, true) else {
             return self.restart(ip);
         };
         assert_reachable!("crash: hold-down path");
@@ -652,7 +653,10 @@ impl FaultContext {
             assert_reachable!("crash_for: target already dead, skipped");
             return Ok(false);
         }
-        let Some(kind) = self.gate_crash(ip_addr, RebootKind::Crash) else {
+        let Some(kind) = self.ask_kill_policy(ip_addr, RebootKind::Crash, false) else {
+            return Ok(false);
+        };
+        let Some(kind) = self.gate_crash(ip_addr, kind) else {
             assert_reachable!("shard gate: a timed crash spares its victim");
             if let Some(book) = ShardBook::of(&self.state) {
                 book.count(Downgrade::CrashSpared);
@@ -723,7 +727,13 @@ impl FaultContext {
     /// The shard gate for a reboot of `ip` of `kind`: the kind to run, or
     /// `None` for a clean restart in place instead (see the
     /// [`shard`](super::shard) module).
-    fn gate_reboot(&self, ip: std::net::IpAddr, kind: RebootKind) -> Option<RebootKind> {
+    fn gate_reboot(
+        &self,
+        ip: std::net::IpAddr,
+        kind: RebootKind,
+        held: bool,
+    ) -> Option<RebootKind> {
+        let kind = self.ask_kill_policy(ip, kind, held)?;
         let kind = self.gate_crash(ip, kind);
         if kind.is_none() {
             assert_reachable!("shard gate: a kill becomes a clean restart");
@@ -732,6 +742,45 @@ impl FaultContext {
             }
         }
         kind
+    }
+
+    /// The harness's [`KillPolicy`] on a fault of `kind` on `ip`: the kind
+    /// to run, or `None` when the policy keeps `ip` up (see the
+    /// [`kill_policy`](super::kill_policy) module). `held` is a crash with
+    /// no scheduled restart. Draws nothing.
+    fn ask_kill_policy(
+        &self,
+        ip: std::net::IpAddr,
+        kind: RebootKind,
+        held: bool,
+    ) -> Option<RebootKind> {
+        let Some(policy) = KillPolicy::of(&self.state) else {
+            return Some(kind);
+        };
+        let mut dead = self.dead_set();
+        dead.remove(&ip);
+        let wiped = WipeLedger::unhealed(&self.state)
+            .into_iter()
+            .filter(|wiped| *wiped != ip)
+            .collect();
+        let ask = KillAsk {
+            victim: ip,
+            kind,
+            held,
+            dead,
+            wiped,
+        };
+        match policy.judge(&ask) {
+            KillVerdict::KeepDisk if kind == RebootKind::CrashAndWipe => {
+                assert_reachable!("kill policy: a wipe keeps its disk");
+                Some(RebootKind::Crash)
+            }
+            KillVerdict::Allow | KillVerdict::KeepDisk => Some(kind),
+            KillVerdict::Restart => {
+                assert_reachable!("kill policy: a kill becomes a restart");
+                None
+            }
+        }
     }
 
     /// The gate's judgement of `kind` on `ip`: a wipe that would cost a

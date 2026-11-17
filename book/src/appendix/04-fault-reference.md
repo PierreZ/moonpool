@@ -125,7 +125,7 @@ The stripe key comes from `LayoutRegion::stripe` (the journal uses the entry pos
 | Outage | `Chaos::Outage` | Every process of the named groups loses power at one instant. A workload can hold it with `OutageVeto`. |
 | Hint | `hint!("label")` in library code | The seed's first admitting attrition regime may reboot the process at that moment. A workload can budget it with `HintVeto::new(\|ip, label\| bool).publish(state)` under `HINT_VETO_KEY`. The veto also guards a per-process regime's timed reboots, asked with `TIMED_REBOOT_LABEL`. |
 
-Reboots are bounded by `max_dead` per injector pool. The restart runs the process factory again: a fresh instance, the same IP, the same disk unless wiped.
+Reboots are bounded by `max_dead` per injector pool. A harness's `KillPolicy` (under `KILL_POLICY_KEY`) is asked before every kill and wipe of the `FaultContext`: `Allow`, `KeepDisk` (a wipe runs as a crash) or `Restart` (no crash). It is FoundationDB's `canKillProcesses`. The restart runs the process factory again: a fresh instance, the same IP, the same disk unless wiped.
 
 ## CPU and Gray Failures
 

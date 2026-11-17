@@ -60,6 +60,8 @@ Terms are listed alphabetically. Cross-references are in **bold**. Type and macr
 
 **LayoutRegion** -- `moonpool_core::LayoutRegion { path, bytes, kind, stripe, shard }`: a named byte range of a file. Published with `SimWorld::publish_layout`, consumed by **fault focus** and **replicated fault patterns**.
 
+**KillPolicy** -- `KillPolicy::new(|ask: &KillAsk| KillVerdict).publish(ctx.state())`: the harness's `canKillProcesses`. Asked before every kill and wipe with the victim, the kind, whether it is held down, and the dead and wiped processes. It answers `Allow`, `KeepDisk` or `Restart`. Stored under `KILL_POLICY_KEY`.
+
 **Locality** -- The datacenter, zone and machine of a process (`LocalityInfo`), sampled from `LocalityConfig` by `SimulationBuilder::cluster`. Drives `LinkLatencyConfig`, partition strategies and attrition scopes.
 
 **Lost-synced-write oracle** -- A sector that a sync reported durable and that changes across a crash fails the run with `StorageFaultKind::LostSyncedWrite`, unless `barrier_violation_probability` arms that lie on purpose.
