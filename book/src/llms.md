@@ -109,6 +109,7 @@ if report.is_failure() { report.eprint(); std::process::exit(1); }
 | `swarm_operations()` | Per-seed operation subsets; test with `swarm_op_enabled(op_id)`. |
 | `link_latency(cfg)`, `tcp_send_window_bytes(n)`, `accept_backlog_capacity(n)` | Deployment shape. Defaults none, 64 KiB, 128. |
 | `max_spawns(n)` | Cap on processes workloads spawn per run through `ctx.deployment()`. Default 16. |
+| `seed_plan(\|plan: &mut SeedPlan\| ..)` | Once per seed, before the groups resolve: `set_count(group, n)` replaces a `.processes()` group's draw, `set_max_dead(group, n)` replaces the base `max_dead` of the regimes whose victims are that group (before the swarm draw), `calm(group)` drops its outages, `publish(key, u64)` lands in `ctx.state()`. |
 | `spawnable_group(name)` | Declare a group a workload starts later with `spawn_group`, so a `GrayFailure` or `Outage` may name it (else refused as unregistered). A gray window on it picks its victim when it starts. Draws nothing. |
 | `invariant(i)`, `invariant_fn(name, \|q, t\| ..)`, `trace_level(level)` | Invariants run after every step. |
 | `metrics_factory(\|ip\| Arc<S>)` | App metrics in the report. |

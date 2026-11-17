@@ -238,6 +238,9 @@ pub(crate) struct OrchestrateInputs<'a> {
     pub(crate) max_spawns: usize,
     /// The run's shard fault shapes (the gate is always on).
     pub(crate) shard_faults: crate::runner::shard::ShardFaults,
+    /// The values the seed plan publishes in the run's state
+    /// ([`SeedPlan::publish`](crate::SeedPlan::publish)).
+    pub(crate) seed_values: &'a [(String, u64)],
     /// Per-iteration accounting for detached task panics.
     pub(crate) task_panics: TaskPanicTracker,
 }
@@ -309,6 +312,7 @@ impl WorkloadOrchestrator {
             run_time_budget,
             max_spawns,
             shard_faults,
+            seed_values,
             task_panics,
         } = inputs;
         crate::chaos::window::set_chaos_ended_at(None);
@@ -322,6 +326,9 @@ impl WorkloadOrchestrator {
         // Shared state for cross-workload publish/get communication. Event
         // timelines and invariants live on `obs` (SimulationLayer).
         let state = StateHandle::new();
+        for (key, value) in seed_values {
+            state.publish(key, *value);
+        }
         // The run's wipe ledger: draws nothing, read only by a regime with
         // a wipe budget.
         crate::runner::wipe::WipeLedger::install(&state);

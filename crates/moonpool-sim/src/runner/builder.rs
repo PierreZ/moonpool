@@ -203,6 +203,8 @@ pub struct SimulationBuilder {
     /// How many processes the workloads may spawn per run.
     pub(super) max_spawns: usize,
     pub(super) shard_faults: crate::runner::shard::ShardFaults,
+    /// The hook that draws each seed's plan ([`Self::seed_plan`]).
+    pub(super) seed_plan: Option<crate::runner::seed_plan::SeedPlanHook>,
 }
 
 /// The default [`SimulationBuilder::max_spawns`] cap.
@@ -273,6 +275,7 @@ impl SimulationBuilder {
             corpus_file: None,
             max_spawns: DEFAULT_MAX_SPAWNS,
             shard_faults: crate::runner::shard::ShardFaults::default(),
+            seed_plan: None,
         }
     }
 
@@ -1006,6 +1009,33 @@ impl SimulationBuilder {
     #[must_use]
     pub fn max_spawns(mut self, max_spawns: usize) -> Self {
         self.max_spawns = max_spawns;
+        self
+    }
+
+    /// Draw each seed's [`SeedPlan`](crate::SeedPlan) with `hook`: a
+    /// group's process count, its attrition budget, whether its outages
+    /// strike, and values published in the run's
+    /// [`StateHandle`](crate::StateHandle).
+    ///
+    /// The hook runs once per seed, after the workload count draw and before
+    /// the process groups resolve, so its draws come from the seed's
+    /// configuration stream (`sim_random_range`, `sim_random_bool`) like the
+    /// group counts it replaces. A count it sets replaces that group's own
+    /// draw. A `max_dead` it sets replaces the base of every attrition regime
+    /// whose victims are that group, before `ChaosMode::Swarm` draws the
+    /// seed's regime. A builder without a hook makes no draw for it.
+    ///
+    /// Use it when one draw decides several surfaces at once: a larger
+    /// cluster on a share of the seeds whose dead budget follows its size.
+    ///
+    /// # Panics
+    ///
+    /// The run panics at the first seed when the hook sets the count of a
+    /// group that is not a `.processes()` group: a `.cluster()` group's
+    /// topology owns its count.
+    #[must_use]
+    pub fn seed_plan(mut self, hook: impl Fn(&mut crate::SeedPlan) + 'static) -> Self {
+        self.seed_plan = Some(Box::new(hook));
         self
     }
 
