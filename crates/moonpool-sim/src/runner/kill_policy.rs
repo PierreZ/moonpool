@@ -21,13 +21,15 @@
 //!
 //! The policy must not draw randomness: its answer must not change the draw
 //! schedule. It is asked at the decision, with the processes dead and wiped
-//! at that instant; the victim is not among them.
+//! at that instant; the victim is not among them. It gets the run's state
+//! as an argument: a policy that captured the [`StateHandle`] it is
+//! published in would keep that state alive past its run.
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use crate::RebootKind;
+use crate::{RebootKind, StateHandle};
 
 /// The run's state key a [`KillPolicy`] is published under.
 pub const KILL_POLICY_KEY: &str = "moonpool:kill-policy";
@@ -73,32 +75,34 @@ pub enum KillVerdict {
 }
 
 /// What a [`KillPolicy`] answers.
-type Judge = dyn Fn(&KillAsk) -> KillVerdict + Send + Sync;
+type Judge = dyn Fn(&StateHandle, &KillAsk) -> KillVerdict + Send + Sync;
 
 /// A harness's policy over the destructive faults (see the module doc).
 #[derive(Clone)]
 pub struct KillPolicy(Arc<Judge>);
 
 impl KillPolicy {
-    /// A policy answering `judge(ask)`.
-    pub fn new(judge: impl Fn(&KillAsk) -> KillVerdict + Send + Sync + 'static) -> Self {
+    /// A policy answering `judge(state, ask)`, `state` the run's state.
+    pub fn new(
+        judge: impl Fn(&StateHandle, &KillAsk) -> KillVerdict + Send + Sync + 'static,
+    ) -> Self {
         Self(Arc::new(judge))
     }
 
     /// Install this policy for the run that owns `state`, replacing any
     /// earlier one.
-    pub fn publish(self, state: &crate::StateHandle) {
+    pub fn publish(self, state: &StateHandle) {
         state.publish(KILL_POLICY_KEY, self);
     }
 
     /// The policy of the run that owns `state`, if one is published.
-    pub(crate) fn of(state: &crate::StateHandle) -> Option<Self> {
+    pub(crate) fn of(state: &StateHandle) -> Option<Self> {
         state.get::<Self>(KILL_POLICY_KEY)
     }
 
-    /// The policy's answer to `ask`.
-    pub(crate) fn judge(&self, ask: &KillAsk) -> KillVerdict {
-        (self.0)(ask)
+    /// The policy's answer to `ask` in the run that owns `state`.
+    pub(crate) fn judge(&self, state: &StateHandle, ask: &KillAsk) -> KillVerdict {
+        (self.0)(state, ask)
     }
 }
 

@@ -36,7 +36,7 @@ impl Process for Node {
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let verdict = self.verdict;
         let asks = self.asks.clone();
-        KillPolicy::new(move |ask| {
+        KillPolicy::new(move |_state, ask| {
             asks.lock()
                 .expect("Mutex poisoned: prior task panicked")
                 .push(ask.clone());

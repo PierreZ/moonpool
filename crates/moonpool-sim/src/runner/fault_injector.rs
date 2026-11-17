@@ -770,7 +770,7 @@ impl FaultContext {
             dead,
             wiped,
         };
-        match policy.judge(&ask) {
+        match policy.judge(&self.state, &ask) {
             KillVerdict::KeepDisk if kind == RebootKind::CrashAndWipe => {
                 assert_reachable!("kill policy: a wipe keeps its disk");
                 Some(RebootKind::Crash)

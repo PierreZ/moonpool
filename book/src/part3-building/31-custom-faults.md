@@ -131,7 +131,7 @@ A harness does the same with a `KillPolicy`. It publishes the policy in `ctx.sta
 - `Restart`: no crash. A reboot or a hold-down restarts the process in place, and a timed crash spares it.
 
 ```rust
-KillPolicy::new(|ask| {
+KillPolicy::new(|_state, ask| {
     // Our cell survives one lost disk: a second unhealed wipe keeps its disk.
     if ask.wipes() && !ask.wiped.is_empty() {
         KillVerdict::KeepDisk
@@ -142,7 +142,7 @@ KillPolicy::new(|ask| {
 .publish(ctx.state());
 ```
 
-The policy runs before the shard gate, and it draws nothing, so the draw schedule does not depend on its answer. The reachables `kill policy: a wipe keeps its disk` and `kill policy: a kill becomes a restart` show that it acted.
+The policy gets the run's state as its first argument. It must not capture the `StateHandle` it is published in, which would keep the state alive past the run. It runs before the shard gate, and it draws nothing, so the draw schedule does not depend on its answer. The reachables `kill policy: a wipe keeps its disk` and `kill policy: a kill becomes a restart` show that it acted.
 
 ## Rules for an Injector
 
