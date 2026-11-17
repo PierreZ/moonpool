@@ -15,6 +15,7 @@
 //! | [`deployment`] | [`Deployment`]: a workload spawns and retires processes mid-run |
 //! | [`membership`] | [`Membership`], [`DomainSpec`], [`DeploymentChanges`]: the live process set |
 //! | [`fault_injector`] | [`FaultInjector`], [`FaultContext`], the built-in attrition injector |
+//! | [`kill_policy`] | [`KillPolicy`], [`KillAsk`], [`KillVerdict`]: the harness's `canKillProcesses` |
 //! | [`outage`] | [`Outage`], [`OutageVeto`], [`OutageLanded`] |
 //! | [`gray_failure`] | [`GrayFailure`], [`GrayKinds`] |
 //! | [`hint`] | The hint sink and [`HintVeto`] |
@@ -38,6 +39,7 @@ pub mod gray_failure;
 pub mod groups;
 pub mod hint;
 pub(crate) mod iteration;
+pub mod kill_policy;
 pub mod live;
 pub mod locality;
 pub mod membership;
@@ -67,6 +69,7 @@ pub use fault_injector::{FaultContext, FaultInjector};
 pub use gray_failure::{GrayFailure, GrayKinds};
 pub use groups::GroupRegistry;
 pub use hint::{HINT_VETO_KEY, HintVeto, TIMED_REBOOT_LABEL};
+pub use kill_policy::{KILL_POLICY_KEY, KillAsk, KillPolicy, KillVerdict};
 pub use live::{LiveClock, LiveSimulation, LiveStatus};
 pub use locality::{LocalityConfig, MachineRegistry};
 pub use membership::{DeploymentChanges, DomainSpec, Membership};

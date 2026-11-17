@@ -120,6 +120,30 @@ Each process has a **lifecycle generation** (`SimWorld::process_generation(ip)`)
 
 An injector is the natural home for the harness's budgets. At the start of the window it can publish a `HintVeto` or an `OutageVeto` in `ctx.state()`, and the built-in injectors ask them before they strike. It can also wait on what the built-ins publish: an `OutageLanded` under `OUTAGE_STATE_KEY` marks the instant every memory of a group is gone, the right moment to plant latent disk damage. [hint!](29-hints.md) and [Correlated Outages](30-outages.md) show both vetoes.
 
+## Asking the Harness Before a Kill
+
+Vetoes hold a fault back. But what about a fault that the system does not promise to survive at all? A cell of three replicas promises to survive one lost disk. A wipe of a second replica before the first one heals is not a bug the run should find: it is a fault the design refuses. FoundationDB's simulator asks `canKillProcesses` before each kill, and turns a delete that would leave too few copies into a plain reboot.
+
+A harness does the same with a `KillPolicy`. It publishes the policy in `ctx.state()` under `KILL_POLICY_KEY`, and every kill and wipe of the `FaultContext` asks it first: attrition, a reboot hint, an outage, and a scripted `reboot`, `crash` or `crash_for`. The policy gets a `KillAsk`: the victim, the `RebootKind`, whether the process is held down with no scheduled restart, and the processes dead and wiped at that instant. It answers a `KillVerdict`:
+
+- `Allow`: the fault runs as drawn.
+- `KeepDisk`: a wipe runs as a crash, and the disk stays.
+- `Restart`: no crash. A reboot or a hold-down restarts the process in place, and a timed crash spares it.
+
+```rust
+KillPolicy::new(|_state, ask| {
+    // Our cell survives one lost disk: a second unhealed wipe keeps its disk.
+    if ask.wipes() && !ask.wiped.is_empty() {
+        KillVerdict::KeepDisk
+    } else {
+        KillVerdict::Allow
+    }
+})
+.publish(ctx.state());
+```
+
+The policy gets the run's state as its first argument. It must not capture the `StateHandle` it is published in, which would keep the state alive past the run. It runs before the shard gate, and it draws nothing, so the draw schedule does not depend on its answer. The reachables `kill policy: a wipe keeps its disk` and `kill policy: a kill becomes a restart` show that it acted.
+
 ## Rules for an Injector
 
 1. Draw randomness only from `ctx.random()` or the `sim_random_*` functions. Never from `rand::thread_rng()` or the wall clock.

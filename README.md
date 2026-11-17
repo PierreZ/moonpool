@@ -179,6 +179,9 @@ and under the simulator in its own `#[test]`.
   signals it healed, and a wipe past the budget becomes a crash.
 - `Chaos::Outage`: a correlated outage of whole process groups, with an
   optional straggler. An `OutageVeto` lets the harness defer it.
+- A `KillPolicy`, FoundationDB's `canKillProcesses`: the harness answers
+  every kill and wipe before it runs, and may keep the disk or turn the
+  kill into an in-place restart.
 - `Chaos::Cpu` and `Chaos::GrayFailure`: a CPU model per process and slow
   but alive machines. Workloads read `SimContext::slowness`.
 - `Chaos::Clocks`: each process boot has its own `now()`, which starts
