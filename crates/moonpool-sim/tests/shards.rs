@@ -385,3 +385,106 @@ fn a_moving_shard_converges_on_its_core() {
     assert!(aimed > 0, "the aim struck a moving shard");
     assert!(edge > 0, "the edge pushed a shard to its minimum");
 }
+
+/// A replica of `orders` (three replicas, one copy lost at most) that idles.
+struct Idle;
+
+#[async_trait]
+impl Process for Idle {
+    fn name(&self) -> &'static str {
+        "node"
+    }
+
+    async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        shard!(
+            "orders",
+            current = Replication::tolerates(replicas(ctx), 1, 1)
+        );
+        ctx.shutdown().cancelled().await;
+        Ok(())
+    }
+}
+
+/// What the hold-down script saw after each step.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct HeldSteps {
+    first_held_down: bool,
+    second_held_down: bool,
+    wipes_to_crash: u64,
+    held_after_restart: bool,
+}
+
+/// Holds node 0 down, then node 1, wipes node 2, restarts node 0 and holds
+/// node 1 down again.
+struct HoldScript(Arc<Mutex<HeldSteps>>);
+
+#[async_trait]
+impl moonpool_sim::FaultInjector for HoldScript {
+    fn name(&self) -> &'static str {
+        "hold-script"
+    }
+
+    async fn inject(&mut self, ctx: &moonpool_sim::FaultContext) -> SimulationResult<()> {
+        let sleep = |ms| async move {
+            ctx.time()
+                .sleep(Duration::from_millis(ms))
+                .await
+                .map_err(|e| moonpool_sim::SimulationError::InvalidState(format!("sleep: {e}")))
+        };
+        sleep(500).await?;
+        let ips = ctx.process_ips();
+        let mut steps = HeldSteps::default();
+        ctx.crash(&ips[0])?;
+        steps.first_held_down = ctx.is_dead(&ips[0]);
+        sleep(50).await?;
+        ctx.crash(&ips[1])?;
+        steps.second_held_down = ctx.is_dead(&ips[1]);
+        sleep(50).await?;
+        ctx.reboot(&ips[2], moonpool_sim::RebootKind::CrashAndWipe)?;
+        steps.wipes_to_crash = ctx
+            .shards()
+            .counts()
+            .downgrades_of(moonpool_sim::Downgrade::WipeToCrash);
+        sleep(5_000).await?;
+        ctx.restart(&ips[0])?;
+        sleep(500).await?;
+        ctx.crash(&ips[1])?;
+        steps.held_after_restart = ctx.is_dead(&ips[1]);
+        *self.0.lock().expect("steps lock") = steps;
+        Ok(())
+    }
+}
+
+/// Under `durable_only`, a hold-down is a lost copy until its restart: the
+/// gate holds one replica of a shard that tolerates one lost copy down,
+/// restarts the second in place, counts the held one when it judges a
+/// wipe, and holds a replica down again once the first came back.
+#[test]
+fn under_durable_only_a_hold_down_counts_as_a_lost_copy() {
+    let steps = Arc::new(Mutex::new(HeldSteps::default()));
+    let script = Arc::clone(&steps);
+    let report = SimulationBuilder::new()
+        .processes(3, || Box::new(Idle))
+        .workload(Timed {
+            run_for: Duration::from_secs(10),
+            counts: Arc::default(),
+        })
+        .shard_faults(ShardFaults::default().durable_only())
+        .fault_factory(move || Box::new(HoldScript(Arc::clone(&script))))
+        .chaos_duration(Duration::from_secs(9))
+        .set_iterations(1)
+        .set_debug_seeds(vec![1])
+        .run()
+        .expect("simulation configuration is valid");
+    assert_eq!(report.failed_runs, 0, "{:?}", report.assertion_violations);
+    let steps = steps.lock().expect("steps lock").clone();
+    assert_eq!(
+        steps,
+        HeldSteps {
+            first_held_down: true,
+            second_held_down: false,
+            wipes_to_crash: 1,
+            held_after_restart: true,
+        }
+    );
+}

@@ -613,6 +613,9 @@ impl FaultContext {
         };
         assert_reachable!("crash: hold-down path");
         self.mark_dead(ip_addr);
+        if let Some(book) = ShardBook::of(&self.state) {
+            book.note_held(ip_addr);
+        }
         // A hold-down starts a new generation: a restart still pending from
         // an earlier reboot, or the kill of a grace period, must not end it.
         let generation = self.sim.advance_process_generation(ip_addr);
@@ -656,7 +659,7 @@ impl FaultContext {
         let Some(kind) = self.ask_kill_policy(ip_addr, RebootKind::Crash, false) else {
             return Ok(false);
         };
-        let Some(kind) = self.gate_crash(ip_addr, kind) else {
+        let Some(kind) = self.gate_crash(ip_addr, kind, false) else {
             assert_reachable!("shard gate: a timed crash spares its victim");
             if let Some(book) = ShardBook::of(&self.state) {
                 book.count(Downgrade::CrashSpared);
@@ -699,13 +702,18 @@ impl FaultContext {
     }
 
     /// The replicas whose copies count as lost now: wiped and not healed,
-    /// or on a failed disk.
+    /// on a failed disk, or, under `durable_only`, held down with no
+    /// scheduled restart.
     fn not_intact(
         &self,
         book: &ShardBook,
         requirements: &Requirements,
     ) -> std::collections::BTreeSet<std::net::IpAddr> {
         let mut out = book.wiped();
+        if !book.config().judges_progress() {
+            let dead = self.dead_set();
+            out.extend(book.held().into_iter().filter(|ip| dead.contains(ip)));
+        }
         for (_, replications) in requirements {
             for replication in replications {
                 for replica in replication
@@ -734,7 +742,7 @@ impl FaultContext {
         held: bool,
     ) -> Option<RebootKind> {
         let kind = self.ask_kill_policy(ip, kind, held)?;
-        let kind = self.gate_crash(ip, kind);
+        let kind = self.gate_crash(ip, kind, held);
         if kind.is_none() {
             assert_reachable!("shard gate: a kill becomes a clean restart");
             if let Some(book) = ShardBook::of(&self.state) {
@@ -786,15 +794,25 @@ impl FaultContext {
     /// The gate's judgement of `kind` on `ip`: a wipe that would cost a
     /// shard its data becomes a crash, a crash whose dirty sectors could
     /// cost a stripe keeps the page cache, and `None` when taking `ip` down
-    /// would stop a shard's progress. Draws nothing.
-    fn gate_crash(&self, ip: std::net::IpAddr, kind: RebootKind) -> Option<RebootKind> {
+    /// would stop a shard's progress, or, under `durable_only`, when a
+    /// hold-down (`held`) would cost a shard its data. Draws nothing.
+    fn gate_crash(&self, ip: std::net::IpAddr, kind: RebootKind, held: bool) -> Option<RebootKind> {
         let Some((book, requirements)) = self.gate_requirements() else {
             return Some(kind);
         };
         let verdict = super::shard::pure(|| {
             let mut kind = kind;
+            let not_intact = self.not_intact(&book, &requirements);
+            if held
+                && !book.config().judges_progress()
+                && !super::shard::lose_ok(&requirements, &not_intact, &book.losses(), &[ip])
+            {
+                assert_reachable!(
+                    "shard gate: a hold-down that would cost a shard its data restarts"
+                );
+                return None;
+            }
             if kind == RebootKind::CrashAndWipe {
-                let not_intact = self.not_intact(&book, &requirements);
                 // Also per stripe: a copy damaged elsewhere leaves fewer
                 // clean ones than intact replicas.
                 if !super::shard::lose_ok(&requirements, &not_intact, &book.losses(), &[ip])
@@ -866,6 +884,9 @@ impl FaultContext {
             return Ok(());
         }
         assert_reachable!("restart: explicit restart path");
+        if let Some(book) = ShardBook::of(&self.state) {
+            book.clear_held(ip_addr);
+        }
         self.sim
             .schedule_process_restart(ip_addr, Duration::from_nanos(1));
         tracing::info!("Explicitly restarting process at IP {}", ip);
