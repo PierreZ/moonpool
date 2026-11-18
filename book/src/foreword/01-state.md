@@ -6,7 +6,7 @@ Moonpool is under active development. It is used to find real bugs in distribute
 
 ## The crates
 
-The workspace holds seventeen crates. Twelve are published to crates.io. Five are tools and examples that stay in the repository. The [Crate Map](../appendix/02-crate-map.md) has the dependency graph.
+The workspace holds eighteen crates. Thirteen are published to crates.io. Five are tools and examples that stay in the repository. The [Crate Map](../appendix/02-crate-map.md) has the dependency graph.
 
 | Crate | What it is | Status |
 |---|---|---|

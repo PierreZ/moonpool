@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-The workspace has 17 members at version 0.9.0. Application code depends on `moonpool` (the facade) or directly on the crate it needs.
+The workspace has 18 members at version 0.9.0. Application code depends on `moonpool` (the facade) or directly on the crate it needs.
 
 ## Dependency Graph
 
