@@ -20,14 +20,23 @@ pub enum ExplorationConfig {}
 
 /// Initialise the assertion region: `MAP_SHARED` under the explorer (so
 /// forked workers share counts and discovery latches), or a plain heap table
-/// without it.
+/// without it. Where the explorer cannot map shared memory (wasm, or a
+/// failed `mmap`), the heap table holds the counts: a run without a table
+/// would count no assertion at all, and its report would name no violation.
 pub fn init_assertion_region() {
     #[cfg(feature = "exploration")]
-    if let Err(e) = moonpool_explorer::init_assertions() {
-        tracing::error!("Failed to initialize assertion table: {e}");
-    }
+    fall_back_to_heap(moonpool_explorer::init_assertions());
     #[cfg(not(feature = "exploration"))]
     moonpool_assertions::init();
+}
+
+/// Give the run a heap assertion table when `shared` failed to map one.
+#[cfg(feature = "exploration")]
+fn fall_back_to_heap(shared: std::io::Result<()>) {
+    if let Err(e) = shared {
+        tracing::warn!("no shared assertion table ({e}): the counts stay in this process");
+        moonpool_assertions::init();
+    }
 }
 
 /// Tear down the assertion region.
@@ -92,5 +101,32 @@ pub fn explorer_is_child() -> bool {
     #[cfg(not(feature = "exploration"))]
     {
         false
+    }
+}
+
+#[cfg(all(test, feature = "exploration"))]
+mod tests {
+    #[test]
+    fn a_run_whose_shared_table_fails_counts_on_the_heap() {
+        moonpool_assertions::clear();
+        super::fall_back_to_heap(Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "shared memory requires unix",
+        )));
+        assert!(!moonpool_assertions::assertion_table_ptr().is_null());
+        moonpool_assertions::assertion_bool(
+            moonpool_assertions::AssertKind::Always,
+            false,
+            false,
+            "fallback: an always fails",
+        );
+        let slots = moonpool_assertions::assertion_read_all();
+        assert!(
+            slots
+                .iter()
+                .any(|slot| slot.msg == "fallback: an always fails" && slot.fail_count == 1)
+        );
+        super::cleanup_assertion_region();
+        assert!(moonpool_assertions::assertion_table_ptr().is_null());
     }
 }
