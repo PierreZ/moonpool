@@ -1141,6 +1141,7 @@ impl SimulationBuilder {
             seeds_failing: Vec::new(),
             seeds_stalled: Vec::new(),
             failure_causes: BTreeMap::new(),
+            seed_violations: BTreeMap::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             dropped_assertion_allocations: 0,
@@ -1681,7 +1682,7 @@ impl SimulationBuilder {
                     seed,
                     wall_time,
                     &all_results,
-                    crate::chaos::has_always_violations(),
+                    crate::chaos::always_violations(),
                     sim_metrics,
                 );
                 Self::log_progress_milestone(

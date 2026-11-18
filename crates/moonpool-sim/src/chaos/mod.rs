@@ -116,7 +116,7 @@ pub mod window;
 
 // Re-export main types at module level
 pub use assertions::{
-    AssertionStats, assertion_results, has_always_violations, on_assertion_bool,
+    AssertionStats, always_violations, assertion_results, has_always_violations, on_assertion_bool,
     on_assertion_numeric, on_assertion_sometimes_all, on_sometimes_each, record_always_violation,
     reset_always_violations, reset_assertion_results, validate_assertion_contracts,
 };

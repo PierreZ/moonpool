@@ -97,9 +97,9 @@ Both matter. A run that never violates an invariant but never reaches an error p
   Events       8,432 avg
 
   Faulty seeds: [7891, 42033]
-  Seed 7891: an always assertion was violated
+  Seed 7891: an always assertion was violated: 'kv: read matches the model'
   Replay: .set_debug_seeds(vec![7891])
-  Seed 42033: an always assertion was violated
+  Seed 42033: an always assertion was violated: 'kv: read matches the model'
   Replay: .set_debug_seeds(vec![42033])
 
 ━━━ Assertions (4) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -110,7 +110,7 @@ Both matter. A run that never violates an invariant but never reaches an error p
   ✗  assert_always!('kv: read matches the model') failed 47 times out of 12,847
 ```
 
-The report says which seeds failed and why (`report.failure_causes`: the error of a workload's `run()` or `check()`, a panic, a stall guard, a settle timeout, a violated always-assertion), which assertion broke, and how rare it was. An assertion written with a detail block also printed `[ASSERTION FAILED] kv: read matches the model (seed=7891) | key=k3 server=10.0.1.2` on stderr the moment it failed, which is why the workload chapter attached the key and the server. [Debugging a Failing Seed](./20-debugging.md) takes it from here: pin seed 7891 with `set_debug_seeds(vec![7891])` and `set_iterations(1)`, raise the trace level, read backwards from the first violation.
+The report says which seeds failed and why (`report.failure_causes`: the error of a workload's `run()` or `check()`, a panic, a stall guard, a settle timeout, each violated always-assertion by its message; `report.seed_violations` lists those messages for each seed), which assertion broke, and how rare it was. An assertion written with a detail block also printed `[ASSERTION FAILED] kv: read matches the model (seed=7891) | key=k3 server=10.0.1.2` on stderr the moment it failed, which is why the workload chapter attached the key and the server. [Debugging a Failing Seed](./20-debugging.md) takes it from here: pin seed 7891 with `set_debug_seeds(vec![7891])` and `set_iterations(1)`, raise the trace level, read backwards from the first violation.
 
 ## Stop Conditions
 

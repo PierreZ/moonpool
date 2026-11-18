@@ -26,15 +26,18 @@
 //! | `assert_sometimes_all!` | yes | no | on frontier advance |
 //! | `assert_sometimes_each!` | yes | no | on discovery/quality |
 
-use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 
 // =============================================================================
 // Thread-local violation tracking (Antithesis-style: never panic)
 // =============================================================================
 
 thread_local! {
-    static ALWAYS_VIOLATION_COUNT: Cell<u64> = const { Cell::new(0) };
+    /// The message of each always-type assertion violated during this
+    /// iteration: the runner reports them per seed
+    /// ([`SimulationReport::seed_violations`](crate::SimulationReport::seed_violations)).
+    static ALWAYS_VIOLATIONS: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
     /// When set, the next call to [`reset_assertion_results`] is skipped.
     /// Used by multi-seed runs to prevent `SimWorld::create` from zeroing
     /// assertion state that the between-seed reset already handled (a selective
@@ -42,23 +45,38 @@ thread_local! {
     static SKIP_NEXT_ASSERTION_RESET: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Record that an always-type assertion was violated during this iteration.
+/// Record that the always-type assertion `msg` was violated during this
+/// iteration.
 ///
 /// Called by always-type macros instead of panicking. The simulation runner
-/// checks `has_always_violations()` after each iteration to report failures.
-pub fn record_always_violation() {
-    ALWAYS_VIOLATION_COUNT.with(|c| c.set(c.get() + 1));
+/// checks `has_always_violations()` after each iteration to report failures,
+/// and names each violated message next to the seed.
+pub fn record_always_violation(msg: impl AsRef<str>) {
+    let msg = msg.as_ref();
+    ALWAYS_VIOLATIONS.with(|violations| {
+        let mut violations = violations.borrow_mut();
+        if !violations.contains(msg) {
+            violations.insert(msg.to_owned());
+        }
+    });
 }
 
-/// Reset the violation counter. Must be called at the start of each iteration.
+/// Forget this iteration's violations. Must be called at the start of each iteration.
 pub fn reset_always_violations() {
-    ALWAYS_VIOLATION_COUNT.with(|c| c.set(0));
+    ALWAYS_VIOLATIONS.with(|violations| violations.borrow_mut().clear());
 }
 
 /// Check whether any always-type assertion was violated during this iteration.
 #[must_use]
 pub fn has_always_violations() -> bool {
-    ALWAYS_VIOLATION_COUNT.with(|c| c.get() > 0)
+    ALWAYS_VIOLATIONS.with(|violations| !violations.borrow().is_empty())
+}
+
+/// The message of each always-type assertion violated during this
+/// iteration, sorted and without duplicates.
+#[must_use]
+pub fn always_violations() -> Vec<String> {
+    ALWAYS_VIOLATIONS.with(|violations| violations.borrow().iter().cloned().collect())
 }
 
 /// Statistics for a tracked assertion.
@@ -473,7 +491,7 @@ macro_rules! assert_always {
             true,
         );
         if !cond {
-            $crate::chaos::assertions::record_always_violation();
+            $crate::chaos::assertions::record_always_violation(&__msg);
         }
     }};
     ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {{
@@ -486,7 +504,7 @@ macro_rules! assert_always {
             true,
         );
         if !cond {
-            $crate::chaos::assertions::record_always_violation();
+            $crate::chaos::assertions::record_always_violation(&__msg);
             eprintln!(
                 "[ASSERTION FAILED] {} (seed={}) | {}",
                 __msg,
@@ -515,7 +533,7 @@ macro_rules! assert_always_or_unreachable {
             false,
         );
         if !cond {
-            $crate::chaos::assertions::record_always_violation();
+            $crate::chaos::assertions::record_always_violation(&__msg);
         }
     }};
     ($condition:expr, $message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {{
@@ -528,7 +546,7 @@ macro_rules! assert_always_or_unreachable {
             false,
         );
         if !cond {
-            $crate::chaos::assertions::record_always_violation();
+            $crate::chaos::assertions::record_always_violation(&__msg);
             eprintln!(
                 "[ASSERTION FAILED] {} (seed={}) | {}",
                 __msg,
@@ -593,7 +611,7 @@ macro_rules! assert_unreachable {
             $crate::chaos::assertions::_re_export::AssertKind::Unreachable,
             false,
         );
-        $crate::chaos::assertions::record_always_violation();
+        $crate::chaos::assertions::record_always_violation(&__msg);
     }};
     ($message:expr, { $($key:expr => $val:expr),+ $(,)? }) => {{
         let __msg = $message;
@@ -603,7 +621,7 @@ macro_rules! assert_unreachable {
             $crate::chaos::assertions::_re_export::AssertKind::Unreachable,
             false,
         );
-        $crate::chaos::assertions::record_always_violation();
+        $crate::chaos::assertions::record_always_violation(&__msg);
         eprintln!(
             "[ASSERTION FAILED] {} | {}",
             __msg,
@@ -633,7 +651,7 @@ macro_rules! __assert_always_numeric {
             $maximize,
         );
         if !(__v $op __t) {
-            $crate::chaos::assertions::record_always_violation();
+            $crate::chaos::assertions::record_always_violation(&__msg);
         }
     }};
     ($cmp:ident, $op:tt, $maximize:expr, $val:expr, $thresh:expr, $message:expr, { $($key:expr => $dval:expr),+ $(,)? }) => {{
@@ -649,7 +667,7 @@ macro_rules! __assert_always_numeric {
             $maximize,
         );
         if !(__v $op __t) {
-            $crate::chaos::assertions::record_always_violation();
+            $crate::chaos::assertions::record_always_violation(&__msg);
             eprintln!(
                 concat!("[ASSERTION FAILED] {} ({}", stringify!($op), "{} failed, seed={}) | {}"),
                 __msg, __v, __t,

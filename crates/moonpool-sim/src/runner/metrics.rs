@@ -26,6 +26,8 @@ pub(crate) struct MetricsCollector {
     run_id: u64,
     /// The cause of each failing seed, as the report shows it.
     failure_causes: BTreeMap<u64, String>,
+    /// The always-assertions each failing seed's own run violated.
+    seed_violations: BTreeMap<u64, Vec<String>>,
     /// The seed whose successful iteration is the last entry of
     /// `individual_metrics` and whose samples are not yet folded into
     /// `app_metrics`. A second pass over the seed
@@ -48,6 +50,7 @@ impl MetricsCollector {
             app_metrics: BTreeMap::new(),
             run_id,
             failure_causes: BTreeMap::new(),
+            seed_violations: BTreeMap::new(),
             uncommitted_success: None,
         }
     }
@@ -58,7 +61,7 @@ impl MetricsCollector {
         seed: u64,
         wall_time: Duration,
         results: &[SimulationResult<()>],
-        has_assertion_violations: bool,
+        violations: Vec<String>,
         metrics: SimulationMetrics,
     ) {
         self.commit_success();
@@ -68,10 +71,13 @@ impl MetricsCollector {
         {
             self.stalled_seeds.push(seed);
         }
-        if results.iter().all(Result::is_ok) && !has_assertion_violations {
+        if results.iter().all(Result::is_ok) && violations.is_empty() {
             self.record_success(seed, wall_time, metrics);
         } else {
-            self.record_failure(seed, failure_cause(results, has_assertion_violations));
+            self.record_failure(seed, failure_cause(results, &violations));
+            if !violations.is_empty() {
+                self.seed_violations.insert(seed, violations);
+            }
         }
     }
 
@@ -195,6 +201,7 @@ impl MetricsCollector {
             seeds_failing: self.faulty_seeds,
             seeds_stalled: self.stalled_seeds,
             failure_causes: self.failure_causes,
+            seed_violations: self.seed_violations,
             assertion_results: inputs.assertion_results,
             assertion_violations: inputs.assertion_violations,
             dropped_assertion_allocations: inputs.dropped_assertion_allocations,
@@ -213,8 +220,8 @@ impl MetricsCollector {
 }
 
 /// The cause of a failed iteration: the text of each distinct error, in
-/// result order, or the always-violation when no result failed.
-fn failure_cause(results: &[SimulationResult<()>], has_assertion_violations: bool) -> String {
+/// result order, then the always-assertions it violated, each by its message.
+fn failure_cause(results: &[SimulationResult<()>], violations: &[String]) -> String {
     let mut causes: Vec<String> = Vec::new();
     for error in results.iter().filter_map(|result| result.as_ref().err()) {
         let text = error.to_string();
@@ -222,8 +229,12 @@ fn failure_cause(results: &[SimulationResult<()>], has_assertion_violations: boo
             causes.push(text);
         }
     }
-    if has_assertion_violations {
-        causes.push("an always assertion was violated".to_string());
+    if !violations.is_empty() {
+        let names: Vec<String> = violations.iter().map(|msg| format!("'{msg}'")).collect();
+        causes.push(format!(
+            "an always assertion was violated: {}",
+            names.join(", ")
+        ));
     }
     causes.join("; ")
 }
