@@ -30,7 +30,7 @@ Emit a plain `tracing` event after each step, as for an invariant ([Events and I
 tracing::info!(rm = %rm, state = %"prepared", "rm_prepare");
 ```
 
-The state after the step is a **projection**: a few values that pin down the model's variables. The 2024 paper measures why it matters. With only event names, TLC must guess every variable, the search explodes, and a wrong trace can even be accepted. With the state logged, the search stays linear in the length of the trace.
+The state after the step is a **projection**: a few values that pin down the model's variables. Read them back from the code's state; do not log constants. A projection matters where the action leaves something open, or where the code keeps its own copy of a model variable: the two-phase commit example logs how many votes the coordinator holds, so a coordinator that loses or counts a vote twice no longer matches the model. The 2024 paper measures why logging state matters. With only event names, TLC must guess every variable, the search explodes, and a wrong trace can even be accepted. With the state logged, the search stays linear in the length of the trace.
 
 Log the **faults** too. If the harness drops or repeats a message, emit an event for it, so TLC does not have to guess where faults happened. Turn off the fault kinds that the spec does not model: a fault outside the model gives a rejection that is not a bug.
 
@@ -80,7 +80,9 @@ INVARIANT Consistent
 INVARIANT TraceUnfinished
 ```
 
-`TraceUnfinished` is violated exactly when a behaviour matched every event. That violation is how an accepted trace shows. Put the spec's own invariants before it, so a broken invariant is reported first.
+`TraceUnfinished` is violated exactly when a behaviour matched every event. That violation is how an accepted trace shows. It must be the **last** invariant: TLC reports the first violated invariant in configuration order, so an invariant after it would never be seen. `TraceCheck` refuses a configuration where it is missing or not last, and a spec folder that holds a file named like the trace module (`Trace.tla`).
+
+Guard the fields an event names (`e.rm \in RM`). An event the trace spec cannot read, such as a missing field or a node outside the constant set, otherwise makes TLC stop with an error and no verdict, instead of rejecting the trace.
 
 ## Verdicts
 
@@ -88,7 +90,9 @@ INVARIANT TraceUnfinished
 |---------|--------------|---------------|
 | `Accepted` | Reached the end of the trace | The run is a behaviour of the spec, and every invariant held on the way |
 | `Rejected(rejection)` | Explored every match and stopped before the end | The code took a step the spec forbids, or the spec lacks a step the code is right to take |
-| `InvariantViolated { invariant, matched, state }` | Matched a prefix that breaks an invariant | A safety bug, seen through the model's own invariant |
+| `InvariantViolated { invariant, matched, state }` | Matched a prefix that breaks an invariant | A finding about the spec: the model breaks its own invariant, or a hidden step of the trace spec leaves the model |
+
+A bug in the code always shows as a rejection. Every step of the trace spec is a step of the model, so the trace spec only reaches states the model reaches; if the model keeps its invariants, a matched trace keeps them too. The trace check is stronger than an invariant on the outcome: it judges every step, not only the states the steps lead to.
 
 A rejection names the first event that no behaviour matches (`rejection.index`) and the model state just before it. To learn the index in one TLC run, `TraceCheck` runs a small generated module that extends the trace spec and records the highest `l` that any behaviour reached. A second run on the matched prefix prints the state.
 
@@ -104,7 +108,7 @@ An accepted trace proves little if the check cannot fail. Plant **mutants**: cop
 - a resource manager that commits without the commit message;
 - a coordinator that aborts after it committed.
 
-The first mutant breaks no invariant when no resource manager aborts. The trace check still sees it, because committing before every vote is not a step of the spec.
+On a seed where nobody aborts, the first mutant ends in a state that looks fine: every resource manager committed. An oracle that looks only at the outcome cannot see it. The trace check rejects the `tm_commit` event, because committing before every vote is not a step of the spec.
 
 ## Cost and Limits
 

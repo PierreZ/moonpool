@@ -132,3 +132,89 @@ fn a_missing_tlc_is_reported() {
     assert!(matches!(error, CheckError::TlcNotFound { .. }), "{error}");
     assert!(!check().tlc("/nonexistent/tlc").tlc_available());
 }
+
+#[test]
+fn a_negative_integer_is_readable_by_tlc() {
+    if !tlc_or_skip() {
+        return;
+    }
+    let mut trace = Trace::new();
+    trace.event("inc", [("x", Value::Int(1)), ("delta", Value::Int(-1))]);
+    assert_eq!(check().check(&trace).expect("verdict"), Verdict::Accepted);
+}
+
+#[test]
+fn parallel_checks_do_not_race() {
+    if !tlc_or_skip() {
+        return;
+    }
+    let threads: Vec<_> = (0..6)
+        .map(|_| std::thread::spawn(|| check().check(&incs(&[1, 2]))))
+        .collect();
+    for thread in threads {
+        let verdict = thread.join().expect("the check thread does not panic");
+        assert_eq!(verdict.expect("verdict"), Verdict::Accepted);
+    }
+}
+
+/// A copy of the counter spec folder with `cfg` as its configuration and
+/// `extra` as one more file, removed on drop.
+struct SpecCopy(PathBuf);
+
+impl SpecCopy {
+    fn new(name: &str, cfg: &str, extra: Option<&str>) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("moonpool-tla-test-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temporary folder");
+        for file in ["Counter.tla", "CounterTrace.tla"] {
+            std::fs::copy(spec_dir().join(file), dir.join(file)).expect("copy the spec");
+        }
+        std::fs::write(dir.join("CounterTrace.cfg"), cfg).expect("write the configuration");
+        if let Some(extra) = extra {
+            std::fs::write(dir.join(extra), "").expect("write the extra file");
+        }
+        Self(dir)
+    }
+}
+
+impl Drop for SpecCopy {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn the_end_invariant_must_be_the_last_invariant() {
+    let early = SpecCopy::new(
+        "early",
+        "SPECIFICATION TraceSpec\nINVARIANT TraceUnfinished\nINVARIANT BelowFour\n",
+        None,
+    );
+    let error = TraceCheck::new(&early.0, "CounterTrace")
+        .check(&incs(&[1, 2, 3, 4]))
+        .expect_err("BelowFour would never be reported");
+    assert!(matches!(error, CheckError::Contract(_)), "{error}");
+
+    let missing = SpecCopy::new(
+        "missing",
+        "SPECIFICATION TraceSpec\nINVARIANT BelowFour\n",
+        None,
+    );
+    let error = TraceCheck::new(&missing.0, "CounterTrace")
+        .check(&incs(&[1]))
+        .expect_err("no trace could be accepted");
+    assert!(matches!(error, CheckError::Contract(_)), "{error}");
+}
+
+#[test]
+fn a_file_named_like_the_trace_module_is_refused() {
+    let copy = SpecCopy::new(
+        "reserved",
+        "SPECIFICATION TraceSpec\nINVARIANT TraceUnfinished\n",
+        Some("Trace.tla"),
+    );
+    let error = TraceCheck::new(&copy.0, "CounterTrace")
+        .check(&incs(&[1]))
+        .expect_err("the check writes Trace.tla");
+    assert!(matches!(error, CheckError::Contract(_)), "{error}");
+}

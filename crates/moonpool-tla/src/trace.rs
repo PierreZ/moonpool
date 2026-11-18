@@ -82,7 +82,8 @@ impl Trace {
     /// or the module or definition name that is not a TLA+ identifier.
     pub fn to_module(&self, module: &str) -> Result<String, ValueError> {
         check_identifier(module)?;
-        let mut out = format!("---- MODULE {module} ----\n");
+        // `Integers` gives the unary minus of a negative value.
+        let mut out = format!("---- MODULE {module} ----\nEXTENDS Integers\n");
         for (name, value) in &self.definitions {
             check_identifier(name)?;
             out.push_str(name);
@@ -118,6 +119,7 @@ mod tests {
         assert_eq!(
             module,
             "---- MODULE Trace ----\n\
+             EXTENDS Integers\n\
              TraceRM == {\"r1\", \"r2\"}\n\
              Trace == <<\n  \
              [event |-> \"rm_prepare\", rm |-> \"r1\"],\n  \
@@ -129,7 +131,10 @@ mod tests {
     #[test]
     fn an_empty_trace_is_the_empty_sequence() {
         let module = Trace::new().to_module("Trace").expect("writable");
-        assert_eq!(module, "---- MODULE Trace ----\nTrace == <<\n>>\n====\n");
+        assert_eq!(
+            module,
+            "---- MODULE Trace ----\nEXTENDS Integers\nTrace == <<\n>>\n====\n"
+        );
     }
 
     #[test]

@@ -9,7 +9,7 @@ pub enum Value {
     /// `TRUE` or `FALSE`.
     Bool(bool),
     /// An integer. TLC holds integers in 32 bits, so a value outside
-    /// `i32` is refused when the trace is written.
+    /// `i32::MIN + 1 ..= i32::MAX` is refused when the trace is written.
     Int(i64),
     /// A string, written between double quotes.
     Str(String),
@@ -67,7 +67,9 @@ impl Value {
             Self::Bool(true) => out.push_str("TRUE"),
             Self::Bool(false) => out.push_str("FALSE"),
             Self::Int(v) => {
-                if i32::try_from(*v).is_err() {
+                // `i32::MIN` is refused too: TLC reads `-2147483648` as the
+                // minus of a literal that does not fit 32 bits.
+                if i32::try_from(*v).is_err() || *v == i64::from(i32::MIN) {
                     return Err(ValueError::IntOutOfRange(*v));
                 }
                 // `write!` to a String cannot fail.
@@ -225,6 +227,12 @@ mod tests {
             Value::Int(big).write_tla(&mut out),
             Err(ValueError::IntOutOfRange(big))
         );
+        let min = i64::from(i32::MIN);
+        assert_eq!(
+            Value::Int(min).write_tla(&mut out),
+            Err(ValueError::IntOutOfRange(min))
+        );
+        assert_eq!(Value::Int(min + 1).write_tla(&mut out), Ok(()));
     }
 
     #[test]

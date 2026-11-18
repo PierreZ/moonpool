@@ -17,10 +17,13 @@
 //! Happy path: every seed is accepted.
 //!
 //! Controls: three mutants of the code, each one a bug the spec forbids.
-//! Each must give a rejected trace on some seed, and a plain rejection (the
-//! code took a step the spec does not allow), not only a broken invariant:
-//! a coordinator that commits after the first vote breaks no invariant when
-//! no resource manager aborts, and the trace check still sees it.
+//! Each must give a rejected trace on some seed: the code took a step that
+//! the spec does not allow. A code bug always shows as a rejection, because
+//! every step of the trace spec is a step of the model, and the model keeps
+//! its own invariants. So a coordinator that commits after the first vote
+//! is caught even on seeds where nobody aborts, where no oracle that looks
+//! only at the outcome (no resource manager commits while another aborts)
+//! could see it.
 //!
 //! The tests need TLC (`tlc`, in the nix dev shell). Without it they are
 //! skipped, except in CI, where they fail.
@@ -173,20 +176,20 @@ impl TwoPhase {
     /// RM `rm` votes yes.
     fn prepare(&mut self, rm: &'static str, out: &mut Vec<Msg>) {
         self.set_rm(rm, RmState::Prepared);
-        tracing::info!(rm = %rm, state = %RmState::Prepared.name(), "rm_prepare");
+        tracing::info!(rm = %rm, state = %self.rm(rm).name(), "rm_prepare");
         out.push(Msg::Prepared(rm));
     }
 
     /// RM `rm` gives up before it votes.
     fn choose_abort(&mut self, rm: &'static str) {
         self.set_rm(rm, RmState::Aborted);
-        tracing::info!(rm = %rm, state = %RmState::Aborted.name(), "rm_choose_abort");
+        tracing::info!(rm = %rm, state = %self.rm(rm).name(), "rm_choose_abort");
     }
 
     /// The mutant RM commits without a commit message.
     fn self_commit(&mut self, rm: &'static str) {
         self.set_rm(rm, RmState::Committed);
-        tracing::info!(rm = %rm, state = %RmState::Committed.name(), "rm_rcv_commit");
+        tracing::info!(rm = %rm, state = %self.rm(rm).name(), "rm_rcv_commit");
     }
 
     fn receive(&mut self, msg: Msg, out: &mut Vec<Msg>) {
@@ -194,11 +197,11 @@ impl TwoPhase {
             Msg::Prepared(rm) => self.tm_receive_prepared(rm, out),
             Msg::Commit(rm) => {
                 self.set_rm(rm, RmState::Committed);
-                tracing::info!(rm = %rm, state = %RmState::Committed.name(), "rm_rcv_commit");
+                tracing::info!(rm = %rm, state = %self.rm(rm).name(), "rm_rcv_commit");
             }
             Msg::Abort(rm) => {
                 self.set_rm(rm, RmState::Aborted);
-                tracing::info!(rm = %rm, state = %RmState::Aborted.name(), "rm_rcv_abort");
+                tracing::info!(rm = %rm, state = %self.rm(rm).name(), "rm_rcv_abort");
             }
         }
     }
@@ -211,7 +214,7 @@ impl TwoPhase {
         if !self.prepared.contains(&rm) {
             self.prepared.push(rm);
         }
-        tracing::info!(rm = %rm, "tm_rcv_prepared");
+        tracing::info!(rm = %rm, prepared = self.prepared.len(), "tm_rcv_prepared");
         let enough = match self.mutant {
             Mutant::CommitOnFirstVote => !self.prepared.is_empty(),
             _ => self.prepared.len() == RMS.len(),

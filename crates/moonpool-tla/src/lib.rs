@@ -35,6 +35,8 @@
 //! # Ok::<(), moonpool_tla::CheckError>(())
 //! ```
 
+#![deny(missing_docs)]
+
 mod check;
 mod trace;
 mod value;

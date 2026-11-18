@@ -36,8 +36,13 @@ pub enum Verdict {
     /// step the spec forbids, or the spec lacks a step the code is right to
     /// take.
     Rejected(Rejection),
-    /// A behaviour matched a prefix of the trace and broke an invariant of
-    /// the spec on the way.
+    /// A behaviour of the spec that matched a prefix of the trace broke an
+    /// invariant of the configuration.
+    ///
+    /// Every step of a trace spec is a step of the model, so this verdict is
+    /// about the spec, not the code: the model itself breaks the invariant,
+    /// or the trace spec lets a hidden step leave the model's next-state
+    /// relation. A bug in the code shows as [`Verdict::Rejected`].
     InvariantViolated {
         /// The invariant that TLC reports.
         invariant: String,
@@ -92,8 +97,16 @@ pub enum CheckError {
         /// The error of the start.
         source: std::io::Error,
     },
+    /// The spec folder or its configuration breaks the contract of
+    /// [`TraceCheck`]: the end invariant is missing or not the last
+    /// invariant, a file uses a name that the check writes, or TLC matched
+    /// every event without reporting the end invariant.
+    Contract(String),
     /// TLC ran but gave no verdict: a parse error in the spec, a wrong
-    /// configuration, a deadlock check left on.
+    /// configuration, or an event the trace spec cannot read (a missing
+    /// field, a value of the wrong type, a node outside the constant set).
+    /// Guard the trace spec (`e.rm \in RM`) to turn a malformed event into
+    /// a rejection.
     Tlc {
         /// TLC's exit code, if it exited.
         code: Option<i32>,
@@ -107,6 +120,7 @@ impl fmt::Display for CheckError {
         match self {
             Self::Value(e) => write!(f, "the trace cannot be written: {e}"),
             Self::Io(e) => write!(f, "I/O error while preparing TLC: {e}"),
+            Self::Contract(why) => write!(f, "the trace spec breaks the check's contract: {why}"),
             Self::TlcNotFound { program, source } => write!(
                 f,
                 "cannot start TLC (`{}`): {source}; install `tlaplus` or set {TLC_ENV}",
@@ -125,7 +139,7 @@ impl std::error::Error for CheckError {
             Self::Value(e) => Some(e),
             Self::Io(e) => Some(e),
             Self::TlcNotFound { source, .. } => Some(source),
-            Self::Tlc { .. } => None,
+            Self::Contract(_) | Self::Tlc { .. } => None,
         }
     }
 }
@@ -164,10 +178,15 @@ const MATCHED_MARK: &str = "<<\"moonpool-tla matched\", ";
 /// - a variable, `l` by default, holds the index of the next event to
 ///   match, from 1;
 /// - the configuration checks the invariant `TraceUnfinished ==
-///   l <= Len(Trace)` (the name can change). TLC reports it violated when
-///   a behaviour matched every event, and that is how an accepted trace
-///   shows. When TLC ends with no error, no behaviour reached the end of
-///   the trace: it is rejected.
+///   l <= Len(Trace)` (the name can change), as its **last** `INVARIANT`.
+///   TLC reports it violated when a behaviour matched every event, and
+///   that is how an accepted trace shows. TLC reports the first violated
+///   invariant in configuration order, so an invariant listed after it
+///   would never be seen; the check refuses such a configuration. When TLC
+///   ends with no error, no behaviour reached the end of the trace: it is
+///   rejected.
+/// - the folder has no file named like the trace module (`Trace.tla`) or
+///   the generated wrapper (`MoonpoolTraceCheck.tla`, `.cfg`).
 ///
 /// ```tla
 /// TraceNext == \/ l <= Len(Trace) /\ Step   /\ l' = l + 1   \* a logged step
@@ -254,8 +273,18 @@ impl TraceCheck {
     ///
     /// Returns a [`CheckError`] when TLC cannot run or gives no verdict.
     pub fn check(&self, trace: &Trace) -> Result<Verdict, CheckError> {
-        let run = self.run_tlc(trace)?;
+        crate::value::check_identifier(&self.spec)?;
+        crate::value::check_identifier(&self.cursor)?;
+        let config = self.config()?;
+        let run = self.run_tlc(trace, &config)?;
         match parse_output(&run, &self.end_invariant, &self.cursor)? {
+            Verdict::Rejected(Rejection { index, .. }) if index >= trace.len() => {
+                Err(CheckError::Contract(format!(
+                    "TLC matched all {} events but did not report `{}` violated",
+                    trace.len(),
+                    self.end_invariant
+                )))
+            }
             Verdict::Rejected(Rejection { index, .. }) => {
                 // TLC prints no behaviour when it ends with no error. The
                 // matched prefix is accepted, and its run prints the
@@ -263,7 +292,16 @@ impl TraceCheck {
                 let state = if index == 0 {
                     String::new()
                 } else {
-                    last_state(&self.run_tlc(&trace.prefix(index))?.output)
+                    let prefix = self.run_tlc(&trace.prefix(index), &config)?;
+                    match parse_output(&prefix, &self.end_invariant, &self.cursor)? {
+                        Verdict::Accepted => last_state(&prefix.output),
+                        other => {
+                            return Err(CheckError::Contract(format!(
+                                "TLC matched {index} events, but the prefix of {index} events \
+                                 is not accepted: {other:?}"
+                            )));
+                        }
+                    }
                 };
                 Ok(Verdict::Rejected(Rejection { index, state }))
             }
@@ -271,9 +309,31 @@ impl TraceCheck {
         }
     }
 
-    fn run_tlc(&self, trace: &Trace) -> Result<TlcRun, CheckError> {
-        crate::value::check_identifier(&self.spec)?;
-        crate::value::check_identifier(&self.cursor)?;
+    /// Read the configuration and check the contract of the spec folder.
+    fn config(&self) -> Result<String, CheckError> {
+        for reserved in [
+            format!("{}.tla", self.trace_module),
+            format!("{WRAPPER}.tla"),
+            format!("{WRAPPER}.cfg"),
+        ] {
+            if self.spec_dir.join(&reserved).exists() {
+                return Err(CheckError::Contract(format!(
+                    "the spec folder has a file `{reserved}`, which the check writes"
+                )));
+            }
+        }
+        let config = std::fs::read_to_string(self.spec_dir.join(format!("{}.cfg", self.spec)))?;
+        let invariants = config_invariants(&config);
+        if invariants.last() != Some(&self.end_invariant.as_str()) {
+            return Err(CheckError::Contract(format!(
+                "`{}` must be the last INVARIANT of {}.cfg (the invariants are {invariants:?})",
+                self.end_invariant, self.spec
+            )));
+        }
+        Ok(config)
+    }
+
+    fn run_tlc(&self, trace: &Trace, config: &str) -> Result<TlcRun, CheckError> {
         let module = trace.to_module(&self.trace_module)?;
         let work = TempDir::new()?;
         for entry in std::fs::read_dir(&self.spec_dir)? {
@@ -289,7 +349,6 @@ impl TraceCheck {
             work.path().join(format!("{}.tla", self.trace_module)),
             module,
         )?;
-        let config = std::fs::read_to_string(self.spec_dir.join(format!("{}.cfg", self.spec)))?;
         std::fs::write(
             work.path().join(format!("{WRAPPER}.tla")),
             wrapper_module(&self.spec, &self.cursor),
@@ -298,8 +357,17 @@ impl TraceCheck {
             work.path().join(format!("{WRAPPER}.cfg")),
             format!("{config}\nCONSTRAINT MoonpoolMatched\n"),
         )?;
+        // TLC unpacks its standard modules (`TLC.tla`, `Naturals.tla`, ...)
+        // to fixed names in Java's temporary folder, so two runs that share
+        // it race. Give each run its own.
+        let java_tmp = work.path().join("java-tmp");
+        std::fs::create_dir(&java_tmp)?;
+        let mut java_options = std::env::var("JAVA_TOOL_OPTIONS").unwrap_or_default();
+        java_options.push_str(" -Djava.io.tmpdir=");
+        java_options.push_str(&java_tmp.to_string_lossy());
         let output = Command::new(&self.tlc)
             .current_dir(work.path())
+            .env("JAVA_TOOL_OPTIONS", java_options.trim_start())
             .args(["-deadlock", "-workers", "1", "-cleanup", "-config"])
             .arg(format!("{WRAPPER}.cfg"))
             .arg("-metadir")
@@ -365,6 +433,47 @@ fn parse_output(run: &TlcRun, end_invariant: &str, cursor: &str) -> Result<Verdi
         code: run.code,
         output: run.output.clone(),
     })
+}
+
+/// The invariants of a TLC configuration, in order: the names after each
+/// `INVARIANT` or `INVARIANTS` keyword, up to the next keyword. Comments
+/// (`\*` to the end of the line) are skipped.
+fn config_invariants(config: &str) -> Vec<&str> {
+    const KEYWORDS: [&str; 20] = [
+        "SPECIFICATION",
+        "INIT",
+        "NEXT",
+        "CONSTANT",
+        "CONSTANTS",
+        "INVARIANT",
+        "INVARIANTS",
+        "PROPERTY",
+        "PROPERTIES",
+        "CONSTRAINT",
+        "CONSTRAINTS",
+        "ACTION_CONSTRAINT",
+        "ACTION_CONSTRAINTS",
+        "SYMMETRY",
+        "VIEW",
+        "CHECK_DEADLOCK",
+        "POSTCONDITION",
+        "POSTCONDITIONS",
+        "ALIAS",
+        "TYPE",
+    ];
+    let mut invariants = Vec::new();
+    let mut in_invariants = false;
+    for line in config.lines() {
+        let line = line.split("\\*").next().unwrap_or_default();
+        for token in line.split_whitespace() {
+            if KEYWORDS.contains(&token) {
+                in_invariants = token.starts_with("INVARIANT");
+            } else if in_invariants {
+                invariants.push(token);
+            }
+        }
+    }
+    invariants
 }
 
 /// The highest event count that the wrapper printed; 0 when it printed none.
@@ -433,18 +542,25 @@ fn cursor_value(state: &str, cursor: &str) -> Option<usize> {
 struct TempDir(PathBuf);
 
 impl TempDir {
+    /// A new, empty folder. `create_dir` fails on a name that exists, so
+    /// the check never writes into a folder or a link it did not create.
     fn new() -> std::io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "moonpool-tla-{}-{n}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos())
-        ));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self(path))
+        loop {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "moonpool-tla-{}-{n}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_nanos())
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     fn path(&self) -> &Path {
@@ -539,6 +655,20 @@ mod tests {
         assert_eq!(last_state(out), "/\\ l = 1\n/\\ x = 9");
         assert_eq!(cursor_value(&last_state(out), "l"), Some(1));
         assert_eq!(violated_invariant(out), Some("BelowFour"));
+    }
+
+    #[test]
+    fn the_invariants_of_a_configuration_are_read_in_order() {
+        let config = "SPECIFICATION TraceSpec\n\
+                      CONSTANT RM <- TraceRM\n\
+                      INVARIANT TypeOK \\* the types\n\
+                      INVARIANTS Consistent\n  TraceUnfinished\n\
+                      CONSTRAINT Bound\n";
+        assert_eq!(
+            config_invariants(config),
+            ["TypeOK", "Consistent", "TraceUnfinished"]
+        );
+        assert!(config_invariants("SPECIFICATION S\n").is_empty());
     }
 
     #[test]

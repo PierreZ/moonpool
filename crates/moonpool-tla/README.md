@@ -36,5 +36,8 @@ Traces of Distributed Programs Against TLA+ Specifications" (2024).
   harness records events itself.
 - Running TLC needs the `tlc` launcher (nixpkgs `tlaplus`, installed by the
   moonpool dev shell) or the path in `MOONPOOL_TLC`.
+- The trace spec's configuration must check the end invariant
+  (`TraceUnfinished == l <= Len(Trace)`) as its last `INVARIANT`;
+  `TraceCheck` refuses it otherwise.
 - The book chapter "Checking Runs Against a TLA+ Spec" explains the trace
   spec, the verdicts and the controls.
