@@ -1,0 +1,23 @@
+[package]
+name = "moonpool-walk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Seeded random walk over sans-I/O state machines for the moonpool framework"
+documentation = "https://docs.rs/moonpool-walk"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+# Pure std plus the two zero-dependency moonpool crates: no executor, no
+# network, no clock. Compiles on wasm32-unknown-unknown, macOS and Linux, so a
+# sans-I/O library can test itself with this crate and never pull in the
+# simulation runtime.
+[dependencies]
+moonpool-assertions = { path = "../moonpool-assertions", version = "0.8.0" }
+moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
+
+[lints]
+workspace = true

@@ -76,6 +76,12 @@ name = "moonpool-assertions"
 changelog_path = "crates/moonpool-assertions/CHANGELOG.md"
 version_group = "moonpool"
 
+# Seeded random walk over sans-I/O state machines; depends only on the two
+# leaf crates above.
+[[package]]
+name = "moonpool-walk"
+version_group = "moonpool"
+
 [[package]]
 name = "moonpool-explorer"
 changelog_path = "crates/moonpool-explorer/CHANGELOG.md"

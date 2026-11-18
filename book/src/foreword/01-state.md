@@ -6,7 +6,7 @@ Moonpool is under active development. It is used to find real bugs in distribute
 
 ## The crates
 
-The workspace holds sixteen crates. Eleven are published to crates.io. Five are tools and examples that stay in the repository. The [Crate Map](../appendix/02-crate-map.md) has the dependency graph.
+The workspace holds seventeen crates. Twelve are published to crates.io. Five are tools and examples that stay in the repository. The [Crate Map](../appendix/02-crate-map.md) has the dependency graph.
 
 | Crate | What it is | Status |
 |---|---|---|
@@ -21,6 +21,7 @@ The workspace holds sixteen crates. Eleven are published to crates.io. Five are 
 | `moonpool-rpc-derive` | The `#[moonpool_rpc::service]` attribute. | New |
 | `moonpool-prometheus` | `PrometheusSource`: the metrics your code already keeps, reported per node and across seeds. | Stable |
 | `moonpool-journal` | A CLSTORE journal: positions in any order, crash told apart from corruption, damage identified for repair from peers. | New. Rewritten this cycle. |
+| `moonpool-walk` | A seeded random walk over sans-I/O state machines: deliver, drop, duplicate, reorder, crash and restart with no executor, no network and no clock. Depends on `moonpool-assertions` and `moonpool-buggify` only. | New |
 | `moonpool-rpc-sim` | The simulation harness, oracles and six CI campaigns for `moonpool-rpc`. Not published. | New |
 | `moonpool-sim-examples` | Runnable simulations found by `xtask`: maze, dungeon, axum, tonic, journal, topology, metrics. Not published. | Stable |
 | `moonpool-wasm-demo` | The browser demo embedded in [Simulation in the Browser](../part4-integration/07-wasm.md). Not published. | Stable |

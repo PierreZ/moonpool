@@ -50,6 +50,10 @@ export const CRATE_NOTES = {
     when: "A node needs a durable log that tells a crash from a corruption.",
     chapter: "part5-building-on-top/08-journal.md",
   },
+  "moonpool-walk": {
+    when: "A sans-I/O protocol core that you test with seeded schedules, with no simulator. A dev-dependency.",
+    chapter: "part5-building-on-top/09-walk.md",
+  },
   "moonpool-rpc-sim": {
     when: "Not published. Read it as an example of simulation campaigns and oracles.",
     chapter: "part4-networking/03-rpc-guarantees.md",
