@@ -363,7 +363,9 @@ pub struct BucketSiteSummary {
 }
 
 /// Comprehensive report of a simulation run with statistical analysis.
-#[derive(Debug, Clone)]
+///
+/// `Default` is the report of no run, for a test that builds a report by hand.
+#[derive(Debug, Clone, Default)]
 pub struct SimulationReport {
     /// Number of iterations executed
     pub iterations: usize,
