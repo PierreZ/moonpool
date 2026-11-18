@@ -537,13 +537,15 @@ impl ShardBook {
         self.0.lock().expect("Mutex poisoned: prior task panicked")
     }
 
-    /// Resolve every replica a later declaration names by `host:port`
-    /// through `names`, the run's name table: the book holds it as
-    /// `ip:port`, so a wipe, a failed disk or damage on that process counts
-    /// against it. The gate cannot map a host name to a process, so such a
-    /// replica counts as intact whatever happens to it: a system under test
-    /// that names its replicas by host installs its table here before it
-    /// declares. A name the table does not know is kept as it is.
+    /// Resolve every replica a declaration names by `host:port` through
+    /// `names`, the run's name table, each time the gate judges: the gate
+    /// reads it as `ip:port`, so a wipe, a failed disk or damage on that
+    /// process counts against it, and a name the table points at nothing
+    /// counts as down from that moment, for every view already declared.
+    /// Without a table the gate cannot map a host name to a process, so
+    /// such a replica counts as intact whatever happens to it: a system
+    /// under test that names its replicas by host installs its table here.
+    /// A name the table does not know is kept as it is.
     pub fn resolve_names(&self, names: ScriptedResolver) {
         self.lock().names = Some(names);
     }
@@ -571,19 +573,27 @@ impl ShardBook {
     ) {
         let mut book = self.lock();
         let book = &mut *book;
-        let declaration = Declaration {
-            current: declaration.current.map(|r| book.resolved_replication(r)),
-            next: declaration.next.map(|r| book.resolved_replication(r)),
-            ..declaration
-        };
+        // The view keeps the replicas as the code named them, and the gate
+        // resolves them through the name table each time it judges: a name
+        // that stops reaching its process after this declaration counts at
+        // once, not at the declarer's next declaration. The event records
+        // the names as they resolved now.
+        let resolved_current = declaration
+            .current
+            .clone()
+            .map(|r| book.resolved_replication(r));
+        let resolved_next = declaration
+            .next
+            .clone()
+            .map(|r| book.resolved_replication(r));
         book.counts.declarations += 1;
         book.events.push(ShardEvent {
             at,
             name: declaration.name.clone(),
             process: declarer.map(|ip| ip.to_string()),
             site: declaration.site,
-            current: declaration.current.clone(),
-            next: declaration.next.clone(),
+            current: resolved_current.clone(),
+            next: resolved_next.clone(),
         });
         let Declaration {
             name,
@@ -601,7 +611,7 @@ impl ShardBook {
         };
         // A declaration lists its replicas: a wiped one listed after its
         // wipe may heal once its code says it caught up.
-        for replication in std::iter::once(&current).chain(next.as_ref()) {
+        for replication in resolved_current.iter().chain(resolved_next.as_ref()) {
             for replica in replicas_of(replication) {
                 if let Some(wiped) = replica_ip(&replica).and_then(|ip| book.wiped.get_mut(&ip)) {
                     wiped.listed = true;
@@ -804,7 +814,7 @@ impl ShardBook {
                 let lists = replicas_of(&view.current)
                     .iter()
                     .chain(replicas_of(next).iter())
-                    .any(|replica| replica_ip(replica) == Some(ip));
+                    .any(|replica| replica_ip(&book.resolved(replica)) == Some(ip));
                 if lists && let Some(site) = book.sites.get_mut(view.site) {
                     site.landed = true;
                 }
@@ -818,7 +828,7 @@ impl ShardBook {
         book.shards
             .iter()
             .filter(|(name, _)| !book.config.is_off(name))
-            .map(|(name, views)| (name.clone(), state_of(name, views).replications()))
+            .map(|(name, views)| (name.clone(), state_of(&book, name, views).replications()))
             .filter(|(_, replications)| !replications.is_empty())
             .collect()
     }
@@ -840,7 +850,7 @@ impl ShardBook {
                     continue;
                 }
                 for replica in replicas_of(&view.current).iter().chain(&replicas_of(next)) {
-                    out.extend(replica_ip(replica));
+                    out.extend(replica_ip(&book.resolved(replica)));
                 }
             }
         }
@@ -883,7 +893,7 @@ impl ShardBook {
             shards: book
                 .shards
                 .iter()
-                .map(|(name, views)| (name.clone(), state_of(name, views)))
+                .map(|(name, views)| (name.clone(), state_of(&book, name, views)))
                 .collect(),
             events: book.events.clone(),
             counts: book.counts.clone(),
@@ -908,7 +918,7 @@ fn end_move(book: &mut Book, site: &'static str) {
     }
 }
 
-fn state_of(name: &str, views: &[View]) -> ShardState {
+fn state_of(book: &Book, name: &str, views: &[View]) -> ShardState {
     ShardState {
         name: name.to_string(),
         views: views
@@ -916,8 +926,11 @@ fn state_of(name: &str, views: &[View]) -> ShardState {
             .map(|view| ShardView {
                 process: view.declarer.map(|ip| ip.to_string()),
                 site: view.site,
-                current: view.current.clone(),
-                next: view.next.clone(),
+                current: book.resolved_replication(view.current.clone()),
+                next: view
+                    .next
+                    .clone()
+                    .map(|next| book.resolved_replication(next)),
             })
             .collect(),
     }
@@ -1627,6 +1640,56 @@ mod tests {
             &[ip("10.0.0.1")]
         ));
         assert!(!down_ok(&reqs, &none, &[ip("10.0.0.1")], &|_, _| false));
+    }
+
+    #[test]
+    fn a_name_that_stops_reaching_its_process_counts_for_views_declared_before() {
+        let book = ShardBook::new(ShardFaults::default());
+        let table = ScriptedResolver::new();
+        for (host, addr) in [
+            ("db-1", "10.0.0.1"),
+            ("db-2", "10.0.0.2"),
+            ("db-3", "10.0.0.3"),
+        ] {
+            table.set(host, vec![ip(addr)]);
+        }
+        book.lock().names = Some(table.clone());
+        let named = Replication::tolerates(
+            ["db-1", "db-2", "db-3"]
+                .iter()
+                .map(|h| Replica::new(format!("{h}:4500")))
+                .collect(),
+            1,
+            1,
+        );
+        book.declare(
+            Some(ip("10.0.0.1")),
+            Duration::ZERO,
+            declaration("s", Some(named), None, "s:1"),
+            || true,
+        );
+        let none = BTreeSet::new();
+        assert!(lose_ok(
+            &requirements(&book),
+            &none,
+            &ShardLosses::new(),
+            &[ip("10.0.0.1")]
+        ));
+        // db-3 comes back under another name before anyone declares again:
+        // the view already held counts it as down at once.
+        table.set("db-3", vec![]);
+        let reqs = requirements(&book);
+        assert_eq!(reqs[0].1[0].replicas[2], Replica::new("0.0.0.0:4500"));
+        assert!(!lose_ok(
+            &reqs,
+            &none,
+            &ShardLosses::new(),
+            &[ip("10.0.0.1")]
+        ));
+        // The event keeps the names as they resolved when declared.
+        let events = book.snapshot().events;
+        let declared = events[0].current.as_ref().expect("a current replication");
+        assert_eq!(declared.replicas[2], Replica::new("10.0.0.3:4500"));
     }
 
     #[test]
