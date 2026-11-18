@@ -260,12 +260,14 @@ impl<M: Model> Harness<M> {
     }
 
     pub(crate) fn restart_unchecked(&mut self, node: &M::Node) {
+        let was_down = !self.model.is_up(node);
         self.core.note(Entry::Restart(node.clone()));
         let mut cx = Cx {
             core: &mut self.core,
         };
         self.model.restart(node, &mut cx);
-        if self.model.is_up(node) {
+        // A restart counts when a node that was down came up.
+        if was_down && self.model.is_up(node) {
             self.core.stats.restarts += 1;
         }
     }

@@ -457,7 +457,7 @@ fn trace<'a>(steps: impl Iterator<Item = &'a Step>) -> Trace {
 }
 
 /// The schedule of the TLC tests: short runs with many crashes, so that a
-/// trace is a few hundred events and TLC answers in about a second.
+/// trace is a few dozen events and TLC answers in about a second.
 fn short<const MUTANT: bool>() -> Walk<Paxos<MUTANT>> {
     Walk::new()
         .chaos_steps(150)

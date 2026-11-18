@@ -387,8 +387,8 @@ yours, and the conversion to a checker's records is a few lines in the test.
 
 `tests/paxos.rs` does this for real. The Paxos model records each step of
 the protocol (`prepare`, `promise`, `propose`, `accept`, `chosen`), and TLC
-checks the trace against a TLA+ spec of Paxos in `tests/paxos_tla`. Every
-walk of the correct protocol is accepted. The two judges do not see the same
+checks the trace against a TLA+ spec of Paxos in `tests/paxos_tla`. The
+walks of the correct protocol that the test checks are accepted. The two judges do not see the same
 thing:
 
 - The oracle of the model (`at most one value is chosen`) fails the mutant
