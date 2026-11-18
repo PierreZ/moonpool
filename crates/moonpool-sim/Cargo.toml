@@ -37,6 +37,9 @@ moonpool-assertions = { path = "../moonpool-assertions", version = "0.8.0" }
 # seeded RNG into it per run; production code can depend on it directly.
 moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
 moonpool-explorer = { path = "../moonpool-explorer", version = "0.8.0", optional = true }
+# Model-based trace checking (pure std, wasm-able): the observability module
+# turns the captured timeline into a trace that TLC checks against a spec.
+moonpool-tla = { path = "../moonpool-tla", version = "0.8.0" }
 
 # Runnable/Task split, waker wiring, join + cancellation for the deterministic
 # executor (same backbone as madsim); no_std-able, no runtime of its own.

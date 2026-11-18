@@ -15,6 +15,7 @@ members = [
     "crates/moonpool-rpc-sim",
     "crates/moonpool-sim",
     "crates/moonpool-sim-examples",
+    "crates/moonpool-tla",
     "crates/moonpool-wasm-demo",
     "crates/xtask",
 ]
