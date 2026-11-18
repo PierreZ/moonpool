@@ -76,6 +76,12 @@ name = "moonpool-assertions"
 changelog_path = "crates/moonpool-assertions/CHANGELOG.md"
 version_group = "moonpool"
 
+# Leaf trace-checking crate (zero dependencies); moonpool-sim depends on it.
+[[package]]
+name = "moonpool-tla"
+changelog_path = "crates/moonpool-tla/CHANGELOG.md"
+version_group = "moonpool"
+
 # Seeded random walk over sans-I/O state machines; depends only on the two
 # leaf crates above.
 [[package]]

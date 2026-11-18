@@ -318,6 +318,7 @@ and under the simulator in its own `#[test]`.
 | `moonpool-sim` | Simulator, runner, chaos, assertion macros | yes |
 | `moonpool-buggify` | `buggify!`, `hint!`, `cpu_charge`; zero dependencies | yes |
 | `moonpool-assertions` | Assertion accounting; zero dependencies, wasm-clean | yes |
+| `moonpool-tla` | Check a run's trace against a TLA+ spec with TLC; zero dependencies | yes |
 | `moonpool-explorer` | Frontier exploration with forked workers (Linux, macOS) | yes |
 | `moonpool-hyper` | hyper 1.x, tonic and axum over the providers | yes |
 | `moonpool-prometheus` | Prometheus registry in the simulation report | yes |

@@ -26,6 +26,10 @@ export const CRATE_NOTES = {
     when: "Shipped code that counts `sometimes` and `always` facts, with zero dependencies.",
     chapter: "part3-building/12-assertions.md",
   },
+  "moonpool-tla": {
+    when: "Checking a run's trace against a TLA+ spec with TLC, from a simulation or a sans-I/O test.",
+    chapter: "part3-building/35-trace-checking.md",
+  },
   "moonpool-explorer": {
     when: "Rarely directly: `moonpool-sim` uses it through its default `exploration` feature.",
     chapter: "part5-building-on-top/01-exploration.md",

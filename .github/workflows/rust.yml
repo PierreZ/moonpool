@@ -166,6 +166,7 @@ jobs:
       - name: Build for wasm32-unknown-unknown
         run: |
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-assertions
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-tla
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-journal
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-walk
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-sim --no-default-features
@@ -217,6 +218,7 @@ jobs:
             -p moonpool-rpc-derive \
             -p moonpool-sim \
             -p moonpool-walk \
+            -p moonpool-tla \
             -p moonpool
       - name: Lean production dependency tree excludes sim/explorer
         run: |
