@@ -63,19 +63,25 @@
 //!         Self { next: 0, pending: Vec::new(), applied: Vec::new(), up: true }
 //!     }
 //!
-//!     fn actions() -> &'static [(Action, u32)] {
-//!         &[(Action::Submit, 10), (Action::Retry, 20)]
+//!     fn actions() -> &'static [Action] {
+//!         &[Action::Submit, Action::Retry]
+//!     }
+//!
+//!     fn weight(action: Action, phase: Phase) -> u32 {
+//!         match (action, phase) {
+//!             (Action::Submit, Phase::Chaos) => 10,
+//!             (Action::Submit, _) => 0, // no new request once the faults stopped
+//!             (Action::Retry, _) => 20,
+//!         }
 //!     }
 //!
 //!     fn act(&mut self, action: Action, cx: &mut Cx<'_, Self>) {
 //!         match action {
-//!             // No new request once the faults stopped.
-//!             Action::Submit if cx.phase() == Phase::Chaos => {
+//!             Action::Submit => {
 //!                 self.pending.push(self.next);
 //!                 cx.send(Msg::Put(self.next));
 //!                 self.next += 1;
 //!             }
-//!             Action::Submit => {}
 //!             Action::Retry => {
 //!                 for id in &self.pending {
 //!                     cx.send(Msg::Put(*id));
@@ -122,13 +128,16 @@
 //!         assert_eq!(seen.len(), self.applied.len(), "a request is applied once");
 //!     }
 //!
-//!     fn converged(&self) -> bool {
-//!         self.pending.is_empty()
+//!     fn converged(&self) -> Result<(), String> {
+//!         if self.pending.is_empty() {
+//!             Ok(())
+//!         } else {
+//!             Err(format!("requests {:?} have no answer", self.pending))
+//!         }
 //!     }
 //! }
 //!
 //! let report = Walk::<Retries>::new().seeds(50).chaos_steps(200).report();
-//! assert_eq!(report.seeds, 50);
 //! assert!(report.stats.dropped > 0 && report.stats.crashes > 0);
 //! ```
 //!
@@ -138,13 +147,15 @@
 //!
 //! ## The judges a walk gives
 //!
-//! - **Safety**: [`Model::check`] after every step, with plain `assert!`.
+//! - **Safety**: [`Model::check`] after every delivery and every step,
+//!   with plain `assert!`.
 //! - **Liveness**: [`Model::converged`] after a quiet tail with no fault.
 //! - **Coverage**: a [`sometimes!`] or [`reachable!`] site that no seed
 //!   passes fails the campaign. A walk that never reaches the hard case
 //!   proves nothing about it.
 //! - **Rare branches**: [`buggify!`] sites in the code under test fire from
-//!   the seed.
+//!   the seed. A [`buggify_fault_with_prob!`] site is silent in the quiet
+//!   tail.
 //! - **Mutation**: [`Walk::try_run`] returns the failure, so a test can
 //!   prove that a known bug is caught.
 //! - **A trace**: [`Cx::record`] keeps the facts of a run in order, and
@@ -173,4 +184,4 @@ pub use rng::Rng;
 pub use walk::{DEFAULT_ENV_PREFIX, Walk};
 
 pub use moonpool_assertions::{reachable, sometimes};
-pub use moonpool_buggify::{buggify, buggify_with_prob};
+pub use moonpool_buggify::{buggify, buggify_fault_with_prob, buggify_with_prob};

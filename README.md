@@ -223,7 +223,7 @@ and under the simulator in its own `#[test]`.
   draws a schedule from a seed with no executor, no network and no clock:
   deliver, drop, duplicate, reorder, crash, restart, or a move of the model.
 - A chaos phase, a quiet tail and a convergence check for each seed.
-  Safety is `check()` after every step. Liveness is `converged()`.
+  Safety is `check()` after every delivery. Liveness is `converged()`.
 - A failing seed prints its log and replays alone
   (`MOONPOOL_WALK_SEED=17`). `Harness` scripts a schedule by hand.
 - `sometimes!` coverage over the campaign, seeded `buggify!`, swarm

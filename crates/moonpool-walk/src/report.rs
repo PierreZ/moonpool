@@ -64,7 +64,8 @@ pub struct SeedFailure {
     /// What failed: the message of the panic, the assertion that recorded a
     /// failure, or the liveness claim that did not hold.
     pub message: String,
-    /// The last entries of the log, oldest first.
+    /// The last entries of the log, oldest first
+    /// ([`Walk::failure_tail`](crate::Walk::failure_tail) sets how many).
     pub tail: Vec<String>,
     /// The state of the model ([`Model::describe`](crate::Model::describe)).
     pub state: String,
@@ -106,6 +107,9 @@ impl fmt::Display for SeedFailure {
 pub enum WalkError {
     /// One seed failed. The campaign stops at the first one.
     Seed(Box<SeedFailure>),
+    /// The campaign could not start: it has no seed to run, or a variable
+    /// of the environment does not hold a number.
+    Setup(String),
     /// Every seed passed, but the campaign did not reach what it must
     /// reach: a `sometimes!` or `reachable!` site that never passed, or an
     /// assertion the table could not count. One line for each.
@@ -116,6 +120,7 @@ impl fmt::Display for WalkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Seed(failure) => failure.fmt(f),
+            Self::Setup(why) => writeln!(f, "the campaign did not start: {why}"),
             Self::Coverage(gaps) => {
                 writeln!(f, "every seed passed, but the campaign has coverage gaps:")?;
                 for gap in gaps {

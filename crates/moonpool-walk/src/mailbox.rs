@@ -14,7 +14,7 @@ use crate::Rng;
 /// The walk owns one mailbox for each run. The ordered methods
 /// ([`pop_front`](Self::pop_front), [`retain`](Self::retain),
 /// [`take_where`](Self::take_where)) are for a scripted schedule, which
-/// reaches them through a [`Harness`](crate::Harness).
+/// reaches them through [`Harness::mailbox_mut`](crate::Harness::mailbox_mut).
 #[derive(Debug, Clone)]
 pub struct Mailbox<M> {
     inflight: Vec<M>,

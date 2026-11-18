@@ -14,8 +14,9 @@ pub enum Phase {
     /// The faults stopped: nothing is dropped or duplicated, every node is
     /// asked to restart, and the model keeps moving.
     Quiet,
-    /// The end of the tail: each round runs every action once and empties
-    /// the mailbox, until [`Model::converged`] holds.
+    /// The end of the tail: each round runs once every action that has a
+    /// weight in this phase and empties the mailbox, until
+    /// [`Model::converged`] holds.
     Settle,
 }
 
@@ -39,10 +40,12 @@ pub enum Phase {
 /// | drop, duplicate | chaos | nothing: the message disappears, or goes back in flight |
 /// | crash | chaos | [`crash`](Self::crash) on a random node that is up |
 /// | restart | chaos | [`restart`](Self::restart) on a random node that is down |
-/// | a model move | all | [`act`](Self::act) with an action drawn by weight |
-/// | the faults stop | once | [`calm`](Self::calm), then [`restart`](Self::restart) on every node that is down |
-/// | after every step | all | [`check`](Self::check) |
-/// | after each settle round | settle | [`converged`](Self::converged) |
+/// | a model move | all | [`act`](Self::act) with an action drawn by its [`weight`](Self::weight) in the phase |
+/// | the faults stop | once | [`calm`](Self::calm) |
+/// | each quiet step and settle round | quiet, settle | [`restart`](Self::restart) on every node that is down |
+/// | after every delivery and every step | all | [`check`](Self::check) |
+/// | before each settle round | settle | [`converged`](Self::converged) |
+/// | the run converged | once | [`finish`](Self::finish) |
 ///
 /// A failed `assert!` anywhere in the model fails the seed. The walk
 /// reports the seed, the step and the last entries of the log.
@@ -64,18 +67,28 @@ pub trait Model: Sized {
     /// [`Cx::rng`], and put the first messages in flight with [`Cx::send`].
     fn new(cx: &mut Cx<'_, Self>) -> Self;
 
-    /// The model's moves and the weight of each. The walk draws one move
-    /// against the weights of its own steps (deliver, crash, restart).
-    ///
-    /// The alphabet is fixed. A move that is not possible in the current
-    /// state does nothing in [`act`](Self::act).
+    /// The model's moves. The alphabet is fixed. A move that is not
+    /// possible in the current state does nothing in [`act`](Self::act).
     #[must_use]
-    fn actions() -> &'static [(Self::Action, u32)] {
+    fn actions() -> &'static [Self::Action] {
         &[]
     }
 
-    /// Make one move. Read [`Cx::phase`] to stop a move that must not run
-    /// in the quiet tail (new client requests, say).
+    /// The weight of `action` in `phase`, against the weights of the walk's
+    /// own steps (45 for a deliver step, 3 for a crash, 3 for a restart,
+    /// unless set on the [`Walk`](crate::Walk)). One by default.
+    ///
+    /// Zero keeps a move out of a phase: no new client request in the quiet
+    /// tail, no step-down while the run settles. In the settle phase the
+    /// weight is a switch: each round makes once every move whose weight is
+    /// not zero.
+    #[must_use]
+    fn weight(action: Self::Action, phase: Phase) -> u32 {
+        let _ = (action, phase);
+        1
+    }
+
+    /// Make one move.
     fn act(&mut self, action: Self::Action, cx: &mut Cx<'_, Self>) {
         let _ = (action, cx);
     }
@@ -99,6 +112,15 @@ pub trait Model: Sized {
         true
     }
 
+    /// How likely the walk is to pick `node` for a crash or a restart,
+    /// against the other nodes. One by default; zero keeps the walk's hands
+    /// off a node.
+    #[must_use]
+    fn node_weight(&self, node: &Self::Node) -> u32 {
+        let _ = node;
+        1
+    }
+
     /// Crash `node`: drop its volatile state, keep what its disk holds.
     fn crash(&mut self, node: &Self::Node, cx: &mut Cx<'_, Self>) {
         let _ = (node, cx);
@@ -110,20 +132,46 @@ pub trait Model: Sized {
         let _ = (node, cx);
     }
 
-    /// The faults just stopped. Called once, before the walk restarts every
-    /// node that is down.
+    /// The faults just stopped. Called once, before the walk asks every
+    /// node that is down to restart. The place to draw the nodes that stay
+    /// dead for the tail.
     fn calm(&mut self, cx: &mut Cx<'_, Self>) {
         let _ = cx;
     }
 
-    /// The oracles: what must hold after every step. Fail with `assert!`.
+    /// The oracles: what must hold after every delivery and every step.
+    /// Fail with `assert!`.
     fn check(&mut self) {}
 
-    /// The liveness claim, judged at the end of the quiet tail. The walk
-    /// fails the seed when this stays `false` after the last settle round.
+    /// The liveness claim, judged at the end of the quiet tail: `Err` says
+    /// what is still missing. The walk fails the seed, with that text, when
+    /// this is still an error after the last settle round.
+    ///
+    /// # Errors
+    ///
+    /// What the run has not reached yet.
+    fn converged(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// The run converged. The place for the facts and the claims that hold
+    /// only at the end of a run (`sometimes!` on what the whole run did).
+    fn finish(&mut self) {}
+
+    /// The messages of the `reachable!` sites that some seed of a campaign
+    /// must reach. A site that no seed evaluates is otherwise invisible.
+    /// Keep each message in a `const`, so that the site and this list share
+    /// it.
     #[must_use]
-    fn converged(&self) -> bool {
-        true
+    fn reachable_sites() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The messages of the `sometimes!` sites that some seed of a campaign
+    /// must pass, as [`reachable_sites`](Self::reachable_sites).
+    #[must_use]
+    fn sometimes_sites() -> &'static [&'static str] {
+        &[]
     }
 
     /// The state to print when a seed fails.
@@ -151,6 +199,13 @@ impl<M: Model> Cx<'_, M> {
         self.core.step
     }
 
+    /// The step within the current phase, from zero: for a move that runs
+    /// only early in the quiet tail, or once at a given step of it.
+    #[must_use]
+    pub fn phase_step(&self) -> u64 {
+        self.core.step - self.core.phase_start
+    }
+
     /// Whether faults are on, off, or the run is settling.
     #[must_use]
     pub fn phase(&self) -> Phase {
@@ -176,6 +231,21 @@ impl<M: Model> Cx<'_, M> {
         self.core.note(Entry::Event(event));
     }
 
+    /// Say that `node` just crashed by itself, in the middle of a delivery
+    /// for example: the log and the counts then show it. The model keeps the
+    /// truth ([`Model::is_up`]); this only records the fact.
+    pub fn crashed(&mut self, node: &M::Node) {
+        self.core.stats.crashes += 1;
+        self.core.note(Entry::Crash(node.clone()));
+    }
+
+    /// Lose every message in flight that `lost` admits: a partition, or the
+    /// network of a staged tail that starts empty. Returns how many were
+    /// lost.
+    pub fn drop_where(&mut self, lost: impl FnMut(&M::Msg) -> bool) -> usize {
+        self.core.drop_where(lost)
+    }
+
     /// How many messages are in flight.
     #[must_use]
     pub fn inflight(&self) -> usize {
@@ -187,13 +257,15 @@ impl<M: Model> Cx<'_, M> {
 pub enum Entry<M: Model> {
     /// A message reached the model.
     Deliver(M::Msg),
-    /// A message was taken out of flight and lost.
+    /// A message in flight was lost: dropped by the walk, or by the model
+    /// with [`Cx::drop_where`].
     Drop(M::Msg),
     /// A message was delivered and also put back in flight.
     Duplicate(M::Msg),
     /// The mailbox was full and lost this message.
     Evict(M::Msg),
-    /// A node crashed.
+    /// A node crashed: the walk crashed it, or the model reported it with
+    /// [`Cx::crashed`].
     Crash(M::Node),
     /// A node restarted.
     Restart(M::Node),
@@ -264,9 +336,10 @@ pub struct Stats {
     pub duplicated: u64,
     /// Messages lost to a full mailbox.
     pub evicted: u64,
-    /// Crashes made by the walk.
+    /// Crashes made by the walk, and the ones the model reported with
+    /// [`Cx::crashed`].
     pub crashes: u64,
-    /// Restarts that brought a node up.
+    /// Restarts after which the node was up.
     pub restarts: u64,
     /// Facts recorded by the model.
     pub events: u64,
@@ -299,6 +372,8 @@ impl Stats {
 pub(crate) struct Core<M: Model> {
     pub(crate) seed: u64,
     pub(crate) step: u64,
+    /// The step at which the current phase started.
+    pub(crate) phase_start: u64,
     pub(crate) phase: Phase,
     pub(crate) rng: Rng,
     pub(crate) mailbox: Mailbox<M::Msg>,
@@ -311,6 +386,7 @@ impl<M: Model> Core<M> {
         Self {
             seed,
             step: 0,
+            phase_start: 0,
             phase: Phase::Chaos,
             rng: Rng::new(seed),
             mailbox: Mailbox::new(mailbox),
@@ -328,6 +404,21 @@ impl<M: Model> Core<M> {
             phase: self.phase,
             entry,
         });
+    }
+
+    pub(crate) fn enter(&mut self, phase: Phase) {
+        self.phase = phase;
+        self.phase_start = self.step;
+    }
+
+    pub(crate) fn drop_where(&mut self, mut lost: impl FnMut(&M::Msg) -> bool) -> usize {
+        let mut count = 0;
+        while let Some(message) = self.mailbox.take_where(&mut lost) {
+            self.stats.dropped += 1;
+            self.note(Entry::Drop(message));
+            count += 1;
+        }
+        count
     }
 
     pub(crate) fn send(&mut self, message: M::Msg) {

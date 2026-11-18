@@ -62,18 +62,25 @@ impl Model for Retries {
         Self { next: 0, pending: Vec::new(), applied: Vec::new(), up: true }
     }
 
-    fn actions() -> &'static [(Action, u32)] {
-        &[(Action::Submit, 10), (Action::Retry, 20)]
+    fn actions() -> &'static [Action] {
+        &[Action::Submit, Action::Retry]
+    }
+
+    fn weight(action: Action, phase: Phase) -> u32 {
+        match (action, phase) {
+            (Action::Submit, Phase::Chaos) => 10,
+            (Action::Submit, _) => 0, // no new request in the quiet tail
+            (Action::Retry, _) => 20,
+        }
     }
 
     fn act(&mut self, action: Action, cx: &mut Cx<'_, Self>) {
         match action {
-            Action::Submit if cx.phase() == Phase::Chaos => {
+            Action::Submit => {
                 self.pending.push(self.next);
                 cx.send(Msg::Put(self.next));
                 self.next += 1;
             }
-            Action::Submit => {} // no new request in the quiet tail
             Action::Retry => {
                 for id in &self.pending {
                     cx.send(Msg::Put(*id));
@@ -108,8 +115,12 @@ impl Model for Retries {
         assert_eq!(seen.len(), self.applied.len(), "a request is applied once");
     }
 
-    fn converged(&self) -> bool {
-        self.pending.is_empty()
+    fn converged(&self) -> Result<(), String> {
+        if self.pending.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("requests {:?} have no answer", self.pending))
+        }
     }
 }
 
@@ -132,6 +143,10 @@ alphabet of the model:
 There is no clock. Time passes when the walk draws a tick action. A timeout
 is a move of the model like any other, and the walk decides when it happens.
 
+`Model::weight(action, phase)` gives each move its weight in each phase, one
+by default. Zero keeps a move out of a phase: no new client request in the
+quiet tail, no step-down while the run settles.
+
 ## The Schedule
 
 The walk owns the messages in flight and decides what happens next. A run has
@@ -139,18 +154,27 @@ three phases.
 
 | Phase | What the walk does |
 |-------|--------------------|
-| **Chaos** | Each step is one draw by weight: deliver three messages in random order, crash a node that is up, restart a node that is down, or one action of the model. A message taken for delivery is dropped with probability 0.1. A delivered message goes back in flight with probability 0.1. |
-| **Quiet** | The faults stop. `Model::calm` runs once, then every node that is down is asked to restart. Nothing is dropped or duplicated. The walk keeps delivering and drawing actions. |
-| **Settle** | Each round runs every action once and then empties the mailbox. The rounds stop when `Model::converged` holds. A run that does not converge in 200 rounds fails. |
+| **Chaos** | Each step is one draw by weight: deliver three messages in random order (weight 45), crash a node that is up (3), restart a node that is down (3), or one action of the model (its `weight`). A message taken for delivery is dropped with probability 0.1. A delivered message goes back in flight with probability 0.1. |
+| **Quiet** | The faults stop. `Model::calm` runs once. Then, at each step, every node that is down is asked to restart, nothing is dropped or duplicated, and the walk delivers eight messages or draws one action that has a weight in this phase. |
+| **Settle** | Each round runs once every action that has a weight in this phase and then empties the mailbox. The rounds stop when `Model::converged` returns `Ok`. A run that does not converge in 200 rounds fails, with the reason that `converged` gave. `Model::finish` runs once on a run that converged. |
 
-`Model::check` runs after every step, in every phase. The mailbox holds at
-most 128 messages. One more evicts a random message, in every phase: this is
-the limit that stops a backlog from starving the work.
+`Model::check` runs after every delivery and at the end of every step, in
+every phase. `Walk::check_each_delivery(false)` keeps only the end of the
+step, for an oracle that is too slow. The mailbox holds at most 128
+messages. One more evicts a random message, in every phase: this is the
+limit that stops a backlog from starving the work.
 
 The model holds the truth about who is up. The walk asks `is_up` and keeps no
 list of its own, so a node may also crash by itself inside `deliver`, between
-a write and its sync for example. A model may refuse a restart: a node that
-stays dead for the tail is how you prove that the others take its work over.
+a write and its sync for example. `cx.crashed(&node)` puts that crash in the
+log. A model may refuse a restart: a node that stays dead for the tail is how
+you prove that the others take its work over. Draw those nodes in `calm`.
+`Model::node_weight` makes one kind of party crash more often than another.
+
+A model reaches the run through `cx`: `cx.rng()`, `cx.send(message)`,
+`cx.phase()` and `cx.phase_step()` (the step within the phase), and
+`cx.drop_where(..)`, which loses messages in flight: a partition, or the
+empty network of a second tail.
 
 Every number is a method of `Walk`:
 
@@ -161,11 +185,15 @@ Walk::<ProxyModel>::new()
     .quiet_steps(400)
     .drop_probability(0.2)
     .crash_weights(5, 5)
+    .deliver_weights(45, 60)
     .max_down(1)
     .mailbox(64)
     .env_prefix(Some("PROXY_MODEL"))
     .run();
 ```
+
+A model that takes a configuration is built by a closure:
+`Walk::model(|cx| ProxyModel::new(cx, grid))` replaces `Model::new`.
 
 ## When a Seed Fails
 
@@ -173,29 +201,35 @@ A failed `assert!` anywhere in the model fails the seed. The campaign stops
 and prints what you need to run it again:
 
 ```text
-seed 2817 failed at step 43: at most one value is chosen: {2, 3}
-run it again alone with PAXOS_WALK_SEED=2817
-the last 40 entries of the log:
-    ...
-    42 chaos  deliver Promise { to: 1, from: 0, ballot: 7, accepted: Some((2, 2)) }
-    43 chaos  deliver Accept { to: 1, ballot: 7, value: 3 }
-    43 chaos  duplicate Accept { to: 2, ballot: 7, value: 3 }
-    43 chaos  deliver Accept { to: 2, ballot: 7, value: 3 }
-    43 chaos  event 3
+seed 87 failed at step 68: at most one value is chosen: {4, 5}
+run it again alone with PAXOS_WALK_SEED=87
+the last 8 entries of the log:
+      67 chaos  deliver Prepare { to: 0, from: 0, ballot: 10 }
+      67 chaos  duplicate Prepare { to: 0, from: 0, ballot: 8 }
+      67 chaos  deliver Prepare { to: 0, from: 0, ballot: 8 }
+      68 chaos  deliver Promise { to: 0, from: 2, ballot: 10, accepted: Some((5, 5)) }
+      68 chaos  deliver Accept { to: 0, ballot: 10, value: 5 }
+      68 chaos  duplicate Accept { to: 1, ballot: 10, value: 5 }
+      68 chaos  deliver Accept { to: 1, ballot: 10, value: 5 }
+      68 chaos  event 5
 the model:
-acceptor 0: promised 7 accepted Some((2, 2)) down false
-acceptor 1: promised 7 accepted Some((7, 3)) down false
-acceptor 2: promised 7 accepted Some((7, 3)) down false
+acceptor 0: promised 10 accepted Some((10, 5)) down false
+acceptor 1: promised 10 accepted Some((10, 5)) down false
+acceptor 2: promised 10 accepted Some((5, 5)) down false
 ```
 
-The walk reads four environment variables. With the default prefix they are
+The walk reads five environment variables. With the default prefix they are
 `MOONPOOL_WALK_SEED` (one seed alone), `MOONPOOL_WALK_SEEDS` (how many),
-`MOONPOOL_WALK_FROM` (the first seed) and `MOONPOOL_WALK_STEPS` (the chaos
-steps). `env_prefix` gives each model its own names, so two models in one
-test binary do not share them.
+`MOONPOOL_WALK_FROM` (the first seed), `MOONPOOL_WALK_STEPS` (the chaos
+steps) and `MOONPOOL_WALK_TAIL` (how many entries of the log a failure
+prints; 40 by default, a large number for the whole log). A value that is
+not a number stops the campaign. Every walk with the default prefix reads
+the same variables, so `env_prefix` gives each model its own names.
 
-`Walk::replay(seed)` returns the `Run` of one seed: the model as the run left
-it, and the log of everything the run did.
+`Walk::replay(seed)` runs one seed. A seed that passes returns its `Run`: the
+model as the run left it, and the log of everything the run did. A seed that
+fails returns its `SeedFailure`, with as much of the log as
+`Walk::failure_tail` asks for.
 
 A seed replays only when the model draws every choice from `cx.rng()`. A
 model that reads a clock or iterates a `HashMap` does not replay.
@@ -216,12 +250,28 @@ moonpool_walk::sometimes!(
 
 The counts add up over the campaign. A site that no seed passes fails the
 campaign with a coverage error, after every seed passed. A site that is never
-evaluated is invisible, so declare the ones that matter with
-`Walk::expect_sometimes("...")`. The `Report` lists every site with its hit
-count.
+evaluated is invisible, so a model declares the ones that matter. Keep each
+message in a `const`, so that the site and the declaration share it:
+
+```rust,ignore
+const TAKEN_BACK: &str = "a leader took a delegated round back";
+
+fn reachable_sites() -> &'static [&'static str] {
+    &[TAKEN_BACK]
+}
+// ... and where it happens:
+moonpool_walk::reachable!(TAKEN_BACK);
+```
+
+`Model::sometimes_sites` does the same for `sometimes!`. `Model::finish` is
+the place for a fact that is known only at the end of a run. The `Report`
+lists every site with its hit count.
 
 An always-style assertion that the code under test records in the table
-(`assertion_bool` with `AssertKind::Always`) fails the seed that records it.
+(`assertion_bool` with `AssertKind::Always`) fails the seed. The walk reads
+the table once at the end of each seed, because a read scans the whole table.
+When it finds a failure it runs the seed again and reads after every step, so
+the report names the step that records the failure.
 
 Coverage is not judged when one seed runs alone.
 
@@ -231,9 +281,14 @@ For each seed the walk installs a seeded source into
 [`moonpool-buggify`](../part3-building/08-buggify.md). The `buggify!` sites
 in the code under test fire as they do in a simulation: a location is active
 on half the seeds, and an active location fires on a quarter of its calls.
-When the chaos phase ends the walk calls `buggify_enter_recovery`, so the
-fault sites are silent in the tail. Buggify draws from its own stream:
+When the chaos phase ends the walk calls `buggify_enter_recovery`: the
+disruptive sites (`buggify_fault_with_prob!`, `buggify_named!`) are silent in
+the tail, and `buggify!` keeps firing. Buggify draws from its own stream:
 adding a site does not move the schedule of a seed.
+
+A walk that starts inside a running simulation leaves buggify alone. A walk
+that finds an assertion table already installed counts in it, and leaves the
+coverage to the owner of the table.
 
 `Walk::swarm(true)` is swarm testing at the level of the schedule. Each seed
 switches off a random subset of the fault families (drops, duplicates,
@@ -249,7 +304,10 @@ is caught:
 
 ```rust,ignore
 let error = Walk::<Paxos<true>>::new() // acceptors that forget their promise
-    .seeds(5_000)
+    .seeds(2_000)
+    .chaos_steps(150)
+    .crash_weights(20, 20)
+    .deliver_weights(20, 45)
     .try_run()
     .expect_err("the mutant chooses two values on some seed");
 let WalkError::Seed(failure) = error else { panic!("{error}") };
@@ -259,8 +317,13 @@ assert!(failure.message.contains("at most one value is chosen"));
 `crates/moonpool-walk/tests/paxos.rs` is this test in full: a single-decree
 Paxos with three acceptors and two proposers. The correct protocol passes
 every seed, converges after the tail, and reaches its three `sometimes!`
-sites. The mutant keeps its promise in memory only, and the walk finds the
-seed where two values are chosen: seed 2817 of 5,000, in about one second.
+sites. The mutant keeps its promise in memory only, so the bug needs a crash
+between a promise and an older accept.
+
+Tune the schedule to the mutant. With the default weights the walk catches
+this one on 1 seed in 3,000. With frequent crashes and short runs it catches
+it on 1 seed in 100, the first at seed 87. A mutant test that depends on one
+lucky seed breaks the day a draw moves.
 
 ## A Scripted Schedule
 
@@ -278,7 +341,20 @@ assert_eq!(harness.model().acceptors[1].accepted, None, "the promise is durable"
 ```
 
 `deliver_next`, `deliver_where`, `drop_where` and `drain` move the messages
-in flight in the order you choose. `Model::check` runs after each call.
+in flight in the order you choose, and `mailbox_mut` gives the whole bag.
+`harness.with(|model, cx| ..)` calls a helper of the model that needs a
+`cx`. `Model::check` runs after each call.
+
+A script can end with the tail of a walk. `Walk::finish(&mut harness)` stops
+the faults, runs the quiet steps and the settle rounds, and returns why the
+model did not converge:
+
+```rust,ignore
+Walk::<Paxos<false>>::new().finish(&mut harness)?;
+```
+
+A harness installs neither buggify nor the assertion table: it is a script,
+not a campaign.
 
 ## A Trace for a Checker
 
@@ -304,9 +380,13 @@ spec that models the faults.
 
 - It does not run async code. A state machine that awaits is a job for the
   [simulation](../part3-building/01-first-simulation.md).
-- It does not model a partition. A model that needs one adds an action that
-  cuts a link and drops the matching messages in `deliver`.
+- It does not draw partitions. A model that needs one adds an action that
+  cuts a link: it drops the messages in flight with `cx.drop_where` and the
+  later ones in `deliver`.
 - It does not shrink a failing schedule. The log of a few hundred steps is
   short, and `Harness` turns the part that matters into a test.
+- It catches a failed `assert!` with `catch_unwind`, so it needs
+  `panic = "unwind"`, the default of a test build. The panic hook still
+  prints each caught panic.
 - It is not exhaustive. A random walk samples schedules. A model checker
   enumerates them.

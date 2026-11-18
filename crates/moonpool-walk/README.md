@@ -32,15 +32,16 @@ impl Model for Retries {
     type Event = u32;      // a fact for a trace checker
 
     fn new(cx: &mut Cx<'_, Self>) -> Self { /* draw the deployment */ }
-    fn actions() -> &'static [(Action, u32)] { &[(Action::Submit, 10), (Action::Retry, 20)] }
+    fn actions() -> &'static [Action] { &[Action::Submit, Action::Retry] }
+    fn weight(action: Action, phase: Phase) -> u32 { /* 0 keeps a move out of a phase */ }
     fn act(&mut self, action: Action, cx: &mut Cx<'_, Self>) { /* cx.send(..) */ }
     fn deliver(&mut self, message: Msg, cx: &mut Cx<'_, Self>) { /* cx.send(..), cx.record(..) */ }
     fn nodes(&self) -> Vec<()> { vec![()] }
     fn is_up(&self, node: &()) -> bool { self.up }
     fn crash(&mut self, node: &(), cx: &mut Cx<'_, Self>) { /* keep the disk */ }
     fn restart(&mut self, node: &(), cx: &mut Cx<'_, Self>) { /* read the disk */ }
-    fn check(&mut self) { /* assert!(..): safety, after every step */ }
-    fn converged(&self) -> bool { /* liveness, after the quiet tail */ }
+    fn check(&mut self) { /* assert!(..): safety, after every delivery and step */ }
+    fn converged(&self) -> Result<(), String> { /* liveness, after the quiet tail */ }
 }
 
 #[test]
@@ -57,29 +58,35 @@ single-decree Paxos with a mutant that the walk catches.
 | Phase | What happens |
 |-------|--------------|
 | Chaos | Each step is one draw by weight: deliver messages in random order (each may be dropped or duplicated), crash a node, restart a node, or one action of the model. |
-| Quiet | The faults stop. Every node is asked to restart. The walk keeps delivering and moving. |
-| Settle | Rounds of "every action once, then empty the mailbox" until `converged()` holds. A run that never converges fails. |
+| Quiet | The faults stop. At each step every node that is down is asked to restart. The walk keeps delivering and drawing the actions that have a weight in this phase. |
+| Settle | Rounds of "every action of this phase once, then empty the mailbox" until `converged()` holds. A run that never converges fails with the reason `converged()` gave. |
 
 ## What you get on every model
 
 - **Replay.** A failure prints the seed, the step, the last entries of the
   log and the state of the model. `MOONPOOL_WALK_SEED=17 cargo test` runs
-  that seed alone. `MOONPOOL_WALK_SEEDS=5000` makes a long run.
-  `Walk::env_prefix` gives a model its own variable names.
+  that seed alone, `MOONPOOL_WALK_TAIL=100000` prints its whole log, and
+  `MOONPOOL_WALK_SEEDS=5000` makes a long run. Every walk with the default
+  prefix reads these: `Walk::env_prefix` gives a model its own names.
 - **Coverage.** A `sometimes!` or `reachable!` site that no seed passes
-  fails the campaign. `Walk::expect_sometimes` declares a site that may
-  never be evaluated.
+  fails the campaign. `Model::reachable_sites` and `Model::sometimes_sites`
+  declare the sites that may never be evaluated.
+- **Always assertions.** An always-style assertion that the code under test
+  records in the `moonpool-assertions` table fails the seed, at the step
+  that records it.
 - **Buggify.** The walk seeds `moonpool-buggify`, so `buggify!` sites in the
-  code under test fire, and fault sites fall silent in the quiet tail.
+  code under test fire. `buggify_fault_with_prob!` and `buggify_named!`
+  sites are silent in the quiet tail.
 - **Swarm testing.** `Walk::swarm(true)` switches off a random subset of the
   fault families and of the actions for each seed.
 - **Mutation.** `Walk::try_run` returns the failure, so a test proves that a
   known bug is caught.
 - **A trace.** `Cx::record` keeps the facts of a run in order.
-  `Walk::run_each` hands each `Run` to a trace checker, `moonpool-tla` for
+  `Walk::run_each` hands each `Run` to a trace checker, a TLA+ one for
   example.
 - **Scripted schedules.** `Harness` is the same engine one step at a time: a
-  schedule that a seed found becomes a named regression test.
+  schedule that a seed found becomes a named regression test, and
+  `Walk::finish` ends it with the quiet tail of a walk.
 - **A determinism check.** `Walk::check_determinism` runs a seed twice and
   compares the logs.
 

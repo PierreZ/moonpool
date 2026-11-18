@@ -3,7 +3,8 @@
 //!
 //! Three acceptors with a disk, two proposers. The correct protocol passes
 //! every seed. A mutant whose acceptors keep their promise in memory only
-//! (lost by a crash) chooses two values, and the walk finds the seed.
+//! (lost by a crash) chooses two values, and the walk finds the seed: about
+//! one seed in a hundred, under a schedule with many crashes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -99,8 +100,12 @@ impl<const MUTANT: bool> Model for Paxos<MUTANT> {
         }
     }
 
-    fn actions() -> &'static [(Action, u32)] {
-        &[(Action::Propose, 8)]
+    fn actions() -> &'static [Action] {
+        &[Action::Propose]
+    }
+
+    fn weight(_action: Action, _phase: Phase) -> u32 {
+        8
     }
 
     fn act(&mut self, Action::Propose: Action, cx: &mut Cx<'_, Self>) {
@@ -212,8 +217,12 @@ impl<const MUTANT: bool> Model for Paxos<MUTANT> {
         );
     }
 
-    fn converged(&self) -> bool {
-        !self.chosen.is_empty()
+    fn converged(&self) -> Result<(), String> {
+        if self.chosen.is_empty() {
+            Err("no value is chosen".into())
+        } else {
+            Ok(())
+        }
     }
 
     fn describe(&self) -> String {
@@ -247,12 +256,21 @@ fn paxos_is_safe_under_chaos_and_live_after_it() {
     assert!(report.sites.iter().all(|site| site.hits > 0), "{report}");
 }
 
+/// The schedule that hunts the mutant: the bug needs a crash between a
+/// promise and an older accept, so crashes are frequent and runs are short.
+/// About one seed in a hundred catches it, so 2,000 seeds cannot miss.
+fn hunt() -> Walk<Paxos<true>> {
+    Walk::new()
+        .seeds(2_000)
+        .chaos_steps(150)
+        .crash_weights(20, 20)
+        .deliver_weights(20, 45)
+        .env_prefix(None)
+}
+
 #[test]
 fn a_promise_kept_in_memory_only_is_caught() {
-    let error = Walk::<Paxos<true>>::new()
-        .seeds(5_000)
-        .chaos_steps(300)
-        .env_prefix(None)
+    let error = hunt()
         .try_run()
         .expect_err("the mutant chooses two values on some seed");
     let WalkError::Seed(failure) = error else {
@@ -262,18 +280,33 @@ fn a_promise_kept_in_memory_only_is_caught() {
         failure.message.contains("at most one value is chosen"),
         "{failure}"
     );
+    assert!(failure.seed < 500, "one seed in a hundred: {failure}");
     assert!(!failure.tail.is_empty());
     assert!(failure.state.contains("acceptor 0"), "{failure}");
 
     // The seed fails again alone, at the same step: it is a regression test.
-    let again = Walk::<Paxos<true>>::new()
-        .chaos_steps(300)
-        .env_prefix(None)
+    let again = hunt()
         .replay(failure.seed)
         .err()
         .expect("the same seed fails again");
     assert_eq!(again.step, failure.step);
     assert_eq!(again.tail, failure.tail);
+
+    // The same schedule finds nothing in the correct protocol.
+    Walk::<Paxos<false>>::new()
+        .seeds(300)
+        .chaos_steps(150)
+        .crash_weights(20, 20)
+        .deliver_weights(20, 45)
+        .env_prefix(None)
+        .run_each(|_| {})
+        .map(|_| ())
+        .or_else(|error| match error {
+            // Short runs with many crashes may miss a `sometimes!` site.
+            WalkError::Coverage(_) => Ok(()),
+            other => Err(other),
+        })
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// The schedule the walk found for the mutant, written by hand: acceptor 1

@@ -89,6 +89,23 @@ impl<M: Model> Harness<M> {
         &self.core.mailbox
     }
 
+    /// The messages in flight, to reorder, filter or empty them by hand.
+    pub fn mailbox_mut(&mut self) -> &mut Mailbox<M::Msg> {
+        &mut self.core.mailbox
+    }
+
+    /// Call the model with a [`Cx`], as the walk does: for a helper of the
+    /// model that sends or draws and is not one of its actions.
+    /// [`Model::check`] runs afterwards.
+    pub fn with<R>(&mut self, call: impl FnOnce(&mut M, &mut Cx<'_, M>) -> R) -> R {
+        let mut cx = Cx {
+            core: &mut self.core,
+        };
+        let result = call(&mut self.model, &mut cx);
+        self.end_step();
+        result
+    }
+
     /// Everything done so far, in order.
     #[must_use]
     pub fn log(&self) -> &[Logged<M>] {
@@ -139,14 +156,8 @@ impl<M: Model> Harness<M> {
 
     /// Lose every message in flight that `lost` admits: a scripted
     /// partition. Returns how many were lost.
-    pub fn drop_where(&mut self, mut lost: impl FnMut(&M::Msg) -> bool) -> usize {
-        let mut count = 0;
-        while let Some(message) = self.core.mailbox.take_where(&mut lost) {
-            self.core.stats.dropped += 1;
-            self.core.note(Entry::Drop(message));
-            count += 1;
-        }
-        count
+    pub fn drop_where(&mut self, lost: impl FnMut(&M::Msg) -> bool) -> usize {
+        self.core.drop_where(lost)
     }
 
     /// Deliver messages oldest first, the ones sent on the way too, until
@@ -179,7 +190,9 @@ impl<M: Model> Harness<M> {
     }
 
     /// Stop the faults: enter the quiet phase, call [`Model::calm`], then
-    /// restart every node that is down.
+    /// ask every node that is down to restart.
+    /// [`Walk::finish`](crate::Walk::finish) runs the whole tail of a walk
+    /// instead.
     pub fn calm(&mut self) {
         self.calm_unchecked();
         self.end_step();
@@ -207,6 +220,10 @@ impl<M: Model> Harness<M> {
     /// Count the step and run the oracles.
     pub(crate) fn end_step(&mut self) {
         self.model.check();
+        self.count_step();
+    }
+
+    pub(crate) fn count_step(&mut self) {
         self.core.step += 1;
         self.core.stats.steps += 1;
     }
@@ -214,73 +231,66 @@ impl<M: Model> Harness<M> {
     pub(crate) fn deliver_unchecked(&mut self, message: M::Msg) {
         self.core.stats.delivered += 1;
         self.core.note(Entry::Deliver(message.clone()));
-        self.model.deliver(
-            message,
-            &mut Cx {
-                core: &mut self.core,
-            },
-        );
+        let mut cx = Cx {
+            core: &mut self.core,
+        };
+        self.model.deliver(message, &mut cx);
     }
 
     pub(crate) fn act_unchecked(&mut self, action: M::Action) {
-        if let Some(index) = M::actions().iter().position(|(known, _)| *known == action)
+        if let Some(index) = M::actions().iter().position(|known| *known == action)
             && let Some(count) = self.core.stats.actions.get_mut(index)
         {
             *count += 1;
         }
         self.core.note(Entry::Act(action));
-        self.model.act(
-            action,
-            &mut Cx {
-                core: &mut self.core,
-            },
-        );
+        let mut cx = Cx {
+            core: &mut self.core,
+        };
+        self.model.act(action, &mut cx);
     }
 
     pub(crate) fn crash_unchecked(&mut self, node: &M::Node) {
         self.core.stats.crashes += 1;
         self.core.note(Entry::Crash(node.clone()));
-        self.model.crash(
-            node,
-            &mut Cx {
-                core: &mut self.core,
-            },
-        );
+        let mut cx = Cx {
+            core: &mut self.core,
+        };
+        self.model.crash(node, &mut cx);
     }
 
     pub(crate) fn restart_unchecked(&mut self, node: &M::Node) {
-        self.core.stats.restarts += 1;
         self.core.note(Entry::Restart(node.clone()));
-        self.model.restart(
-            node,
-            &mut Cx {
-                core: &mut self.core,
-            },
-        );
+        let mut cx = Cx {
+            core: &mut self.core,
+        };
+        self.model.restart(node, &mut cx);
+        if self.model.is_up(node) {
+            self.core.stats.restarts += 1;
+        }
     }
 
     pub(crate) fn calm_unchecked(&mut self) {
-        self.core.phase = Phase::Quiet;
+        self.core.enter(Phase::Quiet);
         self.core.note(Entry::Calm);
-        self.model.calm(&mut Cx {
+        let mut cx = Cx {
             core: &mut self.core,
-        });
+        };
+        self.model.calm(&mut cx);
         self.revive();
     }
 
     /// Ask every node that is down to restart. A node that came up is
-    /// logged; a node that refused is not.
+    /// logged, after what its restart sent; a node that refused is not.
     pub(crate) fn revive(&mut self) {
         for node in self.model.nodes() {
             if self.model.is_up(&node) {
                 continue;
             }
-            self.model.restart(
-                &node,
-                &mut Cx {
-                    core: &mut self.core,
-                },
-            );
+            let mut cx = Cx {
+                core: &mut self.core,
+            };
+            self.model.restart(&node, &mut cx);
             if self.model.is_up(&node) {
                 self.core.stats.restarts += 1;
                 self.core.note(Entry::Restart(node));
