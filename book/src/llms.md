@@ -23,6 +23,7 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 | `moonpool-core` | Provider traits and core types. | `default = ["tokio-providers", "select"]`, `compio-providers`, `deterministic-select` |
 | `moonpool-sim` | The runtime, builder, chaos, assertions, observability. | `default = ["tokio-providers", "exploration"]` |
 | `moonpool-assertions`, `moonpool-buggify` | Probes and fault sites for libraries. Zero dependencies. | none |
+| `moonpool-tla` | Check a run's trace against a TLA+ spec with TLC (`Trace`, `TraceCheck`, `Verdict`). Zero dependencies. `moonpool_sim::observability::tla::trace_from_timeline` builds the trace from the timeline. | none |
 | `moonpool-explorer` | Multiverse exploration (`fork`, `mmap`). | none |
 | `moonpool-hyper`, `moonpool-rpc`, `moonpool-prometheus`, `moonpool-journal` | HTTP/2, typed RPC, metrics, a CLSTORE journal. | see the [Crate Map](./appendix/02-crate-map.md) |
 

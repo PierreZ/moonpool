@@ -1,0 +1,21 @@
+[package]
+name = "moonpool-tla"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model-based trace checking for the moonpool framework: check a run's events against a TLA+ spec with TLC"
+documentation = "https://docs.rs/moonpool-tla"
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+# Pure std, zero dependencies: a sans-I/O library or a test harness can record
+# a trace and ask TLC about it without pulling in the simulation runtime.
+# The crate compiles on wasm32-unknown-unknown; running TLC needs a platform
+# that can spawn a process.
+[dependencies]
+
+[lints]
+workspace = true

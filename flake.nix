@@ -61,6 +61,10 @@
 
             # website/site (Astro)
             nodejs
+
+            # moonpool-tla: TLC checks recorded traces against TLA+ specs
+            # (the `tlc` launcher, Java included).
+            tlaplus
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             # C toolchain for linking. Linux-only: darwin's stdenv already
             # provides clang, and GNU gcc is a heavy, fragile build there.

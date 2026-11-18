@@ -123,6 +123,10 @@ crates/
 │                            (reboot under the seed's attrition regime, process = task owner).
 │                            shard!(name, current = r1[, next = r2]): the code declares its
 │                            replication; the sim's shard book and gate keep faults survivable.
+├── moonpool-tla/          - Model-based trace checking (pure std, ZERO deps, wasm-able): a run's
+│                            events as a TLA+ module, TLC as the judge (Trace, TraceCheck,
+│                            Verdict). moonpool-sim's observability::tla builds the trace
+│                            from the timeline. Needs `tlc` (nixpkgs tlaplus, in the dev shell).
 ├── moonpool-sim/          - Simulation runtime, chaos testing, buggify, assertions wiring.
 │                            feature `exploration` (default ON) gates moonpool-explorer; without it
 │                            the sim compiles to wasm32-unknown-unknown.

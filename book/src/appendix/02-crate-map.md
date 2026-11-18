@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-The workspace has 16 members at version 0.9.0. Application code depends on `moonpool` (the facade) or directly on the crate it needs.
+The workspace has 17 members at version 0.9.0. Application code depends on `moonpool` (the facade) or directly on the crate it needs.
 
 ## Dependency Graph
 
@@ -13,6 +13,7 @@ moonpool (facade)
  |   |- moonpool-core [deterministic-select]
  |   |- moonpool-assertions
  |   |- moonpool-buggify
+ |   |- moonpool-tla                 TLA+ trace checking (zero dependencies)
  |   `- moonpool-explorer (feature exploration)
  |        `- moonpool-assertions
  |- moonpool-hyper (feature hyper)        -> moonpool-core
@@ -37,6 +38,7 @@ Production builds keep the simulation out: `moonpool = { default-features = fals
 | `moonpool` | Facade. Re-exports `moonpool_core::*` and, with `sim`, `moonpool_sim::*`. Modules `hyper`, `prometheus`, `rpc` behind features. `prelude` with `Process`, `SimContext`, `SimulationBuilder`, `Workload`. | everything below | `default = ["sim", "tokio"]`, `sim`, `tokio`, `hyper`, `prometheus`, `rpc`, `rpc-derive`, `rpc-tls`, `rpc-tls-pki` |
 | `moonpool-core` | Provider traits and core types. wasm-clean with all features off. | `TimeProvider`, `TaskProvider`, `NetworkProvider`, `TcpListenerTrait`, `RandomProvider`, `StorageProvider`, `StorageFile`, `SystemProvider`, `Providers`, `Resolver`, `Detach`, `JoinError`, `OpenOptions`, `DirectIo`, `IoConstraints`, `AlignedBuf`, `BlockFile`, `FileCursor`, `LayoutRegion`, `SystemSample`, `DiskCounters`, `SimulationError`, `SimulationResult`, `MetricsSource`, `MetricSample`, `MetricValue`, `select!`, `Tokio*` providers | `default = ["tokio-providers", "select"]`; `tokio-providers` (the Tokio backend); `compio-providers` (the compio backend); `select`; `deterministic-select` |
 | `moonpool-sim` | Simulation runtime: executor, `SimWorld`, network and storage simulation, chaos, runner, assertions wiring, observability. | `SimulationBuilder`, `SimContext`, `Process`, `Workload`, `FaultInjector`, `FaultContext`, `Chaos`, `ChaosMode`, `IterationControl`, `SimulationReport`, `SimWorld`, `SimProviders`, `Invariant`, `TraceQuery`, assertion macros, `buggify_knob!`, `ExplorationConfig` | `default = ["tokio-providers", "exploration"]` |
+| `moonpool-tla` | Model-based trace checking. Pure std, zero dependencies. Writes a run's events as a TLA+ module and runs TLC on a trace spec. | `Trace`, `Value`, `TraceCheck`, `Verdict`, `Rejection`, `CheckError` | none |
 | `moonpool-assertions` | Assertion accounting. Pure std, zero dependencies, wasm-able. Heap table by default, `MAP_SHARED` overlay under exploration. | `AssertKind`, `AssertCmp`, `DiscoveryKind`, `DiscoveryHooks`, `reachable!`, `sometimes!`, `MAX_ASSERTION_SLOTS`, `MAX_EACH_BUCKETS`, `MAX_EACH_KEYS` | none |
 | `moonpool-buggify` | Fault-injection macros and state. Pure std, zero dependencies, wasm-able. Inert until a random source is installed. | `buggify!`, `buggify_with_prob!`, `buggify_fault_with_prob!`, `buggify_named!`, `buggify_pick!`, `buggify_range!`, `hint!`, `cpu_charge`, `set_activation`, `buggify_init`, `buggify_reset`, `is_simulated` | none |
 | `moonpool-explorer` | Frontier exploration controller: recipes, bounded worker pool, shared memory, sancov. `libc` only. Never wasm. | `Explorer`, `ExplorationConfig`, `ExploreJob`, `Recipe`, `DiscoveryEvent`, `format_timeline`, `parse_timeline`, `set_rng_count_hook`, `sancov_is_available`, `sancov_edges_covered`, `explorer_is_child` | none |

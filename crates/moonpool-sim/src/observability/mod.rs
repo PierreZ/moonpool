@@ -71,6 +71,13 @@
 //! by the runner under the [`crate::SIM_FAULT_EVENT_NAME`] name with a
 //! `kind` field and `source = "sim"`, so invariants can correlate
 //! application anomalies with infrastructure faults in one timeline.
+//!
+//! # Checking a run against a TLA+ spec
+//!
+//! [`tla::trace_from_timeline`] turns the chosen events of the timeline into
+//! a [`moonpool_tla::Trace`], and [`moonpool_tla::TraceCheck`] asks TLC
+//! whether the run is a behaviour of the spec. The canonical example is
+//! `tests/two_phase_trace.rs`.
 
 pub mod event;
 pub mod fmt;
@@ -78,6 +85,7 @@ pub mod init;
 pub mod invariant;
 pub mod layer;
 pub mod query;
+pub mod tla;
 
 pub use event::{FieldValue, TraceEvent};
 pub use fmt::{Clock, SimTime};
