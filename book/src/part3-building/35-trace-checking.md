@@ -108,6 +108,8 @@ An accepted trace proves little if the check cannot fail. Plant **mutants**: cop
 - a resource manager that commits without the commit message;
 - a coordinator that aborts after it committed.
 
+A sans-I/O state machine does not need the simulator for this. `crates/moonpool-walk/tests/paxos.rs` checks the walks of a Paxos model against a TLA+ spec of Paxos the same way: see [A Trace for a Checker](../part5-building-on-top/09-walk.md#a-trace-for-a-checker).
+
 On a seed where nobody aborts, the first mutant ends in a state that looks fine: every resource manager committed. An oracle that looks only at the outcome cannot see it. The trace check rejects the `tm_commit` event, because committing before every vote is not a step of the spec.
 
 ## Cost and Limits

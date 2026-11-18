@@ -362,17 +362,44 @@ not a campaign.
 them, and `Walk::run_each` hands every finished run to a closure:
 
 ```rust,ignore
-Walk::<Paxos<false>>::new().run_each(|run| {
+use moonpool_tla::{Trace, TraceCheck, Value, Verdict};
+
+let spec = TraceCheck::new("tests/paxos_tla", "PaxosTrace");
+Walk::<Paxos<false>>::new().seeds(3).run_each(|run| {
     let mut trace = Trace::new();
-    for event in run.events() {
-        trace.event(event.name(), event.fields());
+    for step in run.events() {
+        match *step {
+            Step::Prepare { ballot } => trace.event("prepare", [("bal", int(ballot))]),
+            Step::Accept { acceptor, ballot, value } => trace.event(
+                "accept",
+                [("acc", int(acceptor)), ("bal", int(ballot)), ("val", int(value))],
+            ),
+            // ... one arm for each step of the protocol
+        }
     }
-    check_against_the_spec(&trace);
+    assert_eq!(spec.check(&trace).expect("verdict"), Verdict::Accepted);
 })?;
 ```
 
-The walk knows no trace format. The event type is yours, and the conversion
-to a checker's records is a few lines in the test. `Run::log` also holds the
+The walk knows no trace format, and `moonpool-walk` does not depend on
+[`moonpool-tla`](../part3-building/35-trace-checking.md). The event type is
+yours, and the conversion to a checker's records is a few lines in the test.
+
+`tests/paxos.rs` does this for real. The Paxos model records each step of
+the protocol (`prepare`, `promise`, `propose`, `accept`, `chosen`), and TLC
+checks the trace against a TLA+ spec of Paxos in `tests/paxos_tla`. Every
+walk of the correct protocol is accepted. The two judges do not see the same
+thing:
+
+- The oracle of the model (`at most one value is chosen`) fails the mutant
+  on about one seed in a hundred, when the lost promise leads to two chosen
+  values.
+- TLC rejects the mutant on the first seed, at the first step the spec
+  forbids: an acceptor accepts a ballot below the promise it forgot. The
+  rejection gives the event and the state of the spec before it.
+
+TLC costs about a second for each trace, so check a few seeds with TLC and
+all of them with the oracles. `Run::log` also holds the
 steps of the walk itself (deliver, drop, duplicate, crash, restart), for a
 spec that models the faults.
 

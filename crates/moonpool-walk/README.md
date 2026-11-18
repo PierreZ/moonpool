@@ -82,8 +82,9 @@ single-decree Paxos with a mutant that the walk catches.
 - **Mutation.** `Walk::try_run` returns the failure, so a test proves that a
   known bug is caught.
 - **A trace.** `Cx::record` keeps the facts of a run in order.
-  `Walk::run_each` hands each `Run` to a trace checker, a TLA+ one for
-  example.
+  `Walk::run_each` hands each `Run` to a trace checker. `tests/paxos.rs`
+  gives the events of a Paxos walk to `moonpool-tla`, and TLC checks them
+  against a TLA+ spec of Paxos.
 - **Scripted schedules.** `Harness` is the same engine one step at a time: a
   schedule that a seed found becomes a named regression test, and
   `Walk::finish` ends it with the quiet tail of a walk.

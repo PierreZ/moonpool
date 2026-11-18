@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use moonpool_tla::{Trace, TraceCheck, Value, Verdict};
 use moonpool_walk::{Cx, Harness, Model, Phase, Walk, WalkError, sometimes};
 
 const ACCEPTORS: usize = 3;
@@ -48,6 +49,30 @@ struct Acceptor {
     down: bool,
 }
 
+/// One step of the protocol, as the TLA+ spec in `tests/paxos_tla` names
+/// it. A run's events are the trace that TLC checks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Step {
+    /// A proposer opened a ballot (`Phase1a`).
+    Prepare { ballot: u64 },
+    /// An acceptor promised a ballot and reported its accept (`Phase1b`).
+    Promise {
+        acceptor: usize,
+        ballot: u64,
+        accepted: Option<(u64, u64)>,
+    },
+    /// A proposer asked to accept a value (`Phase2a`).
+    Propose { ballot: u64, value: u64 },
+    /// An acceptor accepted a value (`Phase2b`).
+    Accept {
+        acceptor: usize,
+        ballot: u64,
+        value: u64,
+    },
+    /// A majority accepted the value.
+    Chosen { value: u64 },
+}
+
 /// A proposer's open round.
 #[derive(Default)]
 struct Proposer {
@@ -74,6 +99,9 @@ impl<const MUTANT: bool> Paxos<MUTANT> {
         state.ballot = state.round * PROPOSERS as u64 + proposer as u64;
         state.promises.clear();
         state.sent_accept = false;
+        cx.record(Step::Prepare {
+            ballot: state.ballot,
+        });
         for to in 0..ACCEPTORS {
             cx.send(Msg::Prepare {
                 to,
@@ -88,8 +116,7 @@ impl<const MUTANT: bool> Model for Paxos<MUTANT> {
     type Msg = Msg;
     type Node = usize;
     type Action = Action;
-    /// A value was chosen.
-    type Event = u64;
+    type Event = Step;
 
     fn new(_cx: &mut Cx<'_, Self>) -> Self {
         Self {
@@ -128,6 +155,11 @@ impl<const MUTANT: bool> Model for Paxos<MUTANT> {
                     return;
                 }
                 acceptor.promised = ballot;
+                cx.record(Step::Promise {
+                    acceptor: to,
+                    ballot,
+                    accepted: acceptor.accepted,
+                });
                 cx.send(Msg::Promise {
                     to: from,
                     from: to,
@@ -157,6 +189,7 @@ impl<const MUTANT: bool> Model for Paxos<MUTANT> {
                 );
                 // A proposer's own value is its ballot: unique.
                 let value = inherited.unwrap_or(ballot);
+                cx.record(Step::Propose { ballot, value });
                 for to in 0..ACCEPTORS {
                     cx.send(Msg::Accept { to, ballot, value });
                 }
@@ -175,10 +208,15 @@ impl<const MUTANT: bool> Model for Paxos<MUTANT> {
                 }
                 acceptor.promised = ballot;
                 acceptor.accepted = Some((ballot, value));
+                cx.record(Step::Accept {
+                    acceptor: to,
+                    ballot,
+                    value,
+                });
                 let voters = self.votes.entry((ballot, value)).or_default();
                 voters.insert(to);
                 if voters.len() == MAJORITY && self.chosen.insert(value) {
-                    cx.record(value);
+                    cx.record(Step::Chosen { value });
                     sometimes!(
                         cx.phase() == Phase::Chaos,
                         "a value was chosen while faults were on"
@@ -246,7 +284,10 @@ fn paxos_is_safe_under_chaos_and_live_after_it() {
         .chaos_steps(300)
         .env_prefix(Some("PAXOS_WALK"))
         .run_each(|run| {
-            assert_eq!(run.events().count(), 1, "seed {}: one value", run.seed);
+            let values = run
+                .events()
+                .filter(|step| matches!(step, Step::Chosen { .. }));
+            assert_eq!(values.count(), 1, "seed {}: one value", run.seed);
             chosen += 1;
         })
         .unwrap_or_else(|error| panic!("{error}"));
@@ -340,4 +381,196 @@ fn the_lost_promise_schedule_by_hand() {
     }
     assert!(!accepts_the_old_ballot::<false>(), "the promise is durable");
     assert!(accepts_the_old_ballot::<true>(), "the mutant forgot it");
+}
+
+/// The check of a walk against the TLA+ spec of Paxos in `tests/paxos_tla`.
+fn spec() -> TraceCheck {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/paxos_tla");
+    TraceCheck::new(dir, "PaxosTrace")
+}
+
+/// Whether TLC can run here (`tlc`, in the nix dev shell); a missing TLC
+/// fails only in CI.
+fn tlc_or_skip() -> bool {
+    if spec().tlc_available() {
+        return true;
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "TLC is missing in CI: run the tests in the nix dev shell"
+    );
+    eprintln!("skipped: TLC (`tlc`) is not installed");
+    false
+}
+
+/// A ballot, a value or an acceptor as a TLA+ integer.
+fn int(number: impl TryInto<i64>) -> Value {
+    Value::Int(number.try_into().unwrap_or(i64::MAX))
+}
+
+/// The whole bridge between the two crates: each event a model recorded
+/// becomes one event of the trace. Neither crate knows the other.
+fn trace<'a>(steps: impl Iterator<Item = &'a Step>) -> Trace {
+    let mut trace = Trace::new();
+    trace.define(
+        "TraceAcceptor",
+        Value::Set((0..ACCEPTORS).map(int).collect()),
+    );
+    for step in steps {
+        match *step {
+            Step::Prepare { ballot } => trace.event("prepare", [("bal", int(ballot))]),
+            Step::Promise {
+                acceptor,
+                ballot,
+                accepted,
+            } => {
+                let (at, value) = accepted.unwrap_or((0, 0));
+                trace.event(
+                    "promise",
+                    [
+                        ("acc", int(acceptor)),
+                        ("bal", int(ballot)),
+                        ("vbal", int(at)),
+                        ("vval", int(value)),
+                    ],
+                );
+            }
+            Step::Propose { ballot, value } => {
+                trace.event("propose", [("bal", int(ballot)), ("val", int(value))]);
+            }
+            Step::Accept {
+                acceptor,
+                ballot,
+                value,
+            } => trace.event(
+                "accept",
+                [
+                    ("acc", int(acceptor)),
+                    ("bal", int(ballot)),
+                    ("val", int(value)),
+                ],
+            ),
+            Step::Chosen { value } => trace.event("chosen", [("val", int(value))]),
+        }
+    }
+    trace
+}
+
+/// The schedule of the TLC tests: short runs with many crashes, so that a
+/// trace is a few hundred events and TLC answers in about a second.
+fn short<const MUTANT: bool>() -> Walk<Paxos<MUTANT>> {
+    Walk::new()
+        .chaos_steps(150)
+        .crash_weights(20, 20)
+        .deliver_weights(20, 45)
+        .env_prefix(None)
+}
+
+/// The walk checks the oracles of the model; TLC checks that every step of
+/// the run is a step of the spec. The correct protocol passes both.
+#[test]
+fn tlc_accepts_the_walks_of_the_correct_protocol() {
+    if !tlc_or_skip() {
+        return;
+    }
+    for seed in 1..=3 {
+        let run = short::<false>()
+            .replay(seed)
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        let trace = trace(run.events());
+        eprintln!("seed {seed}: {} events", trace.len());
+        assert!(trace.len() >= 10, "seed {seed}: {} events", trace.len());
+        let verdict = spec().check(&trace).expect("verdict");
+        assert_eq!(verdict, Verdict::Accepted, "seed {seed}");
+    }
+}
+
+/// TLC is a stricter judge than the oracle. The oracle of the model fails a
+/// mutant seed only when two values are chosen, about one seed in a
+/// hundred. TLC rejects a seed at the first step the spec forbids: the
+/// acceptor that forgot its promise accepts, or promises, below it.
+#[test]
+fn tlc_rejects_a_walk_of_the_mutant_that_the_oracle_passed() {
+    if !tlc_or_skip() {
+        return;
+    }
+    let mut rejected = None;
+    for seed in 1..=10 {
+        let Ok(run) = short::<true>().replay(seed) else {
+            continue; // the oracle caught this seed itself
+        };
+        let steps: Vec<Step> = run.events().copied().collect();
+        if let Verdict::Rejected(rejection) = spec().check(&trace(steps.iter())).expect("verdict") {
+            rejected = Some((seed, steps[rejection.index], rejection.state));
+            break;
+        }
+    }
+    let (seed, step, state) = rejected.expect("a mutant seed in ten breaks the spec");
+    match step {
+        Step::Accept {
+            acceptor, ballot, ..
+        }
+        | Step::Promise {
+            acceptor, ballot, ..
+        } => eprintln!(
+            "seed {seed}: acceptor {acceptor} took ballot {ballot} below its promise\n{state}"
+        ),
+        other => panic!("seed {seed}: the mutant only breaks a promise: {other:?}"),
+    }
+}
+
+/// The lost promise by hand, under TLC: the spec's acceptor 1 still holds
+/// the promise the mutant forgot, so the accept is not a step.
+#[test]
+fn tlc_names_the_accept_below_a_lost_promise() {
+    fn verdict<const MUTANT: bool>() -> (Verdict, Vec<Step>) {
+        let mut harness = Harness::<Paxos<MUTANT>>::new(1);
+        harness.with(|paxos, cx| paxos.propose(0, cx)); // ballot 2
+        harness.with(|paxos, cx| paxos.propose(1, cx)); // ballot 3
+        // Acceptors 0 and 2 promise ballot 2; acceptor 1 promises ballot 3,
+        // then crashes and restarts.
+        for (to, ballot) in [(0, 2), (2, 2), (1, 3)] {
+            assert!(harness.deliver_where(
+                |m| matches!(m, Msg::Prepare { to: t, ballot: b, .. } if (*t, *b) == (to, ballot))
+            ));
+        }
+        harness.crash(&1);
+        harness.restart(&1);
+        // Proposer 0 has its majority and asks to accept; acceptor 1 hears it.
+        while harness.deliver_where(|m| matches!(m, Msg::Promise { ballot: 2, .. })) {}
+        harness.deliver_where(|m| {
+            matches!(
+                m,
+                Msg::Accept {
+                    to: 1,
+                    ballot: 2,
+                    ..
+                }
+            )
+        });
+        let run = harness.into_run();
+        let steps: Vec<Step> = run.events().copied().collect();
+        (spec().check(&trace(steps.iter())).expect("verdict"), steps)
+    }
+    if !tlc_or_skip() {
+        return;
+    }
+    let (correct, steps) = verdict::<false>();
+    assert_eq!(correct, Verdict::Accepted, "{steps:?}");
+    assert!(!steps.iter().any(|s| matches!(s, Step::Accept { .. })));
+
+    let (mutant, steps) = verdict::<true>();
+    let Verdict::Rejected(rejection) = mutant else {
+        panic!("the spec forbids the accept: {mutant:?}");
+    };
+    assert_eq!(
+        steps[rejection.index],
+        Step::Accept {
+            acceptor: 1,
+            ballot: 2,
+            value: 2
+        }
+    );
+    assert_eq!(rejection.index, steps.len() - 1);
+    assert!(rejection.state.contains("maxBal"), "{}", rejection.state);
 }

@@ -86,6 +86,7 @@ version_group = "moonpool"
 # leaf crates above.
 [[package]]
 name = "moonpool-walk"
+changelog_path = "crates/moonpool-walk/CHANGELOG.md"
 version_group = "moonpool"
 
 [[package]]

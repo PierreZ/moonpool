@@ -159,7 +159,9 @@
 //! - **Mutation**: [`Walk::try_run`] returns the failure, so a test can
 //!   prove that a known bug is caught.
 //! - **A trace**: [`Cx::record`] keeps the facts of a run in order, and
-//!   [`Walk::run_each`] hands each [`Run`] to a trace checker.
+//!   [`Walk::run_each`] hands each [`Run`] to a trace checker. The crate
+//!   knows none: `tests/paxos.rs` converts the events of a Paxos walk for
+//!   `moonpool-tla` in a few lines, and TLC checks them against a spec.
 //!
 //! ## Rules for a model
 //!

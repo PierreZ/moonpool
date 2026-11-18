@@ -144,8 +144,9 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 campaigns = { max-threads = 2 }
 
 # Model-based trace checks start TLC (a JVM, about a second) for each
-# checked trace: the two-phase commit example checks one trace per seed, and
-# a rejected trace costs a second run.
+# checked trace: the two-phase commit example checks one trace per seed, the
+# Paxos walk of moonpool-walk checks a few, and a rejected trace costs a
+# second run.
 [[profile.default.overrides]]
-filter = 'binary(two_phase_trace) | package(moonpool-tla)'
+filter = 'binary(two_phase_trace) | package(moonpool-tla) | (package(moonpool-walk) & test(/^tlc_/))'
 slow-timeout = { period = "15s", terminate-after = 4 }

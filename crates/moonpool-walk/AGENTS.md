@@ -21,7 +21,8 @@ checker and a `moonpool-sim` simulation. No executor, no network, no clock.
   have zero dependencies. The crate must compile on
   `wasm32-unknown-unknown`. It must never depend on `moonpool-sim`,
   `moonpool-core` or a trace checker: a checker reads `Run::events`, the
-  walk does not know it.
+  walk does not know it. `moonpool-tla` is a dev-dependency only:
+  `tests/paxos.rs` gives a walk's events to TLC (spec in `tests/paxos_tla`).
 - **One generator for each run.** The schedule and the model draw from
   `Core::rng`. Buggify draws from its own stream (`seed ^ BUGGIFY_SALT`), so
   a new buggify site does not move the schedule of a seed. The swarm draws

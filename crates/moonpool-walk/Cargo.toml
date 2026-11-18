@@ -21,3 +21,8 @@ moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
 
 [lints]
 workspace = true
+
+# Tests only: `tests/paxos.rs` gives a walk's events to TLC. The library does
+# not know a trace checker.
+[dev-dependencies]
+moonpool-tla = { path = "../moonpool-tla", version = "0.8.0" }
