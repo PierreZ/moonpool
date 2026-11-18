@@ -158,11 +158,11 @@ fn parallel_checks_do_not_race() {
 }
 
 /// A copy of the counter spec folder with `cfg` as its configuration and
-/// `extra` as one more file, removed on drop.
+/// `extra` as more files (name, content), removed on drop.
 struct SpecCopy(PathBuf);
 
 impl SpecCopy {
-    fn new(name: &str, cfg: &str, extra: Option<&str>) -> Self {
+    fn new(name: &str, cfg: &str, extra: &[(&str, &str)]) -> Self {
         let dir =
             std::env::temp_dir().join(format!("moonpool-tla-test-{name}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temporary folder");
@@ -170,8 +170,8 @@ impl SpecCopy {
             std::fs::copy(spec_dir().join(file), dir.join(file)).expect("copy the spec");
         }
         std::fs::write(dir.join("CounterTrace.cfg"), cfg).expect("write the configuration");
-        if let Some(extra) = extra {
-            std::fs::write(dir.join(extra), "").expect("write the extra file");
+        for (file, content) in extra {
+            std::fs::write(dir.join(file), content).expect("write the extra file");
         }
         Self(dir)
     }
@@ -188,7 +188,7 @@ fn the_end_invariant_must_be_the_last_invariant() {
     let early = SpecCopy::new(
         "early",
         "SPECIFICATION TraceSpec\nINVARIANT TraceUnfinished\nINVARIANT BelowFour\n",
-        None,
+        &[],
     );
     let error = TraceCheck::new(&early.0, "CounterTrace")
         .check(&incs(&[1, 2, 3, 4]))
@@ -198,7 +198,7 @@ fn the_end_invariant_must_be_the_last_invariant() {
     let missing = SpecCopy::new(
         "missing",
         "SPECIFICATION TraceSpec\nINVARIANT BelowFour\n",
-        None,
+        &[],
     );
     let error = TraceCheck::new(&missing.0, "CounterTrace")
         .check(&incs(&[1]))
@@ -207,14 +207,129 @@ fn the_end_invariant_must_be_the_last_invariant() {
 }
 
 #[test]
-fn a_file_named_like_the_trace_module_is_refused() {
+fn a_file_named_like_the_wrapper_is_refused() {
+    for file in ["MoonpoolTraceCheck.tla", "MoonpoolTraceCheck.cfg"] {
+        let copy = SpecCopy::new(
+            "reserved",
+            "SPECIFICATION TraceSpec\nINVARIANT TraceUnfinished\n",
+            &[(file, "")],
+        );
+        let error = TraceCheck::new(&copy.0, "CounterTrace")
+            .check(&incs(&[1]))
+            .expect_err("the check writes the wrapper");
+        assert!(matches!(error, CheckError::Contract(_)), "{error}");
+    }
+}
+
+#[test]
+fn a_sample_trace_beside_the_spec_is_replaced() {
+    if !tlc_or_skip() {
+        return;
+    }
+    // A sample that would reject every trace: the check must not read it.
     let copy = SpecCopy::new(
-        "reserved",
+        "sample",
         "SPECIFICATION TraceSpec\nINVARIANT TraceUnfinished\n",
-        Some("Trace.tla"),
+        &[(
+            "Trace.tla",
+            "---- MODULE Trace ----\nTrace == <<[event |-> \"skip\"]>>\n====\n",
+        )],
     );
-    let error = TraceCheck::new(&copy.0, "CounterTrace")
-        .check(&incs(&[1]))
-        .expect_err("the check writes Trace.tla");
-    assert!(matches!(error, CheckError::Contract(_)), "{error}");
+    assert_eq!(
+        TraceCheck::new(&copy.0, "CounterTrace")
+            .check(&incs(&[1, 2]))
+            .expect("verdict"),
+        Verdict::Accepted
+    );
+}
+
+#[test]
+fn a_user_constraint_does_not_hide_the_rejected_event() {
+    if !tlc_or_skip() {
+        return;
+    }
+    // A configuration names a constraint: the trace spec gets one more
+    // definition before its end line.
+    let trace_spec = std::fs::read_to_string(spec_dir().join("CounterTrace.tla"))
+        .expect("the trace spec")
+        .replacen("\n====", "\nSmall == x < 2\n====", 1);
+    let copy = SpecCopy::new(
+        "constraint",
+        "SPECIFICATION TraceSpec\nCONSTRAINT Small\nINVARIANT TraceUnfinished\n",
+        &[("CounterTrace.tla", &trace_spec)],
+    );
+    let verdict = TraceCheck::new(&copy.0, "CounterTrace")
+        .check(&incs(&[1, 2, 9]))
+        .expect("verdict");
+    let Verdict::Rejected(rejection) = verdict else {
+        panic!("a jump from 2 to 9 is not a step of the spec: {verdict:?}");
+    };
+    assert_eq!(rejection.index, 2);
+}
+
+#[test]
+fn a_configuration_with_block_comments_is_read() {
+    if !tlc_or_skip() {
+        return;
+    }
+    let copy = SpecCopy::new(
+        "comments",
+        "(* the counter (* nested *) INVARIANT Hidden *)\n\
+         SPECIFICATION TraceSpec\n\
+         INVARIANT BelowFour (* the model *)\n\
+         INVARIANT TraceUnfinished\n",
+        &[],
+    );
+    assert_eq!(
+        TraceCheck::new(&copy.0, "CounterTrace")
+            .check(&incs(&[1, 2]))
+            .expect("verdict"),
+        Verdict::Accepted
+    );
+}
+
+#[test]
+fn a_spec_may_define_its_own_int() {
+    if !tlc_or_skip() {
+        return;
+    }
+    // The trace spec extends the trace module. The trace module keeps
+    // `Integers` local, so the spec's own `Int` is the only one, and it
+    // forbids x = 2.
+    let copy = SpecCopy::new(
+        "int",
+        "SPECIFICATION TraceSpec\nINVARIANT TraceUnfinished\n",
+        &[(
+            "Counter.tla",
+            "---- MODULE Counter ----\n\
+             EXTENDS Naturals\n\
+             VARIABLE x\n\
+             Int == 0..1\n\
+             Init == x = 0\n\
+             Inc == x < 5 /\\ x' = x + 1 /\\ x' \\in Int\n\
+             BelowFour == x < 4\n\
+             ====\n",
+        )],
+    );
+    let mut trace = incs(&[1, 2]);
+    trace.event("inc", [("x", Value::Int(3)), ("delta", Value::Int(-1))]);
+    let verdict = TraceCheck::new(&copy.0, "CounterTrace")
+        .check(&trace)
+        .expect("verdict");
+    let Verdict::Rejected(rejection) = verdict else {
+        panic!("the spec's Int forbids x = 2: {verdict:?}");
+    };
+    assert_eq!(rejection.index, 1);
+}
+
+#[test]
+fn a_temporary_folder_with_a_space_works() {
+    if !tlc_or_skip() {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("moonpool tla space {}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("temporary folder");
+    let verdict = check().temp_dir(&root).check(&incs(&[1, 2]));
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(verdict.expect("verdict"), Verdict::Accepted);
 }

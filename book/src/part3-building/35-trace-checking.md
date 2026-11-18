@@ -80,7 +80,7 @@ INVARIANT Consistent
 INVARIANT TraceUnfinished
 ```
 
-`TraceUnfinished` is violated exactly when a behaviour matched every event. That violation is how an accepted trace shows. It must be the **last** invariant: TLC reports the first violated invariant in configuration order, so an invariant after it would never be seen. `TraceCheck` refuses a configuration where it is missing or not last, and a spec folder that holds a file named like the trace module (`Trace.tla`).
+`TraceUnfinished` is violated exactly when a behaviour matched every event. That violation is how an accepted trace shows. It must be the **last** invariant: TLC reports the first violated invariant in configuration order, so an invariant after it would never be seen. `TraceCheck` refuses a configuration where it is missing or not last, and a spec folder that holds a file named like its generated wrapper (`MoonpoolTraceCheck.tla` or `.cfg`). A `Trace.tla` beside the trace spec is allowed, so that an editor can parse the spec: the check does not copy it and writes the real trace in its place. The trace module keeps `Integers` local (`LOCAL INSTANCE`), so a spec can define its own `Int`. Your own `CONSTRAINT`s and `(* ... *)` comments in the configuration are fine.
 
 Guard the fields an event names (`e.rm \in RM`). An event the trace spec cannot read, such as a missing field or a node outside the constant set, otherwise makes TLC stop with an error and no verdict, instead of rejecting the trace.
 

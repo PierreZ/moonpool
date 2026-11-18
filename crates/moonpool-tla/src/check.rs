@@ -99,7 +99,8 @@ pub enum CheckError {
     },
     /// The spec folder or its configuration breaks the contract of
     /// [`TraceCheck`]: the end invariant is missing or not the last
-    /// invariant, a file uses a name that the check writes, or TLC matched
+    /// invariant, the configuration has a comment or a string that is not
+    /// closed, a file uses a name of the generated wrapper, or TLC matched
     /// every event without reporting the end invariant.
     Contract(String),
     /// TLC ran but gave no verdict: a parse error in the spec, a wrong
@@ -185,8 +186,10 @@ const MATCHED_MARK: &str = "<<\"moonpool-tla matched\", ";
 ///   would never be seen; the check refuses such a configuration. When TLC
 ///   ends with no error, no behaviour reached the end of the trace: it is
 ///   rejected.
-/// - the folder has no file named like the trace module (`Trace.tla`) or
-///   the generated wrapper (`MoonpoolTraceCheck.tla`, `.cfg`).
+/// - the folder has no file named like the generated wrapper
+///   (`MoonpoolTraceCheck.tla`, `.cfg`). A file named like the trace module
+///   (`Trace.tla`) is not copied: the check writes the trace in its place,
+///   so a sample trace can stay beside the trace spec for an editor.
 ///
 /// ```tla
 /// TraceNext == \/ l <= Len(Trace) /\ Step   /\ l' = l + 1   \* a logged step
@@ -206,6 +209,7 @@ pub struct TraceCheck {
     end_invariant: String,
     cursor: String,
     tlc: PathBuf,
+    temp_root: Option<PathBuf>,
 }
 
 impl TraceCheck {
@@ -221,6 +225,7 @@ impl TraceCheck {
             end_invariant: DEFAULT_END_INVARIANT.to_owned(),
             cursor: DEFAULT_CURSOR.to_owned(),
             tlc,
+            temp_root: None,
         }
     }
 
@@ -251,6 +256,14 @@ impl TraceCheck {
     #[must_use]
     pub fn tlc(mut self, program: impl Into<PathBuf>) -> Self {
         self.tlc = program.into();
+        self
+    }
+
+    /// Create the folder of each check under `dir` instead of the system's
+    /// temporary folder ([`std::env::temp_dir`]).
+    #[must_use]
+    pub fn temp_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.temp_root = Some(dir.into());
         self
     }
 
@@ -311,11 +324,10 @@ impl TraceCheck {
 
     /// Read the configuration and check the contract of the spec folder.
     fn config(&self) -> Result<String, CheckError> {
-        for reserved in [
-            format!("{}.tla", self.trace_module),
-            format!("{WRAPPER}.tla"),
-            format!("{WRAPPER}.cfg"),
-        ] {
+        // A `Trace.tla` in the folder is allowed (a sample trace helps an
+        // editor parse the trace spec): the check does not copy it and
+        // writes the real trace in its place.
+        for reserved in [format!("{WRAPPER}.tla"), format!("{WRAPPER}.cfg")] {
             if self.spec_dir.join(&reserved).exists() {
                 return Err(CheckError::Contract(format!(
                     "the spec folder has a file `{reserved}`, which the check writes"
@@ -323,7 +335,7 @@ impl TraceCheck {
             }
         }
         let config = std::fs::read_to_string(self.spec_dir.join(format!("{}.cfg", self.spec)))?;
-        let invariants = config_invariants(&config);
+        let invariants = config_invariants(&config)?;
         if invariants.last() != Some(&self.end_invariant.as_str()) {
             return Err(CheckError::Contract(format!(
                 "`{}` must be the last INVARIANT of {}.cfg (the invariants are {invariants:?})",
@@ -335,27 +347,35 @@ impl TraceCheck {
 
     fn run_tlc(&self, trace: &Trace, config: &str) -> Result<TlcRun, CheckError> {
         let module = trace.to_module(&self.trace_module)?;
-        let work = TempDir::new()?;
+        let work = match &self.temp_root {
+            Some(root) => TempDir::new(root)?,
+            None => TempDir::new(&std::env::temp_dir())?,
+        };
+        let trace_file = format!("{}.tla", self.trace_module);
         for entry in std::fs::read_dir(&self.spec_dir)? {
             let path = entry?.path();
             let spec_file = path
                 .extension()
                 .is_some_and(|ext| ext == "tla" || ext == "cfg");
-            if spec_file && let Some(name) = path.file_name() {
+            if spec_file
+                && let Some(name) = path.file_name()
+                && name != trace_file.as_str()
+            {
                 std::fs::copy(&path, work.path().join(name))?;
             }
         }
-        std::fs::write(
-            work.path().join(format!("{}.tla", self.trace_module)),
-            module,
-        )?;
+        std::fs::write(work.path().join(&trace_file), module)?;
         std::fs::write(
             work.path().join(format!("{WRAPPER}.tla")),
             wrapper_module(&self.spec, &self.cursor),
         )?;
         std::fs::write(
             work.path().join(format!("{WRAPPER}.cfg")),
-            format!("{config}\nCONSTRAINT MoonpoolMatched\n"),
+            // The wrapper's constraint comes first. TLC stops at the first
+            // constraint that is false, so after a user constraint the
+            // wrapper would miss the states outside it, and name an earlier
+            // event than the first one that does not match.
+            format!("CONSTRAINT MoonpoolMatched\n{config}\n"),
         )?;
         // TLC unpacks its standard modules (`TLC.tla`, `Naturals.tla`, ...)
         // to fixed names in Java's temporary folder, so two runs that share
@@ -363,8 +383,8 @@ impl TraceCheck {
         let java_tmp = work.path().join("java-tmp");
         std::fs::create_dir(&java_tmp)?;
         let mut java_options = std::env::var("JAVA_TOOL_OPTIONS").unwrap_or_default();
-        java_options.push_str(" -Djava.io.tmpdir=");
-        java_options.push_str(&java_tmp.to_string_lossy());
+        java_options.push(' ');
+        java_options.push_str(&java_option("java.io.tmpdir", &java_tmp)?);
         let output = Command::new(&self.tlc)
             .current_dir(work.path())
             .env("JAVA_TOOL_OPTIONS", java_options.trim_start())
@@ -384,6 +404,24 @@ impl TraceCheck {
             code: output.status.code(),
             output: text,
         })
+    }
+}
+
+/// `-Dkey=value` for `JAVA_TOOL_OPTIONS`. Java splits that variable on
+/// white space, so a value with a space goes in double quotes. Java has no
+/// escape inside the quotes: a path with a double quote is refused.
+fn java_option(key: &str, value: &Path) -> Result<String, CheckError> {
+    let value = value.to_string_lossy();
+    if value.contains('"') {
+        return Err(CheckError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("Java cannot read a temporary folder with a double quote: {value}"),
+        )));
+    }
+    if value.chars().any(char::is_whitespace) {
+        Ok(format!("-D{key}=\"{value}\""))
+    } else {
+        Ok(format!("-D{key}={value}"))
     }
 }
 
@@ -437,9 +475,10 @@ fn parse_output(run: &TlcRun, end_invariant: &str, cursor: &str) -> Result<Verdi
 
 /// The invariants of a TLC configuration, in order: the names after each
 /// `INVARIANT` or `INVARIANTS` keyword, up to the next keyword. Comments
-/// (`\*` to the end of the line) are skipped.
-fn config_invariants(config: &str) -> Vec<&str> {
-    const KEYWORDS: [&str; 20] = [
+/// (`\*` to the end of the line, and `(* ... *)`, which nest) and strings
+/// are skipped.
+fn config_invariants(config: &str) -> Result<Vec<&str>, CheckError> {
+    const KEYWORDS: [&str; 21] = [
         "SPECIFICATION",
         "INIT",
         "NEXT",
@@ -460,20 +499,104 @@ fn config_invariants(config: &str) -> Vec<&str> {
         "POSTCONDITIONS",
         "ALIAS",
         "TYPE",
+        "TYPE_CONSTRAINT",
     ];
     let mut invariants = Vec::new();
     let mut in_invariants = false;
-    for line in config.lines() {
-        let line = line.split("\\*").next().unwrap_or_default();
-        for token in line.split_whitespace() {
-            if KEYWORDS.contains(&token) {
-                in_invariants = token.starts_with("INVARIANT");
-            } else if in_invariants {
-                invariants.push(token);
-            }
+    for token in config_tokens(config)? {
+        if KEYWORDS.contains(&token) {
+            in_invariants = token.starts_with("INVARIANT");
+        } else if in_invariants {
+            invariants.push(token);
         }
     }
-    invariants
+    Ok(invariants)
+}
+
+/// The words of a TLC configuration, outside comments and strings. A word
+/// is a run of characters that are not white space; a comment or a string
+/// ends a word. An unclosed comment or string is refused.
+fn config_tokens(config: &str) -> Result<Vec<&str>, CheckError> {
+    let bytes = config.as_bytes();
+    let mut tokens = Vec::new();
+    let mut word: Option<usize> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &bytes[i..];
+        let skip_to = if rest.starts_with(b"\\*") {
+            Some(
+                rest.iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(bytes.len(), |n| i + n),
+            )
+        } else if rest.starts_with(b"(*") {
+            Some(block_comment_end(bytes, i)?)
+        } else if rest[0] == b'"' {
+            Some(string_end(bytes, i)?)
+        } else {
+            None
+        };
+        if let Some(next) = skip_to {
+            if let Some(start) = word.take() {
+                tokens.push(&config[start..i]);
+            }
+            i = next;
+        } else if rest[0].is_ascii_whitespace() {
+            if let Some(start) = word.take() {
+                tokens.push(&config[start..i]);
+            }
+            i += 1;
+        } else {
+            word.get_or_insert(i);
+            i += 1;
+        }
+    }
+    if let Some(start) = word {
+        tokens.push(&config[start..]);
+    }
+    Ok(tokens)
+}
+
+/// The index just after the `*)` that closes the block comment opened at
+/// `start`. Block comments nest.
+fn block_comment_end(bytes: &[u8], start: usize) -> Result<usize, CheckError> {
+    let mut depth = 0usize;
+    let mut i = start;
+    while i + 1 < bytes.len() {
+        match &bytes[i..i + 2] {
+            b"(*" => {
+                depth += 1;
+                i += 2;
+            }
+            b"*)" => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return Ok(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Err(CheckError::Contract(
+        "the configuration has a `(*` comment that is not closed".to_owned(),
+    ))
+}
+
+/// The index just after the `"` that closes the string opened at `start`.
+/// A backslash escapes the next character.
+fn string_end(bytes: &[u8], start: usize) -> Result<usize, CheckError> {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return Ok(i + 1),
+            _ => i += 1,
+        }
+    }
+    Err(CheckError::Contract(
+        "the configuration has a string that is not closed".to_owned(),
+    ))
 }
 
 /// The highest event count that the wrapper printed; 0 when it printed none.
@@ -542,13 +665,13 @@ fn cursor_value(state: &str, cursor: &str) -> Option<usize> {
 struct TempDir(PathBuf);
 
 impl TempDir {
-    /// A new, empty folder. `create_dir` fails on a name that exists, so
+    /// A new, empty folder under `root`. `create_dir` fails on a name that exists, so
     /// the check never writes into a folder or a link it did not create.
-    fn new() -> std::io::Result<Self> {
+    fn new(root: &Path) -> std::io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         loop {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let path = root.join(format!(
                 "moonpool-tla-{}-{n}-{}",
                 std::process::id(),
                 std::time::SystemTime::now()
@@ -665,10 +788,56 @@ mod tests {
                       INVARIANTS Consistent\n  TraceUnfinished\n\
                       CONSTRAINT Bound\n";
         assert_eq!(
-            config_invariants(config),
+            config_invariants(config).expect("readable"),
             ["TypeOK", "Consistent", "TraceUnfinished"]
         );
-        assert!(config_invariants("SPECIFICATION S\n").is_empty());
+        assert!(
+            config_invariants("SPECIFICATION S\n")
+                .expect("readable")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn block_comments_strings_and_type_constraints_are_read() {
+        let config = "(* the trace (* nested *) check\n\
+                      INVARIANT Hidden *)\n\
+                      SPECIFICATION TraceSpec\n\
+                      CONSTANT Name = \"INVARIANT (* \\\" Fake\"\n\
+                      INVARIANT TypeOK(* inline *)Consistent\n\
+                      TYPE_CONSTRAINT Bound\n\
+                      INVARIANT TraceUnfinished \\* (* not a block\n";
+        assert_eq!(
+            config_invariants(config).expect("readable"),
+            ["TypeOK", "Consistent", "TraceUnfinished"]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_comment_or_string_is_refused() {
+        for config in [
+            "INVARIANT A (* open",
+            "INVARIANT A (* (* *)",
+            "CONSTANT N = \"open\nINVARIANT A",
+        ] {
+            assert!(
+                matches!(config_invariants(config), Err(CheckError::Contract(_))),
+                "{config}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_java_option_with_a_space_is_quoted() {
+        assert_eq!(
+            java_option("java.io.tmpdir", Path::new("/tmp/a b")).expect("quotable"),
+            "-Djava.io.tmpdir=\"/tmp/a b\""
+        );
+        assert_eq!(
+            java_option("java.io.tmpdir", Path::new("/tmp/ab")).expect("plain"),
+            "-Djava.io.tmpdir=/tmp/ab"
+        );
+        assert!(java_option("java.io.tmpdir", Path::new("/tmp/a\"b")).is_err());
     }
 
     #[test]
