@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-The workspace has 17 members at version 0.9.0. Application code depends on `moonpool` (the facade) or directly on the crate it needs.
+The workspace has 18 members at version 0.9.0. Application code depends on `moonpool` (the facade) or directly on the crate it needs.
 
 ## Dependency Graph
 
@@ -22,6 +22,7 @@ moonpool (facade)
       `- moonpool-rpc-derive (feature rpc-derive)
 
 moonpool-journal   -> moonpool-core, moonpool-buggify   (not in the facade)
+moonpool-walk      -> moonpool-assertions, moonpool-buggify   (not in the facade)
 moonpool-rpc-sim   -> moonpool-rpc, moonpool-sim, moonpool-core (unpublished campaigns)
 moonpool-sim-examples -> moonpool-sim, moonpool-hyper, moonpool-prometheus, moonpool-journal
 moonpool-wasm-demo -> moonpool-sim (no default features)
@@ -47,6 +48,7 @@ Production builds keep the simulation out: `moonpool = { default-features = fals
 | `moonpool-rpc-derive` | Proc macro behind `moonpool-rpc/derive`. | `service` attribute | none |
 | `moonpool-prometheus` | Prometheus registry adapter: one `PrometheusSource` per node, scraped into the report. | `PrometheusSource`, `SimCounter`, `SimCounterVec`, `SimGauge`, `SimGaugeVec`, `SimHistogram`, `SimHistogramVec`, `SimTimer` | none |
 | `moonpool-journal` | CLSTORE write-ahead journal over `StorageProvider`. Positions in any order, crash told apart from corruption, identified damage, three `hint!` moments per batched commit, durable writes (`pwritev2(RWF_DSYNC)`) on the ordered path, recycled segments (no zero-fill). | `Journal`, `Batch`, `JournalConfig`, `JournalId`, `Durability`, `Geometry`, `Id`, `ID_SIZE`, `State`, `Recovery`, `Rolls`, `Layout`, `Entry`, `CommitError`, `OpenError`, `ReadError`, `Durable`, `BLOCK`, `RECORD_SIZE`, `META_MAX`, `MAX_BATCH_RECORDS` | none |
+| `moonpool-walk` | Seeded random walk over sans-I/O state machines: no executor, no network, no clock. wasm-able. See [A Random Walk over Pure State Machines](../part5-building-on-top/09-walk.md). | `Model`, `Cx`, `Walk`, `Harness`, `Run`, `Logged`, `Entry`, `Stats`, `Phase`, `Report`, `WalkError`, `SeedFailure`, `Site`, `Rng`, `Mailbox`, re-exports of `sometimes!`, `reachable!`, `buggify!`, `buggify_with_prob!` | none |
 
 ## Binary and Harness Crates
 
@@ -66,6 +68,7 @@ The `moonpool` facade also carries examples: `retrying_worker` and `metastable_g
 | You want | Depend on |
 |----------|-----------|
 | Write a service that runs in production and in simulation | `moonpool` with `default-features = false, features = ["tokio"]` in the library, `moonpool` (defaults) in dev-dependencies |
+| Test a sans-I/O protocol core with no simulator | `moonpool-walk` (dev-dependency) |
 | Write a library with no simulation dependency, but with probes | `moonpool-core` (no default features), `moonpool-assertions`, `moonpool-buggify` |
 | Run simulations from a test or binary | `moonpool-sim` or `moonpool` with `sim` |
 | HTTP/2, gRPC through tonic | `moonpool-hyper` or `moonpool` with `hyper` |

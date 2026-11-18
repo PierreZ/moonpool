@@ -139,6 +139,10 @@ crates/
 │                            optional dep of moonpool-sim.
 ├── moonpool-journal/      - A CLSTORE journal over the storage providers: positions in any
 │                            order, crash vs. corruption, identified damage.
+├── moonpool-walk/         - Seeded random walk over sans-I/O state machines (`Model`, `Walk`,
+│                            `Harness`): deliver, drop, duplicate, reorder, crash, restart with
+│                            no executor, network or clock. Depends on moonpool-assertions and
+│                            moonpool-buggify only; wasm-able. Never depends on moonpool-sim.
 ├── moonpool-rpc/          - Typed dynamic-endpoint RPC over the provider traits
 │                            (`moonpool-rpc-derive`: optional typed-interface generation).
 ├── moonpool-rpc-sim/      - Simulation harness, oracles and campaigns for moonpool-rpc

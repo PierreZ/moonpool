@@ -217,6 +217,19 @@ and under the simulator in its own `#[test]`.
   `storage_fault_mask`, `swarm_operations` with `swarm_op_enabled`). We
   prefer one workload with swarm testing over many separate workloads.
 
+### A random walk over sans-I/O state machines (`moonpool-walk`)
+
+- `Model` holds pure state machines, their disks and the oracles. `Walk`
+  draws a schedule from a seed with no executor, no network and no clock:
+  deliver, drop, duplicate, reorder, crash, restart, or a move of the model.
+- A chaos phase, a quiet tail and a convergence check for each seed.
+  Safety is `check()` after every delivery. Liveness is `converged()`.
+- A failing seed prints its log and replays alone
+  (`MOONPOOL_WALK_SEED=17`). `Harness` scripts a schedule by hand.
+- `sometimes!` coverage over the campaign, seeded `buggify!`, swarm
+  testing, and `try_run` to prove that a mutant is caught.
+- `Cx::record` and `Run::events` give the trace of a run to a checker.
+
 ### Assertions and invariants (`moonpool-assertions`)
 
 - Nine Antithesis-style macros. Boolean: `assert_always!`,
@@ -312,6 +325,7 @@ and under the simulator in its own `#[test]`.
 | `moonpool-rpc` | Typed dynamic-endpoint RPC | yes |
 | `moonpool-rpc-derive` | `#[service]` interface generation | yes |
 | `moonpool-journal` | CLSTORE journal: crash vs. corruption | yes |
+| `moonpool-walk` | Seeded random walk over sans-I/O state machines; no simulator | yes |
 | `moonpool-rpc-sim` | RPC simulation campaigns and oracles | no |
 | `moonpool-sim-examples` | Example simulations (maze, dungeon, axum, tonic, journal) | no |
 | `moonpool-wasm-demo` | Website run engine (wasm) | no |
@@ -356,7 +370,8 @@ nix develop --command cargo xtask sim run-all
   [`moonpool-core`](https://docs.rs/moonpool-core),
   [`moonpool-sim`](https://docs.rs/moonpool-sim),
   [`moonpool-buggify`](https://docs.rs/moonpool-buggify),
-  [`moonpool-assertions`](https://docs.rs/moonpool-assertions).
+  [`moonpool-assertions`](https://docs.rs/moonpool-assertions),
+  [`moonpool-walk`](https://docs.rs/moonpool-walk).
 - [Repository](https://github.com/PierreZ/moonpool)
 
 ## License
