@@ -82,8 +82,10 @@ impl Trace {
     /// or the module or definition name that is not a TLA+ identifier.
     pub fn to_module(&self, module: &str) -> Result<String, ValueError> {
         check_identifier(module)?;
-        // `Integers` gives the unary minus of a negative value.
-        let mut out = format!("---- MODULE {module} ----\nEXTENDS Integers\n");
+        // `Integers` gives the unary minus of a negative value. A LOCAL
+        // INSTANCE keeps its names out of the modules that extend the trace,
+        // so a spec can define its own `Int` or `-`.
+        let mut out = format!("---- MODULE {module} ----\nLOCAL INSTANCE Integers\n");
         for (name, value) in &self.definitions {
             check_identifier(name)?;
             out.push_str(name);
@@ -119,7 +121,7 @@ mod tests {
         assert_eq!(
             module,
             "---- MODULE Trace ----\n\
-             EXTENDS Integers\n\
+             LOCAL INSTANCE Integers\n\
              TraceRM == {\"r1\", \"r2\"}\n\
              Trace == <<\n  \
              [event |-> \"rm_prepare\", rm |-> \"r1\"],\n  \
@@ -133,7 +135,7 @@ mod tests {
         let module = Trace::new().to_module("Trace").expect("writable");
         assert_eq!(
             module,
-            "---- MODULE Trace ----\nEXTENDS Integers\nTrace == <<\n>>\n====\n"
+            "---- MODULE Trace ----\nLOCAL INSTANCE Integers\nTrace == <<\n>>\n====\n"
         );
     }
 

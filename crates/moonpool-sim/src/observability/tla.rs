@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(
             module,
             "---- MODULE Trace ----\n\
-             EXTENDS Integers\n\
+             LOCAL INSTANCE Integers\n\
              Trace == <<\n  \
              [event |-> \"b\", source |-> \"10.0.1.1\"],\n  \
              [event |-> \"a\", n |-> 1, source |-> \"10.0.1.1\"],\n  \
