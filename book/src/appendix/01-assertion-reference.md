@@ -2,7 +2,7 @@
 
 <!-- toc -->
 
-All macros live in `moonpool_sim` (also through the `moonpool` facade with the `sim` feature). Accounting lives in `moonpool-assertions`, a dependency-free crate with a heap table by default and a `MAP_SHARED` table under exploration. No macro panics. A violated always-style assertion records a failure for the current seed, and the report lists it.
+All macros live in `moonpool_sim` (also through the `moonpool` facade with the `sim` feature). Accounting lives in `moonpool-assertions`, a dependency-free crate with a heap table by default and a `MAP_SHARED` table under exploration. Where the explorer cannot map shared memory (wasm, or a failed `mmap`), the run counts in the heap table. No macro panics. A violated always-style assertion records a failure for the current seed, and the report lists it.
 
 ## Macro Summary
 
