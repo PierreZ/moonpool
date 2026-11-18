@@ -182,3 +182,54 @@ fn passing_check_stays_a_success() {
     assert_eq!(report.successful_runs, 1);
     assert_eq!(report.failed_runs, 0);
 }
+
+/// `check()` violates one always-assertion on odd seeds and none on even ones.
+struct CheckViolatesOnOddSeeds;
+
+#[async_trait]
+impl Workload for CheckViolatesOnOddSeeds {
+    fn name(&self) -> &'static str {
+        "check_violates_on_odd_seeds"
+    }
+
+    async fn run(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        Ok(())
+    }
+
+    async fn check(&mut self, _ctx: &SimContext) -> SimulationResult<()> {
+        let odd = moonpool_sim::current_sim_seed() % 2 == 1;
+        moonpool_sim::assert_always!(!odd, "check: the seed is even");
+        moonpool_sim::assert_always!(true, "check: never violated");
+        Ok(())
+    }
+}
+
+/// The report names, for each failing seed, the always-assertions its own
+/// run violated, and the cause of the seed names them too.
+#[test]
+fn the_report_names_the_violations_of_each_seed() {
+    let report = SimulationBuilder::new()
+        .workload(CheckViolatesOnOddSeeds)
+        .set_debug_seeds(vec![1, 2, 3])
+        .set_iterations(3)
+        .run()
+        .expect("simulation configuration is valid");
+
+    assert_eq!(report.failed_runs, 2, "the two odd seeds fail");
+    let expected = vec!["check: the seed is even".to_string()];
+    assert_eq!(report.seed_violations.get(&1), Some(&expected));
+    assert_eq!(report.seed_violations.get(&3), Some(&expected));
+    assert!(
+        !report.seed_violations.contains_key(&2),
+        "a green seed has no violation"
+    );
+    let cause = &report.failure_causes[&1];
+    assert!(
+        cause.contains("'check: the seed is even'"),
+        "the cause names the violation: {cause}"
+    );
+    assert!(
+        !cause.contains("never violated"),
+        "the cause names only what was violated: {cause}"
+    );
+}

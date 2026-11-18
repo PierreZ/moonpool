@@ -390,6 +390,13 @@ pub struct SimulationReport {
     /// determinism replay, an exploration timeline) that failed it. The
     /// report prints it next to the seed.
     pub failure_causes: BTreeMap<u64, String>,
+    /// The message of each always-assertion that a failing seed's own run
+    /// violated, sorted, for each seed that violated one. A test that keeps a
+    /// list of known violations judges each seed by it. A violation in an
+    /// exploration timeline of the seed is in
+    /// [`assertion_violations`](Self::assertion_violations) only, because the
+    /// timeline runs in a forked child.
+    pub seed_violations: BTreeMap<u64, Vec<String>>,
     /// Aggregated assertion results across all iterations
     pub assertion_results: BTreeMap<String, AssertionStats>,
     /// Always-type assertion violations (definite bugs).
@@ -620,6 +627,7 @@ mod tests {
             seeds_failing: Vec::new(),
             seeds_stalled: Vec::new(),
             failure_causes: BTreeMap::new(),
+            seed_violations: BTreeMap::new(),
             assertion_results: BTreeMap::new(),
             assertion_violations: Vec::new(),
             dropped_assertion_allocations: 0,
