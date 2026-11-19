@@ -228,6 +228,11 @@ and under the simulator in its own `#[test]`.
   (`MOONPOOL_WALK_SEED=17`). `Harness` scripts a schedule by hand.
 - `sometimes!` coverage over the campaign, seeded `buggify!`, swarm
   testing, and `try_run` to prove that a mutant is caught.
+- `Walk::explore`: coverage-driven exploration. A run that passes a site
+  for the first time, or covers new code edges (`edge_coverage`), is
+  branched, and each child replays it up to that step before it draws a
+  new schedule. A branched run is a `Timeline` and replays alone
+  (`MOONPOOL_WALK_TIMELINE=17@120:ff`).
 - `Cx::record` and `Run::events` give the trace of a run to a checker.
 
 ### Assertions and invariants (`moonpool-assertions`)
