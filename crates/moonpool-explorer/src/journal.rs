@@ -170,7 +170,7 @@ mod tests {
 
         let events = take();
         assert_eq!(events, vec![hooks_event]);
-        assert!(take().is_empty());
+        assert!(take().is_empty(), "take() drains the journal");
 
         moonpool_assertions::clear_discovery_hooks();
     }

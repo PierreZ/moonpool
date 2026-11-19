@@ -110,8 +110,7 @@ impl PendingCalls {
     pub(super) fn on_connection(&self, id: u64) -> Vec<u64> {
         self.by_connection
             .get(&id)
-            .map(|calls| calls.iter().copied().collect())
-            .unwrap_or_default()
+            .map_or_default(|calls| calls.iter().copied().collect())
     }
 
     /// Whether any call waits for a reply from connection `id`.

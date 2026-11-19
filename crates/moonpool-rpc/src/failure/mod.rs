@@ -130,8 +130,7 @@ impl<P: RpcProviders> FailureMonitor<P> {
     fn read<T: Default>(&self, read: impl FnOnce(&MonitorState) -> T) -> T {
         self.shared
             .upgrade()
-            .map(|shared| shared.read_monitor(read))
-            .unwrap_or_default()
+            .map_or_default(|shared| shared.read_monitor(read))
     }
 
     /// The monitor's revision: it moves on every published change.

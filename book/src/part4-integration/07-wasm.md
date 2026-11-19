@@ -147,7 +147,7 @@ To build it outside the site:
 `website/site/scripts/build-wasm-demo.sh` runs those steps and stages the
 bundle in `website/site/public/wasm-demo/pkg/`, where the site's engine worker
 loads it. Run it before `npm run build` in `website/site/`. The `wasm-bindgen`
-crate version must match the CLI exactly (`0.2.129` in the Nix flake), or
+crate version must match the CLI exactly (`0.2.130` in the Nix flake), or
 bindgen fails with an opaque schema error.
 
 Run a config natively with

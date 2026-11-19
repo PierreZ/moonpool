@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Optional typed-interface generation for moonpool-rpc"
 documentation = "https://docs.rs/moonpool-rpc-derive"
 readme = "README.md"

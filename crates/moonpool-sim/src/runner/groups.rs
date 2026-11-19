@@ -149,7 +149,10 @@ mod tests {
             vec![ip(1, 1), ip(1, 2), ip(1, 3)]
         );
         assert_eq!(registry.ips_in_group("matchmaker"), vec![ip(2, 1)]);
-        assert!(registry.ips_in_group("spare").is_empty());
+        assert!(
+            registry.ips_in_group("spare").is_empty(),
+            "an undeclared group has no IPs"
+        );
         assert_eq!(registry.group_for(ip(2, 1)), Some("matchmaker"));
         assert_eq!(registry.group_for(ip(3, 1)), None);
     }
@@ -162,7 +165,10 @@ mod tests {
         registry.register(ip(1, 1), "acceptor");
 
         assert_eq!(registry.groups(), ["acceptor", "matchmaker"]);
-        assert!(registry.ips_in_group("matchmaker").is_empty());
+        assert!(
+            registry.ips_in_group("matchmaker").is_empty(),
+            "a declared group with no member has no IPs"
+        );
     }
 
     #[test]

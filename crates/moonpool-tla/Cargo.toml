@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Model-based trace checking for the moonpool framework: check a run's events against a TLA+ spec with TLC"
 documentation = "https://docs.rs/moonpool-tla"
 readme = "README.md"

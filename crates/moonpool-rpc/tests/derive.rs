@@ -49,8 +49,8 @@ pub trait Ping {
 struct Pinger;
 
 impl Ping for Pinger {
-    async fn ping(&self, request: Key) -> Value {
-        Value { value: request.key }
+    fn ping(&self, request: Key) -> impl Future<Output = Value> + Send {
+        std::future::ready(Value { value: request.key })
     }
 }
 
@@ -88,11 +88,11 @@ struct Store {
 }
 
 impl Kv for Store {
-    async fn get(&self, request: Key) -> Value {
+    fn get(&self, request: Key) -> impl Future<Output = Value> + Send {
         self.gets.fetch_add(1, Ordering::SeqCst);
-        Value {
+        std::future::ready(Value {
             value: format!("v:{}", request.key),
-        }
+        })
     }
 
     async fn touch(&self, _request: Key) {

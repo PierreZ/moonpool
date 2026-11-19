@@ -1229,8 +1229,7 @@ impl Workload for StreamsWorkload {
         let workload = board
             .stats_with_prefix(WORKLOAD_LABEL)
             .first()
-            .map(|(_, stats)| *stats)
-            .unwrap_or_default();
+            .map_or_default(|(_, stats)| *stats);
         assert_sometimes!(
             workload.stream_acks_immediate > 0,
             "rpc stream item acknowledged on arrival by a waiting consumer"

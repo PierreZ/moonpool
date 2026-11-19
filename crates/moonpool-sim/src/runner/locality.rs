@@ -260,17 +260,20 @@ mod tests {
         assert!(
             LocalityConfig::new(0, 2, 2, 2)
                 .resolve_topology()
-                .is_empty()
+                .is_empty(),
+            "zero datacenters resolve to no topology"
         );
         assert!(
             LocalityConfig::new(2, 2, 0, 2)
                 .resolve_topology()
-                .is_empty()
+                .is_empty(),
+            "zero machines per zone resolve to no topology"
         );
         assert!(
             LocalityConfig::new(2, 2, 2, 0)
                 .resolve_topology()
-                .is_empty()
+                .is_empty(),
+            "zero processes per machine resolve to no topology"
         );
     }
 

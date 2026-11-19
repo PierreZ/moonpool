@@ -611,8 +611,7 @@ impl QualificationWorkload {
         let subject = caller
             .ledger
             .issued(id)
-            .map(|issued| issued.subject)
-            .unwrap_or_default();
+            .map_or_default(|issued| issued.subject);
         let asks = Arc::new(AtomicU32::new(0));
         let client = target.bind(&runtimes.rpc).with_credentials(Refresher {
             trust: caller.trust.clone(),

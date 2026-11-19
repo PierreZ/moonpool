@@ -488,7 +488,10 @@ fn test_recipe_format_roundtrip() {
     let empty = moonpool_sim::format_timeline(&[]);
     assert_eq!(empty, "");
     let parsed_empty = moonpool_sim::parse_timeline("").expect("parse failed");
-    assert!(parsed_empty.is_empty());
+    assert!(
+        parsed_empty.is_empty(),
+        "an empty timeline parses to no breakpoints"
+    );
 }
 
 /// Planted-bug scenario: cascaded rare gates are found through recipe
@@ -671,5 +674,8 @@ fn the_exploration_tree_is_off_by_default() {
             .workload_factory(|| Box::new(PlantedBugWorkload)),
     );
     let exp = report.exploration.expect("exploration report missing");
-    assert!(exp.timelines.is_empty());
+    assert!(
+        exp.timelines.is_empty(),
+        "the exploration tree is off by default"
+    );
 }

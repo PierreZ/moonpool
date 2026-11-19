@@ -132,15 +132,24 @@ macro_rules! well_known {
 
 well_known!(
     /// The participant's directory: its current interface.
-    Directory, Probe, ServiceInterface, 0x10
+    Directory,
+    Probe,
+    ServiceInterface,
+    0x10
 );
 well_known!(
     /// Recruit into a configuration: a fresh interface for it.
-    Recruiter, Recruit, ServiceInterface, 0x11
+    Recruiter,
+    Recruit,
+    ServiceInterface,
+    0x11
 );
 well_known!(
     /// Adopt recruited members and call each of them.
-    Adopter, Adopt, Adopted, 0x12
+    Adopter,
+    Adopt,
+    Adopted,
+    0x12
 );
 
 const DIRECTORY: WellKnownId = WellKnownId::new(1);

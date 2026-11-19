@@ -376,7 +376,10 @@ fn a_panic_in_the_model_is_the_failure_of_the_seed() {
     let failure = seed_failure(walk::<PANICS_AT_BIRTH>().try_run().expect_err("no model"));
     assert_eq!(failure.step, 0);
     assert!(failure.message.contains("cannot be built"), "{failure}");
-    assert!(failure.tail.is_empty());
+    assert!(
+        failure.tail.is_empty(),
+        "a model that fails at birth has no step tail"
+    );
 }
 
 #[test]

@@ -174,7 +174,7 @@ fn the_cpu_model_counts_real_cpu_time_and_replays() {
         .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "{report}");
     let samples = lock(&samples).clone();
-    assert!(!samples.is_empty());
+    assert!(!samples.is_empty(), "the workload took CPU samples");
     assert!(
         samples
             .iter()
@@ -196,7 +196,7 @@ fn without_the_cpu_model_a_poll_costs_nothing() {
         .expect("simulation configuration is valid");
     assert_eq!(report.failed_runs, 0, "{report}");
     let samples = lock(&samples).clone();
-    assert!(!samples.is_empty());
+    assert!(!samples.is_empty(), "the workload took CPU samples");
     assert!(
         samples
             .iter()

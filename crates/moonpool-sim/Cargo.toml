@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Simulation engine for the moonpool framework"
 documentation = "https://docs.rs/moonpool-sim"
 readme = "README.md"

@@ -305,7 +305,10 @@ fn a_budget_draws_nothing_the_unbudgeted_regime_does_not() {
 fn a_budgeted_run_replays_identically_for_a_seed() {
     let (_, first) = run(7, true, Some(Duration::from_secs(3)));
     let (_, second) = run(7, true, Some(Duration::from_secs(3)));
-    assert!(!first.lifecycle.is_empty());
+    assert!(
+        !first.lifecycle.is_empty(),
+        "the budgeted run records lifecycle events"
+    );
     assert_eq!(first, second);
 
     let report = SimulationBuilder::new()

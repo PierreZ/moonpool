@@ -322,7 +322,10 @@ fn a_promise_kept_in_memory_only_is_caught() {
         "{failure}"
     );
     assert!(failure.seed < 500, "one seed in a hundred: {failure}");
-    assert!(!failure.tail.is_empty());
+    assert!(
+        !failure.tail.is_empty(),
+        "the failure keeps the steps that led to it"
+    );
     assert!(failure.state.contains("acceptor 0"), "{failure}");
 
     // The seed fails again alone, at the same step: it is a regression test.

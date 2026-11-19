@@ -490,8 +490,7 @@ impl StorageEngine {
             .replication
             .iter()
             .find(|slot| slot.plan.is_rolling() && slot.plan.domain(ip).is_some())
-            .map(|slot| slot.plan.window_ids(slot.turn))
-            .unwrap_or_default()
+            .map_or_default(|slot| slot.plan.window_ids(slot.turn))
     }
 
     /// Install the run's shard book (or remove it with `None`).

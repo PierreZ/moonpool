@@ -317,8 +317,7 @@ impl NetworkSimulation {
             .state
             .pending_connections
             .remove(addr)
-            .map(Vec::from)
-            .unwrap_or_default();
+            .map_or_default(Vec::from);
         let mut wakes = WakeBatch::default();
         let reserved_ids: Vec<AcceptWaiterId> = self
             .accept_reservations

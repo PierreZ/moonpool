@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Prometheus registry adapter for moonpool simulation metrics"
 documentation = "https://docs.rs/moonpool-prometheus"
 readme = "README.md"

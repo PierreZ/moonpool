@@ -212,8 +212,7 @@ impl QualificationWorkload {
         let outstanding = runtimes
             .rpc
             .probe()
-            .map(|probe| probe.outstanding())
-            .unwrap_or_default();
+            .map_or_default(|probe| probe.outstanding());
         assert_always!(
             client.pending_calls == 0
                 && client.retained_calls == 0

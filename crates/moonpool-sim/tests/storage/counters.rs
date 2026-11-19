@@ -184,7 +184,10 @@ fn the_world_remembers_the_samples_it_handed_out() {
     ready(settle(&mut sim, file.write_at(0, b"four")), "write").expect("write");
     let second = provider.sample("").expect("sample");
     assert_eq!(sim.system_samples(owner), vec![first, second]);
-    assert!(sim.system_samples(ip(2)).is_empty());
+    assert!(
+        sim.system_samples(ip(2)).is_empty(),
+        "a machine that did no I/O has no samples"
+    );
 
     for _ in 0..moonpool_sim::SYSTEM_SAMPLES_KEPT {
         provider.sample("").expect("sample");

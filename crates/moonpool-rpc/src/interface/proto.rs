@@ -266,7 +266,7 @@ mod tests {
             .varint(1, 0)
             .fixed64(2, 0)
             .bytes(3, &[]);
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "default-valued fields are not written");
     }
 
     #[test]

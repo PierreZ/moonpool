@@ -102,7 +102,10 @@ fn bounded_campaign_hits_every_required_scenario() {
             "required scenario never fired: {required}"
         );
     }
-    assert!(!records(&observations).is_empty());
+    assert!(
+        !records(&observations).is_empty(),
+        "the campaign records at least one run"
+    );
 }
 
 /// The same seed replays the same semantic history: every operation, its
@@ -122,7 +125,7 @@ fn same_seed_replays_the_same_semantic_history() {
     for seed in [1, 7, 42] {
         let first = run(seed);
         assert_eq!(first.len(), 1);
-        assert!(!first[0].history.is_empty());
+        assert!(!first[0].history.is_empty(), "the run records a history");
         assert_eq!(first, run(seed), "seed {seed} diverged");
     }
 }

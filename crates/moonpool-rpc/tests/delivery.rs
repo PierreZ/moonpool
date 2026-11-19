@@ -227,8 +227,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = CuttableStream<S>;
-    async fn connect(&self, stream: S, peer: &str) -> io::Result<(Self::Stream, PeerContext)> {
-        Ok(self.wrap(stream, peer))
+    fn connect(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>> {
+        std::future::ready(Ok(self.wrap(stream, peer)))
     }
 }
 
@@ -237,8 +241,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = CuttableStream<S>;
-    async fn accept(&self, stream: S, peer: &str) -> io::Result<(Self::Stream, PeerContext)> {
-        Ok(self.wrap(stream, peer))
+    fn accept(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>> {
+        std::future::ready(Ok(self.wrap(stream, peer)))
     }
 }
 
@@ -855,14 +863,17 @@ impl TableResolver {
 }
 
 impl Resolver for TableResolver {
-    async fn resolve(&self, target: &str) -> io::Result<Vec<SocketAddr>> {
-        let (host, _) = moonpool_core::split_host_port(target)?;
-        self.table
-            .lock()
-            .expect("Mutex poisoned: prior panic")
-            .get(host)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown name"))
+    fn resolve(&self, target: &str) -> impl Future<Output = io::Result<Vec<SocketAddr>>> + Send {
+        std::future::ready(
+            moonpool_core::split_host_port(target).and_then(|(host, _)| {
+                self.table
+                    .lock()
+                    .expect("Mutex poisoned: prior panic")
+                    .get(host)
+                    .cloned()
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown name"))
+            }),
+        )
     }
 }
 
@@ -1114,11 +1125,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = S;
-    async fn connect(&self, stream: S, peer: &str) -> io::Result<(S, PeerContext)> {
-        if self.refuse.load(Ordering::SeqCst) {
-            return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "one-way"));
-        }
-        Ok((stream, PeerContext::new(peer)))
+    fn connect(&self, stream: S, peer: &str) -> impl Future<Output = io::Result<(S, PeerContext)>> {
+        std::future::ready(if self.refuse.load(Ordering::SeqCst) {
+            Err(io::Error::new(io::ErrorKind::ConnectionRefused, "one-way"))
+        } else {
+            Ok((stream, PeerContext::new(peer)))
+        })
     }
 }
 
@@ -1127,8 +1139,8 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = S;
-    async fn accept(&self, stream: S, peer: &str) -> io::Result<(S, PeerContext)> {
-        Ok((stream, PeerContext::new(peer)))
+    fn accept(&self, stream: S, peer: &str) -> impl Future<Output = io::Result<(S, PeerContext)>> {
+        std::future::ready(Ok((stream, PeerContext::new(peer))))
     }
 }
 

@@ -292,8 +292,7 @@ impl Ledger {
         inner
             .issued
             .get(&id)
-            .map(|issued| candidates(issued, inner.mints.get(&id)))
-            .unwrap_or_default()
+            .map_or_default(|issued| candidates(issued, inner.mints.get(&id)))
     }
 
     /// Record what the caller of `id` saw.

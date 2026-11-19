@@ -339,7 +339,10 @@ fn a_rolling_turn_moves_on_once_the_damage_is_repaired() {
 #[test]
 fn a_truncation_repairs_the_damage() {
     let mut sim = rolling_world(&[topology()]);
-    assert!(!write_and_crash(&mut sim, ip(3), Some(layout(2))).is_empty());
+    assert!(
+        !write_and_crash(&mut sim, ip(3), Some(layout(2))).is_empty(),
+        "zone b takes the turn and the damage"
+    );
     local_runtime().block_on(async {
         run_as(&mut sim, ip(3), |provider| async move {
             let file = provider
@@ -390,8 +393,14 @@ fn each_group_rolls_its_own_turn() {
     };
     // Group one: zones a and b. Group two: zones a and c.
     let mut sim = rolling_world(&[group([1, 3]), group([2, 4])]);
-    assert!(!write_and_crash(&mut sim, ip(3), Some(layout(2))).is_empty());
-    assert!(!write_and_crash(&mut sim, ip(4), Some(layout(3))).is_empty());
+    assert!(
+        !write_and_crash(&mut sim, ip(3), Some(layout(2))).is_empty(),
+        "group one takes damage"
+    );
+    assert!(
+        !write_and_crash(&mut sim, ip(4), Some(layout(3))).is_empty(),
+        "group two takes damage"
+    );
     assert_eq!(sim.fault_turn(ip(3)), vec!["b".to_string()]);
     assert_eq!(sim.fault_turn(ip(4)), vec!["c".to_string()]);
     assert!(

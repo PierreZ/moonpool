@@ -963,7 +963,10 @@ mod tests {
             &[("a", true), ("b", true)],
         );
         let (_, coverage) = validate_assertion_contracts();
-        assert!(coverage.is_empty());
+        assert!(
+            coverage.is_empty(),
+            "a compound contract whose parts all held has no coverage violation"
+        );
         moonpool_assertions::clear();
     }
 

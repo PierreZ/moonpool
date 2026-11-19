@@ -692,8 +692,7 @@ fn write_seeds(w: &mut impl Write, report: &SimulationReport, color: bool) {
         if let Some(Ok(m)) = report.individual_metrics.get(i) {
             let tl_suffix = per_seed_tl
                 .and_then(|v| v.get(i))
-                .map(|t| format!("   {} timelines", fmt_num(*t)))
-                .unwrap_or_default();
+                .map_or_default(|t| format!("   {} timelines", fmt_num(*t)));
             let style = if report.seeds_failing.contains(seed) {
                 paint(ansi::RED, color)
             } else {

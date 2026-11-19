@@ -107,37 +107,77 @@ macro_rules! method {
 
 method!(
     /// Echo the probe back at once.
-    Echo, Probe, Echoed, 0x0100, 1, "echo"
+    Echo,
+    Probe,
+    Echoed,
+    0x0100,
+    1,
+    "echo"
 );
 method!(
     /// Echo after a provider-time delay (cancellation and late replies).
-    Slow, Probe, Echoed, 0x0101, 1, "slow"
+    Slow,
+    Probe,
+    Echoed,
+    0x0101,
+    1,
+    "slow"
 );
 method!(
     /// Served once, then its endpoint is destroyed and a fresh one
     /// registered in the same registry slot.
-    Ephemeral, Probe, Echoed, 0x0102, 1, "ephemeral"
+    Ephemeral,
+    Probe,
+    Echoed,
+    0x0102,
+    1,
+    "ephemeral"
 );
 method!(
     /// Recorded, never answered; asks the fault script to crash the server.
-    CrashAfterReceipt, Probe, Echoed, 0x0103, 1, "crash-after-receipt"
+    CrashAfterReceipt,
+    Probe,
+    Echoed,
+    0x0103,
+    1,
+    "crash-after-receipt"
 );
 method!(
     /// Forwarded by the relay process to the server's echo endpoint.
-    Relay, Probe, Relayed, 0x0200, 1, "relay"
+    Relay,
+    Probe,
+    Relayed,
+    0x0200,
+    1,
+    "relay"
 );
 method!(
     /// Echo's method with a newer contract version the server never
     /// registered.
-    EchoNextSchema, Probe, Echoed, 0x0100, 2, "echo.v2"
+    EchoNextSchema,
+    Probe,
+    Echoed,
+    0x0100,
+    2,
+    "echo.v2"
 );
 method!(
     /// A method id the server never registered, aimed at echo's endpoint.
-    WrongMethod, Probe, Echoed, 0x01FF, 1, "wrong-method"
+    WrongMethod,
+    Probe,
+    Echoed,
+    0x01FF,
+    1,
+    "wrong-method"
 );
 method!(
     /// Echo's method and schema with a body in a foreign codec.
-    EchoForeignCodec, ForeignBody, Echoed, 0x0100, 1, "echo.foreign-codec"
+    EchoForeignCodec,
+    ForeignBody,
+    Echoed,
+    0x0100,
+    1,
+    "echo.foreign-codec"
 );
 
 /// Bytes tagged with an application codec id the server never registered.

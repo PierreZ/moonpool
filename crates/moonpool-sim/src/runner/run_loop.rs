@@ -1611,8 +1611,7 @@ impl SimulationBuilder {
             for config in &self.replicated_faults {
                 let mut localities = process_config
                     .as_ref()
-                    .map(|config| config.machine_registry.locality_map())
-                    .unwrap_or_default();
+                    .map_or_default(|config| config.machine_registry.locality_map());
                 if let (Some(group), Some(process_config)) =
                     (config.group_name(), process_config.as_ref())
                 {

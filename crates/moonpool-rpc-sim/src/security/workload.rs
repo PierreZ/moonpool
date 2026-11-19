@@ -480,8 +480,7 @@ impl SecurityWorkload {
         let subject = remote
             .ledger
             .issued(first)
-            .map(|issued| issued.subject)
-            .unwrap_or_default();
+            .map_or_default(|issued| issued.subject);
         let outcome = remote.unary(rpc, &service, first, 0).await;
         let _ = remote.judge(first, &outcome.clone().map(Some));
         self.note(first, SecurityOp::Reuse, kind, &describe(&outcome));
@@ -524,8 +523,7 @@ impl SecurityWorkload {
         let subject = remote
             .ledger
             .issued(id)
-            .map(|issued| issued.subject)
-            .unwrap_or_default();
+            .map_or_default(|issued| issued.subject);
         let asks = Arc::new(AtomicU32::new(0));
         let client = service.bind(rpc).with_credentials(Refresher {
             trust: remote.trust.clone(),

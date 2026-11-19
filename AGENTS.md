@@ -57,10 +57,14 @@ not match CI.
 - `nix develop --command cargo clippy`
 - `nix develop --command cargo nextest run`
 
-**Clippy pedantic is enabled**. Never silence a clippy warning with
-`#[allow(clippy::...)]` — fix the underlying issue (refactor the
-function, split the type, rename the variable, etc.). The allow
-attribute is not an acceptable resolution.
+**Clippy pedantic is enabled**, and the whole workspace passes it with no
+lint allowed (Pierre, 2026-11-19): no `#[allow(clippy::...)]` and no
+`allow` entry under `[workspace.lints.clippy]`. Fix the underlying issue
+(refactor the function, split the type, rename the variable, give an
+`assert!` a message, etc.). When a lint is wrong for one item, write
+`#[expect(clippy::<lint>, reason = "...")]` on that item, never wider, and
+name it in the PR description. Today the one exception is the generated
+gRPC module in `moonpool-sim-examples/src/tonic_grpc.rs`.
 
 **Simulation binaries**: Managed via xtask:
 - `cargo xtask sim list` — list all simulation binaries

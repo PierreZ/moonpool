@@ -74,10 +74,11 @@ use crate::support::{invalid_state, peer_ip, unless_shutdown};
 /// Protobuf messages and gRPC stubs generated from `proto/echo.proto` by
 /// `tonic-prost-build` (requires `protoc`).
 pub mod proto {
-    // Generated code is exempt from the crate's lint bar: it cannot be
-    // hand-fixed, and regenerating on every toolchain bump is upstream's
-    // concern (prost/tonic), not this crate's.
-    #![allow(missing_docs, clippy::pedantic)]
+    #![expect(
+        clippy::pedantic,
+        reason = "tonic-prost-build generates this module: it cannot be hand-fixed, \
+                  and its lint bar is upstream's (prost/tonic), not this crate's"
+    )]
     tonic::include_proto!("moonpool.sim");
 }
 

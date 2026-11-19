@@ -103,7 +103,10 @@ fn exempt_sites_and_other_modules_are_not_required() {
             "declared: the dead path measures",
         ]));
     assert!(!report.is_failure(), "{report:?}");
-    assert!(report.coverage_violations.is_empty());
+    assert!(
+        report.coverage_violations.is_empty(),
+        "every declared site was covered"
+    );
 
     let report = run(SimulationBuilder::new().require_declared_sites(["some_other_crate"]));
     assert!(!report.is_failure(), "{report:?}");
@@ -113,5 +116,8 @@ fn exempt_sites_and_other_modules_are_not_required() {
 fn without_the_requirement_nothing_changes() {
     let report = run(SimulationBuilder::new());
     assert!(!report.is_failure(), "{report:?}");
-    assert!(report.coverage_violations.is_empty());
+    assert!(
+        report.coverage_violations.is_empty(),
+        "without the requirement no coverage is violated"
+    );
 }

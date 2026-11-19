@@ -828,8 +828,12 @@ where
     S: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = S;
-    async fn connect(&self, stream: S, peer: &str) -> std::io::Result<(S, PeerContext)> {
-        Ok((stream, PeerContext::new(peer).with_identity("server")))
+    fn connect(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> impl Future<Output = std::io::Result<(S, PeerContext)>> {
+        std::future::ready(Ok((stream, PeerContext::new(peer).with_identity("server"))))
     }
 }
 
@@ -838,11 +842,16 @@ where
     S: futures::io::AsyncRead + futures::io::AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = S;
-    async fn accept(&self, stream: S, peer: &str) -> std::io::Result<(S, PeerContext)> {
-        if self.refuse_inbound {
-            return Err(std::io::Error::other("upgrade refused"));
-        }
-        Ok((stream, PeerContext::new(peer).with_identity("client")))
+    fn accept(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> impl Future<Output = std::io::Result<(S, PeerContext)>> {
+        std::future::ready(if self.refuse_inbound {
+            Err(std::io::Error::other("upgrade refused"))
+        } else {
+            Ok((stream, PeerContext::new(peer).with_identity("client")))
+        })
     }
 }
 

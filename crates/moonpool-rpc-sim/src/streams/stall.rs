@@ -81,8 +81,12 @@ where
 {
     type Stream = StallingStream<S>;
 
-    async fn connect(&self, stream: S, peer: &str) -> io::Result<(Self::Stream, PeerContext)> {
-        Ok(self.wrap(stream, peer))
+    fn connect(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>> {
+        std::future::ready(Ok(self.wrap(stream, peer)))
     }
 }
 
@@ -92,8 +96,12 @@ where
 {
     type Stream = StallingStream<S>;
 
-    async fn accept(&self, stream: S, peer: &str) -> io::Result<(Self::Stream, PeerContext)> {
-        Ok(self.wrap(stream, peer))
+    fn accept(
+        &self,
+        stream: S,
+        peer: &str,
+    ) -> impl Future<Output = io::Result<(Self::Stream, PeerContext)>> {
+        std::future::ready(Ok(self.wrap(stream, peer)))
     }
 }
 

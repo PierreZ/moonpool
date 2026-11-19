@@ -108,13 +108,25 @@ macro_rules! method {
 
 method!(
     /// The server's dynamic work endpoint.
-    Execute, Job, Done, 0x0300, "delivery.execute"
+    Execute,
+    Job,
+    Done,
+    0x0300,
+    "delivery.execute"
 );
 method!(
     /// The server's well-known directory.
-    Directory, Lookup, Listing, 0x0301, "delivery.directory"
+    Directory,
+    Lookup,
+    Listing,
+    0x0301,
+    "delivery.directory"
 );
 method!(
     /// Each peer's greeting endpoint.
-    Greet, Greeting, Greeting, 0x0302, "delivery.greet"
+    Greet,
+    Greeting,
+    Greeting,
+    0x0302,
+    "delivery.greet"
 );

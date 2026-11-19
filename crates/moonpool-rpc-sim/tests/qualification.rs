@@ -155,7 +155,10 @@ fn bounded_campaign_hits_every_required_scenario() {
         2 * usize::try_from(SEED_BUDGET).unwrap_or(usize::MAX)
     );
     for record in &finished {
-        assert!(!record.history.is_empty());
+        assert!(
+            !record.history.is_empty(),
+            "every finished run records a history"
+        );
         assert!(record.recovered_ms.is_some(), "a run did not recover");
         assert!(record.baseline, "a run ended away from its baseline");
     }

@@ -1591,12 +1591,18 @@ mod tests {
         let config = StorageConfiguration::fast_local();
         let mut image = image(0);
         image.write(0, b"durable");
-        assert!(image.sync(&config, &always_eligible).is_empty());
+        assert!(
+            image.sync(&config, &always_eligible).is_empty(),
+            "a sync with no barrier violation armed lies about no sector"
+        );
         assert_eq!(image.durable_size(), 7);
 
         // Nothing dirty, so a crash cannot change anything.
         let report = image.crash("f", &config, false, &always_eligible);
-        assert!(report.resolutions.is_empty());
+        assert!(
+            report.resolutions.is_empty(),
+            "a crash with nothing dirty resolves no sector"
+        );
         let mut buf = vec![0u8; 7];
         image.read(0, &mut buf).expect("read failed");
         assert_eq!(&buf, b"durable");

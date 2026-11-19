@@ -128,7 +128,7 @@ fn a_live_run_is_the_same_run_as_a_whole_run() {
     assert!(steps > 1, "the live run paused at least once");
     let whole = whole.lock().expect("whole").clone();
     let live = live.lock().expect("live").clone();
-    assert!(!whole.is_empty());
+    assert!(!whole.is_empty(), "the whole run produced a trace");
     assert_eq!(live, whole, "pausing changes nothing in the run");
 }
 

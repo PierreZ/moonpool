@@ -149,17 +149,33 @@ macro_rules! method {
 
 method!(
     /// A participant's well-known directory.
-    Directory, Lookup, Publication, 0x0215_0101, "interfaces.directory"
+    Directory,
+    Lookup,
+    Publication,
+    0x0215_0101,
+    "interfaces.directory"
 );
 method!(
     /// A participant's well-known recruiter.
-    Recruiter, Recruit, Publication, 0x0215_0102, "interfaces.recruit"
+    Recruiter,
+    Recruit,
+    Publication,
+    0x0215_0102,
+    "interfaces.recruit"
 );
 method!(
     /// A participant's well-known dismissal endpoint.
-    Dismiss, Recruit, Dismissed, 0x0215_0103, "interfaces.dismiss"
+    Dismiss,
+    Recruit,
+    Dismissed,
+    0x0215_0103,
+    "interfaces.dismiss"
 );
 method!(
     /// The third participant's well-known adopter.
-    Adopter, Adopt, Adopted, 0x0215_0104, "interfaces.adopt"
+    Adopter,
+    Adopt,
+    Adopted,
+    0x0215_0104,
+    "interfaces.adopt"
 );

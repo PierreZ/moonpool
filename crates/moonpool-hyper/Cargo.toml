@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "hyper 1.x integration for the moonpool provider traits"
 documentation = "https://docs.rs/moonpool-hyper"
 readme = "README.md"
