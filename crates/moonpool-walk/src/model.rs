@@ -432,8 +432,15 @@ impl<M: Model> Core<M> {
 /// One finished run of one seed: the model as the run left it, and
 /// everything the run did.
 pub struct Run<M: Model> {
-    /// The seed.
+    /// The seed: the root seed of [`timeline`](Self::timeline).
     pub seed: u64,
+    /// The timeline: the seed, and the branch points of an exploring
+    /// campaign ([`Walk::explore`](crate::Walk::explore)).
+    pub timeline: crate::Timeline,
+    /// The chaos steps after which this run found something new: a first
+    /// pass in the assertion table, or more covered edges. Empty unless the
+    /// campaign explores.
+    pub discoveries: Vec<u64>,
     /// The model at the end of the run.
     pub model: M,
     /// Everything the run did, in order.

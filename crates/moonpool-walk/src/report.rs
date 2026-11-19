@@ -16,8 +16,16 @@ pub struct Site {
 /// The result of a campaign in which every seed passed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
-    /// How many seeds ran.
+    /// How many root seeds ran.
     pub seeds: u64,
+    /// How many runs: the root seeds, and the children an exploring
+    /// campaign added ([`Walk::explore`](crate::Walk::explore)).
+    pub timelines: u64,
+    /// How many of the runs were children.
+    pub branched: u64,
+    /// The chaos steps, over every run, after which a run found something
+    /// new.
+    pub discoveries: u64,
     /// The counts over every seed.
     pub stats: Stats,
     /// The name of each action of the model, in the order of
@@ -44,6 +52,13 @@ impl fmt::Display for Report {
             stats.restarts,
             stats.events,
         )?;
+        if self.branched > 0 {
+            writeln!(
+                f,
+                "explored: {} timelines, {} of them branched, {} discoveries",
+                self.timelines, self.branched, self.discoveries
+            )?;
+        }
         for (name, count) in self.actions.iter().zip(&stats.actions) {
             writeln!(f, "  action {name}: {count}")?;
         }
@@ -57,8 +72,11 @@ impl fmt::Display for Report {
 /// A seed that failed: where, why, and how to run it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedFailure {
-    /// The seed.
+    /// The root seed.
     pub seed: u64,
+    /// The timeline that failed: the seed alone, or the seed and the
+    /// branch points of an exploring campaign.
+    pub timeline: crate::Timeline,
     /// The step that failed, from zero.
     pub step: u64,
     /// What failed: the message of the panic, the assertion that recorded a
@@ -78,11 +96,19 @@ pub struct SeedFailure {
 
 impl fmt::Display for SeedFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(
-            f,
-            "seed {} failed at step {}: {}",
-            self.seed, self.step, self.message
-        )?;
+        if self.timeline.branches.is_empty() {
+            writeln!(
+                f,
+                "seed {} failed at step {}: {}",
+                self.seed, self.step, self.message
+            )?;
+        } else {
+            writeln!(
+                f,
+                "timeline {} failed at step {}: {}",
+                self.timeline, self.step, self.message
+            )?;
+        }
         if let Some(replay) = &self.replay {
             writeln!(f, "run it again alone with {replay}")?;
         }

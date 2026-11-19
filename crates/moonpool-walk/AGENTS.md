@@ -9,7 +9,8 @@ checker and a `moonpool-sim` simulation. No executor, no network, no clock.
 |---|---|
 | `Model` | what a user writes: `new`, `deliver`, and optionally `actions`/`weight`/`act`, `nodes`/`is_up`/`node_weight`/`crash`/`restart`, `calm`, `check`, `converged`, `finish`, `describe`, `reachable_sites`/`sometimes_sites` |
 | `Cx` | what a model reaches while it is called: `rng`, `send`, `record`, `crashed`, `drop_where`, `inflight`, `phase`, `phase_step`, `step`, `seed` |
-| `Walk` | the seeded schedule (chaos, quiet, settle) and the campaign: `run`, `report`, `try_run`, `run_each`, `replay`, `check_determinism`, and `finish` for the tail of a scripted `Harness` |
+| `Walk` | the seeded schedule (chaos, quiet, settle) and the campaign: `run`, `report`, `try_run`, `run_each`, `replay`, `replay_timeline`, `check_determinism`, `finish` for the tail of a scripted `Harness`, and `explore`/`branching`/`edge_coverage` for coverage-driven exploration |
+| `Timeline`, `Branch` | a run of an exploring campaign: the root seed and the chaos steps where it drew a new seed |
 | `Harness` | the step engine, public for scripted schedules; `Walk` drives the same one |
 | `Run`, `Logged`, `Entry`, `Stats` | everything one seed did |
 | `Report`, `WalkError`, `SeedFailure`, `Site` | the result of a campaign |
@@ -45,6 +46,12 @@ checker and a `moonpool-sim` simulation. No executor, no network, no clock.
   becomes a `SeedFailure`. `run` and `report` panic with it; `try_run`
   returns it. The crate prints nothing itself; the panic hook of the
   process still prints each caught panic.
+- **An exploring campaign branches only at chaos steps** (`Scout`, `Frontier` in
+  `walk.rs`). A branch replaces the generator (and the buggify stream) after
+  the step, so a child shares its parent's log up to that step. The
+  discovery hook of `moonpool-assertions` is the walk's only while it
+  explores outside a simulation (`Installed::hooks`). The edge reader is
+  called only in an exploring campaign: a plain campaign pays nothing.
 - `Walk` reads the environment only through `plan_from`, which the unit
   tests call with a closure. Do not call `std::env::set_var` in a test.
 - Book: `book/src/part5-building-on-top/09-walk.md`.

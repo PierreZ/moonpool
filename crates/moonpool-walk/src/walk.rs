@@ -2,6 +2,7 @@
 //! runs a campaign of seeds.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -10,6 +11,7 @@ use moonpool_assertions::{AssertKind, AssertionSlotSnapshot};
 use crate::harness::{DEFAULT_MAILBOX, Harness};
 use crate::model::Entry;
 use crate::report::{Report, SeedFailure, Site, WalkError};
+use crate::timeline::Timeline;
 use crate::{Cx, Model, Phase, Rng, Run};
 
 /// The environment prefix a [`Walk`] reads, unless set.
@@ -24,6 +26,14 @@ thread_local! {
     /// The state of the generator that buggify draws from. Buggify takes a
     /// plain function pointer, so the state lives here.
     static BUGGIFY_STREAM: Cell<u64> = const { Cell::new(0) };
+    /// How many discoveries the assertion table reported while an exploring
+    /// walk listened. The hook is a plain function pointer, so the count
+    /// lives here.
+    static DISCOVERIES: Cell<u64> = const { Cell::new(0) };
+}
+
+fn count_discovery(_kind: moonpool_assertions::DiscoveryKind, _state: u64) {
+    DISCOVERIES.with(|count| count.set(count.get() + 1));
 }
 
 fn buggify_draw() -> f64 {
@@ -73,7 +83,7 @@ fn buggify_draw() -> f64 {
 ///
 /// ## Environment
 ///
-/// A walk reads five variables, so that a long run or the replay of one
+/// A walk reads seven variables, so that a long run or the replay of one
 /// seed needs no code change. With the default prefix:
 ///
 /// | Variable | Meaning |
@@ -83,6 +93,8 @@ fn buggify_draw() -> f64 {
 /// | `MOONPOOL_WALK_SEEDS` | how many seeds to run |
 /// | `MOONPOOL_WALK_FROM` | the first seed |
 /// | `MOONPOOL_WALK_STEPS` | the chaos steps of each seed |
+/// | `MOONPOOL_WALK_EXPLORE` | the timelines each root seed may add ([`explore`](Self::explore)) |
+/// | `MOONPOOL_WALK_TIMELINE` | run this one timeline (`17@120:ff`), and skip the coverage check |
 ///
 /// A value that is not a number fails the campaign. Every walk with the
 /// default prefix reads the same variables:
@@ -110,6 +122,9 @@ pub struct Walk<M: Model> {
     expected: Vec<(AssertKind, String)>,
     failure_tail: usize,
     check_each_delivery: bool,
+    explore: u64,
+    branching: u64,
+    edges: Option<fn() -> usize>,
     make: Option<Factory<M>>,
     model: PhantomData<fn() -> M>,
 }
@@ -152,6 +167,9 @@ impl<M: Model> Walk<M> {
             expected: Vec::new(),
             failure_tail: 40,
             check_each_delivery: true,
+            explore: 0,
+            branching: 2,
+            edges: None,
             make: None,
             model: PhantomData,
         }
@@ -284,6 +302,57 @@ impl<M: Model> Walk<M> {
         self
     }
 
+    /// Coverage-driven exploration: the campaign may add up to `timelines`
+    /// runs for each root seed, that branch from the runs that found
+    /// something new (0, the default, switches it off). The budget is the
+    /// campaign's: a seed that finds nothing new leaves its share to the
+    /// seeds that did.
+    ///
+    /// A run finds something new at a chaos step when the step passes a
+    /// `sometimes!` or `reachable!` site for the first time in the
+    /// campaign's assertion table (any discovery the table reports), or
+    /// when the [`edge_coverage`](Self::edge_coverage) count grows. For
+    /// each such step the walk queues [`branching`](Self::branching)
+    /// children: each one replays the run up to that step, then draws a
+    /// new schedule from a seed of its own ([`Timeline::child`]). The
+    /// children of a discovery run before the next root seed, and their own
+    /// discoveries queue grandchildren. Once every root seed ran, the budget
+    /// left goes round the discovery points, newest first. So the seeds go
+    /// where no seed went before, not where every seed goes.
+    ///
+    /// Only chaos steps branch: the quiet tail and the settle rounds are
+    /// the liveness judge, not a search. A failure in a child names its
+    /// [`Timeline`], and `MOONPOOL_WALK_TIMELINE` runs it again alone.
+    ///
+    /// While it explores, the walk installs the discovery hook of
+    /// [`moonpool_assertions`] (outside a simulation only) and removes it at
+    /// the end of the campaign.
+    #[must_use]
+    pub fn explore(mut self, timelines: u64) -> Self {
+        self.explore = timelines;
+        self
+    }
+
+    /// How many children each discovery queues (2 by default).
+    #[must_use]
+    pub fn branching(mut self, children: u64) -> Self {
+        self.branching = children;
+        self
+    }
+
+    /// A second signal for [`explore`](Self::explore): a count of the code
+    /// edges covered so far, which never goes down. A chaos step after
+    /// which the count grew found something new. Pass the reader of the
+    /// code coverage of the system under test, for example
+    /// `moonpool_explorer::sancov_edges_covered_live` in a build that
+    /// instruments it. The walk reads it once after each chaos step of an
+    /// exploring campaign, and never otherwise.
+    #[must_use]
+    pub fn edge_coverage(mut self, edges: fn() -> usize) -> Self {
+        self.edges = Some(edges);
+        self
+    }
+
     /// Swarm testing: each seed switches off a random subset of the walk's
     /// fault families (drops, duplicates, crashes) and of the model's
     /// actions for its chaos phase, and keeps at least one action. A seed
@@ -380,20 +449,45 @@ impl<M: Model> Walk<M> {
         if plan.count == 0 {
             return Err(WalkError::Setup("the campaign has no seed to run".into()));
         }
-        let installed = Installed::new(self);
+        let installed = Installed::new(self, plan.explore > 0);
         let mut judge = Judge::new();
         let mut report = Report {
             actions: M::actions().iter().map(|a| format!("{a:?}")).collect(),
             ..Report::default()
         };
-        for offset in 0..plan.count {
-            // Seeds wrap at the end of `u64`: a campaign is never cut short.
-            let seed = plan.first.wrapping_add(offset);
+        if let Some(timeline) = &plan.timeline {
             let run = self
-                .one_seed(&plan, &installed, &mut judge, seed)
+                .one_seed(&plan, &installed, &mut judge, timeline)
                 .map_err(WalkError::Seed)?;
             report.seeds += 1;
+            report.timelines += 1;
             report.stats.absorb(&run.stats);
+            visit(&run);
+        }
+        let count = if plan.timeline.is_some() {
+            0
+        } else {
+            plan.count
+        };
+        let mut frontier = Frontier::new(
+            plan.first,
+            count,
+            plan.explore.saturating_mul(count),
+            self.branching,
+        );
+        while let Some(timeline) = frontier.next() {
+            let run = self
+                .one_seed(&plan, &installed, &mut judge, &timeline)
+                .map_err(WalkError::Seed)?;
+            report.timelines += 1;
+            if timeline.branches.is_empty() {
+                report.seeds += 1;
+            } else {
+                report.branched += 1;
+            }
+            report.discoveries += u64::try_from(run.discoveries.len()).unwrap_or(u64::MAX);
+            report.stats.absorb(&run.stats);
+            frontier.found(&timeline, &run.discoveries);
             visit(&run);
         }
         if !installed.table {
@@ -416,16 +510,30 @@ impl<M: Model> Walk<M> {
     /// The failure of the seed. [`failure_tail`](Self::failure_tail) sets
     /// how much of its log the failure keeps.
     pub fn replay(&self, seed: u64) -> Result<Run<M>, Box<SeedFailure>> {
+        self.replay_timeline(&Timeline::root(seed))
+    }
+
+    /// Run one [`Timeline`] and return everything it did, as
+    /// [`replay`](Self::replay) does for a seed: the place to study a
+    /// failure that an exploring campaign found in a child.
+    ///
+    /// # Errors
+    ///
+    /// The failure of the timeline.
+    pub fn replay_timeline(&self, timeline: &Timeline) -> Result<Run<M>, Box<SeedFailure>> {
         let plan = match self.plan() {
             Ok(plan) => Plan {
-                first: seed,
+                first: timeline.seed,
                 count: 1,
                 pinned: true,
+                explore: 0,
+                timeline: None,
                 ..plan
             },
             Err(why) => {
                 return Err(Box::new(SeedFailure {
-                    seed,
+                    seed: timeline.seed,
+                    timeline: timeline.clone(),
                     step: 0,
                     message: why,
                     tail: Vec::new(),
@@ -435,9 +543,9 @@ impl<M: Model> Walk<M> {
                 }));
             }
         };
-        let installed = Installed::new(self);
+        let installed = Installed::new(self, false);
         let mut judge = Judge::new();
-        self.one_seed(&plan, &installed, &mut judge, seed)
+        self.one_seed(&plan, &installed, &mut judge, timeline)
     }
 
     /// Run `seed` twice and compare the two logs: a model that reads a
@@ -505,6 +613,8 @@ impl<M: Model> Walk<M> {
             tail: self.failure_tail,
             pinned: false,
             replay: None,
+            explore: self.explore,
+            timeline: None,
         };
         let Some(prefix) = &self.env_prefix else {
             return Ok(plan);
@@ -533,10 +643,23 @@ impl<M: Model> Walk<M> {
         if let Some(tail) = read("TAIL")? {
             plan.tail = usize::try_from(tail).unwrap_or(usize::MAX);
         }
+        if let Some(explore) = read("EXPLORE")? {
+            plan.explore = explore;
+        }
         if let Some(seed) = read("SEED")? {
             plan.first = seed;
             plan.count = 1;
             plan.pinned = true;
+            plan.explore = 0;
+        }
+        let name = format!("{prefix}_TIMELINE");
+        if let Some(text) = lookup(&name) {
+            let timeline: Timeline = text.parse().map_err(|why| format!("{name}: {why}"))?;
+            plan.first = timeline.seed;
+            plan.count = 1;
+            plan.pinned = true;
+            plan.explore = 0;
+            plan.timeline = Some(timeline);
         }
         plan.replay = Some(replay);
         Ok(plan)
@@ -548,11 +671,11 @@ impl<M: Model> Walk<M> {
         plan: &Plan,
         installed: &Installed,
         judge: &mut Judge,
-        seed: u64,
+        timeline: &Timeline,
     ) -> Result<Run<M>, Box<SeedFailure>> {
         judge.every_step = false;
         judge.tripped = false;
-        let first = self.attempt(plan, installed, judge, seed);
+        let first = self.attempt(plan, installed, judge, timeline);
         if first.is_ok() || !judge.tripped {
             return first;
         }
@@ -561,7 +684,7 @@ impl<M: Model> Walk<M> {
         // stop at the step that records it.
         judge.every_step = true;
         judge.tripped = false;
-        match self.attempt(plan, installed, judge, seed) {
+        match self.attempt(plan, installed, judge, timeline) {
             Err(located) if judge.tripped => Err(located),
             // The second run did not record it: the model does not replay.
             _ => first,
@@ -574,10 +697,12 @@ impl<M: Model> Walk<M> {
         plan: &Plan,
         installed: &Installed,
         judge: &mut Judge,
-        seed: u64,
+        timeline: &Timeline,
     ) -> Result<Run<M>, Box<SeedFailure>> {
+        let seed = timeline.seed;
         installed.start_seed(seed);
         let swarm = Swarm::draw(self, seed);
+        let mut scout = Scout::new(installed, self.edges, timeline);
         let mut slot: Option<Harness<M>> = None;
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let harness = slot.insert(match &self.make {
@@ -586,7 +711,7 @@ impl<M: Model> Walk<M> {
             });
             harness.model.check();
             judge.step()?;
-            self.chaos(harness, plan, &swarm, judge)?;
+            self.chaos(harness, plan, &swarm, judge, &mut scout)?;
             if installed.buggify.is_some() {
                 moonpool_buggify::buggify_enter_recovery();
             }
@@ -600,19 +725,32 @@ impl<M: Model> Walk<M> {
         };
         let (Some(message), harness) = (message, &slot) else {
             // The closure returned, so it filled the slot.
-            return slot.map(Harness::into_run).ok_or_else(|| {
-                Box::new(failure_of::<M>(
-                    plan,
-                    seed,
-                    0,
-                    "the run left no model".into(),
-                    &[],
-                ))
-            });
+            return slot
+                .map(|harness| {
+                    let mut run = harness.into_run();
+                    run.timeline = timeline.clone();
+                    run.discoveries = scout.found;
+                    run
+                })
+                .ok_or_else(|| {
+                    Box::new(failure_of::<M>(
+                        plan,
+                        timeline,
+                        0,
+                        "the run left no model".into(),
+                        &[],
+                    ))
+                });
         };
         let mut failure = match harness {
-            Some(harness) => failure_of(plan, seed, harness.core.step, message, &harness.core.log),
-            None => failure_of::<M>(plan, seed, 0, message, &[]),
+            Some(harness) => failure_of(
+                plan,
+                timeline,
+                harness.core.step,
+                message,
+                &harness.core.log,
+            ),
+            None => failure_of::<M>(plan, timeline, 0, message, &[]),
         };
         failure.swarm = swarm.describe::<M>();
         if let Some(harness) = harness {
@@ -660,10 +798,11 @@ impl<M: Model> Walk<M> {
         plan: &Plan,
         swarm: &Swarm,
         judge: &mut Judge,
+        scout: &mut Scout,
     ) -> Result<(), String> {
         let actions = M::actions();
         let weights = self.weights(Phase::Chaos, Some(swarm));
-        for _ in 0..plan.chaos_steps {
+        for step in 0..plan.chaos_steps {
             match harness.core.rng.weighted(&weights) {
                 Some(0) => {
                     for _ in 0..self.deliveries {
@@ -680,6 +819,7 @@ impl<M: Model> Walk<M> {
                 None => {}
             }
             Self::close(harness, judge)?;
+            scout.after(step, &mut harness.core.rng);
         }
         Ok(())
     }
@@ -821,27 +961,176 @@ struct Plan {
     pinned: bool,
     /// The variables that run one seed again, up to the `=` of the seed.
     replay: Option<String>,
+    /// The timelines each root seed may add.
+    explore: u64,
+    /// The one timeline asked for.
+    timeline: Option<Timeline>,
 }
 
 fn failure_of<M: Model>(
     plan: &Plan,
-    seed: u64,
+    timeline: &Timeline,
     step: u64,
     message: String,
     log: &[crate::Logged<M>],
 ) -> SeedFailure {
     let from = log.len().saturating_sub(plan.tail);
+    let replay = plan.replay.as_ref().map(|variables| {
+        if timeline.branches.is_empty() {
+            format!("{variables}{}", timeline.seed)
+        } else {
+            // `variables` ends with `<PREFIX>_SEED=`: a branched run needs
+            // the timeline in its place.
+            let prefix = variables.strip_suffix("SEED=").unwrap_or(variables);
+            format!("{prefix}TIMELINE={timeline}")
+        }
+    });
     SeedFailure {
-        seed,
+        seed: timeline.seed,
+        timeline: timeline.clone(),
         step,
         message,
         tail: log[from..].iter().map(|l| format!("{l:?}")).collect(),
         state: String::new(),
         swarm: String::new(),
-        replay: plan
-            .replay
-            .as_ref()
-            .map(|variables| format!("{variables}{seed}")),
+        replay,
+    }
+}
+
+/// The runs a campaign still owes: its root seeds, and the children of an
+/// exploring campaign.
+///
+/// The children of a discovery run before the next root seed, breadth
+/// first, so a discovery is followed while it is fresh. The budget is the
+/// campaign's, not a seed's: once a root seed finds what the earlier ones
+/// found, it has nothing new to branch from, and its share goes to the
+/// points that found something. When every root ran and the queue is dry
+/// with budget left, each discovery point gets `branching` more children,
+/// newest point first, round after round, until the budget is spent.
+struct Frontier {
+    next_root: u64,
+    roots_left: u64,
+    queue: VecDeque<Timeline>,
+    /// Each discovery point: the run, its step, and the next child number.
+    points: Vec<(Timeline, u64, u64)>,
+    budget: u64,
+    branching: u64,
+}
+
+impl Frontier {
+    fn new(first: u64, roots: u64, budget: u64, branching: u64) -> Self {
+        Self {
+            next_root: first,
+            roots_left: roots,
+            queue: VecDeque::new(),
+            points: Vec::new(),
+            budget,
+            branching: branching.max(1),
+        }
+    }
+
+    /// The next run, or `None` when every root ran, the budget is spent and
+    /// the queue is empty.
+    fn next(&mut self) -> Option<Timeline> {
+        if let Some(child) = self.queue.pop_front() {
+            return Some(child);
+        }
+        if self.roots_left > 0 {
+            self.roots_left -= 1;
+            let seed = self.next_root;
+            // Seeds wrap at the end of `u64`: a campaign is never cut short.
+            self.next_root = seed.wrapping_add(1);
+            return Some(Timeline::root(seed));
+        }
+        if self.budget > 0 && !self.points.is_empty() {
+            let branching = self.branching;
+            for index in (0..self.points.len()).rev() {
+                self.spawn(index, branching);
+            }
+        }
+        self.queue.pop_front()
+    }
+
+    /// `timeline` found something new after each step of `steps`.
+    fn found(&mut self, timeline: &Timeline, steps: &[u64]) {
+        for step in steps {
+            self.points.push((timeline.clone(), *step, 0));
+            let index = self.points.len() - 1;
+            self.spawn(index, self.branching);
+        }
+    }
+
+    fn spawn(&mut self, index: usize, children: u64) {
+        let (timeline, step, nth) = &mut self.points[index];
+        for _ in 0..children {
+            if self.budget == 0 {
+                return;
+            }
+            self.budget -= 1;
+            self.queue.push_back(timeline.child(*step, *nth));
+            *nth += 1;
+        }
+    }
+}
+
+/// What one run of an exploring campaign watches after each chaos step: the
+/// discoveries of the assertion table and the edge count, and the branch
+/// points of its timeline.
+struct Scout {
+    /// The run explores: it reads the signals.
+    on: bool,
+    edges: Option<fn() -> usize>,
+    discoveries: u64,
+    covered: usize,
+    /// The branch points still ahead, in step order.
+    branches: std::vec::IntoIter<crate::timeline::Branch>,
+    next: Option<crate::timeline::Branch>,
+    /// The buggify stream is this walk's: a branch reseeds it too.
+    buggify: bool,
+    /// Discoveries before this step are an ancestor's.
+    after: Option<u64>,
+    /// The chaos steps after which this run found something new.
+    found: Vec<u64>,
+}
+
+impl Scout {
+    fn new(installed: &Installed, edges: Option<fn() -> usize>, timeline: &Timeline) -> Self {
+        let mut branches = timeline.branches.clone().into_iter();
+        let next = branches.next();
+        let on = installed.hooks;
+        Self {
+            on,
+            edges: edges.filter(|_| on),
+            discoveries: DISCOVERIES.with(Cell::get),
+            covered: edges.filter(|_| on).map_or(0, |read| read()),
+            branches,
+            next,
+            buggify: installed.buggify.is_some(),
+            after: timeline.last_step(),
+            found: Vec::new(),
+        }
+    }
+
+    /// The end of chaos step `step`: note a discovery, then take the branch
+    /// point of this step.
+    fn after(&mut self, step: u64, rng: &mut Rng) {
+        if self.on {
+            let discoveries = DISCOVERIES.with(Cell::get);
+            let covered = self.edges.map_or(0, |read| read());
+            let new = discoveries > self.discoveries || covered > self.covered;
+            self.discoveries = discoveries;
+            self.covered = self.covered.max(covered);
+            if new && self.after.is_none_or(|last| step > last) {
+                self.found.push(step);
+            }
+        }
+        if let Some(branch) = self.next.filter(|branch| branch.step == step) {
+            *rng = Rng::new(branch.seed);
+            if self.buggify {
+                BUGGIFY_STREAM.with(|stream| stream.set(branch.seed ^ BUGGIFY_SALT));
+            }
+            self.next = self.branches.next();
+        }
     }
 }
 
@@ -931,10 +1220,13 @@ struct Installed {
     table: bool,
     /// Buggify is this walk's: no simulation was running before.
     buggify: Option<f64>,
+    /// The discovery hook is this walk's: the campaign explores outside a
+    /// simulation.
+    hooks: bool,
 }
 
 impl Installed {
-    fn new<M: Model>(walk: &Walk<M>) -> Self {
+    fn new<M: Model>(walk: &Walk<M>, explore: bool) -> Self {
         let table = moonpool_assertions::assertion_table_ptr().is_null();
         if table {
             // Sites are declared only in a table of this walk: a declaration
@@ -958,7 +1250,18 @@ impl Installed {
         if buggify.is_some() {
             moonpool_buggify::set_random_source(buggify_draw);
         }
-        Self { table, buggify }
+        // Inside a simulation the explorer of the simulation owns the hook.
+        let hooks = explore && !moonpool_buggify::is_simulated();
+        if hooks {
+            moonpool_assertions::set_discovery_hooks(moonpool_assertions::DiscoveryHooks {
+                on_discovery: count_discovery,
+            });
+        }
+        Self {
+            table,
+            buggify,
+            hooks,
+        }
     }
 
     fn start_seed(&self, seed: u64) {
@@ -971,6 +1274,9 @@ impl Installed {
 
 impl Drop for Installed {
     fn drop(&mut self) {
+        if self.hooks {
+            moonpool_assertions::clear_discovery_hooks();
+        }
         if self.buggify.is_some() {
             moonpool_buggify::buggify_reset();
             moonpool_buggify::clear_random_source();
@@ -1171,6 +1477,30 @@ mod tests {
     }
 
     #[test]
+    fn the_environment_sets_the_exploration_and_pins_a_timeline() {
+        let walk = Walk::<Nothing>::new().explore(10);
+        assert_eq!(walk.plan_from(env(&[])).expect("nothing").explore, 10);
+        let plan = walk
+            .plan_from(env(&[("MOONPOOL_WALK_EXPLORE", "500")]))
+            .expect("a number");
+        assert_eq!(plan.explore, 500);
+
+        let plan = walk
+            .plan_from(env(&[("MOONPOOL_WALK_TIMELINE", "9@4:ab")]))
+            .expect("a timeline");
+        assert!(plan.pinned, "one timeline: coverage is not judged");
+        assert_eq!((plan.first, plan.count, plan.explore), (9, 1, 0));
+        assert_eq!(
+            plan.timeline.map(|t| t.to_string()).as_deref(),
+            Some("9@4:ab")
+        );
+        assert!(
+            walk.plan_from(env(&[("MOONPOOL_WALK_TIMELINE", "9@x")]))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn a_variable_that_is_not_a_number_stops_the_campaign() {
         let walk = Walk::<Nothing>::new();
         let error = walk
@@ -1224,6 +1554,12 @@ mod tests {
     #[test]
     fn the_walk_removes_what_it_installed() {
         Walk::<Nothing>::new().seeds(1).env_prefix(None).run();
+        assert!(moonpool_assertions::assertion_table_ptr().is_null());
+        Walk::<Nothing>::new()
+            .seeds(1)
+            .explore(3)
+            .env_prefix(None)
+            .run();
         assert!(moonpool_assertions::assertion_table_ptr().is_null());
         assert!(!moonpool_buggify::is_simulated());
     }

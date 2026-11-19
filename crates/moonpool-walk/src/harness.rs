@@ -203,6 +203,8 @@ impl<M: Model> Harness<M> {
     pub fn into_run(self) -> Run<M> {
         Run {
             seed: self.core.seed,
+            timeline: crate::Timeline::root(self.core.seed),
+            discoveries: Vec::new(),
             model: self.model,
             log: self.core.log,
             stats: self.core.stats,
