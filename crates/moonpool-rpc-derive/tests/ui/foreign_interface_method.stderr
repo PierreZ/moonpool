@@ -14,5 +14,7 @@ help: the trait `InterfaceMethod<Kv>` is not implemented for `Other`
 note: required by a bound in `InterfaceRef::<I>::method`
   --> $WORKSPACE/crates/moonpool-rpc/src/interface/reference.rs
    |
+   | impl<I: RpcInterface> InterfaceRef<I> {
+...
    |     pub fn method<M: InterfaceMethod<I>>(&self) -> Result<ServiceRef<M>, DecodeError> {
    |                      ^^^^^^^^^^^^^^^^^^ required by this bound in `InterfaceRef::<I>::method`
