@@ -29,7 +29,7 @@
 //! the draws the same regime without one makes, and a regime without one
 //! (`wipe_budget: None`) never reads the ledger at all.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -75,6 +75,9 @@ pub struct WipeBudget {
 struct Wiped {
     /// When the wiped process restarted, once it has.
     restarted_at: Option<Duration>,
+    /// How the regime that wiped it heals it: [`WipeHeal::Signal`] for a
+    /// wipe no budgeted regime decided.
+    heal: WipeHeal,
 }
 
 impl Wiped {
@@ -157,19 +160,27 @@ impl WipeLedger {
         self.0.lock().expect("Mutex poisoned: prior task panicked")
     }
 
-    /// Record a wipe decided now: `ip` is unhealed and not yet restarted,
-    /// whatever an earlier wipe of it recorded.
-    pub(crate) fn record_wipe(&self, ip: IpAddr) {
-        self.lock().insert(ip, Wiped { restarted_at: None });
+    /// Record a wipe decided now, by a regime that heals it under `heal`:
+    /// `ip` is unhealed and not yet restarted, whatever an earlier wipe of
+    /// it recorded.
+    pub(crate) fn record_wipe(&self, ip: IpAddr, heal: WipeHeal) {
+        self.lock().insert(
+            ip,
+            Wiped {
+                restarted_at: None,
+                heal,
+            },
+        );
     }
 
     /// Record a wipe at its kill: a wipe whose decision did not record it
     /// (a process [crashing itself](crate::SelfCrash::crash)) becomes
     /// unhealed; one its decision recorded keeps that record.
     pub(crate) fn note_wipe_kill(&self, ip: IpAddr) {
-        self.lock()
-            .entry(ip)
-            .or_insert(Wiped { restarted_at: None });
+        self.lock().entry(ip).or_insert(Wiped {
+            restarted_at: None,
+            heal: WipeHeal::Signal,
+        });
     }
 
     /// The process at `ip` restarted at `now`: an unhealed wipe of it
@@ -180,6 +191,18 @@ impl WipeLedger {
         {
             wiped.restarted_at = Some(now);
         }
+    }
+
+    /// The processes whose disk is still lost at `now`: wiped, and not yet
+    /// healed under the heal of the regime that wiped them. A replicated
+    /// fault pattern counts each one's domain as holding damage to every
+    /// record (see [`ReplicatedFaults`](crate::ReplicatedFaults)).
+    pub(crate) fn lost(&self, now: Duration) -> BTreeSet<IpAddr> {
+        self.lock()
+            .iter()
+            .filter(|(_, wiped)| wiped.unhealed(wiped.heal, now))
+            .map(|(ip, _)| *ip)
+            .collect()
     }
 
     /// How many of `ips` are unhealed under `heal` at `now`.
@@ -205,7 +228,7 @@ mod tests {
         let state = StateHandle::new();
         WipeLedger::install(&state);
         let ledger = WipeLedger::of(&state).expect("installed");
-        ledger.record_wipe(ip(1));
+        ledger.record_wipe(ip(1), WipeHeal::Signal);
         assert_eq!(WipeLedger::unhealed(&state), vec![ip(1)]);
         assert!(WipeLedger::heal(&state, "10.0.1.1"));
         assert!(!WipeLedger::heal(&state, "10.0.1.1"));
@@ -232,7 +255,7 @@ mod tests {
         let one = "10.0.1.1".to_string();
         let pool = [&one];
         let heal = WipeHeal::After(Duration::from_secs(5));
-        ledger.record_wipe(ip(1));
+        ledger.record_wipe(ip(1), WipeHeal::Signal);
         // Not restarted yet: unhealed however long it has been down.
         assert_eq!(
             ledger.unhealed_among(&pool, heal, Duration::from_secs(60)),

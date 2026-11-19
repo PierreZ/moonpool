@@ -30,6 +30,12 @@
 //!
 //! In each, a record's copies hold damage in at most `tolerance` domains at
 //! once, and so does node-local data: by construction, with no ledger.
+//!
+//! A wiped disk holds no copy at all, so a process wiped and not yet healed
+//! (in the run's [`WipeLedger`](crate::WipeLedger)) counts as damage in its
+//! domain for every record: a fault lands only where that domain is already
+//! among the ones the fault's records may be damaged in, and a rolling turn
+//! holds on a window with a lost disk.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -294,9 +300,15 @@ impl ReplicationPlan {
     }
 
     /// Whether a random fault may damage `sector` of `owner`'s file at
-    /// `path`, given what `owner` published and, for a rolling pattern,
-    /// where the turn starts. A process outside the group is not
-    /// constrained.
+    /// `path`, given what `owner` published, for a rolling pattern where
+    /// the turn starts, and the processes whose disk is `lost` (wiped and
+    /// not healed). A process outside the group is not constrained.
+    ///
+    /// A lost disk holds no copy of any record, so its domain counts as
+    /// damaged for every stripe: the fault lands only if each lost member's
+    /// domain is already among the domains this fault's records may be
+    /// damaged in. Otherwise a wipe in one domain and damage in another
+    /// leave a record with no clean copy at `tolerance = 1`.
     pub(crate) fn allows(
         &self,
         owner: IpAddr,
@@ -304,10 +316,15 @@ impl ReplicationPlan {
         path: &str,
         sector: u64,
         turn: usize,
+        lost: &BTreeSet<IpAddr>,
     ) -> bool {
         let Some(&domain) = self.domain_of.get(&owner) else {
             return true;
         };
+        if !self.lost_within(domain, turn, lost) {
+            crate::assert_reachable!("storage: a lost disk elsewhere spares a replica");
+            return false;
+        }
         match &self.pattern {
             FaultPattern::Spared => false,
             FaultPattern::Minority { .. } => self.marked[domain],
@@ -329,6 +346,38 @@ impl ReplicationPlan {
                     .all(|stripe| self.rotates_to(domain, stripe))
             }
         }
+    }
+}
+
+impl ReplicationPlan {
+    /// The domains of the members in `lost`, the group's lost copies.
+    pub(crate) fn lost_domains<'a>(
+        &'a self,
+        lost: &'a BTreeSet<IpAddr>,
+    ) -> impl Iterator<Item = usize> + 'a {
+        lost.iter().filter_map(|ip| self.domain(*ip))
+    }
+
+    /// Whether every domain holding a lost copy is one a fault on `domain`
+    /// may leave damaged anyway, so the fault keeps each record within
+    /// `tolerance` domains: the marked ones of a minority, the window of a
+    /// rolling turn, and for a stripe rotation the `local` domains plus
+    /// `domain` itself (a stripe-rotated fault on an unmarked domain damages
+    /// only stripes rotating to it).
+    fn lost_within(&self, domain: usize, turn: usize, lost: &BTreeSet<IpAddr>) -> bool {
+        self.lost_domains(lost).all(|held| match &self.pattern {
+            FaultPattern::Spared => true,
+            FaultPattern::Minority { .. } => self.marked[held],
+            FaultPattern::Rolling { .. } => self.in_window(held, turn),
+            FaultPattern::Striped { .. } => self.marked[held] || held == domain,
+        })
+    }
+
+    /// Whether the rolling window starting at `turn` holds a lost copy:
+    /// the turn then stays, as it stays on damage.
+    pub(crate) fn window_lost(&self, turn: usize, lost: &BTreeSet<IpAddr>) -> bool {
+        self.lost_domains(lost)
+            .any(|domain| self.in_window(domain, turn))
     }
 }
 
@@ -565,6 +614,86 @@ mod tests {
         format!("10.0.1.{n}").parse().expect("ip")
     }
 
+    /// No lost disk.
+    fn none() -> BTreeSet<IpAddr> {
+        BTreeSet::new()
+    }
+
+    #[test]
+    fn a_lost_disk_counts_as_its_domain_holding_damage() {
+        let zones = localities(&["a", "b", "c"]);
+        // A minority marks zone a; zone b's process is wiped and unhealed.
+        let minority = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone),
+            &zones,
+            PatternKind::Minority,
+            |_| 0,
+        );
+        let lost: BTreeSet<IpAddr> = [ip(2)].into();
+        assert!(minority.allows(ip(1), None, "x", 0, 0, &none()));
+        assert!(
+            !minority.allows(ip(1), None, "x", 0, 0, &lost),
+            "zone a would damage a second copy while zone b holds none"
+        );
+        let marked: BTreeSet<IpAddr> = [ip(1)].into();
+        assert!(
+            minority.allows(ip(1), None, "x", 0, 0, &marked),
+            "a lost disk in the damaged domain itself costs nothing more"
+        );
+
+        // A rolling turn on zone a may not damage while zone b is lost,
+        // and the turn holds on a window with a lost disk.
+        let rolling = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone),
+            &zones,
+            PatternKind::Rolling,
+            |_| 0,
+        );
+        assert!(!rolling.allows(ip(1), None, "x", 0, 0, &lost));
+        assert!(!rolling.window_lost(0, &lost));
+        assert!(rolling.window_lost(1, &lost));
+        assert!(rolling.allows(ip(2), None, "x", 0, 1, &lost));
+
+        // A stripe rotation damages a stripe only in the lost domain.
+        let striped = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone),
+            &zones,
+            PatternKind::Striped,
+            |_| 0,
+        );
+        let regions: Vec<LayoutRegion> = (0..9)
+            .map(|s| region(s * 512..(s + 1) * 512, Some(s)))
+            .collect();
+        let layout = LayoutIndex::new(&regions);
+        for stripe in 0..9 {
+            let damaged: Vec<u8> = (1..=3)
+                .filter(|n| striped.allows(ip(*n), Some(&layout), "wal/seg", stripe, 0, &lost))
+                .collect();
+            assert!(
+                damaged.iter().all(|n| *n == 2),
+                "stripe {stripe} damaged outside the lost zone: {damaged:?}"
+            );
+        }
+
+        // At tolerance 2, one lost zone leaves room for one more.
+        let wide = ReplicationPlan::draw(
+            ReplicatedFaults::new(DomainLevel::Zone).tolerance(2),
+            &zones,
+            PatternKind::Minority,
+            |_| 0,
+        );
+        let FaultPattern::Minority { domains } = wide.pattern() else {
+            panic!("a minority");
+        };
+        assert_eq!(domains, &["a".to_string(), "c".to_string()]);
+        let lost_c: BTreeSet<IpAddr> = [ip(3)].into();
+        assert!(
+            !wide.allows(ip(1), None, "x", 0, 0, &lost),
+            "a, c and lost b"
+        );
+        assert!(wide.allows(ip(1), None, "x", 0, 0, &lost_c), "a and lost c");
+    }
+
     fn region(bytes: Range<u64>, stripe: Option<u64>) -> LayoutRegion {
         LayoutRegion {
             path: "wal/seg".to_string(),
@@ -626,7 +755,7 @@ mod tests {
         let layout = LayoutIndex::new(&regions);
         for stripe in 0..9 {
             let damaged: Vec<u8> = (1..=3)
-                .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", stripe, 0))
+                .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", stripe, 0, &none()))
                 .collect();
             assert_eq!(damaged.len(), 1, "stripe {stripe}: {damaged:?}");
         }
@@ -643,7 +772,7 @@ mod tests {
         );
         // Stripes 0 and 1 share sector 0: no domain may damage it.
         let layout = LayoutIndex::new(&[region(0..256, Some(0)), region(256..512, Some(1))]);
-        assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0, 0)));
+        assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0, 0, &none())));
     }
 
     #[test]
@@ -657,12 +786,12 @@ mod tests {
         );
         let layout = LayoutIndex::new(&[region(0..512, None)]);
         let damaged: Vec<u8> = (1..=3)
-            .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", 0, 0))
+            .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", 0, 0, &none()))
             .collect();
         assert_eq!(damaged, vec![2], "domain index 1 is zone b");
         // Bytes never published count as node-local too.
-        assert!(plan.allows(ip(2), None, "other", 7, 0));
-        assert!(!plan.allows(ip(1), None, "other", 7, 0));
+        assert!(plan.allows(ip(2), None, "other", 7, 0, &none()));
+        assert!(!plan.allows(ip(1), None, "other", 7, 0, &none()));
     }
 
     #[test]
@@ -682,7 +811,7 @@ mod tests {
             "at tolerance one no domain takes node-local damage"
         );
         let layout = LayoutIndex::new(&[region(0..512, None)]);
-        assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0, 0)));
+        assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0, 0, &none())));
     }
 
     #[test]
@@ -700,7 +829,7 @@ mod tests {
         let layout = LayoutIndex::new(&regions);
         for stripe in 0..12 {
             let damaged: Vec<u8> = (1..=4)
-                .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", stripe, 0))
+                .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", stripe, 0, &none()))
                 .collect();
             assert_eq!(damaged.len(), 2, "stripe {stripe}: {damaged:?}");
             assert!(damaged.contains(&1), "zone a is node-local: {damaged:?}");
@@ -725,7 +854,7 @@ mod tests {
             "tolerance is clamped below the domain count"
         );
         let spared = (1..=4)
-            .filter(|n| !plan.allows(ip(*n), None, "x", 0, 0))
+            .filter(|n| !plan.allows(ip(*n), None, "x", 0, 0, &none()))
             .count();
         assert!(spared >= 1, "one domain keeps every record");
     }
@@ -740,8 +869,11 @@ mod tests {
             |_| 0,
         );
         assert_eq!(plan.pattern(), &FaultPattern::Spared);
-        assert!(!plan.allows(ip(1), None, "x", 0, 0));
-        assert!(plan.allows(ip(9), None, "x", 0, 0), "outside the topology");
+        assert!(!plan.allows(ip(1), None, "x", 0, 0, &none()));
+        assert!(
+            plan.allows(ip(9), None, "x", 0, 0, &none()),
+            "outside the topology"
+        );
     }
 
     #[test]
@@ -757,7 +889,9 @@ mod tests {
         for turn in 0..3 {
             for sector in 0..2 {
                 let damaged: Vec<u8> = (1..=3)
-                    .filter(|n| plan.allows(ip(*n), Some(&layout), "wal/seg", sector, turn))
+                    .filter(|n| {
+                        plan.allows(ip(*n), Some(&layout), "wal/seg", sector, turn, &none())
+                    })
                     .collect();
                 let expected = u8::try_from(turn + 1).expect("small");
                 assert_eq!(damaged, vec![expected], "turn {turn}, sector {sector}");

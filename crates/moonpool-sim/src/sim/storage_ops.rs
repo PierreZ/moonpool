@@ -264,6 +264,12 @@ impl SimWorld {
         self.inner.write().storage.set_shard_book(book);
     }
 
+    /// Install the run's wipe ledger: a replicated fault pattern counts a
+    /// process wiped and not yet healed as a domain holding damage.
+    pub(crate) fn set_wipe_ledger(&self, ledger: Option<crate::runner::wipe::WipeLedger>) {
+        self.inner.write().storage.set_wipe_ledger(ledger);
+    }
+
     /// Whether `ip`'s copy of `(shard, stripe)` is clean on its disk (failed
     /// disks and damaged sectors; wipes are the book's).
     pub(crate) fn shard_copy_intact(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {

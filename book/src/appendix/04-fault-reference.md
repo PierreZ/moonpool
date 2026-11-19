@@ -110,6 +110,8 @@ A crash (any `RebootKind::Crash`, `CrashAndWipe`, `crash_self`, or a disk crash 
 
 The stripe key comes from `LayoutRegion::stripe` (the journal uses the entry position), so one pattern hits the same position on every replica.
 
+A process wiped and not yet healed (in the `WipeLedger`) counts as damage in its domain for every record, so the patterns never damage a second copy while a wiped replica is still empty.
+
 ## Process Faults
 
 | Fault | Source | What happens |

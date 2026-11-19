@@ -498,6 +498,12 @@ impl StorageEngine {
         self.state.shards = book;
     }
 
+    /// Install the run's wipe ledger, which the replicated fault patterns
+    /// read (see `StorageState::wipes`).
+    pub(crate) fn set_wipe_ledger(&mut self, ledger: Option<crate::runner::wipe::WipeLedger>) {
+        self.state.wipes = ledger;
+    }
+
     /// Whether `ip` may lose every copy it holds (see
     /// `StorageState::replica_loss_allowed`).
     pub(crate) fn replica_loss_allowed(&self, ip: IpAddr) -> bool {

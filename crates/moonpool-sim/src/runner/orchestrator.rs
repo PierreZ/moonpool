@@ -329,9 +329,11 @@ impl WorkloadOrchestrator {
         for (key, value) in seed_values {
             state.publish(key, *value);
         }
-        // The run's wipe ledger: draws nothing, read only by a regime with
-        // a wipe budget.
+        // The run's wipe ledger: draws nothing, read by a regime with a
+        // wipe budget and by the replicated fault patterns, which count an
+        // unhealed wipe as a lost copy.
         crate::runner::wipe::WipeLedger::install(&state);
+        sim.set_wipe_ledger(crate::runner::wipe::WipeLedger::of(&state));
         // The run's shard book: every `shard!` declaration lands in it, and
         // the gate, the disks and the network read it.
         let shard_book = crate::runner::shard::ShardBook::new(shard_faults);
