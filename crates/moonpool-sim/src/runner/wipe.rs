@@ -22,12 +22,25 @@
 //! [`WipeHeal::After`] heals a process a fixed simulated time after its
 //! restart, with no cooperation from the code under test.
 //!
+//! Each wipe heals the way the regime that decided it heals: its budget's
+//! [`WipeHeal`], or [`WipeHeal::Signal`] for a wipe no budgeted regime
+//! decided (a scripted reboot, a regime without a budget, a process
+//! crashing itself). Every reader of the ledger, a budget and the
+//! replicated fault patterns alike, judges a wipe by that one heal.
+//!
+//! # Replicated fault patterns
+//!
+//! A wiped disk holds no copy of any record, so the
+//! [replicated fault patterns](crate::ReplicatedFaults) read the ledger
+//! too: an unhealed wipe counts as damage in its failure domain. A drawn
+//! wipe that would put a group past its `tolerance`, because another
+//! domain of the group already holds damage, becomes a crash.
+//!
 //! # Determinism
 //!
 //! The budget draws nothing. A downgrade is decided *after* the reboot kind
 //! is drawn, from the ledger alone, so a regime with a budget makes exactly
-//! the draws the same regime without one makes, and a regime without one
-//! (`wipe_budget: None`) never reads the ledger at all.
+//! the draws the same regime without one makes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -81,9 +94,10 @@ struct Wiped {
 }
 
 impl Wiped {
-    /// Whether this wipe is still unhealed under `heal` at `now`.
-    fn unhealed(self, heal: WipeHeal, now: Duration) -> bool {
-        match heal {
+    /// Whether this wipe is still unhealed at `now`, under the heal of the
+    /// regime that decided it.
+    fn unhealed(self, now: Duration) -> bool {
+        match self.heal {
             WipeHeal::Signal => true,
             WipeHeal::After(bound) => self
                 .restarted_at
@@ -99,10 +113,12 @@ impl Wiped {
 /// wipe is recorded, whoever decided it: an attrition regime, a scripted
 /// [`FaultContext::reboot`](crate::FaultContext::reboot) with
 /// [`RebootKind::CrashAndWipe`](crate::RebootKind::CrashAndWipe), or a
-/// process [crashing itself](crate::SelfCrash::crash). Only a regime with a
-/// [`WipeBudget`] reads it, and only to downgrade its own drawn wipes:
-/// scripted wipes are never refused, but they do count against a budgeted
-/// pool they land in.
+/// process [crashing itself](crate::SelfCrash::crash). Two readers judge
+/// wipes by it: a regime with a [`WipeBudget`], to downgrade its own drawn
+/// wipes (scripted wipes are never refused, but they do count against a
+/// budgeted pool they land in), and the
+/// [replicated fault patterns](crate::ReplicatedFaults), which count an
+/// unhealed wipe as damage in its domain.
 #[derive(Debug, Clone, Default)]
 pub struct WipeLedger(Arc<Mutex<BTreeMap<IpAddr, Wiped>>>);
 
@@ -200,17 +216,17 @@ impl WipeLedger {
     pub(crate) fn lost(&self, now: Duration) -> BTreeSet<IpAddr> {
         self.lock()
             .iter()
-            .filter(|(_, wiped)| wiped.unhealed(wiped.heal, now))
+            .filter(|(_, wiped)| wiped.unhealed(now))
             .map(|(ip, _)| *ip)
             .collect()
     }
 
-    /// How many of `ips` are unhealed under `heal` at `now`.
-    pub(crate) fn unhealed_among(&self, ips: &[&String], heal: WipeHeal, now: Duration) -> usize {
+    /// How many of `ips` are unhealed at `now`.
+    pub(crate) fn unhealed_among(&self, ips: &[&String], now: Duration) -> usize {
         let ledger = self.lock();
         ips.iter()
             .filter_map(|ip| ip.parse::<IpAddr>().ok())
-            .filter(|ip| ledger.get(ip).is_some_and(|w| w.unhealed(heal, now)))
+            .filter(|ip| ledger.get(ip).is_some_and(|w| w.unhealed(now)))
             .count()
     }
 }
@@ -254,26 +270,36 @@ mod tests {
         let ledger = WipeLedger::default();
         let one = "10.0.1.1".to_string();
         let pool = [&one];
-        let heal = WipeHeal::After(Duration::from_secs(5));
-        ledger.record_wipe(ip(1), WipeHeal::Signal);
+        ledger.record_wipe(ip(1), WipeHeal::After(Duration::from_secs(5)));
         // Not restarted yet: unhealed however long it has been down.
-        assert_eq!(
-            ledger.unhealed_among(&pool, heal, Duration::from_secs(60)),
-            1
-        );
+        assert_eq!(ledger.unhealed_among(&pool, Duration::from_secs(60)), 1);
         ledger.note_restart(ip(1), Duration::from_secs(60));
+        assert_eq!(ledger.unhealed_among(&pool, Duration::from_secs(64)), 1);
+        assert_eq!(ledger.unhealed_among(&pool, Duration::from_secs(65)), 0);
+    }
+
+    #[test]
+    fn lost_follows_the_heal_of_each_wipe() {
+        let ledger = WipeLedger::default();
+        ledger.record_wipe(ip(1), WipeHeal::After(Duration::from_secs(5)));
+        ledger.record_wipe(ip(2), WipeHeal::Signal);
+        ledger.note_restart(ip(1), Duration::from_secs(10));
+        ledger.note_restart(ip(2), Duration::from_secs(10));
         assert_eq!(
-            ledger.unhealed_among(&pool, heal, Duration::from_secs(64)),
-            1
+            ledger.lost(Duration::from_secs(14)),
+            [ip(1), ip(2)].into(),
+            "both are lost before the bound"
         );
         assert_eq!(
-            ledger.unhealed_among(&pool, heal, Duration::from_secs(65)),
-            0
+            ledger.lost(Duration::from_secs(15)),
+            [ip(2)].into(),
+            "the bound heals only the wipe that carries it"
         );
-        // A signal-healed regime still counts it.
+        let two = "10.0.1.2".to_string();
         assert_eq!(
-            ledger.unhealed_among(&pool, WipeHeal::Signal, Duration::from_secs(65)),
-            1
+            ledger.unhealed_among(&[&two], Duration::from_secs(3600)),
+            1,
+            "a signal-healed wipe stays unhealed for the budget too"
         );
     }
 
@@ -281,15 +307,13 @@ mod tests {
     fn a_wipe_kill_records_an_unrecorded_wipe_and_keeps_a_recorded_one() {
         let ledger = WipeLedger::default();
         let one = "10.0.1.1".to_string();
-        let heal = WipeHeal::After(Duration::from_secs(1));
         ledger.note_wipe_kill(ip(1));
-        assert_eq!(ledger.unhealed_among(&[&one], heal, Duration::ZERO), 1);
+        assert_eq!(ledger.unhealed_among(&[&one], Duration::ZERO), 1);
+        // A recorded wipe keeps its heal and its restart clock across the
+        // kill notice.
+        ledger.record_wipe(ip(1), WipeHeal::After(Duration::from_secs(1)));
         ledger.note_restart(ip(1), Duration::ZERO);
-        // A second kill notice must not reset the restart clock.
         ledger.note_wipe_kill(ip(1));
-        assert_eq!(
-            ledger.unhealed_among(&[&one], heal, Duration::from_secs(1)),
-            0
-        );
+        assert_eq!(ledger.unhealed_among(&[&one], Duration::from_secs(1)), 0);
     }
 }

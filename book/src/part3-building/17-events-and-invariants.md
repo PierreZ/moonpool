@@ -175,6 +175,7 @@ The `kind` values, with their fields:
 | Storage | `storage_read_fault`, `storage_sync_fault` | `ip`, `file_id` |
 | | `storage_write_fault` | `ip`, `file_id`, `write_kind` (`phantom`, `misdirected`, `corruption`) |
 | | `storage_disk_failure`, `storage_crash`, `storage_wipe` | `ip` |
+| | `replica_still_lost` (at shutdown: a wiped process a replicated fault pattern still counts as a lost copy) | `ip` |
 | | `storage_crash_sectors` | `ip`, `path`, `kept_old`, `kept_new`, `lost`, `latent`, `shorn`, `lost_synced` (sector indexes, comma separated), `clean`, `length_reverted` |
 
 `storage_crash_sectors` follows each `storage_crash`, once per file that had unsynced writes. A clean crash keeps every unsynced write: it lists them all in `kept_new` and sets `clean`. It is read-only: it reports what the crash model decided for each sector and draws nothing, so it never changes a run. A recorder can draw a file as a row of sectors with it, and an invariant can tell "my unsynced write was lost" from "my synced write was lost".

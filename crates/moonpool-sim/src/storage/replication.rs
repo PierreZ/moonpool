@@ -257,6 +257,12 @@ impl ReplicationPlan {
         self.domain_of.get(&ip).copied()
     }
 
+    /// How many domains may hold damage to one record at once (0 for a
+    /// spared group, which takes none).
+    pub(crate) fn tolerance(&self) -> usize {
+        self.tolerance
+    }
+
     pub(crate) fn domain_count(&self) -> usize {
         self.marked.len()
     }

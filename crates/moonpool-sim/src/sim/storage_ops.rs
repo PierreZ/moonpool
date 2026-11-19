@@ -270,6 +270,20 @@ impl SimWorld {
         self.inner.write().storage.set_wipe_ledger(ledger);
     }
 
+    /// The wiped, unhealed processes a non-spared replicated fault pattern
+    /// covers now: the domains it counts as damaged for their lost disk.
+    pub(crate) fn lost_in_replicated_groups(&self) -> std::collections::BTreeSet<IpAddr> {
+        self.inner.read().storage.lost_in_groups()
+    }
+
+    /// Whether a wipe of `victim` now keeps every replicated fault pattern
+    /// covering it within its tolerance: no other domain of its group holds
+    /// damage that, with the victim's lost copy, would leave a record with
+    /// no clean copy.
+    pub(crate) fn wipe_keeps_tolerance(&self, victim: IpAddr) -> bool {
+        self.inner.read().storage.wipe_keeps_tolerance(victim)
+    }
+
     /// Whether `ip`'s copy of `(shard, stripe)` is clean on its disk (failed
     /// disks and damaged sectors; wipes are the book's).
     pub(crate) fn shard_copy_intact(&self, ip: IpAddr, shard: &str, stripe: Option<u64>) -> bool {

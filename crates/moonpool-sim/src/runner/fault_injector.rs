@@ -1128,7 +1128,7 @@ impl AttritionInjector {
             .filter(|ip| !victims.contains(ip))
             .collect();
         let unhealed = WipeLedger::of(ctx.state()).map_or(0, |ledger| {
-            ledger.unhealed_among(&others, budget.heal, ctx.sim.current_time())
+            ledger.unhealed_among(&others, ctx.sim.current_time())
         });
         if unhealed + victims.len() > budget.max_unhealed {
             assert_reachable!("attrition: wipe budget downgrades a wipe to a crash");
@@ -1229,7 +1229,26 @@ impl AttritionInjector {
     /// Reboot `ip` with this regime's delays, recording a wipe as healing
     /// under the regime's [`WipeBudget`](super::wipe::WipeBudget) (by a
     /// signal without one).
+    ///
+    /// A drawn wipe that would put a replicated fault pattern past its
+    /// tolerance, because another domain of the victim's group already
+    /// holds damage, becomes a crash: the wipe would lose the last clean
+    /// copy of a damaged record. Draws nothing.
     fn reboot(&self, ctx: &FaultContext, ip: &str, kind: RebootKind) -> SimulationResult<()> {
+        let kind = if kind == RebootKind::CrashAndWipe
+            && ip
+                .parse()
+                .is_ok_and(|victim| !ctx.sim.wipe_keeps_tolerance(victim))
+        {
+            assert_reachable!("attrition: damage elsewhere downgrades a wipe to a crash");
+            tracing::info!(
+                %ip,
+                "attrition: another domain holds damage, crashing instead of wiping"
+            );
+            RebootKind::Crash
+        } else {
+            kind
+        };
         let (recovery_range, grace_range) = self.delay_ranges();
         let heal = self
             .config

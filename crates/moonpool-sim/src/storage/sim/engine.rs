@@ -504,6 +504,18 @@ impl StorageEngine {
         self.state.wipes = ledger;
     }
 
+    /// The processes whose disk is lost now in a replicated group (see
+    /// `StorageState::lost_in_groups`).
+    pub(crate) fn lost_in_groups(&self) -> std::collections::BTreeSet<IpAddr> {
+        self.state.lost_in_groups()
+    }
+
+    /// Whether a wipe of `victim` now keeps every replicated group within
+    /// its tolerance (see `StorageState::wipe_keeps_tolerance`).
+    pub(crate) fn wipe_keeps_tolerance(&self, victim: IpAddr) -> bool {
+        self.state.wipe_keeps_tolerance(victim)
+    }
+
     /// Whether `ip` may lose every copy it holds (see
     /// `StorageState::replica_loss_allowed`).
     pub(crate) fn replica_loss_allowed(&self, ip: IpAddr) -> bool {

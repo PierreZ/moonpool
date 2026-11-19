@@ -178,7 +178,7 @@ impl PhaseStall {
                     .lock()
                     .expect("Mutex poisoned: prior task panicked")
                     .push(reason);
-                WorkloadOrchestrator::trigger_shutdown(sim, env.shutdown_signal);
+                WorkloadOrchestrator::trigger_shutdown(sim, env);
                 self.shutdown_triggered = true;
                 self.guard.reset_after_shutdown();
                 false
@@ -451,7 +451,7 @@ impl WorkloadOrchestrator {
                 .await
                 .map_err(|()| env.deadlock())?;
         results.extend(check_results);
-        Self::trigger_shutdown(sim, env.shutdown_signal);
+        Self::trigger_shutdown(sim, &env);
         results.extend(Self::stop_injectors(injectors).await);
         process_manager.abort_all();
         for panic in process_manager.take_panics() {
@@ -806,7 +806,7 @@ impl WorkloadOrchestrator {
             // A workload done early shuts its siblings down, unless chaos
             // lasts until the last one returns.
             if any_finished && !stall.shutdown_triggered && !chaos_until_run_ends {
-                Self::trigger_shutdown(sim, env.shutdown_signal);
+                Self::trigger_shutdown(sim, &env);
                 stall.shutdown_triggered = true;
                 // While a sibling still runs, let every task see the
                 // cancelled token before the next step runs the `Shutdown`
@@ -1700,9 +1700,26 @@ impl WorkloadOrchestrator {
     }
 
     /// Trigger shutdown and let each simulation engine drain its own waiters.
-    fn trigger_shutdown(sim: &mut SimWorld, shutdown_signal: &CancellationToken) {
+    ///
+    /// The first trigger also records a `replica_still_lost` fault for
+    /// each wiped process a replicated fault pattern still counts as a lost
+    /// copy, so a harness that never heals its wipes sees that the pattern
+    /// kept damage in that domain (or out of the group) since the wipe.
+    fn trigger_shutdown(sim: &mut SimWorld, env: &IterationEnv<'_>) {
         tracing::debug!("Triggering shutdown signal");
-        shutdown_signal.cancel();
+        if !env.shutdown_signal.is_cancelled() {
+            for ip in sim.lost_in_replicated_groups() {
+                tracing::warn!(
+                    %ip,
+                    "replicated fault patterns: a wiped process is still unhealed at the run's end"
+                );
+                env.obs.record_sim_fault(
+                    Self::sim_now_ms(sim),
+                    &SimFaultEvent::ReplicaStillLost { ip: ip.to_string() },
+                );
+            }
+        }
+        env.shutdown_signal.cancel();
 
         sim.schedule_event(crate::sim::Event::Shutdown, Duration::from_nanos(1));
     }
