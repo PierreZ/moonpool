@@ -99,5 +99,5 @@ fn same_seed_produces_identical_execution_traces() {
 #[test]
 fn other_seeds_also_complete() {
     let trace = run_once(7);
-    assert!(!trace.is_empty());
+    assert!(!trace.is_empty(), "the run produced a trace");
 }

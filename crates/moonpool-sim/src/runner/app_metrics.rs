@@ -292,7 +292,10 @@ mod tests {
     fn empty_handle_collects_nothing() {
         let handle = MetricsHandle::new();
         assert!(handle.is_empty());
-        assert!(handle.collect_all().is_empty());
+        assert!(
+            handle.collect_all().is_empty(),
+            "an empty handle collects no series"
+        );
         assert!(handle.get::<Counting>("10.0.1.1").is_none());
     }
 

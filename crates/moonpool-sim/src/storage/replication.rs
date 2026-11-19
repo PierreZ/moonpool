@@ -317,9 +317,7 @@ impl ReplicationPlan {
                     // Counted as damaged for every stripe already.
                     return true;
                 }
-                let mut stripes = layout
-                    .map(|layout| layout.stripes(path, sector))
-                    .unwrap_or_default();
+                let mut stripes = layout.map_or_default(|layout| layout.stripes(path, sector));
                 if stripes.is_empty() || stripes.contains(&None) {
                     // Bytes this node alone holds, or never described.
                     return false;
@@ -679,7 +677,10 @@ mod tests {
         let FaultPattern::Striped { local, .. } = plan.pattern() else {
             panic!("a stripe rotation");
         };
-        assert!(local.is_empty());
+        assert!(
+            local.is_empty(),
+            "at tolerance one no domain takes node-local damage"
+        );
         let layout = LayoutIndex::new(&[region(0..512, None)]);
         assert!((1..=3).all(|n| !plan.allows(ip(n), Some(&layout), "wal/seg", 0, 0)));
     }

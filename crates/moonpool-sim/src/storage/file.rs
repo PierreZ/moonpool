@@ -121,9 +121,13 @@ impl StorageFile for SimStorageFile {
         Ok(written)
     }
 
-    async fn size(&self) -> io::Result<u64> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-        sim.file_size(self.handle_id).map_err(Into::into)
+    fn size(&self) -> impl Future<Output = io::Result<u64>> + Send {
+        std::future::ready(
+            self.sim
+                .upgrade()
+                .map_err(|_| sim_shutdown_error())
+                .and_then(|sim| sim.file_size(self.handle_id).map_err(Into::into)),
+        )
     }
 
     async fn set_len(&self, size: u64) -> io::Result<()> {
@@ -141,9 +145,13 @@ impl StorageFile for SimStorageFile {
         AllocateFuture::new(self.sim.clone(), self.handle_id, len).await
     }
 
-    async fn drop_cache(&self) -> io::Result<()> {
-        let sim = self.sim.upgrade().map_err(|_| sim_shutdown_error())?;
-        sim.drop_file_cache(self.handle_id).map_err(Into::into)
+    fn drop_cache(&self) -> impl Future<Output = io::Result<()>> + Send {
+        std::future::ready(
+            self.sim
+                .upgrade()
+                .map_err(|_| sim_shutdown_error())
+                .and_then(|sim| sim.drop_file_cache(self.handle_id).map_err(Into::into)),
+        )
     }
 }
 

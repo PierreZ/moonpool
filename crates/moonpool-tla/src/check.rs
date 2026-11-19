@@ -794,7 +794,8 @@ mod tests {
         assert!(
             config_invariants("SPECIFICATION S\n")
                 .expect("readable")
-                .is_empty()
+                .is_empty(),
+            "a config with no INVARIANT line names no invariant"
         );
     }
 

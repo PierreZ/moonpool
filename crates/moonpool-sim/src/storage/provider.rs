@@ -217,8 +217,11 @@ impl StorageProvider for SimStorageProvider {
         ))
     }
 
-    async fn exists(&self, path: &str) -> io::Result<bool> {
-        Ok(self.sim()?.file_exists(self.owner_ip, path)?)
+    fn exists(&self, path: &str) -> impl Future<Output = io::Result<bool>> + Send {
+        std::future::ready(
+            self.sim()
+                .and_then(|sim| sim.file_exists(self.owner_ip, path).map_err(Into::into)),
+        )
     }
 
     async fn delete(&self, path: &str) -> io::Result<()> {
@@ -244,8 +247,11 @@ impl StorageProvider for SimStorageProvider {
         .await
     }
 
-    async fn list_dir(&self, path: &str) -> io::Result<Vec<String>> {
-        Ok(self.sim()?.list_dir(path, self.owner_ip)?)
+    fn list_dir(&self, path: &str) -> impl Future<Output = io::Result<Vec<String>>> + Send {
+        std::future::ready(
+            self.sim()
+                .and_then(|sim| sim.list_dir(path, self.owner_ip).map_err(Into::into)),
+        )
     }
 
     async fn sync_dir(&self, path: &str) -> io::Result<()> {

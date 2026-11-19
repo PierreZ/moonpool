@@ -142,7 +142,7 @@ mod tests {
 
         let bare = SeriesKey::parse("uptime");
         assert_eq!(bare.metric, "uptime");
-        assert!(bare.labels.is_empty());
+        assert!(bare.labels.is_empty(), "a bare metric name has no labels");
         assert_eq!(bare.to_string(), "uptime");
     }
 

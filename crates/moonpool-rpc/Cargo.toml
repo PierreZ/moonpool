@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Typed dynamic-endpoint RPC over the moonpool provider traits"
 documentation = "https://docs.rs/moonpool-rpc"
 readme = "README.md"

@@ -219,8 +219,7 @@ impl SimContext {
         self.providers
             .weak_world()
             .upgrade()
-            .map(|world| world.system_samples(ip))
-            .unwrap_or_default()
+            .map_or_default(|world| world.system_samples(ip))
     }
 
     /// How slow the process at `ip` is now: its gray-failure factors (see

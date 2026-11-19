@@ -652,8 +652,7 @@ impl SimWorld {
             .read()
             .system_samples
             .get(&ip)
-            .map(|kept| kept.iter().cloned().collect())
-            .unwrap_or_default()
+            .map_or_default(|kept| kept.iter().cloned().collect())
     }
 
     /// Give `ip`'s disk a size limit, or lift it with `None` (see

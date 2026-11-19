@@ -142,25 +142,49 @@ macro_rules! method {
 
 method!(
     /// A work instance: unary, one-way and reliable calls.
-    Work, Job, Done, 0x0219_0001, "qualification.work"
+    Work,
+    Job,
+    Done,
+    0x0219_0001,
+    "qualification.work"
 );
 method!(
     /// A callback endpoint the third participant registers per boot.
-    Callback, Job, Done, 0x0219_0002, "qualification.callback"
+    Callback,
+    Job,
+    Done,
+    0x0219_0002,
+    "qualification.callback"
 );
 method!(
     /// A directory: the boot's current publication.
-    Directory, Lookup, Publication, 0x0219_0003, "qualification.directory"
+    Directory,
+    Lookup,
+    Publication,
+    0x0219_0003,
+    "qualification.directory"
 );
 method!(
     /// A server's recruiter.
-    Recruiter, Recruit, Publication, 0x0219_0004, "qualification.recruit"
+    Recruiter,
+    Recruit,
+    Publication,
+    0x0219_0004,
+    "qualification.recruit"
 );
 method!(
     /// A server's forwarder.
-    Forwarder, Forward, Relayed, 0x0219_0005, "qualification.forward"
+    Forwarder,
+    Forward,
+    Relayed,
+    0x0219_0005,
+    "qualification.forward"
 );
 method!(
     /// The third participant's adopter.
-    Adopter, Adopt, Relayed, 0x0219_0006, "qualification.adopt"
+    Adopter,
+    Adopt,
+    Relayed,
+    0x0219_0006,
+    "qualification.adopt"
 );

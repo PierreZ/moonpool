@@ -434,7 +434,10 @@ mod tests {
         );
         let without_a = need.minimal_sets(&|r: &Replica| r.0 != "a");
         assert_eq!(without_a, vec![replicas(&["b", "c"])]);
-        assert!(need.minimal_sets(&|r: &Replica| r.0 == "a").is_empty());
+        assert!(
+            need.minimal_sets(&|r: &Replica| r.0 == "a").is_empty(),
+            "no minimal set survives without replica a"
+        );
     }
 
     #[test]

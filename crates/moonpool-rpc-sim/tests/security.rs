@@ -147,7 +147,7 @@ fn same_seed_replays_the_same_semantic_history() {
     for seed in [3, 11, 27] {
         let first = run(seed);
         assert_eq!(first.len(), 1);
-        assert!(!first[0].history.is_empty());
+        assert!(!first[0].history.is_empty(), "the run records a history");
         assert_eq!(first, run(seed), "seed {seed} diverged");
     }
 }

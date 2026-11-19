@@ -863,8 +863,7 @@ impl Workload for DeliveryWorkload {
         let workload = Board::of(ctx.state())
             .stats_with_prefix(WORKLOAD_LABEL)
             .first()
-            .map(|(_, stats)| *stats)
-            .unwrap_or_default();
+            .map_or_default(|(_, stats)| *stats);
         assert_sometimes!(
             workload.late_replies > 0,
             "rpc late reply discarded after caller cleanup"

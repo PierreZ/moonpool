@@ -387,7 +387,7 @@ fn a_vetoed_outage_strikes_once_the_veto_permits_it() {
 fn a_veto_that_never_permits_holds_the_outage_past_the_window() {
     let (probe, asked) = run_vetoed(1, Duration::MAX);
     assert_eq!(probe.landed, None);
-    assert!(!asked.is_empty());
+    assert!(!asked.is_empty(), "the veto was asked at least once");
     let last = asked.iter().map(|(at, _)| *at).max().unwrap_or_default();
     assert!(last <= CHAOS + VETO_RETRY, "asked last at {last:?}");
 }

@@ -269,7 +269,10 @@ mod tests {
             Poll::Ready(Ok(()))
         ));
         // hyper reads "nothing was filled" as end of stream.
-        assert!(buf.filled().is_empty());
+        assert!(
+            buf.filled().is_empty(),
+            "a read at end of stream fills nothing"
+        );
     }
 
     #[test]

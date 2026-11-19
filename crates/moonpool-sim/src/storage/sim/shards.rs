@@ -83,14 +83,12 @@ impl StorageState {
         let mut everywhere = self
             .shards
             .as_ref()
-            .map(crate::runner::shard::ShardBook::wiped)
-            .unwrap_or_default();
+            .map_or_default(crate::runner::shard::ShardBook::wiped);
         everywhere.extend(self.failed_disks.iter().copied());
         let per_shard = self
             .shards
             .as_ref()
-            .map(crate::runner::shard::ShardBook::losses)
-            .unwrap_or_default();
+            .map_or_default(crate::runner::shard::ShardBook::losses);
         NotIntact {
             everywhere,
             per_shard,
@@ -274,8 +272,7 @@ impl StorageState {
         let pending = self
             .shards
             .as_ref()
-            .map(crate::runner::shard::ShardBook::pending_crashes)
-            .unwrap_or_default();
+            .map_or_default(crate::runner::shard::ShardBook::pending_crashes);
         for other in pending.into_iter().filter(|other| *other != ip) {
             for shard in self.dirty_whole_copies(other) {
                 not_intact.per_shard.entry(shard).or_default().insert(other);

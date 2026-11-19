@@ -56,7 +56,7 @@ fn without_chaos_no_fault_is_injected() {
         ..config(3, false)
     };
     let run = run(&calm).expect("valid config");
-    assert!(run.faults.is_empty());
+    assert!(run.faults.is_empty(), "a calm run injects no fault");
     // Each request arrives: only `buggify!` (a lost answer) drops a message.
     assert!(
         run.messages

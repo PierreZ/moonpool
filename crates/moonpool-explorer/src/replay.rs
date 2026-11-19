@@ -122,13 +122,16 @@ mod tests {
     #[test]
     fn test_parse_empty() {
         let result = parse_timeline("").expect("parse failed");
-        assert!(result.is_empty());
+        assert!(
+            result.is_empty(),
+            "an empty string parses to no breakpoints"
+        );
     }
 
     #[test]
     fn test_parse_whitespace() {
         let result = parse_timeline("  ").expect("parse failed");
-        assert!(result.is_empty());
+        assert!(result.is_empty(), "whitespace parses to no breakpoints");
     }
 
     #[test]

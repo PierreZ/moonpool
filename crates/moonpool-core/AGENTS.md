@@ -10,7 +10,9 @@ browser demo and the no-default-features simulation use.
 - **Provider traits are native AFIT**, not `async_trait`: `Clone + Send + Sync +
   'static` supertraits, `fn f(&self, ..) -> impl Future<Output = ..> + Send` in
   the trait so `Send` propagates through generic callers. Implementations
-  write plain `async fn`. Do not add an object-safe wrapper here; erase at an
+  write plain `async fn`; one that never awaits returns
+  `std::future::ready(..)` from a plain `fn` (clippy's
+  `unused_async_trait_impl`). Do not add an object-safe wrapper here; erase at an
   application boundary with a narrow trait when a consumer needs `dyn`.
 - **Streams are `futures::io`**, never `tokio::io`. hyper integration lives in
   `moonpool-hyper` (`HyperIo`), not here.

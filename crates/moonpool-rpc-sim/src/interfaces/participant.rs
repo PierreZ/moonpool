@@ -71,14 +71,14 @@ impl RoleInstance {
 }
 
 impl Role for RoleInstance {
-    async fn status(&self, request: Probe) -> Answer {
+    fn status(&self, request: Probe) -> impl Future<Output = Answer> + Send {
         self.record(&request);
-        Answer {
+        std::future::ready(Answer {
             id: request.id,
             participant: self.instance.participant.clone(),
             boot: self.instance.boot,
             configuration: self.instance.configuration,
-        }
+        })
     }
 
     async fn note(&self, request: Probe) {

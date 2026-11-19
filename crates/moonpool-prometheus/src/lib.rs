@@ -451,10 +451,7 @@ impl PrometheusSource {
 impl std::fmt::Debug for PrometheusSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PrometheusSource")
-            .field(
-                "metrics",
-                &self.cache.lock().map(|c| c.len()).unwrap_or_default(),
-            )
+            .field("metrics", &self.cache.lock().map_or_default(|c| c.len()))
             .field("recorder", &self.recorder)
             .finish_non_exhaustive()
     }

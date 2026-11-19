@@ -120,8 +120,8 @@ impl ScriptedResolver {
 }
 
 impl Resolver for ScriptedResolver {
-    async fn resolve(&self, target: &str) -> io::Result<Vec<SocketAddr>> {
-        self.answer(target)
+    fn resolve(&self, target: &str) -> impl Future<Output = io::Result<Vec<SocketAddr>>> + Send {
+        std::future::ready(self.answer(target))
     }
 }
 

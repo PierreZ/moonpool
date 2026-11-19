@@ -6,6 +6,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "Measure real storage and network latency, emit moonpool LatencyDistribution constants"
 readme = "README.md"
 

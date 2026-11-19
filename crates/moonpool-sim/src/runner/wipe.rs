@@ -140,8 +140,7 @@ impl WipeLedger {
     pub fn unhealed(state: &StateHandle) -> Vec<IpAddr> {
         state
             .get::<WipeLedger>(WIPE_LEDGER_KEY)
-            .map(|ledger| ledger.lock().keys().copied().collect())
-            .unwrap_or_default()
+            .map_or_default(|ledger| ledger.lock().keys().copied().collect())
     }
 
     /// Publish a fresh ledger into `state`.
@@ -210,7 +209,10 @@ mod tests {
         assert_eq!(WipeLedger::unhealed(&state), vec![ip(1)]);
         assert!(WipeLedger::heal(&state, "10.0.1.1"));
         assert!(!WipeLedger::heal(&state, "10.0.1.1"));
-        assert!(WipeLedger::unhealed(&state).is_empty());
+        assert!(
+            WipeLedger::unhealed(&state).is_empty(),
+            "a healed wipe leaves nothing unhealed"
+        );
     }
 
     #[test]
@@ -218,7 +220,10 @@ mod tests {
         let state = StateHandle::new();
         assert!(!WipeLedger::heal(&state, "10.0.1.1"));
         assert!(!WipeLedger::heal(&state, "not an ip"));
-        assert!(WipeLedger::unhealed(&state).is_empty());
+        assert!(
+            WipeLedger::unhealed(&state).is_empty(),
+            "with no ledger nothing is unhealed"
+        );
     }
 
     #[test]

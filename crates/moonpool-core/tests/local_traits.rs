@@ -250,14 +250,16 @@ impl LocalStorageFile for RcFile {
         Ok(buf.len())
     }
 
-    async fn size(&self) -> io::Result<u64> {
-        Ok(self.bytes.borrow().len() as u64)
+    fn size(&self) -> impl Future<Output = io::Result<u64>> {
+        std::future::ready(Ok(self.bytes.borrow().len() as u64))
     }
 
-    async fn set_len(&self, size: u64) -> io::Result<()> {
-        let size = usize::try_from(size).map_err(|_| io::ErrorKind::InvalidInput)?;
-        self.bytes.borrow_mut().resize(size, 0);
-        Ok(())
+    fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> {
+        std::future::ready(
+            usize::try_from(size)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
+                .map(|size| self.bytes.borrow_mut().resize(size, 0)),
+        )
     }
 
     async fn allocate(&self, len: u64) -> io::Result<()> {
@@ -267,8 +269,8 @@ impl LocalStorageFile for RcFile {
         Ok(())
     }
 
-    async fn drop_cache(&self) -> io::Result<()> {
-        Ok(())
+    fn drop_cache(&self) -> impl Future<Output = io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 
@@ -287,28 +289,28 @@ impl LocalStorageProvider for RcStorage {
         })
     }
 
-    async fn exists(&self, _path: &str) -> io::Result<bool> {
-        Ok(true)
+    fn exists(&self, _path: &str) -> impl Future<Output = io::Result<bool>> {
+        std::future::ready(Ok(true))
     }
 
-    async fn delete(&self, _path: &str) -> io::Result<()> {
-        Ok(())
+    fn delete(&self, _path: &str) -> impl Future<Output = io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 
-    async fn rename(&self, _from: &str, _to: &str) -> io::Result<()> {
-        Ok(())
+    fn rename(&self, _from: &str, _to: &str) -> impl Future<Output = io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 
-    async fn create_dir_all(&self, _path: &str) -> io::Result<()> {
-        Ok(())
+    fn create_dir_all(&self, _path: &str) -> impl Future<Output = io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 
-    async fn list_dir(&self, _path: &str) -> io::Result<Vec<String>> {
-        Ok(Vec::new())
+    fn list_dir(&self, _path: &str) -> impl Future<Output = io::Result<Vec<String>>> {
+        std::future::ready(Ok(Vec::new()))
     }
 
-    async fn sync_dir(&self, _path: &str) -> io::Result<()> {
-        Ok(())
+    fn sync_dir(&self, _path: &str) -> impl Future<Output = io::Result<()>> {
+        std::future::ready(Ok(()))
     }
 }
 

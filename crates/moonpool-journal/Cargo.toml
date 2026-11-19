@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 description = "A CLSTORE journal over moonpool's storage providers: positions in any order, crash vs. corruption, identified damage"
 documentation = "https://docs.rs/moonpool-journal"
 readme = "README.md"

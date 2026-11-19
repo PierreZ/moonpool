@@ -1373,7 +1373,10 @@ mod tests {
             .collect();
         assert_eq!(left, vec!["users".to_string()]);
         book.switch_off("users");
-        assert!(requirements(&book).is_empty());
+        assert!(
+            requirements(&book).is_empty(),
+            "a switched-off shard has no requirement"
+        );
         assert!(ShardFaults::default().off_all().is_off("anything"));
         assert!(ShardFaults::default().judges_progress());
         assert!(!ShardFaults::default().durable_only().judges_progress());
@@ -1514,7 +1517,10 @@ mod tests {
             declaration("s", None, None, "s:4"),
             || true,
         );
-        assert!(requirements(&book).is_empty());
+        assert!(
+            requirements(&book).is_empty(),
+            "a redeclared shard with no replication has no requirement"
+        );
         assert_eq!(book.snapshot().events.len(), 3);
     }
 

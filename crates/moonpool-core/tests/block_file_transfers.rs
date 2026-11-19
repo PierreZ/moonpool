@@ -114,42 +114,47 @@ impl StorageFile for AwkwardFile {
         true
     }
 
-    async fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
-        let moved = self.admit(offset, buf)?;
-        let start = usize::try_from(offset).expect("offset fits in usize");
-        let state = self.state();
-        let available = state.bytes.len().saturating_sub(start).min(moved);
-        buf[..available].copy_from_slice(&state.bytes[start..start + available]);
-        Ok(available)
+    fn read_at(
+        &self,
+        offset: u64,
+        buf: &mut [u8],
+    ) -> impl Future<Output = io::Result<usize>> + Send {
+        std::future::ready(self.admit(offset, buf).map(|moved| {
+            let start = usize::try_from(offset).expect("offset fits in usize");
+            let state = self.state();
+            let available = state.bytes.len().saturating_sub(start).min(moved);
+            buf[..available].copy_from_slice(&state.bytes[start..start + available]);
+            available
+        }))
     }
 
-    async fn write_at(&self, offset: u64, buf: &[u8]) -> io::Result<usize> {
-        let moved = self.admit(offset, buf)?;
-        let start = usize::try_from(offset).expect("offset fits in usize");
-        let mut state = self.state();
-        if start + moved > state.bytes.len() {
-            state.bytes.resize(start + moved, 0);
-        }
-        state.bytes[start..start + moved].copy_from_slice(&buf[..moved]);
-        Ok(moved)
+    fn write_at(&self, offset: u64, buf: &[u8]) -> impl Future<Output = io::Result<usize>> + Send {
+        std::future::ready(self.admit(offset, buf).inspect(|&moved| {
+            let start = usize::try_from(offset).expect("offset fits in usize");
+            let mut state = self.state();
+            if start + moved > state.bytes.len() {
+                state.bytes.resize(start + moved, 0);
+            }
+            state.bytes[start..start + moved].copy_from_slice(&buf[..moved]);
+        }))
     }
 
-    async fn sync_all(&self) -> io::Result<()> {
-        Ok(())
+    fn sync_all(&self) -> impl Future<Output = io::Result<()>> + Send {
+        std::future::ready(Ok(()))
     }
 
-    async fn sync_data(&self) -> io::Result<()> {
-        Ok(())
+    fn sync_data(&self) -> impl Future<Output = io::Result<()>> + Send {
+        std::future::ready(Ok(()))
     }
 
-    async fn size(&self) -> io::Result<u64> {
-        Ok(self.state().bytes.len() as u64)
+    fn size(&self) -> impl Future<Output = io::Result<u64>> + Send {
+        std::future::ready(Ok(self.state().bytes.len() as u64))
     }
 
-    async fn set_len(&self, size: u64) -> io::Result<()> {
+    fn set_len(&self, size: u64) -> impl Future<Output = io::Result<()>> + Send {
         let size = usize::try_from(size).expect("size fits in usize");
         self.state().bytes.resize(size, 0);
-        Ok(())
+        std::future::ready(Ok(()))
     }
 
     async fn allocate(&self, len: u64) -> io::Result<()> {
@@ -159,8 +164,8 @@ impl StorageFile for AwkwardFile {
         Ok(())
     }
 
-    async fn drop_cache(&self) -> io::Result<()> {
-        Ok(())
+    fn drop_cache(&self) -> impl Future<Output = io::Result<()>> + Send {
+        std::future::ready(Ok(()))
     }
 }
 

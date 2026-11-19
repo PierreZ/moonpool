@@ -65,15 +65,16 @@ where
 {
     type Stream = S;
 
-    async fn connect(&self, stream: S, peer: &str) -> io::Result<(S, PeerContext)> {
-        if self.state.get::<bool>(&self.key).unwrap_or(false) {
+    fn connect(&self, stream: S, peer: &str) -> impl Future<Output = io::Result<(S, PeerContext)>> {
+        std::future::ready(if self.state.get::<bool>(&self.key).unwrap_or(false) {
             assert_reachable!("rpc peer dial refused by the one-way gate");
-            return Err(io::Error::new(
+            Err(io::Error::new(
                 io::ErrorKind::ConnectionRefused,
                 "outbound dials blocked (one-way reachability)",
-            ));
-        }
-        Ok((stream, PeerContext::new(peer)))
+            ))
+        } else {
+            Ok((stream, PeerContext::new(peer)))
+        })
     }
 }
 
@@ -83,8 +84,8 @@ where
 {
     type Stream = S;
 
-    async fn accept(&self, stream: S, peer: &str) -> io::Result<(S, PeerContext)> {
-        Ok((stream, PeerContext::new(peer)))
+    fn accept(&self, stream: S, peer: &str) -> impl Future<Output = io::Result<(S, PeerContext)>> {
+        std::future::ready(Ok((stream, PeerContext::new(peer))))
     }
 }
 

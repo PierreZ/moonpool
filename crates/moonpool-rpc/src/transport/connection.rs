@@ -548,11 +548,7 @@ impl Connection {
         if !discard {
             return Vec::new();
         }
-        let frames: Vec<StreamFrame> = queue
-            .stream_out
-            .remove(&call_id)
-            .map(Vec::from)
-            .unwrap_or_default();
+        let frames: Vec<StreamFrame> = queue.stream_out.remove(&call_id).map_or_default(Vec::from);
         let bytes = frames.iter().map(|frame| frame.bytes.len() as u64).sum();
         self.sub_bytes(&mut queue, bytes, false);
         queue

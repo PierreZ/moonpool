@@ -134,7 +134,7 @@ fn wipes_under(verdict: KillVerdict) -> (Vec<KillAsk>, Vec<String>) {
 #[test]
 fn an_allowing_policy_lets_every_wipe_run() {
     let (asks, causes) = wipes_under(KillVerdict::Allow);
-    assert!(!asks.is_empty());
+    assert!(!asks.is_empty(), "the policy was asked about a wipe");
     assert!(asks.iter().all(KillAsk::wipes), "{asks:?}");
     assert!(
         causes.iter().any(|cause| cause == "crash_and_wipe"),
@@ -145,7 +145,7 @@ fn an_allowing_policy_lets_every_wipe_run() {
 #[test]
 fn keep_disk_turns_every_wipe_into_a_crash() {
     let (asks, causes) = wipes_under(KillVerdict::KeepDisk);
-    assert!(!asks.is_empty());
+    assert!(!asks.is_empty(), "the policy was asked about a wipe");
     assert!(!causes.is_empty(), "the kills still run");
     assert!(causes.iter().all(|cause| cause == "crash"), "{causes:?}");
 }
@@ -153,7 +153,7 @@ fn keep_disk_turns_every_wipe_into_a_crash() {
 #[test]
 fn restart_reboots_the_victim_in_place() {
     let (asks, causes) = wipes_under(KillVerdict::Restart);
-    assert!(!asks.is_empty());
+    assert!(!asks.is_empty(), "the policy was asked about a wipe");
     assert!(!causes.is_empty(), "the reboots still run");
     assert!(
         causes.iter().all(|cause| cause == "restart_in_place"),

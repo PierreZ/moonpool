@@ -666,8 +666,7 @@ impl StreamCore {
             effects.hold = state.stop(Terminal::Cancelled, &mut effects);
             connection
                 .as_deref()
-                .map(|connection| connection.remove_stream(self.call_id, true))
-                .unwrap_or_default()
+                .map_or_default(|connection| connection.remove_stream(self.call_id, true))
         };
         drop(discarded);
         effects.apply(connection.as_deref());
