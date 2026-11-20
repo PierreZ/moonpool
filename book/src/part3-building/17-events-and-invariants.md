@@ -77,7 +77,7 @@ SimulationBuilder::new()
 
 ## Querying the Timeline
 
-`TraceQuery` has four methods. `since(name, &cursor)` returns the events newer than the cursor and advances it. It is cheap, and the right default. `snapshot(name)` returns everything since the start of the seed. `len(name)` counts. `names()` lists every event name captured so far, sorted: an invariant that must read every event, such as a search for a leaked secret, walks it with one cursor per name.
+`TraceQuery` has five methods. `since(name, &cursor)` returns the events newer than the cursor and advances it. It is cheap, and the right default. `snapshot(name)` returns everything since the start of the seed. `len(name)` counts. `names()` lists every event name captured so far, sorted: an invariant that must read every event, such as a search for a leaked secret, walks it with one cursor per name. `total()` counts the events under every name. Invariants run after every step and most steps capture nothing, so an invariant that walks every name should first compare `total()` with the value it saw at the last step and return when it did not change.
 
 The canonical example is [`crates/moonpool-sim/tests/leader_election.rs`](https://github.com/PierreZ/moonpool/blob/main/crates/moonpool-sim/tests/leader_election.rs). A workload emits `leader_elected` events, and an invariant checks that no two nodes claim the same term:
 
