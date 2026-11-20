@@ -52,7 +52,7 @@ Terms are listed alphabetically. Cross-references are in **bold**. Type and macr
 
 **HintVeto** -- `HintVeto::new(|ip, label| bool).publish(ctx.state())`: a workload's budget on which hints may strike. Stored under `HINT_VETO_KEY`.
 
-**Invariant** -- A cross-process property checked after every simulation step. Reads the **trace timeline** through `TraceQuery` (`since`, `snapshot`, `len`) and reports with `assert_always!`. Registered with `invariant` or `invariant_fn`.
+**Invariant** -- A cross-process property checked after every simulation step. Reads the **trace timeline** through `TraceQuery` (`since`, `snapshot`, `len`, `names`, `total`) and reports with `assert_always!`. Registered with `invariant` or `invariant_fn`.
 
 **Iteration control** -- `IterationControl::FixedCount(n)` or `UntilCoverageStable { plateau_seeds, max_iterations }` (the default, 10 and 1000).
 

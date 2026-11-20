@@ -65,6 +65,13 @@ measured with the `stream_saturation` example). A burst of 4096 slow calls
 against the defaults admits 1024 and refuses the other 3072 as `Overloaded`,
 with the session still open.
 
+A session drives four things in one future: the writer, the reader, the
+handshake deadline and the liveness monitor. Each of them gets **its own
+waker**, so a frame that arrives polls only the reader, not the writer and
+both timers. The driver does the same for its listener, its command queue
+and its sessions. In the RPC qualification campaign this halves the socket
+reads that find no data.
+
 ### Per-Endpoint Admission Queues
 
 Every endpoint takes the runtime's queue (`RpcConfig::endpoint_queue()`)

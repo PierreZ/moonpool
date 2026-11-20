@@ -203,6 +203,9 @@ struct TraceCapture {
     cursors: [Cell<usize>; TRACED.len()],
     /// One cursor per event name, for [`CapturedTrace::every`].
     every: RefCell<BTreeMap<String, Cell<usize>>>,
+    /// The timeline's event count at the last step: a step that captured
+    /// nothing has nothing to copy, and most steps capture nothing.
+    seen: Cell<usize>,
     sink: Arc<Mutex<CapturedTrace>>,
 }
 
@@ -212,6 +215,10 @@ impl Invariant for TraceCapture {
     }
 
     fn observe(&self, q: &dyn TraceQuery, _sim_time_ms: u64) {
+        let total = q.total();
+        if total == self.seen.replace(total) {
+            return;
+        }
         let mut events = Vec::new();
         for (name, cursor) in TRACED.iter().zip(&self.cursors) {
             events.extend(q.since(name, cursor));
@@ -239,6 +246,7 @@ impl Invariant for TraceCapture {
             cursor.set(0);
         }
         self.every.borrow_mut().clear();
+        self.seen.set(0);
         *self
             .sink
             .lock()
@@ -283,6 +291,7 @@ pub fn qualification_campaign(
         .invariant(TraceCapture {
             cursors: Default::default(),
             every: RefCell::default(),
+            seen: Cell::default(),
             sink: trace,
         })
         .enable_chaos([Chaos::Network(ChaosMode::Swarm), Chaos::BuggifyKnobs])

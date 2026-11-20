@@ -96,6 +96,10 @@ mod tests {
             names.dedup();
             names
         }
+
+        fn total(&self) -> usize {
+            self.0.len()
+        }
     }
 
     fn event(seq: u64, name: &str, fields: &[(&str, FieldValue)]) -> TraceEvent {

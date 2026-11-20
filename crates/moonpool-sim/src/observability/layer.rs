@@ -378,6 +378,10 @@ impl TraceQuery for SimulationLayerHandle {
     fn names(&self) -> Vec<String> {
         self.events.lock().by_name.keys().cloned().collect()
     }
+
+    fn total(&self) -> usize {
+        usize::try_from(self.events.lock().seq_counter).unwrap_or(usize::MAX)
+    }
 }
 
 /// Span-extension marker storing the `ip` field recorded on a process or

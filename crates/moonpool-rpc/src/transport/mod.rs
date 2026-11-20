@@ -59,6 +59,7 @@ mod sessions;
 mod shutdown;
 mod streams;
 pub mod upgrade;
+mod wake_set;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;

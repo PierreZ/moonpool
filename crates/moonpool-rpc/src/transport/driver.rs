@@ -21,6 +21,7 @@ use super::connection::{CloseReason, Connection, read_loop, write_loop};
 use super::handle::RpcHandle;
 use super::peer::jittered;
 use super::upgrade::{Acceptor, Connector, Plaintext};
+use super::wake_set::WakeSet;
 use super::{Command, Listener, SessionUpgrade, Shared, Stream};
 use crate::config::RpcConfig;
 use crate::protocol::{PROTOCOL_VERSION, decode_message_at};
@@ -174,16 +175,25 @@ impl<P: RpcProviders, U: SessionUpgrade<P>> RpcDriver<P, U> {
         let (accepted_sender, mut accepted) = mpsc::unbounded();
         let mut acceptor = listener
             .map(|listener| Box::pin(accept_loop(Arc::clone(&shared), listener, accepted_sender)));
+        // Each source has its own waker, so a session that wakes does not
+        // re-poll the listener and the queues: a pass polls only the
+        // sources that were woken.
+        let wakes = WakeSet::new(4);
         futures::future::poll_fn(|cx| {
-            if let Some(accepting) = acceptor.as_mut()
-                && let Poll::Ready(error) = accepting.as_mut().poll(cx)
+            let ready = wakes.begin(cx);
+            if ready.has(0)
+                && let Some(accepting) = acceptor.as_mut()
+                && let Poll::Ready(error) = accepting.as_mut().poll(&mut wakes.context(0))
             {
                 acceptor = None;
                 return Poll::Ready(error);
             }
             // New work first, so a connection queued by a caller is polled in
             // this same pass.
-            while let Poll::Ready(Some(command)) = commands.poll_next_unpin(cx) {
+            let pushed = children.len();
+            while ready.has(1)
+                && let Poll::Ready(Some(command)) = commands.poll_next_unpin(&mut wakes.context(1))
+            {
                 match command {
                     Command::Connect(connection, address) => {
                         children.push(Box::pin(Either::Left(drive_outbound(
@@ -199,7 +209,10 @@ impl<P: RpcProviders, U: SessionUpgrade<P>> RpcDriver<P, U> {
                     }
                 }
             }
-            while let Poll::Ready(Some((connection, stream))) = accepted.poll_next_unpin(cx) {
+            while ready.has(2)
+                && let Poll::Ready(Some((connection, stream))) =
+                    accepted.poll_next_unpin(&mut wakes.context(2))
+            {
                 children.push(Box::pin(Either::Right(drive_inbound(
                     Arc::clone(&shared),
                     Arc::clone(&upgrade),
@@ -208,8 +221,11 @@ impl<P: RpcProviders, U: SessionUpgrade<P>> RpcDriver<P, U> {
                 ))));
             }
             // Returns Pending once every child is parked (or after its
-            // cooperative budget, having scheduled a re-poll).
-            while let Poll::Ready(Some(())) = children.poll_next_unpin(cx) {}
+            // cooperative budget, having scheduled a re-poll). A child pushed
+            // in this pass is polled now: pushing one wakes nothing.
+            if ready.has(3) || children.len() != pushed {
+                while let Poll::Ready(Some(())) = children.poll_next_unpin(&mut wakes.context(3)) {}
+            }
             Poll::Pending
         })
         .await
@@ -415,23 +431,38 @@ where
     let deadline = handshake_deadline(shared, connection, shared.config.handshake_timeout);
     let liveness = monitor(shared, connection);
     futures::pin_mut!(read, write, deadline, liveness);
-    // Poll the writer first: its first frame is this side's `Hello`, which
-    // must leave before the reader can judge the peer's and end the session
-    // (every side sends a `Hello`, so both sides see and count a refusal).
-    let io = futures::future::select(write, read);
-    let guards = futures::future::select(deadline, liveness);
-    match futures::future::select(io, guards).await {
-        futures::future::Either::Left((
-            futures::future::Either::Left((reason, _))
-            | futures::future::Either::Right((reason, _)),
-            _,
-        ))
-        | futures::future::Either::Right((
-            futures::future::Either::Left((reason, _))
-            | futures::future::Either::Right((reason, _)),
-            _,
-        )) => reason,
-    }
+    // Each branch has its own waker, so a pass polls only the branches that
+    // were woken: a frame that arrives does not re-poll the writer and both
+    // timers. Poll the writer first: its first frame is this side's
+    // `Hello`, which must leave before the reader can judge the peer's and
+    // end the session (every side sends a `Hello`, so both sides see and
+    // count a refusal).
+    let wakes = WakeSet::new(4);
+    futures::future::poll_fn(|cx| {
+        let ready = wakes.begin(cx);
+        if ready.has(0)
+            && let Poll::Ready(reason) = write.as_mut().poll(&mut wakes.context(0))
+        {
+            return Poll::Ready(reason);
+        }
+        if ready.has(1)
+            && let Poll::Ready(reason) = read.as_mut().poll(&mut wakes.context(1))
+        {
+            return Poll::Ready(reason);
+        }
+        if ready.has(2)
+            && let Poll::Ready(reason) = deadline.as_mut().poll(&mut wakes.context(2))
+        {
+            return Poll::Ready(reason);
+        }
+        if ready.has(3)
+            && let Poll::Ready(reason) = liveness.as_mut().poll(&mut wakes.context(3))
+        {
+            return Poll::Ready(reason);
+        }
+        Poll::Pending
+    })
+    .await
 }
 
 /// Resolves only if the peer's `Hello` has not arrived within `timeout`.
