@@ -81,7 +81,7 @@ use crate::runner::locality::MachineRegistry;
 use crate::runner::membership::Membership;
 use crate::runner::process::{AttritionScope, AttritionVictims, RebootKind};
 use crate::runner::shard::{Downgrade, Requirements, ShardBook, Shards};
-use crate::runner::wipe::WipeLedger;
+use crate::runner::wipe::{WipeHeal, WipeLedger};
 use crate::sim::{ProcessKillKind, SimWorld};
 use crate::{assert_always, assert_reachable, assert_sometimes_each};
 
@@ -510,6 +510,27 @@ impl FaultContext {
         recovery_delay_range_ms: &std::ops::Range<usize>,
         grace_period_range_ms: &std::ops::Range<usize>,
     ) -> SimulationResult<()> {
+        self.reboot_healing(
+            ip,
+            kind,
+            recovery_delay_range_ms,
+            grace_period_range_ms,
+            WipeHeal::Signal,
+        )
+    }
+
+    /// [`reboot_with_delays`](Self::reboot_with_delays) for a regime whose
+    /// wipes heal under `heal`: a wipe it decides is recorded unhealed
+    /// until then, for the replicated fault patterns that read the
+    /// [`WipeLedger`].
+    pub(crate) fn reboot_healing(
+        &self,
+        ip: &str,
+        kind: RebootKind,
+        recovery_delay_range_ms: &std::ops::Range<usize>,
+        grace_period_range_ms: &std::ops::Range<usize>,
+        heal: WipeHeal,
+    ) -> SimulationResult<()> {
         let ip_addr = parse_ip(ip)?;
         if self.retired(ip_addr) {
             return Ok(());
@@ -556,7 +577,7 @@ impl FaultContext {
                     // Unhealed from the decision, like dead: a wipe budget
                     // checked before the kill runs must already count it.
                     if let Some(ledger) = WipeLedger::of(&self.state) {
-                        ledger.record_wipe(ip_addr);
+                        ledger.record_wipe(ip_addr, heal);
                     }
                     if let Some(book) = ShardBook::of(&self.state) {
                         book.note_wipe(ip_addr);
@@ -1107,7 +1128,7 @@ impl AttritionInjector {
             .filter(|ip| !victims.contains(ip))
             .collect();
         let unhealed = WipeLedger::of(ctx.state()).map_or(0, |ledger| {
-            ledger.unhealed_among(&others, budget.heal, ctx.sim.current_time())
+            ledger.unhealed_among(&others, ctx.sim.current_time())
         });
         if unhealed + victims.len() > budget.max_unhealed {
             assert_reachable!("attrition: wipe budget downgrades a wipe to a crash");
@@ -1200,10 +1221,40 @@ impl AttritionInjector {
             kind => kind,
         };
         let kind = self.within_wipe_budget(ctx, kind, &eligible, &[&ip_string]);
-        let (recovery_range, grace_range) = self.delay_ranges();
         self.check_victim(ctx, ip);
-        ctx.reboot_with_delays(ip, kind, &recovery_range, &grace_range)?;
+        self.reboot(ctx, ip, kind)?;
         Ok(true)
+    }
+
+    /// Reboot `ip` with this regime's delays, recording a wipe as healing
+    /// under the regime's [`WipeBudget`](super::wipe::WipeBudget) (by a
+    /// signal without one).
+    ///
+    /// A drawn wipe that would put a replicated fault pattern past its
+    /// tolerance, because another domain of the victim's group already
+    /// holds damage, becomes a crash: the wipe would lose the last clean
+    /// copy of a damaged record. Draws nothing.
+    fn reboot(&self, ctx: &FaultContext, ip: &str, kind: RebootKind) -> SimulationResult<()> {
+        let kind = if kind == RebootKind::CrashAndWipe
+            && ip
+                .parse()
+                .is_ok_and(|victim| !ctx.sim.wipe_keeps_tolerance(victim))
+        {
+            assert_reachable!("attrition: damage elsewhere downgrades a wipe to a crash");
+            tracing::info!(
+                %ip,
+                "attrition: another domain holds damage, crashing instead of wiping"
+            );
+            RebootKind::Crash
+        } else {
+            kind
+        };
+        let (recovery_range, grace_range) = self.delay_ranges();
+        let heal = self
+            .config
+            .wipe_budget
+            .map_or(WipeHeal::Signal, |budget| budget.heal);
+        ctx.reboot_healing(ip, kind, &recovery_range, &grace_range, heal)
     }
 
     /// Reboot a single random live eligible process, respecting the
@@ -1230,7 +1281,6 @@ impl AttritionInjector {
             return Ok(());
         }
         let drawn = self.choose_kind();
-        let (recovery_range, grace_range) = self.delay_ranges();
         let idx = Self::draw_victim(ctx, &live);
         let ip = live[idx].clone();
         // Judged once the victim is drawn, so the draw order is unchanged.
@@ -1246,7 +1296,7 @@ impl AttritionInjector {
             return Ok(());
         }
         self.check_victim(ctx, &ip);
-        ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)
+        self.reboot(ctx, &ip, kind)
     }
 
     /// The index of the victim among `live`: uniform, or, under an active
@@ -1357,11 +1407,10 @@ impl AttritionInjector {
         let (replicas, sets) = &candidates[crate::sim::sim_random_range(0..candidates.len())];
         let set = &sets[crate::sim::sim_random_range(0..sets.len())];
         let kind = self.choose_kind();
-        let (recovery_range, grace_range) = self.delay_ranges();
         for ip in replicas.iter().filter(|ip| !set.contains(ip)) {
             let ip = ip.to_string();
             self.check_victim(ctx, &ip);
-            ctx.reboot_with_delays(&ip, kind, &recovery_range, &grace_range)?;
+            self.reboot(ctx, &ip, kind)?;
         }
         assert_reachable!("shard edge: a shard is pushed to its minimum");
         book.count_edge();
@@ -1412,14 +1461,13 @@ impl AttritionInjector {
         }
         let victims: Vec<&String> = ips.iter().collect();
         let kind = self.within_wipe_budget(ctx, self.choose_kind(), &eligible, &victims);
-        let (recovery_range, grace_range) = self.delay_ranges();
         assert_sometimes_each!(
             "attrition_domain_targeted",
             [("group_size", i64::try_from(ips.len()).unwrap_or(i64::MAX))]
         );
         for ip in &ips {
             self.check_victim(ctx, ip);
-            ctx.reboot_with_delays(ip, kind, &recovery_range, &grace_range)?;
+            self.reboot(ctx, ip, kind)?;
         }
         Ok(())
     }

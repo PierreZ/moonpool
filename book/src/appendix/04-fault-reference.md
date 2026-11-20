@@ -110,6 +110,8 @@ A crash (any `RebootKind::Crash`, `CrashAndWipe`, `crash_self`, or a disk crash 
 
 The stripe key comes from `LayoutRegion::stripe` (the journal uses the entry position), so one pattern hits the same position on every replica.
 
+A process wiped and not yet healed (in the `WipeLedger`) counts as damage in its domain for every record, so the patterns never damage a second copy while a wiped replica is still empty. An attrition wipe drawn while another domain of the group holds damage becomes a crash. A process still lost at shutdown is recorded as a `replica_still_lost` sim fault.
+
 ## Process Faults
 
 | Fault | Source | What happens |
@@ -167,6 +169,7 @@ The engine records `SimFaultEvent`s. The runner merges them into the trace under
 | `random_close`, `black_hole`, `bit_flip` | connection faults |
 | `storage_read_fault`, `storage_write_fault`, `storage_sync_fault` | storage I/O faults |
 | `storage_disk_failure`, `storage_crash`, `storage_wipe` | disk and crash |
+| `replica_still_lost` | at shutdown, a wiped process a replicated fault pattern still counts as a lost copy |
 | `storage_crash_sectors` | the fate of each unsynced sector of one file at a crash (read-only) |
 | `chaos_families` | the network and storage families this seed has on, after swarm and masks (read-only, once per seed) |
 

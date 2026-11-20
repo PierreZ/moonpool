@@ -3,6 +3,8 @@
 mod complete;
 mod engine;
 mod event;
+#[cfg(test)]
+mod lost_copies;
 mod namespace;
 mod namespace_ops;
 mod shards;

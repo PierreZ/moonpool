@@ -236,6 +236,15 @@ pub enum SimFaultEvent {
         /// IP of the wiped process.
         ip: String,
     },
+    /// At the run's end, a wiped process of a group a replicated fault
+    /// pattern covers is still unhealed: since its wipe, the pattern has
+    /// counted its domain as damaged, and damage in the group landed only
+    /// there (at the default tolerance). A harness that never calls
+    /// `WipeLedger::heal` shows here.
+    ReplicaStillLost {
+        /// IP of the wiped, unhealed process.
+        ip: String,
+    },
 }
 
 impl SimFaultEvent {
@@ -266,6 +275,7 @@ impl SimFaultEvent {
             Self::StorageCrash { .. } => "storage_crash",
             Self::StorageCrashSectors { .. } => "storage_crash_sectors",
             Self::StorageWipe { .. } => "storage_wipe",
+            Self::ReplicaStillLost { .. } => "replica_still_lost",
             Self::ChaosFamilies { .. } => "chaos_families",
         }
     }

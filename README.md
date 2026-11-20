@@ -176,7 +176,9 @@ and under the simulator in its own `#[test]`.
 - `Chaos::Attrition`: graceful, crash and wipe reboots under a `max_dead`
   budget, scoped per process, machine, zone or datacenter. An optional wipe
   budget makes wipes roll: a wiped process stays unhealed until the harness
-  signals it healed, and a wipe past the budget becomes a crash.
+  signals it healed, and a wipe past the budget becomes a crash. Replicated
+  fault patterns count an unhealed wipe as a lost copy, and a wipe drawn
+  while another domain of its group holds damage becomes a crash.
 - `Chaos::Outage`: a correlated outage of whole process groups, with an
   optional straggler. An `OutageVeto` lets the harness defer it.
 - A `KillPolicy`, FoundationDB's `canKillProcesses`: the harness answers

@@ -125,7 +125,7 @@ Two ways to heal:
 - **`WipeHeal::Signal`**: the harness declares a process healed with `WipeLedger::heal(state, ip)`. It returns whether the process was unhealed, so calling it on every catch-up is safe. Only the system knows when a replaced node has caught up. A process never signaled stays unhealed for the rest of the run, so every later wipe in its pool is a crash.
 - **`WipeHeal::After(duration)`**: healed that long in simulated time after the wiped process restarts. A signal heals it earlier.
 
-`WipeLedger::unhealed(state)` lists the processes wiped and not yet signaled healed.
+`WipeLedger::unhealed(state)` lists the processes wiped and not yet signaled healed. [Replicated fault patterns](33-aimed-faults.md) read the ledger too: an unhealed wipe counts as a lost copy, healed by the signal or by the `WipeHeal::After` bound of the regime that wiped it. Every reader judges a wipe by that one heal, so a scripted wipe that lands in a pool whose budget heals `After` a delay still waits for the signal. And a drawn wipe whose group already holds damage in another domain becomes a crash, whatever the budget.
 
 The budget costs no randomness. The kind is drawn as before, then judged against the ledger, so a seed draws the same values with or without a budget. Swarm mode copies `wipe_budget` through and draws nothing for it. Every wipe enters the ledger, including a scripted `FaultContext::reboot(ip, RebootKind::CrashAndWipe)` and a process that crashes itself with a wipe. A scripted wipe is never downgraded, but it counts against a budgeted pool it lands in.
 
