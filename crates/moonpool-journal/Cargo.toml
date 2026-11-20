@@ -17,10 +17,10 @@ categories.workspace = true
 # thread-per-core runtime and `SimStorageProvider` under simulation. No
 # production providers are pulled in here.
 [dependencies]
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", default-features = false }
 # `hint!` names the moments inside a commit where a power loss is worth
 # testing; zero dependencies, inert outside a simulation.
-moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
+moonpool-buggify = { path = "../moonpool-buggify", version = "0.9.0" }
 crc32c = "0.6"
 thiserror = "2.0"
 
@@ -33,7 +33,7 @@ compio-providers = ["moonpool-core/compio-providers"]
 [dev-dependencies]
 # The example and the real-filesystem tests run the journal on Tokio;
 # `tests/send.rs` pins that its futures stay `Send` there.
-moonpool-core = { path = "../moonpool-core", version = "0.8.0", default-features = false, features = ["tokio-providers"] }
+moonpool-core = { path = "../moonpool-core", version = "0.9.0", default-features = false, features = ["tokio-providers"] }
 # The stream traits of the counting file wrapper in `tests/scrub.rs`.
 futures = "0.3"
 # The runtime `tests/compio_filesystem.rs` drives the journal on.
