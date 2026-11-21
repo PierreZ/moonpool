@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use moonpool_core::impl_providers_bundle;
 
 use crate::network::SimNetworkProvider;
+use crate::runner::ProviderEnv;
 use crate::sim::WeakSimWorld;
 use crate::storage::SimStorageProvider;
 
@@ -19,8 +20,11 @@ use super::{SimRandomProvider, SimSystemProvider, SimTaskProvider, SimTimeProvid
 /// ## Usage
 ///
 /// The runner builds one bundle per process and hands it over through
-/// [`SimContext::providers`](crate::SimContext::providers). A test that
-/// drives a [`SimWorld`](crate::SimWorld) by hand builds its own:
+/// [`SimContext::providers`](crate::SimContext::providers). A custom bundle
+/// (see [`SimulationBuilder::with_providers`](crate::SimulationBuilder::with_providers))
+/// builds its simulated providers with [`from_env`](Self::from_env). A test
+/// that drives a [`SimWorld`](crate::SimWorld) by hand, with no runner,
+/// builds its own with [`new`](Self::new):
 ///
 /// ```rust
 /// use moonpool_sim::{Providers, SimProviders, SimWorld};
@@ -55,7 +59,23 @@ pub struct SimProviders {
 }
 
 impl SimProviders {
-    /// Create a new simulation providers bundle scoped to a process IP.
+    /// The simulated providers of the actor `env` describes: the bundle the
+    /// runner hands out by default.
+    ///
+    /// Tasks spawned through it use the actor's task provider: a process
+    /// kill cancels them, and a panic in one fails the seed. Build a custom
+    /// bundle on top of this.
+    #[must_use]
+    pub fn from_env(env: &ProviderEnv) -> Self {
+        Self::new(env.world().clone(), env.ip()).with_task(env.task().clone())
+    }
+
+    /// A bundle for a [`SimWorld`](crate::SimWorld) driven by hand, with no
+    /// runner.
+    ///
+    /// Its task provider reports no panics: inside the runner, a panic in a
+    /// task it spawns would not fail the seed. Inside the runner, use
+    /// [`from_env`](Self::from_env).
     ///
     /// # Arguments
     ///

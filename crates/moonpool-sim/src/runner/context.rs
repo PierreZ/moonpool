@@ -97,16 +97,14 @@ impl ProviderEnv {
         self.ip
     }
 
-    /// The actor's task provider, bound to its boot scope.
+    /// The actor's task provider. It reports the panics of the tasks it
+    /// spawns, which fail the seed. A process's is also bound to its boot
+    /// scope, so a kill or a reboot cancels its tasks; a workload is never
+    /// killed.
     #[must_use]
     pub fn task(&self) -> &SimTaskProvider {
         &self.task
     }
-}
-
-/// The default [`ProviderFactory`]: the simulated [`SimProviders`].
-pub(crate) fn sim_providers(env: &ProviderEnv) -> SimProviders {
-    SimProviders::new(env.world().clone(), env.ip()).with_task(env.task().clone())
 }
 
 /// Simulation context provided to processes and workloads.
@@ -185,7 +183,11 @@ impl<P: ProviderBundle> SimContext<P> {
     }
 
     /// Get the runner's task provider, which spawns on the deterministic
-    /// executor. It is the one the bundle was built from.
+    /// executor: [`ProviderEnv::task`] of this actor.
+    ///
+    /// A custom bundle has a task provider of its own only if its factory
+    /// gave it this one (as [`SimProviders::from_env`] does); otherwise a
+    /// panic in a task the bundle spawns does not fail the seed.
     ///
     /// Tasks a process spawns belong to that process: a reboot aborts them,
     /// and the CPU gate charges their polls to its core.

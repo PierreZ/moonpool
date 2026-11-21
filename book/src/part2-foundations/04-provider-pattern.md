@@ -92,7 +92,7 @@ On the simulation side each provider is deliberately thin. `SimTimeProvider::sle
 
 ## Bringing Your Own Bundle
 
-What if our code needs a provider that moonpool-core does not define? A clock with drift, a transport with framing, a key-value store over storage. We do not have to fork the runner for it. `SimulationBuilder::with_providers` takes a factory, and the runner calls it once per process boot and once per workload:
+What if our code needs a provider that moonpool-core does not define? A clock with drift, a transport with framing, a key-value store over storage. We do not have to fork the runner for it. `SimulationBuilder::with_providers` takes a factory, and the runner calls it once per process boot and once per workload in each iteration (`setup()`, `run()` and `check()` share it):
 
 ```rust,ignore
 #[derive(Clone)]
@@ -102,8 +102,8 @@ struct AppProviders {
 }
 
 SimulationBuilder::with_providers(|env: &ProviderEnv| {
-    // Spawn through the runner's task provider: a process kill cancels it.
-    let sim = SimProviders::new(env.world().clone(), env.ip()).with_task(env.task().clone());
+    // The simulated providers, spawning in the actor's scope.
+    let sim = SimProviders::from_env(env);
     AppProviders { kv: SimKv::new(sim.storage().clone()), sim }
 })
 .processes(3, || Box::new(KvNode))   // impl Process<AppProviders>
@@ -112,7 +112,7 @@ SimulationBuilder::with_providers(|env: &ProviderEnv| {
 
 The bundle is the type parameter `P` of `SimContext<P>`, `Process<P>`, `Workload<P>` and `Deployment<P>`. It needs only `Clone + Send + Sync + 'static`, so it does not have to implement `Providers`. When it does, `ctx.network()`, `ctx.time()`, `ctx.random()` and `ctx.storage()` return its providers. `ctx.providers()` always returns the whole bundle. Every `P` defaults to `SimProviders`, so `SimulationBuilder::new()` and a plain `SimContext` stay what they were.
 
-There is one hard rule: **the bundle must stay driven by the simulation.** The `ProviderEnv` carries the world, the actor's IP and its task provider. Build network, storage and time on top of the simulated providers for that world and IP. Spawn through `env.task()`, which is bound to the boot scope a crash cancels. A bundle that reads the wall clock or opens a real socket escapes the seed, and its traffic never sees a partition or a torn write.
+There is one hard rule: **the bundle must stay driven by the simulation.** The `ProviderEnv` carries the world, the actor's IP and its task provider. `SimProviders::from_env(env)` builds the simulated providers for that world and IP; build everything else on top of them. Spawn through `env.task()` (the one `from_env` uses): a crash cancels a process's tasks, and a panic in any of them fails the seed. `SimProviders::new(world, ip)` is for a world driven by hand, with no runner: its task provider reports no panics, so inside the runner a panicking task would not fail the seed. A bundle that reads the wall clock or opens a real socket escapes the seed, and its traffic never sees a partition or a torn write.
 
 ## What Stays Outside the Bundle
 

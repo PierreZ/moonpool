@@ -70,7 +70,7 @@ impl Workload for Driver {
 | Group | Methods |
 |-------|---------|
 | Providers | `providers() -> &P`; `network()`, `time()`, `random()`, `storage()` when `P: Providers`; `task()` is always the runner's `SimTaskProvider` |
-| Custom bundle | `SimContext<P = SimProviders>`, `Process<P>`, `Workload<P>`, `Deployment<P>`. `SimulationBuilder::with_providers(\|env: &ProviderEnv\| P)` builds `P` per process boot and per workload. `P: ProviderBundle` (`Clone + Send + Sync + 'static`, `Providers` not required). Build it over the sim: `SimProviders::new(env.world().clone(), env.ip()).with_task(env.task().clone())`. Spawn only through `env.task()` (the boot scope a kill cancels) |
+| Custom bundle | `SimContext<P = SimProviders>`, `Process<P>`, `Workload<P>`, `Deployment<P>`. `SimulationBuilder::with_providers(\|env: &ProviderEnv\| P)` builds `P` per process boot and per workload. `P: ProviderBundle` (`Clone + Send + Sync + 'static`, `Providers` not required). Build it over the sim: `SimProviders::from_env(env)` (`SimProviders::new` is only for a hand-driven `SimWorld`: its task panics are not reported). Spawn only through `env.task()` (the boot scope a kill cancels) |
 | Local code | `run_local(name, \|ctx\| fut)`: run a `!Send` future as a local task of the process, return its answer |
 | Identity | `my_ip()`, `client_id()`, `client_count()`, `peer(name)`, `peers()` |
 | Topology | `topology()` → `WorkloadTopology { groups, ips_in_group, group_for, my_group, peer_by_name, all_process_ips, ips_tagged, tags_for, my_tags, my_locality, locality_for, peers_on_my_machine, ips_in_domain }` |

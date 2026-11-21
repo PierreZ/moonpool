@@ -11,7 +11,7 @@ use tracing::instrument;
 use crate::SimProviders;
 use crate::SimulationError;
 use crate::observability::{Invariant, TraceQuery};
-use crate::runner::context::{ProviderBundle, ProviderEnv, ProviderFactory, sim_providers};
+use crate::runner::context::{ProviderBundle, ProviderEnv, ProviderFactory};
 use crate::runner::fault_injector::FaultInjector;
 use crate::runner::locality::LocalityConfig;
 use crate::runner::process::{Attrition, Process};
@@ -235,20 +235,20 @@ impl SimulationBuilder {
     /// - providers: [`SimProviders`].
     #[must_use]
     pub fn new() -> Self {
-        Self::with_providers(sim_providers)
+        Self::with_providers(SimProviders::from_env)
     }
 }
 
 impl<P: ProviderBundle> SimulationBuilder<P> {
     /// Create a builder like [`new`](SimulationBuilder::new), whose
     /// processes and workloads get the bundle `factory` builds instead of
-    /// [`SimProviders`]: once per process boot, once per workload.
+    /// [`SimProviders`]: once per process boot, once per workload per
+    /// iteration (its `setup()`, `run()` and `check()` share the bundle).
     ///
     /// Build the bundle on top of the simulation the [`ProviderEnv`]
-    /// describes (see its documentation).
-    ///
-    /// # Safety
-    /// A provider that bypasses the [`ProviderEnv`] escapes determinism and the faults.
+    /// describes, with [`SimProviders::from_env`] for the simulated
+    /// providers. A provider that bypasses the [`ProviderEnv`] escapes
+    /// determinism and the faults.
     #[must_use]
     pub fn with_providers(factory: impl Fn(&ProviderEnv) -> P + 'static) -> Self {
         Self {
@@ -1850,7 +1850,7 @@ mod tests {
     #[test]
     fn with_providers_reaches_processes_and_workloads() {
         let report = SimulationBuilder::with_providers(|env| TaggedProviders {
-            _sim: sim_providers(env),
+            _sim: SimProviders::from_env(env),
             tag: "custom",
         })
         .processes(1, || Box::new(TaggedProcess))
