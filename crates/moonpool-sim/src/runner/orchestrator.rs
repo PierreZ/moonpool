@@ -412,6 +412,9 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
                 }
             };
 
+        // `check()` gets the context `setup()` and `run()` had: the bundle is
+        // built once per workload, and a clone shares its handles.
+        let check_contexts = contexts.clone();
         let ((returned_workloads, mut results), injectors) = Self::do_chaos_and_run_phase(
             sim,
             &mut process_manager,
@@ -428,13 +431,20 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
                 &mut process_manager,
                 env,
                 (returned_workloads, results),
+                check_contexts,
                 injectors,
             )
             .await;
         }
         results.extend(Self::stop_injectors(injectors).await);
-        Self::finalize_orchestration(sim, &mut process_manager, env, returned_workloads, results)
-            .await
+        Self::finalize_orchestration(
+            sim,
+            &mut process_manager,
+            env,
+            (returned_workloads, check_contexts),
+            results,
+        )
+        .await
     }
 
     /// The end of a run whose chaos ended with its run phase
@@ -447,13 +457,18 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
         process_manager: &mut ProcessManager<'_, P>,
         env: &IterationEnv<'_, P>,
         (returned_workloads, mut results): CompletedWorkloads<P>,
+        check_contexts: Vec<SimContext<P>>,
         injectors: InjectorHandleSlots,
     ) -> Result<OrchestrateOutput<P>, Deadlock> {
         assert_reachable!("phase: check runs on live processes");
-        let (final_workloads, check_results) =
-            Self::do_check_phase(sim, returned_workloads, env, Some(&mut *process_manager))
-                .await
-                .map_err(|()| env.deadlock())?;
+        let (final_workloads, check_results) = Self::do_check_phase(
+            sim,
+            (returned_workloads, check_contexts),
+            env,
+            Some(&mut *process_manager),
+        )
+        .await
+        .map_err(|()| env.deadlock())?;
         results.extend(check_results);
         trigger_shutdown(sim, env.shutdown_signal);
         results.extend(Self::stop_injectors(injectors).await);
@@ -608,7 +623,7 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
         sim: &mut SimWorld,
         process_manager: &mut ProcessManager<'_, P>,
         env: &IterationEnv<'_, P>,
-        returned_workloads: Vec<Box<dyn Workload<P>>>,
+        (returned_workloads, check_contexts): WorkloadsWithContexts<P>,
         mut results: Vec<SimulationResult<()>>,
     ) -> Result<OrchestrateOutput<P>, Deadlock> {
         // === 5. ABORT ALL PROCESSES ===
@@ -639,7 +654,7 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
 
         // === 7. CHECK PHASE (executor spawn + cooperative stepping) ===
         let (final_workloads, check_results) =
-            Self::do_check_phase(sim, returned_workloads, env, None)
+            Self::do_check_phase(sim, (returned_workloads, check_contexts), env, None)
                 .await
                 .map_err(|()| env.deadlock())?;
         // A `check()` verdict is part of the iteration's result: a workload
@@ -657,8 +672,8 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
         })
     }
 
-    /// Run the entire check phase: build per-workload contexts, spawn
-    /// `check()` futures, drive the cooperative loop, and collect the
+    /// Run the entire check phase: spawn `check()` futures on the contexts
+    /// the workloads had in setup and run, drive the cooperative loop, and collect the
     /// resulting workloads beside each one's `check()` verdict.
     ///
     /// A `check()` that does not return its owned workload stops the campaign,
@@ -666,15 +681,13 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
     ///
     /// # Errors
     ///
-    /// Returns `Err(())` if a workload IP fails to parse or a check task is
-    /// lost.
+    /// Returns `Err(())` if a check task is lost.
     async fn do_check_phase(
         sim: &mut SimWorld,
-        workloads: Vec<Box<dyn Workload<P>>>,
+        (workloads, check_contexts): WorkloadsWithContexts<P>,
         env: &IterationEnv<'_, P>,
         process_manager: Option<&mut ProcessManager<'_, P>>,
     ) -> Result<CompletedWorkloads<P>, ()> {
-        let check_contexts = Self::build_workload_contexts(sim, env)?;
         let (check_handles, check_ips) = Self::spawn_workload_tasks(
             "check",
             workloads,
@@ -1086,7 +1099,8 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
         Ok(process_manager)
     }
 
-    /// Build per-workload [`SimContext`]s for the setup/run and check phases.
+    /// Build per-workload [`SimContext`]s, once per iteration: setup, run and
+    /// check share them.
     ///
     /// # Errors
     ///
