@@ -180,7 +180,7 @@ impl PhaseStall {
                     .lock()
                     .expect("Mutex poisoned: prior task panicked")
                     .push(reason);
-                trigger_shutdown(sim, env.shutdown_signal);
+                trigger_shutdown(sim, env);
                 self.shutdown_triggered = true;
                 self.guard.reset_after_shutdown();
                 false
@@ -334,9 +334,11 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
         for (key, value) in seed_values {
             state.publish(key, *value);
         }
-        // The run's wipe ledger: draws nothing, read only by a regime with
-        // a wipe budget.
+        // The run's wipe ledger: draws nothing, read by a regime with a
+        // wipe budget and by the replicated fault patterns, which count an
+        // unhealed wipe as a lost copy.
         crate::runner::wipe::WipeLedger::install(&state);
+        sim.set_wipe_ledger(crate::runner::wipe::WipeLedger::of(&state));
         // The run's shard book: every `shard!` declaration lands in it, and
         // the gate, the disks and the network read it.
         let shard_book = crate::runner::shard::ShardBook::new(shard_faults);
@@ -470,7 +472,7 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
         .await
         .map_err(|()| env.deadlock())?;
         results.extend(check_results);
-        trigger_shutdown(sim, env.shutdown_signal);
+        trigger_shutdown(sim, env);
         results.extend(Self::stop_injectors(injectors).await);
         process_manager.abort_all();
         for panic in process_manager.take_panics() {
@@ -823,7 +825,7 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
             // A workload done early shuts its siblings down, unless chaos
             // lasts until the last one returns.
             if any_finished && !stall.shutdown_triggered && !chaos_until_run_ends {
-                trigger_shutdown(sim, env.shutdown_signal);
+                trigger_shutdown(sim, env);
                 stall.shutdown_triggered = true;
                 // While a sibling still runs, let every task see the
                 // cancelled token before the next step runs the `Shutdown`
@@ -1725,9 +1727,26 @@ impl<P: ProviderBundle> WorkloadOrchestrator<P> {
 }
 
 /// Trigger shutdown and let each simulation engine drain its own waiters.
-fn trigger_shutdown(sim: &mut SimWorld, shutdown_signal: &CancellationToken) {
+///
+/// The first trigger also records a `replica_still_lost` fault for each
+/// wiped process a replicated fault pattern still counts as a lost copy, so
+/// a harness that never heals its wipes sees that the pattern kept damage in
+/// that domain (or out of the group) since the wipe.
+fn trigger_shutdown<P: ProviderBundle>(sim: &mut SimWorld, env: &IterationEnv<'_, P>) {
     tracing::debug!("Triggering shutdown signal");
-    shutdown_signal.cancel();
+    if !env.shutdown_signal.is_cancelled() {
+        for ip in sim.lost_in_replicated_groups() {
+            tracing::warn!(
+                %ip,
+                "replicated fault patterns: a wiped process is still unhealed at the run's end"
+            );
+            env.obs.record_sim_fault(
+                WorkloadOrchestrator::<P>::sim_now_ms(sim),
+                &SimFaultEvent::ReplicaStillLost { ip: ip.to_string() },
+            );
+        }
+    }
+    env.shutdown_signal.cancel();
 
     sim.schedule_event(crate::sim::Event::Shutdown, Duration::from_nanos(1));
 }

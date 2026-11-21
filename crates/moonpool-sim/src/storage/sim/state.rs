@@ -320,6 +320,10 @@ pub(crate) struct StorageState {
     /// The run's shard book: damage to a region inside a shard lands only
     /// while the shard stays durable (see `shards.rs`).
     pub(crate) shards: Option<crate::runner::shard::ShardBook>,
+    /// The run's wipe ledger: a process wiped and not yet healed has lost
+    /// its copy of every record, which the replicated fault patterns count
+    /// as damage in its domain.
+    pub(crate) wipes: Option<crate::runner::wipe::WipeLedger>,
     /// Every fault the disk has injected, oldest first, drained by the caller.
     pub(crate) fault_records: Vec<StorageFaultRecord>,
     /// What each simulated crash did, per file, drained by the caller.
@@ -367,6 +371,7 @@ impl StorageState {
             replication: Vec::new(),
             layouts: BTreeMap::new(),
             shards: None,
+            wipes: None,
             fault_records: Vec::new(),
             crash_reports: Vec::new(),
             barrier_violation_armed: false,
@@ -439,6 +444,7 @@ impl StorageState {
             .iter()
             .map(|slot| (Arc::clone(&slot.plan), slot.turn))
             .collect();
+        let lost = self.lost_copies();
         let layout = self.layouts.get(&owner).cloned();
         let shard_rule = self.shard_rule(owner, path);
         let path = path.to_string();
@@ -458,9 +464,9 @@ impl StorageState {
                 return 0.0;
             }
             if !sharded.is_some_and(|(_, only)| only)
-                && !replication
-                    .iter()
-                    .all(|(plan, turn)| plan.allows(owner, layout.as_deref(), &path, sector, *turn))
+                && !replication.iter().all(|(plan, turn)| {
+                    plan.allows(owner, layout.as_deref(), &path, sector, *turn, &lost)
+                })
             {
                 return 0.0;
             }
@@ -468,6 +474,31 @@ impl StorageState {
                 .as_ref()
                 .map_or(1.0, |focus| focus.weight(&path, sector))
         }
+    }
+
+    /// The processes whose disk is lost now (wiped, not healed), when a
+    /// replicated fault pattern needs them.
+    fn lost_copies(&self) -> BTreeSet<IpAddr> {
+        if self.replication.is_empty() {
+            return BTreeSet::new();
+        }
+        self.wipes
+            .as_ref()
+            .map_or_default(|wipes| wipes.lost(self.clock))
+    }
+
+    /// The processes whose disk is lost now and that a non-spared
+    /// replicated fault pattern covers: each one's domain counts as damaged.
+    pub(crate) fn lost_in_groups(&self) -> BTreeSet<IpAddr> {
+        self.lost_copies()
+            .into_iter()
+            .filter(|ip| {
+                self.replication.iter().any(|slot| {
+                    slot.plan.domain(*ip).is_some()
+                        && !matches!(slot.plan.pattern(), crate::storage::FaultPattern::Spared)
+                })
+            })
+            .collect()
     }
 
     /// A random fault damaged or a write repaired some sector, or what a
@@ -481,8 +512,9 @@ impl StorageState {
 
     /// Before `owner`'s disk is up for a fault: every rolling turn that
     /// covers `owner` from another domain, and whose window holds no
-    /// damage, moves one domain on.
+    /// damage and no lost disk, moves one domain on.
     pub(crate) fn settle_turns(&mut self, owner: IpAddr) {
+        let lost = self.lost_copies();
         for at in 0..self.replication.len() {
             let plan = Arc::clone(&self.replication[at].plan);
             if !plan.is_rolling() {
@@ -499,7 +531,7 @@ impl StorageState {
                 slot.recheck = false;
             }
             let slot = &mut self.replication[at];
-            if !slot.damaged && !plan.in_window(domain, turn) {
+            if !slot.damaged && !plan.in_window(domain, turn) && !plan.window_lost(turn, &lost) {
                 slot.turn = (turn + 1) % plan.domain_count();
                 slot.recheck = true;
                 crate::assert_reachable!("storage: a rolling turn moves on");
@@ -507,28 +539,55 @@ impl StorageState {
         }
     }
 
-    /// Whether any named file of a process in the window starting at
-    /// `turn` holds a damaged sector its process still publishes (or any
-    /// damaged sector, if it publishes nothing).
+    /// Whether any domain of the window starting at `turn` holds damage
+    /// (see [`damaged_domains`](Self::damaged_domains)).
     fn window_damaged(&self, plan: &ReplicationPlan, turn: usize) -> bool {
-        self.path_to_file.iter().any(|((owner, path), file_id)| {
-            if !plan
-                .domain(*owner)
-                .is_some_and(|domain| plan.in_window(domain, turn))
-            {
-                return false;
-            }
-            let Some(file) = self.files.get(file_id) else {
-                return false;
+        self.damaged_domains(plan)
+            .into_iter()
+            .any(|domain| plan.in_window(domain, turn))
+    }
+
+    /// The domains of `plan` whose processes hold a damaged sector in a
+    /// named file that their process still publishes (or any damaged
+    /// sector, if it publishes nothing).
+    fn damaged_domains(&self, plan: &ReplicationPlan) -> BTreeSet<usize> {
+        self.path_to_file
+            .iter()
+            .filter_map(|((owner, path), file_id)| {
+                let domain = plan.domain(*owner)?;
+                let file = self.files.get(file_id)?;
+                if !file.image.has_damage() {
+                    return None;
+                }
+                let layout = self.layouts.get(owner);
+                file.image
+                    .damaged_sectors()
+                    .into_iter()
+                    .any(|sector| layout.is_none_or(|layout| layout.covers(path, sector)))
+                    .then_some(domain)
+            })
+            .collect()
+    }
+
+    /// Whether a wipe of `victim` now keeps every replicated group covering
+    /// it within its tolerance: the domains holding damage, with the
+    /// victim's, stay within `tolerance`. A wipe loses every copy the
+    /// victim holds, so a wipe that lands after damage in another domain
+    /// would leave some record with no clean copy. A spared group takes no
+    /// damage and allows every wipe. Two wipes in two domains are the
+    /// business of a [`WipeBudget`](crate::WipeBudget), not of this check.
+    pub(crate) fn wipe_keeps_tolerance(&self, victim: IpAddr) -> bool {
+        self.replication.iter().all(|slot| {
+            let plan = &slot.plan;
+            let Some(domain) = plan.domain(victim) else {
+                return true;
             };
-            if !file.image.has_damage() {
-                return false;
+            if matches!(plan.pattern(), crate::storage::FaultPattern::Spared) {
+                return true;
             }
-            let layout = self.layouts.get(owner);
-            file.image
-                .damaged_sectors()
-                .into_iter()
-                .any(|sector| layout.is_none_or(|layout| layout.covers(path, sector)))
+            let mut held = self.damaged_domains(plan);
+            held.insert(domain);
+            held.len() <= plan.tolerance()
         })
     }
 
