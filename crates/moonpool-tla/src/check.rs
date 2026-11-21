@@ -159,11 +159,11 @@ impl From<std::io::Error> for CheckError {
 
 /// The module that [`TraceCheck`] writes around the trace spec to learn how
 /// many events TLC matched.
-const WRAPPER: &str = "MoonpoolTraceCheck";
+pub(crate) const WRAPPER: &str = "MoonpoolTraceCheck";
 
 /// The prefix of the line the wrapper prints each time TLC matches more
 /// events than before.
-const MATCHED_MARK: &str = "<<\"moonpool-tla matched\", ";
+pub(crate) const MATCHED_MARK: &str = "<<\"moonpool-tla matched\", ";
 
 /// Checks traces against one trace spec with TLC.
 ///
@@ -252,6 +252,18 @@ impl TraceCheck {
         self
     }
 
+    pub(crate) fn spec_name(&self) -> &str {
+        &self.spec
+    }
+
+    pub(crate) fn cursor_name(&self) -> &str {
+        &self.cursor
+    }
+
+    pub(crate) fn end_invariant_name(&self) -> &str {
+        &self.end_invariant
+    }
+
     /// Run this TLC launcher instead of the default.
     #[must_use]
     pub fn tlc(mut self, program: impl Into<PathBuf>) -> Self {
@@ -323,7 +335,7 @@ impl TraceCheck {
     }
 
     /// Read the configuration and check the contract of the spec folder.
-    fn config(&self) -> Result<String, CheckError> {
+    pub(crate) fn config(&self) -> Result<String, CheckError> {
         // A `Trace.tla` in the folder is allowed (a sample trace helps an
         // editor parse the trace spec): the check does not copy it and
         // writes the real trace in its place.
@@ -346,6 +358,25 @@ impl TraceCheck {
     }
 
     fn run_tlc(&self, trace: &Trace, config: &str) -> Result<TlcRun, CheckError> {
+        // The wrapper's constraint comes first. TLC stops at the first
+        // constraint that is false, so after a user constraint the wrapper
+        // would miss the states outside it, and name an earlier event than
+        // the first one that does not match.
+        self.run_wrapped(
+            trace,
+            &wrapper_module(&self.spec, &self.cursor),
+            &format!("CONSTRAINT MoonpoolMatched\n{config}\n"),
+        )
+    }
+
+    /// Run TLC on `trace` with `wrapper` as the module around the trace
+    /// spec and `config` as its whole configuration.
+    pub(crate) fn run_wrapped(
+        &self,
+        trace: &Trace,
+        wrapper: &str,
+        config: &str,
+    ) -> Result<TlcRun, CheckError> {
         let module = trace.to_module(&self.trace_module)?;
         let work = match &self.temp_root {
             Some(root) => TempDir::new(root)?,
@@ -365,18 +396,8 @@ impl TraceCheck {
             }
         }
         std::fs::write(work.path().join(&trace_file), module)?;
-        std::fs::write(
-            work.path().join(format!("{WRAPPER}.tla")),
-            wrapper_module(&self.spec, &self.cursor),
-        )?;
-        std::fs::write(
-            work.path().join(format!("{WRAPPER}.cfg")),
-            // The wrapper's constraint comes first. TLC stops at the first
-            // constraint that is false, so after a user constraint the
-            // wrapper would miss the states outside it, and name an earlier
-            // event than the first one that does not match.
-            format!("CONSTRAINT MoonpoolMatched\n{config}\n"),
-        )?;
+        std::fs::write(work.path().join(format!("{WRAPPER}.tla")), wrapper)?;
+        std::fs::write(work.path().join(format!("{WRAPPER}.cfg")), config)?;
         // TLC unpacks its standard modules (`TLC.tla`, `Naturals.tla`, ...)
         // to fixed names in Java's temporary folder, so two runs that share
         // it race. Give each run its own.
@@ -442,13 +463,17 @@ fn wrapper_module(spec: &str, cursor: &str) -> String {
 }
 
 /// The exit code and the output of one TLC run.
-struct TlcRun {
-    code: Option<i32>,
-    output: String,
+pub(crate) struct TlcRun {
+    pub(crate) code: Option<i32>,
+    pub(crate) output: String,
 }
 
 /// Read the verdict out of TLC's output.
-fn parse_output(run: &TlcRun, end_invariant: &str, cursor: &str) -> Result<Verdict, CheckError> {
+pub(crate) fn parse_output(
+    run: &TlcRun,
+    end_invariant: &str,
+    cursor: &str,
+) -> Result<Verdict, CheckError> {
     if let Some(invariant) = violated_invariant(&run.output) {
         if invariant == end_invariant {
             return Ok(Verdict::Accepted);
@@ -478,32 +503,9 @@ fn parse_output(run: &TlcRun, end_invariant: &str, cursor: &str) -> Result<Verdi
 /// (`\*` to the end of the line, and `(* ... *)`, which nest) and strings
 /// are skipped.
 fn config_invariants(config: &str) -> Result<Vec<&str>, CheckError> {
-    const KEYWORDS: [&str; 21] = [
-        "SPECIFICATION",
-        "INIT",
-        "NEXT",
-        "CONSTANT",
-        "CONSTANTS",
-        "INVARIANT",
-        "INVARIANTS",
-        "PROPERTY",
-        "PROPERTIES",
-        "CONSTRAINT",
-        "CONSTRAINTS",
-        "ACTION_CONSTRAINT",
-        "ACTION_CONSTRAINTS",
-        "SYMMETRY",
-        "VIEW",
-        "CHECK_DEADLOCK",
-        "POSTCONDITION",
-        "POSTCONDITIONS",
-        "ALIAS",
-        "TYPE",
-        "TYPE_CONSTRAINT",
-    ];
     let mut invariants = Vec::new();
     let mut in_invariants = false;
-    for token in config_tokens(config)? {
+    for (_, token) in config_tokens(config)? {
         if KEYWORDS.contains(&token) {
             in_invariants = token.starts_with("INVARIANT");
         } else if in_invariants {
@@ -513,10 +515,36 @@ fn config_invariants(config: &str) -> Result<Vec<&str>, CheckError> {
     Ok(invariants)
 }
 
-/// The words of a TLC configuration, outside comments and strings. A word
-/// is a run of characters that are not white space; a comment or a string
-/// ends a word. An unclosed comment or string is refused.
-fn config_tokens(config: &str) -> Result<Vec<&str>, CheckError> {
+/// The keywords of a TLC configuration.
+pub(crate) const KEYWORDS: [&str; 21] = [
+    "SPECIFICATION",
+    "INIT",
+    "NEXT",
+    "CONSTANT",
+    "CONSTANTS",
+    "INVARIANT",
+    "INVARIANTS",
+    "PROPERTY",
+    "PROPERTIES",
+    "CONSTRAINT",
+    "CONSTRAINTS",
+    "ACTION_CONSTRAINT",
+    "ACTION_CONSTRAINTS",
+    "SYMMETRY",
+    "VIEW",
+    "CHECK_DEADLOCK",
+    "POSTCONDITION",
+    "POSTCONDITIONS",
+    "ALIAS",
+    "TYPE",
+    "TYPE_CONSTRAINT",
+];
+
+/// The words of a TLC configuration, outside comments and strings, each
+/// with its byte offset. A word is a run of characters that are not white
+/// space; a comment or a string ends a word. An unclosed comment or string
+/// is refused.
+pub(crate) fn config_tokens(config: &str) -> Result<Vec<(usize, &str)>, CheckError> {
     let bytes = config.as_bytes();
     let mut tokens = Vec::new();
     let mut word: Option<usize> = None;
@@ -538,12 +566,12 @@ fn config_tokens(config: &str) -> Result<Vec<&str>, CheckError> {
         };
         if let Some(next) = skip_to {
             if let Some(start) = word.take() {
-                tokens.push(&config[start..i]);
+                tokens.push((start, &config[start..i]));
             }
             i = next;
         } else if rest[0].is_ascii_whitespace() {
             if let Some(start) = word.take() {
-                tokens.push(&config[start..i]);
+                tokens.push((start, &config[start..i]));
             }
             i += 1;
         } else {
@@ -552,7 +580,7 @@ fn config_tokens(config: &str) -> Result<Vec<&str>, CheckError> {
         }
     }
     if let Some(start) = word {
-        tokens.push(&config[start..]);
+        tokens.push((start, &config[start..]));
     }
     Ok(tokens)
 }
@@ -600,7 +628,7 @@ fn string_end(bytes: &[u8], start: usize) -> Result<usize, CheckError> {
 }
 
 /// The highest event count that the wrapper printed; 0 when it printed none.
-fn matched_events(output: &str) -> usize {
+pub(crate) fn matched_events(output: &str) -> usize {
     output
         .lines()
         .filter_map(|line| line.trim().strip_prefix(MATCHED_MARK))
@@ -612,7 +640,7 @@ fn matched_events(output: &str) -> usize {
 
 /// The name in TLC's `Error: Invariant X is violated.` line (or `... is
 /// violated by the initial state:`).
-fn violated_invariant(output: &str) -> Option<&str> {
+pub(crate) fn violated_invariant(output: &str) -> Option<&str> {
     output.lines().find_map(|line| {
         let rest = line.trim().strip_prefix("Error: Invariant ")?;
         rest.find(" is violated").map(|end| &rest[..end])
@@ -622,7 +650,7 @@ fn violated_invariant(output: &str) -> Option<&str> {
 /// The last state of TLC's error trace: the `/\ var = value` lines after the
 /// last `State N:` header, or after `... violated by the initial state:`.
 /// Empty when the output has no state.
-fn last_state(output: &str) -> String {
+pub(crate) fn last_state(output: &str) -> String {
     let mut last: Vec<&str> = Vec::new();
     let mut open = false;
     for line in output.lines() {
@@ -653,7 +681,7 @@ fn is_state_header(line: &str) -> bool {
 }
 
 /// The value of `/\ cursor = N` in a state.
-fn cursor_value(state: &str, cursor: &str) -> Option<usize> {
+pub(crate) fn cursor_value(state: &str, cursor: &str) -> Option<usize> {
     let prefix = format!("/\\ {cursor} = ");
     state
         .lines()

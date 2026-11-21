@@ -98,6 +98,32 @@ A rejection names the first event that no behaviour matches (`rejection.index`) 
 
 A rejection is a finding in both directions. The papers report that the first rejections are mostly gaps in the spec or in the mapping from code to spec. Fix those too: each one is a fact about the code that the spec did not say.
 
+## Checking a Long Run Live
+
+A long run writes more events than one TLC run can follow: TLC keeps one behaviour of at most 65,535 states, and a check after the run sees a divergence only when the run ends. `TraceCheck::live` checks the events while the run writes them:
+
+```rust,no_run
+use moonpool_tla::{Trace, TraceCheck, Value, Verdict};
+
+let mut start = Trace::new();
+start.define("TraceRM", Value::str_set(["r1", "r2"]));
+let mut live = TraceCheck::new("specs", "TwoPhaseTrace")
+    .live("TraceNext") // the next-state action of the trace spec
+    .chunk(500)
+    .start(&start)?;
+while live.event("rm_prepare", [("rm", Value::from("r1"))]) {
+    // ... the run goes on; `event` returns false once the check stopped
+#   break;
+}
+let verdict = live.finish()?; // indexes count from the first event of the run
+# let _ = verdict;
+# Ok::<(), moonpool_tla::CheckError>(())
+```
+
+`Live` gives each full chunk to a thread of its own, so TLC checks one chunk while the run writes the next. The wrapper module prints each model state at the end of a chunk, and the next chunk starts from the set of those states (`INIT` that set, `NEXT` the action given to `live`), with the cursor back at 1. Every state goes on, not one: a step the trace does not log (a hidden choice) leaves several states, and a later event may match only one of them. So the chunks together check what one TLC run over the whole trace would check, with no limit on the length. The first chunk that no behaviour matches stops the check; `Live::event` then returns `false`, and the run can stop at once. A rejection or a broken invariant counts its events from the first event of the run.
+
+A state goes from one chunk to the next as TLC prints it, so every model value in a state must be a name the spec declares (a constant that the configuration binds to the model value of the same name, such as `None = None`). A model that keeps a fact forever (each sealed segment, each message ever sent) makes the hand-off grow with the run: forget a fact in the trace spec when no later step can read it.
+
 ## Controls
 
 An accepted trace proves little if the check cannot fail. Plant **mutants**: copies of the code with one bug each, mirroring a step the spec forbids. Each mutant must give a rejected trace on some seed. A mutant that passes means the trace logs too little to pin the spec down.
@@ -115,6 +141,6 @@ On a seed where nobody aborts, the first mutant ends in a state that looks fine:
 ## Cost and Limits
 
 - **One run, not the code.** An accepted trace says that this run is allowed. Coverage comes from the number and the quality of the runs, which is the simulation's job.
-- **About a second per trace.** Most of it is the start of the JVM. That is fine for tens of seeds in a test, and too slow for every seed of a long sweep: check a sample.
+- **About a second per trace.** Most of it is the start of the JVM. That is fine for tens of seeds in a test, and too slow for every seed of a long sweep: check a sample. A live check pays it once per chunk.
 - **32-bit integers.** Record large ids as strings, and map ballots or terms to small ranks if the spec compares them.
 - **A loose spec passes.** Trace checking cannot find a bug that the spec also allows. Keep TLC's own model checking for the spec.

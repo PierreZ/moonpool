@@ -38,6 +38,11 @@ impl Trace {
         self.events.push(Value::Record(record));
     }
 
+    /// Append an event that is already a record.
+    pub(crate) fn push_value(&mut self, event: Value) {
+        self.events.push(event);
+    }
+
     /// Add `name == value` to the trace module. A trace spec uses a
     /// definition for what depends on the run, a set of node names say, and
     /// its TLC configuration gives it to a constant of the spec

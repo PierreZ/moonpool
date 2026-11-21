@@ -28,6 +28,12 @@ assert!(matches!(verdict, Verdict::Rejected(_)));
 # Ok::<(), moonpool_tla::CheckError>(())
 ```
 
+A long run goes to `TraceCheck::live("TraceNext")`: `Live` takes the
+events while the run writes them and checks them in chunks on its own
+thread. Each chunk starts from every model state the chunk before it ended
+in, so the length has no limit (one TLC behaviour holds at most 65,535
+states), and the first chunk that no behaviour matches stops the check.
+
 The method is the one of Cirstea, Kuppe, Loillier and Merz, "Validating
 Traces of Distributed Programs Against TLA+ Specifications" (2024).
 
