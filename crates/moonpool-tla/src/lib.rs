@@ -13,6 +13,10 @@
 //! sequence counter, so the timeline is already a total order of every
 //! process's events, and a rejected trace is a seed that replays.
 //!
+//! A long run goes to [`TraceCheck::live`]: [`Live`] checks the events in
+//! chunks while the run writes them, and stops at the first chunk that no
+//! behaviour matches.
+//!
 //! The crate has no dependency and does not need the simulator: a sans-I/O
 //! harness records events itself, and `moonpool-sim` builds a [`Trace`]
 //! from its captured timeline. Running TLC needs a platform that can start
@@ -38,6 +42,7 @@
 #![deny(missing_docs)]
 
 mod check;
+mod live;
 mod trace;
 mod value;
 
@@ -45,5 +50,6 @@ pub use check::{
     CheckError, DEFAULT_CURSOR, DEFAULT_END_INVARIANT, DEFAULT_TRACE_MODULE, Rejection, TLC_ENV,
     TraceCheck, Verdict,
 };
+pub use live::{DEFAULT_BACKLOG, DEFAULT_CHUNK, Live, LiveCheck, MAX_CHUNK};
 pub use trace::{EVENT_FIELD, Trace};
 pub use value::{Value, ValueError};

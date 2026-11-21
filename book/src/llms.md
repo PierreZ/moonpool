@@ -23,7 +23,7 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 | `moonpool-core` | Provider traits and core types. | `default = ["tokio-providers", "select"]`, `compio-providers`, `deterministic-select` |
 | `moonpool-sim` | The runtime, builder, chaos, assertions, observability. | `default = ["tokio-providers", "exploration"]` |
 | `moonpool-assertions`, `moonpool-buggify` | Probes and fault sites for libraries. Zero dependencies. | none |
-| `moonpool-tla` | Check a run's trace against a TLA+ spec with TLC (`Trace`, `TraceCheck`, `Verdict`). Zero dependencies. `moonpool_sim::observability::tla::trace_from_timeline` builds the trace from the timeline. | none |
+| `moonpool-tla` | Check a run's trace against a TLA+ spec with TLC (`Trace`, `TraceCheck`, `Verdict`); `TraceCheck::live` checks a long run in chunks while it runs (`Live`). Zero dependencies. `moonpool_sim::observability::tla::trace_from_timeline` builds the trace from the timeline. | none |
 | `moonpool-walk` | A seeded random walk over sans-I/O state machines (`Model`, `Walk`, `Harness`), with coverage-driven exploration (`Walk::explore`, `Timeline`). No simulator. See [the chapter](./part5-building-on-top/09-walk.md). | none |
 | `moonpool-explorer` | Multiverse exploration (`fork`, `mmap`). | none |
 | `moonpool-hyper`, `moonpool-rpc`, `moonpool-prometheus`, `moonpool-journal` | HTTP/2, typed RPC, metrics, a CLSTORE journal. | see the [Crate Map](./appendix/02-crate-map.md) |
