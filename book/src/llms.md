@@ -24,7 +24,7 @@ This page is a dense map of moonpool for a coding agent that adds deterministic 
 | `moonpool-sim` | The runtime, builder, chaos, assertions, observability. | `default = ["tokio-providers", "exploration"]` |
 | `moonpool-assertions`, `moonpool-buggify` | Probes and fault sites for libraries. Zero dependencies. | none |
 | `moonpool-tla` | Check a run's trace against a TLA+ spec with TLC (`Trace`, `TraceCheck`, `Verdict`). Zero dependencies. `moonpool_sim::observability::tla::trace_from_timeline` builds the trace from the timeline. | none |
-| `moonpool-walk` | A seeded random walk over sans-I/O state machines (`Model`, `Walk`, `Harness`). No simulator. See [the chapter](./part5-building-on-top/09-walk.md). | none |
+| `moonpool-walk` | A seeded random walk over sans-I/O state machines (`Model`, `Walk`, `Harness`), with coverage-driven exploration (`Walk::explore`, `Timeline`). No simulator. See [the chapter](./part5-building-on-top/09-walk.md). | none |
 | `moonpool-explorer` | Multiverse exploration (`fork`, `mmap`). | none |
 | `moonpool-hyper`, `moonpool-rpc`, `moonpool-prometheus`, `moonpool-journal` | HTTP/2, typed RPC, metrics, a CLSTORE journal. | see the [Crate Map](./appendix/02-crate-map.md) |
 
@@ -69,7 +69,8 @@ impl Workload for Driver {
 
 | Group | Methods |
 |-------|---------|
-| Providers | `providers()`, `network()`, `time()`, `task()`, `random()`, `storage()` |
+| Providers | `providers() -> &P`; `network()`, `time()`, `random()`, `storage()` when `P: Providers`; `task()` is always the runner's `SimTaskProvider` |
+| Custom bundle | `SimContext<P = SimProviders>`, `Process<P>`, `Workload<P>`, `Deployment<P>`. `SimulationBuilder::with_providers(\|env: &ProviderEnv\| P)` builds `P` per process boot and per workload. `P: ProviderBundle` (`Clone + Send + Sync + 'static`, `Providers` not required). Build it over the sim: `SimProviders::from_env(env)` (`SimProviders::new` is only for a hand-driven `SimWorld`: its task panics are not reported). Spawn only through `env.task()` (the boot scope a kill cancels) |
 | Local code | `run_local(name, \|ctx\| fut)`: run a `!Send` future as a local task of the process, return its answer |
 | Identity | `my_ip()`, `client_id()`, `client_count()`, `peer(name)`, `peers()` |
 | Topology | `topology()` → `WorkloadTopology { groups, ips_in_group, group_for, my_group, peer_by_name, all_process_ips, ips_tagged, tags_for, my_tags, my_locality, locality_for, peers_on_my_machine, ips_in_domain }` |
@@ -163,7 +164,7 @@ impl Invariant for NoSplitBrain {
 }
 ```
 
-Capture rule: INFO and above, constant message, inside a process or workload task. `TraceEvent { seq, time_ms, source, target, level, name, fields }` with `u64`, `i64`, `f64`, `bool`, `str` accessors. `TraceQuery { len(name), since(name, &cursor), snapshot(name), names() }`. Sim faults appear as `"sim_fault"` events with a `kind` field. `init_sim_tracing(Level)` in a binary's `main`.
+Capture rule: INFO and above, constant message, inside a process or workload task. `TraceEvent { seq, time_ms, source, target, level, name, fields }` with `u64`, `i64`, `f64`, `bool`, `str` accessors. `TraceQuery { len(name), since(name, &cursor), snapshot(name), names(), total() }` (`total()` counts every captured event: skip a step where it did not change). Sim faults appear as `"sim_fault"` events with a `kind` field. `init_sim_tracing(Level)` in a binary's `main`.
 
 ## Buggify and Hints
 

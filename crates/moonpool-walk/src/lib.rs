@@ -176,6 +176,7 @@ mod mailbox;
 mod model;
 mod report;
 mod rng;
+mod timeline;
 mod walk;
 
 pub use harness::{DEFAULT_MAILBOX, Harness};
@@ -183,6 +184,7 @@ pub use mailbox::Mailbox;
 pub use model::{Cx, Entry, Logged, Model, Phase, Run, Stats};
 pub use report::{Report, SeedFailure, Site, WalkError};
 pub use rng::Rng;
+pub use timeline::{Branch, Timeline};
 pub use walk::{DEFAULT_ENV_PREFIX, Walk};
 
 pub use moonpool_assertions::{reachable, sometimes};

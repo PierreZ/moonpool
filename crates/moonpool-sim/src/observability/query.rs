@@ -31,4 +31,10 @@ pub trait TraceQuery {
     /// invariant that must read every event (a search for a leaked secret,
     /// say) walks these names with [`since`](Self::since).
     fn names(&self) -> Vec<String>;
+
+    /// Number of events captured under every name since the start of the
+    /// seed. It only grows within a seed, so an invariant that walks every
+    /// name can skip a step where it did not change: most steps capture
+    /// nothing.
+    fn total(&self) -> usize;
 }

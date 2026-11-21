@@ -218,11 +218,13 @@ acceptor 1: promised 10 accepted Some((10, 5)) down false
 acceptor 2: promised 10 accepted Some((5, 5)) down false
 ```
 
-The walk reads five environment variables. With the default prefix they are
+The walk reads seven environment variables. With the default prefix they are
 `MOONPOOL_WALK_SEED` (one seed alone), `MOONPOOL_WALK_SEEDS` (how many),
 `MOONPOOL_WALK_FROM` (the first seed), `MOONPOOL_WALK_STEPS` (the chaos
-steps) and `MOONPOOL_WALK_TAIL` (how many entries of the log a failure
-prints; 40 by default, a large number for the whole log). A value that is
+steps), `MOONPOOL_WALK_TAIL` (how many entries of the log a failure
+prints; 40 by default, a large number for the whole log),
+`MOONPOOL_WALK_EXPLORE` (the budget of an exploring campaign) and
+`MOONPOOL_WALK_TIMELINE` (one branched run alone, see below). A value that is
 not a number stops the campaign. Every walk with the default prefix reads
 the same variables, so `env_prefix` gives each model its own names.
 
@@ -274,6 +276,54 @@ When it finds a failure it runs the seed again and reads after every step, so
 the report names the step that records the failure.
 
 Coverage is not judged when one seed runs alone.
+
+## Fork at Discovery: Coverage-Driven Exploration
+
+Counting coverage tells us what we missed. Can the walk go and get it? A
+rare case is often a chain: a crash, then an election, then a late message.
+Each link has odds of one in a few, and the chain has the product of them. A
+plain seed must win every link in one run. This is the Sequential Luck
+Problem, and more seeds barely help.
+
+`Walk::explore(n)` keeps what a run found. When a chaos step passes a
+`sometimes!` or `reachable!` site for the first time in the campaign, that
+step is a discovery. The walk then queues children of the run. A child
+replays the run up to the discovery step, so it starts where the run stood
+when it found something new. Then it draws a new schedule from a seed of its
+own. Its discoveries queue grandchildren in turn:
+
+```rust,ignore
+let report = Walk::<Ladder>::new()
+    .seeds(4)
+    .explore(300) // up to 300 more runs for each root seed
+    .run_each(|run| { /* run.timeline names the run */ })?;
+println!("{report}"); // ... explored: 1204 timelines, 1200 of them branched, 9 discoveries
+```
+
+The budget belongs to the campaign. A root seed that finds nothing new
+leaves its share to the seeds that did. The children of a discovery run
+before the next root seed. Once every root seed has run, the budget left goes
+round the discovery points, newest first. `Walk::branching` sets how many
+children one discovery queues (two by default).
+
+A second signal is code coverage. `Walk::edge_coverage(read)` takes a
+function that returns the count of code edges covered so far. A step after
+which the count grew is a discovery too. With
+[SanitizerCoverage](../appendix/08-xtask.md) on the crate under
+test, `moonpool_explorer::sancov_edges_covered_live` is that function, and it
+returns 0 in a plain build. The walk reads it once after each chaos step of
+an exploring campaign.
+
+Each run of an exploring campaign is a `Timeline`: the root seed and its
+branch points, `17@120:9e3779b97f4a7c15`. A timeline replays exactly, like a
+seed. A failure in a child prints `MOONPOOL_WALK_TIMELINE=17@120:...`, and
+`Walk::replay_timeline` returns its `Run`. Only chaos steps branch. The
+quiet tail and the settle rounds stay the liveness judge, not a search.
+
+The walk learns of a first pass through the discovery hook of
+`moonpool-assertions`. It installs the hook for the campaign and removes it at
+the end. Inside a simulation it leaves the hook alone: the
+[explorer](./01-exploration.md) of the simulation owns it.
 
 ## Buggify and Swarm Testing
 
@@ -410,6 +460,8 @@ spec that models the faults.
 - It does not draw partitions. A model that needs one adds an action that
   cuts a link: it drops the messages in flight with `cx.drop_where` and the
   later ones in `deliver`.
+- It does not fork processes. An exploring walk replays a run's prefix in
+  place of a snapshot, which costs little because a run costs microseconds.
 - It does not shrink a failing schedule. The log of a few hundred steps is
   short, and `Harness` turns the part that matters into a test.
 - It catches a failed `assert!` with `catch_unwind`, so it needs
