@@ -8,7 +8,8 @@ Every value on this page is read from the current source. The code wins when the
 
 | Method | Default | Purpose |
 |--------|---------|---------|
-| `new()` | | Start a builder. |
+| `new()` | | Start a builder whose actors get `SimProviders`. |
+| `with_providers(\|env: &ProviderEnv\| P)` | | Start a builder whose actors get the bundle `P` the factory builds, once per process boot and per workload. Processes and workloads then implement `Process<P>` and `Workload<P>`. |
 | `processes(count, factory)` | | Register one server group. `count` is `usize` or `RangeInclusive<usize>` (`ProcessCount`). The g-th group lives on `10.0.{g+1}.x`. Duplicate group names panic. |
 | `cluster(LocalityConfig, factory)` | | Register a group whose count comes from a sampled topology. The group may draw zero processes. |
 | `tags(&[(key, &[values])]) -> Result<Self>` | | Round-robin tag dimensions over the last registered group. |

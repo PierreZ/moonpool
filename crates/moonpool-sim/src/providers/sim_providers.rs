@@ -5,12 +5,11 @@ use std::net::IpAddr;
 use moonpool_core::impl_providers_bundle;
 
 use crate::network::SimNetworkProvider;
+use crate::runner::ProviderEnv;
 use crate::sim::WeakSimWorld;
 use crate::storage::SimStorageProvider;
 
-use super::{
-    SimRandomProvider, SimSystemProvider, SimTaskProvider, SimTimeProvider, TaskPanicReporter,
-};
+use super::{SimRandomProvider, SimSystemProvider, SimTaskProvider, SimTimeProvider};
 
 /// Simulation providers bundle for deterministic testing.
 ///
@@ -21,8 +20,11 @@ use super::{
 /// ## Usage
 ///
 /// The runner builds one bundle per process and hands it over through
-/// [`SimContext::providers`](crate::SimContext::providers). A test that
-/// drives a [`SimWorld`](crate::SimWorld) by hand builds its own:
+/// [`SimContext::providers`](crate::SimContext::providers). A custom bundle
+/// (see [`SimulationBuilder::with_providers`](crate::SimulationBuilder::with_providers))
+/// builds its simulated providers with [`from_env`](Self::from_env). A test
+/// that drives a [`SimWorld`](crate::SimWorld) by hand, with no runner,
+/// builds its own with [`new`](Self::new):
 ///
 /// ```rust
 /// use moonpool_sim::{Providers, SimProviders, SimWorld};
@@ -54,11 +56,26 @@ pub struct SimProviders {
     random: SimRandomProvider,
     storage: SimStorageProvider,
     system: SimSystemProvider,
-    sim: WeakSimWorld,
 }
 
 impl SimProviders {
-    /// Create a new simulation providers bundle scoped to a process IP.
+    /// The simulated providers of the actor `env` describes: the bundle the
+    /// runner hands out by default.
+    ///
+    /// Tasks spawned through it use the actor's task provider: a process
+    /// kill cancels them, and a panic in one fails the seed. Build a custom
+    /// bundle on top of this.
+    #[must_use]
+    pub fn from_env(env: &ProviderEnv) -> Self {
+        Self::new(env.world().clone(), env.ip()).with_task(env.task().clone())
+    }
+
+    /// A bundle for a [`SimWorld`](crate::SimWorld) driven by hand, with no
+    /// runner.
+    ///
+    /// Its task provider reports no panics: inside the runner, a panic in a
+    /// task it spawns would not fail the seed. Inside the runner, use
+    /// [`from_env`](Self::from_env).
     ///
     /// # Arguments
     ///
@@ -72,32 +89,19 @@ impl SimProviders {
             task: SimTaskProvider::default(),
             random: SimRandomProvider::new(),
             storage: SimStorageProvider::new(sim.clone(), ip),
-            system: SimSystemProvider::new(sim.clone(), ip),
-            sim,
+            system: SimSystemProvider::new(sim, ip),
         }
     }
 
-    /// A weak handle on the simulation these providers serve.
-    pub(crate) fn weak_world(&self) -> WeakSimWorld {
-        self.sim.clone()
-    }
-
-    /// Bind every task spawned through this bundle's task provider to
-    /// `scope`: cancelling it drops them all, descendants included.
+    /// Spawn through `task` instead of an unscoped task provider.
     ///
-    /// The runner gives each process boot its own scope and cancels it when
-    /// the process is killed, so a crash ends the process's background work
-    /// along with its root future. Workloads get no scope.
+    /// The runner passes the actor's
+    /// [`ProviderEnv::task`](crate::ProviderEnv::task): bound to the boot
+    /// scope a process kill cancels, and recording the panics of the tasks
+    /// it spawns.
     #[must_use]
-    pub(crate) fn with_task_scope(mut self, scope: tokio_util::sync::CancellationToken) -> Self {
-        self.task = self.task.with_scope(scope);
-        self
-    }
-
-    /// Record panics from detached provider-spawned tasks for this actor.
-    #[must_use]
-    pub(crate) fn with_task_panic_reporter(mut self, reporter: TaskPanicReporter) -> Self {
-        self.task = self.task.with_panic_reporter(reporter);
+    pub fn with_task(mut self, task: SimTaskProvider) -> Self {
+        self.task = task;
         self
     }
 }
