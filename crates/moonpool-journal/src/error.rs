@@ -57,6 +57,22 @@ pub enum OpenError {
         batch: u64,
     },
 
+    /// The metainfo lost an update inside one open generation: an intact
+    /// entry of `batch` was written after the metainfo update numbered
+    /// `stamp` (its low 48 bits), but the metainfo reads back as `seq`, an
+    /// older one. Each entry is stamped with the metainfo it was written
+    /// under, so the caller's node-unique state went back, and the journal
+    /// refuses rather than hand it out.
+    #[error("the metainfo (seq {seq}) is older than batch {batch:#x}, stamped {stamp}")]
+    MetaUpdateLost {
+        /// The metainfo's `seq`.
+        seq: u64,
+        /// The stamp the entry holds: the low 48 bits of a later `seq`.
+        stamp: u64,
+        /// The batch of the entry.
+        batch: u64,
+    },
+
     /// A segment file is unusable at file granularity: wrong size, no valid
     /// header copy, or a header naming another journal or another batch.
     /// CLSTORE crashes on file-system metadata faults.

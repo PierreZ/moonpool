@@ -10,7 +10,7 @@ use crate::batch::{Batch, Write};
 use crate::format::{
     BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, MAX_BATCH_RECORDS,
     MAX_GENERATION, META_COPY_B_AT, META_MAX, Meta, RECORD_SIZE, Record, Retire, SegmentHeader,
-    Slot, align_up, clear_id, entry_crc, first_batch_of, generation_of, journal_tag, last_batch_of,
+    Slot, align_up, clear_id, first_batch_of, generation_of, journal_tag, last_batch_of, stamp_of,
     u64_of, usize_of,
 };
 use crate::io::block_buf;
@@ -676,6 +676,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation: meta.open_generation,
             last: meta.open_last,
             mark: meta.last_batch,
+            seq: meta.seq,
         };
         let mut scanned = scan(&segments, tag, known).await?;
         if scanned.last_batch < meta.last_batch {
@@ -1020,10 +1021,9 @@ impl<P: LocalStorageProvider> Journal<P> {
     fn intact(&self, position: u64, at: &Located, bytes: &[u8]) -> bool {
         assert_eq!(bytes.len(), entry_bytes(at), "judged on its whole entry");
         let record = record_of(position, at);
-        let intact = EntryHeader::parse(bytes).is_some_and(|(header, stored)| {
-            header.tag == self.tag
-                && entry_matches(&record, &header, stored)
-                && entry_crc(&bytes[..RECORD_SIZE], &bytes[RECORD_SIZE..]) == stored
+        let intact = EntryHeader::parse(bytes, self.tag).is_some_and(|entry| {
+            entry_matches(&record, &entry.header, entry.crc)
+                && entry.payload_intact(&bytes[RECORD_SIZE..])
         });
         if !intact {
             self.seen_damaged
@@ -1127,6 +1127,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation: self.generation,
             last: self.meta.open_last,
             mark: self.meta.last_batch,
+            seq: self.meta.seq,
         };
         let (writes, repair) =
             plan_repair(&self.segments, self.tag, known, self.last_batch).await?;
@@ -1662,9 +1663,9 @@ impl<P: LocalStorageProvider> Journal<P> {
                 position,
                 id,
                 len,
-                tag: self.tag,
+                stamp: stamp_of(self.meta.seq),
             };
-            let entry_crc = header.encode(payload, &mut entries[start..]);
+            let entry_crc = header.encode(self.tag, payload, &mut entries[start..]);
             decoded.push(Record {
                 kind,
                 flags,

@@ -162,6 +162,13 @@ fn spots(journal: &J, position: u64) -> ((String, u64), (String, u64)) {
     )
 }
 
+/// The spot of one byte in the entry header of `position`: damage there
+/// leaves nothing of the entry, where a payload byte leaves its header.
+fn header_spot(journal: &J, position: u64) -> (String, u64) {
+    let layout = journal.layout(position).expect("a live position");
+    (layout.entry.path, layout.entry.bytes.start + 20)
+}
+
 const BOTH: [Durability; 2] = [Durability::Ordered, Durability::Batched];
 
 #[test]
@@ -832,7 +839,8 @@ fn a_damaged_record_and_entry_before_the_last_batch_refuse_to_open() {
         let journal = five(&mut sim, Durability::Ordered).await;
         let journal = put(&mut sim, journal, &[(10, 1, 300), (11, 1, 300)]).await;
         let journal = put(&mut sim, journal, &[(12, 1, 300)]).await;
-        let (record, entry) = spots(&journal, 11);
+        let (record, _) = spots(&journal, 11);
+        let entry = header_spot(&journal, 11);
         drop(journal);
         flip(&mut sim, record.0, record.1).await;
         flip(&mut sim, entry.0, entry.1).await;
@@ -844,6 +852,39 @@ fn a_damaged_record_and_entry_before_the_last_batch_refuse_to_open() {
     });
 }
 
+/// A damaged record and a damaged payload whose entry header is intact:
+/// the header names the entry, so the open reports it corrupt, with its
+/// identity, and goes on. It never writes the record back, because the
+/// header proves nothing of the payload: the next open finds the same.
+#[test]
+fn a_damaged_record_and_payload_under_an_intact_header_are_corruption() {
+    runtime().block_on(async {
+        let mut sim = sim(8);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let journal = put(&mut sim, journal, &[(10, 1, 300), (11, 1, 300)]).await;
+        let journal = put(&mut sim, journal, &[(12, 1, 300)]).await;
+        let (record, entry) = spots(&journal, 11);
+        drop(journal);
+        flip(&mut sim, record.0, record.1).await;
+        flip(&mut sim, entry.0, entry.1).await;
+        for open in 0..2 {
+            let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+                .await
+                .expect("one entry named and damaged");
+            assert_eq!(recovery.corrupt, vec![(11, id(11, 1))], "open {open}");
+            assert_eq!(recovery.rebuilt, 0, "open {open}");
+            assert_eq!(recovery.repair.blocks_written, 0, "open {open}");
+            let (journal, read_11) = read(&mut sim, journal, 11).await;
+            assert!(
+                matches!(read_11, Err(ReadError::Damaged { position: 11, .. })),
+                "{read_11:?}"
+            );
+            let (_, read_12) = read(&mut sim, journal, 12).await;
+            assert_eq!(read_12.expect("after it"), payload(12, 1, 300));
+        }
+    });
+}
+
 /// Every record of a batch and its first entry damaged, before the last
 /// batch: nothing even says how many records it held.
 #[test]
@@ -851,7 +892,8 @@ fn a_batch_with_no_surviving_identity_before_the_last_is_lost() {
     runtime().block_on(async {
         let mut sim = sim(8);
         let journal = five(&mut sim, Durability::Ordered).await;
-        let (record, entry) = spots(&journal, 3);
+        let (record, _) = spots(&journal, 3);
+        let entry = header_spot(&journal, 3);
         drop(journal);
         flip(&mut sim, record.0, record.1).await;
         flip(&mut sim, entry.0, entry.1).await;
@@ -860,6 +902,27 @@ fn a_batch_with_no_surviving_identity_before_the_last_is_lost() {
             matches!(refused, Err(OpenError::LostBatch { .. })),
             "{refused:?}"
         );
+    });
+}
+
+/// Every record of a batch damaged and its first payload too, under an
+/// intact entry header: the header locates the batch, and names its
+/// damaged entry.
+#[test]
+fn a_batch_with_only_an_entry_header_left_is_found_from_it() {
+    runtime().block_on(async {
+        let mut sim = sim(8);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let (record, entry) = spots(&journal, 3);
+        drop(journal);
+        flip(&mut sim, record.0, record.1).await;
+        flip(&mut sim, entry.0, entry.1).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect("the header locates the batch");
+        assert_eq!(recovery.corrupt, vec![(3, id(3, 1))]);
+        let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+        assert_eq!(live, vec![1, 2, 3, 4, 5]);
     });
 }
 
@@ -1416,15 +1479,28 @@ fn two_faults_on_a_witnessed_last_batch_refuse_to_open() {
         ] {
             let mut sim = sim(9);
             let journal = five_then_two(&mut sim, durability, witnessed).await;
-            let (record, entry) = spots(&journal, 7);
+            let (record, payload_spot) = spots(&journal, 7);
+            let entry = header_spot(&journal, 7);
             drop(journal);
-            flip(&mut sim, record.0, record.1).await;
+            let image = file_bytes(&mut sim, record.0.clone()).await;
+            flip(&mut sim, record.0.clone(), record.1).await;
             flip(&mut sim, entry.0, entry.1).await;
             let refused = reopen(&mut sim, durability).await.map(drop);
             assert!(
                 matches!(refused, Err(OpenError::DoubleFault { index: 1, .. })),
                 "{durability:?}, witnessed {witnessed}: {refused:?}"
             );
+            // The payload damaged instead of the header: the header names
+            // the acknowledged entry, which is corrupt, not torn.
+            put_bytes(&mut sim, record.0.clone(), image).await;
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, payload_spot.0, payload_spot.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}, {witnessed}: {error}"));
+            assert_eq!(recovery.corrupt, vec![(7, id(7, 1))], "{durability:?}");
+            assert_eq!(recovery.torn, 0, "{durability:?}");
+            assert!(matches!(journal.state(6), State::Live { .. }));
         }
     });
 }
@@ -1438,7 +1514,8 @@ fn a_witnessed_last_batch_with_no_surviving_identity_is_lost_not_the_end() {
         for durability in BOTH {
             let mut sim = sim(9);
             let journal = five_then_two(&mut sim, durability, true).await;
-            let (record_6, entry_6) = spots(&journal, 6);
+            let (record_6, _) = spots(&journal, 6);
+            let entry_6 = header_spot(&journal, 6);
             let (record_7, _) = spots(&journal, 7);
             drop(journal);
             flip(&mut sim, record_6.0, record_6.1).await;
@@ -1480,6 +1557,57 @@ fn a_metainfo_older_than_the_log_is_refused() {
             matches!(refused, Err(OpenError::MetaRolledBack { .. })),
             "{refused:?}"
         );
+    });
+}
+
+/// The metainfo of the same open restored in both copies (both copy
+/// writes of one update lost): no generation is ahead, but the batch after
+/// the update is stamped with the newer metainfo, which proves the
+/// metainfo older than the log.
+#[test]
+fn a_metainfo_that_lost_an_update_in_its_open_is_refused() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(17);
+            let journal = five(&mut sim, durability).await;
+            let older = file_bytes(&mut sim, format!("{DIR}/meta")).await;
+            let mut batch = Batch::new();
+            batch.set_meta("promise 3");
+            let journal = commit(&mut sim, journal, batch).await.expect("meta");
+            let journal = put(&mut sim, journal, &[(6, 1, 10)]).await;
+            drop(journal);
+            put_bytes(&mut sim, format!("{DIR}/meta"), older).await;
+            let refused = reopen(&mut sim, durability).await.map(drop);
+            assert!(
+                matches!(refused, Err(OpenError::MetaUpdateLost { .. })),
+                "{durability:?}: {refused:?}"
+            );
+        }
+    });
+}
+
+/// The batch that carries a metainfo update is stamped with the metainfo
+/// before it: a crash between the batch and the update leaves a log that
+/// opens.
+#[test]
+fn a_crash_before_the_metainfo_update_of_a_batch_is_no_rollback() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(17);
+            let journal = five(&mut sim, durability).await;
+            let older = file_bytes(&mut sim, format!("{DIR}/meta")).await;
+            let mut batch = Batch::new();
+            batch
+                .put(6, id(6, 1), payload(6, 1, 10))
+                .set_meta("promise 3");
+            let journal = commit(&mut sim, journal, batch).await.expect("meta");
+            drop(journal);
+            put_bytes(&mut sim, format!("{DIR}/meta"), older).await;
+            let (journal, _) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}: {error}"));
+            assert_eq!(journal.meta(), b"born", "{durability:?}");
+        }
     });
 }
 

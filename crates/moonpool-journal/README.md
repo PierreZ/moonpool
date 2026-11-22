@@ -73,7 +73,9 @@ journal.commit(batch).await?;
   in a batch the mark records, or in an `Ordered` batch with an intact
   record, refuse the open (`DoubleFault`) instead of discarding an
   acknowledged entry. A batch of a later generation than the metainfo's
-  refuses it too (`MetaRolledBack`): the metainfo lost an update. An intact
+  refuses it too (`MetaRolledBack`): the metainfo lost an update. Inside one
+  generation, each entry carries a stamp, the metainfo `seq` it was written
+  under: a stamp above the metainfo's refuses the open (`MetaUpdateLost`). An intact
   metainfo or segment header of another format version is not damage:
   `UnsupportedVersion` names the version found. A batch
   number holds the generation in its high 24 bits and the count in its
@@ -85,8 +87,14 @@ journal.commit(batch).await?;
   tombstone does, so one fault on it is rebuilt, and it says where the entry
   walk goes on, so an intact entry behind the slot is found again. The open
   that retires torn slots raises the high-water mark only once its retire
-  batch is durable. The format is version 4: a segment of version 3 (with
-  void records) is refused.
+  batch is durable.
+- **An entry header names its entry alone.** The header has its own CRC,
+  apart from the payload's. A record and a payload both damaged under an
+  intact header, in a witnessed batch, are `Corrupt` with the entry's
+  identity, not a refused open. In an unwitnessed last batch they are still
+  torn, the record is never rebuilt from a header alone, and an `Ordered`
+  batch is witnessed only by an intact record. The format is version 5: a
+  segment or metainfo of an earlier version is refused.
 - **An open reads what the device holds.** A commit can fail because the
   kernel could not write its pages back (fsyncgate). The kernel then marks
   those pages clean: no later sync writes them, and reads return them, in the
@@ -134,8 +142,9 @@ No snapshots and no compaction.
 ## On disk
 
 `<dir>/meta` holds the metainfo: copy A at block 0, copy B at block 16. Each
-`<dir>/seg-<first batch>.wal` is allocated whole: two header copies, a
-persist log of 64-byte records, a guard gap, and an entry log. Every batch
+`<dir>/seg-<first batch>.wal` is allocated whole: header copy A, a persist
+log of 64-byte records, a guard gap, an entry log, and header copy B in the
+last block, so one fault on a run of blocks never reaches both copies. Every batch
 starts on a fresh 4 KiB block in both logs, so a commit never touches a sector
 that holds acknowledged data. A record repair is the one exception: it writes
 a persist block again only when the entry of each record in it is intact, so a
@@ -170,12 +179,14 @@ filesystem.
 - positions in any order, the floor and tombstones, the metainfo copies;
 - one test per row of the recovery table, aimed with `Journal::layout`,
   with the two-fault cases: a record and its entry both damaged in a
-  witnessed last batch (`DoubleFault`), every record and the first entry of
+  witnessed last batch (`DoubleFault`), a record and a payload under an
+  intact header (`Corrupt`), every record and the first entry of
   a witnessed last batch damaged (`LostBatch`), a metainfo older than the
-  log (`MetaRolledBack`), and a rotted record found by `verify_records`;
+  log (`MetaRolledBack`) or than a stamp in the same open
+  (`MetaUpdateLost`), and a rotted record found by `verify_records`;
 - retire records: the probes of #482 and #483 (a repaired position, a record
   after a torn slot, a fault on a retire record), a crash at each moment of
-  an open that retires torn slots, and a refused version 3 segment;
+  an open that retires torn slots, and a refused version 4 segment;
 - record repair: an open writes back a rebuilt record of an earlier batch,
   a torn repair write leaves each record rebuildable, a block with a damaged
   entry is not written, and `repair_records` repairs the records of

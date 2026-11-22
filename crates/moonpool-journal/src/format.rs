@@ -42,11 +42,11 @@ pub(crate) const META_COPY_B_AT: u64 = 16 * BLOCK_U64;
 pub(crate) const META_FILE_BLOCKS: u64 = 17;
 
 const SEGMENT_MAGIC: u32 = u32::from_le_bytes(*b"MPJS");
-const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 const META_MAGIC: u32 = u32::from_le_bytes(*b"MPJM");
 /// 3: segments are recycled, so a batch older than its segment is stale.
 /// 4: a retire record names a dead slot; the void record is gone.
-/// 5: segment header copy B is the last block of the file.
+/// 5: segment header copy B is the last block of the file; an entry header
+///    has its own CRC apart from its payload's, and a metainfo stamp.
 pub(crate) const VERSION: u16 = 5;
 
 const _: () = assert!(BLOCK.is_multiple_of(RECORD_SIZE));
@@ -65,6 +65,9 @@ fn put_u16(buf: &mut [u8], at: usize, value: u16) {
 fn put_u32(buf: &mut [u8], at: usize, value: u32) {
     buf[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
+fn put_u48(buf: &mut [u8], at: usize, value: u64) {
+    buf[at..at + 6].copy_from_slice(&value.to_le_bytes()[..6]);
+}
 fn put_u64(buf: &mut [u8], at: usize, value: u64) {
     buf[at..at + 8].copy_from_slice(&value.to_le_bytes());
 }
@@ -76,6 +79,11 @@ fn get_u16(buf: &[u8], at: usize) -> u16 {
 }
 fn get_u32(buf: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(buf[at..at + 4].try_into().expect("four bytes"))
+}
+fn get_u48(buf: &[u8], at: usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes[..6].copy_from_slice(&buf[at..at + 6]);
+    u64::from_le_bytes(bytes)
 }
 fn get_u64(buf: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(buf[at..at + 8].try_into().expect("eight bytes"))
@@ -348,7 +356,8 @@ pub(crate) struct Record {
     pub offset: u32,
     /// Payload length.
     pub len: u32,
-    /// The entry header's CRC: the entry this record names, exactly.
+    /// The entry header's CRC: the entry this record names, exactly (the
+    /// header holds its payload's CRC).
     pub entry_crc: u32,
 }
 
@@ -437,11 +446,18 @@ pub(crate) fn clear_id(end: u64) -> Id {
 /// so a stale or misdirected entry never passes for the one a record names,
 /// and an intact entry can rebuild a lost record whole.
 ///
+/// The header has its own CRC, apart from the payload's. An intact header
+/// with a damaged payload still proves which entry was written there, and
+/// how long it is, so the walk of the entries goes on past it.
+///
 /// ```text
-///  0 u32 magic         8 u64 batch      24 u16 index    28 u8  kind     32 [24] id
-///  4 u32 len          16 u64 position   26 u16 count    29 u8  flags    56 u32 journal tag
-///                                                                       60 u32 crc (header + payload)
+///  0 u32 len     8 u64 batch      24 u8  kind     26 u48 stamp   32 [24] id
+///  4 u16 index  16 u64 position   25 u8  flags                   56 u32 payload crc
+///  6 u16 count                                                   60 u32 header crc
 /// ```
+///
+/// The header CRC covers bytes 0..60 and starts from the journal's tag, so
+/// an entry of another journal never reads as intact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct EntryHeader {
     pub kind: Kind,
@@ -452,7 +468,43 @@ pub(crate) struct EntryHeader {
     pub position: u64,
     pub id: Id,
     pub len: u32,
-    pub tag: u32,
+    /// The low 48 bits of the metainfo's `seq` when the batch was written
+    /// ([`stamp_of`]): a metainfo that reads back older than a stamp lost
+    /// an update.
+    pub stamp: u64,
+}
+
+/// An entry header that passed its CRC: its fields, its CRC (the one its
+/// persist record holds), and the CRC its payload must have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedEntry {
+    pub header: EntryHeader,
+    pub crc: u32,
+    pub payload_crc: u32,
+}
+
+impl ParsedEntry {
+    /// Whether `payload` is the payload this header names.
+    pub fn payload_intact(&self, payload: &[u8]) -> bool {
+        u64_of(payload.len()) == u64::from(self.header.len) && crc(payload) == self.payload_crc
+    }
+}
+
+/// The bits of a stamp: the low 48 bits of the metainfo's `seq`.
+const STAMP_BITS: u32 = 48;
+const STAMP_MASK: u64 = (1 << STAMP_BITS) - 1;
+
+/// The stamp of a batch written while the metainfo's `seq` is `seq`.
+pub(crate) fn stamp_of(seq: u64) -> u64 {
+    seq & STAMP_MASK
+}
+
+/// Whether `stamp` is above the metainfo's `seq`, as 48-bit sequence
+/// numbers: ahead by less than half their range. (A metainfo is written at
+/// most once per commit or open: 2^47 writes never happen.)
+pub(crate) fn stamp_is_ahead(stamp: u64, seq: u64) -> bool {
+    let ahead = stamp.wrapping_sub(stamp_of(seq)) & STAMP_MASK;
+    ahead != 0 && ahead < 1 << (STAMP_BITS - 1)
 }
 
 impl EntryHeader {
@@ -461,58 +513,75 @@ impl EntryHeader {
         align_up(RECORD_U64 + u64::from(len), 8)
     }
 
-    /// Write the header and payload into `out` and return the CRC stored.
-    pub fn encode(&self, payload: &[u8], out: &mut [u8]) -> u32 {
+    /// Write the header and payload into `out` and return the header CRC,
+    /// the one the entry's persist record stores. `tag` is the journal's
+    /// ([`journal_tag`]).
+    pub fn encode(&self, tag: u32, payload: &[u8], out: &mut [u8]) -> u32 {
         assert!(
             u64_of(payload.len()) == u64::from(self.len),
             "an entry header states its payload's length"
         );
+        assert!(self.stamp <= STAMP_MASK, "a stamp fits 48 bits");
         out[..RECORD_SIZE].fill(0);
-        put_u32(out, 0, ENTRY_MAGIC);
-        put_u32(out, 4, self.len);
+        put_u32(out, 0, self.len);
+        put_u16(out, 4, self.index);
+        put_u16(out, 6, self.count);
         put_u64(out, 8, self.batch);
         put_u64(out, 16, self.position);
-        put_u16(out, 24, self.index);
-        put_u16(out, 26, self.count);
-        out[28] = self.kind as u8;
-        out[29] = self.flags;
+        out[24] = self.kind as u8;
+        out[25] = self.flags;
+        put_u48(out, 26, self.stamp);
         out[32..56].copy_from_slice(&self.id);
-        put_u32(out, 56, self.tag);
-        out[RECORD_SIZE..RECORD_SIZE + payload.len()].copy_from_slice(payload);
-        let sum = entry_crc(&out[..RECORD_SIZE], payload);
+        let payload_crc = crc(payload);
+        put_u32(out, 56, payload_crc);
+        let sum = header_crc(tag, &out[..60]);
         put_u32(out, 60, sum);
-        check_round_trip(Self::parse(&out[..RECORD_SIZE]) == Some((*self, sum)));
+        out[RECORD_SIZE..RECORD_SIZE + payload.len()].copy_from_slice(payload);
+        check_round_trip(
+            Self::parse(&out[..RECORD_SIZE], tag)
+                == Some(ParsedEntry {
+                    header: *self,
+                    crc: sum,
+                    payload_crc,
+                }),
+        );
         sum
     }
 
-    /// The header's fields and its stored CRC, if the header is plausible.
-    /// The CRC covers the payload too, so a caller checks it with
-    /// [`entry_crc`] once it has the payload.
-    pub fn parse(bytes: &[u8]) -> Option<(Self, u32)> {
-        if bytes.len() < RECORD_SIZE || get_u32(bytes, 0) != ENTRY_MAGIC {
+    /// The header at the start of `bytes`, if it passes its CRC under the
+    /// journal's `tag`. Its payload is checked apart
+    /// ([`ParsedEntry::payload_intact`]).
+    pub fn parse(bytes: &[u8], tag: u32) -> Option<ParsedEntry> {
+        if bytes.len() < RECORD_SIZE {
+            return None;
+        }
+        let sum = get_u32(bytes, 60);
+        if header_crc(tag, &bytes[..60]) != sum {
             return None;
         }
         let header = Self {
-            kind: Kind::from_byte(bytes[28])?,
-            flags: bytes[29],
-            index: get_u16(bytes, 24),
-            count: get_u16(bytes, 26),
+            kind: Kind::from_byte(bytes[24])?,
+            flags: bytes[25],
+            index: get_u16(bytes, 4),
+            count: get_u16(bytes, 6),
             batch: get_u64(bytes, 8),
             position: get_u64(bytes, 16),
             id: bytes[32..56].try_into().expect("24 bytes"),
-            len: get_u32(bytes, 4),
-            tag: get_u32(bytes, 56),
+            len: get_u32(bytes, 0),
+            stamp: get_u48(bytes, 26),
         };
-        (header.index < header.count).then_some((header, get_u32(bytes, 60)))
+        (header.index < header.count).then_some(ParsedEntry {
+            header,
+            crc: sum,
+            payload_crc: get_u32(bytes, 56),
+        })
     }
 }
 
-/// The CRC an entry carries: over its header (CRC field zeroed) and payload.
-pub(crate) fn entry_crc(header: &[u8], payload: &[u8]) -> u32 {
-    let mut head = [0u8; RECORD_SIZE];
-    head.copy_from_slice(&header[..RECORD_SIZE]);
-    put_u32(&mut head, 60, 0);
-    crc32c::crc32c_append(crc(&head), payload)
+/// The CRC of an entry header's first 60 bytes, started from the journal's
+/// tag.
+fn header_crc(tag: u32, head: &[u8]) -> u32 {
+    crc32c::crc32c_append(tag, head)
 }
 
 /// Batch numbers carry the open generation that wrote them in their high
@@ -660,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_round_trips_and_its_crc_covers_the_payload() {
+    fn an_entry_round_trips_and_its_payload_has_its_own_crc() {
         let header = EntryHeader {
             kind: Kind::Put,
             flags: 0,
@@ -670,14 +739,30 @@ mod tests {
             position: 9,
             id: [1; ID_SIZE],
             len: 5,
-            tag: 77,
+            stamp: STAMP_MASK,
         };
         let mut out = vec![0u8; 128];
-        let sum = header.encode(b"hello", &mut out);
-        let (parsed, stored) = EntryHeader::parse(&out).expect("parses");
-        assert_eq!((parsed, stored), (header, sum));
-        assert_eq!(entry_crc(&out[..RECORD_SIZE], b"hello"), sum);
-        assert_ne!(entry_crc(&out[..RECORD_SIZE], b"hellp"), sum);
+        let sum = header.encode(77, b"hello", &mut out);
+        let parsed = EntryHeader::parse(&out, 77).expect("parses");
+        assert_eq!((parsed.header, parsed.crc), (header, sum));
+        assert!(parsed.payload_intact(b"hello"));
+        assert!(!parsed.payload_intact(b"hellp"));
+        assert_eq!(
+            EntryHeader::parse(&out, 78),
+            None,
+            "another journal's entry"
+        );
+        out[30] ^= 1;
+        assert_eq!(EntryHeader::parse(&out, 77), None, "a flipped header bit");
+    }
+
+    #[test]
+    fn a_stamp_is_ahead_by_less_than_half_its_range() {
+        assert!(!stamp_is_ahead(stamp_of(5), 5));
+        assert!(!stamp_is_ahead(stamp_of(4), 5));
+        assert!(stamp_is_ahead(stamp_of(6), 5));
+        assert!(stamp_is_ahead(0, STAMP_MASK), "across the wrap");
+        assert!(!stamp_is_ahead(STAMP_MASK, 0), "behind across the wrap");
     }
 
     #[test]
