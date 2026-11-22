@@ -11,7 +11,7 @@ use moonpool_journal::{
     Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
     Layout, OpenError, ReadError, RecordRepair, Recovery, State,
 };
-use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
+use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration, WritebackErrorReporting};
 
 mod support;
 use support::{CrashModel, crash_loop};
@@ -1127,6 +1127,11 @@ async fn fail_then_restart_then_crash(seed: u64, durability: Durability, failing
     let mut config = StorageConfiguration::fast_local();
     config.writeback_error_probability = 1.0;
     config.writeback_error_revert_probability = if seed.is_multiple_of(2) { 0.0 } else { 1.0 };
+    config.writeback_error_reporting = [
+        WritebackErrorReporting::Errseq,
+        WritebackErrorReporting::OpenedBefore,
+        WritebackErrorReporting::FirstCaller,
+    ][usize::try_from(seed / 2 % 3).expect("small")];
     sim.set_storage_config(config);
     let mut batch = Batch::new();
     match failing {
@@ -1144,8 +1149,14 @@ async fn fail_then_restart_then_crash(seed: u64, durability: Durability, failing
     }
 
     // The disk is healthy again and the process restarts: no power loss,
-    // the page cache survives.
+    // the page cache survives. A peek reads the metainfo the device holds.
     sim.set_storage_config(StorageConfiguration::fast_local());
+    let peeked = run(&mut sim, |provider| async move {
+        Journal::peek_meta(&provider, DIR, JOURNAL).await
+    })
+    .await
+    .unwrap_or_else(|error| panic!("{at}: peek: {error}"))
+    .expect("a journal is there");
     let restarted = reopen(&mut sim, durability).await;
     let (live, meta) = after_failed(&restarted, &format!("{at}, after the restart"));
     drop(restarted);
@@ -1154,13 +1165,17 @@ async fn fail_then_restart_then_crash(seed: u64, durability: Durability, failing
     sim.simulate_crash_for_process(ip(), true);
     let crashed = reopen(&mut sim, durability).await;
     let (live_after, meta_after) = after_failed(&crashed, &format!("{at}, after the power loss"));
-    assert!(
-        !live || live_after,
+    assert_eq!(
+        live, live_after,
         "{at}: the restart read position 2 from the page cache, not from the device"
     );
     assert_eq!(
         meta, meta_after,
         "{at}: the restart read a metainfo the device never held"
+    );
+    assert_eq!(
+        peeked, meta_after,
+        "{at}: the peek read a metainfo the device never held"
     );
 }
 

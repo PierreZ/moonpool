@@ -90,7 +90,8 @@ journal.commit(batch).await?;
   kernel could not write its pages back (fsyncgate). The kernel then marks
   those pages clean: no later sync writes them, and reads return them, in the
   next process too. So an open syncs each file, then drops its cached pages
-  (`StorageFile::drop_cache`), before it reads it. A batch whose commit
+  (`StorageFile::drop_cache`, `posix_fadvise(DONTNEED)` on Linux and a
+  no-op elsewhere), before it reads it. A batch whose commit
   failed then reads as what a power loss leaves, never as written, and never
   as damage after the next power loss. `Journal::peek_meta` drops the cache
   too, without a sync.

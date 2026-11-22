@@ -556,7 +556,10 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// of a commit whose writeback failed (fsyncgate), which the kernel
     /// marked clean although the device never got them. So opening syncs
     /// each file, then drops its cached pages, before it reads it: what it
-    /// keeps, it syncs, and what it reads, the device holds.
+    /// keeps, it syncs, and what it reads, the device holds. The drop is
+    /// [`StorageFile::drop_cache`](moonpool_core::StorageFile::drop_cache):
+    /// `posix_fadvise(DONTNEED)` on Linux, which the kernel may decline for
+    /// a mapped or locked page, and nothing elsewhere.
     ///
     /// # Errors
     /// The evidence variants of [`OpenError`] when the journal cannot be
@@ -663,6 +666,11 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// it: no recovery, no repair, no sync, nothing created, so a probe never
     /// changes what the next open finds. `Ok(None)` where there is no journal:
     /// no meta file and no segment.
+    ///
+    /// It drops the meta file's clean cached pages first
+    /// ([`StorageFile::drop_cache`](moonpool_core::StorageFile::drop_cache)),
+    /// so a copy whose write failed (fsyncgate) is not read as written. A
+    /// predecessor's unsynced copy may still be read: only an open syncs.
     ///
     /// # Errors
     /// [`OpenError::MetaLost`] when no copy is valid, or when the directory

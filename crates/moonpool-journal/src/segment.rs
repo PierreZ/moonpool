@@ -326,8 +326,10 @@ pub(crate) async fn named_batches<P: LocalStorageProvider>(
     direct_io: DirectIo,
 ) -> Result<Vec<u64>, OpenError> {
     let file = open_file(provider, path, direct_io).await?;
-    // A roll whose header write failed may have left its headers in the
-    // cache only: the device's are the ones a roll onto this spare finds.
+    // Defensive: a roll whose header write failed poisons the journal, but
+    // it may have left its headers in the cache only. The device's are the
+    // ones a power loss keeps, so they decide whether this spare aliases a
+    // live segment.
     read_from_device(&file).await?;
     let headers = read_blocks(&file, 0, file.buffer(2)?).await?;
     let copies = [
