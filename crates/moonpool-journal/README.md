@@ -118,7 +118,9 @@ journal.commit(batch).await?;
   rename: no byte written, no space allocated. With no spare, a roll
   allocates a new segment (`StorageFile::allocate`, `fallocate(2)` on
   Linux) and writes only its headers. No segment is ever zero-filled, and
-  no task runs beside the commits.
+  no task runs beside the commits. `JournalConfig::spares` (default 1) sets
+  how many spares the journal keeps, and `Journal::prepare_spares` allocates
+  them ahead of the rolls, off the commit path.
 - **Crash hints.** A batched commit names three moments with
   `moonpool_buggify::hint!`; an ordered commit names the metainfo one and
   leaves the windows inside its two durable writes to the storage layer,
@@ -139,15 +141,16 @@ a persist block again only when the entry of each record in it is intact, so a
 crash that tears the write leaves each record rebuildable from its entry.
 
 `<dir>/spare-<generation>-<n>.wal` is a dead segment's file, renamed and kept
-for the next roll. A roll writes and syncs its headers, renames it to its
+for a later roll, or a file `prepare_spares` allocated (its headers read as
+zeros). A roll writes and syncs its headers, renames it to its
 segment name and syncs the directory. Its old batches stay in it, and they
 are never evidence: a segment named after its first batch only receives
 batches at or above that number, batch numbers never repeat, so every record
 or entry older than the segment reads as stale, like a never-written one.
 Inside a segment, batch numbers grow with the place in the persist log, so a
 record after a batch boundary whose batch is not above the batch before it
-is old bytes too, at every open. An open keeps one whole spare and deletes
-the others.
+is old bytes too, at every open. An open keeps up to `JournalConfig::spares`
+whole spares and deletes the others.
 
 A new segment reads as zeros without a byte written. Its first pass pays one
 small metadata change per block on each durable write (the extent goes from

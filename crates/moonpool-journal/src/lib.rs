@@ -110,6 +110,8 @@
 //!   every open. With no spare, a roll allocates a
 //!   new file ([`allocate`](moonpool_core::StorageFile::allocate)) and
 //!   writes only its headers. No segment is ever zero-filled.
+//!   [`Journal::prepare_spares`] allocates spares ahead of the rolls, up to
+//!   [`JournalConfig::spares`], so no commit pays for an allocation.
 //!   [`Journal::rolls`] counts the rolls of each kind.
 //! - **Durable writes.** An ordered commit writes each log with one
 //!   [`write_at_durable`](moonpool_core::StorageFile::write_at_durable)
@@ -146,13 +148,14 @@
 //! <dir>/meta                    metainfo copy A (block 0) and copy B (block 16)
 //! <dir>/seg-<first batch>.wal   allocated segments:
 //!     header A | header B | persist log | guard gap | entry log
-//! <dir>/spare-<gen>-<n>.wal     a dead segment's file, kept for the next roll
+//! <dir>/spare-<gen>-<n>.wal     a dead segment's file, or one allocated ahead,
+//!                               kept for a later roll
 //! ```
 //!
 //! A **spare** is never evidence: no batch is written to it before it is
 //! renamed to a segment, and the batches it still holds are older than any
-//! it will hold. An open keeps one whole spare and deletes the others
-//! ([`Recovery::spares_removed`]), and never keeps a spare whose header names
+//! it will hold. An open keeps up to [`JournalConfig::spares`] whole spares
+//! and deletes the others ([`Recovery::spares_removed`]), and never keeps a spare whose header names
 //! a listed segment: a crash in a roll left it as a second name of that
 //! segment.
 //!

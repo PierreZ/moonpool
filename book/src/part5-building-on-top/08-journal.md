@@ -266,8 +266,16 @@ But a recycled file is full of old batches. Why are they not evidence?
 - **The commit acknowledges its batch only after the directory sync**, so
   the segment's name is durable before any batch in it is.
 
-An open keeps one whole spare it finds (`Recovery::spare_kept`) and deletes
-the others (`Recovery::spares_removed`). `Journal::rolls()` counts the rolls
+How many spares? `JournalConfig::spares` sets it (1 by default), and a
+journal that only grows never gets a dead segment to recycle. So
+`Journal::prepare_spares` allocates spares ahead of the rolls: each one is a
+whole file under a temporary name, synced, then renamed. Its headers read as
+zeros, so it names no segment and holds no batch. Call it after an open, or
+when the node is idle, and no commit pays for an allocation. etcd's file
+pipeline and canonical/raft's `uv_prepare` do the same.
+
+An open keeps up to `spares` whole spares it finds (`Recovery::spares_kept`)
+and deletes the others (`Recovery::spares_removed`). `Journal::rolls()` counts the rolls
 of each kind. The commit side names two moments with `hint!` ("journal roll:
 spare headers synced, not renamed", "journal roll: spare renamed, directory
 not synced").
@@ -364,7 +372,7 @@ before anything is written, and a reopen starts a new generation. Opening return
 what it found and did: `corrupt`, `ambiguous`, `torn`, `rebuilt`, `repair`
 (the persist blocks it wrote back, and those it left),
 `meta_repaired` (a metainfo copy rewritten from its twin),
-`headers_repaired`, `segments_removed`, `spares_removed` and `spare_kept`. Only the last batch's entries are
+`headers_repaired`, `segments_removed`, `spares_removed` and `spares_kept`. Only the last batch's entries are
 read at open. The rest are checked when read: `read(position)` returns
 `ReadError::Damaged { position, id }` with the identity its record kept, and
 `replay(range)` reports a damaged entry in place and goes on. A replay reads

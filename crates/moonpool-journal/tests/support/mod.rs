@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
-use moonpool_journal::{Batch, Durability, Id, Journal, OpenError, ReadError};
+use moonpool_journal::{Batch, Durability, Id, Journal, JournalConfig, OpenError, ReadError};
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration, WritebackErrorReporting};
 
 use super::{DIR, JOURNAL, config, id, ip, payload, run, runtime};
@@ -28,6 +28,8 @@ pub(crate) enum CrashModel {
 #[derive(Debug, Default)]
 pub(crate) struct Tally {
     pub recoveries: usize,
+    /// Spare files allocated ahead of a roll (`prepare_spares`).
+    pub spares_prepared: u64,
     pub commits: usize,
     pub restarts: usize,
     /// Restarts without a power loss right after a commit failed: the page
@@ -113,6 +115,8 @@ struct Ledger {
     failed: bool,
     /// Rolls onto a recycled spare, over every open.
     onto_spare: u64,
+    /// Spares allocated ahead of a roll, over every open.
+    spares_prepared: u64,
     /// Scrubs that finished, and the blocks they wrote again.
     scrubs: usize,
     blocks_repaired: u32,
@@ -129,6 +133,8 @@ struct Pending {
     /// Run a scrub of the persist records once the batch is acknowledged:
     /// a crash may then tear a repair write.
     scrub: bool,
+    /// Allocate spares before the batch: a crash may cut the allocation.
+    prepare: bool,
 }
 
 impl Ledger {
@@ -172,6 +178,12 @@ pub(crate) fn crash_loop(
         let mut scrubs = Rng(seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1);
         let mut sim = SimWorld::new_with_seed(seed);
         sim.set_storage_config(storage(model, &mut rng));
+        // How many spares the journal keeps, and whether this seed allocates
+        // them ahead of the rolls.
+        // Their own stream, so the other draws of each seed stay as they were.
+        let mut ahead = Rng(seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);
+        let spares = u32::try_from(ahead.below(4)).expect("small");
+        let prepare = ahead.below(2) == 0;
         let ledger: Shared = Arc::new(Mutex::new(Ledger {
             meta: b"born".to_vec(),
             ..Ledger::default()
@@ -201,29 +213,23 @@ pub(crate) fn crash_loop(
                     sim.storage_provider(ip()),
                     DIR,
                     JOURNAL,
-                    config(durability),
+                    JournalConfig {
+                        spares,
+                        ..config(durability)
+                    },
                 ));
-                for _ in 0..budget {
-                    if handle.is_finished() {
-                        break;
-                    }
-                    if sim.pending_event_count() > 0 {
-                        sim.step();
-                    }
-                    tokio::task::yield_now().await;
-                }
-                handle.abort();
-                let _ = handle.await;
+                cut_after(&mut sim, handle, budget).await;
                 sim.simulate_crash_for_process(ip(), true);
                 tally.crashed_opens += 1;
             }
-            let journal = recover(&mut sim, &ledger, durability, &at, tally).await;
+            let journal = recover(&mut sim, &ledger, (durability, spares), &at, tally).await;
             let ops = 1 + rng.below(10);
             let mut plan = Vec::new();
             for _ in 0..ops {
                 version += 1;
                 let mut pending = random_batch(&mut rng, &ledger, version);
                 pending.scrub = scrubs.below(16) == 0;
+                pending.prepare = prepare && ahead.below(4) == 0;
                 plan.push(pending);
             }
             for pending in &mut plan {
@@ -231,17 +237,7 @@ pub(crate) fn crash_loop(
             }
             let handle = tokio::spawn(write(journal, plan, Arc::clone(&ledger)));
             let budget = rng.below(500);
-            for _ in 0..budget {
-                if handle.is_finished() {
-                    break;
-                }
-                if sim.pending_event_count() > 0 {
-                    sim.step();
-                }
-                tokio::task::yield_now().await;
-            }
-            handle.abort();
-            let _ = handle.await;
+            cut_after(&mut sim, handle, budget).await;
             let restart = rng.below(4) == 0;
             if std::env::var("JOURNAL_DEBUG").is_ok() {
                 eprintln!("--- stopped after {budget} steps, restart only: {restart}");
@@ -257,6 +253,7 @@ pub(crate) fn crash_loop(
         }
         tally.commits += ledger.lock().expect("ledger").commits;
         tally.onto_spare += ledger.lock().expect("ledger").onto_spare;
+        tally.spares_prepared += ledger.lock().expect("ledger").spares_prepared;
         tally.scrubs += ledger.lock().expect("ledger").scrubs;
         tally.blocks_repaired += ledger.lock().expect("ledger").blocks_repaired;
         let names = run(&mut sim, |provider| async move {
@@ -270,6 +267,22 @@ pub(crate) fn crash_loop(
             tally.prefix_dropped += 1;
         }
     });
+}
+
+/// Step the world for `handle` at most `budget` times, then cut it off
+/// wherever it is.
+async fn cut_after<T>(sim: &mut SimWorld, handle: tokio::task::JoinHandle<T>, budget: u64) {
+    for _ in 0..budget {
+        if handle.is_finished() {
+            break;
+        }
+        if sim.pending_event_count() > 0 {
+            sim.step();
+        }
+        tokio::task::yield_now().await;
+    }
+    handle.abort();
+    let _ = handle.await;
 }
 
 /// Flip one byte of one valid persist record of a random segment, durably,
@@ -404,6 +417,17 @@ async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
             batch.set_meta(meta.clone());
         }
         ledger.lock().expect("ledger").pending = Some(pending.clone());
+        if pending.prepare {
+            // Spares are never evidence: whatever a crash leaves of the
+            // allocation, the ledger stands.
+            let prepared = journal.rolls().spares_prepared;
+            let outcome = journal.prepare_spares().await;
+            ledger.lock().expect("ledger").spares_prepared +=
+                journal.rolls().spares_prepared - prepared;
+            if outcome.is_err() {
+                return;
+            }
+        }
         let rolled = journal.rolls().onto_spare;
         let outcome = journal.commit(batch).await;
         ledger.lock().expect("ledger").onto_spare += journal.rolls().onto_spare - rolled;
@@ -446,15 +470,19 @@ async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
 async fn recover(
     sim: &mut SimWorld,
     ledger: &Shared,
-    durability: Durability,
+    (durability, spares): (Durability, u32),
     at: &str,
     tally: &mut Tally,
 ) -> J {
+    let config = JournalConfig {
+        spares,
+        ..config(durability)
+    };
     for _ in 0..64 {
         let opened = run(sim, move |provider| async move {
-            match Journal::open(provider.clone(), DIR, JOURNAL, config(durability)).await? {
+            match Journal::open(provider.clone(), DIR, JOURNAL, config).await? {
                 Some(found) => Ok(found),
-                None => Journal::create(provider, DIR, JOURNAL, config(durability), b"born")
+                None => Journal::create(provider, DIR, JOURNAL, config, b"born")
                     .await
                     .map(|journal| (journal, moonpool_journal::Recovery::default())),
             }
@@ -478,7 +506,7 @@ async fn recover(
         tally.ambiguous += recovery.ambiguous.len();
         tally.meta_repaired += usize::from(recovery.meta_repaired);
         tally.segments_removed += recovery.segments_removed;
-        tally.spares_kept += u32::from(recovery.spare_kept);
+        tally.spares_kept += recovery.spares_kept;
         match judge(sim, journal, ledger, at).await {
             Some(journal) => return journal,
             None => {

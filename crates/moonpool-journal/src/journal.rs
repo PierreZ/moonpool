@@ -17,7 +17,7 @@ use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{BlockWrite, Known, Located, Op, entry_matches, plan_repair, scan};
 use crate::segment::{Segment, is_segment_leftover, named_batches, parse_segment_name};
-use crate::spare::{is_spare, spare_name};
+use crate::spare::{self, is_spare, is_spare_leftover, spare_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
 
 /// A journal's identity, stamped in its meta file, its segment headers and
@@ -45,7 +45,7 @@ pub enum Durability {
 }
 
 /// How a journal lays out and writes its files.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JournalConfig {
     /// The protocol of each commit. Recorded per batch, so it may change
     /// between opens.
@@ -54,6 +54,23 @@ pub struct JournalConfig {
     pub geometry: Geometry,
     /// Direct-I/O policy for the segment files.
     pub direct_io: DirectIo,
+    /// The most spare segment files the journal keeps for later rolls: dead
+    /// segments it recycles, and files [`Journal::prepare_spares`]
+    /// allocates. A roll onto a spare is a header write and a rename; with
+    /// none, the roll allocates a new file inside the commit. `0` deletes
+    /// every dead segment. Default: 1.
+    pub spares: u32,
+}
+
+impl Default for JournalConfig {
+    fn default() -> Self {
+        Self {
+            durability: Durability::default(),
+            geometry: Geometry::default(),
+            direct_io: DirectIo::default(),
+            spares: 1,
+        }
+    }
 }
 
 /// What a position holds, as far as the journal knows without reading it.
@@ -118,14 +135,13 @@ pub struct Recovery {
     pub meta_repaired: bool,
     /// Segment header copies rewritten from their twin.
     pub headers_repaired: u32,
-    /// Segments that held nothing live: kept as the spare or deleted.
+    /// Segments that held nothing live: kept as spares or deleted.
     pub segments_removed: u32,
-    /// Spare files deleted: one more than the spare kept, not a whole
+    /// Spare files deleted: past [`JournalConfig::spares`], not a whole
     /// segment, or a second name a crash left on a live segment.
     pub spares_removed: u32,
-    /// A dead segment's file an earlier open recycled, kept for the next
-    /// roll.
-    pub spare_kept: bool,
+    /// Spare files an earlier open kept or prepared, kept for later rolls.
+    pub spares_kept: u32,
 }
 
 /// What a repair of the persist records did ([`Journal::repair_records`],
@@ -155,6 +171,8 @@ pub struct Rolls {
     pub onto_spare: u64,
     /// Rolls that created the segment: an allocation and a header write.
     pub created: u64,
+    /// Spare files allocated ahead of a roll ([`Journal::prepare_spares`]).
+    pub spares_prepared: u64,
 }
 
 /// Where a position's persist record and entry live, for aiming faults:
@@ -213,8 +231,9 @@ pub struct Journal<P: LocalStorageProvider> {
     /// Whether the regions are published whole: with no stripe
     /// ([`Journal::publish_layout_whole`]).
     layout_whole: bool,
-    /// The name of the spare, a dead segment's file kept for the next roll.
-    spare: Option<String>,
+    /// The spares, files kept for later rolls, the next one to use first:
+    /// dead segments' files and files allocated ahead of a roll.
+    spares: Vec<String>,
     /// Spares this open has named: the number in the next one's name.
     spares_named: u32,
     rolls: Rolls,
@@ -230,10 +249,17 @@ impl<P: LocalStorageProvider> std::fmt::Debug for Journal<P> {
             .field("live", &self.index.len())
             .field("segments", &self.segments.len())
             .field("poisoned", &self.poisoned)
-            .field("spare", &self.spare)
+            .field("spares", &self.spares)
             .field("rolls", &self.rolls)
             .finish_non_exhaustive()
     }
+}
+
+/// The error of a call a poisoned journal refuses.
+fn poisoned() -> OpenError {
+    OpenError::Io(std::io::Error::other(
+        "a failed commit poisoned the journal: reopen it",
+    ))
 }
 
 fn check_config(config: &JournalConfig) -> Result<(), OpenError> {
@@ -299,7 +325,7 @@ async fn list_segments<P: LocalStorageProvider>(
     for name in names {
         if is_spare(&name) {
             spares.push(name);
-        } else if is_segment_leftover(&name) {
+        } else if is_segment_leftover(&name) || is_spare_leftover(&name) {
             delete_if_present(provider, &format!("{dir}/{name}")).await?;
         } else if let Some(first) = parse_segment_name(&name) {
             firsts.push((first, name));
@@ -335,7 +361,7 @@ async fn clear_for_create<P: LocalStorageProvider>(
     }
     let mut removed = false;
     for name in names {
-        if is_spare(&name) || is_segment_leftover(&name) {
+        if is_spare(&name) || is_segment_leftover(&name) || is_spare_leftover(&name) {
             delete_if_present(provider, &format!("{dir}/{name}")).await?;
             removed = true;
         }
@@ -346,25 +372,25 @@ async fn clear_for_create<P: LocalStorageProvider>(
     Ok(())
 }
 
-/// Keep one whole spare of `spares` and delete the others (with their
-/// count). A spare is never evidence: no batch is written to it before it
+/// Keep up to [`JournalConfig::spares`] whole spares of `spares` and delete
+/// the others (with their count). A spare is never evidence: no batch is written to it before it
 /// is renamed to a segment, so deleting one loses nothing. Kept, its old
 /// batches are older than any batch it will hold (see [`crate::spare`]).
 ///
 /// A spare whose header names a segment of `firsts` is never kept: a crash
 /// in a roll left it as a second name of that live segment.
-async fn keep_one_spare<P: LocalStorageProvider>(
+async fn keep_spares<P: LocalStorageProvider>(
     provider: &P,
     dir: &str,
     spares: Vec<String>,
     firsts: &[(u64, String)],
     (journal, config): (JournalId, &JournalConfig),
-) -> Result<(Option<String>, u32), OpenError> {
-    let mut kept = None;
+) -> Result<(Vec<String>, u32), OpenError> {
+    let mut kept = Vec::new();
     let mut removed = 0;
     for name in spares {
         let path = format!("{dir}/{name}");
-        let whole = kept.is_none() && {
+        let whole = kept.len() < usize_of(u64::from(config.spares)) && {
             let file = provider
                 .open(&path, moonpool_core::OpenOptions::read_only())
                 .await?;
@@ -376,7 +402,7 @@ async fn keep_one_spare<P: LocalStorageProvider>(
                 .iter()
                 .any(|batch| firsts.iter().any(|(first, _)| first == batch));
         if whole && !aliased {
-            kept = Some(name);
+            kept.push(name);
         } else {
             delete_if_present(provider, &path).await?;
             removed += 1;
@@ -540,7 +566,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             poisoned: false,
             layout_shard: None,
             layout_whole: false,
-            spare: None,
+            spares: Vec::new(),
             spares_named: 0,
             rolls: Rolls::default(),
         })
@@ -588,12 +614,12 @@ impl<P: LocalStorageProvider> Journal<P> {
                 "the geometry differs from the one the journal was created with",
             ));
         }
-        let (spare, spares_removed) =
-            keep_one_spare(&provider, dir, spares, &firsts, (id, &config)).await?;
+        let (spares, spares_removed) =
+            keep_spares(&provider, dir, spares, &firsts, (id, &config)).await?;
         let mut recovery = Recovery {
             meta_repaired,
             spares_removed,
-            spare_kept: spare.is_some(),
+            spares_kept: u32::try_from(spares.len()).unwrap_or(u32::MAX),
             ..Recovery::default()
         };
         let (mut segments, headers_repaired) =
@@ -646,7 +672,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             poisoned: false,
             layout_shard: None,
             layout_whole: false,
-            spare,
+            spares,
             spares_named: 0,
             rolls: Rolls::default(),
         };
@@ -1332,6 +1358,37 @@ impl<P: LocalStorageProvider> Journal<P> {
         name
     }
 
+    /// Allocate spare files until the journal keeps
+    /// [`JournalConfig::spares`] of them, and return how many it allocated.
+    ///
+    /// A roll with no spare allocates its segment inside the commit: an
+    /// allocation, a header write, a sync, a rename and a directory sync.
+    /// A roll onto a spare is a header write and a rename. Call this off
+    /// the commit path (after an open or a create, or when the caller is
+    /// idle) so no commit pays for the allocation. A spare is never
+    /// evidence, so this changes nothing an open finds: each file is
+    /// allocated whole under a temporary name, synced, then renamed. A full
+    /// disk fails here ([`std::io::ErrorKind::StorageFull`]) and leaves no
+    /// file behind.
+    ///
+    /// # Errors
+    /// [`OpenError::Io`] when the provider fails, or when a failed commit
+    /// poisoned the journal (reopen it).
+    pub async fn prepare_spares(&mut self) -> Result<u32, OpenError> {
+        if self.poisoned {
+            return Err(poisoned());
+        }
+        let mut prepared = 0;
+        while self.spares.len() < usize_of(u64::from(self.config.spares)) {
+            let name = self.next_spare_name();
+            spare::allocate(&self.provider, &self.dir, &name, self.config.geometry).await?;
+            self.spares.push(name);
+            self.rolls.spares_prepared += 1;
+            prepared += 1;
+        }
+        Ok(prepared)
+    }
+
     /// How this open rolled onto new segments so far.
     #[must_use]
     pub fn rolls(&self) -> Rolls {
@@ -1459,7 +1516,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             .last()
             .is_some_and(|s| s.fits(persist_blocks, entry_bytes));
         if !fits {
-            let spare = self.spare.take();
+            let spare = (!self.spares.is_empty()).then(|| self.spares.remove(0));
             let created = match &spare {
                 Some(spare) => {
                     let header = SegmentHeader {
@@ -1580,8 +1637,9 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// Remove the leading segments that hold nothing live, never the active
     /// one, and only from the front: a later segment may hold the write or
     /// the tombstone that makes an earlier one dead, so it must outlive it.
-    /// The first becomes the spare when there is none (renamed, never
-    /// written: see [`crate::spare`]); the others are deleted. Each rename
+    /// Each becomes a spare while the journal keeps fewer than
+    /// [`JournalConfig::spares`] (renamed, never written: see
+    /// [`crate::spare`]); the others are deleted. Each rename
     /// or unlink is made durable before the next, so a crash can only bring
     /// back the front one, never leave a hole in the chain, and a spare is
     /// never written while it may still come back as its old segment.
@@ -1589,13 +1647,13 @@ impl<P: LocalStorageProvider> Journal<P> {
         let mut removed = 0;
         while self.segments.len() > 1 && self.segments[0].live == 0 {
             let path = format!("{}/{}", self.dir, self.segments[0].name);
-            if self.spare.is_none() {
+            if self.spares.len() < usize_of(u64::from(self.config.spares)) {
                 let name = self.next_spare_name();
                 self.provider
                     .rename(&path, &format!("{}/{name}", self.dir))
                     .await?;
                 self.provider.sync_dir(&self.dir).await?;
-                self.spare = Some(name);
+                self.spares.push(name);
             } else {
                 self.provider.delete(&path).await?;
                 self.provider.sync_dir(&self.dir).await?;
