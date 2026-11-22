@@ -9,12 +9,12 @@ use std::net::IpAddr;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
     Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
-    Layout, OpenError, ReadError, RecordRepair, Recovery, State,
+    Layout, OpenError, ReadError, RecordRepair, Recovery, Scrub, State,
 };
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration, WritebackErrorReporting};
 
 mod support;
-use support::{CrashModel, crash_loop};
+use support::{CrashModel, crash_loop, cut_after};
 
 pub(crate) const DIR: &str = "wal";
 pub(crate) const JOURNAL: JournalId = JournalId(0x00C0_FFEE);
@@ -326,7 +326,7 @@ fn a_dead_segment_is_recycled_and_its_old_batches_read_as_stale() {
             drop(journal);
             sim.simulate_crash_for_process(ip(), true);
             let (mut journal, recovery) = reopen(&mut sim, durability).await.expect("reopen");
-            assert!(recovery.spare_kept, "{recovery:?}");
+            assert!(recovery.spares_kept > 0, "{recovery:?}");
             assert_eq!(recovery.spares_removed, 0);
 
             // The third segment fills; the next roll adopts the spare, whose
@@ -361,6 +361,128 @@ fn a_dead_segment_is_recycled_and_its_old_batches_read_as_stale() {
 }
 
 #[test]
+fn prepared_spares_take_the_rolls_and_an_open_keeps_them() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(18);
+            let spares = |durability| JournalConfig {
+                spares: 2,
+                ..config(durability)
+            };
+            let mut journal = run(&mut sim, move |provider| async move {
+                Journal::create(provider, DIR, JOURNAL, spares(durability), b"born").await
+            })
+            .await
+            .expect("create");
+            journal = run(&mut sim, move |_| async move {
+                let prepared = journal.prepare_spares().await.expect("prepare");
+                assert_eq!(prepared, 2, "up to the configured count");
+                let again = journal.prepare_spares().await.expect("prepare");
+                assert_eq!(again, 0, "the journal keeps two already");
+                journal
+            })
+            .await;
+            assert_eq!(journal.rolls().spares_prepared, 2);
+            assert_eq!(count(&names(&mut sim).await, "spare-"), 2);
+
+            // The first segment and the next one both come from spares: no
+            // roll allocates.
+            for position in 0..16 {
+                journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+            }
+            assert_eq!(journal.rolls().onto_spare, 2, "{durability:?}");
+            assert_eq!(journal.rolls().created, 0, "{durability:?}");
+
+            // Prepared again, crashed: the open keeps both spares and reads
+            // every batch, with nothing torn or damaged.
+            journal = run(&mut sim, move |_| async move {
+                assert_eq!(journal.prepare_spares().await.expect("prepare"), 2);
+                journal
+            })
+            .await;
+            drop(journal);
+            sim.simulate_crash_for_process(ip(), true);
+            let (journal, recovery) = run(&mut sim, move |provider| async move {
+                Journal::open(provider, DIR, JOURNAL, spares(durability)).await
+            })
+            .await
+            .expect("reopen")
+            .expect("a journal is there");
+            assert_eq!(recovery.spares_kept, 2, "{recovery:?}");
+            assert_eq!(recovery.spares_removed, 0, "{recovery:?}");
+            assert_eq!(recovery.torn, 0, "{recovery:?}");
+            assert!(recovery.corrupt.is_empty(), "{recovery:?}");
+            assert_eq!(journal.positions().count(), 16, "{durability:?}");
+            drop(journal);
+
+            // Opened with room for one spare, the journal deletes the other.
+            let (_, recovery) = reopen(&mut sim, durability).await.expect("reopen");
+            assert_eq!(recovery.spares_kept, 1, "{recovery:?}");
+            assert_eq!(recovery.spares_removed, 1, "{recovery:?}");
+        }
+    });
+}
+
+#[test]
+fn a_journal_with_no_spares_deletes_its_dead_segments() {
+    runtime().block_on(async {
+        let mut sim = sim(19);
+        let none = JournalConfig {
+            spares: 0,
+            ..config(Durability::Ordered)
+        };
+        let mut journal = run(&mut sim, move |provider| async move {
+            Journal::create(provider, DIR, JOURNAL, none, b"born").await
+        })
+        .await
+        .expect("create");
+        for position in 0..16 {
+            journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+        }
+        journal = run(&mut sim, move |_| async move {
+            assert_eq!(journal.prepare_spares().await.expect("prepare"), 0);
+            journal
+        })
+        .await;
+        journal = raise_floor(&mut sim, journal, 8, 16).await;
+        drop(journal);
+        let listed = names(&mut sim).await;
+        assert_eq!(count(&listed, "spare-"), 0, "{listed:?}");
+        assert_eq!(count(&listed, "seg-"), 2, "{listed:?}");
+    });
+}
+
+#[test]
+fn a_spare_a_crash_left_under_its_temporary_name_is_deleted() {
+    runtime().block_on(async {
+        let mut sim = sim(20);
+        let mut journal = create(&mut sim, Durability::Ordered).await;
+        journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        drop(journal);
+        // What a crash inside `prepare_spares` leaves before its rename.
+        run(&mut sim, |provider| async move {
+            let path = format!("{DIR}/spare-0000000099-0000000000.wal.tmp");
+            let file = provider
+                .open(&path, OpenOptions::create_new_write())
+                .await?;
+            file.write_at(0, &[0xA5; 4096]).await?;
+            file.sync_all().await
+        })
+        .await
+        .expect("a leftover");
+        sim.simulate_crash_for_process(ip(), true);
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        assert_eq!(recovery.spares_kept, 0);
+        assert!(matches!(journal.state(0), State::Live { .. }));
+        let names = names(&mut sim).await;
+        assert!(
+            names.iter().all(|name| !name.contains(".wal.")),
+            "{names:?}"
+        );
+    });
+}
+
+#[test]
 fn a_spare_that_is_not_a_whole_segment_is_deleted_and_never_read() {
     runtime().block_on(async {
         let mut sim = sim(17);
@@ -381,7 +503,7 @@ fn a_spare_that_is_not_a_whole_segment_is_deleted_and_never_read() {
         sim.simulate_crash_for_process(ip(), true);
         let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
         assert_eq!(recovery.spares_removed, 1);
-        assert!(!recovery.spare_kept);
+        assert_eq!(recovery.spares_kept, 0);
         assert!(matches!(journal.state(0), State::Live { .. }));
         let names = names(&mut sim).await;
         assert_eq!(count(&names, "spare-"), 0, "{names:?}");
@@ -427,7 +549,7 @@ async fn a_crash_mid_adopt(seed: u64) {
     drop(journal);
     sim.simulate_crash_for_process(ip(), true);
     let (mut journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
-    assert!(recovery.spare_kept, "{at}: {recovery:?}");
+    assert!(recovery.spares_kept > 0, "{at}: {recovery:?}");
     for position in 17..24 {
         journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
     }
@@ -1008,6 +1130,10 @@ fn paper(durability: Option<Durability>) {
         tally.restarts_after_failure > 0,
         "no process ever restarted right after a failed commit"
     );
+    assert!(
+        tally.spares_prepared > 0,
+        "no spare was ever allocated ahead"
+    );
 }
 
 /// The crash loop under moonpool's full crash physics, for one durability
@@ -1400,6 +1526,179 @@ fn a_scrub_finds_a_rotted_record_and_a_new_put_repairs_it() {
             let (_, bytes) = read(&mut sim, journal, 3).await;
             assert_eq!(bytes.expect("intact"), payload(3, 2, 300));
         }
+    });
+}
+
+/// Scrub until a pass ends, `budget` bytes per call; with every call's
+/// findings added up.
+async fn scrub_a_pass(sim: &mut SimWorld, mut journal: J, budget: u64) -> (J, Scrub, u32) {
+    let mut total = Scrub::default();
+    let mut calls = 0;
+    loop {
+        let (back, step) = run(sim, move |_| async move {
+            let step = journal.scrub(budget).await;
+            (journal, step)
+        })
+        .await;
+        journal = back;
+        let step = step.expect("scrub");
+        calls += 1;
+        total.checked += step.checked;
+        total.bytes_read += step.bytes_read;
+        total.damaged.extend(step.damaged);
+        total.records_mismatched.extend(step.records_mismatched);
+        total.repair.blocks_written += step.repair.blocks_written;
+        total.repair.blocks_left += step.repair.blocks_left;
+        total.meta_repaired += step.meta_repaired;
+        total.headers_repaired += step.headers_repaired;
+        if step.pass_done {
+            return (journal, total, calls);
+        }
+        assert!(calls < 1000, "a pass ends");
+    }
+}
+
+#[test]
+fn a_scrub_pass_checks_every_entry_within_its_budget() {
+    runtime().block_on(async {
+        let mut sim = sim(21);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        // Each entry is 64 + 300 bytes: a budget of 0 checks one per call.
+        let (journal, pass, calls) = scrub_a_pass(&mut sim, journal, 0).await;
+        assert_eq!(calls, 5);
+        assert_eq!(
+            pass,
+            Scrub {
+                checked: 5,
+                bytes_read: 5 * 364,
+                ..Scrub::default()
+            }
+        );
+        // A large budget checks the pass in one call; the next call starts
+        // a new pass.
+        let (journal, pass, calls) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
+        assert_eq!((calls, pass.checked), (1, 5));
+        let (_, pass, calls) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
+        assert_eq!((calls, pass.checked), (1, 5));
+    });
+}
+
+#[test]
+fn a_scrub_finds_a_rotted_entry_and_repairs_the_copies_from_their_twins() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(22);
+            let journal = five(&mut sim, durability).await;
+            let (record, _) = spots(&journal, 4);
+            let (_, rotted) = spots(&journal, 2);
+            let segment = record.0.clone();
+            // One fault on each structure with a twin: an entry (its twin is
+            // a peer's copy), a record (its entry), a metainfo copy, a
+            // segment header copy.
+            flip(&mut sim, rotted.0, rotted.1).await;
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, format!("{DIR}/meta"), 30).await;
+            flip(&mut sim, segment, 4096 + 30).await;
+            let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 512).await;
+            assert_eq!(pass.damaged, vec![(2, id(2, 1))], "{durability:?}");
+            assert_eq!(pass.records_mismatched, vec![4], "{durability:?}");
+            assert_eq!(pass.repair.blocks_written, 1, "{durability:?}");
+            assert_eq!(pass.meta_repaired, 1, "{durability:?}");
+            assert_eq!(pass.headers_repaired, 1, "{durability:?}");
+            // A second pass finds only the entry, which needs a peer.
+            let (journal, again, _) = scrub_a_pass(&mut sim, journal, 512).await;
+            assert_eq!(again.damaged, vec![(2, id(2, 1))]);
+            assert_eq!(
+                (again.meta_repaired, again.headers_repaired, again.repair),
+                (0, 0, RecordRepair::default())
+            );
+            // The caller writes the entry again from a peer: nothing is left
+            // for the next open to repair.
+            let journal = put(&mut sim, journal, &[(2, 2, 300)]).await;
+            drop(journal);
+            sim.simulate_crash_for_process(ip(), true);
+            let (_, recovery) = reopen(&mut sim, durability).await.expect("reopen");
+            assert!(!recovery.meta_repaired, "{recovery:?}");
+            assert_eq!(recovery.headers_repaired, 0, "{recovery:?}");
+            assert_eq!(recovery.rebuilt, 0, "{recovery:?}");
+        }
+    });
+}
+
+#[test]
+fn a_scrub_rewrites_both_metainfo_copies_and_both_header_copies() {
+    runtime().block_on(async {
+        let mut sim = sim(23);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let (record, _) = spots(&journal, 1);
+        flip(&mut sim, format!("{DIR}/meta"), 30).await;
+        flip(&mut sim, format!("{DIR}/meta"), 16 * 4096 + 30).await;
+        flip(&mut sim, record.0.clone(), 30).await;
+        flip(&mut sim, record.0, 4096 + 30).await;
+        let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
+        assert_eq!((pass.meta_repaired, pass.headers_repaired), (2, 2));
+        drop(journal);
+        sim.simulate_crash_for_process(ip(), true);
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        assert!(!recovery.meta_repaired, "{recovery:?}");
+        assert_eq!(recovery.headers_repaired, 0, "{recovery:?}");
+        assert_eq!(journal.positions().count(), 5);
+    });
+}
+
+/// Run one scrub step of `journal` and crash after `budget` steps of the
+/// world, then reopen.
+async fn scrub_cut_then_reopen(
+    sim: &mut SimWorld,
+    mut journal: J,
+    budget: u64,
+) -> Result<(J, Recovery), OpenError> {
+    let handle = tokio::spawn(async move {
+        let _ = journal.scrub(1 << 20).await;
+    });
+    cut_after(sim, handle, budget).await;
+    sim.simulate_crash_for_process(ip(), true);
+    reopen(sim, Durability::Ordered).await
+}
+
+/// A crash at any moment of a scrub that rewrites copies never stops the
+/// next open: one damaged copy of each pair is one fault, and the scrub
+/// writes one copy at a time. With both header copies damaged on the disk,
+/// the open refuses until the scrub has written one of them, and never
+/// again after that.
+#[test]
+fn a_scrub_cut_by_a_crash_never_leaves_a_copy_pair_worse() {
+    runtime().block_on(async {
+        for budget in 0..60 {
+            let mut sim = sim(31);
+            let journal = five(&mut sim, Durability::Ordered).await;
+            let (record, _) = spots(&journal, 1);
+            flip(&mut sim, format!("{DIR}/meta"), 30).await;
+            flip(&mut sim, record.0, 4096 + 30).await;
+            let (journal, _) = scrub_cut_then_reopen(&mut sim, journal, budget)
+                .await
+                .unwrap_or_else(|error| panic!("budget {budget}: {error}"));
+            assert_eq!(journal.positions().count(), 5, "budget {budget}");
+        }
+        let mut opened = None;
+        for budget in 0..60 {
+            let mut sim = sim(37);
+            let journal = five(&mut sim, Durability::Ordered).await;
+            let (record, _) = spots(&journal, 1);
+            flip(&mut sim, record.0.clone(), 30).await;
+            flip(&mut sim, record.0, 4096 + 30).await;
+            match scrub_cut_then_reopen(&mut sim, journal, budget).await {
+                Ok((journal, _)) => {
+                    assert_eq!(journal.positions().count(), 5, "budget {budget}");
+                    opened.get_or_insert(budget);
+                }
+                Err(OpenError::BadSegment { .. }) => {
+                    assert!(opened.is_none(), "budget {budget} after {opened:?}");
+                }
+                Err(error) => panic!("budget {budget}: {error}"),
+            }
+        }
+        assert!(opened.is_some(), "no scrub finished its rewrite");
     });
 }
 

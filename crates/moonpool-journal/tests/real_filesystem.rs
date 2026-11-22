@@ -40,6 +40,7 @@ async fn committed_bytes_read_back_after_a_reopen() -> Result<(), Box<dyn std::e
             durability,
             geometry: Geometry::small(),
             direct_io,
+            ..JournalConfig::default()
         };
         let id = JournalId(11);
         let mut journal = Journal::create(provider.clone(), dir, id, config, b"m0").await?;

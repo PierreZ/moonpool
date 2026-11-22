@@ -52,6 +52,7 @@ journal.commit(batch).await?;
 | `JournalConfig` / `Durability` / `Geometry` | One or two syncs per commit; the segment shape; direct I/O |
 | `Id` / `JournalId` | The caller's 24-byte identity per entry; the journal's own identity |
 | `State` / `Recovery` | What a position holds (`Live`, `Corrupt`, `Ambiguous`); what opening found and repaired |
+| `Journal::scrub` / `Scrub` | Check the next part of the journal against the device, a byte budget per call: metainfo and header copies rewritten from the open's value, entries checked without a copy, rotted records repaired, damaged entries named |
 | `Journal::verify_records` | Read a range's persist records from disk and name the positions whose record rotted since the open, for a caller's scrub |
 | `Journal::repair_records` / `RecordRepair` | Write back each persist record that is damaged while its entry is intact (tombstones and replaced positions too); each open does it for the batches before the last |
 | `Journal::layout` / `Journal::regions` / `Layout` | Byte ranges of records, entries, metainfo and headers, for aiming faults |
@@ -118,7 +119,9 @@ journal.commit(batch).await?;
   rename: no byte written, no space allocated. With no spare, a roll
   allocates a new segment (`StorageFile::allocate`, `fallocate(2)` on
   Linux) and writes only its headers. No segment is ever zero-filled, and
-  no task runs beside the commits.
+  no task runs beside the commits. `JournalConfig::spares` (default 1) sets
+  how many spares the journal keeps, and `Journal::prepare_spares` allocates
+  them ahead of the rolls, off the commit path.
 - **Crash hints.** A batched commit names three moments with
   `moonpool_buggify::hint!`; an ordered commit names the metainfo one and
   leaves the windows inside its two durable writes to the storage layer,
@@ -139,15 +142,16 @@ a persist block again only when the entry of each record in it is intact, so a
 crash that tears the write leaves each record rebuildable from its entry.
 
 `<dir>/spare-<generation>-<n>.wal` is a dead segment's file, renamed and kept
-for the next roll. A roll writes and syncs its headers, renames it to its
+for a later roll, or a file `prepare_spares` allocated (its headers read as
+zeros). A roll writes and syncs its headers, renames it to its
 segment name and syncs the directory. Its old batches stay in it, and they
 are never evidence: a segment named after its first batch only receives
 batches at or above that number, batch numbers never repeat, so every record
 or entry older than the segment reads as stale, like a never-written one.
 Inside a segment, batch numbers grow with the place in the persist log, so a
 record after a batch boundary whose batch is not above the batch before it
-is old bytes too, at every open. An open keeps one whole spare and deletes
-the others.
+is old bytes too, at every open. An open keeps up to `JournalConfig::spares`
+whole spares and deletes the others.
 
 A new segment reads as zeros without a byte written. Its first pass pays one
 small metadata change per block on each durable write (the extent goes from
@@ -184,8 +188,9 @@ filesystem.
   moonpool's full model with lost, latent and shorn sectors), for each
   durability mode and for a mode drawn again every round, with crashes
   inside recovery, floor raises that recycle segments, rolls onto
-  recycled segments, scrubs (`repair_records`) cut by a crash, failed syncs
-  and failed writebacks, and restarts right after a failed commit.
+  recycled segments, scrubs (`scrub`, `repair_records`) cut by a crash,
+  failed syncs and failed writebacks, and restarts right after a failed
+  commit.
 
 `JOURNAL_CRASH_SEEDS` raises the seed count. `JOURNAL_CRASH_SEED` replays one
 seed.

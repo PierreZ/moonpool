@@ -5,7 +5,9 @@
 //!
 //! When the floor or later writes leave the front segment with nothing live,
 //! the journal renames it to `spare-<generation>-<n>.wal` and syncs the
-//! directory, if it holds no spare yet; else it deletes it. The file keeps
+//! directory, if it keeps fewer spares than
+//! [`JournalConfig::spares`](crate::JournalConfig::spares); else it deletes
+//! it. The file keeps
 //! its full size, its old header and its old batches, all durable. A roll
 //! writes the new header into the spare, syncs it, renames it to its
 //! segment name and syncs the directory
@@ -19,7 +21,8 @@
 //! written ones, and recovery's verdicts stay those of the crate docs.
 //!
 //! A spare holds no batch of its own: no batch is written to it before its
-//! rename. An open keeps one whole spare it finds and deletes the others.
+//! rename. An open keeps up to `spares` whole spares it finds and deletes
+//! the others.
 //!
 //! **A crash can leave one file two names.** A rename whose directory sync
 //! did not happen may keep the old name, the new one, or both. Both is one
@@ -28,12 +31,28 @@
 //! and deletes a spare that names a segment the directory lists. A real
 //! spare never does: a dead segment's name is gone once it is a spare, and
 //! no later segment takes its first batch.
+//!
+//! **A spare can also be allocated ahead of a roll**
+//! ([`Journal::prepare_spares`](crate::Journal::prepare_spares)): a new file
+//! of a whole segment's size under a temporary name, synced, then renamed to
+//! a spare name and the directory synced. Its headers read as zeros: no
+//! header, so it names no segment and holds no batch. A crash leaves the
+//! temporary name, which every open deletes, or a whole spare. The journal
+//! keeps at most [`JournalConfig::spares`](crate::JournalConfig::spares)
+//! spares of either kind.
+//!
 //! With no spare, a roll creates its segment with
 //! [`allocate`](moonpool_core::StorageFile::allocate): the space is
 //! reserved, reads as zeros, and nothing is written but the headers.
 
+use moonpool_core::{LocalStorageFile, LocalStorageProvider, OpenOptions};
+
+use crate::OpenError;
+use crate::format::{BLOCK_U64, Geometry};
+
 const PREFIX: &str = "spare-";
 const SUFFIX: &str = ".wal";
+const TEMPORARY: &str = ".tmp";
 
 /// `spare-0000000007-0000000003.wal`: the fourth spare of open generation
 /// 7. Every spare has its own name.
@@ -50,6 +69,45 @@ pub(crate) fn is_spare(name: &str) -> bool {
         .is_some_and(|(generation, number)| digits(generation) && digits(number))
 }
 
+/// Whether `name` is a spare that a crashed allocation left under its
+/// temporary name.
+pub(crate) fn is_spare_leftover(name: &str) -> bool {
+    name.strip_suffix(TEMPORARY).is_some_and(is_spare)
+}
+
+/// Allocate the spare `name` in `dir`: a whole segment's size under a
+/// temporary name, synced (bytes and length), then renamed and the
+/// directory synced. On a failure the temporary file is deleted, best
+/// effort: an open deletes what is left.
+pub(crate) async fn allocate<P: LocalStorageProvider>(
+    provider: &P,
+    dir: &str,
+    name: &str,
+    geometry: Geometry,
+) -> Result<(), OpenError> {
+    let path = format!("{dir}/{name}");
+    let temporary = format!("{path}{TEMPORARY}");
+    if provider.exists(&temporary).await? {
+        provider.delete(&temporary).await?;
+    }
+    let file = provider
+        .open(&temporary, OpenOptions::create_new_write().read(true))
+        .await?;
+    let filled = async {
+        file.allocate(geometry.total_blocks() * BLOCK_U64).await?;
+        file.sync_all().await
+    }
+    .await;
+    drop(file);
+    if let Err(error) = filled {
+        let _ = provider.delete(&temporary).await;
+        return Err(error.into());
+    }
+    provider.rename(&temporary, &path).await?;
+    provider.sync_dir(dir).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +119,8 @@ mod tests {
         assert_eq!(crate::segment::parse_segment_name(&spare_name(7, 3)), None);
         assert!(!crate::segment::is_segment_leftover(&spare_name(7, 3)));
         assert!(!is_spare(&crate::segment::segment_name(7)));
+        assert!(is_spare_leftover(&format!("{}.tmp", spare_name(7, 3))));
+        assert!(!is_spare(&format!("{}.tmp", spare_name(7, 3))));
+        assert!(!is_spare_leftover(&spare_name(7, 3)));
     }
 }

@@ -10,9 +10,15 @@ filesystem:
   thread. File operations are submitted to `io_uring`. A durable write is a
   write followed by an `fdatasync`.
 
-Both runs use the same journal configuration and the same payloads. Spares
-are prepared in the background on each backend's own task provider.
+Both runs use the same journal configuration and the same payloads.
 Neither backend was tuned.
+
+**These runs are older than the current journal.** When they ran, the
+journal zero-filled its spare segments in a background task, and the text
+below says so. Today no segment is zero-filled and no task runs beside the
+commits: a roll adopts a recycled dead segment, or allocates a new one
+(`fallocate(2)`), and `Journal::prepare_spares` allocates spares ahead of the
+rolls. The numbers were not measured again.
 
 ## Reproduce
 

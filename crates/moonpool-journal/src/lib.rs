@@ -95,6 +95,14 @@
 //!   tombstones and replaced positions too, before a second fault on the
 //!   same slot makes the next open refuse. Each open does the same for the
 //!   batches before the last one ([`RecordRepair`]).
+//! - **A scrub of everything.** [`Journal::scrub`] checks the journal against
+//!   the device in steps, a byte budget per call: each pass rewrites any
+//!   metainfo copy or segment header copy that differs from the value the
+//!   open holds, checks each live entry without copying it, and repairs each
+//!   rotted persist record from its entry. A damaged entry is named
+//!   ([`Scrub::damaged`]) for the caller to fetch from a peer. One fault is
+//!   then found while its twin still holds, before a second makes the next
+//!   open refuse.
 //! - **Fault aiming.** [`Journal::layout`] and [`Journal::regions`] return the
 //!   byte ranges of each record, entry, metainfo copy and segment header as
 //!   [`LayoutRegion`](moonpool_core::LayoutRegion) values. A simulation uses them to aim
@@ -110,6 +118,8 @@
 //!   every open. With no spare, a roll allocates a
 //!   new file ([`allocate`](moonpool_core::StorageFile::allocate)) and
 //!   writes only its headers. No segment is ever zero-filled.
+//!   [`Journal::prepare_spares`] allocates spares ahead of the rolls, up to
+//!   [`JournalConfig::spares`], so no commit pays for an allocation.
 //!   [`Journal::rolls`] counts the rolls of each kind.
 //! - **Durable writes.** An ordered commit writes each log with one
 //!   [`write_at_durable`](moonpool_core::StorageFile::write_at_durable)
@@ -146,13 +156,14 @@
 //! <dir>/meta                    metainfo copy A (block 0) and copy B (block 16)
 //! <dir>/seg-<first batch>.wal   allocated segments:
 //!     header A | header B | persist log | guard gap | entry log
-//! <dir>/spare-<gen>-<n>.wal     a dead segment's file, kept for the next roll
+//! <dir>/spare-<gen>-<n>.wal     a dead segment's file, or one allocated ahead,
+//!                               kept for a later roll
 //! ```
 //!
 //! A **spare** is never evidence: no batch is written to it before it is
 //! renamed to a segment, and the batches it still holds are older than any
-//! it will hold. An open keeps one whole spare and deletes the others
-//! ([`Recovery::spares_removed`]), and never keeps a spare whose header names
+//! it will hold. An open keeps up to [`JournalConfig::spares`] whole spares
+//! and deletes the others ([`Recovery::spares_removed`]), and never keeps a spare whose header names
 //! a listed segment: a crash in a roll left it as a second name of that
 //! segment.
 //!
@@ -297,5 +308,5 @@ pub use error::{CommitError, Durable, OpenError, ReadError};
 pub use format::{BLOCK, Geometry, ID_SIZE, Id, MAX_BATCH_RECORDS, META_MAX, RECORD_SIZE};
 pub use journal::{
     Durability, Entry, Journal, JournalConfig, JournalId, Layout, RecordRepair, Recovery, Rolls,
-    State,
+    Scrub, State,
 };

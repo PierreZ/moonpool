@@ -128,6 +128,7 @@ fn committed_bytes_read_back_after_a_reopen_on_compio() -> Result<(), Box<dyn st
             durability,
             geometry: Geometry::small(),
             direct_io,
+            ..JournalConfig::default()
         };
         runtime.block_on(run(dir, config))?;
     }

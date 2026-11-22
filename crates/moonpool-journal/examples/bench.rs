@@ -128,6 +128,7 @@ impl Args {
                 Direct::Optional => DirectIo::Optional,
                 Direct::Required => DirectIo::Required,
             },
+            ..JournalConfig::default()
         }
     }
 

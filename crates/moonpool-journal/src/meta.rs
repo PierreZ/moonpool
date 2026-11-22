@@ -193,6 +193,25 @@ impl<F: LocalStorageFile> MetaFile<F> {
         self.write_durable(Copy::A, meta).await?;
         self.write_durable(Copy::B, meta).await
     }
+
+    /// Read both copies again from the device and rewrite each one that is
+    /// not `meta`, the value this open holds and last made durable. Returns
+    /// the copies rewritten. One copy is rewritten alone; two are rewritten
+    /// one after the other ([`update`](Self::update)), as a commit does.
+    pub async fn scrub(&self, meta: &Meta) -> std::io::Result<u32> {
+        // Every write to the file is durable on return: nothing is dirty,
+        // so the reads come from the device.
+        self.file.get_ref().drop_cache().await?;
+        let good = |read: Result<Meta, Option<u16>>| read.is_ok_and(|found| &found == meta);
+        let a = good(self.read(Copy::A).await?);
+        let b = good(self.read(Copy::B).await?);
+        match (a, b) {
+            (true, true) => Ok(0),
+            (false, false) => self.update(meta).await.map(|()| 2),
+            (false, true) => self.write_durable(Copy::A, meta).await.map(|()| 1),
+            (true, false) => self.write_durable(Copy::B, meta).await.map(|()| 1),
+        }
+    }
 }
 
 async fn open_file<P: LocalStorageProvider>(
