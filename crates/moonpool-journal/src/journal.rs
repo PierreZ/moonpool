@@ -58,8 +58,13 @@ pub struct JournalConfig {
     /// segments it recycles, and files [`Journal::prepare_spares`]
     /// allocates. A roll onto a spare is a header write and a rename; with
     /// none, the roll allocates a new file inside the commit. `0` deletes
-    /// every dead segment. Default: 1.
+    /// every dead segment. At most [`JournalConfig::MAX_SPARES`]. Default: 1.
     pub spares: u32,
+}
+
+impl JournalConfig {
+    /// The most spares a journal keeps: each is a whole segment of disk.
+    pub const MAX_SPARES: u32 = 64;
 }
 
 impl Default for JournalConfig {
@@ -166,7 +171,11 @@ pub struct RecordRepair {
 /// What one call of [`Journal::scrub`] checked and repaired.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Scrub {
-    /// Live positions this call checked: entry and persist record.
+    /// Live positions this call checked: entry and persist record. A
+    /// position the open already found damaged ([`Recovery::corrupt`],
+    /// [`Recovery::ambiguous`]) is not read again and not counted here or
+    /// in [`damaged`](Self::damaged): the open reported it, and a
+    /// [`read`](Journal::read) of it reports it too.
     pub checked: u64,
     /// Bytes of entries this call read.
     pub bytes_read: u64,
@@ -293,13 +302,15 @@ fn poisoned() -> OpenError {
 }
 
 fn check_config(config: &JournalConfig) -> Result<(), OpenError> {
-    if config.geometry.is_valid() {
-        Ok(())
-    } else {
-        Err(OpenError::InvalidConfig(
+    if !config.geometry.is_valid() {
+        return Err(OpenError::InvalidConfig(
             "the geometry describes no usable segment",
-        ))
+        ));
     }
+    if config.spares > JournalConfig::MAX_SPARES {
+        return Err(OpenError::InvalidConfig("more spares than MAX_SPARES"));
+    }
+    Ok(())
 }
 
 /// Every directory whose entries name a component of `dir`, from the root
@@ -403,8 +414,9 @@ async fn clear_for_create<P: LocalStorageProvider>(
 }
 
 /// Keep up to [`JournalConfig::spares`] whole spares of `spares` and delete
-/// the others (with their count). A spare is never evidence: no batch is written to it before it
-/// is renamed to a segment, so deleting one loses nothing. Kept, its old
+/// the others (with their count). A spare is never evidence: no batch is
+/// written to it before it is renamed to a segment, so deleting one loses
+/// nothing. Kept, its old
 /// batches are older than any batch it will hold (see [`crate::spare`]).
 ///
 /// A spare whose header names a segment of `firsts` is never kept: a crash
@@ -1099,10 +1111,15 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// as damage, so a block that holds one is left.
     ///
     /// # Errors
-    /// [`OpenError::Io`] when the provider fails; an evidence variant of
-    /// [`OpenError`] when the persist log no longer reads as a log (damage
-    /// since the open that the next open refuses too).
+    /// [`OpenError::Io`] when the provider fails (a failed write poisons
+    /// the journal, as a failed commit does) or the journal is poisoned; an
+    /// evidence variant of [`OpenError`] when the persist log no longer
+    /// reads as a log (damage since the open that the next open refuses
+    /// too).
     pub async fn repair_records(&mut self) -> Result<RecordRepair, OpenError> {
+        if self.poisoned {
+            return Err(poisoned());
+        }
         let known = Known {
             generation: self.generation,
             last: self.meta.open_last,
@@ -1110,7 +1127,13 @@ impl<P: LocalStorageProvider> Journal<P> {
         };
         let (writes, repair) =
             plan_repair(&self.segments, self.tag, known, self.last_batch).await?;
-        write_persist(&self.segments, writes).await?;
+        if let Err(error) = write_persist(&self.segments, writes).await {
+            // A failed rewrite may leave a persist block dirty or torn in the
+            // cache, under the next commit's range sync: poisoned, as a
+            // failed commit is.
+            self.poisoned = true;
+            return Err(error.into());
+        }
         Ok(repair)
     }
 
@@ -1226,7 +1249,8 @@ impl<P: LocalStorageProvider> Journal<P> {
     ///
     /// # Errors
     /// [`OpenError::Io`] when the provider fails or a failed commit
-    /// poisoned the journal; an evidence variant of [`OpenError`] when the
+    /// poisoned the journal (a failed rewrite of a copy or a record poisons
+    /// it too); an evidence variant of [`OpenError`] when the
     /// record repair finds damage the next open refuses too.
     pub async fn scrub(&mut self, budget: u64) -> Result<Scrub, OpenError> {
         if self.poisoned {
@@ -1234,9 +1258,15 @@ impl<P: LocalStorageProvider> Journal<P> {
         }
         let mut out = Scrub::default();
         if self.scrub_next.is_none() {
-            out.meta_repaired = self.meta_file.scrub(&self.meta).await?;
-            for segment in &self.segments {
-                out.headers_repaired += segment.scrub_headers(self.id).await?;
+            // A failed rewrite may leave a copy dirty or torn in the cache.
+            // The next write of its twin assumes it is the file's one
+            // unsynced write, so the failure poisons, as a commit's does.
+            match self.scrub_copies().await {
+                Ok((meta, headers)) => (out.meta_repaired, out.headers_repaired) = (meta, headers),
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(error.into());
+                }
             }
         }
         let start = self.scrub_next.unwrap_or(0);
@@ -1266,15 +1296,21 @@ impl<P: LocalStorageProvider> Journal<P> {
                 .await?;
         }
         let mut damaged = Vec::new();
+        let mut checked = 0;
         out.bytes_read = self
             .read_runs(&chunk, |position, at, bytes| {
-                if bytes.is_some_and(|entry| !self.intact(position, at, entry)) {
-                    damaged.push((position, at.id));
+                // A position the open found damaged is not read again: the
+                // open reported it, and a read reports it too.
+                if let Some(entry) = bytes {
+                    checked += 1;
+                    if !self.intact(position, at, entry) {
+                        damaged.push((position, at.id));
+                    }
                 }
             })
             .await?;
         out.damaged = damaged;
-        out.checked = u64_of(chunk.len());
+        out.checked = checked;
         out.records_mismatched = self.verify_records(first..=last).await?;
         if !out.records_mismatched.is_empty() {
             out.repair = self.repair_records().await?;
@@ -1284,6 +1320,17 @@ impl<P: LocalStorageProvider> Journal<P> {
             .filter(|&next| self.index.range(next..).next().is_some());
         out.pass_done = self.scrub_next.is_none();
         Ok(out)
+    }
+
+    /// Scrub the metainfo copies and every segment's header copies.
+    /// Returns the metainfo copies and the header copies rewritten.
+    async fn scrub_copies(&self) -> std::io::Result<(u32, u32)> {
+        let meta = self.meta_file.scrub(&self.meta).await?;
+        let mut headers = 0;
+        for segment in &self.segments {
+            headers += segment.scrub_headers(self.id).await?;
+        }
+        Ok((meta, headers))
     }
 
     // ---- writes ----

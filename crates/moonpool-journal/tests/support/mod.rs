@@ -280,7 +280,11 @@ pub(crate) fn crash_loop(
 
 /// Step the world for `handle` at most `budget` times, then cut it off
 /// wherever it is.
-async fn cut_after<T>(sim: &mut SimWorld, handle: tokio::task::JoinHandle<T>, budget: u64) {
+pub(crate) async fn cut_after<T>(
+    sim: &mut SimWorld,
+    handle: tokio::task::JoinHandle<T>,
+    budget: u64,
+) {
     for _ in 0..budget {
         if handle.is_finished() {
             break;
@@ -463,8 +467,12 @@ async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
             // A scrub writes no data: whatever it hits, the ledger stands.
             // One step of the full scrub (the first of a pass rewrites any
             // metainfo or header copy that differs), then the record repair.
-            let Ok(step) = journal.scrub(4096).await else {
-                return;
+            // An I/O error is the disk's; evidence of damage is a bug, as
+            // it is for an open.
+            let step = match journal.scrub(4096).await {
+                Ok(step) => step,
+                Err(OpenError::Io(_)) => return,
+                Err(error) => panic!("a scrub after a crash found evidence: {error}"),
             };
             match journal.repair_records().await {
                 Ok(repair) => {
@@ -474,7 +482,8 @@ async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
                     ledger.scrub_steps += 1;
                     ledger.scrub_damaged += step.damaged.len();
                 }
-                Err(_) => return,
+                Err(OpenError::Io(_)) => return,
+                Err(error) => panic!("a record repair after a crash found evidence: {error}"),
             }
         }
     }

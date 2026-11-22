@@ -17,7 +17,7 @@ use moonpool_core::{
     AlignedBuf, BlockFile, DirectIo, LocalStorageFile, LocalStorageProvider, OpenOptions,
 };
 
-use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, VERSION, usize_of};
+use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, VERSION, u64_of, usize_of};
 use crate::io::{
     ReadBytes, block_buf, read_blocks, read_bytes, read_from_device, write_blocks,
     write_blocks_durable,
@@ -285,17 +285,17 @@ impl<F: LocalStorageFile> Segment<F> {
             SegmentHeader::decode(&blocks.as_slice()[at * BLOCK..(at + 1) * BLOCK])
                 .is_some_and(|found| found == header)
         };
-        match (good(0), good(1)) {
-            (true, true) => Ok(0),
-            (false, false) => write_headers_durable(&self.file, &header).await.map(|()| 2),
-            (a, _) => {
-                let block = u64::from(a);
-                let mut copy = block_buf(BLOCK);
-                header.encode(copy.as_mut_slice());
-                write_blocks_durable(&self.file, block, copy).await?;
-                Ok(1)
-            }
+        let damaged = [!good(0), !good(1)];
+        let mut rewritten = 0;
+        // One copy at a time, each durable before the next: a crash tears at
+        // most one, even when both only read as bad (a misdirected read).
+        for (block, _) in damaged.iter().enumerate().filter(|(_, bad)| **bad) {
+            let mut copy = block_buf(BLOCK);
+            header.encode(copy.as_mut_slice());
+            write_blocks_durable(&self.file, u64_of(block), copy).await?;
+            rewritten += 1;
         }
+        Ok(rewritten)
     }
 
     /// The whole persist log, damaged blocks zero-filled.
@@ -385,12 +385,17 @@ async fn write_headers<F: LocalStorageFile>(
     Ok(())
 }
 
-/// [`write_headers`], durable on return.
+/// [`write_headers`], durable on return: copy A, durable, then copy B,
+/// durable, so a crash tears at most one of them.
 async fn write_headers_durable<F: LocalStorageFile>(
     file: &BlockFile<F>,
     header: &SegmentHeader,
 ) -> std::io::Result<()> {
-    write_blocks_durable(file, 0, header_blocks(header)).await?;
+    for block in 0..2 {
+        let mut copy = block_buf(BLOCK);
+        header.encode(copy.as_mut_slice());
+        write_blocks_durable(file, block, copy).await?;
+    }
     Ok(())
 }
 

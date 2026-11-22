@@ -266,7 +266,8 @@ But a recycled file is full of old batches. Why are they not evidence?
 - **The commit acknowledges its batch only after the directory sync**, so
   the segment's name is durable before any batch in it is.
 
-How many spares? `JournalConfig::spares` sets it (1 by default), and a
+How many spares? `JournalConfig::spares` sets it (1 by default, at most
+`JournalConfig::MAX_SPARES`), and a
 journal that only grows never gets a dead segment to recycle. So
 `Journal::prepare_spares` allocates spares ahead of the rolls: each one is a
 whole file under a temporary name, synced, then renamed. Its headers read as
@@ -408,11 +409,14 @@ scrubber. Each call checks the next run of live positions, at most `budget`
 bytes of entries (and at least one entry), and goes on where the last call
 stopped. Each pass starts with the metainfo copies and the header copies: a
 copy that differs from the value the open holds is rewritten from it, one
-durable write at a time, as a commit writes them. Then each entry is checked
+durable write at a time, as a commit writes them. A failed rewrite poisons
+the journal, as a failed commit does. Then each entry is checked
 for its CRC and its identity, in place, without a copy of its payload. Each
 record of the run is checked as `verify_records` does, and a mismatch runs
 `repair_records`. A damaged entry has no local twin: `Scrub::damaged` names
-it, with its identity, and the caller fetches it from a peer. The scrub drops
+it, with its identity, and the caller fetches it from a peer. A position that
+the open already found damaged is not read again: the open reported it. The
+scrub drops
 the page cache of each file before it reads it, so it checks the device and
 not a cached copy. `Scrub::pass_done` says when a pass ends.
 

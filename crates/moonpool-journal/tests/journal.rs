@@ -14,7 +14,7 @@ use moonpool_journal::{
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration, WritebackErrorReporting};
 
 mod support;
-use support::{CrashModel, crash_loop};
+use support::{CrashModel, crash_loop, cut_after};
 
 pub(crate) const DIR: &str = "wal";
 pub(crate) const JOURNAL: JournalId = JournalId(0x00C0_FFEE);
@@ -1643,6 +1643,62 @@ fn a_scrub_rewrites_both_metainfo_copies_and_both_header_copies() {
         assert!(!recovery.meta_repaired, "{recovery:?}");
         assert_eq!(recovery.headers_repaired, 0, "{recovery:?}");
         assert_eq!(journal.positions().count(), 5);
+    });
+}
+
+/// Run one scrub step of `journal` and crash after `budget` steps of the
+/// world, then reopen.
+async fn scrub_cut_then_reopen(
+    sim: &mut SimWorld,
+    mut journal: J,
+    budget: u64,
+) -> Result<(J, Recovery), OpenError> {
+    let handle = tokio::spawn(async move {
+        let _ = journal.scrub(1 << 20).await;
+    });
+    cut_after(sim, handle, budget).await;
+    sim.simulate_crash_for_process(ip(), true);
+    reopen(sim, Durability::Ordered).await
+}
+
+/// A crash at any moment of a scrub that rewrites copies never stops the
+/// next open: one damaged copy of each pair is one fault, and the scrub
+/// writes one copy at a time. With both header copies damaged on the disk,
+/// the open refuses until the scrub has written one of them, and never
+/// again after that.
+#[test]
+fn a_scrub_cut_by_a_crash_never_leaves_a_copy_pair_worse() {
+    runtime().block_on(async {
+        for budget in 0..60 {
+            let mut sim = sim(31);
+            let journal = five(&mut sim, Durability::Ordered).await;
+            let (record, _) = spots(&journal, 1);
+            flip(&mut sim, format!("{DIR}/meta"), 30).await;
+            flip(&mut sim, record.0, 4096 + 30).await;
+            let (journal, _) = scrub_cut_then_reopen(&mut sim, journal, budget)
+                .await
+                .unwrap_or_else(|error| panic!("budget {budget}: {error}"));
+            assert_eq!(journal.positions().count(), 5, "budget {budget}");
+        }
+        let mut opened = None;
+        for budget in 0..60 {
+            let mut sim = sim(37);
+            let journal = five(&mut sim, Durability::Ordered).await;
+            let (record, _) = spots(&journal, 1);
+            flip(&mut sim, record.0.clone(), 30).await;
+            flip(&mut sim, record.0, 4096 + 30).await;
+            match scrub_cut_then_reopen(&mut sim, journal, budget).await {
+                Ok((journal, _)) => {
+                    assert_eq!(journal.positions().count(), 5, "budget {budget}");
+                    opened.get_or_insert(budget);
+                }
+                Err(OpenError::BadSegment { .. }) => {
+                    assert!(opened.is_none(), "budget {budget} after {opened:?}");
+                }
+                Err(error) => panic!("budget {budget}: {error}"),
+            }
+        }
+        assert!(opened.is_some(), "no scrub finished its rewrite");
     });
 }
 
