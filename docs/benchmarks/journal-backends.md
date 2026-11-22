@@ -120,6 +120,11 @@ example, the 4 KiB direct batched sequential case had a Tokio p99 of
 
 ### Recovery (256 MiB, cold page cache)
 
+These numbers predate the faster open of format 5 (a sealed segment is read
+only up to its last batch, and blocks of zeros are skipped). On a warm 128 MiB
+journal, open went from 205 ms to 51 ms with that change. Run the bench again
+to refresh the table.
+
 There were three runs per cell, each on a freshly built journal. Each cell
 shows the median and then the slowest run. The table has two sweeps with the
 backend order swapped.

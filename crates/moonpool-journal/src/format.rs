@@ -55,6 +55,14 @@ const _: () = assert!(META_MAX >= 4000);
 const _: () = assert!(GENERATION_SHIFT > 32 && GENERATION_SHIFT < 64);
 const _: () = assert!(META_COPY_B_AT >= 16 * BLOCK_U64);
 
+/// Whether every byte of `bytes` is zero: eight bytes at a time, because an
+/// open looks at every slot of every persist log, and most are never
+/// written.
+pub(crate) fn is_zero(bytes: &[u8]) -> bool {
+    let (words, rest) = bytes.as_chunks::<8>();
+    words.iter().all(|word| u64::from_ne_bytes(*word) == 0) && rest.iter().all(|&b| b == 0)
+}
+
 fn crc(bytes: &[u8]) -> u32 {
     crc32c::crc32c(bytes)
 }
@@ -393,7 +401,7 @@ impl Record {
 
     pub fn decode(bytes: &[u8]) -> Slot {
         let bytes = &bytes[..RECORD_SIZE];
-        if bytes.iter().all(|&b| b == 0) {
+        if is_zero(bytes) {
             return Slot::Zero;
         }
         if get_u32(bytes, 60) != crc(&bytes[..60]) {

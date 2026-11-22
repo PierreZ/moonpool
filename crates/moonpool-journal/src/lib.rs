@@ -211,8 +211,11 @@
 //!
 //! # Recovery
 //!
-//! Opening reads every persist record and judges each one (`last` is the
-//! last batch in the log):
+//! Opening reads the persist records and judges each one (`last` is the
+//! last batch in the log). The last segment is read whole. A sealed segment
+//! ends at the batch that the next segment's header names: opening reads its
+//! persist log only up to that batch, and a record past it is not part of
+//! the segment.
 //!
 //! | Entry | Persist record | Verdict |
 //! |---|---|---|

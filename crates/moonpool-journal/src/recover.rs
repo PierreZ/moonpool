@@ -52,8 +52,8 @@ use moonpool_core::{AlignedBuf, LocalStorageFile};
 
 use crate::format::{
     BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, ParsedEntry, RECORD_SIZE,
-    RECORDS_PER_BLOCK, Record, Retire, Slot, align_up, generation_of, stamp_is_ahead, u64_of,
-    usize_of,
+    RECORDS_PER_BLOCK, Record, Retire, Slot, align_up, generation_of, is_zero, stamp_is_ahead,
+    u64_of, usize_of,
 };
 use crate::segment::Segment;
 use crate::{OpenError, RecordRepair};
@@ -277,10 +277,11 @@ impl Known {
     }
 
     /// [`check_generation`](Self::check_generation) for every valid record
-    /// of a persist log that is not stale.
-    fn check_log(self, log: &[u8], first: u64) -> Result<(), OpenError> {
-        for bytes in log.as_chunks::<RECORD_SIZE>().0 {
-            if let Slot::Valid(record) = Record::decode(bytes)
+    /// of a persist log that is not stale. `written`: its slots that are not
+    /// all zeros ([`written_slots`]).
+    fn check_log(self, log: &[u8], written: &[usize], first: u64) -> Result<(), OpenError> {
+        for &at in written {
+            if let Slot::Valid(record) = Record::decode(&log[at * RECORD_SIZE..])
                 && !self.is_stale_in(first, record.batch)
             {
                 self.check_generation(record.batch)?;
@@ -315,6 +316,26 @@ impl Known {
         }
         Ok(())
     }
+}
+
+/// The slots of a persist log that are not all zeros, in order. A slot of
+/// zeros was never written ([`Slot::Zero`]): the scan never needs to decode
+/// it, and most of a persist log is zeros. A block of zeros is skipped
+/// whole.
+fn written_slots(log: &[u8]) -> Vec<usize> {
+    let mut written = Vec::new();
+    for (block, bytes) in log.chunks(usize_of(BLOCK_U64)).enumerate() {
+        if is_zero(bytes) {
+            continue;
+        }
+        let first = block * RECORDS_PER_BLOCK;
+        for (at, slot) in bytes.as_chunks::<RECORD_SIZE>().0.iter().enumerate() {
+            if !is_zero(slot) {
+                written.push(first + at);
+            }
+        }
+    }
+    written
 }
 
 /// The batch whose first entry is at `offset`, from that entry: when
@@ -455,11 +476,55 @@ async fn from_entry<F: LocalStorageFile>(
     }
 }
 
+/// The most persist blocks a sealed segment's scan reads first (1 MiB):
+/// most of a sealed segment's persist log is never written. A smaller log
+/// reads a 32nd of itself first, so the small test shapes take the same
+/// path.
+const FIRST_READ_BLOCKS: u64 = 256;
+
 /// Pass 1 over one segment. `prev` is the last batch before it; `end`, its
 /// last batch as the next segment's header records it (`None` for the last
 /// segment).
+///
+/// A sealed segment holds no batch after `end`: a roll starts the next
+/// segment, and no batch goes to this one again. So its scan reads a prefix
+/// of the persist log first, and takes the result only when that prefix
+/// holds every batch up to `end` whole. Anything else (a batch that runs
+/// past the prefix, a lost batch, a scan that stops short of `end`) reads a
+/// prefix four times as long, then the whole log, and scans again. The
+/// last segment's log is read whole: nothing says where it ends.
 async fn scan_segment<F: LocalStorageFile>(
     segment: &Segment<F>,
+    (prev, end): (u64, Option<u64>),
+    context: Context<'_>,
+) -> Result<(Vec<BatchScan>, u64, u64), OpenError> {
+    let whole = u64::from(segment.geometry.persist_blocks);
+    let mut blocks = if end.is_some() {
+        (whole / 32).clamp(1, FIRST_READ_BLOCKS).min(whole)
+    } else {
+        whole
+    };
+    loop {
+        let log = segment.read_persist_blocks(blocks).await?;
+        let scanned = scan_log(segment, &log, (prev, end), context).await;
+        if blocks == whole {
+            return scanned;
+        }
+        if let Ok((batches, _, _)) = &scanned
+            && batches.last().map_or(prev, |batch| batch.seq) == end.unwrap_or(prev)
+        {
+            return scanned;
+        }
+        blocks = (blocks * 4).min(whole);
+    }
+}
+
+/// [`scan_segment`] over `log`, the first blocks of its persist log. The
+/// scan stops after batch `end`, so the result of a sealed segment does not
+/// depend on how much of its log was read past that batch.
+async fn scan_log<F: LocalStorageFile>(
+    segment: &Segment<F>,
+    log: &[u8],
     (prev, end): (u64, Option<u64>),
     context: Context<'_>,
 ) -> Result<(Vec<BatchScan>, u64, u64), OpenError> {
@@ -469,7 +534,6 @@ async fn scan_segment<F: LocalStorageFile>(
         retires,
     } = context;
     let geometry = segment.geometry;
-    let log = segment.read_persist_log().await?;
     let slots = log.len() / RECORD_SIZE;
     // A stale record reads as damage: it is not evidence of anything. That
     // covers a batch older than the segment, left in a recycled file, and
@@ -483,19 +547,28 @@ async fn scan_segment<F: LocalStorageFile>(
         }
         slot => slot,
     };
-    known.check_log(&log, segment.first_batch)?;
+    let written = written_slots(log);
+    // A record of a later generation than the metainfo's refuses the open.
+    // The last segment checks its whole log; a sealed segment checks only
+    // its batches (below), as nothing after `end` is part of it.
+    if end.is_none() {
+        known.check_log(log, &written, segment.first_batch)?;
+    }
     let persist_at = |at: usize| Geometry::PERSIST_START + u64_of(at * RECORD_SIZE);
 
     let mut batches = Vec::new();
     let mut last = prev;
     let mut at = 0usize; // slot index of the next batch boundary
     let mut entry_cursor = geometry.entry_start();
-    while at < slots {
+    // Nothing after a sealed segment's last batch is part of it.
+    while at < slots && end != Some(last) {
         // The batch here, from the first valid record at or after `at`.
-        let first_valid = (at..slots).find_map(|j| match slot(j, last) {
-            Slot::Valid(record) => Some((j, record)),
-            _ => None,
-        });
+        let first_valid = written[written.partition_point(|&j| j < at)..]
+            .iter()
+            .find_map(|&j| match slot(j, last) {
+                Slot::Valid(record) => Some((j, record)),
+                _ => None,
+            });
         let shape = locate_batch(
             segment,
             (at, first_valid),
@@ -552,6 +625,10 @@ async fn scan_segment<F: LocalStorageFile>(
         last = seq;
         at += usize_of(Record::blocks_for(batch_slots)) * (usize_of(BLOCK_U64) / RECORD_SIZE);
         entry_cursor = align_up(entries_end, BLOCK_U64);
+    }
+    if end.is_some() {
+        let inside = written.partition_point(|&j| j < at);
+        known.check_log(log, &written[..inside], segment.first_batch)?;
     }
     let persist_next = Geometry::PERSIST_START + u64_of(at * RECORD_SIZE);
     Ok((batches, persist_next, entry_cursor))
@@ -665,8 +742,8 @@ async fn valid_retires<F: LocalStorageFile>(
     let mut retires = Retires::new();
     for segment in segments {
         let log = segment.read_persist_log().await?;
-        for bytes in log.as_chunks::<RECORD_SIZE>().0 {
-            if let Slot::Valid(record) = Record::decode(bytes)
+        for at in written_slots(&log) {
+            if let Slot::Valid(record) = Record::decode(&log[at * RECORD_SIZE..])
                 && !known.is_stale_in(segment.first_batch, record.batch)
                 && let Some(retire) = Retire::of(&record)
             {
