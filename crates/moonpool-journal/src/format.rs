@@ -46,7 +46,8 @@ const ENTRY_MAGIC: u32 = u32::from_le_bytes(*b"MPJE");
 const META_MAGIC: u32 = u32::from_le_bytes(*b"MPJM");
 /// 3: segments are recycled, so a batch older than its segment is stale.
 /// 4: a retire record names a dead slot; the void record is gone.
-pub(crate) const VERSION: u16 = 4;
+/// 5: segment header copy B is the last block of the file.
+pub(crate) const VERSION: u16 = 5;
 
 const _: () = assert!(BLOCK.is_multiple_of(RECORD_SIZE));
 const _: () = assert!(RECORDS_PER_BLOCK == 64);
@@ -106,11 +107,15 @@ pub(crate) fn journal_tag(journal: JournalId) -> u32 {
 ///
 /// ```text
 /// block 0          header copy A
-/// block 1          header copy B
-/// block 2 ..       persist log: 64-byte persist records, 64 per block
+/// block 1 ..       persist log: 64-byte persist records, 64 per block
 /// ..               guard gap: zeros
-/// ..  end          entry log: 64-byte entry headers and payloads
+/// ..               entry log: 64-byte entry headers and payloads
+/// last block       header copy B
 /// ```
+///
+/// The two header copies are at the two ends of the file, so one fault that
+/// reaches a run of blocks (a misdirected write, a bad stretch of the
+/// medium) never reaches both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Geometry {
     /// Blocks in the persist log: 64 records each.
@@ -159,8 +164,8 @@ impl Geometry {
             && u32::try_from(self.total_blocks() * BLOCK_U64).is_ok()
     }
 
-    /// The persist log follows the two header blocks.
-    pub(crate) const PERSIST_START: u64 = 2 * BLOCK_U64;
+    /// The persist log follows header copy A.
+    pub(crate) const PERSIST_START: u64 = BLOCK_U64;
 
     pub(crate) fn persist_end(&self) -> u64 {
         Self::PERSIST_START + u64::from(self.persist_blocks) * BLOCK_U64

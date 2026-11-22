@@ -23,6 +23,10 @@ pub(crate) fn ip() -> IpAddr {
     "10.0.0.1".parse().expect("valid IP")
 }
 
+/// Header copy B of a [`Geometry::small`] segment: its last block (header
+/// A, 8 persist blocks, no gap, 16 entry blocks, header B).
+const HEADER_B_AT: u64 = 25 * 4096;
+
 pub(crate) fn config(durability: Durability) -> JournalConfig {
     JournalConfig {
         durability,
@@ -1598,7 +1602,7 @@ fn a_scrub_finds_a_rotted_entry_and_repairs_the_copies_from_their_twins() {
             flip(&mut sim, rotted.0, rotted.1).await;
             flip(&mut sim, record.0, record.1).await;
             flip(&mut sim, format!("{DIR}/meta"), 30).await;
-            flip(&mut sim, segment, 4096 + 30).await;
+            flip(&mut sim, segment, HEADER_B_AT + 30).await;
             let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 512).await;
             assert_eq!(pass.damaged, vec![(2, id(2, 1))], "{durability:?}");
             assert_eq!(pass.records_mismatched, vec![4], "{durability:?}");
@@ -1634,7 +1638,7 @@ fn a_scrub_rewrites_both_metainfo_copies_and_both_header_copies() {
         flip(&mut sim, format!("{DIR}/meta"), 30).await;
         flip(&mut sim, format!("{DIR}/meta"), 16 * 4096 + 30).await;
         flip(&mut sim, record.0.clone(), 30).await;
-        flip(&mut sim, record.0, 4096 + 30).await;
+        flip(&mut sim, record.0, HEADER_B_AT + 30).await;
         let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
         assert_eq!((pass.meta_repaired, pass.headers_repaired), (2, 2));
         drop(journal);
@@ -1674,7 +1678,7 @@ fn a_scrub_cut_by_a_crash_never_leaves_a_copy_pair_worse() {
             let journal = five(&mut sim, Durability::Ordered).await;
             let (record, _) = spots(&journal, 1);
             flip(&mut sim, format!("{DIR}/meta"), 30).await;
-            flip(&mut sim, record.0, 4096 + 30).await;
+            flip(&mut sim, record.0, HEADER_B_AT + 30).await;
             let (journal, _) = scrub_cut_then_reopen(&mut sim, journal, budget)
                 .await
                 .unwrap_or_else(|error| panic!("budget {budget}: {error}"));
@@ -1686,7 +1690,7 @@ fn a_scrub_cut_by_a_crash_never_leaves_a_copy_pair_worse() {
             let journal = five(&mut sim, Durability::Ordered).await;
             let (record, _) = spots(&journal, 1);
             flip(&mut sim, record.0.clone(), 30).await;
-            flip(&mut sim, record.0, 4096 + 30).await;
+            flip(&mut sim, record.0, HEADER_B_AT + 30).await;
             match scrub_cut_then_reopen(&mut sim, journal, budget).await {
                 Ok((journal, _)) => {
                     assert_eq!(journal.positions().count(), 5, "budget {budget}");
@@ -2098,19 +2102,23 @@ fn a_crash_anywhere_in_a_retiring_open_leaves_the_same_journal() {
     });
 }
 
-/// A segment of format version 3 (with void records) is refused, and the
-/// error names the version found.
+/// A segment of format version 4 (header copy B in block 1) is refused, and
+/// the error names the version found: its copy A, in block 0, says 4.
 #[test]
-fn a_segment_of_format_version_3_is_refused() {
+fn a_segment_of_format_version_4_is_refused() {
     runtime().block_on(async {
         let mut sim = sim(27);
         let journal = five(&mut sim, Durability::Ordered).await;
         let (record, _) = spots(&journal, 1);
         drop(journal);
         let mut bytes = file_bytes(&mut sim, record.0.clone()).await;
+        // Version 4's layout: both copies in blocks 0 and 1, none at the end.
+        bytes.copy_within(0..4096, 4096);
+        let last = bytes.len() - 4096;
+        bytes[last..].fill(0);
         for copy in 0..2 {
             let header = &mut bytes[copy * 4096..copy * 4096 + 4096];
-            header[4..6].copy_from_slice(&3u16.to_le_bytes());
+            header[4..6].copy_from_slice(&4u16.to_le_bytes());
             let sum = crc32c::crc32c(&header[..52]);
             header[52..56].copy_from_slice(&sum.to_le_bytes());
         }
@@ -2120,8 +2128,8 @@ fn a_segment_of_format_version_3_is_refused() {
             matches!(
                 refused,
                 Err(OpenError::UnsupportedVersion {
-                    found: 3,
-                    supported: 4
+                    found: 4,
+                    supported: 5
                 })
             ),
             "{refused:?}"
@@ -2153,7 +2161,7 @@ async fn other_version(sim: &mut SimWorld, path: String, offset: u64, crc_at: us
 const META_COPIES: [u64; 2] = [0, 16 * 4096];
 const META_CRC_AT: usize = 4092;
 /// The offset of each segment header copy, and where its checksum sits.
-const HEADER_COPIES: [u64; 2] = [0, 4096];
+const HEADER_COPIES: [u64; 2] = [0, HEADER_B_AT];
 const HEADER_CRC_AT: usize = 52;
 
 /// Whether `error` names version `found` as the one after the supported one.
@@ -2290,7 +2298,7 @@ fn two_damaged_segment_headers_are_still_a_bad_segment() {
 }
 
 /// Where the persist log of a segment starts: after its two header blocks.
-const PERSIST_START: usize = 2 * 4096;
+const PERSIST_START: usize = 4096;
 const BLOCK: usize = 4096;
 
 /// The segment file that holds `position`.

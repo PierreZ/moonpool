@@ -327,7 +327,7 @@ async fn rot_a_record(sim: &mut SimWorld, rng: &mut Rng) -> bool {
             return false;
         };
         let geometry = config(Durability::Ordered).geometry;
-        let start = 2 * 4096_u64;
+        let start = 4096_u64;
         let mut log = vec![0u8; usize::try_from(geometry.persist_blocks).expect("small") * 4096];
         if file.read_at(start, &mut log).await.is_err() {
             return false;

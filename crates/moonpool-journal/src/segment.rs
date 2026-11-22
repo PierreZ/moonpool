@@ -1,5 +1,5 @@
-//! One segment file: allocated whole, two header copies, then the persist
-//! log and the entry log (see [`Geometry`]).
+//! One segment file: allocated whole, header copy A, the persist log, the
+//! entry log, and header copy B in the last block (see [`Geometry`]).
 //!
 //! A segment is created whole under a temporary name and published by a
 //! rename ([`Segment::create`]), or adopted from a spare, a dead segment's
@@ -17,7 +17,7 @@ use moonpool_core::{
     AlignedBuf, BlockFile, DirectIo, LocalStorageFile, LocalStorageProvider, OpenOptions,
 };
 
-use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, VERSION, u64_of, usize_of};
+use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, VERSION, usize_of};
 use crate::io::{
     ReadBytes, block_buf, read_blocks, read_bytes, read_from_device, write_blocks,
     write_blocks_durable,
@@ -218,17 +218,17 @@ impl<F: LocalStorageFile> Segment<F> {
         // Every read of this open, and of the scan after it, comes from
         // the device: a batch whose commit failed is not read as written.
         read_from_device(&file).await?;
-        let headers = read_blocks(&file, 0, file.buffer(2)?).await?;
-        let a = SegmentHeader::decode(&headers.as_slice()[..BLOCK]);
-        let b = SegmentHeader::decode(&headers.as_slice()[BLOCK..]);
+        let headers = read_header_copies(&file, geometry.total_blocks()).await?;
+        let a = SegmentHeader::decode(headers[0].as_slice());
+        let b = SegmentHeader::decode(headers[1].as_slice());
         let (header, damaged) = match (a, b) {
             (Some(a), Some(b)) if a == b => (a, None),
             (Some(_), Some(_)) => return Err(bad("header copies disagree")),
             (Some(a), None) => (a, Some(1)),
             (None, Some(b)) => (b, Some(0)),
             (None, None) => {
-                let other = SegmentHeader::other_version(&headers.as_slice()[..BLOCK])
-                    .or_else(|| SegmentHeader::other_version(&headers.as_slice()[BLOCK..]));
+                let other = SegmentHeader::other_version(headers[0].as_slice())
+                    .or_else(|| SegmentHeader::other_version(headers[1].as_slice()));
                 return Err(other.map_or_else(
                     || bad("no valid header"),
                     |found| OpenError::UnsupportedVersion {
@@ -249,10 +249,8 @@ impl<F: LocalStorageFile> Segment<F> {
         if header.geometry != geometry {
             return Err(bad("header names another geometry"));
         }
-        if let Some(block) = damaged {
-            let mut copy = block_buf(BLOCK);
-            header.encode(copy.as_mut_slice());
-            write_blocks_durable(&file, block, copy).await?;
+        if let Some(copy) = damaged {
+            write_header_copy_durable(&file, &header, copy).await?;
         }
         Ok((
             Self::fresh(
@@ -280,20 +278,14 @@ impl<F: LocalStorageFile> Segment<F> {
         // Every write to a segment is durable on return: nothing is dirty,
         // so the reads come from the device.
         self.file.get_ref().drop_cache().await?;
-        let blocks = read_blocks(&self.file, 0, self.file.buffer(2)?).await?;
-        let good = |at: usize| {
-            SegmentHeader::decode(&blocks.as_slice()[at * BLOCK..(at + 1) * BLOCK])
-                .is_some_and(|found| found == header)
-        };
-        let damaged = [!good(0), !good(1)];
+        let blocks = read_header_copies(&self.file, self.geometry.total_blocks()).await?;
         let mut rewritten = 0;
-        // One copy at a time, each durable before the next: a crash tears at
-        // most one, even when both only read as bad (a misdirected read).
-        for (block, _) in damaged.iter().enumerate().filter(|(_, bad)| **bad) {
-            let mut copy = block_buf(BLOCK);
-            header.encode(copy.as_mut_slice());
-            write_blocks_durable(&self.file, u64_of(block), copy).await?;
-            rewritten += 1;
+        for (copy, block) in blocks.iter().enumerate() {
+            if SegmentHeader::decode(block.as_slice()) != Some(header) {
+                // One copy at a time: a crash leaves the other one whole.
+                write_header_copy_durable(&self.file, &header, copy).await?;
+                rewritten += 1;
+            }
         }
         Ok(rewritten)
     }
@@ -358,53 +350,81 @@ pub(crate) async fn named_batches<P: LocalStorageProvider>(
     direct_io: DirectIo,
 ) -> Result<Vec<u64>, OpenError> {
     let file = open_file(provider, path, direct_io).await?;
+    let blocks = file.size_in_blocks().await?;
+    if blocks < 2 {
+        return Ok(Vec::new());
+    }
     // Defensive: a roll whose header write failed poisons the journal, but
     // it may have left its headers in the cache only. The device's are the
     // ones a power loss keeps, so they decide whether this spare aliases a
     // live segment.
     read_from_device(&file).await?;
-    let headers = read_blocks(&file, 0, file.buffer(2)?).await?;
-    let copies = [
-        SegmentHeader::decode(&headers.as_slice()[..BLOCK]),
-        SegmentHeader::decode(&headers.as_slice()[BLOCK..]),
-    ];
-    Ok(copies
-        .into_iter()
-        .flatten()
+    let headers = read_header_copies(&file, blocks).await?;
+    Ok(headers
+        .iter()
+        .filter_map(|block| SegmentHeader::decode(block.as_slice()))
         .filter(|header| header.journal == journal)
         .map(|header| header.first_batch)
         .collect())
 }
 
-/// Write both header copies of a segment (blocks 0 and 1).
+/// The block of header copy `copy` in a file of `blocks` blocks: copy A
+/// (0) is the first block, copy B (1) the last.
+pub(crate) fn header_block(blocks: u64, copy: usize) -> u64 {
+    if copy == 0 { 0 } else { blocks - 1 }
+}
+
+/// Read both header copies of a file of `blocks` blocks, damaged blocks
+/// zero-filled.
+async fn read_header_copies<F: LocalStorageFile>(
+    file: &BlockFile<F>,
+    blocks: u64,
+) -> std::io::Result<[AlignedBuf; 2]> {
+    let a = read_blocks(file, header_block(blocks, 0), file.buffer(1)?).await?;
+    let b = read_blocks(file, header_block(blocks, 1), file.buffer(1)?).await?;
+    Ok([a, b])
+}
+
+/// One header copy, encoded in place.
+fn header_copy(header: &SegmentHeader) -> AlignedBuf {
+    let mut block = block_buf(BLOCK);
+    header.encode(block.as_mut_slice());
+    block
+}
+
+/// Write both header copies of a segment, A then B, not synced.
 async fn write_headers<F: LocalStorageFile>(
     file: &BlockFile<F>,
     header: &SegmentHeader,
 ) -> std::io::Result<()> {
-    write_blocks(file, 0, header_blocks(header)).await?;
-    Ok(())
-}
-
-/// [`write_headers`], durable on return: copy A, durable, then copy B,
-/// durable, so a crash tears at most one of them.
-async fn write_headers_durable<F: LocalStorageFile>(
-    file: &BlockFile<F>,
-    header: &SegmentHeader,
-) -> std::io::Result<()> {
-    for block in 0..2 {
-        let mut copy = block_buf(BLOCK);
-        header.encode(copy.as_mut_slice());
-        write_blocks_durable(file, block, copy).await?;
+    let blocks = header.geometry.total_blocks();
+    for copy in 0..2 {
+        write_blocks(file, header_block(blocks, copy), header_copy(header)).await?;
     }
     Ok(())
 }
 
-/// Both header copies, encoded in place: blocks 0 and 1.
-fn header_blocks(header: &SegmentHeader) -> AlignedBuf {
-    let mut blocks = block_buf(2 * BLOCK);
-    header.encode(&mut blocks[..BLOCK]);
-    header.encode(&mut blocks[BLOCK..]);
-    blocks
+/// Write header copy `copy`, durable on return.
+async fn write_header_copy_durable<F: LocalStorageFile>(
+    file: &BlockFile<F>,
+    header: &SegmentHeader,
+    copy: usize,
+) -> std::io::Result<()> {
+    let block = header_block(header.geometry.total_blocks(), copy);
+    write_blocks_durable(file, block, header_copy(header)).await?;
+    Ok(())
+}
+
+/// Both header copies, each durable before the next is written, so a crash
+/// tears at most one of them.
+async fn write_headers_durable<F: LocalStorageFile>(
+    file: &BlockFile<F>,
+    header: &SegmentHeader,
+) -> std::io::Result<()> {
+    for copy in 0..2 {
+        write_header_copy_durable(file, header, copy).await?;
+    }
+    Ok(())
 }
 
 async fn open_file<P: LocalStorageProvider>(

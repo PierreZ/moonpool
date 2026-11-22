@@ -16,7 +16,9 @@ use crate::format::{
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{BlockWrite, Known, Located, Op, entry_matches, plan_repair, scan};
-use crate::segment::{Segment, is_segment_leftover, named_batches, parse_segment_name};
+use crate::segment::{
+    Segment, header_block, is_segment_leftover, named_batches, parse_segment_name,
+};
 use crate::spare::{self, is_spare, is_spare_leftover, spare_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
 
@@ -870,9 +872,10 @@ impl<P: LocalStorageProvider> Journal<P> {
         regions.reserve(paths.len() * 2 + self.index.len() * 2);
         for path in &paths {
             for copy in 0..2 {
+                let block = header_block(self.config.geometry.total_blocks(), copy);
                 regions.push(LayoutRegion {
                     path: path.clone(),
-                    bytes: copy * BLOCK_U64..(copy + 1) * BLOCK_U64,
+                    bytes: block * BLOCK_U64..(block + 1) * BLOCK_U64,
                     kind: Layout::HEADER,
                     stripe: None,
                     shard: None,
