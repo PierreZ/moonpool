@@ -119,12 +119,24 @@ pub struct Entry {
     pub payload: Vec<u8>,
 }
 
+/// The damage a scan found, judged against the log once its ops apply.
+struct Damage {
+    corrupt: Vec<(u64, Id)>,
+    ambiguous: Vec<(u64, Id)>,
+    /// Slots judged from their entry header alone, by position.
+    headed: Vec<(u64, Retire)>,
+    last_batch: u64,
+}
+
 /// What opening found and did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Recovery {
-    /// Entries of the last batch whose bytes are damaged although their
-    /// persist record proves them written (the rest of the log is checked
-    /// when read).
+    /// Live entries whose bytes are damaged although their persist record,
+    /// or their intact entry header in a witnessed batch, proves them
+    /// written. The open reads the entries of the last batch, and the
+    /// header of each entry whose record is damaged; the rest of the log is
+    /// checked when read. An entry that a later batch replaced is not
+    /// listed: its slot is dead, and the open retires it.
     pub corrupt: Vec<(u64, Id)>,
     /// The last batch's damaged entries of a [`Durability::Batched`] commit.
     pub ambiguous: Vec<(u64, Id)>,
@@ -695,12 +707,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         let meta = begin_generation(&meta_file, meta, scanned.last_batch, torn.is_empty()).await?;
         let generation = meta.open_generation;
 
-        recovery.corrupt = scanned.corrupt;
-        recovery.ambiguous = scanned.ambiguous;
         recovery.torn = u32::try_from(torn.len()).unwrap_or(u32::MAX);
         recovery.rebuilt = scanned.rebuilt;
         recovery.repair = scanned.repair;
-        let ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(scanned.last_batch);
         let mut journal = Self {
             tag,
             provider,
@@ -712,7 +721,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             segments,
             index: BTreeMap::new(),
             last_batch: scanned.last_batch,
-            ambiguous_batch,
+            ambiguous_batch: None,
             seen_damaged: Mutex::default(),
             generation,
             poisoned: false,
@@ -727,9 +736,16 @@ impl<P: LocalStorageProvider> Journal<P> {
             journal.apply(&op);
         }
         journal.drop_below_floor();
+        let damage = Damage {
+            corrupt: scanned.corrupt,
+            ambiguous: scanned.ambiguous,
+            headed: scanned.headed,
+            last_batch: scanned.last_batch,
+        };
+        let retires = journal.settle_damage(&mut recovery, torn, damage);
         recovery.segments_removed = journal.remove_dead_segments().await?;
-        if !torn.is_empty() {
-            journal.commit_retires(torn).await?;
+        if !retires.is_empty() {
+            journal.commit_retires(retires).await?;
         }
         journal.assert_invariants();
         Ok(Some((journal, recovery)))
@@ -1371,6 +1387,46 @@ impl<P: LocalStorageProvider> Journal<P> {
         Ok(())
     }
 
+    /// What an open reports, and the slots it retires, once the scan's ops
+    /// are applied. Only what is still live is reported: a damaged entry
+    /// that a later batch replaced, cleared or dropped is nothing the caller
+    /// needs (a caller that fetched it again would write the old value over
+    /// the new one). A slot judged from its header alone whose position
+    /// moved on is dead, and is retired with the torn slots, or one more
+    /// fault on its header would refuse the next open.
+    fn settle_damage(
+        &mut self,
+        recovery: &mut Recovery,
+        torn: Vec<Retire>,
+        damage: Damage,
+    ) -> Vec<Retire> {
+        let live = |(position, id): &(u64, Id)| {
+            self.index
+                .get(position)
+                .is_some_and(|at| at.damaged && at.id == *id)
+        };
+        recovery.corrupt = damage
+            .corrupt
+            .into_iter()
+            .filter(|entry| live(entry))
+            .collect();
+        recovery.ambiguous = damage
+            .ambiguous
+            .into_iter()
+            .filter(|entry| live(entry))
+            .collect();
+        let mut retires = torn;
+        retires.extend(damage.headed.into_iter().filter_map(|(position, retire)| {
+            let current = self
+                .index
+                .get(&position)
+                .is_some_and(|at| at.batch == retire.batch && at.index == retire.index);
+            (!current).then_some(retire)
+        }));
+        self.ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(damage.last_batch);
+        retires
+    }
+
     /// The slots this batch makes dead whose entry is known damaged: the
     /// old slot of each position it replaces, clears, or drops below
     /// `floor`. Each gets a retire record in the batch, so a later fault on
@@ -1383,7 +1439,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         let mut retires = BTreeMap::new();
         let mut consider = |at: &Located| {
             if at.damaged || seen.contains(&(at.batch, at.index)) {
-                let follows = at.index + 1 < at.count;
+                // Where the slot's entry ends, even for the last slot of
+                // its batch: the next batch's entries start on the block
+                // after it, and a lost slot alone does not say where.
                 let resume = u64::from(at.offset) + EntryHeader::footprint(at.len);
                 retires.insert(
                     (at.batch, at.index),
@@ -1391,7 +1449,7 @@ impl<P: LocalStorageProvider> Journal<P> {
                         batch: at.batch,
                         index: at.index,
                         count: at.count,
-                        resume: if follows { resume } else { 0 },
+                        resume,
                     },
                 );
             }

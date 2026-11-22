@@ -221,7 +221,7 @@
 //! | damaged | valid | [`State::Corrupt`], or [`State::Ambiguous`] in a `Batched` last batch |
 //! | damaged | damaged, named by a retire record | ignored |
 //! | damaged | damaged, in an unwitnessed last batch of its open generation | torn by a crash: discarded and retired |
-//! | payload damaged, header intact | damaged, in a witnessed batch, or before the last of its generation | [`State::Corrupt`]: the header names the entry; its record is never written back |
+//! | payload damaged, header intact | damaged, in a witnessed batch, or before the last of its generation | [`State::Corrupt`]: the header names the entry; its record is never written back; replaced by a later batch, it is retired, not reported |
 //! | header damaged | damaged, in a witnessed batch, or before the last of its generation | [`OpenError::DoubleFault`]: refuse to open |
 //!
 //! A **retire record** names a slot of an earlier batch that holds nothing

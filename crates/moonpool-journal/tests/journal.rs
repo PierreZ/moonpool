@@ -905,6 +905,74 @@ fn a_batch_with_no_surviving_identity_before_the_last_is_lost() {
     });
 }
 
+/// A damaged record and payload under an intact header, of a position that
+/// a later batch replaced: nothing the caller needs. The open does not
+/// report it (a caller that fetched it again would write the old value over
+/// the new one), and retires the dead slot, so one more fault on its header
+/// never refuses an open.
+#[test]
+fn a_replaced_entry_named_by_its_header_alone_is_retired_not_reported() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(8);
+            let journal = five(&mut sim, durability).await;
+            let journal = put(&mut sim, journal, &[(11, 1, 300)]).await;
+            let (record, entry) = spots(&journal, 11);
+            let header = header_spot(&journal, 11);
+            let journal = put(&mut sim, journal, &[(11, 2, 300)]).await;
+            let journal = put(&mut sim, journal, &[(12, 1, 300)]).await;
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}: {error}"));
+            assert!(recovery.corrupt.is_empty(), "{durability:?}: {recovery:?}");
+            let (journal, read_11) = read(&mut sim, journal, 11).await;
+            assert_eq!(read_11.expect("the new value"), payload(11, 2, 300));
+            drop(journal);
+            flip(&mut sim, header.0, header.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}, header too: {error}"));
+            assert!(recovery.corrupt.is_empty(), "{durability:?}: {recovery:?}");
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, vec![1, 2, 3, 4, 5, 11, 12], "{durability:?}");
+        }
+    });
+}
+
+/// A position whose entry a read found damaged, replaced: the new batch
+/// retires the old slot. The slot is the only one of its batch, so when its
+/// record and its header rot too, only the retire record says where the
+/// batch's entries end, and so where the next batch's start.
+#[test]
+fn a_retired_last_slot_says_where_its_batch_ends() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(8);
+            let journal = five(&mut sim, durability).await;
+            let journal = put(&mut sim, journal, &[(11, 1, 300)]).await;
+            let (record, entry) = spots(&journal, 11);
+            let header = header_spot(&journal, 11);
+            let journal = put(&mut sim, journal, &[(13, 1, 300)]).await;
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, read_11) = read(&mut sim, journal, 11).await;
+            assert!(read_11.is_err(), "{durability:?}: the payload rotted");
+            let journal = put(&mut sim, journal, &[(11, 2, 300)]).await;
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, header.0, header.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}: {error}"));
+            assert!(recovery.corrupt.is_empty(), "{durability:?}: {recovery:?}");
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, vec![1, 2, 3, 4, 5, 11, 13], "{durability:?}");
+        }
+    });
+}
+
 /// Every record of a batch damaged and its first payload too, under an
 /// intact entry header: the header locates the batch, and names its
 /// damaged entry.

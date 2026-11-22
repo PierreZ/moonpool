@@ -298,8 +298,10 @@ pub(crate) struct Retire {
     /// Records in that batch, so a batch whose first slot is retired is
     /// still found when no record of it survives.
     pub count: u16,
-    /// Where the entry walk of that batch continues after the slot: the
-    /// offset of the next located entry, 0 when none follows.
+    /// Where the entry walk of that batch continues after the slot, and how
+    /// far the batch's entries reach at least: the end of the slot's entry
+    /// where it is known (a dead slot), else the offset of the next located
+    /// entry (a torn slot), 0 when neither is.
     pub resume: u64,
 }
 

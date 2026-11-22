@@ -320,7 +320,10 @@ When the entry header is intact, it still names the entry: its position, its
 id, its length. So a witnessed slot with a damaged record and a damaged
 payload under an intact header is `Corrupt`, with its identity, and the open
 goes on. The caller fetches the entry from a peer, as for any other
-`Corrupt` entry.
+`Corrupt` entry. A later batch may have replaced that position already.
+Then the slot is dead: the open does not report it, because a caller that
+fetched it again would write the old value over the new one. The open
+retires it instead.
 
 Three rules keep the header honest. In an unwitnessed last batch, a damaged
 payload is still torn: a crash can keep the header of a write and lose its
