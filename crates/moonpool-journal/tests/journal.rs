@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
     Batch, CommitError, Durability, Geometry, ID_SIZE, Id, Journal, JournalConfig, JournalId,
-    Layout, OpenError, ReadError, RecordRepair, Recovery, State,
+    Layout, OpenError, ReadError, RecordRepair, Recovery, Scrub, State,
 };
 use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration, WritebackErrorReporting};
 
@@ -1526,6 +1526,123 @@ fn a_scrub_finds_a_rotted_record_and_a_new_put_repairs_it() {
             let (_, bytes) = read(&mut sim, journal, 3).await;
             assert_eq!(bytes.expect("intact"), payload(3, 2, 300));
         }
+    });
+}
+
+/// Scrub until a pass ends, `budget` bytes per call; with every call's
+/// findings added up.
+async fn scrub_a_pass(sim: &mut SimWorld, mut journal: J, budget: u64) -> (J, Scrub, u32) {
+    let mut total = Scrub::default();
+    let mut calls = 0;
+    loop {
+        let (back, step) = run(sim, move |_| async move {
+            let step = journal.scrub(budget).await;
+            (journal, step)
+        })
+        .await;
+        journal = back;
+        let step = step.expect("scrub");
+        calls += 1;
+        total.checked += step.checked;
+        total.bytes_read += step.bytes_read;
+        total.damaged.extend(step.damaged);
+        total.records_mismatched.extend(step.records_mismatched);
+        total.repair.blocks_written += step.repair.blocks_written;
+        total.repair.blocks_left += step.repair.blocks_left;
+        total.meta_repaired += step.meta_repaired;
+        total.headers_repaired += step.headers_repaired;
+        if step.pass_done {
+            return (journal, total, calls);
+        }
+        assert!(calls < 1000, "a pass ends");
+    }
+}
+
+#[test]
+fn a_scrub_pass_checks_every_entry_within_its_budget() {
+    runtime().block_on(async {
+        let mut sim = sim(21);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        // Each entry is 64 + 300 bytes: a budget of 0 checks one per call.
+        let (journal, pass, calls) = scrub_a_pass(&mut sim, journal, 0).await;
+        assert_eq!(calls, 5);
+        assert_eq!(
+            pass,
+            Scrub {
+                checked: 5,
+                bytes_read: 5 * 364,
+                ..Scrub::default()
+            }
+        );
+        // A large budget checks the pass in one call; the next call starts
+        // a new pass.
+        let (journal, pass, calls) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
+        assert_eq!((calls, pass.checked), (1, 5));
+        let (_, pass, calls) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
+        assert_eq!((calls, pass.checked), (1, 5));
+    });
+}
+
+#[test]
+fn a_scrub_finds_a_rotted_entry_and_repairs_the_copies_from_their_twins() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(22);
+            let journal = five(&mut sim, durability).await;
+            let (record, _) = spots(&journal, 4);
+            let (_, rotted) = spots(&journal, 2);
+            let segment = record.0.clone();
+            // One fault on each structure with a twin: an entry (its twin is
+            // a peer's copy), a record (its entry), a metainfo copy, a
+            // segment header copy.
+            flip(&mut sim, rotted.0, rotted.1).await;
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, format!("{DIR}/meta"), 30).await;
+            flip(&mut sim, segment, 4096 + 30).await;
+            let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 512).await;
+            assert_eq!(pass.damaged, vec![(2, id(2, 1))], "{durability:?}");
+            assert_eq!(pass.records_mismatched, vec![4], "{durability:?}");
+            assert_eq!(pass.repair.blocks_written, 1, "{durability:?}");
+            assert_eq!(pass.meta_repaired, 1, "{durability:?}");
+            assert_eq!(pass.headers_repaired, 1, "{durability:?}");
+            // A second pass finds only the entry, which needs a peer.
+            let (journal, again, _) = scrub_a_pass(&mut sim, journal, 512).await;
+            assert_eq!(again.damaged, vec![(2, id(2, 1))]);
+            assert_eq!(
+                (again.meta_repaired, again.headers_repaired, again.repair),
+                (0, 0, RecordRepair::default())
+            );
+            // The caller writes the entry again from a peer: nothing is left
+            // for the next open to repair.
+            let journal = put(&mut sim, journal, &[(2, 2, 300)]).await;
+            drop(journal);
+            sim.simulate_crash_for_process(ip(), true);
+            let (_, recovery) = reopen(&mut sim, durability).await.expect("reopen");
+            assert!(!recovery.meta_repaired, "{recovery:?}");
+            assert_eq!(recovery.headers_repaired, 0, "{recovery:?}");
+            assert_eq!(recovery.rebuilt, 0, "{recovery:?}");
+        }
+    });
+}
+
+#[test]
+fn a_scrub_rewrites_both_metainfo_copies_and_both_header_copies() {
+    runtime().block_on(async {
+        let mut sim = sim(23);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let (record, _) = spots(&journal, 1);
+        flip(&mut sim, format!("{DIR}/meta"), 30).await;
+        flip(&mut sim, format!("{DIR}/meta"), 16 * 4096 + 30).await;
+        flip(&mut sim, record.0.clone(), 30).await;
+        flip(&mut sim, record.0, 4096 + 30).await;
+        let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
+        assert_eq!((pass.meta_repaired, pass.headers_repaired), (2, 2));
+        drop(journal);
+        sim.simulate_crash_for_process(ip(), true);
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered).await.expect("reopen");
+        assert!(!recovery.meta_repaired, "{recovery:?}");
+        assert_eq!(recovery.headers_repaired, 0, "{recovery:?}");
+        assert_eq!(journal.positions().count(), 5);
     });
 }
 

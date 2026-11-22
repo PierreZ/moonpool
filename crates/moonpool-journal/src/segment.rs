@@ -266,6 +266,38 @@ impl<F: LocalStorageFile> Segment<F> {
         ))
     }
 
+    /// Read both header copies again from the device and rewrite each one
+    /// that is not this segment's header. Returns the copies rewritten. A
+    /// header block holds nothing else, so a rewrite reaches nothing
+    /// acknowledged.
+    pub async fn scrub_headers(&self, journal: JournalId) -> std::io::Result<u32> {
+        let header = SegmentHeader {
+            journal,
+            first_batch: self.first_batch,
+            prev_batch: self.prev_batch,
+            geometry: self.geometry,
+        };
+        // Every write to a segment is durable on return: nothing is dirty,
+        // so the reads come from the device.
+        self.file.get_ref().drop_cache().await?;
+        let blocks = read_blocks(&self.file, 0, self.file.buffer(2)?).await?;
+        let good = |at: usize| {
+            SegmentHeader::decode(&blocks.as_slice()[at * BLOCK..(at + 1) * BLOCK])
+                .is_some_and(|found| found == header)
+        };
+        match (good(0), good(1)) {
+            (true, true) => Ok(0),
+            (false, false) => write_headers_durable(&self.file, &header).await.map(|()| 2),
+            (a, _) => {
+                let block = u64::from(a);
+                let mut copy = block_buf(BLOCK);
+                header.encode(copy.as_mut_slice());
+                write_blocks_durable(&self.file, block, copy).await?;
+                Ok(1)
+            }
+        }
+    }
+
     /// The whole persist log, damaged blocks zero-filled.
     pub async fn read_persist_log(&self) -> std::io::Result<AlignedBuf> {
         let start = Geometry::PERSIST_START;

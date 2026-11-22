@@ -163,6 +163,33 @@ pub struct RecordRepair {
     pub blocks_left: u32,
 }
 
+/// What one call of [`Journal::scrub`] checked and repaired.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Scrub {
+    /// Live positions this call checked: entry and persist record.
+    pub checked: u64,
+    /// Bytes of entries this call read.
+    pub bytes_read: u64,
+    /// Live positions whose entry this call found damaged, with the
+    /// identity their persist record holds. As for a read that returned
+    /// [`ReadError::Damaged`], fetch each from a peer and write it in a new
+    /// batch, which retires the damaged slot.
+    pub damaged: Vec<(u64, Id)>,
+    /// Live positions whose persist record no longer matches the record
+    /// this open holds ([`Journal::verify_records`]).
+    pub records_mismatched: Vec<u64>,
+    /// What the record repair did, when a record mismatched
+    /// ([`Journal::repair_records`]).
+    pub repair: RecordRepair,
+    /// Metainfo copies rewritten from the value this open holds.
+    pub meta_repaired: u32,
+    /// Segment header copies rewritten.
+    pub headers_repaired: u32,
+    /// This call ended a pass over every live position: the next call
+    /// starts a new pass, with the metainfo and the segment headers.
+    pub pass_done: bool,
+}
+
 /// How this open of the journal rolled onto new segments.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rolls {
@@ -234,6 +261,9 @@ pub struct Journal<P: LocalStorageProvider> {
     /// The spares, files kept for later rolls, the next one to use first:
     /// dead segments' files and files allocated ahead of a roll.
     spares: Vec<String>,
+    /// Where the scrub goes on: the next position to check, or `None` to
+    /// start a new pass with the metainfo and the segment headers.
+    scrub_next: Option<u64>,
     /// Spares this open has named: the number in the next one's name.
     spares_named: u32,
     rolls: Rolls,
@@ -567,6 +597,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             layout_shard: None,
             layout_whole: false,
             spares: Vec::new(),
+            scrub_next: None,
             spares_named: 0,
             rolls: Rolls::default(),
         })
@@ -673,6 +704,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             layout_shard: None,
             layout_whole: false,
             spares,
+            scrub_next: None,
             spares_named: 0,
             rolls: Rolls::default(),
         };
@@ -954,6 +986,23 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// against its persist record (its CRC, and that it is exactly the entry
     /// the record names).
     fn judge(&self, position: u64, at: &Located, bytes: &[u8]) -> Result<Entry, ReadError> {
+        if !self.intact(position, at, bytes) {
+            return Err(ReadError::Damaged {
+                position,
+                id: at.id,
+            });
+        }
+        Ok(Entry {
+            position,
+            id: at.id,
+            payload: bytes[RECORD_SIZE..].to_vec(),
+        })
+    }
+
+    /// Whether `bytes`, read at `at`, are the entry its persist record names
+    /// and pass its CRC. A damaged entry's slot is remembered, so a batch
+    /// that replaces, clears or drops the position retires it.
+    fn intact(&self, position: u64, at: &Located, bytes: &[u8]) -> bool {
         assert_eq!(bytes.len(), entry_bytes(at), "judged on its whole entry");
         let record = record_of(position, at);
         let intact = EntryHeader::parse(bytes).is_some_and(|(header, stored)| {
@@ -966,16 +1015,8 @@ impl<P: LocalStorageProvider> Journal<P> {
                 .lock()
                 .expect("a lock poisoned: a prior holder panicked")
                 .insert((at.batch, at.index));
-            return Err(ReadError::Damaged {
-                position,
-                id: at.id,
-            });
         }
-        Ok(Entry {
-            position,
-            id: at.id,
-            payload: bytes[RECORD_SIZE..].to_vec(),
-        })
+        intact
     }
 
     /// The live positions in `range` whose persist record on disk no longer
@@ -1090,17 +1131,36 @@ impl<P: LocalStorageProvider> Journal<P> {
         let located: Vec<(u64, Located)> =
             self.index.range(range).map(|(&p, &at)| (p, at)).collect();
         let mut out = Vec::with_capacity(located.len());
+        self.read_runs(&located, |position, at, bytes| {
+            let read = match bytes {
+                Some(entry) => self.judge(position, at, entry),
+                None => Err(ReadError::Damaged {
+                    position,
+                    id: at.id,
+                }),
+            };
+            out.push((position, read));
+        })
+        .await?;
+        assert_eq!(out.len(), located.len(), "every position replayed once");
+        Ok(out)
+    }
+
+    /// Read the entries of `located`, in order, and give each one's bytes
+    /// to `each`: `None` for an entry known damaged, which is not read.
+    /// Entries that follow each other in one segment are read together, at
+    /// most `REPLAY_READ` bytes per read. Returns the bytes read.
+    async fn read_runs(
+        &self,
+        located: &[(u64, Located)],
+        mut each: impl FnMut(u64, &Located, Option<&[u8]>),
+    ) -> Result<u64, std::io::Error> {
+        let mut read = 0;
         let mut first = 0;
         while first < located.len() {
             let (position, at) = located[first];
             if at.damaged {
-                out.push((
-                    position,
-                    Err(ReadError::Damaged {
-                        position,
-                        id: at.id,
-                    }),
-                ));
+                each(position, &at, None);
                 first += 1;
                 continue;
             }
@@ -1126,14 +1186,103 @@ impl<P: LocalStorageProvider> Journal<P> {
             let segment = &self.segments[self.segment_index(at.segment)];
             let bytes = segment.read_at(start, usize_of(end - start)).await?;
             assert_eq!(u64_of(bytes.len()), end - start, "a run reads whole");
-            for &(position, at) in &located[first..stop] {
+            read += end - start;
+            for (position, at) in &located[first..stop] {
                 let from = usize_of(u64::from(at.offset) - start);
-                let entry = &bytes[from..from + entry_bytes(&at)];
-                out.push((position, self.judge(position, &at, entry)));
+                each(*position, at, Some(&bytes[from..from + entry_bytes(at)]));
             }
             first = stop;
         }
-        assert_eq!(out.len(), located.len(), "every position replayed once");
+        Ok(read)
+    }
+
+    /// Check the next part of the journal against the device, at most
+    /// `budget` bytes of entries per call (and at least one entry), and
+    /// repair what can be repaired from a second copy.
+    ///
+    /// Opening checks the persist records and the last batch's entries, and
+    /// [`read`](Self::read) checks an entry only when the caller reads it.
+    /// A fault elsewhere stays unnoticed until the next open, when a second
+    /// fault on its twin may have come too: a rotted metainfo copy whose
+    /// twin then rots is [`OpenError::MetaLost`], a rotted record whose
+    /// entry then rots is [`OpenError::DoubleFault`]. A scrub finds the
+    /// first fault while its twin still holds. Call it on a schedule, with
+    /// a budget that fits beside the commits; each call goes on where the
+    /// last one stopped, in position order, and a pass that ends sets
+    /// [`Scrub::pass_done`].
+    ///
+    /// Each pass starts with the metainfo and the segment headers: a copy
+    /// that is not the value this open holds is rewritten from it, durably,
+    /// one copy at a time. Then each call checks a run of live positions:
+    /// each entry's CRC and identity, without copying its payload, and each
+    /// persist record ([`verify_records`](Self::verify_records)). A damaged
+    /// entry is reported in [`Scrub::damaged`] for the caller to fetch from
+    /// a peer, as for [`read`](Self::read). A damaged record is rewritten
+    /// from its intact entry ([`repair_records`](Self::repair_records),
+    /// which reads the whole persist log). The cached pages of each file
+    /// are dropped before it is read, so the checks see the device and not
+    /// the page cache (on Linux: see
+    /// [`StorageFile::drop_cache`](moonpool_core::StorageFile::drop_cache)).
+    ///
+    /// # Errors
+    /// [`OpenError::Io`] when the provider fails or a failed commit
+    /// poisoned the journal; an evidence variant of [`OpenError`] when the
+    /// record repair finds damage the next open refuses too.
+    pub async fn scrub(&mut self, budget: u64) -> Result<Scrub, OpenError> {
+        if self.poisoned {
+            return Err(poisoned());
+        }
+        let mut out = Scrub::default();
+        if self.scrub_next.is_none() {
+            out.meta_repaired = self.meta_file.scrub(&self.meta).await?;
+            for segment in &self.segments {
+                out.headers_repaired += segment.scrub_headers(self.id).await?;
+            }
+        }
+        let start = self.scrub_next.unwrap_or(0);
+        let mut chunk: Vec<(u64, Located)> = Vec::new();
+        let mut planned = 0;
+        for (&position, &at) in self.index.range(start..) {
+            let bytes = u64_of(entry_bytes(&at));
+            if !chunk.is_empty() && planned + bytes > budget {
+                break;
+            }
+            planned += bytes;
+            chunk.push((position, at));
+        }
+        let (Some(&(first, _)), Some(&(last, _))) = (chunk.first(), chunk.last()) else {
+            self.scrub_next = None;
+            out.pass_done = true;
+            return Ok(out);
+        };
+        let mut touched: Vec<u64> = chunk.iter().map(|(_, at)| at.segment).collect();
+        touched.sort_unstable();
+        touched.dedup();
+        for segment in touched {
+            self.segments[self.segment_index(segment)]
+                .file
+                .get_ref()
+                .drop_cache()
+                .await?;
+        }
+        let mut damaged = Vec::new();
+        out.bytes_read = self
+            .read_runs(&chunk, |position, at, bytes| {
+                if bytes.is_some_and(|entry| !self.intact(position, at, entry)) {
+                    damaged.push((position, at.id));
+                }
+            })
+            .await?;
+        out.damaged = damaged;
+        out.checked = u64_of(chunk.len());
+        out.records_mismatched = self.verify_records(first..=last).await?;
+        if !out.records_mismatched.is_empty() {
+            out.repair = self.repair_records().await?;
+        }
+        self.scrub_next = last
+            .checked_add(1)
+            .filter(|&next| self.index.range(next..).next().is_some());
+        out.pass_done = self.scrub_next.is_none();
         Ok(out)
     }
 

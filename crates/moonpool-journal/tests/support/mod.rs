@@ -52,6 +52,10 @@ pub(crate) struct Tally {
     pub blocks_repaired: u32,
     /// Scrubs (`Journal::repair_records`) that finished.
     pub scrubs: usize,
+    /// Steps of the full scrub (`Journal::scrub`) that finished, and the
+    /// damaged entries they found.
+    pub scrub_steps: usize,
+    pub scrub_damaged: usize,
     /// Persist records rotted out of band between rounds.
     pub records_rotted: u32,
 }
@@ -120,6 +124,9 @@ struct Ledger {
     /// Scrubs that finished, and the blocks they wrote again.
     scrubs: usize,
     blocks_repaired: u32,
+    /// Steps of the full scrub, and the damaged entries they found.
+    scrub_steps: usize,
+    scrub_damaged: usize,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -255,6 +262,8 @@ pub(crate) fn crash_loop(
         tally.onto_spare += ledger.lock().expect("ledger").onto_spare;
         tally.spares_prepared += ledger.lock().expect("ledger").spares_prepared;
         tally.scrubs += ledger.lock().expect("ledger").scrubs;
+        tally.scrub_steps += ledger.lock().expect("ledger").scrub_steps;
+        tally.scrub_damaged += ledger.lock().expect("ledger").scrub_damaged;
         tally.blocks_repaired += ledger.lock().expect("ledger").blocks_repaired;
         let names = run(&mut sim, |provider| async move {
             moonpool_core::StorageProvider::list_dir(&provider, DIR).await
@@ -452,11 +461,18 @@ async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
         }
         if scrub {
             // A scrub writes no data: whatever it hits, the ledger stands.
+            // One step of the full scrub (the first of a pass rewrites any
+            // metainfo or header copy that differs), then the record repair.
+            let Ok(step) = journal.scrub(4096).await else {
+                return;
+            };
             match journal.repair_records().await {
                 Ok(repair) => {
                     let mut ledger = ledger.lock().expect("ledger");
                     ledger.scrubs += 1;
-                    ledger.blocks_repaired += repair.blocks_written;
+                    ledger.blocks_repaired += repair.blocks_written + step.repair.blocks_written;
+                    ledger.scrub_steps += 1;
+                    ledger.scrub_damaged += step.damaged.len();
                 }
                 Err(_) => return,
             }

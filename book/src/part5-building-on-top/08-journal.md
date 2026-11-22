@@ -396,6 +396,26 @@ it was before. A block with one damaged entry is not written: its valid record
 is the only copy of that entry's identity. `RecordRepair` counts the blocks
 written and the blocks left.
 
+But a record is only one of the structures with a twin. What about the
+metainfo copies, the segment header copies, and the entries themselves? An
+open reads each metainfo copy and header copy once, and then never again. An
+entry is checked only when the caller reads it. So one rotted metainfo copy
+waits, silent, for the next open. If its twin rots first, that open refuses
+with `MetaLost`.
+
+`scrub(budget)` closes that window, in the manner of TigerBeetle's grid
+scrubber. Each call checks the next run of live positions, at most `budget`
+bytes of entries (and at least one entry), and goes on where the last call
+stopped. Each pass starts with the metainfo copies and the header copies: a
+copy that differs from the value the open holds is rewritten from it, one
+durable write at a time, as a commit writes them. Then each entry is checked
+for its CRC and its identity, in place, without a copy of its payload. Each
+record of the run is checked as `verify_records` does, and a mismatch runs
+`repair_records`. A damaged entry has no local twin: `Scrub::damaged` names
+it, with its identity, and the caller fetches it from a peer. The scrub drops
+the page cache of each file before it reads it, so it checks the device and
+not a cached copy. `Scrub::pass_done` says when a pass ends.
+
 Three rules keep recovery's own writes honest, and the crash loops found
 each of them. A fourth keeps them apart from the witness rule: an open never
 writes back a rebuilt record of a batch that still has a torn slot no retire
@@ -435,7 +455,7 @@ let focus = FaultFocus::new()
 The crash loops in `tests/support/mod.rs` commit random batches, cut the
 writer off mid-commit with `simulate_crash_for_process`, sometimes crash
 inside recovery itself, rot one persist record while the node is down, run
-a scrub (`repair_records`) that a crash can cut, and judge every reopen against a ledger of what was
+a scrub (`scrub` and `repair_records`) that a crash can cut, and judge every reopen against a ledger of what was
 acknowledged and what was in flight. They run under two fault models:
 
 - **The paper's:** every unsynced sector ends up old or new, plus clean

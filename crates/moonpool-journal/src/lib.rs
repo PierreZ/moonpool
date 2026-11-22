@@ -95,6 +95,14 @@
 //!   tombstones and replaced positions too, before a second fault on the
 //!   same slot makes the next open refuse. Each open does the same for the
 //!   batches before the last one ([`RecordRepair`]).
+//! - **A scrub of everything.** [`Journal::scrub`] checks the journal against
+//!   the device in steps, a byte budget per call: each pass rewrites any
+//!   metainfo copy or segment header copy that differs from the value the
+//!   open holds, checks each live entry without copying it, and repairs each
+//!   rotted persist record from its entry. A damaged entry is named
+//!   ([`Scrub::damaged`]) for the caller to fetch from a peer. One fault is
+//!   then found while its twin still holds, before a second makes the next
+//!   open refuse.
 //! - **Fault aiming.** [`Journal::layout`] and [`Journal::regions`] return the
 //!   byte ranges of each record, entry, metainfo copy and segment header as
 //!   [`LayoutRegion`](moonpool_core::LayoutRegion) values. A simulation uses them to aim
@@ -300,5 +308,5 @@ pub use error::{CommitError, Durable, OpenError, ReadError};
 pub use format::{BLOCK, Geometry, ID_SIZE, Id, MAX_BATCH_RECORDS, META_MAX, RECORD_SIZE};
 pub use journal::{
     Durability, Entry, Journal, JournalConfig, JournalId, Layout, RecordRepair, Recovery, Rolls,
-    State,
+    Scrub, State,
 };
