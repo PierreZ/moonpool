@@ -292,12 +292,17 @@ impl<F: LocalStorageFile> Segment<F> {
 
     /// The whole persist log, damaged blocks zero-filled.
     pub async fn read_persist_log(&self) -> std::io::Result<AlignedBuf> {
-        let start = Geometry::PERSIST_START;
-        let len = usize_of(self.geometry.persist_end() - start);
+        self.read_persist_blocks(u64::from(self.geometry.persist_blocks))
+            .await
+    }
+
+    /// The first `blocks` blocks of the persist log, damaged blocks
+    /// zero-filled.
+    pub async fn read_persist_blocks(&self, blocks: u64) -> std::io::Result<AlignedBuf> {
         read_blocks(
             &self.file,
-            start / BLOCK_U64,
-            self.file.buffer(len / BLOCK)?,
+            Geometry::PERSIST_START / BLOCK_U64,
+            self.file.buffer(usize_of(blocks))?,
         )
         .await
     }

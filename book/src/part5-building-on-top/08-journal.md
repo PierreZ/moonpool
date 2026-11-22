@@ -287,8 +287,12 @@ not synced").
 
 ## Recovering
 
-Opening reads every persist record, locates each batch, walks the entry log
-to match damaged records with their entries, and judges each one:
+Opening reads the persist records, locates each batch, walks the entry log
+to match damaged records with their entries, and judges each one. The last
+segment is read whole. A sealed segment ends at the batch that the next
+segment's header names, so opening reads its persist log only up to that
+batch; a record past it is not part of the segment. Blocks of zeros are
+skipped without a decode.
 
 | Entry | Persist record | Verdict |
 |---|---|---|

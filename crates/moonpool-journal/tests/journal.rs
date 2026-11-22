@@ -1043,6 +1043,68 @@ fn a_lost_batch_in_the_middle_is_refused_not_read_as_the_end() {
     });
 }
 
+/// Batches of positions 1..=5, three entry blocks each, then 6: the entry
+/// log of the first segment fills before its persist log, so batch 6 rolls
+/// to a second segment and the first keeps three persist blocks unwritten.
+async fn sealed_then_one(sim: &mut SimWorld) -> J {
+    let mut journal = create(sim, Durability::Ordered).await;
+    for position in 1..=6 {
+        journal = put(sim, journal, &[(position, 1, 11_000)]).await;
+    }
+    let first = journal.layout(1).expect("live").record.path;
+    let sixth = journal.layout(6).expect("live").record.path;
+    assert_ne!(first, sixth, "batch 6 rolled to a second segment");
+    journal
+}
+
+/// A records block of a later batch written past the end of a sealed
+/// segment (a misdirected write): a sealed segment holds nothing after its
+/// last batch, so the open neither reads it nor takes it for a lost batch.
+#[test]
+fn a_record_past_the_end_of_a_sealed_segment_is_not_a_lost_batch() {
+    runtime().block_on(async {
+        let mut sim = sim(12);
+        let journal = sealed_then_one(&mut sim).await;
+        let sealed = journal.layout(1).expect("live").record.path;
+        let sixth = journal.layout(6).expect("live").record;
+        drop(journal);
+        let later = file_bytes(&mut sim, sixth.path).await;
+        let block = usize::try_from(sixth.bytes.start / 4096 * 4096).expect("small");
+        let mut bytes = file_bytes(&mut sim, sealed.clone()).await;
+        // Persist block 7 of the sealed segment: past its five batches.
+        let past = PERSIST_START + 7 * BLOCK;
+        bytes[past..past + BLOCK].copy_from_slice(&later[block..block + BLOCK]);
+        put_bytes(&mut sim, sealed, bytes).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect("nothing past the end is part of the segment");
+        assert_eq!(recovery.corrupt, vec![]);
+        let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+        assert_eq!(live, vec![1, 2, 3, 4, 5, 6]);
+    });
+}
+
+/// The last batch of a sealed segment lost whole: the open reads past the
+/// first part of the log, finds the segment short of the last batch the
+/// next segment's header names, and refuses.
+#[test]
+fn a_lost_last_batch_of_a_sealed_segment_is_refused() {
+    runtime().block_on(async {
+        let mut sim = sim(12);
+        let journal = sealed_then_one(&mut sim).await;
+        let (record, _) = spots(&journal, 5);
+        let header = header_spot(&journal, 5);
+        drop(journal);
+        zero(&mut sim, record.0, record.1 / 4096 * 4096, 4096).await;
+        zero(&mut sim, header.0, header.1 / 4096 * 4096, 4096).await;
+        let refused = reopen(&mut sim, Durability::Ordered).await.map(drop);
+        assert!(
+            matches!(refused, Err(OpenError::LostBatch { .. })),
+            "{refused:?}"
+        );
+    });
+}
+
 #[test]
 fn a_tail_the_metainfo_proves_durable_is_never_lost_silently() {
     runtime().block_on(async {
