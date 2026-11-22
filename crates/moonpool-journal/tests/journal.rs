@@ -23,6 +23,10 @@ pub(crate) fn ip() -> IpAddr {
     "10.0.0.1".parse().expect("valid IP")
 }
 
+/// Header copy B of a [`Geometry::small`] segment: its last block (header
+/// A, 8 persist blocks, no gap, 16 entry blocks, header B).
+const HEADER_B_AT: u64 = 25 * 4096;
+
 pub(crate) fn config(durability: Durability) -> JournalConfig {
     JournalConfig {
         durability,
@@ -156,6 +160,13 @@ fn spots(journal: &J, position: u64) -> ((String, u64), (String, u64)) {
         (layout.record.path, layout.record.bytes.start + 20),
         (layout.entry.path, layout.entry.bytes.end - 1),
     )
+}
+
+/// The spot of one byte in the entry header of `position`: damage there
+/// leaves nothing of the entry, where a payload byte leaves its header.
+fn header_spot(journal: &J, position: u64) -> (String, u64) {
+    let layout = journal.layout(position).expect("a live position");
+    (layout.entry.path, layout.entry.bytes.start + 20)
 }
 
 const BOTH: [Durability; 2] = [Durability::Ordered, Durability::Batched];
@@ -828,7 +839,8 @@ fn a_damaged_record_and_entry_before_the_last_batch_refuse_to_open() {
         let journal = five(&mut sim, Durability::Ordered).await;
         let journal = put(&mut sim, journal, &[(10, 1, 300), (11, 1, 300)]).await;
         let journal = put(&mut sim, journal, &[(12, 1, 300)]).await;
-        let (record, entry) = spots(&journal, 11);
+        let (record, _) = spots(&journal, 11);
+        let entry = header_spot(&journal, 11);
         drop(journal);
         flip(&mut sim, record.0, record.1).await;
         flip(&mut sim, entry.0, entry.1).await;
@@ -840,6 +852,39 @@ fn a_damaged_record_and_entry_before_the_last_batch_refuse_to_open() {
     });
 }
 
+/// A damaged record and a damaged payload whose entry header is intact:
+/// the header names the entry, so the open reports it corrupt, with its
+/// identity, and goes on. It never writes the record back, because the
+/// header proves nothing of the payload: the next open finds the same.
+#[test]
+fn a_damaged_record_and_payload_under_an_intact_header_are_corruption() {
+    runtime().block_on(async {
+        let mut sim = sim(8);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let journal = put(&mut sim, journal, &[(10, 1, 300), (11, 1, 300)]).await;
+        let journal = put(&mut sim, journal, &[(12, 1, 300)]).await;
+        let (record, entry) = spots(&journal, 11);
+        drop(journal);
+        flip(&mut sim, record.0, record.1).await;
+        flip(&mut sim, entry.0, entry.1).await;
+        for open in 0..2 {
+            let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+                .await
+                .expect("one entry named and damaged");
+            assert_eq!(recovery.corrupt, vec![(11, id(11, 1))], "open {open}");
+            assert_eq!(recovery.rebuilt, 0, "open {open}");
+            assert_eq!(recovery.repair.blocks_written, 0, "open {open}");
+            let (journal, read_11) = read(&mut sim, journal, 11).await;
+            assert!(
+                matches!(read_11, Err(ReadError::Damaged { position: 11, .. })),
+                "{read_11:?}"
+            );
+            let (_, read_12) = read(&mut sim, journal, 12).await;
+            assert_eq!(read_12.expect("after it"), payload(12, 1, 300));
+        }
+    });
+}
+
 /// Every record of a batch and its first entry damaged, before the last
 /// batch: nothing even says how many records it held.
 #[test]
@@ -847,7 +892,8 @@ fn a_batch_with_no_surviving_identity_before_the_last_is_lost() {
     runtime().block_on(async {
         let mut sim = sim(8);
         let journal = five(&mut sim, Durability::Ordered).await;
-        let (record, entry) = spots(&journal, 3);
+        let (record, _) = spots(&journal, 3);
+        let entry = header_spot(&journal, 3);
         drop(journal);
         flip(&mut sim, record.0, record.1).await;
         flip(&mut sim, entry.0, entry.1).await;
@@ -856,6 +902,95 @@ fn a_batch_with_no_surviving_identity_before_the_last_is_lost() {
             matches!(refused, Err(OpenError::LostBatch { .. })),
             "{refused:?}"
         );
+    });
+}
+
+/// A damaged record and payload under an intact header, of a position that
+/// a later batch replaced: nothing the caller needs. The open does not
+/// report it (a caller that fetched it again would write the old value over
+/// the new one), and retires the dead slot, so one more fault on its header
+/// never refuses an open.
+#[test]
+fn a_replaced_entry_named_by_its_header_alone_is_retired_not_reported() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(8);
+            let journal = five(&mut sim, durability).await;
+            let journal = put(&mut sim, journal, &[(11, 1, 300)]).await;
+            let (record, entry) = spots(&journal, 11);
+            let header = header_spot(&journal, 11);
+            let journal = put(&mut sim, journal, &[(11, 2, 300)]).await;
+            let journal = put(&mut sim, journal, &[(12, 1, 300)]).await;
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}: {error}"));
+            assert!(recovery.corrupt.is_empty(), "{durability:?}: {recovery:?}");
+            let (journal, read_11) = read(&mut sim, journal, 11).await;
+            assert_eq!(read_11.expect("the new value"), payload(11, 2, 300));
+            drop(journal);
+            flip(&mut sim, header.0, header.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}, header too: {error}"));
+            assert!(recovery.corrupt.is_empty(), "{durability:?}: {recovery:?}");
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, vec![1, 2, 3, 4, 5, 11, 12], "{durability:?}");
+        }
+    });
+}
+
+/// A position whose entry a read found damaged, replaced: the new batch
+/// retires the old slot. The slot is the only one of its batch, so when its
+/// record and its header rot too, only the retire record says where the
+/// batch's entries end, and so where the next batch's start.
+#[test]
+fn a_retired_last_slot_says_where_its_batch_ends() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(8);
+            let journal = five(&mut sim, durability).await;
+            let journal = put(&mut sim, journal, &[(11, 1, 300)]).await;
+            let (record, entry) = spots(&journal, 11);
+            let header = header_spot(&journal, 11);
+            let journal = put(&mut sim, journal, &[(13, 1, 300)]).await;
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, read_11) = read(&mut sim, journal, 11).await;
+            assert!(read_11.is_err(), "{durability:?}: the payload rotted");
+            let journal = put(&mut sim, journal, &[(11, 2, 300)]).await;
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, header.0, header.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}: {error}"));
+            assert!(recovery.corrupt.is_empty(), "{durability:?}: {recovery:?}");
+            let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+            assert_eq!(live, vec![1, 2, 3, 4, 5, 11, 13], "{durability:?}");
+        }
+    });
+}
+
+/// Every record of a batch damaged and its first payload too, under an
+/// intact entry header: the header locates the batch, and names its
+/// damaged entry.
+#[test]
+fn a_batch_with_only_an_entry_header_left_is_found_from_it() {
+    runtime().block_on(async {
+        let mut sim = sim(8);
+        let journal = five(&mut sim, Durability::Ordered).await;
+        let (record, entry) = spots(&journal, 3);
+        drop(journal);
+        flip(&mut sim, record.0, record.1).await;
+        flip(&mut sim, entry.0, entry.1).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Ordered)
+            .await
+            .expect("the header locates the batch");
+        assert_eq!(recovery.corrupt, vec![(3, id(3, 1))]);
+        let live: Vec<u64> = journal.positions().map(|(p, _)| p).collect();
+        assert_eq!(live, vec![1, 2, 3, 4, 5]);
     });
 }
 
@@ -1412,15 +1547,28 @@ fn two_faults_on_a_witnessed_last_batch_refuse_to_open() {
         ] {
             let mut sim = sim(9);
             let journal = five_then_two(&mut sim, durability, witnessed).await;
-            let (record, entry) = spots(&journal, 7);
+            let (record, payload_spot) = spots(&journal, 7);
+            let entry = header_spot(&journal, 7);
             drop(journal);
-            flip(&mut sim, record.0, record.1).await;
+            let image = file_bytes(&mut sim, record.0.clone()).await;
+            flip(&mut sim, record.0.clone(), record.1).await;
             flip(&mut sim, entry.0, entry.1).await;
             let refused = reopen(&mut sim, durability).await.map(drop);
             assert!(
                 matches!(refused, Err(OpenError::DoubleFault { index: 1, .. })),
                 "{durability:?}, witnessed {witnessed}: {refused:?}"
             );
+            // The payload damaged instead of the header: the header names
+            // the acknowledged entry, which is corrupt, not torn.
+            put_bytes(&mut sim, record.0.clone(), image).await;
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, payload_spot.0, payload_spot.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}, {witnessed}: {error}"));
+            assert_eq!(recovery.corrupt, vec![(7, id(7, 1))], "{durability:?}");
+            assert_eq!(recovery.torn, 0, "{durability:?}");
+            assert!(matches!(journal.state(6), State::Live { .. }));
         }
     });
 }
@@ -1434,7 +1582,8 @@ fn a_witnessed_last_batch_with_no_surviving_identity_is_lost_not_the_end() {
         for durability in BOTH {
             let mut sim = sim(9);
             let journal = five_then_two(&mut sim, durability, true).await;
-            let (record_6, entry_6) = spots(&journal, 6);
+            let (record_6, _) = spots(&journal, 6);
+            let entry_6 = header_spot(&journal, 6);
             let (record_7, _) = spots(&journal, 7);
             drop(journal);
             flip(&mut sim, record_6.0, record_6.1).await;
@@ -1476,6 +1625,57 @@ fn a_metainfo_older_than_the_log_is_refused() {
             matches!(refused, Err(OpenError::MetaRolledBack { .. })),
             "{refused:?}"
         );
+    });
+}
+
+/// The metainfo of the same open restored in both copies (both copy
+/// writes of one update lost): no generation is ahead, but the batch after
+/// the update is stamped with the newer metainfo, which proves the
+/// metainfo older than the log.
+#[test]
+fn a_metainfo_that_lost_an_update_in_its_open_is_refused() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(17);
+            let journal = five(&mut sim, durability).await;
+            let older = file_bytes(&mut sim, format!("{DIR}/meta")).await;
+            let mut batch = Batch::new();
+            batch.set_meta("promise 3");
+            let journal = commit(&mut sim, journal, batch).await.expect("meta");
+            let journal = put(&mut sim, journal, &[(6, 1, 10)]).await;
+            drop(journal);
+            put_bytes(&mut sim, format!("{DIR}/meta"), older).await;
+            let refused = reopen(&mut sim, durability).await.map(drop);
+            assert!(
+                matches!(refused, Err(OpenError::MetaUpdateLost { .. })),
+                "{durability:?}: {refused:?}"
+            );
+        }
+    });
+}
+
+/// The batch that carries a metainfo update is stamped with the metainfo
+/// before it: a crash between the batch and the update leaves a log that
+/// opens.
+#[test]
+fn a_crash_before_the_metainfo_update_of_a_batch_is_no_rollback() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(17);
+            let journal = five(&mut sim, durability).await;
+            let older = file_bytes(&mut sim, format!("{DIR}/meta")).await;
+            let mut batch = Batch::new();
+            batch
+                .put(6, id(6, 1), payload(6, 1, 10))
+                .set_meta("promise 3");
+            let journal = commit(&mut sim, journal, batch).await.expect("meta");
+            drop(journal);
+            put_bytes(&mut sim, format!("{DIR}/meta"), older).await;
+            let (journal, _) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}: {error}"));
+            assert_eq!(journal.meta(), b"born", "{durability:?}");
+        }
     });
 }
 
@@ -1598,7 +1798,7 @@ fn a_scrub_finds_a_rotted_entry_and_repairs_the_copies_from_their_twins() {
             flip(&mut sim, rotted.0, rotted.1).await;
             flip(&mut sim, record.0, record.1).await;
             flip(&mut sim, format!("{DIR}/meta"), 30).await;
-            flip(&mut sim, segment, 4096 + 30).await;
+            flip(&mut sim, segment, HEADER_B_AT + 30).await;
             let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 512).await;
             assert_eq!(pass.damaged, vec![(2, id(2, 1))], "{durability:?}");
             assert_eq!(pass.records_mismatched, vec![4], "{durability:?}");
@@ -1634,7 +1834,7 @@ fn a_scrub_rewrites_both_metainfo_copies_and_both_header_copies() {
         flip(&mut sim, format!("{DIR}/meta"), 30).await;
         flip(&mut sim, format!("{DIR}/meta"), 16 * 4096 + 30).await;
         flip(&mut sim, record.0.clone(), 30).await;
-        flip(&mut sim, record.0, 4096 + 30).await;
+        flip(&mut sim, record.0, HEADER_B_AT + 30).await;
         let (journal, pass, _) = scrub_a_pass(&mut sim, journal, 1 << 20).await;
         assert_eq!((pass.meta_repaired, pass.headers_repaired), (2, 2));
         drop(journal);
@@ -1674,7 +1874,7 @@ fn a_scrub_cut_by_a_crash_never_leaves_a_copy_pair_worse() {
             let journal = five(&mut sim, Durability::Ordered).await;
             let (record, _) = spots(&journal, 1);
             flip(&mut sim, format!("{DIR}/meta"), 30).await;
-            flip(&mut sim, record.0, 4096 + 30).await;
+            flip(&mut sim, record.0, HEADER_B_AT + 30).await;
             let (journal, _) = scrub_cut_then_reopen(&mut sim, journal, budget)
                 .await
                 .unwrap_or_else(|error| panic!("budget {budget}: {error}"));
@@ -1686,7 +1886,7 @@ fn a_scrub_cut_by_a_crash_never_leaves_a_copy_pair_worse() {
             let journal = five(&mut sim, Durability::Ordered).await;
             let (record, _) = spots(&journal, 1);
             flip(&mut sim, record.0.clone(), 30).await;
-            flip(&mut sim, record.0, 4096 + 30).await;
+            flip(&mut sim, record.0, HEADER_B_AT + 30).await;
             match scrub_cut_then_reopen(&mut sim, journal, budget).await {
                 Ok((journal, _)) => {
                     assert_eq!(journal.positions().count(), 5, "budget {budget}");
@@ -2098,19 +2298,23 @@ fn a_crash_anywhere_in_a_retiring_open_leaves_the_same_journal() {
     });
 }
 
-/// A segment of format version 3 (with void records) is refused, and the
-/// error names the version found.
+/// A segment of format version 4 (header copy B in block 1) is refused, and
+/// the error names the version found: its copy A, in block 0, says 4.
 #[test]
-fn a_segment_of_format_version_3_is_refused() {
+fn a_segment_of_format_version_4_is_refused() {
     runtime().block_on(async {
         let mut sim = sim(27);
         let journal = five(&mut sim, Durability::Ordered).await;
         let (record, _) = spots(&journal, 1);
         drop(journal);
         let mut bytes = file_bytes(&mut sim, record.0.clone()).await;
+        // Version 4's layout: both copies in blocks 0 and 1, none at the end.
+        bytes.copy_within(0..4096, 4096);
+        let last = bytes.len() - 4096;
+        bytes[last..].fill(0);
         for copy in 0..2 {
             let header = &mut bytes[copy * 4096..copy * 4096 + 4096];
-            header[4..6].copy_from_slice(&3u16.to_le_bytes());
+            header[4..6].copy_from_slice(&4u16.to_le_bytes());
             let sum = crc32c::crc32c(&header[..52]);
             header[52..56].copy_from_slice(&sum.to_le_bytes());
         }
@@ -2120,8 +2324,8 @@ fn a_segment_of_format_version_3_is_refused() {
             matches!(
                 refused,
                 Err(OpenError::UnsupportedVersion {
-                    found: 3,
-                    supported: 4
+                    found: 4,
+                    supported: 5
                 })
             ),
             "{refused:?}"
@@ -2153,7 +2357,7 @@ async fn other_version(sim: &mut SimWorld, path: String, offset: u64, crc_at: us
 const META_COPIES: [u64; 2] = [0, 16 * 4096];
 const META_CRC_AT: usize = 4092;
 /// The offset of each segment header copy, and where its checksum sits.
-const HEADER_COPIES: [u64; 2] = [0, 4096];
+const HEADER_COPIES: [u64; 2] = [0, HEADER_B_AT];
 const HEADER_CRC_AT: usize = 52;
 
 /// Whether `error` names version `found` as the one after the supported one.
@@ -2290,7 +2494,7 @@ fn two_damaged_segment_headers_are_still_a_bad_segment() {
 }
 
 /// Where the persist log of a segment starts: after its two header blocks.
-const PERSIST_START: usize = 2 * 4096;
+const PERSIST_START: usize = 4096;
 const BLOCK: usize = 4096;
 
 /// The segment file that holds `position`.

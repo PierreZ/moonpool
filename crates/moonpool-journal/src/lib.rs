@@ -155,7 +155,7 @@
 //! ```text
 //! <dir>/meta                    metainfo copy A (block 0) and copy B (block 16)
 //! <dir>/seg-<first batch>.wal   allocated segments:
-//!     header A | header B | persist log | guard gap | entry log
+//!     header A | persist log | guard gap | entry log | header B
 //! <dir>/spare-<gen>-<n>.wal     a dead segment's file, or one allocated ahead,
 //!                               kept for a later roll
 //! ```
@@ -176,7 +176,8 @@
 //!   the entry's offset, length and CRC (CLSTORE's identifier and persist
 //!   record in one);
 //! - **entries**: a 64-byte header that repeats the record's identity, then
-//!   the payload.
+//!   the payload. The header has its own CRC, and holds the payload's CRC
+//!   and a **stamp**, the metainfo `seq` it was written under.
 //!
 //! Every batch starts on a fresh [`BLOCK`] in both logs, so a commit never
 //! touches a sector that holds acknowledged data. The one exception is a
@@ -220,7 +221,8 @@
 //! | damaged | valid | [`State::Corrupt`], or [`State::Ambiguous`] in a `Batched` last batch |
 //! | damaged | damaged, named by a retire record | ignored |
 //! | damaged | damaged, in an unwitnessed last batch of its open generation | torn by a crash: discarded and retired |
-//! | damaged | damaged, in a witnessed batch, or before the last of its generation | [`OpenError::DoubleFault`]: refuse to open |
+//! | payload damaged, header intact | damaged, in a witnessed batch, or before the last of its generation | [`State::Corrupt`]: the header names the entry; its record is never written back; replaced by a later batch, it is retired, not reported |
+//! | header damaged | damaged, in a witnessed batch, or before the last of its generation | [`OpenError::DoubleFault`]: refuse to open |
 //!
 //! A **retire record** names a slot of an earlier batch that holds nothing
 //! the caller needs: a slot a crash tore, or the dead slot of a position
@@ -233,7 +235,8 @@
 //! mark records that batch once it is durable: a crash anywhere in that
 //! open leaves the slots judged the same way at the next one. A commit that
 //! makes dead a slot whose entry is damaged ([`State::Corrupt`], or a read
-//! that returned [`ReadError::Damaged`]) retires it in the same batch.//!
+//! that returned [`ReadError::Damaged`]) retires it in the same batch.
+//!
 //! A batch is **witnessed** when something other than its own two damaged
 //! parts proves it durable: the metainfo's high-water mark records it (a
 //! commit that changed the metainfo records its own batch, and every open
@@ -249,6 +252,16 @@
 //! discarded is an acknowledged last batch that nothing witnesses: its bytes
 //! look exactly like a torn commit.
 //!
+//! An entry header has a CRC of its own, apart from its payload's, so an
+//! intact header with a damaged payload still names its entry and its
+//! length. Three rules keep that from hiding a crash. In an unwitnessed last
+//! batch it is still torn: a commit writes the header and the payload in one
+//! write, and a crash can keep one without the other. A record is never
+//! rebuilt from a header alone, because the header proves nothing of the
+//! payload. And an `Ordered` batch is witnessed only by an intact record,
+//! never by a header. A batch whose records are all damaged is located from
+//! its first entry's header, payload or not.
+//!
 //! A record that the scan finds at a batch boundary but that names an entry
 //! other than the first entry of that boundary was written to the wrong
 //! block (a misdirected write): the open reads it as damaged and locates
@@ -258,8 +271,14 @@
 //! batch the metainfo proves durable, is [`OpenError::LostBatch`]. A batch of
 //! a later open generation than the metainfo's proves the metainfo older
 //! than the log (both copies lost an update): [`OpenError::MetaRolledBack`].
-//! A rollback inside one open generation stays invisible to the journal;
-//! the caller can check its metainfo against its own entries. A batch
+//! Inside one open generation, the stamps tell: an intact entry header
+//! stamped with a later metainfo `seq` than the one that reads back proves
+//! that the metainfo lost an update ([`OpenError::MetaUpdateLost`]). A batch
+//! is stamped with the metainfo that is durable when it is written, so the
+//! batch that carries a metainfo update holds the stamp before it, and a
+//! crash before the update leaves nothing ahead. The open checks the stamps
+//! of the entries it reads: the last batch, and the entries that rebuild a
+//! record or locate a batch. A batch
 //! number holds the open generation in its high 24 bits and the count in
 //! its low 40 bits: an open after generation 2^24 - 1 refuses
 //! ([`OpenError::InvalidConfig`]), and a commit after 2^40 - 1 batches in

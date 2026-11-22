@@ -10,13 +10,15 @@ use crate::batch::{Batch, Write};
 use crate::format::{
     BLOCK, BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, MAX_BATCH_RECORDS,
     MAX_GENERATION, META_COPY_B_AT, META_MAX, Meta, RECORD_SIZE, Record, Retire, SegmentHeader,
-    Slot, align_up, clear_id, entry_crc, first_batch_of, generation_of, journal_tag, last_batch_of,
+    Slot, align_up, clear_id, first_batch_of, generation_of, journal_tag, last_batch_of, stamp_of,
     u64_of, usize_of,
 };
 use crate::io::block_buf;
 use crate::meta::{META_NAME, MetaFile, remove_leftover};
 use crate::recover::{BlockWrite, Known, Located, Op, entry_matches, plan_repair, scan};
-use crate::segment::{Segment, is_segment_leftover, named_batches, parse_segment_name};
+use crate::segment::{
+    Segment, header_block, is_segment_leftover, named_batches, parse_segment_name,
+};
 use crate::spare::{self, is_spare, is_spare_leftover, spare_name};
 use crate::{CommitError, Durable, OpenError, ReadError};
 
@@ -117,12 +119,24 @@ pub struct Entry {
     pub payload: Vec<u8>,
 }
 
+/// The damage a scan found, judged against the log once its ops apply.
+struct Damage {
+    corrupt: Vec<(u64, Id)>,
+    ambiguous: Vec<(u64, Id)>,
+    /// Slots judged from their entry header alone, by position.
+    headed: Vec<(u64, Retire)>,
+    last_batch: u64,
+}
+
 /// What opening found and did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Recovery {
-    /// Entries of the last batch whose bytes are damaged although their
-    /// persist record proves them written (the rest of the log is checked
-    /// when read).
+    /// Live entries whose bytes are damaged although their persist record,
+    /// or their intact entry header in a witnessed batch, proves them
+    /// written. The open reads the entries of the last batch, and the
+    /// header of each entry whose record is damaged; the rest of the log is
+    /// checked when read. An entry that a later batch replaced is not
+    /// listed: its slot is dead, and the open retires it.
     pub corrupt: Vec<(u64, Id)>,
     /// The last batch's damaged entries of a [`Durability::Batched`] commit.
     pub ambiguous: Vec<(u64, Id)>,
@@ -674,6 +688,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation: meta.open_generation,
             last: meta.open_last,
             mark: meta.last_batch,
+            seq: meta.seq,
         };
         let mut scanned = scan(&segments, tag, known).await?;
         if scanned.last_batch < meta.last_batch {
@@ -692,12 +707,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         let meta = begin_generation(&meta_file, meta, scanned.last_batch, torn.is_empty()).await?;
         let generation = meta.open_generation;
 
-        recovery.corrupt = scanned.corrupt;
-        recovery.ambiguous = scanned.ambiguous;
         recovery.torn = u32::try_from(torn.len()).unwrap_or(u32::MAX);
         recovery.rebuilt = scanned.rebuilt;
         recovery.repair = scanned.repair;
-        let ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(scanned.last_batch);
         let mut journal = Self {
             tag,
             provider,
@@ -709,7 +721,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             segments,
             index: BTreeMap::new(),
             last_batch: scanned.last_batch,
-            ambiguous_batch,
+            ambiguous_batch: None,
             seen_damaged: Mutex::default(),
             generation,
             poisoned: false,
@@ -724,9 +736,16 @@ impl<P: LocalStorageProvider> Journal<P> {
             journal.apply(&op);
         }
         journal.drop_below_floor();
+        let damage = Damage {
+            corrupt: scanned.corrupt,
+            ambiguous: scanned.ambiguous,
+            headed: scanned.headed,
+            last_batch: scanned.last_batch,
+        };
+        let retires = journal.settle_damage(&mut recovery, torn, damage);
         recovery.segments_removed = journal.remove_dead_segments().await?;
-        if !torn.is_empty() {
-            journal.commit_retires(torn).await?;
+        if !retires.is_empty() {
+            journal.commit_retires(retires).await?;
         }
         journal.assert_invariants();
         Ok(Some((journal, recovery)))
@@ -870,9 +889,10 @@ impl<P: LocalStorageProvider> Journal<P> {
         regions.reserve(paths.len() * 2 + self.index.len() * 2);
         for path in &paths {
             for copy in 0..2 {
+                let block = header_block(self.config.geometry.total_blocks(), copy);
                 regions.push(LayoutRegion {
                     path: path.clone(),
-                    bytes: copy * BLOCK_U64..(copy + 1) * BLOCK_U64,
+                    bytes: block * BLOCK_U64..(block + 1) * BLOCK_U64,
                     kind: Layout::HEADER,
                     stripe: None,
                     shard: None,
@@ -1017,10 +1037,9 @@ impl<P: LocalStorageProvider> Journal<P> {
     fn intact(&self, position: u64, at: &Located, bytes: &[u8]) -> bool {
         assert_eq!(bytes.len(), entry_bytes(at), "judged on its whole entry");
         let record = record_of(position, at);
-        let intact = EntryHeader::parse(bytes).is_some_and(|(header, stored)| {
-            header.tag == self.tag
-                && entry_matches(&record, &header, stored)
-                && entry_crc(&bytes[..RECORD_SIZE], &bytes[RECORD_SIZE..]) == stored
+        let intact = EntryHeader::parse(bytes, self.tag).is_some_and(|entry| {
+            entry_matches(&record, &entry.header, entry.crc)
+                && entry.payload_intact(&bytes[RECORD_SIZE..])
         });
         if !intact {
             self.seen_damaged
@@ -1124,6 +1143,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation: self.generation,
             last: self.meta.open_last,
             mark: self.meta.last_batch,
+            seq: self.meta.seq,
         };
         let (writes, repair) =
             plan_repair(&self.segments, self.tag, known, self.last_batch).await?;
@@ -1367,6 +1387,46 @@ impl<P: LocalStorageProvider> Journal<P> {
         Ok(())
     }
 
+    /// What an open reports, and the slots it retires, once the scan's ops
+    /// are applied. Only what is still live is reported: a damaged entry
+    /// that a later batch replaced, cleared or dropped is nothing the caller
+    /// needs (a caller that fetched it again would write the old value over
+    /// the new one). A slot judged from its header alone whose position
+    /// moved on is dead, and is retired with the torn slots, or one more
+    /// fault on its header would refuse the next open.
+    fn settle_damage(
+        &mut self,
+        recovery: &mut Recovery,
+        torn: Vec<Retire>,
+        damage: Damage,
+    ) -> Vec<Retire> {
+        let live = |(position, id): &(u64, Id)| {
+            self.index
+                .get(position)
+                .is_some_and(|at| at.damaged && at.id == *id)
+        };
+        recovery.corrupt = damage
+            .corrupt
+            .into_iter()
+            .filter(|entry| live(entry))
+            .collect();
+        recovery.ambiguous = damage
+            .ambiguous
+            .into_iter()
+            .filter(|entry| live(entry))
+            .collect();
+        let mut retires = torn;
+        retires.extend(damage.headed.into_iter().filter_map(|(position, retire)| {
+            let current = self
+                .index
+                .get(&position)
+                .is_some_and(|at| at.batch == retire.batch && at.index == retire.index);
+            (!current).then_some(retire)
+        }));
+        self.ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(damage.last_batch);
+        retires
+    }
+
     /// The slots this batch makes dead whose entry is known damaged: the
     /// old slot of each position it replaces, clears, or drops below
     /// `floor`. Each gets a retire record in the batch, so a later fault on
@@ -1379,7 +1439,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         let mut retires = BTreeMap::new();
         let mut consider = |at: &Located| {
             if at.damaged || seen.contains(&(at.batch, at.index)) {
-                let follows = at.index + 1 < at.count;
+                // Where the slot's entry ends, even for the last slot of
+                // its batch: the next batch's entries start on the block
+                // after it, and a lost slot alone does not say where.
                 let resume = u64::from(at.offset) + EntryHeader::footprint(at.len);
                 retires.insert(
                     (at.batch, at.index),
@@ -1387,7 +1449,7 @@ impl<P: LocalStorageProvider> Journal<P> {
                         batch: at.batch,
                         index: at.index,
                         count: at.count,
-                        resume: if follows { resume } else { 0 },
+                        resume,
                     },
                 );
             }
@@ -1659,9 +1721,9 @@ impl<P: LocalStorageProvider> Journal<P> {
                 position,
                 id,
                 len,
-                tag: self.tag,
+                stamp: stamp_of(self.meta.seq),
             };
-            let entry_crc = header.encode(payload, &mut entries[start..]);
+            let entry_crc = header.encode(self.tag, payload, &mut entries[start..]);
             decoded.push(Record {
                 kind,
                 flags,

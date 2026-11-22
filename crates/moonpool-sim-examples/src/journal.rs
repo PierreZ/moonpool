@@ -319,6 +319,7 @@ fn is_evidence(error: &OpenError) -> bool {
             | OpenError::MetaLost
             | OpenError::BadSegment { .. }
             | OpenError::MetaRolledBack { .. }
+            | OpenError::MetaUpdateLost { .. }
     )
 }
 

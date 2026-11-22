@@ -87,7 +87,7 @@ journal was created with.
 ```text
 <dir>/meta                   metainfo copy A (block 0), copy B (block 16)
 <dir>/seg-<first batch>.wal  allocated whole:
-    header A | header B | persist log | guard gap | entry log
+    header A | persist log | guard gap | entry log | header B
 <dir>/spare-<gen>-<n>.wal    a dead segment's file, kept for the next roll
 ```
 
@@ -96,7 +96,11 @@ Each segment holds two append-only logs. The **persist log** is a run of
 batch, its record count and the record's index. The **entry log** holds the
 payloads in arrival order, each behind a 64-byte header that repeats the
 record's identity, so a misdirected entry never passes for the one a record
-names, and an intact entry can rebuild a lost record. Every batch starts on
+names, and an intact entry can rebuild a lost record. The header has its own
+CRC, and it holds the CRC of its payload. It also holds a **stamp**: the
+metainfo `seq` it was written under. The two header copies of a segment sit
+at its two ends, so one fault on a run of blocks (a misdirected write, a bad
+stretch of the medium) never reaches both. Every batch starts on
 a fresh block in both logs, so **no commit ever touches a sector holding
 anything acknowledged**. That one rule is what makes the crash model below
 survivable. A record repair (below) is the one write that breaks it, and it
@@ -293,7 +297,8 @@ to match damaged records with their entries, and judges each one:
 | damaged | valid | `Corrupt`, or `Ambiguous` in a `Batched` last batch |
 | damaged | damaged, named by a retire record | ignored |
 | damaged | damaged, unwitnessed last batch of its open generation | torn by a crash: discarded and retired |
-| damaged | damaged, witnessed, or earlier in its generation | `OpenError::DoubleFault`: refuse to open |
+| payload damaged, header intact | damaged, witnessed, or earlier in its generation | `Corrupt`: the header names the entry |
+| header damaged | damaged, witnessed, or earlier in its generation | `OpenError::DoubleFault`: refuse to open |
 
 A slot whose record and entry are both damaged is what a crash in the middle
 of a commit leaves, and it is also what two faults leave on an acknowledged
@@ -309,7 +314,22 @@ proves the batch durable:
   its batch was durable.
 
 In a witnessed batch, both parts damaged is `DoubleFault` and a damaged
-entry under a valid record is `Corrupt`, never `Ambiguous`. Only an
+entry under a valid record is `Corrupt`, never `Ambiguous`. But "both parts"
+is often too strong. Most rot hits the payload, which is most of the bytes.
+When the entry header is intact, it still names the entry: its position, its
+id, its length. So a witnessed slot with a damaged record and a damaged
+payload under an intact header is `Corrupt`, with its identity, and the open
+goes on. The caller fetches the entry from a peer, as for any other
+`Corrupt` entry. A later batch may have replaced that position already.
+Then the slot is dead: the open does not report it, because a caller that
+fetched it again would write the old value over the new one. The open
+retires it instead.
+
+Three rules keep the header honest. In an unwitnessed last batch, a damaged
+payload is still torn: a crash can keep the header of a write and lose its
+payload. The open never writes back a record rebuilt from a header alone,
+because the header proves nothing of the payload. And only an intact record
+witnesses an `Ordered` batch, never a header. Only an
 acknowledged last batch that nothing witnesses can still be discarded: a
 `Batched` commit (or an `Ordered` one with no intact record) that changed no
 metainfo, with no open since. Its bytes look exactly like a torn commit. A
@@ -362,9 +382,13 @@ the device loses both copy writes of one update, or loses one while the
 other rots, and the older value wins. Every batch number carries the open
 generation that wrote it, and every open raises the generation in both
 copies before it writes, so a batch of a later generation than the
-metainfo's proves the metainfo older than the log: `MetaRolledBack`. A
-rollback inside one open generation stays invisible to the journal; the
-caller can check its metainfo against its own entries. A batch number
+metainfo's proves the metainfo older than the log: `MetaRolledBack`. What
+about a rollback inside one open generation? The stamps tell. Each batch is
+stamped with the metainfo `seq` that is durable when it is written. So an
+intact entry header stamped above the `seq` that reads back proves that the
+metainfo lost an update: `MetaUpdateLost`. The batch that carries a metainfo
+update holds the stamp before it, so a crash between that batch and its
+metainfo write leaves nothing ahead. A batch number
 holds the generation in its high 24 bits and the count in its low 40 bits,
 so both have a limit. The 16,777,215th open is the last: the next one is
 refused with `OpenError::InvalidConfig`. One open writes at most 2^40 - 1

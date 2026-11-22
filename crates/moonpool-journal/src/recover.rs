@@ -51,8 +51,9 @@ use std::collections::BTreeMap;
 use moonpool_core::{AlignedBuf, LocalStorageFile};
 
 use crate::format::{
-    BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, RECORD_SIZE, RECORDS_PER_BLOCK,
-    Record, Retire, Slot, align_up, entry_crc, generation_of, u64_of, usize_of,
+    BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, ParsedEntry, RECORD_SIZE,
+    RECORDS_PER_BLOCK, Record, Retire, Slot, align_up, generation_of, stamp_is_ahead, u64_of,
+    usize_of,
 };
 use crate::segment::Segment;
 use crate::{OpenError, RecordRepair};
@@ -89,16 +90,30 @@ enum Found {
     Record(Record),
     /// The record is damaged, its entry intact: the record rebuilt from it.
     Rebuilt(Record),
+    /// The record and the payload of a put are damaged, the entry header
+    /// intact: the header names the entry and its place, but proves
+    /// nothing of its payload. Never written back as a record.
+    Headed(Record),
     /// Both damaged, or the entry cannot be located.
     Lost,
 }
 
 impl Found {
-    /// The record this slot holds, valid or rebuilt.
+    /// The record this slot holds, valid, rebuilt, or read from an entry
+    /// header: where its entry is.
     fn record(&self) -> Option<&Record> {
         match self {
-            Found::Record(record) | Found::Rebuilt(record) => Some(record),
+            Found::Record(record) | Found::Rebuilt(record) | Found::Headed(record) => Some(record),
             Found::Lost => None,
+        }
+    }
+
+    /// The record a repair may write back: valid, or rebuilt from an intact
+    /// entry. A record read from a header alone is not.
+    fn proven(&self) -> Option<&Record> {
+        match self {
+            Found::Record(record) | Found::Rebuilt(record) => Some(record),
+            Found::Headed(_) | Found::Lost => None,
         }
     }
 }
@@ -145,6 +160,10 @@ pub(crate) struct Scan {
     /// tore: the open retires them in a new batch before it raises the
     /// high-water mark.
     pub torn: Vec<Retire>,
+    /// The slots judged `Corrupt` from their entry header alone, with their
+    /// position: the open retires each one that a later batch replaced,
+    /// because nothing else ever will.
+    pub headed: Vec<(u64, Retire)>,
     /// The persist blocks the open writes again, in order, each durable
     /// before the next (see [`repair_batch`]).
     pub writes: Vec<BlockWrite>,
@@ -152,31 +171,52 @@ pub(crate) struct Scan {
     pub repair: RecordRepair,
 }
 
-/// An entry checked against what is expected of it.
+/// An entry whose header passed its CRC, and whether its payload did too.
+#[derive(Clone, Copy, Debug)]
+struct EntryRead {
+    entry: ParsedEntry,
+    /// The payload passed its CRC: the entry is intact.
+    whole: bool,
+}
+
+impl EntryRead {
+    /// Whether this is, intact, the entry `record` names.
+    fn proves(&self, record: &Record) -> bool {
+        self.whole && entry_matches(record, &self.entry.header, self.entry.crc)
+    }
+}
+
+/// The entry at `offset`, if its header is intact and lies inside the entry
+/// log.
 async fn read_entry<F: LocalStorageFile>(
     segment: &Segment<F>,
     offset: u64,
     tag: u32,
-) -> std::io::Result<Option<(EntryHeader, u32, Vec<u8>)>> {
+) -> std::io::Result<Option<EntryRead>> {
     let geometry = segment.geometry;
     if offset < geometry.entry_start() || offset + u64_of(RECORD_SIZE) > geometry.entry_end() {
         return Ok(None);
     }
     let head = segment.read_at(offset, RECORD_SIZE).await?;
-    let Some((header, stored)) = EntryHeader::parse(&head) else {
+    let Some(entry) = EntryHeader::parse(&head, tag) else {
         return Ok(None);
     };
-    if header.tag != tag || offset + EntryHeader::footprint(header.len) > geometry.entry_end() {
+    let len = entry.header.len;
+    if offset + EntryHeader::footprint(len) > geometry.entry_end() {
         return Ok(None);
     }
-    let whole = segment
-        .read_at(offset, RECORD_SIZE + usize_of(u64::from(header.len)))
-        .await?;
-    let payload = whole[RECORD_SIZE..].to_vec();
-    if entry_crc(&whole[..RECORD_SIZE], &payload) != stored {
-        return Ok(None);
-    }
-    Ok(Some((header, stored, payload)))
+    let payload = if len == 0 {
+        Vec::new()
+    } else {
+        segment
+            .read_at(offset + u64_of(RECORD_SIZE), usize_of(u64::from(len)))
+            .await?
+            .to_vec()
+    };
+    Ok(Some(EntryRead {
+        entry,
+        whole: entry.payload_intact(&payload),
+    }))
 }
 
 /// Whether `header` (with CRC `stored`) is exactly the entry `record` names.
@@ -220,6 +260,9 @@ pub(crate) struct Known {
     pub last: u64,
     /// The high-water mark: a batch the metainfo proves durable.
     pub mark: u64,
+    /// The metainfo's `seq`: every entry was written under it or an
+    /// earlier one.
+    pub seq: u64,
 }
 
 impl Known {
@@ -242,6 +285,20 @@ impl Known {
             {
                 self.check_generation(record.batch)?;
             }
+        }
+        Ok(())
+    }
+
+    /// An intact entry header stamped with a later metainfo than this one:
+    /// a batch is written under the metainfo that is durable, so the
+    /// metainfo lost an update (both copies of it lost).
+    fn check_stamp(self, header: &EntryHeader) -> Result<(), OpenError> {
+        if stamp_is_ahead(header.stamp, self.seq) {
+            return Err(OpenError::MetaUpdateLost {
+                seq: self.seq,
+                stamp: header.stamp,
+                batch: header.batch,
+            });
         }
         Ok(())
     }
@@ -269,14 +326,18 @@ async fn batch_from_entry<F: LocalStorageFile>(
     (tag, last): (u32, u64),
     known: Known,
 ) -> Result<Option<(u64, u16)>, OpenError> {
+    // An intact header is enough: it names its batch whole, payload or not.
     match read_entry(segment, offset, tag).await? {
-        Some((header, _, _))
-            if header.index == 0
-                && header.batch > last
-                && header.batch >= segment.first_batch
-                && !known.is_stale(header.batch) =>
+        Some(EntryRead {
+            entry: ParsedEntry { header, .. },
+            ..
+        }) if header.index == 0
+            && header.batch > last
+            && header.batch >= segment.first_batch
+            && !known.is_stale(header.batch) =>
         {
             known.check_generation(header.batch)?;
+            known.check_stamp(&header)?;
             Ok(Some((header.batch, header.count)))
         }
         _ => Ok(None),
@@ -364,6 +425,36 @@ async fn locate_batch<F: LocalStorageFile>(
     Ok(shape)
 }
 
+/// What the entry at `offset` says of slot `index` of batch `seq` (of
+/// `count` slots), whose record is damaged: its record rebuilt when the
+/// entry is intact, read from the header alone when only the payload of a
+/// put is damaged, else lost.
+async fn from_entry<F: LocalStorageFile>(
+    segment: &Segment<F>,
+    offset: u64,
+    (seq, index, count): (u64, u16, u16),
+    (tag, known): (u32, Known),
+) -> Result<Found, OpenError> {
+    match read_entry(segment, offset, tag).await? {
+        Some(EntryRead { entry, whole })
+            if entry.header.batch == seq
+                && entry.header.index == index
+                && entry.header.count == count =>
+        {
+            known.check_stamp(&entry.header)?;
+            let record = rebuild(&entry.header, entry.crc, offset);
+            Ok(if whole {
+                Found::Rebuilt(record)
+            } else if record.kind == Kind::Put {
+                Found::Headed(record)
+            } else {
+                Found::Lost
+            })
+        }
+        _ => Ok(Found::Lost),
+    }
+}
+
 /// Pass 1 over one segment. `prev` is the last batch before it; `end`, its
 /// last batch as the next segment's header records it (`None` for the last
 /// segment).
@@ -431,29 +522,24 @@ async fn scan_segment<F: LocalStorageFile>(
                     Found::Record(record)
                 }
                 _ => match walk {
-                    Some(offset) => match read_entry(segment, offset, tag).await? {
-                        Some((header, stored, _))
-                            if header.batch == seq
-                                && header.index == index
-                                && header.count == count =>
-                        {
-                            Found::Rebuilt(rebuild(&header, stored, offset))
-                        }
-                        _ => Found::Lost,
-                    },
+                    Some(offset) => {
+                        from_entry(segment, offset, (seq, index, count), (tag, known)).await?
+                    }
                     None => Found::Lost,
                 },
             };
-            walk = match here {
-                Found::Record(record) | Found::Rebuilt(record) => {
+            walk = match here.record() {
+                Some(record) => {
                     let end = u64::from(record.offset) + EntryHeader::footprint(record.len);
                     entries_end = entries_end.max(end);
                     Some(end)
                 }
-                // A retired slot says where the walk goes on.
-                Found::Lost => retires
+                // A retired slot says where the walk goes on, and the
+                // batch's entries reach at least that far.
+                None => retires
                     .get(&(seq, index))
-                    .and_then(|retire| (retire.resume != 0).then_some(retire.resume)),
+                    .and_then(|retire| (retire.resume != 0).then_some(retire.resume))
+                    .inspect(|&resume| entries_end = entries_end.max(resume)),
             };
             found.push(here);
         }
@@ -607,7 +693,12 @@ pub(crate) async fn plan_repair<F: LocalStorageFile>(
     for (s, (batches, _, _)) in per_segment.iter().enumerate() {
         for batch in batches.iter().filter(|batch| batch.seq <= last) {
             let at = (&segments[s], s);
-            repair_batch(at, batch, (tag, &retires), &mut writes, &mut repair).await?;
+            // An open retired every slot a crash tore: what is left
+            // unretired here is corruption, which a write-back can not
+            // turn into a witness against a torn slot. But no open
+            // generation is known here, so be as careful as an open.
+            let torn = (batch, true);
+            repair_batch(at, torn, (tag, &retires), &mut writes, &mut repair).await?;
         }
     }
     Ok((writes, repair))
@@ -641,13 +732,13 @@ pub(crate) async fn scan<F: LocalStorageFile>(
                 last_of_generation: successor
                     .is_none_or(|after| generation_of(after) != generation_of(batch.seq)),
                 tag,
-                mark: known.mark,
+                known,
             };
             judge_batch(segment, &batch, judge, &retires, &mut out).await?;
             let repair = &mut out.repair;
             repair_batch(
                 (segment, s),
-                &batch,
+                (&batch, judge.crash_explains_lost(&batch)),
                 (tag, &retires),
                 &mut out.writes,
                 repair,
@@ -666,8 +757,8 @@ struct Judge {
     /// The batch is the last that its open generation wrote.
     last_of_generation: bool,
     tag: u32,
-    /// The metainfo's high-water mark.
-    mark: u64,
+    /// What the metainfo says: its high-water mark and its `seq`.
+    known: Known,
 }
 
 impl Judge {
@@ -686,7 +777,7 @@ impl Judge {
         let ordered_witness = batch.slots.iter().any(
             |found| matches!(found, Found::Record(record) if record.flags & FLAG_ORDERED != 0),
         );
-        self.last_of_generation && batch.seq > self.mark && !ordered_witness
+        self.last_of_generation && batch.seq > self.known.mark && !ordered_witness
     }
 }
 
@@ -701,6 +792,26 @@ fn resume_after(batch: &BatchScan, index: u16) -> u64 {
         .map_or(0, |record| u64::from(record.offset))
 }
 
+/// Whether the entry of a valid record of the last batch is damaged. An
+/// intact header that the record names has its stamp checked.
+async fn last_entry_damaged<F: LocalStorageFile>(
+    segment: &Segment<F>,
+    record: &Record,
+    (tag, known): (u32, Known),
+) -> Result<bool, OpenError> {
+    Ok(
+        match read_entry(segment, u64::from(record.offset), tag).await? {
+            Some(read) => {
+                if entry_matches(record, &read.entry.header, read.entry.crc) {
+                    known.check_stamp(&read.entry.header)?;
+                }
+                !read.proves(record)
+            }
+            None => true,
+        },
+    )
+}
+
 /// Pass 2 for one batch.
 async fn judge_batch<F: LocalStorageFile>(
     segment: &Segment<F>,
@@ -710,19 +821,24 @@ async fn judge_batch<F: LocalStorageFile>(
     out: &mut Scan,
 ) -> Result<(), OpenError> {
     let Judge {
-        is_last, tag, mark, ..
+        is_last,
+        tag,
+        known,
+        ..
     } = judge;
+    let mark = known.mark;
     let crash_explains_lost = judge.crash_explains_lost(batch);
     for (index, found) in (0u16..).zip(batch.slots.iter()) {
         let record = match *found {
-            Found::Record(record) => record,
             Found::Rebuilt(record) => {
                 out.rebuilt += 1;
                 record
             }
             // Named by a retire record: nothing the caller needs.
-            Found::Lost if retires.contains_key(&(batch.seq, index)) => continue,
-            Found::Lost if crash_explains_lost => {
+            Found::Lost | Found::Headed(_) if retires.contains_key(&(batch.seq, index)) => {
+                continue;
+            }
+            Found::Lost | Found::Headed(_) if crash_explains_lost => {
                 // Torn by a crash: never acknowledged, discarded. The open
                 // retires it before anything vouches for the batch.
                 out.torn.push(Retire {
@@ -733,12 +849,41 @@ async fn judge_batch<F: LocalStorageFile>(
                 });
                 continue;
             }
+            // A `Headed` slot here is acknowledged, and its header still
+            // names it: corruption of a known entry, which a peer can
+            // repair. (Its record is not written back: the header proves no
+            // payload.)
+            Found::Headed(record) => {
+                // The header says where its entry ends: the walk goes on
+                // there.
+                let end = u64::from(record.offset) + EntryHeader::footprint(record.len);
+                out.headed.push((
+                    record.position,
+                    Retire {
+                        batch: batch.seq,
+                        index,
+                        count: batch.count,
+                        resume: end,
+                    },
+                ));
+                record
+            }
+            Found::Record(record) => record,
             Found::Lost => {
                 return Err(OpenError::DoubleFault {
                     batch: batch.seq,
                     index,
                 });
             }
+        };
+        // The last batch's entries are read now: it is where a crash and
+        // corruption look alike, and it holds the latest stamps.
+        let entry_damaged = match *found {
+            Found::Headed(_) => true,
+            Found::Record(_) if is_last => {
+                last_entry_damaged(segment, &record, (tag, known)).await?
+            }
+            _ => false,
         };
         match record.kind {
             Kind::Retire => {}
@@ -747,21 +892,16 @@ async fn judge_batch<F: LocalStorageFile>(
                 end: record.clear_end(),
             }),
             Kind::Put => {
-                // The last batch's entries are read now: it is where a crash
-                // and corruption look alike.
-                let damaged = if is_last && matches!(found, Found::Record(_)) {
-                    match read_entry(segment, u64::from(record.offset), tag).await? {
-                        Some((header, stored, _)) => !entry_matches(&record, &header, stored),
-                        None => true,
-                    }
-                } else {
-                    false
-                };
+                let damaged = entry_damaged;
                 if damaged {
                     // Durable before the batch's records (`Ordered`), or
                     // recorded by the metainfo: the record proves the entry
-                    // was synced.
-                    if record.flags & FLAG_ORDERED != 0 || batch.seq <= mark {
+                    // was synced. A slot read from its header alone got here
+                    // only because no crash explains it.
+                    if matches!(found, Found::Headed(_))
+                        || record.flags & FLAG_ORDERED != 0
+                        || batch.seq <= mark
+                    {
                         out.corrupt.push((record.position, record.id));
                     } else {
                         out.ambiguous.push((record.position, record.id));
@@ -801,13 +941,14 @@ async fn judge_batch<F: LocalStorageFile>(
 /// with one damaged entry is not written, because its valid record is the
 /// only copy of that identity; it is counted as left.
 ///
-/// A batch with a lost slot that no retire record names is not written at
-/// all: its torn slots are retired first. A rebuilt `Ordered` record
+/// A batch with a lost slot that no retire record names, in a batch where
+/// a crash explains a loss, is not written at all: its torn slots are
+/// retired first. A rebuilt `Ordered` record
 /// written back beside them would read as a witness that makes them
 /// corruption, if a crash came before the retire batch is durable.
 async fn repair_batch<F: LocalStorageFile>(
     (segment, segment_index): (&Segment<F>, usize),
-    batch: &BatchScan,
+    (batch, crash_explains_lost): (&BatchScan, bool),
     (tag, retires): (u32, &Retires),
     writes: &mut Vec<BlockWrite>,
     repair: &mut RecordRepair,
@@ -815,8 +956,15 @@ async fn repair_batch<F: LocalStorageFile>(
     let named = |index: usize| {
         u16::try_from(index).is_ok_and(|index| retires.contains_key(&(batch.seq, index)))
     };
-    let unretired_loss = (0..batch.slots.len())
-        .any(|index| matches!(batch.slots[index], Found::Lost) && !named(index));
+    // A slot read from its header alone is torn only where a crash
+    // explains a loss; elsewhere it is corruption, and blocks nothing.
+    let lost = |found: &Found| match found {
+        Found::Lost => true,
+        Found::Headed(_) => crash_explains_lost,
+        Found::Record(_) | Found::Rebuilt(_) => false,
+    };
+    let unretired_loss =
+        (0..batch.slots.len()).any(|index| lost(&batch.slots[index]) && !named(index));
     for (block, slots) in (0u64..).zip(batch.slots.chunks(RECORDS_PER_BLOCK)) {
         if !slots.iter().any(|found| matches!(found, Found::Rebuilt(_))) {
             continue;
@@ -828,7 +976,7 @@ async fn repair_batch<F: LocalStorageFile>(
             writes.push((
                 segment_index,
                 batch.persist_at + block * BLOCK_U64,
-                encode_records(slots.iter().map(Found::record)),
+                encode_records(slots.iter().map(Found::proven)),
             ));
             repair.blocks_written += 1;
         } else {
@@ -853,11 +1001,11 @@ async fn entries_prove<F: LocalStorageFile>(
             _ if retired(at) => {}
             Found::Record(record) => {
                 match read_entry(segment, u64::from(record.offset), tag).await? {
-                    Some((header, stored, _)) if entry_matches(record, &header, stored) => {}
+                    Some(read) if read.proves(record) => {}
                     _ => return Ok(false),
                 }
             }
-            Found::Lost => return Ok(false),
+            Found::Headed(_) | Found::Lost => return Ok(false),
         }
     }
     Ok(true)

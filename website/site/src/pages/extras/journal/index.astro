@@ -45,8 +45,8 @@ const magic = (name: string) => {
 // Every record kind of `enum Kind`, with its byte and its doc.
 const kinds = variantDocs(format, "Kind").map((k) => `${k.value} ${k.name}: ${k.doc.replace(/`/g, "").replace(/\s+/g, " ")}`);
 if (kinds.length === 0) throw new Error("format.rs has no enum Kind");
-const common = (magicName: string) => ({
-  magic: `"${magic(magicName)}" in ASCII: what this structure is.`,
+const common = (magicName?: string) => ({
+  ...(magicName ? { magic: `"${magic(magicName)}" in ASCII: what this structure is.` } : {}),
   version: `The format version, ${VERSION} today.`,
   crc: "CRC32C of every byte before it.",
   kind: kinds.join(" "),
@@ -60,7 +60,7 @@ const common = (magicName: string) => ({
 const geometryFields = fieldDocs(format, "Geometry");
 const layouts = [
   {
-    title: "segment header (blocks 0 and 1)", size: BLOCK, strip: false,
+    title: "segment header (the first block and the last)", size: BLOCK, strip: false,
     fields: encodeLayout(format, "SegmentHeader"),
     docs: { ...common("SEGMENT_MAGIC"), ...fieldDocs(format, "SegmentHeader"), ...geometryFields, journal: "The journal's id: a segment of another journal is never read as ours." },
     tail: "The rest of the block is zeros. Both copies hold the same bytes.",
@@ -68,12 +68,12 @@ const layouts = [
   {
     title: "persist record", size: RECORD, strip: true,
     fields: encodeLayout(format, "Record"),
-    docs: { ...common("ENTRY_MAGIC"), ...fieldDocs(format, "Record") },
+    docs: { ...common(), ...fieldDocs(format, "Record") },
   },
   {
     title: "entry header (then the payload, padded to 8 bytes)", size: RECORD, strip: true,
     fields: encodeLayout(format, "EntryHeader"),
-    docs: { ...common("ENTRY_MAGIC"), ...fieldDocs(format, "EntryHeader"), index: "This entry's index in its batch: the same as its record's.", len: "The payload's length.", tag: "A CRC32C of the journal's id: an entry of another journal never passes for ours.", crc: "CRC32C of the header (this field as zero) and of the payload." },
+    docs: { ...common(), ...fieldDocs(format, "EntryHeader"), index: "This entry's index in its batch: the same as its record's.", len: "The payload's length.", payload_crc: "CRC32C of the payload.", crc: "CRC32C of the 60 bytes before it, started from a CRC32C of the journal's id: an entry of another journal never passes for ours. The entry's persist record holds the same value." },
   },
   {
     title: "metainfo copy (block 0 and block " + COPY_B / BLOCK + " of meta)", size: BLOCK, strip: false,
@@ -86,10 +86,11 @@ const geo = implFields(format, "Default for Geometry", "default");
 const small = implFields(format, "Geometry", "small");
 const mib = (blocks: number) => (blocks * BLOCK) / (1024 * 1024);
 const regions = (g: Record<string, number>) => [
-  { name: "headers", blocks: 2, cls: "r-head" },
+  { name: "header A", blocks: 1, cls: "r-head" },
   { name: "persist log", blocks: g.persist_blocks, cls: "r-persist" },
   { name: "guard gap", blocks: g.gap_blocks, cls: "r-gap" },
   { name: "entry log", blocks: g.entry_blocks, cls: "r-entry" },
+  { name: "header B", blocks: 1, cls: "r-head" },
 ];
 const total = (g: Record<string, number>) => 2 + g.persist_blocks + g.gap_blocks + g.entry_blocks;
 const shapes = [
