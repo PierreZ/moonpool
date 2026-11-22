@@ -432,17 +432,11 @@ async fn write_persist<F: moonpool_core::LocalStorageFile>(
     segments: &[Segment<F>],
     writes: Vec<BlockWrite>,
 ) -> std::io::Result<()> {
-    // A rebuilt record says its entry was persisted, and the entry it was
-    // rebuilt from may be a predecessor's unsynced write still in the page
-    // cache: the entry reaches the disk first, as in a commit. (A crash
-    // between a rewrite and the entries' sync left records naming entries
-    // that never landed: corruption from a crash alone.)
-    let mut synced: Vec<usize> = writes.iter().map(|(at, _, _)| *at).collect();
-    synced.sort_unstable();
-    synced.dedup();
-    for at in synced {
-        segments[at].sync().await?;
-    }
+    // A rebuilt record says its entry was persisted. The entry it was
+    // rebuilt from is on the device: each segment was synced, and its cache
+    // dropped, before the scan read it ([`Segment::open`]). (A record
+    // rebuilt from an entry that never landed is corruption from a crash
+    // alone.)
     for (at, offset, bytes) in writes {
         segments[at].write_durable(offset, bytes).await?;
     }
@@ -556,9 +550,16 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// journal here (no meta file, no segments); whether that is a fresh
     /// node or a lost disk is the caller's to judge.
     ///
-    /// Everything opening reports is durable before it returns: a process
-    /// that restarted without a power loss reads its predecessor's unsynced
-    /// writes back from the page cache, so opening syncs what it keeps.
+    /// Everything opening reports is what the device holds, durable before
+    /// it returns. A process that restarted without a power loss finds its
+    /// predecessor's writes in the page cache: the unsynced ones, and those
+    /// of a commit whose writeback failed (fsyncgate), which the kernel
+    /// marked clean although the device never got them. So opening syncs
+    /// each file, then drops its cached pages, before it reads it: what it
+    /// keeps, it syncs, and what it reads, the device holds. The drop is
+    /// [`StorageFile::drop_cache`](moonpool_core::StorageFile::drop_cache):
+    /// `posix_fadvise(DONTNEED)` on Linux, which the kernel may decline for
+    /// a mapped or locked page, and nothing elsewhere.
     ///
     /// # Errors
     /// The evidence variants of [`OpenError`] when the journal cannot be
@@ -615,12 +616,9 @@ impl<P: LocalStorageProvider> Journal<P> {
             segment.persist_next = *persist_next;
             segment.entry_next = *entry_next;
         }
+        // Whatever opening keeps survives the next power loss: each file was
+        // synced before it was read, and each write since is durable.
         write_persist(&segments, std::mem::take(&mut scanned.writes)).await?;
-        // Whatever opening keeps must survive the next power loss.
-        for segment in &segments {
-            segment.sync().await?;
-        }
-        meta_file.sync().await?;
         let torn = std::mem::take(&mut scanned.torn);
         let meta = begin_generation(&meta_file, meta, scanned.last_batch, torn.is_empty()).await?;
         let generation = meta.open_generation;
@@ -668,6 +666,11 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// it: no recovery, no repair, no sync, nothing created, so a probe never
     /// changes what the next open finds. `Ok(None)` where there is no journal:
     /// no meta file and no segment.
+    ///
+    /// It drops the meta file's clean cached pages first
+    /// ([`StorageFile::drop_cache`](moonpool_core::StorageFile::drop_cache)),
+    /// so a copy whose write failed (fsyncgate) is not read as written. A
+    /// predecessor's unsynced copy may still be read: only an open syncs.
     ///
     /// # Errors
     /// [`OpenError::MetaLost`] when no copy is valid, or when the directory

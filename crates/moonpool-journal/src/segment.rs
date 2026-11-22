@@ -19,7 +19,8 @@ use moonpool_core::{
 
 use crate::format::{BLOCK, BLOCK_U64, Geometry, SegmentHeader, VERSION, usize_of};
 use crate::io::{
-    ReadBytes, block_buf, read_blocks, read_bytes, write_blocks, write_blocks_durable,
+    ReadBytes, block_buf, read_blocks, read_bytes, read_from_device, write_blocks,
+    write_blocks_durable,
 };
 use crate::{JournalId, OpenError};
 
@@ -214,6 +215,9 @@ impl<F: LocalStorageFile> Segment<F> {
         if file.size_in_blocks().await? != geometry.total_blocks() {
             return Err(bad("wrong size"));
         }
+        // Every read of this open, and of the scan after it, comes from
+        // the device: a batch whose commit failed is not read as written.
+        read_from_device(&file).await?;
         let headers = read_blocks(&file, 0, file.buffer(2)?).await?;
         let a = SegmentHeader::decode(&headers.as_slice()[..BLOCK]);
         let b = SegmentHeader::decode(&headers.as_slice()[BLOCK..]);
@@ -322,6 +326,11 @@ pub(crate) async fn named_batches<P: LocalStorageProvider>(
     direct_io: DirectIo,
 ) -> Result<Vec<u64>, OpenError> {
     let file = open_file(provider, path, direct_io).await?;
+    // Defensive: a roll whose header write failed poisons the journal, but
+    // it may have left its headers in the cache only. The device's are the
+    // ones a power loss keeps, so they decide whether this spare aliases a
+    // live segment.
+    read_from_device(&file).await?;
     let headers = read_blocks(&file, 0, file.buffer(2)?).await?;
     let copies = [
         SegmentHeader::decode(&headers.as_slice()[..BLOCK]),

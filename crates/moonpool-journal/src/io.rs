@@ -27,6 +27,22 @@ pub(crate) fn block_buf(len: usize) -> AlignedBuf {
     AlignedBuf::zeroed(len, BLOCK)
 }
 
+/// Make what `file` reads be what its device holds: sync it, then drop its
+/// clean cached pages.
+///
+/// A failed writeback (fsyncgate) leaves pages that the kernel marked clean
+/// although the device never got them. No later sync writes them, and reads
+/// go on returning them, in the next process too, since a restart keeps the
+/// page cache. Opening reads every file through this first, so a batch or a
+/// metainfo copy whose commit failed reads as what a power loss leaves, not
+/// as written. The sync comes first because a dirty page is never dropped:
+/// a predecessor's unsynced write reaches the device, and is then read back
+/// from it. A direct-I/O file has no cache to drop.
+pub(crate) async fn read_from_device<F: LocalStorageFile>(file: &BlockFile<F>) -> io::Result<()> {
+    file.sync_data().await?;
+    file.get_ref().drop_cache().await
+}
+
 /// The `EIO` code (Linux and macOS): the device failed the transfer.
 const EIO: i32 = 5;
 

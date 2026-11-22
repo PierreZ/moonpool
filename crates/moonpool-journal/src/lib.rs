@@ -261,7 +261,14 @@
 //! [`OpenError::UnsupportedVersion`], because each checksum covers the
 //! version field. Opening reads only the last batch's entries; the
 //! journal checks the rest when they are read ([`Journal::read`],
-//! [`Journal::replay`]). Opening syncs what it keeps before it returns.
+//! [`Journal::replay`]). Opening syncs what it keeps before it returns,
+//! and reads only what the device holds: it syncs each file, then drops its
+//! cached pages, before it reads it (on Linux: see
+//! [`StorageFile::drop_cache`](moonpool_core::StorageFile::drop_cache)). A
+//! commit that failed because the
+//! kernel could not write its pages back (fsyncgate) leaves them marked
+//! clean in the page cache, where a restart without a power loss would
+//! otherwise read them as written.
 //!
 //! # Examples and tests
 //!

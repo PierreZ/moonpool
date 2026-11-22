@@ -16,7 +16,7 @@
 use moonpool_core::{BlockFile, LocalStorageFile, LocalStorageProvider, OpenOptions};
 
 use crate::format::{BLOCK, BLOCK_U64, META_COPY_B_AT, META_FILE_BLOCKS, Meta, VERSION};
-use crate::io::{block_buf, read_blocks, write_blocks, write_blocks_durable};
+use crate::io::{block_buf, read_blocks, read_from_device, write_blocks, write_blocks_durable};
 use crate::{JournalId, OpenError};
 
 pub(crate) const META_NAME: &str = "meta";
@@ -91,12 +91,14 @@ impl<F: LocalStorageFile> MetaFile<F> {
         if file.size_in_blocks().await? != META_FILE_BLOCKS {
             return Err(OpenError::MetaLost);
         }
+        // A predecessor's unsynced copy may sit in the page cache (it
+        // restarted without a power loss): it reaches the disk before the
+        // other copy is touched, since two copies in flight at once can both
+        // be torn by one crash. A copy whose write failed may sit there too,
+        // marked clean but never on the device: it is dropped, so the choice
+        // is made on what a power loss keeps.
+        read_from_device(&file).await?;
         let meta_file = Self { file };
-        // A predecessor's unsynced copy may sit in the page cache (its commit
-        // failed, or it restarted without a power loss). It reaches the disk
-        // before the other copy is touched: two copies in flight at once can
-        // both be torn by one crash.
-        meta_file.sync().await?;
         let (meta, stale) = meta_file.choose(journal).await?;
         if let Some(copy) = stale {
             meta_file.write_durable(copy, &meta).await?;
@@ -139,6 +141,11 @@ impl<F: LocalStorageFile> MetaFile<F> {
 
     /// The metainfo of a closed journal, read only: no sync, no repair,
     /// nothing created. `Ok(None)` where there is no meta file.
+    ///
+    /// The clean cached pages are dropped first, so a copy whose write
+    /// failed (fsyncgate) is not read as written. Without a sync, a
+    /// predecessor's unsynced copy may still be read: the open that follows
+    /// makes it durable before it reads it.
     pub async fn peek<P: LocalStorageProvider<File = F>>(
         provider: &P,
         dir: &str,
@@ -153,6 +160,7 @@ impl<F: LocalStorageFile> MetaFile<F> {
         if file.size_in_blocks().await? != META_FILE_BLOCKS {
             return Err(OpenError::MetaLost);
         }
+        file.get_ref().drop_cache().await?;
         let (meta, _) = Self { file }.choose(journal).await?;
         Ok(Some(meta))
     }
@@ -184,10 +192,6 @@ impl<F: LocalStorageFile> MetaFile<F> {
     pub async fn update(&self, meta: &Meta) -> std::io::Result<()> {
         self.write_durable(Copy::A, meta).await?;
         self.write_durable(Copy::B, meta).await
-    }
-
-    pub async fn sync(&self) -> std::io::Result<()> {
-        self.file.sync_data().await
     }
 }
 
