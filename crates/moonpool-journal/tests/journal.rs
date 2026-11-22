@@ -1004,6 +1004,10 @@ fn paper(durability: Option<Durability>) {
         tally.blocks_repaired > 0,
         "no open or scrub ever wrote a rebuilt record back"
     );
+    assert!(
+        tally.restarts_after_failure > 0,
+        "no process ever restarted right after a failed commit"
+    );
 }
 
 /// The crash loop under moonpool's full crash physics, for one durability
@@ -1081,6 +1085,94 @@ fn acknowledged_commits_survive_a_crash() {
                 matches!(journal.state(2), State::Live { .. }),
                 "{durability:?}"
             );
+        }
+    });
+}
+
+/// What a failed commit tries to write: a batch at position 2 (a `len`-byte
+/// payload), or only a new metainfo.
+#[derive(Clone, Copy, Debug)]
+enum Failing {
+    Batch(usize),
+    Meta,
+}
+
+/// The journal at position 2 and its metainfo, after an open.
+fn after_failed(opened: &Result<(J, Recovery), OpenError>, at: &str) -> (bool, Vec<u8>) {
+    let (journal, _) = opened
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{at}: a failed commit must never refuse an open: {error}"));
+    assert!(
+        matches!(journal.state(1), State::Live { .. }),
+        "{at}: the acknowledged batch is kept"
+    );
+    let live = match journal.state(2) {
+        State::Empty => false,
+        State::Live { .. } => true,
+        damaged => panic!("{at}: a write that never landed reads as damage: {damaged:?}"),
+    };
+    (live, journal.meta().to_vec())
+}
+
+/// A commit fails because the kernel could not write its pages back
+/// (fsyncgate): it marks them clean, a later sync is a no-op, and reads go on
+/// returning them, in the next process too. What the restart reads must be
+/// what the device holds: a later power loss never changes it.
+async fn fail_then_restart_then_crash(seed: u64, durability: Durability, failing: Failing) {
+    let at = format!("seed {seed} {durability:?} {failing:?}");
+    let mut sim = sim(seed);
+    let journal = create(&mut sim, durability).await;
+    let journal = put(&mut sim, journal, &[(1, 1, 100)]).await;
+
+    let mut config = StorageConfiguration::fast_local();
+    config.writeback_error_probability = 1.0;
+    config.writeback_error_revert_probability = if seed.is_multiple_of(2) { 0.0 } else { 1.0 };
+    sim.set_storage_config(config);
+    let mut batch = Batch::new();
+    match failing {
+        Failing::Batch(len) => {
+            batch.put(2, id(2, 1), payload(2, 1, len));
+        }
+        Failing::Meta => {
+            batch.set_meta("never durable");
+        }
+    }
+    match commit(&mut sim, journal, batch).await {
+        Err(CommitError::Io { .. }) => {}
+        Err(other) => panic!("{at}: {other}"),
+        Ok(_) => panic!("{at}: every writeback fails, the commit must too"),
+    }
+
+    // The disk is healthy again and the process restarts: no power loss,
+    // the page cache survives.
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let restarted = reopen(&mut sim, durability).await;
+    let (live, meta) = after_failed(&restarted, &format!("{at}, after the restart"));
+    drop(restarted);
+
+    // Then the power is lost: what the restart read must survive it.
+    sim.simulate_crash_for_process(ip(), true);
+    let crashed = reopen(&mut sim, durability).await;
+    let (live_after, meta_after) = after_failed(&crashed, &format!("{at}, after the power loss"));
+    assert!(
+        !live || live_after,
+        "{at}: the restart read position 2 from the page cache, not from the device"
+    );
+    assert_eq!(
+        meta, meta_after,
+        "{at}: the restart read a metainfo the device never held"
+    );
+}
+
+#[test]
+fn a_failed_commit_is_never_read_back_from_the_page_cache() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            for failing in [Failing::Batch(100), Failing::Batch(20_000), Failing::Meta] {
+                for seed in 0..40 {
+                    fail_then_restart_then_crash(seed, durability, failing).await;
+                }
+            }
         }
     });
 }

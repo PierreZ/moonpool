@@ -9,14 +9,14 @@ use std::sync::{Arc, Mutex};
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{Batch, Durability, Id, Journal, OpenError, ReadError};
-use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration};
+use moonpool_sim::{SimStorageProvider, SimWorld, StorageConfiguration, WritebackErrorReporting};
 
 use super::{DIR, JOURNAL, config, id, ip, payload, run, runtime};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum CrashModel {
     /// The paper's: every unsynced sector ends up old or new, plus clean
-    /// crashes and correlated rollbacks.
+    /// crashes and correlated rollbacks, failed syncs and failed writebacks.
     Paper,
     /// Moonpool's full physics on top: sectors lost to garbage, latent read
     /// faults, shorn writes. These destroy what an in-flight sector held,
@@ -30,6 +30,9 @@ pub(crate) struct Tally {
     pub recoveries: usize,
     pub commits: usize,
     pub restarts: usize,
+    /// Restarts without a power loss right after a commit failed: the page
+    /// cache may hold that batch, marked clean, never on the device.
+    pub restarts_after_failure: usize,
     pub open_retries: usize,
     pub torn: u32,
     pub rebuilt: u32,
@@ -75,6 +78,16 @@ fn storage(model: CrashModel, rng: &mut Rng) -> StorageConfiguration {
     config.crash_latent_fault_probability = 0.0;
     config.shorn_write_probability = 0.0;
     config.sync_failure_probability = rng.pick(&[0.0, 0.02, 0.05]);
+    // fsyncgate: a writeback fails and the kernel marks the pages clean, so
+    // a restart without a power loss still reads them. The commit fails;
+    // its batch may read as absent, never as written nor as damage.
+    config.writeback_error_probability = rng.pick(&[0.0, 0.02, 0.05]);
+    config.writeback_error_revert_probability = rng.pick(&[0.0, 0.5, 1.0]);
+    config.writeback_error_reporting = rng.pick(&[
+        WritebackErrorReporting::Errseq,
+        WritebackErrorReporting::OpenedBefore,
+        WritebackErrorReporting::FirstCaller,
+    ]);
     config.unsynced_dir_entry_loss_probability = rng.pick(&[0.0, 0.5, 1.0]);
     if matches!(model, CrashModel::Harsh) {
         config.crash_lost_probability = rng.pick(&[0.02, 0.1, 0.3]);
@@ -96,6 +109,8 @@ struct Ledger {
     /// The batch in flight when the writer stopped.
     pending: Option<Pending>,
     commits: usize,
+    /// Whether the last commit failed.
+    failed: bool,
     /// Rolls onto a recycled spare, over every open.
     onto_spare: u64,
     /// Scrubs that finished, and the blocks they wrote again.
@@ -231,9 +246,11 @@ pub(crate) fn crash_loop(
             if std::env::var("JOURNAL_DEBUG").is_ok() {
                 eprintln!("--- stopped after {budget} steps, restart only: {restart}");
             }
+            let failed = std::mem::take(&mut ledger.lock().expect("ledger").failed);
             if restart {
                 // The process alone dies: the page cache survives.
                 tally.restarts += 1;
+                tally.restarts_after_failure += usize::from(failed);
             } else {
                 sim.simulate_crash_for_process(ip(), true);
             }
@@ -400,6 +417,7 @@ async fn write(mut journal: J, plan: Vec<Pending>, ledger: Shared) {
             );
         }
         if outcome.is_err() {
+            ledger.lock().expect("ledger").failed = true;
             return;
         }
         let scrub = pending.scrub;

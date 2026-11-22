@@ -395,8 +395,14 @@ record names. A rebuilt `Ordered` record is an intact record, which would make
 the torn slot corruption if a crash came before the retire batch is durable.
 **What opening keeps, it syncs**, because a process that
 restarted without a power loss reads its predecessor's unsynced writes from
-the page cache. **A record never reaches the disk before its entry**, so a
-rebuilt record is written only after the entries are synced. **What an open
+the page cache. **What opening reads, the device holds**: a commit that failed
+because the kernel could not write its pages back (fsyncgate) leaves them
+marked clean in the cache, so no sync writes them and a restart would read
+the failed batch as written. The next power loss would then show it as
+`Corrupt`, or refuse the open with `LostBatch`. So an open syncs each file,
+then calls `StorageFile::drop_cache`, before it reads it. **A record never
+reaches the disk before its entry**, so a rebuilt record is written only
+after the entries are synced, which that first sync does. **What an open
 declared the end stays the end**: every open bumps an open generation in the
 metainfo, and a record a crash left unreadable can never read back later as
 evidence.
@@ -430,6 +436,12 @@ acknowledged and what was in flight. They run under two fault models:
 - **Moonpool's full physics:** sectors lost, latent read faults and shorn
   writes on top (`crash_lost_probability`, `crash_latent_fault_probability`,
   `shorn_write_probability`), with failed syncs and lost directory entries.
+
+Both models also fail writebacks (`writeback_error_probability`, with each
+reporting mode) and sometimes restart the process with no power loss right
+after a failed commit. The restart must not read that commit's batch or
+metainfo from the page cache. Before opens dropped the cache, all six loops
+failed on this.
 
 The promise is the same under both: nothing acknowledged is lost, changed or
 reported damaged, and only a `Batched` batch in flight may come back

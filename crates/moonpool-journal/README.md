@@ -86,6 +86,14 @@ journal.commit(batch).await?;
   that retires torn slots raises the high-water mark only once its retire
   batch is durable. The format is version 4: a segment of version 3 (with
   void records) is refused.
+- **An open reads what the device holds.** A commit can fail because the
+  kernel could not write its pages back (fsyncgate). The kernel then marks
+  those pages clean: no later sync writes them, and reads return them, in the
+  next process too. So an open syncs each file, then drops its cached pages
+  (`StorageFile::drop_cache`), before it reads it. A batch whose commit
+  failed then reads as what a power loss leaves, never as written, and never
+  as damage after the next power loss. `Journal::peek_meta` drops the cache
+  too, without a sync.
 - **A misplaced records block is rebuilt, not a lost batch.** A records
   block written at the wrong place (a misdirected write) is found, because
   the first record of a batch names the first entry of its own place. The
@@ -168,11 +176,15 @@ filesystem.
   entry is not written, and `repair_records` repairs the records of
   tombstones and replaced positions;
 - lost batches and lost segments;
+- a commit that fails on a failed writeback (fsyncgate), then a restart with
+  no power loss, then a power loss: the restart never reads the failed batch
+  or metainfo from the page cache;
 - crash loops under two fault models (the paper's sector-atomic model, and
   moonpool's full model with lost, latent and shorn sectors), for each
   durability mode and for a mode drawn again every round, with crashes
   inside recovery, floor raises that recycle segments, rolls onto
-  recycled segments, and scrubs (`repair_records`) cut by a crash.
+  recycled segments, scrubs (`repair_records`) cut by a crash, failed syncs
+  and failed writebacks, and restarts right after a failed commit.
 
 `JOURNAL_CRASH_SEEDS` raises the seed count. `JOURNAL_CRASH_SEED` replays one
 seed.
