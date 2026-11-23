@@ -1,0 +1,49 @@
+name: Nightly simulation
+
+# The journal simulation on many more seeds than a pull request runs. A path
+# that needs several rare faults in one seed shows up once in hundreds or
+# thousands of seeds: the 50 and 500 seeds of the `sim` job of rust.yml see
+# it only by luck. A red run here is a real failing seed, named in the log:
+# replay it with JOURNAL_SIM_SEED.
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      seeds:
+        description: Seeds for each disk of the journal simulation
+        default: "15000"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NIX_CONFIG: |
+    connect-timeout = 60
+    download-attempts = 10
+
+jobs:
+  journal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - name: Journal simulation, many seeds
+        env:
+          JOURNAL_SIM_SEEDS: ${{ inputs.seeds || '15000' }}
+        run: |
+          set -o pipefail
+          mkdir -p target/ci-traces
+          nix develop --command cargo run --release -p moonpool-sim-examples --bin sim-journal 2>&1 | grep -v '^  #' | tee target/ci-traces/nightly-sim-journal.log
+      - name: Upload the report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-sim-journal
+          path: target/ci-traces/
+          if-no-files-found: ignore
+          retention-days: 14

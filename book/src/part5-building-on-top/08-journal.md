@@ -523,6 +523,7 @@ The full simulation is `journal.rs` in `moonpool-sim-examples`
 (`cargo xtask sim run journal`). One process owns the journal.
 `Chaos::Attrition` crashes it over and over with `prob_wipe: 0.0`, since a
 wiped disk is data loss no local journal can recover from.
+The node runs on two disks in turn. On the **faulty disk**,
 `Chaos::Storage(ChaosMode::Random)` runs every fault family of the disk
 underneath but a failed disk, which never answers again. Rot, EIO,
 misdirected and phantom writes are on, and a `JournalStrike` fault injector
@@ -563,9 +564,45 @@ acknowledged, and rebuilds the whole journal when an open refuses. On the
 code before the witness rule, the oracle failed in a few seeds of every 50:
 two faults on a recorded last batch were discarded as a torn commit.
 
+The reporting oracle has a blind spot: with rot always possible, every
+damage report is plausible, also one the journal caused itself. So the node
+runs a second time on an **honest disk** (`Disk::Honest`), which keeps only
+the families that never change bytes a sync reported durable: crashes with
+their torn, lost and shorn sectors, failed syncs and writebacks, short
+transfers, lost directory entries and slow disks. Rot, misdirected and
+phantom writes, EIO (a read that fails with EIO is the medium failing, and
+the journal counts its blocks as damaged) and the strikes are off. Nothing
+on this disk explains damage, so the oracle is strict:
+
+```rust,ignore
+assert_always!(disk == Disk::Faulty, "on an honest disk an open never refuses");
+assert_always!(
+    self.disk == Disk::Faulty || !acknowledged,
+    "on an honest disk an acknowledged entry is never reported damaged"
+);
+```
+
+and the unwitnessed last batch is never voided. The honest disk runs 500
+seeds for the faulty disk's 50, and `Chaos::BuggifyKnobs` spikes the rate of
+failed writebacks on some of them.
+
 A failed sync is an operating error, not a verdict: `CommitError::Io` says
-whether the batch may be durable anyway (`Durable::Unknown`), the journal is
-poisoned, and the node reopens it. `Durable::No` is a promise: no byte of the
+whether the batch may be durable anyway (`Durable::Unknown`), and the journal
+is poisoned. What the node does next is drawn: it opens the journal again in
+place, or dies with the page cache kept (`RebootKind::KillKeepCache`), or
+loses power. After the first two, the cache may still hold the batch of a
+commit whose writeback failed, and the open must not read it as written
+(see "What opening reads, the device holds" above). The run must reach that
+state: the binary fails unless the simulator reports "disk: a kill kept
+sectors that a failed writeback stranded" on the honest disk. With the
+cache drop of the open removed, every run fails in about ten seeds of the
+500. The node once crashed itself with a power loss on every I/O error.
+The simulation had found this bug, and that change made the seeds pass
+without a change to the journal: the simulation then could not see the bug
+for a month. `JOURNAL_SIM_SEEDS` raises the seed count of each disk (a
+nightly workflow runs 15,000) and `JOURNAL_SIM_SEED` replays one seed.
+
+`Durable::No` is a promise: no byte of the
 batch was issued (the commit failed before its first write, for example when
 it could not create its next segment). A failed entries write is always
 `Unknown`, because recovery rebuilds a batch from its first entry, so even a

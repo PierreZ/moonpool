@@ -16,7 +16,7 @@ racing, the attrition preset, the binaries' report-and-exit) lives in
 | `metrics_service.rs` | application metrics through `.metrics_factory()` / `.metric()` |
 | `topology.rs` | failure domains with `.cluster(LocalityConfig, ..)` and machine-scoped attrition |
 | `tonic_grpc.rs` | a tonic service over hyper HTTP/2 under network chaos plus `Chaos::Attrition` |
-| `journal.rs` | a storage engine (`moonpool-journal`) on the simulated disk under crash attrition and `Chaos::Storage(Random)` with a `storage_fault_mask`, with a ledger in the `StateHandle` that outlives reboots |
+| `journal.rs` | a storage engine (`moonpool-journal`) on the simulated disk under crash attrition and `Chaos::Storage(Random)` with a `storage_fault_mask`, with a ledger in the `StateHandle` that outlives reboots; two runs, a faulty disk (damage must be reported) and an honest disk (no damage may be reported) |
 
 ## Adding an example
 
@@ -30,7 +30,9 @@ Three registrations, in one change, or CI never runs it:
 
 Verbosity is `init_sim_tracing(Level)` in `main`; seeds and iteration counts
 are builder calls, not CLI flags (`cargo xtask sim run <name>` passes anything
-after `--` to the binary, but no example parses arguments today). An example
+after `--` to the binary, but no example parses arguments today). The one
+exception is `sim-journal`: `JOURNAL_SIM_SEEDS` raises its seed count for the
+nightly workflow and `JOURNAL_SIM_SEED` replays one seed. An example
 should be reference-quality: factory-created workloads, every assertion
 message stable, a `sometimes` for each outcome it claims to reach, and a
 comment above every buggify site saying why that boundary.

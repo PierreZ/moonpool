@@ -246,7 +246,9 @@ cargo run --release -p moonpool-journal --features compio-providers \
 ```
 
 `crates/moonpool-sim-examples/src/journal.rs` runs the journal inside a full
-simulation, with one node crashed over and over by attrition:
+simulation, with one node crashed over and over by attrition, on a faulty
+disk (damage must be reported, never hidden) and then on an honest disk (no
+damage may be reported on acknowledged data):
 
 ```sh
 cargo xtask sim run journal

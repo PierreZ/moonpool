@@ -1602,7 +1602,8 @@ impl StorageEngine {
     }
 
     /// A kill that keeps the page cache: the process dies, the machine does
-    /// not, so every unsynced write and directory entry lands as written
+    /// not, so every unsynced write and directory entry lands as written,
+    /// and a sector that a failed writeback stranded stays in the cache
     /// (see [`FileImage::keep_cache`]). Otherwise as
     /// [`simulate_crash`](Self::simulate_crash). Draws nothing.
     pub(crate) fn simulate_kill_keep_cache(&mut self, ip: IpAddr) -> StorageActions {
@@ -1638,12 +1639,15 @@ impl StorageEngine {
                 continue;
             };
             let report = if keep_cache {
-                file.image.keep_cache(&path, armed, &weigh)
+                // The page cache lives on, and with it a writeback error no
+                // handle saw yet.
+                file.image.keep_cache(&path, armed)
             } else {
+                // The reboot starts with an empty page cache: no error is
+                // pending.
+                file.writeback.reported = file.writeback.count;
                 file.image.crash(&path, &config, armed, &weigh)
             };
-            // The reboot starts with an empty page cache: no error is pending.
-            file.writeback.reported = file.writeback.count;
             if !keep_cache {
                 self.state.note_torn_whole_copies(ip, &path, &report);
             }

@@ -83,6 +83,22 @@ pub fn finish_or_exit_on_failure(report: &SimulationReport) {
     }
 }
 
+/// Exit non-zero unless the run reached the assertion `msg` at least once.
+///
+/// For a `reachable` assertion that lives in the simulator, not in the
+/// example: one never reached is absent from the report and fails nothing,
+/// so a run that stopped exercising the path would stay green.
+pub fn finish_or_exit_unless_reached(report: &SimulationReport, msg: &str) {
+    let reached = report
+        .assertion_details
+        .iter()
+        .any(|detail| detail.msg == msg && detail.pass_count > 0);
+    if !reached {
+        eprintln!("ERROR: the run never reached \"{msg}\"");
+        process::exit(1);
+    }
+}
+
 /// Print the report and exit non-zero unless exploration found the planted
 /// bug.
 ///

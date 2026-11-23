@@ -90,7 +90,10 @@ pub enum RebootKind {
 
     /// Instant kill that keeps the page cache: the process dies, its
     /// machine does not, so every write not yet synced (and every unsynced
-    /// directory entry) lands as written.
+    /// directory entry) lands as written. A sector that a failed writeback
+    /// stranded (`writeback_error_probability`) stays in the cache: the
+    /// restarted process reads bytes the device never got, and a later
+    /// power loss can take them.
     ///
     /// Peers see connection resets as for [`Crash`](RebootKind::Crash), but
     /// the disk loses nothing. The shard gate downgrades a crash to this
