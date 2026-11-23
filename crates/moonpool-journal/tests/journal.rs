@@ -1054,14 +1054,19 @@ fn a_retired_slot_whose_entry_reads_whole_again_stays_gone() {
             drop(journal);
             // The entry reads whole again; the record stays damaged.
             write_back(&mut sim, entry.0.clone(), entry.1, whole).await;
-            for _ in 0..2 {
+            for round in 0..3 {
+                if round == 2 {
+                    // A second fault on the entry, after the open wrote the
+                    // retired slot back empty: the retire still names it.
+                    flip(&mut sim, entry.0.clone(), entry.1).await;
+                }
                 let (journal, _) = reopen(&mut sim, Durability::Batched).await.expect("opens");
-                assert_eq!(
-                    journal.state(7),
-                    State::Empty,
-                    "later batch: {with_later_batch}"
-                );
-                assert!(matches!(journal.state(6), State::Live { .. }));
+                let at = format!("later batch: {with_later_batch}, round {round}");
+                assert_eq!(journal.state(7), State::Empty, "{at}");
+                assert!(matches!(journal.state(6), State::Live { .. }), "{at}");
+                if with_later_batch {
+                    assert!(matches!(journal.state(8), State::Live { .. }), "{at}");
+                }
                 drop(journal);
             }
         }

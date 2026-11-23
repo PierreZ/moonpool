@@ -233,8 +233,10 @@ struct LedgerState {
     /// The node is writing damaged entries again: a crash, or an I/O
     /// error and the crash it brings, may cut it.
     rewriting: bool,
-    /// The acknowledged entries that the rewrite in flight puts again,
-    /// under their acknowledged ids: a crash can tear these copies.
+    /// The acknowledged entries that a Batched rewrite in flight puts
+    /// again, under their acknowledged ids: a crash can tear these copies
+    /// and keep their records. An Ordered rewrite never leaves a record
+    /// beside a torn entry, so it is not recorded here.
     rewrites: Vec<(u64, Value)>,
     /// Commits so far: each one's version makes its values unique.
     version: u64,
@@ -458,7 +460,7 @@ async fn live(ctx: &SimContext, ledger: &Ledger, disk: Disk) -> Ended {
         }
     };
     note_recovery(ctx, &recovery).await;
-    if let Err(error) = reconcile(ctx, &mut journal, ledger, disk).await {
+    if let Err(error) = reconcile(ctx, &mut journal, ledger, (disk, durability)).await {
         return Ended::Commit(error);
     }
     run(ctx, journal, ledger).await
@@ -564,7 +566,7 @@ struct Expected<'a> {
     /// What a commit that reported `Durable::No` tried to write.
     absent_puts: &'a [(u64, Value)],
     last: &'a LastBatch,
-    /// The acknowledged entries a cut rewrite was putting again.
+    /// The acknowledged entries a cut Batched rewrite was putting again.
     rewrites: &'a [(u64, Value)],
     disk: Disk,
 }
@@ -618,7 +620,7 @@ impl Expected<'_> {
                     // acknowledged one is whole on the device, unless the
                     // node was writing it again when the crash came: the
                     // copy in flight carries the acknowledged id, and a
-                    // Batched journal keeps a record beside a torn entry.
+                    // Batched commit keeps a record beside a torn entry.
                     let in_rewrite = self
                         .rewrites
                         .iter()
@@ -661,19 +663,18 @@ async fn reconcile(
     ctx: &SimContext,
     journal: &mut Journal<SimStorageProvider>,
     ledger: &Ledger,
-    disk: Disk,
+    (disk, durability): (Disk, Durability),
 ) -> Result<(), CommitError> {
     if ledger.with(|state| state.rewriting) {
         assert_reachable!("a reboot cut the rewrite of a damaged entry");
     }
-    let (acked, floor, meta, mut pending, last, rewrites) = ledger.with(|state| {
+    let (acked, floor, meta, mut pending, last) = ledger.with(|state| {
         (
             state.acked.clone(),
             state.floor,
             state.meta.clone(),
             state.pending.clone().unwrap_or_default(),
             state.last.on(disk),
-            state.rewrites.clone(),
         )
     });
     let absent = pending.known_absent;
@@ -710,6 +711,7 @@ async fn reconcile(
             });
         }
     };
+    let rewrites = ledger.with(|state| state.rewrites.clone());
     let expected = Expected {
         acked: &acked,
         pending: &pending,
@@ -736,7 +738,15 @@ async fn reconcile(
         );
     }
     if !rewrite.is_empty() || !clear.is_empty() {
-        repair(ctx, journal, ledger, (&rewrite, &clear), &mut found).await?;
+        let batched = durability == Durability::Batched;
+        repair(
+            ctx,
+            journal,
+            ledger,
+            (&rewrite, &clear, batched),
+            &mut found,
+        )
+        .await?;
     }
     ledger.with(|state| {
         state.acked = found;
@@ -763,7 +773,7 @@ async fn repair(
     ctx: &SimContext,
     journal: &mut Journal<SimStorageProvider>,
     ledger: &Ledger,
-    (rewrite, clear): (&[(u64, Value)], &[u64]),
+    (rewrite, clear, batched): (&[(u64, Value)], &[u64], bool),
     found: &mut BTreeMap<u64, Value>,
 ) -> Result<(), CommitError> {
     // The metainfo records the repair batch: it is witnessed.
@@ -778,7 +788,15 @@ async fn repair(
     batch.set_meta(journal.meta().to_vec());
     ledger.with(|state| {
         state.rewriting = true;
-        state.rewrites = rewrite.to_vec();
+        // Copies an earlier cut rewrite tore stay torn until a rewrite
+        // completes, so the list only grows here.
+        if batched {
+            for entry in rewrite {
+                if !state.rewrites.contains(entry) {
+                    state.rewrites.push(entry.clone());
+                }
+            }
+        }
     });
     // A crash in the middle of the rewrite: the open after it must
     // still report the damaged entry, or return the new copy, never
