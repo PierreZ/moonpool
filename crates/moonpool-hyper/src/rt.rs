@@ -123,13 +123,32 @@ fn anchor() -> Instant {
 /// `saturating_duration_since`) is pure `Duration` arithmetic that never
 /// touches the missing clock, so the timer keeps running on provider time
 /// exactly as on native targets.
+///
+/// std offers no safe way to build an `Instant` without a clock, so this is
+/// the one place that relies on std's private layout. The layout is checked
+/// twice: size and alignment at compile time, and at run time that the
+/// minted value behaves as the zero `Instant` (nothing lies before it, and
+/// arithmetic from it is exact). A std change that broke either check
+/// panics here, at timer creation, instead of handing hyper a wrong clock.
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 fn anchor() -> Instant {
+    const _: () = {
+        assert!(size_of::<Instant>() == size_of::<Duration>());
+        assert!(align_of::<Instant>() == align_of::<Duration>());
+    };
     // SAFETY: on wasm32-unknown-unknown `std::time::Instant` is
-    // `struct Instant(Duration)`, so `Duration::ZERO`'s bit pattern is a valid
-    // `Instant`. `transmute` checks the sizes at compile time: a std layout
-    // change that altered the size fails this build rather than miscompiling.
-    unsafe { std::mem::transmute::<Duration, Instant>(Duration::ZERO) }
+    // `struct Instant(Duration)` (`std::sys::time::unsupported`), so
+    // `Duration::ZERO`'s bit pattern is a valid `Instant`. Size and alignment
+    // are asserted above; the behaviour is asserted below.
+    let zero = unsafe { std::mem::transmute::<Duration, Instant>(Duration::ZERO) };
+    let probe = Duration::from_millis(1500);
+    assert!(
+        zero.checked_sub(Duration::from_nanos(1)).is_none()
+            && (zero + probe).saturating_duration_since(zero) == probe,
+        "std::time::Instant is no longer a Duration on this target: \
+         HyperTimer cannot mint its anchor"
+    );
+    zero
 }
 
 impl<T: TimeProvider> hyper::rt::Timer for HyperTimer<T> {

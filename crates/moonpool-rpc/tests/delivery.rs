@@ -89,6 +89,24 @@ async fn listen(config: RpcConfig) -> (RpcHandle<TokioProviders>, Driver) {
     listen_at("127.0.0.1:0", config).await
 }
 
+/// Listen again at the address a stopped runtime used. The old listener
+/// closes when its driver task ends, so a short wait covers a slow close;
+/// an address that stays taken fails the test, never skips its half.
+async fn relisten(
+    address: std::net::SocketAddr,
+    config: RpcConfig,
+) -> (RpcHandle<TokioProviders>, Driver) {
+    let mut last = None;
+    for _ in 0..100 {
+        match RpcDriver::listen(TokioProviders::new(), &address.to_string(), config.clone()).await {
+            Ok((driver, rpc)) => return (rpc, tokio::spawn(driver.run())),
+            Err(error) => last = Some(error),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("could not listen again at {address}: {last:?}");
+}
+
 /// A client-only runtime upgrading with `upgrade`, spawned on Tokio.
 ///
 /// A macro, not a generic function: the session upgrade traits do not
@@ -419,15 +437,7 @@ async fn failure_monitor_separates_disconnects_addresses_and_endpoints() {
     );
 
     // Same address, new incarnation.
-    let Ok((restarted, restarted_driver)) =
-        RpcDriver::listen(TokioProviders::new(), &address.to_string(), fast())
-            .await
-            .map(|(driver, rpc)| (rpc, tokio::spawn(driver.run())))
-    else {
-        eprintln!("could not rebind {address}; skipping the restart half");
-        client_driver.abort();
-        return;
-    };
+    let (restarted, restarted_driver) = relisten(address, fast()).await;
     let (_again, wk_again) = restarted
         .register_well_known::<Echo>(WellKnownId::new(1), AccessClass::Public)
         .expect("register well-known again");
@@ -770,15 +780,7 @@ async fn a_clean_close_is_no_failure_and_watchers_probe() {
     // The peer comes back while the address is failed and has no
     // connection. A new watcher probes it, so the verdict changes and the
     // wait for a sustained failure does not end.
-    let Ok((back, back_driver)) =
-        RpcDriver::listen(TokioProviders::new(), &address.to_string(), fast())
-            .await
-            .map(|(driver, rpc)| (rpc, tokio::spawn(driver.run())))
-    else {
-        eprintln!("could not rebind {address}; skipping the recovery half");
-        client_driver.abort();
-        return;
-    };
+    let (back, back_driver) = relisten(address, fast()).await;
     // Without a watcher, nothing dials: the verdict stays.
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(client.stats().expect("running").dials, dials);

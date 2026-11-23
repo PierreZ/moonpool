@@ -859,12 +859,38 @@ impl<P: ProviderBundle> SimulationBuilder<P> {
     /// iteration, because most registries have no reset, so a reused instance
     /// would make seed 50 report the sum of fifty runs.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use moonpool_sim::{
+    /// #     MetricSample, MetricsSource, Process, SimContext, SimulationBuilder,
+    /// #     SimulationResult, Workload,
+    /// # };
+    /// # // Stand-ins: `PrometheusSource` is in moonpool-prometheus.
+    /// # #[derive(Default)]
+    /// # struct PrometheusSource;
+    /// # impl MetricsSource for PrometheusSource {
+    /// #     fn collect(&self) -> Vec<MetricSample> { Vec::new() }
+    /// # }
+    /// # struct MyNode;
+    /// # impl MyNode { fn new() -> Self { Self } }
+    /// # #[async_trait::async_trait]
+    /// # impl Process for MyNode {
+    /// #     fn name(&self) -> &str { "node" }
+    /// #     async fn run(&mut self, _: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
+    /// # #[derive(Default)]
+    /// # struct MyWorkload;
+    /// # #[async_trait::async_trait]
+    /// # impl Workload for MyWorkload {
+    /// #     fn name(&self) -> &str { "workload" }
+    /// #     async fn run(&mut self, _: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # }
     /// SimulationBuilder::new()
     ///     .metrics_factory(|_ip| Arc::new(PrometheusSource::default()))
     ///     .processes(3, || Box::new(MyNode::new()))
     ///     .workload(MyWorkload::default())
     ///     .run()?;
+    /// # Ok::<(), moonpool_sim::SimulationError>(())
     /// ```
     ///
     /// Metric values are reported, never used to steer the simulation: a

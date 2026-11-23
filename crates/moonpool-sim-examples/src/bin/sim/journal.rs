@@ -28,11 +28,16 @@ use moonpool_sim_examples::support::{finish_or_exit_on_failure, finish_or_exit_u
 /// open takes a failed commit for a written one (fsyncgate).
 const STRANDED_KEPT: &str = "disk: a kill kept sectors that a failed writeback stranded";
 
-/// The number in the environment variable `name`, if it holds one.
+/// The number in the environment variable `name`, if it is set. A value
+/// that is set but is not a number stops the run: falling back to the
+/// default would run other seeds than the ones asked for, in silence.
 fn env<T: std::str::FromStr>(name: &str) -> Option<T> {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
+    let value = std::env::var(name).ok()?;
+    if let Ok(number) = value.trim().parse() {
+        return Some(number);
+    }
+    eprintln!("{name}={value:?} is not a number");
+    std::process::exit(2);
 }
 
 /// The seeds each disk runs: `JOURNAL_SIM_SEEDS`, or `default`.

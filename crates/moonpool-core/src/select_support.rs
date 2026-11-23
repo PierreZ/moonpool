@@ -44,6 +44,16 @@ pub fn set_select_offset_override(source: Option<SelectOffsetFn>) {
     OFFSET_OVERRIDE.with(|cell| cell.set(source));
 }
 
+/// Whether a branch-offset source is installed on the current thread.
+///
+/// moonpool-sim checks it each time its executor starts a drive: a
+/// simulation whose `select!` drew from the entropy fallback would not
+/// replay from its seed.
+#[must_use]
+pub fn select_offset_override_installed() -> bool {
+    OFFSET_OVERRIDE.with(|cell| cell.get().is_some())
+}
+
 /// Draw the branch start offset for one `select!` execution.
 ///
 /// Not part of the public API: only `select!` expansions call this.
@@ -100,6 +110,8 @@ mod tests {
         set_select_offset_override(Some(always_five));
         assert_eq!(select_offset(8), 5);
         assert_eq!(select_offset(3), 2); // 5 % 3
+        assert!(select_offset_override_installed());
         set_select_offset_override(None);
+        assert!(!select_offset_override_installed());
     }
 }

@@ -392,18 +392,13 @@ fn spec() -> TraceCheck {
     TraceCheck::new(dir, "PaxosTrace")
 }
 
-/// Whether TLC can run here (`tlc`, in the nix dev shell); a missing TLC
-/// fails only in CI.
-fn tlc_or_skip() -> bool {
-    if spec().tlc_available() {
-        return true;
-    }
+/// Fail the test when TLC (`tlc`, in the nix dev shell) cannot run here:
+/// a missing checker is a failure, never a skip.
+fn require_tlc() {
     assert!(
-        std::env::var_os("CI").is_none(),
-        "TLC is missing in CI: run the tests in the nix dev shell"
+        spec().tlc_available(),
+        "TLC (`tlc`) is missing: run the tests in the nix dev shell"
     );
-    eprintln!("skipped: TLC (`tlc`) is not installed");
-    false
 }
 
 /// A ballot, a value or an acceptor as a TLA+ integer.
@@ -473,9 +468,7 @@ fn short<const MUTANT: bool>() -> Walk<Paxos<MUTANT>> {
 /// the run is a step of the spec. The correct protocol passes both.
 #[test]
 fn tlc_accepts_the_walks_of_the_correct_protocol() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     for seed in 1..=3 {
         let run = short::<false>()
             .replay(seed)
@@ -494,9 +487,7 @@ fn tlc_accepts_the_walks_of_the_correct_protocol() {
 /// acceptor that forgot its promise accepts, or promises, below it.
 #[test]
 fn tlc_rejects_a_walk_of_the_mutant_that_the_oracle_passed() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let mut rejected = None;
     for seed in 1..=10 {
         let Ok(run) = short::<true>().replay(seed) else {
@@ -555,9 +546,7 @@ fn tlc_names_the_accept_below_a_lost_promise() {
         let steps: Vec<Step> = run.events().copied().collect();
         (spec().check(&trace(steps.iter())).expect("verdict"), steps)
     }
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let (correct, steps) = verdict::<false>();
     assert_eq!(correct, Verdict::Accepted, "{steps:?}");
     assert!(!steps.iter().any(|s| matches!(s, Step::Accept { .. })));

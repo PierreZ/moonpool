@@ -440,12 +440,17 @@ async fn restart_scenario() {
     // refusal I2 gives its resent copy can only say `MaybeExecuted`: it
     // proves nothing about an attempt that already left.
     assert!(sessions_closed(&b).await, "B sees I1's session close");
-    let Some((_a2, _second_boot)) = boot(&address.to_string(), "i2", second_calls.clone()).await
-    else {
-        eprintln!("could not rebind {address}; skipping");
-        b_driver.abort();
-        return;
-    };
+    // The old listener closes when its driver task ends; a short wait
+    // covers a slow close. An address that stays taken fails the test.
+    let mut second = None;
+    for _ in 0..100 {
+        second = boot(&address.to_string(), "i2", second_calls.clone()).await;
+        if second.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let (_a2, _second_boot) = second.unwrap_or_else(|| panic!("could not boot again at {address}"));
 
     // I1 is refused, terminally; it never reaches I2's handler, even as a
     // reliable call.

@@ -2,8 +2,8 @@
 //! rejected one with the first event that does not match, a broken
 //! invariant, and a spec TLC cannot read.
 //!
-//! The tests need TLC (`tlc`, in the nix dev shell). Without it they are
-//! skipped, except in CI, where they fail.
+//! The tests need TLC (`tlc`, in the nix dev shell). Without it they
+//! fail: a missing checker is never a skip.
 
 use std::path::PathBuf;
 
@@ -17,17 +17,13 @@ fn check() -> TraceCheck {
     TraceCheck::new(spec_dir(), "CounterTrace")
 }
 
-/// Whether TLC can run here; a missing TLC fails only in CI.
-fn tlc_or_skip() -> bool {
-    if check().tlc_available() {
-        return true;
-    }
+/// Fail the test when TLC (`tlc`, in the nix dev shell) cannot run here:
+/// a missing checker is a failure, never a skip.
+fn require_tlc() {
     assert!(
-        std::env::var_os("CI").is_none(),
-        "TLC is missing in CI: run the tests in the nix dev shell"
+        check().tlc_available(),
+        "TLC (`tlc`) is missing: run the tests in the nix dev shell"
     );
-    eprintln!("skipped: TLC (`tlc`) is not installed");
-    false
 }
 
 /// One `inc` event per value, in order.
@@ -41,9 +37,7 @@ fn incs(values: &[i64]) -> Trace {
 
 #[test]
 fn a_trace_the_spec_allows_is_accepted() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     assert_eq!(
         check().check(&incs(&[1, 2, 3])).expect("verdict"),
         Verdict::Accepted
@@ -56,9 +50,7 @@ fn a_trace_the_spec_allows_is_accepted() {
 
 #[test]
 fn a_rejection_names_the_first_event_that_does_not_match() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let verdict = check().check(&incs(&[1, 2, 4, 5])).expect("verdict");
     let Verdict::Rejected(rejection) = verdict else {
         panic!("a jump from 2 to 4 is not a step of the spec: {verdict:?}");
@@ -69,9 +61,7 @@ fn a_rejection_names_the_first_event_that_does_not_match() {
 
 #[test]
 fn a_rejection_at_the_first_event_has_no_state() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let mut trace = incs(&[1]);
     trace.event("skip", Vec::<(String, Value)>::new());
     let verdict = check().check(&incs(&[7])).expect("verdict");
@@ -90,9 +80,7 @@ fn a_rejection_at_the_first_event_has_no_state() {
 
 #[test]
 fn a_broken_invariant_names_it_and_the_matched_events() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let verdict = check().check(&incs(&[1, 2, 3, 4, 5])).expect("verdict");
     let Verdict::InvariantViolated {
         invariant,
@@ -109,9 +97,7 @@ fn a_broken_invariant_names_it_and_the_matched_events() {
 
 #[test]
 fn a_spec_tlc_cannot_read_is_an_error() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let error = TraceCheck::new(spec_dir(), "Missing")
         .check(&incs(&[1]))
         .expect_err("there is no Missing.cfg");
@@ -135,9 +121,7 @@ fn a_missing_tlc_is_reported() {
 
 #[test]
 fn a_negative_integer_is_readable_by_tlc() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let mut trace = Trace::new();
     trace.event("inc", [("x", Value::Int(1)), ("delta", Value::Int(-1))]);
     assert_eq!(check().check(&trace).expect("verdict"), Verdict::Accepted);
@@ -145,9 +129,7 @@ fn a_negative_integer_is_readable_by_tlc() {
 
 #[test]
 fn parallel_checks_do_not_race() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let threads: Vec<_> = (0..6)
         .map(|_| std::thread::spawn(|| check().check(&incs(&[1, 2]))))
         .collect();
@@ -223,9 +205,7 @@ fn a_file_named_like_the_wrapper_is_refused() {
 
 #[test]
 fn a_sample_trace_beside_the_spec_is_replaced() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     // A sample that would reject every trace: the check must not read it.
     let copy = SpecCopy::new(
         "sample",
@@ -245,9 +225,7 @@ fn a_sample_trace_beside_the_spec_is_replaced() {
 
 #[test]
 fn a_user_constraint_does_not_hide_the_rejected_event() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     // A configuration names a constraint: the trace spec gets one more
     // definition before its end line.
     let trace_spec = std::fs::read_to_string(spec_dir().join("CounterTrace.tla"))
@@ -269,9 +247,7 @@ fn a_user_constraint_does_not_hide_the_rejected_event() {
 
 #[test]
 fn a_configuration_with_block_comments_is_read() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let copy = SpecCopy::new(
         "comments",
         "(* the counter (* nested *) INVARIANT Hidden *)\n\
@@ -290,9 +266,7 @@ fn a_configuration_with_block_comments_is_read() {
 
 #[test]
 fn a_spec_may_define_its_own_int() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     // The trace spec extends the trace module. The trace module keeps
     // `Integers` local, so the spec's own `Int` is the only one, and it
     // forbids x = 2.
@@ -324,9 +298,7 @@ fn a_spec_may_define_its_own_int() {
 
 #[test]
 fn a_temporary_folder_with_a_space_works() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let root = std::env::temp_dir().join(format!("moonpool tla space {}", std::process::id()));
     std::fs::create_dir_all(&root).expect("temporary folder");
     let verdict = check().temp_dir(&root).check(&incs(&[1, 2]));

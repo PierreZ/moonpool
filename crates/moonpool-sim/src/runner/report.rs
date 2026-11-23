@@ -473,9 +473,11 @@ impl SimulationReport {
     /// ([`convergence_timeout`](Self::convergence_timeout)). Use it in every
     /// simulation binary, so that CI fails on each of these:
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn finish(report: &moonpool_sim::SimulationReport) {
     /// report.eprint();
     /// std::process::exit(report.exit_code());
+    /// # }
     /// ```
     #[must_use]
     pub fn exit_code(&self) -> i32 {

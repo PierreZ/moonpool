@@ -92,6 +92,10 @@ jobs:
       # and prometheus facade features too.
       - name: Run the metastable retry-storm example test
         run: nix develop --command cargo nextest run -p moonpool --features sim,hyper,prometheus --example metastable_grpc_retry_storm
+      # nextest skips doctests: every crate's doc examples run here, so a
+      # documented example that stops compiling fails the PR, not the release.
+      - name: Doctests (workspace)
+        run: nix develop --command cargo test --workspace --doc
       # On failure, print the hung tests' stacks into the log and upload them
       # with nextest's JUnit report (every failing test's output) so a
       # failure can be debugged from the run alone.
@@ -187,13 +191,6 @@ jobs:
           # Only what the features add (the rest runs in the test job):
           # the tests/tls.rs and tests/mtls.rs binaries and the TLS unit tests.
           nix develop --command cargo nextest run -p moonpool-rpc --features tls-pki -E 'binary(tls) | binary(mtls) | test(/tls::/)'
-      # nextest skips doctests; the RPC crate's examples and compile-fail
-      # doctests (derive included) run here.
-      - name: moonpool-rpc doctests
-        run: nix develop --command cargo test -p moonpool-rpc --features derive --doc
-      # nextest skips doctests; the walk's worked example is one.
-      - name: moonpool-walk doctests
-        run: nix develop --command cargo test -p moonpool-walk --doc
       # The journal on the real filesystem (TokioStorageProvider): write,
       # restart, rot an entry on disk, repair. Self-checking.
       - name: moonpool-journal real-filesystem example
@@ -202,24 +199,15 @@ jobs:
       # runners give noisy I/O, so the numbers are printed, never checked.
       - name: moonpool-journal benchmark (smoke)
         run: nix develop --command cargo run -p moonpool-journal --example bench -- --duration 1 --writers 2
-      - name: Build without any rustflags (no tokio_unstable required)
-        run: |
-          # Issue #151 acceptance: a consumer on stable with no .cargo/config.toml
-          # rustflags must be able to build every published crate.
-          RUSTFLAGS="" nix develop --command cargo check \
-            -p moonpool-assertions \
-            -p moonpool-buggify \
-            -p moonpool-core \
-            -p moonpool-explorer \
-            -p moonpool-hyper \
-            -p moonpool-journal \
-            -p moonpool-prometheus \
-            -p moonpool-rpc \
-            -p moonpool-rpc-derive \
-            -p moonpool-sim \
-            -p moonpool-walk \
-            -p moonpool-tla \
-            -p moonpool
+      # Package every published crate (publish = false crates are left out)
+      # and build each one from its .crate, the way crates.io will see it:
+      # a file missing from `include`, a path dependency without a version or
+      # a manifest crates.io refuses fails here, not during the release.
+      # RUSTFLAGS is empty for issue #151: a consumer on stable with no
+      # .cargo/config.toml rustflags must be able to build every published
+      # crate.
+      - name: Package and build the published crates
+        run: RUSTFLAGS="" nix develop --command cargo package --workspace
       - name: Lean production dependency tree excludes sim/explorer
         run: |
           tree=$(nix develop --command cargo tree -p moonpool --no-default-features --features tokio -e no-dev)

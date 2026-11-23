@@ -101,3 +101,9 @@ required-features = ["prost"]
 
 [lints]
 workspace = true
+
+# docs.rs documents the typed-interface macro and the TLS sessions, which are
+# off by default. `compio-providers` only runs a test, so it stays off.
+[package.metadata.docs.rs]
+features = ["derive", "tls", "tls-pki"]
+rustdoc-args = ["--cfg", "docsrs"]
