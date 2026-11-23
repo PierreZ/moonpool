@@ -79,7 +79,7 @@ use moonpool_journal::{
     Batch, CommitError, Durability, Durable, Geometry, ID_SIZE, Id, Journal, JournalConfig,
     JournalId, OpenError, Recovery,
 };
-use moonpool_journal::{Layout, ReadError};
+use moonpool_journal::{Layout, ReadError, State};
 use moonpool_sim::{
     FaultContext, FaultInjector, Process, RandomProvider, RebootKind, SimContext,
     SimStorageProvider, SimulationResult, StorageFault, StorageFaultMask, StorageProvider,
@@ -711,6 +711,30 @@ async fn reconcile(
             });
         }
     };
+    if disk == Disk::Honest {
+        // Only a crash damages an entry on this disk, and a crash tears
+        // only what no sync made durable: never a synced entry, so never
+        // `Corrupt`. A torn entry beside a kept record is `Ambiguous` until
+        // the node commits a batch of its own, whatever batches the
+        // journal's opens wrote in between.
+        for (position, read) in &replay {
+            if read.is_err() {
+                let state = journal.state(*position);
+                assert_always!(
+                    matches!(state, State::Ambiguous { .. }),
+                    "on an honest disk damage is always ambiguous",
+                    { "position" => *position, "state" => format!("{state:?}"), "last_batch" => journal.last_batch() }
+                );
+            }
+        }
+        for (position, state) in journal.positions() {
+            assert_always!(
+                !matches!(state, State::Corrupt { .. }),
+                "on an honest disk no entry is ever reported corrupt",
+                { "position" => position, "last_batch" => journal.last_batch() }
+            );
+        }
+    }
     let rewrites = ledger.with(|state| state.rewrites.clone());
     let expected = Expected {
         acked: &acked,

@@ -32,7 +32,7 @@ pub const MAX_BATCH_RECORDS: usize = u16::MAX as usize;
 /// Largest caller metainfo, in bytes: one block less the copy's own fields.
 pub const META_MAX: usize = META_CRC_AT - META_BYTES_AT;
 
-const META_BYTES_AT: usize = 80;
+const META_BYTES_AT: usize = 88;
 const META_CRC_AT: usize = BLOCK - 4;
 
 /// Where metainfo copy B lives in the meta file: far from copy A, so one
@@ -47,7 +47,9 @@ const META_MAGIC: u32 = u32::from_le_bytes(*b"MPJM");
 /// 4: a retire record names a dead slot; the void record is gone.
 /// 5: segment header copy B is the last block of the file; an entry header
 ///    has its own CRC apart from its payload's, and a metainfo stamp.
-pub(crate) const VERSION: u16 = 5;
+/// 6: the metainfo names the first batch whose damage a crash may explain
+///    (`ambiguous`), so a later open's own batches leave it ambiguous.
+pub(crate) const VERSION: u16 = 6;
 
 const _: () = assert!(BLOCK.is_multiple_of(RECORD_SIZE));
 const _: () = assert!(RECORDS_PER_BLOCK == 64);
@@ -623,7 +625,8 @@ pub(crate) fn last_batch_of(generation: u64) -> u64 {
 /// ```text
 ///  0 u32 magic   6 u8 copy      24 u64 seq     40 u64 last_batch   64 u64 open_last
 ///  4 u16 version 8 u128 journal 32 u64 floor   48 geometry          72 u32 open_generation
-///                                                                   76 u32 len, 80 bytes..
+///                                                                   76 u32 len
+///                                                                   80 u64 ambiguous, 88 bytes..
 ///                                                                 4092 u32 crc
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -643,6 +646,13 @@ pub(crate) struct Meta {
     /// numbered above it was invisible to that open (torn, or a latent
     /// sector) and the log moved on: it is garbage if it ever reads back.
     pub open_last: u64,
+    /// The first batch whose damaged entries a crash may explain (0: none):
+    /// an open found an entry of it damaged beside a valid record, in a
+    /// `Batched` batch that nothing had witnessed, and no batch of the
+    /// caller has committed since. Every batch from it on is judged as
+    /// unwitnessed for that damage, whatever the high-water mark says: the
+    /// opens' own batches and mark raises are not the caller's.
+    pub ambiguous: u64,
     pub geometry: Geometry,
     pub bytes: Vec<u8>,
 }
@@ -662,6 +672,7 @@ impl Meta {
         put_u32(block, 52, self.geometry.gap_blocks);
         put_u32(block, 56, self.geometry.entry_blocks);
         put_u64(block, 64, self.open_last);
+        put_u64(block, 80, self.ambiguous);
         put_u32(block, 72, self.open_generation);
         put_u32(
             block,
@@ -698,6 +709,7 @@ impl Meta {
             floor: get_u64(block, 32),
             last_batch: get_u64(block, 40),
             open_last: get_u64(block, 64),
+            ambiguous: get_u64(block, 80),
             open_generation: get_u32(block, 72),
             geometry: Geometry {
                 persist_blocks: get_u32(block, 48),
@@ -784,6 +796,7 @@ mod tests {
             last_batch: 2,
             open_generation: 3,
             open_last: 2,
+            ambiguous: 2,
             geometry: Geometry::small(),
             bytes: b"state".to_vec(),
         };
@@ -874,6 +887,7 @@ mod tests {
             last_batch: 0,
             open_generation: 1,
             open_last: 0,
+            ambiguous: 0,
             geometry: Geometry::small(),
             bytes: vec![1, 2],
         };

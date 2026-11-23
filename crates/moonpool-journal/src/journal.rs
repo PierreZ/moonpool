@@ -101,7 +101,9 @@ pub enum State {
     /// The last batch of a [`Durability::Batched`] journal: a damaged entry
     /// beside an intact persist record is a crash or corruption, and nothing
     /// local tells which. Leave it (it becomes [`State::Corrupt`] once
-    /// another batch commits) or clear it.
+    /// another batch of the caller commits) or clear it. The metainfo
+    /// records it, so later opens, and the batches they write, keep it
+    /// ambiguous.
     Ambiguous {
         /// Its identity, from the persist record.
         id: Id,
@@ -125,7 +127,6 @@ struct Damage {
     ambiguous: Vec<(u64, Id)>,
     /// Slots judged from their entry header alone, by position.
     headed: Vec<(u64, Retire)>,
-    last_batch: u64,
 }
 
 /// What opening found and did.
@@ -265,9 +266,9 @@ pub struct Journal<P: LocalStorageProvider> {
     index: BTreeMap<u64, Located>,
     /// The last batch in the log (0: none).
     last_batch: u64,
-    /// The batch whose damaged entries are still ambiguous: the last one at
-    /// open, until the caller's next batch commits.
-    ambiguous_batch: Option<u64>,
+    /// The first batch whose damaged entries are still ambiguous (the
+    /// metainfo's `ambiguous`), until the caller's next batch commits.
+    ambiguous_from: Option<u64>,
     /// Slots `(batch, index)` whose entry a read or a replay found damaged.
     /// A batch that replaces, clears or drops such a position retires the
     /// slot, as it does a slot the open found damaged.
@@ -534,10 +535,16 @@ async fn write_persist<F: moonpool_core::LocalStorageFile>(
 /// names yet, because a slot at or below the mark whose record and entry
 /// are both damaged is corruption. The retire batch's own commit then
 /// records itself as the mark, once it is durable.
+///
+/// The metainfo also records `ambiguous`, the first batch in which the scan
+/// found an entry that a crash may have torn beside its record (0: none).
+/// The mark this open raises, and the batches it writes, prove nothing about
+/// that entry: it stays [`State::Ambiguous`] at every later open, until a
+/// batch of the caller commits.
 async fn begin_generation<F: moonpool_core::LocalStorageFile>(
     meta_file: &MetaFile<F>,
     meta: Meta,
-    last_batch: u64,
+    (last_batch, ambiguous): (u64, u64),
     raise_mark: bool,
 ) -> Result<Meta, OpenError> {
     // A batch number holds the generation in its bits above
@@ -557,6 +564,7 @@ async fn begin_generation<F: moonpool_core::LocalStorageFile>(
         },
         open_generation: generation,
         open_last: last_batch,
+        ambiguous,
         ..meta
     };
     meta_file.update(&meta).await?;
@@ -601,6 +609,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             last_batch: 0,
             open_generation: 1,
             open_last: 0,
+            ambiguous: 0,
             geometry: config.geometry,
             bytes: meta.to_vec(),
         };
@@ -616,7 +625,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             segments: Vec::new(),
             index: BTreeMap::new(),
             last_batch: 0,
-            ambiguous_batch: None,
+            ambiguous_from: None,
             seen_damaged: Mutex::default(),
             generation: 1,
             poisoned: false,
@@ -688,6 +697,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation: meta.open_generation,
             last: meta.open_last,
             mark: meta.last_batch,
+            ambiguous: meta.ambiguous,
             seq: meta.seq,
         };
         let mut scanned = scan(&segments, tag, known).await?;
@@ -704,7 +714,13 @@ impl<P: LocalStorageProvider> Journal<P> {
         // synced before it was read, and each write since is durable.
         write_persist(&segments, std::mem::take(&mut scanned.writes)).await?;
         let torn = std::mem::take(&mut scanned.torn);
-        let meta = begin_generation(&meta_file, meta, scanned.last_batch, torn.is_empty()).await?;
+        let meta = begin_generation(
+            &meta_file,
+            meta,
+            (scanned.last_batch, scanned.ambiguous_from),
+            torn.is_empty(),
+        )
+        .await?;
         let generation = meta.open_generation;
 
         recovery.torn = u32::try_from(torn.len()).unwrap_or(u32::MAX);
@@ -721,7 +737,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             segments,
             index: BTreeMap::new(),
             last_batch: scanned.last_batch,
-            ambiguous_batch: None,
+            ambiguous_from: None,
             seen_damaged: Mutex::default(),
             generation,
             poisoned: false,
@@ -740,7 +756,6 @@ impl<P: LocalStorageProvider> Journal<P> {
             corrupt: scanned.corrupt,
             ambiguous: scanned.ambiguous,
             headed: scanned.headed,
-            last_batch: scanned.last_batch,
         };
         let retires = journal.settle_damage(&mut recovery, torn, damage);
         recovery.segments_removed = journal.remove_dead_segments().await?;
@@ -817,7 +832,9 @@ impl<P: LocalStorageProvider> Journal<P> {
                 id: at.id,
                 len: at.len,
             }
-        } else if self.ambiguous_batch == Some(at.batch) && at.flags & FLAG_ORDERED == 0 {
+        } else if self.ambiguous_from.is_some_and(|from| at.batch >= from)
+            && at.flags & FLAG_ORDERED == 0
+        {
             State::Ambiguous { id: at.id }
         } else {
             State::Corrupt { id: at.id }
@@ -1143,6 +1160,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             generation: self.generation,
             last: self.meta.open_last,
             mark: self.meta.last_batch,
+            ambiguous: self.meta.ambiguous,
             seq: self.meta.seq,
         };
         let (writes, repair) =
@@ -1411,7 +1429,7 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// batch once it is durable. The caller's ambiguous entries stay
     /// ambiguous: this is not the caller's batch.
     async fn commit_retires(&mut self, torn: Vec<Retire>) -> Result<(), OpenError> {
-        let ambiguous_batch = self.ambiguous_batch;
+        let ambiguous_from = self.ambiguous_from;
         let mut batch = Batch::new();
         batch.set_meta(self.meta.bytes.clone());
         // A retire that does not fit is left out: its slot stays as it was,
@@ -1423,7 +1441,7 @@ impl<P: LocalStorageProvider> Journal<P> {
                 CommitError::Io { error, .. } => OpenError::Io(error),
                 other => OpenError::Io(std::io::Error::other(other.to_string())),
             })?;
-        self.ambiguous_batch = ambiguous_batch;
+        self.ambiguous_from = ambiguous_from;
         Ok(())
     }
 
@@ -1463,7 +1481,7 @@ impl<P: LocalStorageProvider> Journal<P> {
                 .is_some_and(|at| at.batch == retire.batch && at.index == retire.index);
             (!current).then_some(retire)
         }));
-        self.ambiguous_batch = (!recovery.ambiguous.is_empty()).then_some(damage.last_batch);
+        self.ambiguous_from = (self.meta.ambiguous != 0).then_some(self.meta.ambiguous);
         retires
     }
 
@@ -1556,11 +1574,21 @@ impl<P: LocalStorageProvider> Journal<P> {
         while !batch.fits_exactly(self.config.geometry, retires.len()) {
             owed.extend(retires.pop());
         }
-        let meta_changes = batch.meta.is_some() || floor != self.meta.floor;
+        // The caller's batch ends the ambiguity an open recorded: from now on
+        // a damaged entry beside its record there is corruption. A batch
+        // with no write (an open's retire batch, a metainfo update) does
+        // not.
+        let ends_ambiguity = self.meta.ambiguous != 0 && !batch.writes.is_empty();
+        let meta_changes = batch.meta.is_some() || floor != self.meta.floor || ends_ambiguity;
         let mut next_meta = Meta {
             seq: self.meta.seq + 1,
             floor,
             last_batch: self.last_batch,
+            ambiguous: if ends_ambiguity {
+                0
+            } else {
+                self.meta.ambiguous
+            },
             bytes: batch
                 .meta
                 .clone()
@@ -1625,7 +1653,7 @@ impl<P: LocalStorageProvider> Journal<P> {
             self.apply(&op);
         }
         self.last_batch = prepared.seq;
-        self.ambiguous_batch = None;
+        self.ambiguous_from = None;
         if meta_changes {
             self.meta = next_meta;
         }

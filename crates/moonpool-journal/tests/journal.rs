@@ -813,6 +813,42 @@ fn a_damaged_last_entry_is_corrupt_when_ordered_and_ambiguous_when_batched() {
     });
 }
 
+/// #573: an open records the last batch it found as the high-water mark,
+/// and that made a crash-torn entry of a `Batched` batch `Corrupt` at the
+/// next open: the open's own mark is not the caller's batch. The entry
+/// stays `Ambiguous` at every open until the caller commits.
+#[test]
+fn a_damaged_batched_entry_stays_ambiguous_across_opens_until_the_caller_commits() {
+    runtime().block_on(async {
+        let mut sim = sim(6);
+        let journal = five(&mut sim, Durability::Batched).await;
+        let (_, entry) = spots(&journal, 5);
+        drop(journal);
+        flip(&mut sim, entry.0, entry.1).await;
+        let ambiguous = State::Ambiguous { id: id(5, 1) };
+        for open in 0..3 {
+            let (journal, recovery) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+            assert_eq!(recovery.ambiguous, vec![(5, id(5, 1))], "open {open}");
+            assert_eq!(journal.state(5), ambiguous, "open {open}");
+        }
+        let (journal, _) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+        let journal = put(&mut sim, journal, &[(6, 1, 10)]).await;
+        assert_eq!(journal.state(5), State::Corrupt { id: id(5, 1) });
+        drop(journal);
+        let (journal, recovery) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+        assert!(recovery.ambiguous.is_empty(), "{recovery:?}");
+        assert_eq!(
+            journal.state(5),
+            State::Live {
+                id: id(5, 1),
+                len: 300
+            }
+        );
+        let (_, read) = read(&mut sim, journal, 5).await;
+        assert!(matches!(read, Err(ReadError::Damaged { .. })), "{read:?}");
+    });
+}
+
 #[test]
 fn a_damaged_record_is_rebuilt_from_its_intact_entry() {
     runtime().block_on(async {
@@ -2550,7 +2586,7 @@ fn a_segment_of_format_version_4_is_refused() {
                 refused,
                 Err(OpenError::UnsupportedVersion {
                     found: 4,
-                    supported: 5
+                    supported: 6
                 })
             ),
             "{refused:?}"

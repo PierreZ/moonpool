@@ -223,7 +223,7 @@
 //! |---|---|---|
 //! | intact | valid | live |
 //! | intact | damaged | live; the record is rebuilt from the entry, and written back before `last` |
-//! | damaged | valid | [`State::Corrupt`], or [`State::Ambiguous`] in a `Batched` last batch |
+//! | damaged | valid | [`State::Corrupt`], or [`State::Ambiguous`] in a `Batched` last batch, or from the batch the metainfo names as ambiguous on |
 //! | damaged | damaged, named by a retire record | ignored |
 //! | damaged | damaged, in an unwitnessed last batch of its open generation | torn by a crash: discarded and retired |
 //! | payload damaged, header intact | damaged, in a witnessed batch, or before the last of its generation | [`State::Corrupt`]: the header names the entry; its record is never written back; replaced by a later batch, it is retired, not reported |
@@ -255,7 +255,12 @@
 //! record was written. A crash in the middle of a commit cannot leave a
 //! witnessed batch with a slot whose record and entry are both damaged, so
 //! there that is corruption, not a crash. In a witnessed batch, an entry
-//! that is damaged while its record is valid is [`State::Corrupt`] too.
+//! that is damaged while its record is valid is [`State::Corrupt`] too,
+//! except one that an open already found damaged that way while the batch
+//! was not witnessed: the metainfo names the first such batch, and its
+//! entries stay [`State::Ambiguous`] until the caller commits a batch with a
+//! write. An open's own mark raise and retire batch witness the batch's
+//! intact slots, not the entry the crash had already torn.
 //! Only the last batch of an open generation can be torn by a crash, because
 //! a failed commit poisons the journal. The one batch that may still be
 //! discarded is an acknowledged last batch that nothing witnesses: its bytes
