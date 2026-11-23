@@ -41,7 +41,8 @@ test("the journal's layouts read from its code", () => {
   assert.deepEqual(header.map((r) => r.name), ["magic", "version", "journal", "first_batch", "persist_blocks", "gap_blocks", "entry_blocks", "prev_batch", "crc"]);
   const meta = encodeLayout(format, "Meta");
   assert.equal(meta.at(-1).at, 4092);
-  assert.ok(meta.some((r) => r.name === "bytes" && r.at === 80 && r.size === null));
+  assert.ok(meta.some((r) => r.name === "ambiguous" && r.at === 80 && r.size === 8));
+  assert.ok(meta.some((r) => r.name === "bytes" && r.at === 88 && r.size === null));
   assert.deepEqual(implFields(format, "Default for Geometry", "default"), { persist_blocks: 7936, gap_blocks: 512, entry_blocks: 7936 });
 });
 
