@@ -73,8 +73,8 @@ journal.commit(chunk).await?;   // metainfo and floor go in the last one
 ```
 
 `Batch::fits(geometry)` is the same bound for a staged batch. Both count
-each write twice in the persist log, room for the retire record that a
-write replacing a position whose entry is damaged makes due (below). The default
+each write twice in the persist log. That is slack now: the room a retire
+record once took in the same batch (below). The default
 `Geometry` is a 64 MiB segment with persist and entry logs of the same size
 (507,904 records and 31 MiB of entries). Every batch starts on a fresh block
 in both logs, so a segment holds 7,936 batches of one small entry.
@@ -367,8 +367,9 @@ new put of the position, then leaves nothing behind that a second fault can
 turn into a refused open. Why not in the same batch? A crash can tear that
 batch's put and keep its retire record: the open would discard the put as
 torn, ignore the old slot, and forget the only copy of an acknowledged
-entry. A crash between the two batches leaves the old slot to the next
-open, which retires a dead slot it finds damaged.
+entry. A crash between the two batches leaves the old slot unretired: the
+next open retires it when only its header is left, and otherwise it stays
+one fault from a refused open, as a damaged slot nothing has replaced yet.
 
 Two rules keep old or misplaced records from passing for evidence. Batch
 numbers grow with the place in the persist log, so a record after a batch

@@ -200,7 +200,8 @@ struct LedgerState {
     target: Option<Target>,
     /// A rebuild from the ledger is under way: the disk holds part of it.
     rebuilding: bool,
-    /// The node is writing damaged entries again: a crash may cut it.
+    /// The node is writing damaged entries again: a crash, or an I/O
+    /// error and the crash it brings, may cut it.
     rewriting: bool,
     /// Commits so far: each one's version makes its values unique.
     version: u64,
@@ -554,7 +555,7 @@ async fn reconcile(
     ledger: &Ledger,
 ) -> Result<(), CommitError> {
     if ledger.with(|state| state.rewriting) {
-        assert_reachable!("a crash cut the rewrite of a damaged entry");
+        assert_reachable!("a reboot cut the rewrite of a damaged entry");
     }
     let (acked, floor, meta, mut pending, last) = ledger.with(|state| {
         (

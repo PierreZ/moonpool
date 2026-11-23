@@ -1369,8 +1369,10 @@ impl<P: LocalStorageProvider> Journal<P> {
         let mut owed = self.commit_with(batch, Vec::new()).await?;
         if !owed.is_empty() {
             // The batch is durable and the slots it made dead are not
-            // retired yet: a power loss here leaves each one to the next
-            // open, which retires it.
+            // retired yet. A power loss here leaves each one unretired: the
+            // next open retires one whose header is all that is left, but
+            // one whose record is valid stays one fault from a refused open.
+            // That is the cost of never retiring in the same batch.
             moonpool_buggify::hint!(
                 "journal commit: batch durable, its dead slots not retired",
                 COMMIT_HINT_PROB
@@ -1383,8 +1385,11 @@ impl<P: LocalStorageProvider> Journal<P> {
         // write and keep its retire record, and the open would then ignore
         // the only copy of an acknowledged entry.
         while !owed.is_empty() {
+            let before = owed.len();
             owed = match self.commit_with(Batch::new(), owed).await {
-                Ok(owed) => owed,
+                // A geometry that fits no retire record at all.
+                Ok(left) if left.len() >= before => break,
+                Ok(left) => left,
                 // The caller's batch is durable, but the journal is
                 // poisoned: the caller reopens and reads what is there.
                 Err(CommitError::Io { error, .. }) => {
@@ -1464,8 +1469,9 @@ impl<P: LocalStorageProvider> Journal<P> {
 
     /// The slots this batch makes dead whose entry is known damaged: the
     /// old slot of each position it replaces, clears, or drops below
-    /// `floor`. Each gets a retire record in the batch, so a later fault on
-    /// its record never refuses an open.
+    /// `floor`. Each gets a retire record in a later batch, written once
+    /// this one is durable, so a later fault on its record never refuses an
+    /// open.
     fn retires_for(&self, batch: &Batch, floor: u64) -> Vec<Retire> {
         let seen = self
             .seen_damaged
