@@ -312,7 +312,7 @@ impl<P: LocalStorageProvider> std::fmt::Debug for Journal<P> {
 /// The error of a call a poisoned journal refuses.
 fn poisoned() -> OpenError {
     OpenError::Io(std::io::Error::other(
-        "a failed commit poisoned the journal: reopen it",
+        "a failed or dropped write poisoned the journal: reopen it",
     ))
 }
 
@@ -1395,11 +1395,18 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// batch may be durable anyway).
     ///
     /// # Cancel safety
-    /// Not cancel-safe, by design: a commit future dropped before it
-    /// returns (a timeout, a losing `select!` branch) poisons the journal,
-    /// as a failed commit does, and every later call refuses until the
-    /// caller reopens. The batch may be on disk, wholly or in part; the
-    /// open finds out which.
+    /// A commit future dropped before the batch is durable and memory
+    /// follows it (a timeout, a losing `select!` branch) poisons the
+    /// journal, as a failed commit does: the batch may be on disk, wholly or
+    /// in part, and the open finds out which. Every later write
+    /// ([`commit`](Self::commit), [`scrub`](Self::scrub),
+    /// [`repair_records`](Self::repair_records),
+    /// [`prepare_spares`](Self::prepare_spares)) refuses until the caller
+    /// reopens; reads still answer from what memory holds. A future dropped
+    /// after the batch is durable, while it retires the dead slots the batch
+    /// made, leaves the journal usable: the batch is committed, and the
+    /// slots stay unretired until the next open, as after a power loss
+    /// there.
     pub async fn commit(&mut self, batch: Batch) -> Result<(), CommitError> {
         let mut owed = self.commit_with(batch, Vec::new()).await?;
         if !owed.is_empty() {
