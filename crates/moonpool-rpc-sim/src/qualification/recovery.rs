@@ -14,6 +14,7 @@ use super::ops::{StreamOutcome, StreamShape};
 use super::state::{Instance, QualLedger, SCRIPT_DONE_KEY, instance_code};
 use super::workload::{CallRecord, Class, QualOp, QualificationWorkload, Runtimes, describe};
 use super::{CALL_TIMEOUT, RECOVERY_BOUND, RELEASE_BOUND, pause};
+use crate::carriers::Carriers;
 use crate::foundations::state::Board;
 use crate::security::state::{Class as AuthClass, Ledger as AuthLedger};
 use crate::security::trust::{Kind, Trust};
@@ -67,6 +68,7 @@ pub(crate) async fn drain_watcher(
                 boot,
                 configuration: 0,
                 hold_ms: 0,
+                mark: crate::carriers::mark(id),
             };
             let outcome = target
                 .bind(rpc)
@@ -290,9 +292,17 @@ impl QualificationWorkload {
     /// request against the independent ledgers.
     pub(crate) fn judge_all(&self, ctx: &SimContext) {
         let ledger = QualLedger::of(ctx.state());
+        let carriers = Carriers::of(ctx.state());
         let mut one_way_executed = false;
         for call in &self.calls {
             let runs = ledger.executions(call.id);
+            // Every call, reliable ones too: one run at most per connection
+            // the network saw carry the job.
+            assert_always!(
+                runs.len() <= carriers.count(call.id),
+                "rpc qual a call ran at most once per connection that carried it",
+                { "id" => call.id, "op" => format!("{:?}", call.op), "runs" => runs.len(), "carriers" => carriers.count(call.id) }
+            );
             for run in &runs {
                 assert_always!(
                     *run == call.expected,

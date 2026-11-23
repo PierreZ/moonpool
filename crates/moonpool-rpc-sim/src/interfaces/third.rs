@@ -67,6 +67,7 @@ async fn adopt(rpc: &RpcHandle<SimProviders>, mut adopter: RequestStream<Adopter
                 participant: member.participant.clone(),
                 boot: member.boot,
                 configuration: member.configuration,
+                mark: crate::carriers::mark(id),
             };
             // The interface arrived as data; binding it here is the third
             // participant's own, explicit choice.

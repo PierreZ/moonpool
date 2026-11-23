@@ -137,6 +137,7 @@ impl NetworkSimulation {
                     return;
                 };
                 let delivered = self.maybe_corrupt_data(receiver, &data, now, actions);
+                self.show_taps(sender, receiver, &delivered);
                 if let Some(connection) = self.state.connections.get_mut(&receiver) {
                     connection.receive_buffer.extend(delivered);
                 }
@@ -156,6 +157,30 @@ impl NetworkSimulation {
                     wakes.append(self.reset_endpoint(receiver));
                 }
             }
+        }
+    }
+
+    /// Show the installed taps the bytes that `sender` just delivered to
+    /// `receiver`. Both directions of a connection are named by the smaller
+    /// endpoint id of the pair.
+    fn show_taps(&self, sender: ConnectionId, receiver: ConnectionId, bytes: &[u8]) {
+        if self.taps.0.is_empty() {
+            return;
+        }
+        let ips = |id| {
+            self.state
+                .connections
+                .get(&id)
+                .and_then(|connection: &super::state::ConnectionState| connection.local_ip)
+        };
+        let delivered = crate::network::DeliveredBytes {
+            connection: sender.0.min(receiver.0),
+            from: ips(sender),
+            to: ips(receiver),
+            bytes,
+        };
+        for tap in &self.taps.0 {
+            tap(&delivered);
         }
     }
 

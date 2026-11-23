@@ -77,7 +77,7 @@ impl Workload for Driver {
 | Lifecycle | `shutdown()` (a `CancellationToken`), `crash_self(kind, Option<Duration>)`, `self_crash() -> SelfCrash` |
 | Deployment | `deployment() -> &Deployment { spawn(group), spawn_in(group, DomainSpec), spawn_group(name, count, factory), retire(ip), version() }`; refuses from a process; topology queries read the live `Membership` |
 | Shared state | `state()` → `StateHandle { publish(key, v), get::<T>(key), contains(key) }` |
-| Observation | `observability()` (a `TraceQuery`), `disk_counters(ip)`, `system_samples(ip)`, `slowness(ip)` |
+| Observation | `observability()` (a `TraceQuery`), `disk_counters(ip)`, `system_samples(ip)`, `slowness(ip)`, `tap_network(NetworkTap)` (every delivery of stream bytes, as `DeliveredBytes { connection, from, to, bytes }`; runs under the world lock, must not call back) |
 | Metrics | `metrics::<S>()`, `metrics_handle()` |
 
 ## SimulationBuilder

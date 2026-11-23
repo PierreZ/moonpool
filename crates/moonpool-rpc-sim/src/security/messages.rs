@@ -12,6 +12,23 @@ pub struct Probe {
     /// How long the handler holds it before answering, in milliseconds.
     #[prost(uint32, tag = "2")]
     pub hold_ms: u32,
+    /// The request's carrier mark ([`crate::carriers::mark`] of `id`):
+    /// lets the oracle count, from the network, the connections that
+    /// carried it.
+    #[prost(bytes = "vec", tag = "3")]
+    pub mark: Vec<u8>,
+}
+
+impl Probe {
+    /// A marked request.
+    #[must_use]
+    pub fn new(id: u64, hold_ms: u32) -> Self {
+        Self {
+            id,
+            hold_ms,
+            mark: crate::carriers::mark(id),
+        }
+    }
 }
 
 /// A reply, or a stream item.

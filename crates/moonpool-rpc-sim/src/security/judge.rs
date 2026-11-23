@@ -94,7 +94,7 @@ impl Caller {
             client = client.with_credentials(Credential::bearer(token));
         }
         client
-            .try_get_reply_within(&Probe { id, hold_ms }, CALL_TIMEOUT)
+            .try_get_reply_within(&Probe::new(id, hold_ms), CALL_TIMEOUT)
             .await
     }
 

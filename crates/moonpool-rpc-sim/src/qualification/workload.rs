@@ -26,6 +26,7 @@ use super::state::{
 use super::{
     CapturedTrace, HostJitter, QualificationRecord, QualificationRecords, RPC_PORT, qual_config,
 };
+use crate::carriers::Carriers;
 use crate::foundations::report_stats;
 use crate::foundations::state::Board;
 use crate::security::judge::Caller;
@@ -517,6 +518,7 @@ impl Workload for QualificationWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let _ = Carriers::tapped(ctx);
         let config_error = |error| SimulationError::InvalidState(format!("rpc config: {error}"));
         let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), client_config())
             .map_err(config_error)?;

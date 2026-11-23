@@ -25,6 +25,7 @@ use super::messages::{
 };
 use super::state::{Instance, Ledger, SCRIPT_DONE_KEY, WORKLOAD_LABEL};
 use super::{InterfacesRecord, InterfacesRecords};
+use crate::carriers::Carriers;
 use crate::foundations::state::Board;
 use crate::foundations::{RPC_PORT, report_stats, rpc_config};
 
@@ -197,6 +198,7 @@ impl InterfacesWorkload {
             participant: publication.participant.clone(),
             boot: publication.boot,
             configuration: publication.configuration,
+            mark: crate::carriers::mark(self.next_id),
         }
     }
 
@@ -776,6 +778,7 @@ impl Workload for InterfacesWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let _ = Carriers::tapped(ctx);
         let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), rpc_config())
             .map_err(|error| SimulationError::InvalidState(format!("rpc config: {error}")))?;
         let board = Board::of(ctx.state());
@@ -799,6 +802,7 @@ impl Workload for InterfacesWorkload {
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let ledger = Ledger::of(ctx.state());
+        let carriers = Carriers::of(ctx.state());
         let mut ambiguous_executed = false;
         let mut one_way_executed = false;
         for call in &self.calls {
@@ -815,6 +819,13 @@ impl Workload for InterfacesWorkload {
                     "a single attempt through an interface never runs twice"
                 );
             }
+            // Every call, reliable ones too: one run at most per connection
+            // the network saw carry the request.
+            assert_always!(
+                executions.len() <= carriers.count(call.id),
+                "an interface call ran at most once per connection that carried it",
+                { "id" => call.id, "runs" => executions.len(), "carriers" => carriers.count(call.id) }
+            );
             match call.class {
                 Class::Replied => {
                     assert_always!(!executions.is_empty(), "a replied interface call executed");

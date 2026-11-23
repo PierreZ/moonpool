@@ -50,6 +50,11 @@ pub struct Probe {
     /// The configuration it serves (0: the base instance).
     #[prost(uint64, tag = "4")]
     pub configuration: u64,
+    /// The request's carrier mark ([`crate::carriers::mark`] of `id`):
+    /// lets the oracle count, from the network, the connections that
+    /// carried it.
+    #[prost(bytes = "vec", tag = "5")]
+    pub mark: Vec<u8>,
 }
 
 /// Who served a probe.
