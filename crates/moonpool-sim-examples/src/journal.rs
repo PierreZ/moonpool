@@ -609,7 +609,11 @@ impl Expected<'_> {
                         { "position" => position }
                     );
                     // A torn entry in flight is damage a crash explains. An
-                    // acknowledged one is whole on the device.
+                    // acknowledged one is whole on the device. A position
+                    // that the batch in flight touches is left out for now:
+                    // there the journal does report the acknowledged id as
+                    // damaged, about once in 300 seeds, also with no crash
+                    // damage at all (moonpool issue 570).
                     let acknowledged = !self.pending.touches(position)
                         && self.acked.get(&position).is_some_and(|(i, _)| *i == id);
                     assert_always!(

@@ -745,8 +745,10 @@ impl FileImage {
     /// the kernel marked it clean, so no writeback lands it, and it stays in
     /// the cache, so the next process reads the bytes the device never got
     /// (fsyncgate). It stays volatile: a later [`crash`](Self::crash)
-    /// resolves it, and only [`drop_cache`](Self::drop_cache) or a write
-    /// ends it. Draws nothing.
+    /// resolves it (a clean crash returns it to its durable bytes), and
+    /// only [`drop_cache`](Self::drop_cache) or a write ends it. A sector
+    /// that a sync lied about before the writeback failed keeps its lie and
+    /// its stamp, for that crash to judge. Draws nothing.
     #[instrument(level = "trace", skip(self))]
     pub fn keep_cache(&mut self, path: &str, barrier_violation_armed: bool) -> FileCrashReport {
         let mut report = FileCrashReport {
@@ -1266,10 +1268,18 @@ impl FileImage {
 
     /// Verify that every sector a sync reported durable still holds what the
     /// caller was told, and report the ones a lying sync lost.
+    ///
+    /// A sector still stranded is not judged: a kill kept it in the cache,
+    /// so nothing of it is lost yet, and the crash that resolves it judges
+    /// it (a crash clears the mark before its sweep).
     fn oracle_sweep(&mut self, path: &str, lied: &[u64], armed: bool) -> Vec<u64> {
         let mut lost = Vec::new();
-        let stamps: Vec<(u64, (u32, usize))> =
-            self.oracle.iter().map(|(s, stamp)| (*s, *stamp)).collect();
+        let stamps: Vec<(u64, (u32, usize))> = self
+            .oracle
+            .iter()
+            .filter(|(sector, _)| !self.stranded.is_set(as_index(**sector)))
+            .map(|(s, stamp)| (*s, *stamp))
+            .collect();
         for (sector, (crc, stamped_len)) in stamps {
             let range = self.committed_bounds(sector);
             if range.len() < stamped_len {
@@ -1829,6 +1839,34 @@ mod tests {
         image.crash("f", &clean_crash(), false, &always_eligible);
         image.read(0, &mut buf).expect("read failed");
         assert_eq!(buf, vec![1; SECTOR_SIZE], "the power loss takes it");
+    }
+
+    /// A sector that a sync lied about, and that a failed writeback then
+    /// stranded, is not judged by a kill that keeps the cache: its bytes are
+    /// still there. The power loss after it reports the lost synced write.
+    #[test]
+    fn a_kill_that_keeps_the_cache_leaves_a_lied_and_stranded_sector_to_the_crash() {
+        seeded(11);
+        let honest = StorageConfiguration::fast_local();
+        let lying = StorageConfiguration {
+            barrier_violation_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        };
+        let mut image = FileImage::new(0, 42, true);
+        image.write(0, &[1; SECTOR_SIZE]);
+        image.sync(&honest, &always_eligible);
+        image.write(0, &[2; SECTOR_SIZE]);
+        image.sync(&lying, &always_eligible);
+        assert_eq!(image.fail_writeback(true), vec![0], "a lied sector strands");
+
+        let report = image.keep_cache("f", true);
+        assert!(report.lost_synced.is_empty(), "nothing is lost yet");
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        image.read(0, &mut buf).expect("read failed");
+        assert_eq!(buf, vec![2; SECTOR_SIZE], "the cache still holds it");
+
+        let report = image.crash("f", &clean_crash(), true, &always_eligible);
+        assert_eq!(report.lost_synced, vec![0], "the crash reports the lie");
     }
 
     /// A sync that lies about a sector in the grown region leaves the fill
