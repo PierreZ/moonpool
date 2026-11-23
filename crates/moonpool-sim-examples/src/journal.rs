@@ -233,6 +233,11 @@ struct LedgerState {
     /// The node is writing damaged entries again: a crash, or an I/O
     /// error and the crash it brings, may cut it.
     rewriting: bool,
+    /// The acknowledged entries that a Batched rewrite in flight puts
+    /// again, under their acknowledged ids: a crash can tear these copies
+    /// and keep their records. An Ordered rewrite never leaves a record
+    /// beside a torn entry, so it is not recorded here.
+    rewrites: Vec<(u64, Value)>,
     /// Commits so far: each one's version makes its values unique.
     version: u64,
 }
@@ -455,7 +460,7 @@ async fn live(ctx: &SimContext, ledger: &Ledger, disk: Disk) -> Ended {
         }
     };
     note_recovery(ctx, &recovery).await;
-    if let Err(error) = reconcile(ctx, &mut journal, ledger, disk).await {
+    if let Err(error) = reconcile(ctx, &mut journal, ledger, (disk, durability)).await {
         return Ended::Commit(error);
     }
     run(ctx, journal, ledger).await
@@ -484,6 +489,7 @@ async fn rebuild(
     let (acked, floor, meta) = ledger.with(|state| {
         state.rebuilding = true;
         state.rewriting = false;
+        state.rewrites.clear();
         state.pending = None;
         state.target = None;
         (state.acked.clone(), state.floor, state.meta.clone())
@@ -560,6 +566,8 @@ struct Expected<'a> {
     /// What a commit that reported `Durable::No` tried to write.
     absent_puts: &'a [(u64, Value)],
     last: &'a LastBatch,
+    /// The acknowledged entries a cut Batched rewrite was putting again.
+    rewrites: &'a [(u64, Value)],
     disk: Disk,
 }
 
@@ -609,13 +617,16 @@ impl Expected<'_> {
                         { "position" => position }
                     );
                     // A torn entry in flight is damage a crash explains. An
-                    // acknowledged one is whole on the device. A position
-                    // that the batch in flight touches is left out for now:
-                    // there the journal does report the acknowledged id as
-                    // damaged, about once in 300 seeds, also with no crash
-                    // damage at all (moonpool issue 570).
-                    let acknowledged = !self.pending.touches(position)
-                        && self.acked.get(&position).is_some_and(|(i, _)| *i == id);
+                    // acknowledged one is whole on the device, unless the
+                    // node was writing it again when the crash came: the
+                    // copy in flight carries the acknowledged id, and a
+                    // Batched commit keeps a record beside a torn entry.
+                    let in_rewrite = self
+                        .rewrites
+                        .iter()
+                        .any(|(p, (i, _))| *p == position && *i == id);
+                    let acknowledged =
+                        !in_rewrite && self.acked.get(&position).is_some_and(|(i, _)| *i == id);
                     assert_always!(
                         self.disk == Disk::Faulty || !acknowledged,
                         "on an honest disk an acknowledged entry is never reported damaged",
@@ -652,7 +663,7 @@ async fn reconcile(
     ctx: &SimContext,
     journal: &mut Journal<SimStorageProvider>,
     ledger: &Ledger,
-    disk: Disk,
+    (disk, durability): (Disk, Durability),
 ) -> Result<(), CommitError> {
     if ledger.with(|state| state.rewriting) {
         assert_reachable!("a reboot cut the rewrite of a damaged entry");
@@ -700,11 +711,13 @@ async fn reconcile(
             });
         }
     };
+    let rewrites = ledger.with(|state| state.rewrites.clone());
     let expected = Expected {
         acked: &acked,
         pending: &pending,
         absent_puts: &absent_puts,
         last: &last,
+        rewrites: &rewrites,
         disk,
     };
     let Judged {
@@ -725,26 +738,15 @@ async fn reconcile(
         );
     }
     if !rewrite.is_empty() || !clear.is_empty() {
-        // The metainfo records the repair batch: it is witnessed.
-        let mut batch = Batch::new();
-        for (position, (id, payload)) in &rewrite {
-            batch.put(*position, *id, payload.clone());
-            found.insert(*position, (*id, payload.clone()));
-        }
-        for position in &clear {
-            batch.clear(*position..*position + 1);
-        }
-        batch.set_meta(journal.meta().to_vec());
-        ledger.with(|state| state.rewriting = true);
-        // A crash in the middle of the rewrite: the open after it must
-        // still report the damaged entry, or return the new copy, never
-        // forget the position (a torn rewrite once took the old slot's
-        // retire record with it).
-        if moonpool_sim::buggify!() {
-            let delay = Duration::from_millis(ctx.random().random_range(0..3));
-            let _ = ctx.crash_self(RebootKind::Crash, Some(delay));
-        }
-        journal.commit(batch).await?;
+        let batched = durability == Durability::Batched;
+        repair(
+            ctx,
+            journal,
+            ledger,
+            (&rewrite, &clear, batched),
+            &mut found,
+        )
+        .await?;
     }
     ledger.with(|state| {
         state.acked = found;
@@ -753,6 +755,7 @@ async fn reconcile(
         state.pending = None;
         state.target = None;
         state.rewriting = false;
+        state.rewrites.clear();
         // The open recorded the last batch it found, and a repair batch
         // carries the metainfo.
         state.last = LastBatch {
@@ -760,6 +763,50 @@ async fn reconcile(
             before: BTreeMap::new(),
         };
     });
+    Ok(())
+}
+
+/// Play the replication layer: write each damaged acknowledged entry again
+/// and clear each damaged entry nothing acknowledged, in one batch that the
+/// ledger records as in flight.
+async fn repair(
+    ctx: &SimContext,
+    journal: &mut Journal<SimStorageProvider>,
+    ledger: &Ledger,
+    (rewrite, clear, batched): (&[(u64, Value)], &[u64], bool),
+    found: &mut BTreeMap<u64, Value>,
+) -> Result<(), CommitError> {
+    // The metainfo records the repair batch: it is witnessed.
+    let mut batch = Batch::new();
+    for (position, (id, payload)) in rewrite {
+        batch.put(*position, *id, payload.clone());
+        found.insert(*position, (*id, payload.clone()));
+    }
+    for position in clear {
+        batch.clear(*position..*position + 1);
+    }
+    batch.set_meta(journal.meta().to_vec());
+    ledger.with(|state| {
+        state.rewriting = true;
+        // Copies an earlier cut rewrite tore stay torn until a rewrite
+        // completes, so the list only grows here.
+        if batched {
+            for entry in rewrite {
+                if !state.rewrites.contains(entry) {
+                    state.rewrites.push(entry.clone());
+                }
+            }
+        }
+    });
+    // A crash in the middle of the rewrite: the open after it must
+    // still report the damaged entry, or return the new copy, never
+    // forget the position (a torn rewrite once took the old slot's
+    // retire record with it).
+    if moonpool_sim::buggify!() {
+        let delay = Duration::from_millis(ctx.random().random_range(0..3));
+        let _ = ctx.crash_self(RebootKind::Crash, Some(delay));
+    }
+    journal.commit(batch).await?;
     Ok(())
 }
 

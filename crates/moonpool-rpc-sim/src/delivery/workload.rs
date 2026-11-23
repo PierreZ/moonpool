@@ -598,10 +598,24 @@ impl DeliveryWorkload {
         bootstrap: &BootstrapClient<SimProviders, ScriptedResolver>,
     ) -> SimulationResult<()> {
         let Some(monitor) = rpc.failure_monitor() else {
-            return Ok(());
+            return Err(SimulationError::InvalidState(
+                "the delivery campaign runs with a failure monitor".to_string(),
+            ));
         };
+        // The directory read makes 60 attempts (about a minute of simulated
+        // time when each fails at once, about three when each times out),
+        // the name points at the server within two seconds, network chaos
+        // lasts eight, and every scripted crash comes after discovery and
+        // ends in a restart: only the end of the run excuses a client that
+        // never found the service.
         let Some(mut execute) = self.discover(bootstrap).await else {
-            return Ok(());
+            if ctx.shutdown().is_cancelled() {
+                return Ok(());
+            }
+            return Err(SimulationError::InvalidState(format!(
+                "the first discovery failed: {}",
+                self.history.last().map_or("", String::as_str)
+            )));
         };
         for _ in 0..self.config.operations {
             if ctx.shutdown().is_cancelled() {

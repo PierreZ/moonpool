@@ -1025,6 +1025,54 @@ fn a_torn_last_record_is_discarded_durably() {
     });
 }
 
+/// A slot an open retired as torn stays gone when its entry later reads
+/// whole: the fault that hid the entry was transient (a misdirected read),
+/// and the replay of the retiring open already left the position out. Before,
+/// the next open rebuilt the slot's record from the intact entry, returned
+/// the position again, and wrote the rebuilt record back for good (journal
+/// simulation seed 12138230116445670879).
+#[test]
+fn a_retired_slot_whose_entry_reads_whole_again_stays_gone() {
+    runtime().block_on(async {
+        for with_later_batch in [false, true] {
+            let mut sim = sim(9);
+            let journal = five(&mut sim, Durability::Batched).await;
+            let journal = put(&mut sim, journal, &[(6, 1, 300), (7, 1, 300)]).await;
+            let (record, entry) = spots(&journal, 7);
+            drop(journal);
+            let whole = bytes_at(&mut sim, entry.0.clone(), entry.1, 1).await;
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, entry.0.clone(), entry.1).await;
+            let (journal, recovery) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+            assert_eq!(recovery.torn, 1);
+            assert_eq!(journal.state(7), State::Empty);
+            let journal = if with_later_batch {
+                put(&mut sim, journal, &[(8, 1, 10)]).await
+            } else {
+                journal
+            };
+            drop(journal);
+            // The entry reads whole again; the record stays damaged.
+            write_back(&mut sim, entry.0.clone(), entry.1, whole).await;
+            for round in 0..3 {
+                if round == 2 {
+                    // A second fault on the entry, after the open wrote the
+                    // retired slot back empty: the retire still names it.
+                    flip(&mut sim, entry.0.clone(), entry.1).await;
+                }
+                let (journal, _) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+                let at = format!("later batch: {with_later_batch}, round {round}");
+                assert_eq!(journal.state(7), State::Empty, "{at}");
+                assert!(matches!(journal.state(6), State::Live { .. }), "{at}");
+                if with_later_batch {
+                    assert!(matches!(journal.state(8), State::Live { .. }), "{at}");
+                }
+                drop(journal);
+            }
+        }
+    });
+}
+
 #[test]
 fn a_lost_batch_in_the_middle_is_refused_not_read_as_the_end() {
     runtime().block_on(async {
