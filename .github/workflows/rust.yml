@@ -199,15 +199,30 @@ jobs:
       # runners give noisy I/O, so the numbers are printed, never checked.
       - name: moonpool-journal benchmark (smoke)
         run: nix develop --command cargo run -p moonpool-journal --example bench -- --duration 1 --writers 2
-      # Package every published crate (publish = false crates are left out)
-      # and build each one from its .crate, the way crates.io will see it:
+      # Package every published crate and build each one from its .crate,
+      # the way crates.io will see it (cargo package does not skip
+      # publish = false crates, so the published ones are named):
       # a file missing from `include`, a path dependency without a version or
       # a manifest crates.io refuses fails here, not during the release.
       # RUSTFLAGS is empty for issue #151: a consumer on stable with no
       # .cargo/config.toml rustflags must be able to build every published
       # crate.
       - name: Package and build the published crates
-        run: RUSTFLAGS="" nix develop --command cargo package --workspace
+        run: |
+          RUSTFLAGS="" nix develop --command cargo package \
+            -p moonpool-assertions \
+            -p moonpool-buggify \
+            -p moonpool-core \
+            -p moonpool-explorer \
+            -p moonpool-hyper \
+            -p moonpool-journal \
+            -p moonpool-prometheus \
+            -p moonpool-rpc \
+            -p moonpool-rpc-derive \
+            -p moonpool-sim \
+            -p moonpool-walk \
+            -p moonpool-tla \
+            -p moonpool
       - name: Lean production dependency tree excludes sim/explorer
         run: |
           tree=$(nix develop --command cargo tree -p moonpool --no-default-features --features tokio -e no-dev)
