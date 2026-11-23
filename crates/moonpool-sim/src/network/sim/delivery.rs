@@ -175,6 +175,7 @@ impl NetworkSimulation {
         };
         let delivered = crate::network::DeliveredBytes {
             connection: sender.0.min(receiver.0),
+            sender: sender.0,
             from: ips(sender),
             to: ips(receiver),
             bytes,

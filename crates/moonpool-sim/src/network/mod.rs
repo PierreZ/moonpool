@@ -71,6 +71,9 @@ pub struct DeliveredBytes<'a> {
     /// The connection the bytes crossed. Both directions of one connection
     /// share this number, and no other connection of the run has it.
     pub connection: u64,
+    /// The sending endpoint: each direction of a connection has its own
+    /// number, even when both ends share an IP.
+    pub sender: u64,
     /// The sender's IP, when the sim knows it.
     pub from: Option<std::net::IpAddr>,
     /// The receiver's IP, when the sim knows it.

@@ -17,7 +17,6 @@
 //! the bound.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use moonpool_sim::{DeliveredBytes, NetworkTap, SimContext, StateHandle};
@@ -42,9 +41,9 @@ pub fn mark(id: u64) -> Vec<u8> {
 
 #[derive(Default)]
 struct Inner {
-    /// The last `MARK_LEN - 1` bytes of each direction of each connection,
-    /// so a mark split across two deliveries is still found.
-    tails: BTreeMap<(u64, Option<IpAddr>, Option<IpAddr>), Vec<u8>>,
+    /// The last `MARK_LEN - 1` bytes of each direction (by its sending
+    /// endpoint), so a mark split across two deliveries is still found.
+    tails: BTreeMap<u64, Vec<u8>>,
     /// The connections that carried each id.
     carriers: BTreeMap<u64, BTreeSet<u64>>,
     /// Whether the tap is installed in this run.
@@ -53,7 +52,7 @@ struct Inner {
 
 impl Inner {
     fn delivered(&mut self, delivery: &DeliveredBytes<'_>) {
-        let key = (delivery.connection, delivery.from, delivery.to);
+        let key = delivery.sender;
         let mut window = self.tails.remove(&key).unwrap_or_default();
         window.extend_from_slice(delivery.bytes);
         let mut at = 0;
@@ -146,6 +145,7 @@ mod tests {
     fn deliver(inner: &mut Inner, connection: u64, bytes: &[u8]) {
         inner.delivered(&DeliveredBytes {
             connection,
+            sender: connection,
             from: None,
             to: None,
             bytes,
@@ -181,6 +181,26 @@ mod tests {
         deliver(&mut inner, 5, &[mark(3), mark(4)].concat());
         assert_eq!(inner.carriers.get(&3).map(BTreeSet::len), Some(2));
         assert_eq!(inner.carriers.get(&4).map(BTreeSet::len), Some(1));
+    }
+
+    #[test]
+    fn the_two_directions_keep_their_own_window() {
+        let mut inner = Inner::default();
+        let split = mark(9);
+        for (sender, bytes) in [
+            (1, &split[..5]),
+            (2, &b"a reply in between"[..]),
+            (1, &split[5..]),
+        ] {
+            inner.delivered(&DeliveredBytes {
+                connection: 1,
+                sender,
+                from: None,
+                to: None,
+                bytes,
+            });
+        }
+        assert_eq!(inner.carriers.get(&9).map(BTreeSet::len), Some(1));
     }
 
     #[test]

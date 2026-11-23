@@ -100,8 +100,8 @@ pub enum State {
     },
     /// The last batch of a [`Durability::Batched`] journal: a damaged entry
     /// beside an intact persist record is a crash or corruption, and nothing
-    /// local tells which. Leave it (it becomes [`State::Corrupt`] once
-    /// another batch of the caller commits) or clear it. The metainfo
+    /// local tells which. Leave it (it becomes [`State::Corrupt`] once the
+    /// caller commits another batch with a put or a clear) or clear it. The metainfo
     /// records it, so later opens, and the batches they write, keep it
     /// ambiguous.
     Ambiguous {
@@ -526,6 +526,19 @@ async fn write_persist<F: moonpool_core::LocalStorageFile>(
     Ok(())
 }
 
+/// The first ambiguous batch the next metainfo records: the one this scan
+/// found, or the one the metainfo already names while its batch is still in
+/// the log. An entry that reads whole once (a transient fault hid the tear)
+/// does not end the ambiguity: only a batch of the caller does.
+fn still_ambiguous(recorded: u64, last_batch: u64, found: u64) -> u64 {
+    let kept = (recorded != 0 && recorded <= last_batch).then_some(recorded);
+    match (kept, found) {
+        (Some(kept), 0) => kept,
+        (Some(kept), found) => kept.min(found),
+        (None, found) => found,
+    }
+}
+
 /// Make what this open found the log from now on: a new generation, durable
 /// in both metainfo copies before any write, so whatever lies beyond the end
 /// and was invisible here can never come back as evidence.
@@ -537,7 +550,8 @@ async fn write_persist<F: moonpool_core::LocalStorageFile>(
 /// records itself as the mark, once it is durable.
 ///
 /// The metainfo also records `ambiguous`, the first batch in which the scan
-/// found an entry that a crash may have torn beside its record (0: none).
+/// found an entry that a crash may have torn beside its record, or the one
+/// it already named ([`still_ambiguous`]; 0: none).
 /// The mark this open raises, and the batches it writes, prove nothing about
 /// that entry: it stays [`State::Ambiguous`] at every later open, until a
 /// batch of the caller commits.
@@ -564,7 +578,7 @@ async fn begin_generation<F: moonpool_core::LocalStorageFile>(
         },
         open_generation: generation,
         open_last: last_batch,
-        ambiguous,
+        ambiguous: still_ambiguous(meta.ambiguous, last_batch, ambiguous),
         ..meta
     };
     meta_file.update(&meta).await?;
@@ -1427,9 +1441,8 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// The retire batch of an open: one retire record for each slot the
     /// scan found torn, with a metainfo write, so the mark records the
     /// batch once it is durable. The caller's ambiguous entries stay
-    /// ambiguous: this is not the caller's batch.
+    /// ambiguous: the batch has no write, so it is not the caller's.
     async fn commit_retires(&mut self, torn: Vec<Retire>) -> Result<(), OpenError> {
-        let ambiguous_from = self.ambiguous_from;
         let mut batch = Batch::new();
         batch.set_meta(self.meta.bytes.clone());
         // A retire that does not fit is left out: its slot stays as it was,
@@ -1441,7 +1454,6 @@ impl<P: LocalStorageProvider> Journal<P> {
                 CommitError::Io { error, .. } => OpenError::Io(error),
                 other => OpenError::Io(std::io::Error::other(other.to_string())),
             })?;
-        self.ambiguous_from = ambiguous_from;
         Ok(())
     }
 
@@ -1653,7 +1665,11 @@ impl<P: LocalStorageProvider> Journal<P> {
             self.apply(&op);
         }
         self.last_batch = prepared.seq;
-        self.ambiguous_from = None;
+        // Only a batch with a write ends the ambiguity, as on disk: a
+        // retire batch (the open's, or the one a commit owes) does not.
+        if !batch.writes.is_empty() {
+            self.ambiguous_from = None;
+        }
         if meta_changes {
             self.meta = next_meta;
         }

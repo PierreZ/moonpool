@@ -849,6 +849,34 @@ fn a_damaged_batched_entry_stays_ambiguous_across_opens_until_the_caller_commits
     });
 }
 
+/// A commit with no put or clear (here a floor raise that drops one of two
+/// ambiguous entries) does not end the ambiguity of the other, also not
+/// through the retire batch it owes for the dropped slot.
+#[test]
+fn a_floor_raise_and_its_retire_batch_leave_the_other_entry_ambiguous() {
+    runtime().block_on(async {
+        let mut sim = sim(6);
+        let journal = create(&mut sim, Durability::Batched).await;
+        let journal = put(&mut sim, journal, &[(1, 1, 300)]).await;
+        let journal = put(&mut sim, journal, &[(6, 1, 300), (7, 1, 300)]).await;
+        let (_, six) = spots(&journal, 6);
+        let (_, seven) = spots(&journal, 7);
+        drop(journal);
+        flip(&mut sim, six.0, six.1).await;
+        flip(&mut sim, seven.0, seven.1).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+        assert_eq!(recovery.ambiguous.len(), 2, "{recovery:?}");
+        let mut batch = Batch::new();
+        batch.truncate_prefix(7);
+        let journal = commit(&mut sim, journal, batch).await.expect("commit");
+        assert_eq!(journal.state(6), State::Empty);
+        assert_eq!(journal.state(7), State::Ambiguous { id: id(7, 1) });
+        drop(journal);
+        let (journal, _) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+        assert_eq!(journal.state(7), State::Ambiguous { id: id(7, 1) });
+    });
+}
+
 #[test]
 fn a_damaged_record_is_rebuilt_from_its_intact_entry() {
     runtime().block_on(async {
