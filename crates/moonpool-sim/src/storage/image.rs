@@ -740,16 +740,15 @@ impl FileImage {
 
     /// Resolve a kill that keeps the page cache: the machine stays up, so
     /// every dirty sector lands new and an unsynced length change survives.
-    /// A stranded sector, whose writeback already failed, keeps its durable
-    /// bytes, as in a clean crash. `weight` decides whether such a sector
-    /// gets back the damage marks of its durable bytes. Draws nothing.
-    #[instrument(level = "trace", skip(self, weight))]
-    pub fn keep_cache(
-        &mut self,
-        path: &str,
-        barrier_violation_armed: bool,
-        weight: &dyn Fn(u64) -> f64,
-    ) -> FileCrashReport {
+    ///
+    /// A stranded sector, whose writeback already failed, stays as it is:
+    /// the kernel marked it clean, so no writeback lands it, and it stays in
+    /// the cache, so the next process reads the bytes the device never got
+    /// (fsyncgate). It stays volatile: a later [`crash`](Self::crash)
+    /// resolves it, and only [`drop_cache`](Self::drop_cache) or a write
+    /// ends it. Draws nothing.
+    #[instrument(level = "trace", skip(self))]
+    pub fn keep_cache(&mut self, path: &str, barrier_violation_armed: bool) -> FileCrashReport {
         let mut report = FileCrashReport {
             path: path.to_string(),
             clean: true,
@@ -760,22 +759,18 @@ impl FileImage {
             self.committed.resize(self.visible.len(), 0);
             fill_extension(&mut self.committed, old_len, self.fill);
         }
-        let dirty = self.dirty_sectors();
-        let lied: Vec<u64> = dirty
-            .iter()
-            .copied()
-            .filter(|s| self.lied.is_set(as_index(*s)))
-            .collect();
-        report.clean_kept = self.keep_unstranded(dirty, weight);
-        self.visible.clear();
-        self.visible.extend_from_slice(&self.committed);
-        let sectors = self.sectors();
-        self.resize_bitsets(sectors);
-        self.faults.clone_from(&self.durable_faults);
-        self.damaged.clone_from(&self.durable_damaged);
-        self.dirty.clear_all();
-        self.lied.clear_all();
-        self.stranded.clear_all();
+        // A sector a sync lied about and a writeback then stranded keeps
+        // its lie with its place in the cache.
+        let lied: Vec<u64> = self.lied.iter_ones_without(&self.stranded).collect();
+        // A clean sector reads its durable bytes and carries its durable
+        // marks already, so only the dirty ones change.
+        for sector in self.flushable_sectors() {
+            self.commit_sector(sector);
+            report.clean_kept.push(sector);
+        }
+        if self.stranded.iter_ones().next().is_some() {
+            assert_reachable!("disk: a kill kept sectors that a failed writeback stranded");
+        }
         report.lost_synced = self.oracle_sweep(path, &lied, barrier_violation_armed);
         for sector in &report.lost_synced {
             self.mark_durably(as_index(*sector), false);
@@ -1509,6 +1504,14 @@ mod tests {
         FileImage::new(size, 0, false)
     }
 
+    /// A power loss that keeps every unsynced write the device got.
+    fn clean_crash() -> StorageConfiguration {
+        StorageConfiguration {
+            clean_crash_probability: 1.0,
+            ..StorageConfiguration::fast_local()
+        }
+    }
+
     fn always_eligible(_sector: u64) -> f64 {
         1.0
     }
@@ -1793,10 +1796,39 @@ mod tests {
         let fill = image.fill.sector(1).to_vec();
         assert_eq!(durable_sector(&image, 1), fill, "the grown durable tail");
 
-        image.keep_cache("f", false, &always_eligible);
+        image.crash("f", &clean_crash(), false, &always_eligible);
         let mut buf = vec![0u8; SECTOR_SIZE];
         image.read(size, &mut buf).expect("read failed");
         assert_eq!(buf, fill, "a stranded sector keeps the fill, not zeros");
+    }
+
+    /// A kill that keeps the page cache keeps a stranded sector in it: the
+    /// next process reads the bytes the device never got, a sync still does
+    /// not flush them, and the next power loss takes them (fsyncgate).
+    #[test]
+    fn a_kill_that_keeps_the_cache_keeps_a_stranded_sector_readable_and_volatile() {
+        seeded(9);
+        let config = StorageConfiguration::fast_local();
+        let size = SECTOR_SIZE as u64;
+        let mut image = FileImage::new(0, 42, true);
+        image.write(0, &[1; 2 * SECTOR_SIZE]);
+        image.sync(&config, &always_eligible);
+        image.write(0, &[2; SECTOR_SIZE]);
+        assert_eq!(image.fail_writeback(false), vec![0]);
+        image.write(size, &[3; SECTOR_SIZE]);
+
+        let report = image.keep_cache("f", false);
+        assert_eq!(report.clean_kept, vec![1], "the dirty sector lands");
+        assert_eq!(durable_sector(&image, 1), vec![3; SECTOR_SIZE]);
+        let mut buf = vec![0u8; SECTOR_SIZE];
+        image.read(0, &mut buf).expect("read failed");
+        assert_eq!(buf, vec![2; SECTOR_SIZE], "the cache still holds it");
+        assert_eq!(durable_sector(&image, 0), vec![1; SECTOR_SIZE]);
+        assert!(!image.has_flushable(), "no sync writes it");
+
+        image.crash("f", &clean_crash(), false, &always_eligible);
+        image.read(0, &mut buf).expect("read failed");
+        assert_eq!(buf, vec![1; SECTOR_SIZE], "the power loss takes it");
     }
 
     /// A sync that lies about a sector in the grown region leaves the fill

@@ -195,6 +195,8 @@ Where generics hurt, erase at an application boundary with a narrowly scoped tra
 **Goal**: Find bugs, not regression testing
 **NEVER remove assertions that catch bugs** — if an assertion fails, fix the underlying bug. Assertions exist to find real issues; deleting a failing assertion hides the bug.
 **When an assertion catches a bug**: find the root cause before you change code. Reproduce the seed alone, read the relevant reference code, and trace the full data flow from the first violation back to the decision that caused it (`debug-a-seed` skill). A fix that only makes the assertion quiet is not a fix.
+**A failing seed is fixed in the code under test, not in the harness.** A change to a workload, a process of an example, a fault mask or an oracle that makes a failing seed pass needs two things before it merges: an issue against the code under test that names the seed and the bug, and Pierre's go-ahead. This holds also when the new harness behaviour is what a careful user would do: the library must stay correct for the user who does not. (In October 2026 the journal simulation found that an open read a failed commit back from the page cache. The example node was changed to lose power on every I/O error, the seeds passed, and the journal kept the bug until a code review found it a month later.)
+**An oracle that accepts a report must be able to refuse it.** When a check accepts "the system reported damage", some run must exist where no fault explains damage and the same report fails (the journal example's honest disk).
 
 ## Storage Layering
 One provider, one file abstraction, one simulated file image. `StorageProvider`
