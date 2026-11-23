@@ -1179,13 +1179,12 @@ impl<P: LocalStorageProvider> Journal<P> {
         };
         let (writes, repair) =
             plan_repair(&self.segments, self.tag, known, self.last_batch).await?;
-        if let Err(error) = write_persist(&self.segments, writes).await {
-            // A failed rewrite may leave a persist block dirty or torn in the
-            // cache, under the next commit's range sync: poisoned, as a
-            // failed commit is.
-            self.poisoned = true;
-            return Err(error.into());
-        }
+        // A failed or dropped rewrite may leave a persist block dirty or
+        // torn in the cache, under the next commit's range sync: poisoned,
+        // as a failed commit is, until the rewrite returns.
+        self.poisoned = true;
+        write_persist(&self.segments, writes).await?;
+        self.poisoned = false;
         Ok(repair)
     }
 
@@ -1310,16 +1309,13 @@ impl<P: LocalStorageProvider> Journal<P> {
         }
         let mut out = Scrub::default();
         if self.scrub_next.is_none() {
-            // A failed rewrite may leave a copy dirty or torn in the cache.
-            // The next write of its twin assumes it is the file's one
-            // unsynced write, so the failure poisons, as a commit's does.
-            match self.scrub_copies().await {
-                Ok((meta, headers)) => (out.meta_repaired, out.headers_repaired) = (meta, headers),
-                Err(error) => {
-                    self.poisoned = true;
-                    return Err(error.into());
-                }
-            }
+            // A failed or dropped rewrite may leave a copy dirty or torn in
+            // the cache. The next write of its twin assumes it is the file's
+            // one unsynced write, so the journal stays poisoned, as for a
+            // commit, until the rewrites return.
+            self.poisoned = true;
+            (out.meta_repaired, out.headers_repaired) = self.scrub_copies().await?;
+            self.poisoned = false;
         }
         let start = self.scrub_next.unwrap_or(0);
         let mut chunk: Vec<(u64, Located)> = Vec::new();
@@ -1397,6 +1393,13 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// [`CommitError::BatchNumbersExhausted`] before anything is written; an I/O
     /// failure poisons the journal ([`CommitError::Io`] says whether the
     /// batch may be durable anyway).
+    ///
+    /// # Cancel safety
+    /// Not cancel-safe, by design: a commit future dropped before it
+    /// returns (a timeout, a losing `select!` branch) poisons the journal,
+    /// as a failed commit does, and every later call refuses until the
+    /// caller reopens. The batch may be on disk, wholly or in part; the
+    /// open finds out which.
     pub async fn commit(&mut self, batch: Batch) -> Result<(), CommitError> {
         let mut owed = self.commit_with(batch, Vec::new()).await?;
         if !owed.is_empty() {
@@ -1609,13 +1612,24 @@ impl<P: LocalStorageProvider> Journal<P> {
         };
         if batch.writes.is_empty() && retires.is_empty() {
             if meta_changes {
+                // Poisoned until memory follows the disk: see below.
+                self.poisoned = true;
                 self.write_meta_only(&next_meta).await?;
                 self.meta = next_meta;
                 self.after_commit().await?;
+                self.poisoned = false;
             }
             return Ok(self.still_held(owed));
         }
         let mut prepared = self.prepare(&batch, &retires)?;
+        // Everything a commit refuses is refused by now. From the first
+        // await until memory follows the disk, the journal is poisoned: a
+        // caller that drops this future (a timeout, a `select!`) can leave
+        // the batch partly or wholly on disk while memory still names the
+        // old tail, and a next commit would then write the same batch
+        // number at the same offsets over it. A dropped commit is a failed
+        // commit: the caller reopens.
+        self.poisoned = true;
         // The metainfo lands only once the batch is durable, so it records
         // the batch itself as the high-water mark.
         next_meta.last_batch = prepared.seq;
@@ -1630,7 +1644,6 @@ impl<P: LocalStorageProvider> Journal<P> {
         if let Err((error, durable)) =
             write_protocol(segment, &self.meta_file, &mut prepared, meta, ordered).await
         {
-            self.poisoned = true;
             return Err(CommitError::Io { error, durable });
         }
 
@@ -1675,7 +1688,9 @@ impl<P: LocalStorageProvider> Journal<P> {
         }
         let committed = self.after_commit().await;
         self.publish_regions(Vec::new());
-        committed.map(|()| self.still_held(owed))
+        committed?;
+        self.poisoned = false;
+        Ok(self.still_held(owed))
     }
 
     /// The retires of `owed` whose slot is still in a segment of the log: a
@@ -1691,7 +1706,6 @@ impl<P: LocalStorageProvider> Journal<P> {
     async fn after_commit(&mut self) -> Result<(), CommitError> {
         self.drop_below_floor();
         if let Err(error) = self.remove_dead_segments().await {
-            self.poisoned = true;
             return Err(CommitError::Io {
                 error,
                 durable: Durable::Unknown,
@@ -1909,7 +1923,6 @@ impl<P: LocalStorageProvider> Journal<P> {
                     }
                 }
                 Err(error) => {
-                    self.poisoned = true;
                     // The provider's own error keeps its kind, so a caller
                     // tells a full disk (`StorageFull`) from a failing one.
                     let error = match error {
@@ -1927,13 +1940,13 @@ impl<P: LocalStorageProvider> Journal<P> {
     }
 
     async fn write_meta_only(&mut self, meta: &Meta) -> Result<(), CommitError> {
-        self.meta_file.update(meta).await.map_err(|error| {
-            self.poisoned = true;
-            CommitError::Io {
+        self.meta_file
+            .update(meta)
+            .await
+            .map_err(|error| CommitError::Io {
                 error,
                 durable: Durable::Unknown,
-            }
-        })
+            })
     }
 
     // ---- the index ----

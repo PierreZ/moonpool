@@ -365,6 +365,16 @@ A crash that tears the retire batch makes it the last of its generation, so
 its own lost slots are torn slots too. Only the last batch of a generation
 can be torn by a crash, because a failed commit poisons the journal.
 
+What about a commit that never fails, because the caller stops waiting? A
+timeout or a losing `select!` branch drops the commit future at an await.
+The batch can then be on disk, whole or in part, while memory still names
+the old tail. The next commit would write the same batch number at the same
+offsets over it, and a crash during that write tears a batch that was
+durable: an honest disk then reads as corrupt. So a commit poisons the
+journal before its first await and clears the poison only once memory
+follows the disk. **A dropped commit is a failed commit**, and the caller
+reopens. A scrub's copy rewrites and a record repair do the same.
+
 A commit retires slots too. When a batch replaces, clears or drops below the
 floor a position whose entry is known damaged (`State::Corrupt`, or a read
 that returned `ReadError::Damaged`), the commit retires the old slot in a
