@@ -405,8 +405,14 @@ pub fn install_select_offset() {
 
 /// Uninstall the simulation stream as the `select!` offset source, restoring
 /// moonpool-core's entropy fallback (production behavior).
+///
+/// A no-op while a `SimWorld` still lives on this thread: the end of a run
+/// (or of a live run) must not take the seeded source from a raw world that
+/// outlives it. The last world dropped uninstalls it.
 pub fn uninstall_select_offset() {
-    moonpool_core::select_support::set_select_offset_override(None);
+    if super::world::live_worlds() == 0 {
+        moonpool_core::select_support::set_select_offset_override(None);
+    }
 }
 
 /// The offset source registered with moonpool-core: one draw per `select!`.

@@ -371,45 +371,74 @@ async fn sessions_closed(rpc: &RpcHandle<TokioProviders>) -> bool {
     false
 }
 
+struct Directory;
+impl RpcMethod for Directory {
+    type Request = Text;
+    type Reply = InterfaceRef<Kv>;
+    const METHOD: MethodId = MethodId::new(0xd1);
+    const SCHEMA: SchemaVersion = SchemaVersion::new(1);
+    const NAME: &'static str = "directory";
+}
+const DIRECTORY: WellKnownId = WellKnownId::new(1);
+
+/// One boot of the restart scenario's participant: a Kv group plus the directory that
+/// publishes it.
+async fn boot(
+    address: &str,
+    name: &'static str,
+    executions: Arc<AtomicU64>,
+) -> Result<(RpcHandle<TokioProviders>, Vec<tokio::task::JoinHandle<()>>), String> {
+    let (driver, rpc) = RpcDriver::listen(TokioProviders::new(), address, RpcConfig::default())
+        .await
+        .map_err(|e| format!("listen: {e:?}"))?;
+    let group = rpc
+        .register_group::<Kv>(AccessClass::Public)
+        .map_err(|e| format!("register the group: {e:?}"))?;
+    let get = serve(
+        group
+            .serve::<Get>()
+            .map_err(|e| format!("serve get: {e:?}"))?,
+        name,
+        executions,
+    );
+    let (_, mut directory) = rpc
+        .register_well_known::<Directory>(DIRECTORY, AccessClass::Public)
+        .map_err(|e| format!("register the directory: {e:?}"))?;
+    let published = group.interface_ref();
+    let directory = tokio::spawn(async move {
+        let _group = group;
+        while let Some(IncomingRequest { reply, .. }) = directory.recv().await {
+            let _ = reply.send(&published);
+        }
+    });
+    let driver = tokio::spawn(async move {
+        let _ = driver.run().await;
+    });
+    Ok((rpc, vec![driver, get, directory]))
+}
+
+/// Boot again at the address a stopped boot used. The old listener closes
+/// when its driver task ends, so a taken address is retried for about two
+/// seconds; any other error fails at once, and so does an address that
+/// stays taken.
+async fn boot_again(
+    address: std::net::SocketAddr,
+    name: &'static str,
+    executions: Arc<AtomicU64>,
+) -> (RpcHandle<TokioProviders>, Vec<tokio::task::JoinHandle<()>>) {
+    let mut last = String::new();
+    for _ in 0..100 {
+        match boot(&address.to_string(), name, executions.clone()).await {
+            Ok(booted) => return booted,
+            Err(why) if why.starts_with("listen") => last = why,
+            Err(why) => panic!("could not boot again at {address}: {why}"),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("could not boot again at {address}: {last}");
+}
+
 async fn restart_scenario() {
-    struct Directory;
-    impl RpcMethod for Directory {
-        type Request = Text;
-        type Reply = InterfaceRef<Kv>;
-        const METHOD: MethodId = MethodId::new(0xd1);
-        const SCHEMA: SchemaVersion = SchemaVersion::new(1);
-        const NAME: &'static str = "directory";
-    }
-    const DIRECTORY: WellKnownId = WellKnownId::new(1);
-
-    /// One boot of the participant: a Kv group plus the directory that
-    /// publishes it.
-    async fn boot(
-        address: &str,
-        name: &'static str,
-        executions: Arc<AtomicU64>,
-    ) -> Option<(RpcHandle<TokioProviders>, Vec<tokio::task::JoinHandle<()>>)> {
-        let (driver, rpc) = RpcDriver::listen(TokioProviders::new(), address, RpcConfig::default())
-            .await
-            .ok()?;
-        let group = rpc.register_group::<Kv>(AccessClass::Public).ok()?;
-        let get = serve(group.serve::<Get>().ok()?, name, executions);
-        let (_, mut directory) = rpc
-            .register_well_known::<Directory>(DIRECTORY, AccessClass::Public)
-            .ok()?;
-        let published = group.interface_ref();
-        let directory = tokio::spawn(async move {
-            let _group = group;
-            while let Some(IncomingRequest { reply, .. }) = directory.recv().await {
-                let _ = reply.send(&published);
-            }
-        });
-        let driver = tokio::spawn(async move {
-            let _ = driver.run().await;
-        });
-        Some((rpc, vec![driver, get, directory]))
-    }
-
     let (first_calls, second_calls) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     let (a, first_boot) = boot("127.0.0.1:0", "i1", first_calls.clone())
         .await
@@ -440,17 +469,7 @@ async fn restart_scenario() {
     // refusal I2 gives its resent copy can only say `MaybeExecuted`: it
     // proves nothing about an attempt that already left.
     assert!(sessions_closed(&b).await, "B sees I1's session close");
-    // The old listener closes when its driver task ends; a short wait
-    // covers a slow close. An address that stays taken fails the test.
-    let mut second = None;
-    for _ in 0..100 {
-        second = boot(&address.to_string(), "i2", second_calls.clone()).await;
-        if second.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let (_a2, _second_boot) = second.unwrap_or_else(|| panic!("could not boot again at {address}"));
+    let (_a2, _second_boot) = boot_again(address, "i2", second_calls.clone()).await;
 
     // I1 is refused, terminally; it never reaches I2's handler, even as a
     // reliable call.

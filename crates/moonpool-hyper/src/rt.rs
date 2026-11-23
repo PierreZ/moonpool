@@ -125,11 +125,12 @@ fn anchor() -> Instant {
 /// exactly as on native targets.
 ///
 /// std offers no safe way to build an `Instant` without a clock, so this is
-/// the one place that relies on std's private layout. The layout is checked
-/// twice: size and alignment at compile time, and at run time that the
-/// minted value behaves as the zero `Instant` (nothing lies before it, and
-/// arithmetic from it is exact). A std change that broke either check
-/// panics here, at timer creation, instead of handing hyper a wrong clock.
+/// the one place that relies on std's private layout. The guard is the
+/// compile-time check of size and alignment: a std change to either fails
+/// the build. The run-time probe after it is a second line only: it catches
+/// a type of the same size whose meaning changed (the minted value must be
+/// the zero `Instant`, with nothing before it and exact arithmetic from it),
+/// and panics at timer creation instead of handing hyper a wrong clock.
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]
 fn anchor() -> Instant {
     const _: () = {

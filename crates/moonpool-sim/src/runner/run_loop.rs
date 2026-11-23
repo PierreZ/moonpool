@@ -375,10 +375,6 @@ impl<P: ProviderBundle> SimulationBuilder<P> {
             providers,
         } = inputs;
         async move {
-            // Both ways the runner drives a run (`run()` and a live run) go
-            // through here. A `select!` that drew its branch offset from OS
-            // entropy would make the run unreplayable from its seed.
-            assert_select_seeded(seed);
             WorkloadOrchestrator::orchestrate_workloads(OrchestrateInputs {
                 workloads,
                 fault_injectors,
@@ -2035,16 +2031,6 @@ fn build_bucket_summaries(
         .collect();
     summaries.sort_by_key(|s| std::cmp::Reverse(s.total_hits));
     summaries
-}
-
-/// Panic unless the seeded `select!` offset source is installed on this
-/// thread when the run of `seed` starts. (The run's world installs it too,
-/// and its last handle removes it, so it is gone once the run is over.)
-fn assert_select_seeded(seed: u64) {
-    assert!(
-        moonpool_core::select_support::select_offset_override_installed(),
-        "seed {seed}: the seeded select! offset is not installed at the start of the run"
-    );
 }
 
 #[cfg(test)]

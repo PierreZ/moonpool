@@ -4,8 +4,8 @@
 //! A `select!` inside a run that drew its branch offset from OS entropy
 //! would make the run unreplayable from its seed, in silence. The ways in
 //! are `SimulationBuilder::run`, `SimulationBuilder::live` and a raw
-//! `SimWorld` (low-level tests). The runner also checks the source at the
-//! start and the end of each run.
+//! `SimWorld` (low-level tests). The end of a run must not remove the source
+//! from a raw world that outlives it.
 
 use std::time::Duration;
 
@@ -92,6 +92,25 @@ fn a_live_run_installs_the_source_and_removes_it_when_dropped() {
         !select_offset_override_installed(),
         "after the live run, select! is back on the production source"
     );
+}
+
+#[test]
+fn a_run_does_not_take_the_source_from_a_raw_world_that_outlives_it() {
+    let world = SimWorld::new_with_seed(9);
+    let report = builder().set_iterations(1).run().expect("valid builder");
+    assert_eq!(report.failed_runs, 0, "{report:?}");
+    assert!(
+        select_offset_override_installed(),
+        "the raw world still lives: its select! keeps the seeded source"
+    );
+    let live = builder().live().expect("a live run");
+    drop(live);
+    assert!(
+        select_offset_override_installed(),
+        "a dropped live run leaves the raw world's source"
+    );
+    drop(world);
+    assert!(!select_offset_override_installed(), "every world dropped");
 }
 
 #[test]

@@ -177,6 +177,8 @@ jobs:
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-wasm-demo
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-rpc
           nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-rpc --no-default-features
+          # The wasm-only clockless Instant anchor of HyperTimer.
+          nix develop --command cargo check --target wasm32-unknown-unknown -p moonpool-hyper
       - name: moonpool-rpc without its codec feature
         run: nix develop --command cargo clippy -p moonpool-rpc --no-default-features --all-targets -- --deny warnings
       - name: moonpool-rpc with its optional derive
@@ -199,6 +201,11 @@ jobs:
       # runners give noisy I/O, so the numbers are printed, never checked.
       - name: moonpool-journal benchmark (smoke)
         run: nix develop --command cargo run -p moonpool-journal --example bench -- --duration 1 --writers 2
+      # The workspace doctest run gets moonpool-rpc's `derive` only through
+      # feature unification; naming it keeps the derive examples and the
+      # compile-fail doctests if that ever changes.
+      - name: moonpool-rpc derive doctests
+        run: nix develop --command cargo test -p moonpool-rpc --features derive --doc
       # Package every published crate and build each one from its .crate,
       # the way crates.io will see it (cargo package does not skip
       # publish = false crates, so the published ones are named):

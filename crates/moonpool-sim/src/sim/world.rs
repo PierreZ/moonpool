@@ -240,6 +240,11 @@ thread_local! {
     static LIVE_WORLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The number of worlds alive on this thread.
+pub(crate) fn live_worlds() -> usize {
+    LIVE_WORLDS.with(std::cell::Cell::get)
+}
+
 impl Drop for SimWorld {
     fn drop(&mut self) {
         // A handle made from a weak reference shares the world: only the

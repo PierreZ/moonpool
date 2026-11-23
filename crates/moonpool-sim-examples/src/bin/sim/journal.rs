@@ -42,7 +42,13 @@ fn env<T: std::str::FromStr>(name: &str) -> Option<T> {
 
 /// The seeds each disk runs: `JOURNAL_SIM_SEEDS`, or `default`.
 fn seeds(default: usize) -> usize {
-    env("JOURNAL_SIM_SEEDS").unwrap_or(default)
+    let seeds = env("JOURNAL_SIM_SEEDS").unwrap_or(default);
+    if seeds == 0 {
+        // Zero seeds would pass without running anything.
+        eprintln!("JOURNAL_SIM_SEEDS=0 runs nothing: ask for at least one seed");
+        std::process::exit(2);
+    }
+    seeds
 }
 
 /// The run of the node on `disk`, for `iterations` seeds.
