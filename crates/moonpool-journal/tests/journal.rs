@@ -5,6 +5,9 @@
 
 use std::future::Future;
 use std::net::IpAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
 use moonpool_core::{OpenOptions, StorageFile, StorageProvider};
 use moonpool_journal::{
@@ -617,6 +620,201 @@ async fn a_crash_mid_adopt(seed: u64) {
             "{at}: position {position}"
         );
     }
+}
+
+/// Kills the caller at the hint `label` (at the first hint it reaches when
+/// `None`), once, and says so in `hit`.
+struct DropAt {
+    label: Option<&'static str>,
+    hit: Arc<AtomicBool>,
+}
+
+impl moonpool_buggify::hint::Sink for DropAt {
+    fn strike(&self, label: &'static str) -> moonpool_buggify::hint::Strike {
+        if self.label.is_none_or(|at| at == label) && !self.hit.swap(true, Ordering::SeqCst) {
+            moonpool_buggify::hint::Strike::Killed
+        } else {
+            moonpool_buggify::hint::Strike::None
+        }
+    }
+}
+
+/// Commit the batch `fill` makes, and drop the commit future once it sits
+/// at the hint `label` (the first hint when `None`), as a caller's timeout
+/// would. Returns the journal and the commit's result, `None` when it was
+/// dropped.
+async fn commit_until(
+    sim: &mut SimWorld,
+    mut journal: J,
+    label: Option<&'static str>,
+    fill: impl FnOnce(&mut Batch),
+) -> (J, Option<Result<(), CommitError>>) {
+    let mut batch = Batch::new();
+    fill(&mut batch);
+    let hit = Arc::new(AtomicBool::new(false));
+    moonpool_buggify::set_random_source(|| 0.0);
+    moonpool_buggify::buggify_init(1.0);
+    moonpool_buggify::hint::set_sink(Box::new(DropAt {
+        label,
+        hit: Arc::clone(&hit),
+    }));
+    let out = run(sim, move |_| async move {
+        let finished = {
+            let mut commit = std::pin::pin!(journal.commit(batch));
+            std::future::poll_fn(|cx| match commit.as_mut().poll(cx) {
+                Poll::Ready(result) => Poll::Ready(Some(result)),
+                // The caller gives up once the commit sits at the hint.
+                Poll::Pending if hit.load(Ordering::SeqCst) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            })
+            .await
+        };
+        (journal, finished)
+    })
+    .await;
+    moonpool_buggify::hint::clear_sink();
+    moonpool_buggify::buggify_reset();
+    out
+}
+
+/// Every await of a commit a caller can drop it at: each window the
+/// commit names, for the durability that has it.
+const DROP_POINTS: [(Durability, &str); 5] = [
+    (
+        Durability::Batched,
+        "journal commit: entries written, not synced",
+    ),
+    (
+        Durability::Batched,
+        "journal commit: records written, not synced",
+    ),
+    (
+        Durability::Batched,
+        "journal commit: batch synced, metainfo stale",
+    ),
+    (
+        Durability::Ordered,
+        "storage: durable write landed, not synced",
+    ),
+    (
+        Durability::Ordered,
+        "journal commit: batch synced, metainfo stale",
+    ),
+];
+
+/// A commit the caller drops part way (a timeout, a losing `select!`
+/// branch) poisons the journal, as a failed commit does: memory still names
+/// the old tail while the batch may be on disk, so a next commit would
+/// write the same batch number at the same offsets over it. After a power
+/// loss, an honest disk then never reads as damaged, and nothing
+/// acknowledged is lost.
+#[test]
+fn a_dropped_commit_poisons_and_an_honest_disk_reads_whole_after_a_crash() {
+    runtime().block_on(async {
+        for (durability, label) in DROP_POINTS {
+            for seed in 0..18 {
+                a_dropped_commit(seed, durability, label).await;
+            }
+        }
+    });
+}
+
+async fn a_dropped_commit(seed: u64, durability: Durability, label: &'static str) {
+    let at = format!("seed {seed}, {durability:?}, at {label:?}");
+    let mut sim = sim(seed);
+    let mut journal = create(&mut sim, durability).await;
+    for position in 0..4 {
+        journal = put(&mut sim, journal, &[(position, 1, 100)]).await;
+    }
+    let (journal, finished) = commit_until(&mut sim, journal, Some(label), |batch| {
+        batch.put(4, id(4, 1), payload(4, 1, 100));
+        batch.set_meta(b"moved".to_vec());
+    })
+    .await;
+    assert!(
+        finished.is_none(),
+        "{at}: the commit never reached its hint: {finished:?}"
+    );
+
+    // The next commit refuses: the dropped one poisoned the journal. Had
+    // it gone through, it would write the same batch number at the same
+    // offsets over the dropped one; it is dropped too, at its first hint.
+    let (_, next) = commit_until(&mut sim, journal, None, |batch| {
+        batch.put(4, id(4, 2), payload(4, 2, 300));
+        batch.put(5, id(5, 1), payload(5, 1, 300));
+    })
+    .await;
+
+    // Power loss under the crash physics of an honest disk (each unsynced
+    // sector kept, lost to the fill pattern or shorn; no rot, no read
+    // error), then an open: nothing damaged, nothing acknowledged lost, and
+    // position 4 holds what one of the two commits wrote, or nothing.
+    let mut config = StorageConfiguration::fast_local();
+    config.garbage_fill_probability = [0.0, 0.5, 1.0][usize::try_from(seed % 3).expect("small")];
+    config.crash_lost_probability = [0.1, 0.3, 0.6][usize::try_from(seed / 3 % 3).expect("small")];
+    config.shorn_write_probability = [0.0, 0.2][usize::try_from(seed / 9 % 2).expect("small")];
+    sim.set_storage_config(config);
+    sim.simulate_crash_for_process(ip(), true);
+    sim.set_storage_config(StorageConfiguration::fast_local());
+    let (mut journal, recovery) = reopen(&mut sim, durability)
+        .await
+        .unwrap_or_else(|error| panic!("{at}: reopen: {error}"));
+    assert!(
+        recovery.corrupt.is_empty(),
+        "{at}: an honest disk reads as corrupt: {recovery:?}"
+    );
+    for position in 0..4 {
+        let (back, bytes) = read(&mut sim, journal, position).await;
+        journal = back;
+        assert_eq!(
+            bytes.unwrap_or_else(|error| panic!("{at}: position {position}: {error}")),
+            payload(position, 1, 100),
+            "{at}: position {position}"
+        );
+    }
+    let (_, bytes) = read(&mut sim, journal, 4).await;
+    if let Ok(bytes) = bytes {
+        assert!(
+            bytes == payload(4, 1, 100) || bytes == payload(4, 2, 300),
+            "{at}: position 4 reads bytes no commit wrote"
+        );
+    }
+    assert!(
+        matches!(next, Some(Err(CommitError::Poisoned))),
+        "{at}: the commit after a dropped one was not refused: {next:?}"
+    );
+}
+
+/// A scrub dropped while it rewrites the metainfo and header copies
+/// poisons the journal too: a copy may sit dirty or torn in the cache, and
+/// the next write of its twin assumes it is the file's one unsynced write.
+#[test]
+fn a_dropped_scrub_poisons() {
+    runtime().block_on(async {
+        let mut sim = sim(7);
+        let journal = create(&mut sim, Durability::Ordered).await;
+        let mut journal = put(&mut sim, journal, &[(0, 1, 100)]).await;
+        let dropped = run(&mut sim, move |_| async move {
+            let pending = {
+                let mut scrub = std::pin::pin!(journal.scrub(u64::MAX));
+                // The caller gives up after one poll: the copies' first
+                // read is in flight.
+                std::future::poll_fn(|cx| Poll::Ready(scrub.as_mut().poll(cx).is_pending())).await
+            };
+            (journal, pending)
+        })
+        .await;
+        let (journal, pending) = dropped;
+        assert!(pending, "the scrub finished in one poll");
+        let mut batch = Batch::new();
+        batch.put(1, id(1, 1), payload(1, 1, 100));
+        let next = commit(&mut sim, journal, batch).await;
+        assert!(
+            matches!(next, Err(CommitError::Poisoned)),
+            "the commit after a dropped scrub was not refused: {:?}",
+            next.map(|_| ())
+        );
+    });
 }
 
 #[test]

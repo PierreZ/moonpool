@@ -209,7 +209,11 @@
 //!
 //! A failed commit poisons the journal: [`CommitError::Io`] says through
 //! [`Durable`] whether the batch may be on disk anyway, and the caller
-//! reopens.
+//! reopens. A commit future dropped before it returns (a timeout, a losing
+//! `select!` branch) is a failed commit too: the journal stays poisoned from
+//! the commit's first await until memory follows the disk, so a dropped
+//! commit never lets the next one write the same batch number over a batch
+//! that is partly on disk.
 //!
 //! # Recovery
 //!
