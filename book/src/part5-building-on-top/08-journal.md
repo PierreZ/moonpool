@@ -73,8 +73,8 @@ journal.commit(chunk).await?;   // metainfo and floor go in the last one
 ```
 
 `Batch::fits(geometry)` is the same bound for a staged batch. Both count
-each write twice in the persist log: a write that replaces a position whose
-entry is damaged takes a retire record for the old slot (below). The default
+each write twice in the persist log. That is slack now: the room a retire
+record once took in the same batch (below). The default
 `Geometry` is a 64 MiB segment with persist and entry logs of the same size
 (507,904 records and 31 MiB of entries). Every batch starts on a fresh block
 in both logs, so a segment holds 7,936 batches of one small entry.
@@ -361,10 +361,15 @@ can be torn by a crash, because a failed commit poisons the journal.
 
 A commit retires slots too. When a batch replaces, clears or drops below the
 floor a position whose entry is known damaged (`State::Corrupt`, or a read
-that returned `ReadError::Damaged`), the batch carries a retire record for
-the old slot. The caller's usual repair, a new put of the position, then
-leaves nothing behind that a second fault can turn into a refused open. A
-commit that only raises the floor writes a batch for such retire records.
+that returned `ReadError::Damaged`), the commit retires the old slot in a
+batch of its own, once its batch is durable. The caller's usual repair, a
+new put of the position, then leaves nothing behind that a second fault can
+turn into a refused open. Why not in the same batch? A crash can tear that
+batch's put and keep its retire record: the open would discard the put as
+torn, ignore the old slot, and forget the only copy of an acknowledged
+entry. A crash between the two batches leaves the old slot unretired: the
+next open retires it when only its header is left, and otherwise it stays
+one fault from a refused open, as a damaged slot nothing has replaced yet.
 
 Two rules keep old or misplaced records from passing for evidence. Batch
 numbers grow with the place in the persist log, so a record after a batch
@@ -377,7 +382,10 @@ batch from its entries.
 A batch missing while later ones exist, or a log ending before the batch the
 metainfo proves durable, is `LostBatch`: that covers every record and the
 first entry of a witnessed last batch damaged, where nothing on disk even
-says the batch was there. A missing meta file beside segments, or two
+says the batch was there. Batch numbers have no gaps (an open generation
+counts on from its first number), so a missing batch is found even when
+the walk of the entries goes straight past it, as it does past an open's
+retire batch that the disk lost: its entry sat over the slot it discarded. A missing meta file beside segments, or two
 damaged copies, is `MetaLost`. But what if the bytes are intact and only
 the format version is not ours? That is a binary of another version, not a
 lost disk: `UnsupportedVersion { found, supported }`. Each checksum covers

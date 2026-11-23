@@ -89,8 +89,10 @@ impl Batch {
     /// durable than one segment holds splits it across commits.
     ///
     /// Each write counts twice in the records, and once more as a 64-byte
-    /// entry: a write that replaces a position whose entry is damaged takes
-    /// a retire record for the old slot in the same batch.
+    /// entry: room a retire record once took in the same batch. A commit
+    /// now retires the old slot of a damaged entry in a batch of its own, so
+    /// this is slack, kept so the bound callers size batches with is
+    /// unchanged.
     #[must_use]
     pub fn fits(&self, geometry: Geometry) -> bool {
         self.fits_with(geometry, None)

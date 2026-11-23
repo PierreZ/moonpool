@@ -136,7 +136,9 @@
 //!   [`hint!`](moonpool_buggify::hint!): entries written but not synced, records
 //!   written but not synced, and the batch synced while the metainfo is
 //!   still stale. An ordered commit names the last one; the windows inside
-//!   its two durable writes are the storage layer's to name. In production these are no-ops. In a simulation the
+//!   its two durable writes are the storage layer's to name. A commit that
+//!   makes a damaged slot dead names one more: the batch durable, the
+//!   retire batch for that slot not written yet. In production these are no-ops. In a simulation the
 //!   simulator may reboot the process there, under the seed's attrition
 //!   regime and an optional harness `HintVeto` budget.
 //!
@@ -238,7 +240,11 @@
 //! mark records that batch once it is durable: a crash anywhere in that
 //! open leaves the slots judged the same way at the next one. A commit that
 //! makes dead a slot whose entry is damaged ([`State::Corrupt`], or a read
-//! that returned [`ReadError::Damaged`]) retires it in the same batch.
+//! that returned [`ReadError::Damaged`]) retires it in a batch of its own,
+//! written once the commit's batch is durable. Never in the same batch: a
+//! crash can tear that batch's put and keep its retire record, and the open
+//! would discard the put as torn and ignore the old slot, the only copy of
+//! an acknowledged entry.
 //!
 //! A batch is **witnessed** when something other than its own two damaged
 //! parts proves it durable: the metainfo's high-water mark records it (a
@@ -271,7 +277,11 @@
 //! the batch from its first entry.
 //!
 //! A batch missing while later ones exist, or a log that ends before the
-//! batch the metainfo proves durable, is [`OpenError::LostBatch`]. A batch of
+//! batch the metainfo proves durable, is [`OpenError::LostBatch`]. Batch
+//! numbers have no gaps (an open generation counts on from its first
+//! number), so a missing batch is found even when the walk of the entries
+//! goes straight past it: an open's retire batch that the disk lost, say,
+//! whose entry sat over the slot it discarded. A batch of
 //! a later open generation than the metainfo's proves the metainfo older
 //! than the log (both copies lost an update): [`OpenError::MetaRolledBack`].
 //! Inside one open generation, the stamps tell: an intact entry header

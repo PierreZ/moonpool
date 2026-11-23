@@ -52,8 +52,8 @@ use moonpool_core::{AlignedBuf, LocalStorageFile};
 
 use crate::format::{
     BLOCK_U64, EntryHeader, FLAG_ORDERED, Geometry, Id, Kind, ParsedEntry, RECORD_SIZE,
-    RECORDS_PER_BLOCK, Record, Retire, Slot, align_up, generation_of, is_zero, stamp_is_ahead,
-    u64_of, usize_of,
+    RECORDS_PER_BLOCK, Record, Retire, Slot, align_up, first_batch_of, generation_of, is_zero,
+    stamp_is_ahead, u64_of, usize_of,
 };
 use crate::segment::Segment;
 use crate::{OpenError, RecordRepair};
@@ -580,6 +580,7 @@ async fn scan_log<F: LocalStorageFile>(
         let Some((seq, count)) = shape else {
             break;
         };
+        follows(last, seq)?;
         let batch_slots = usize::from(count);
         if at + batch_slots > slots {
             return Err(OpenError::LostBatch { batch: seq });
@@ -632,6 +633,24 @@ async fn scan_log<F: LocalStorageFile>(
     }
     let persist_next = Geometry::PERSIST_START + u64_of(at * RECORD_SIZE);
     Ok((batches, persist_next, entry_cursor))
+}
+
+/// Batch numbers have no gaps: a generation counts on from the batch
+/// before `seq`, and a new one starts at its first number. A gap is a batch
+/// the disk lost (a synced write rolled back), and with it, maybe, the
+/// retire records that discarded what lies before it: `LostBatch`, even
+/// when the walk of the entries went straight past it.
+fn follows(last: u64, seq: u64) -> Result<(), OpenError> {
+    let expected = if generation_of(seq) == generation_of(last) {
+        last + 1
+    } else {
+        first_batch_of(generation_of(seq))
+    };
+    if seq == expected {
+        Ok(())
+    } else {
+        Err(OpenError::LostBatch { batch: expected })
+    }
 }
 
 /// Pass 1 over every segment (sorted by first batch): per segment, its

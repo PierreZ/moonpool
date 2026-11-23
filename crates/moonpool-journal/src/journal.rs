@@ -1366,7 +1366,44 @@ impl<P: LocalStorageProvider> Journal<P> {
     /// failure poisons the journal ([`CommitError::Io`] says whether the
     /// batch may be durable anyway).
     pub async fn commit(&mut self, batch: Batch) -> Result<(), CommitError> {
-        self.commit_with(batch, Vec::new()).await
+        let mut owed = self.commit_with(batch, Vec::new()).await?;
+        if !owed.is_empty() {
+            // The batch is durable and the slots it made dead are not
+            // retired yet. A power loss here leaves each one unretired: the
+            // next open retires one whose header is all that is left, but
+            // one whose record is valid stays one fault from a refused open.
+            // That is the cost of never retiring in the same batch.
+            moonpool_buggify::hint!(
+                "journal commit: batch durable, its dead slots not retired",
+                COMMIT_HINT_PROB
+            )
+            .await;
+        }
+        // The batch is durable. The dead slots it made are retired now, in
+        // batches of their own: a retire record never rides in the batch
+        // that makes its slot dead, because a crash can tear that batch's
+        // write and keep its retire record, and the open would then ignore
+        // the only copy of an acknowledged entry.
+        while !owed.is_empty() {
+            let before = owed.len();
+            owed = match self.commit_with(Batch::new(), owed).await {
+                // A geometry that fits no retire record at all.
+                Ok(left) if left.len() >= before => break,
+                Ok(left) => left,
+                // The caller's batch is durable, but the journal is
+                // poisoned: the caller reopens and reads what is there.
+                Err(CommitError::Io { error, .. }) => {
+                    return Err(CommitError::Io {
+                        error,
+                        durable: Durable::Unknown,
+                    });
+                }
+                // Refused before a write (the batch numbers ran out): the
+                // slots stay as they are, one fault from a refused open.
+                Err(_) => break,
+            };
+        }
+        Ok(())
     }
 
     /// The retire batch of an open: one retire record for each slot the
@@ -1377,7 +1414,10 @@ impl<P: LocalStorageProvider> Journal<P> {
         let ambiguous_batch = self.ambiguous_batch;
         let mut batch = Batch::new();
         batch.set_meta(self.meta.bytes.clone());
-        self.commit_with(batch, torn)
+        // A retire that does not fit is left out: its slot stays as it was,
+        // one fault from a refused open.
+        let _left_out = self
+            .commit_with(batch, torn)
             .await
             .map_err(|error| match error {
                 CommitError::Io { error, .. } => OpenError::Io(error),
@@ -1429,8 +1469,9 @@ impl<P: LocalStorageProvider> Journal<P> {
 
     /// The slots this batch makes dead whose entry is known damaged: the
     /// old slot of each position it replaces, clears, or drops below
-    /// `floor`. Each gets a retire record in the batch, so a later fault on
-    /// its record never refuses an open.
+    /// `floor`. Each gets a retire record in a later batch, written once
+    /// this one is durable, so a later fault on its record never refuses an
+    /// open.
     fn retires_for(&self, batch: &Batch, floor: u64) -> Vec<Retire> {
         let seen = self
             .seen_damaged
@@ -1506,14 +1547,14 @@ impl<P: LocalStorageProvider> Journal<P> {
         &mut self,
         batch: Batch,
         mut retires: Vec<Retire>,
-    ) -> Result<(), CommitError> {
+    ) -> Result<Vec<Retire>, CommitError> {
         let floor = self.check(&batch)?;
-        retires.extend(self.retires_for(&batch, floor));
-        // `fits` counts one retire record for each write; a clear or a floor
-        // may retire more. A retire that does not fit is left out: its slot
-        // stays as it was, one fault from a refused open.
+        // The dead damaged slots this batch makes: owed, retired only once
+        // it is durable.
+        let mut owed = self.retires_for(&batch, floor);
+        // A retire that does not fit waits for a later batch.
         while !batch.fits_exactly(self.config.geometry, retires.len()) {
-            retires.pop();
+            owed.extend(retires.pop());
         }
         let meta_changes = batch.meta.is_some() || floor != self.meta.floor;
         let mut next_meta = Meta {
@@ -1532,7 +1573,7 @@ impl<P: LocalStorageProvider> Journal<P> {
                 self.meta = next_meta;
                 self.after_commit().await?;
             }
-            return Ok(());
+            return Ok(self.still_held(owed));
         }
         let mut prepared = self.prepare(&batch, &retires)?;
         // The metainfo lands only once the batch is durable, so it records
@@ -1590,7 +1631,15 @@ impl<P: LocalStorageProvider> Journal<P> {
         }
         let committed = self.after_commit().await;
         self.publish_regions(Vec::new());
-        committed
+        committed.map(|()| self.still_held(owed))
+    }
+
+    /// The retires of `owed` whose slot is still in a segment of the log: a
+    /// removed segment needs none.
+    fn still_held(&self, mut owed: Vec<Retire>) -> Vec<Retire> {
+        let oldest = self.segments.first().map_or(u64::MAX, |s| s.first_batch);
+        owed.retain(|retire| retire.batch >= oldest);
+        owed
     }
 
     /// The floor took effect and segments emptied: recycle or drop what is
