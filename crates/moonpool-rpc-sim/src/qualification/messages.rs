@@ -35,6 +35,11 @@ pub struct Job {
     /// How long the handler holds the reply, in milliseconds.
     #[prost(uint32, tag = "5")]
     pub hold_ms: u32,
+    /// The request's carrier mark ([`crate::carriers::mark`] of `id`):
+    /// lets the oracle count, from the network, the connections that
+    /// carried it.
+    #[prost(bytes = "vec", tag = "6")]
+    pub mark: Vec<u8>,
 }
 
 /// Who ran a job.

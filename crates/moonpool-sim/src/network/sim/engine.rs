@@ -118,6 +118,19 @@ pub(crate) struct NetworkSimulation {
     operation_waiters: WakerRegistry<NetworkOperationId>,
     /// Asked before a random partition is made (the shard gate).
     pub(super) partition_guard: GuardSlot,
+    /// Shown every delivery of stream bytes.
+    pub(super) taps: TapSlot,
+}
+
+/// Holds the installed [`NetworkTap`](crate::network::NetworkTap)s in a
+/// `Debug` struct.
+#[derive(Clone, Default)]
+pub(crate) struct TapSlot(pub(super) Vec<crate::network::NetworkTap>);
+
+impl std::fmt::Debug for TapSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TapSlot({})", self.0.len())
+    }
 }
 
 /// Holds the optional [`PartitionGuard`](crate::network::PartitionGuard) in a
@@ -173,6 +186,7 @@ impl NetworkSimulation {
             next_connect_waiter_id: 0,
             completed_operations: BTreeSet::new(),
             partition_guard: GuardSlot::default(),
+            taps: TapSlot::default(),
             failed_operations: BTreeSet::new(),
             failed_accepts: BTreeMap::new(),
             failed_connects: BTreeSet::new(),
@@ -224,6 +238,11 @@ impl NetworkSimulation {
     /// Install (or with `None` remove) the guard random partitions ask.
     pub(crate) fn set_partition_guard(&mut self, guard: Option<crate::network::PartitionGuard>) {
         self.partition_guard = GuardSlot(guard);
+    }
+
+    /// Add a tap that is shown every delivery of stream bytes.
+    pub(crate) fn add_tap(&mut self, tap: crate::network::NetworkTap) {
+        self.taps.0.push(tap);
     }
 
     /// Bind `addr` for `owner`, resolving a numeric socket address's port zero

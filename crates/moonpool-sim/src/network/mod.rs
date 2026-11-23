@@ -64,5 +64,32 @@ pub(crate) type PartitionGuard = std::sync::Arc<
         + Sync,
 >;
 
+/// What a [`NetworkTap`] is shown: bytes the simulated network just put in
+/// a receiver's buffer.
+#[derive(Debug, Clone, Copy)]
+pub struct DeliveredBytes<'a> {
+    /// The connection the bytes crossed. Both directions of one connection
+    /// share this number, and no other connection of the run has it.
+    pub connection: u64,
+    /// The sending endpoint: each direction of a connection has its own
+    /// number, even when both ends share an IP.
+    pub sender: u64,
+    /// The sender's IP, when the sim knows it.
+    pub from: Option<std::net::IpAddr>,
+    /// The receiver's IP, when the sim knows it.
+    pub to: Option<std::net::IpAddr>,
+    /// The bytes, as the receiver gets them (after any bit flip).
+    pub bytes: &'a [u8],
+}
+
+/// An observer of every delivery of stream bytes, installed with
+/// [`SimContext::tap_network`](crate::SimContext::tap_network).
+///
+/// A tap lets an oracle learn from the network itself what crossed it,
+/// instead of from the code under test. It is called while the simulation
+/// holds its own lock: it must not call back into the simulation, wake a
+/// task or draw randomness. It changes nothing in the run.
+pub type NetworkTap = std::sync::Arc<dyn Fn(&DeliveredBytes<'_>) + Send + Sync>;
+
 // Re-export simulation network provider
 pub use sim::{DeathNotice, SimNetworkProvider};

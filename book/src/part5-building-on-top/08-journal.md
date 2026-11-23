@@ -131,8 +131,14 @@ journal.
 record beside a damaged entry exactly as corruption would. The paper's
 Appendix A proves the two cannot be told apart, so the last batch's damaged
 entries are reported `State::Ambiguous` and the replication layer decides.
-The **ambiguous tail** stays ambiguous until the next batch commits, then
-becomes `Corrupt`. `Ordered` writes the records only once the entries are
+The **ambiguous tail** stays ambiguous until the caller's next batch
+commits, then becomes `Corrupt`. The opens in between do not end it: the
+metainfo records the first batch whose damage an open found ambiguous, and
+neither the open's own retire batch nor its high-water mark (below) counts
+as the caller's batch. Without that record, a second open would see the
+batch below the mark the first open raised, and call a crash-torn entry that
+nothing ever acknowledged `Corrupt`, which tells the caller that a peer has
+it. `Ordered` writes the records only once the entries are
 durable, so a record always proves its entry was synced.
 
 `Ordered` issues each log's write as one durable write
@@ -298,7 +304,7 @@ skipped without a decode.
 |---|---|---|
 | intact | valid | live |
 | intact | damaged | live; the record is rebuilt from the entry |
-| damaged | valid | `Corrupt`, or `Ambiguous` in a `Batched` last batch |
+| damaged | valid | `Corrupt`, or `Ambiguous` in a `Batched` last batch, or from the batch the metainfo names as ambiguous on |
 | damaged | damaged, named by a retire record | ignored |
 | damaged | damaged, unwitnessed last batch of its open generation | torn by a crash: discarded and retired |
 | payload damaged, header intact | damaged, witnessed, or earlier in its generation | `Corrupt`: the header names the entry |

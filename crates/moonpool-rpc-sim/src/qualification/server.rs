@@ -467,6 +467,7 @@ async fn forward(rpc: &RpcHandle<SimProviders>, request: Forward) -> Relayed {
         boot: callback.boot,
         configuration: callback.configuration,
         hold_ms: 0,
+        mark: crate::carriers::mark(request.id),
     };
     let Ok(target) = ServiceRef::<Callback>::from_bytes(&callback.work) else {
         relayed.failures.push(format!("{}:undecodable", request.id));

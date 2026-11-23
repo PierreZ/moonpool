@@ -52,6 +52,12 @@ impl SimWorld {
         self.inner.write().network.set_partition_guard(guard);
     }
 
+    /// Adds a tap that is shown every delivery of stream bytes for the rest
+    /// of this world's life (see [`NetworkTap`](crate::network::NetworkTap)).
+    pub fn tap_network(&self, tap: crate::network::NetworkTap) {
+        self.inner.write().network.add_tap(tap);
+    }
+
     /// Borrows the network configuration.
     pub fn with_network_config<F, R>(&self, f: F) -> R
     where

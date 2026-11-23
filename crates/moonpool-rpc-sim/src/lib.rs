@@ -83,6 +83,7 @@
 #![deny(missing_docs)]
 #![deny(clippy::unwrap_used)]
 
+pub mod carriers;
 pub mod delivery;
 pub mod foundations;
 pub mod interfaces;

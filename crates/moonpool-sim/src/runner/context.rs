@@ -272,6 +272,16 @@ impl<P: ProviderBundle> SimContext<P> {
             .map_or(crate::Slowness::HEALTHY, |world| world.slowness(ip))
     }
 
+    /// Show `tap` every delivery of stream bytes for the rest of this
+    /// iteration (see [`NetworkTap`](crate::NetworkTap)). An oracle uses it
+    /// to learn from the network, not from the code under test, what
+    /// crossed it. Does nothing once the simulation is gone.
+    pub fn tap_network(&self, tap: crate::NetworkTap) {
+        if let Ok(world) = self.env.world().upgrade() {
+            world.tap_network(tap);
+        }
+    }
+
     /// Get this actor's IP address: `10.0.{group}.{n}` for a process,
     /// `10.0.0.{n}` for a workload.
     #[must_use]

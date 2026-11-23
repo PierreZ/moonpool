@@ -83,6 +83,22 @@ one backlogged connection while its latency elapses. Dropping the future
 returns the reservation to the front of the backlog. Shutdown fails every
 delayed operation and drains the waiters instead of parking them.
 
+## Watching the Wire
+
+An oracle sometimes needs to know what crossed the network without asking
+the code it judges. `SimContext::tap_network` installs a `NetworkTap`, a
+function the engine calls with every delivery of stream bytes: the
+connection's number (shared by both directions), the sending endpoint's
+number (one per direction), the sender's and the receiver's IP, and the bytes as the receiver gets them. A tap changes
+nothing in the run and draws no randomness. It runs under the world's lock,
+so it must not call back into the simulation.
+
+The rpc campaigns use one to bound reliable calls: each request carries a
+mark (a magic and its id) in its payload, the tap records which connections
+carried each mark, and the oracle checks that a call ran at most once per
+connection that carried it. The runtime's own retransmission counter would
+excuse the bug it should find.
+
 ## A Raw TCP Process
 
 The server below is ordinary process code. It binds its assigned address,

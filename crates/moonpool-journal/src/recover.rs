@@ -155,6 +155,8 @@ pub(crate) struct Scan {
     pub cursors: Vec<(u64, u64)>,
     pub corrupt: Vec<(u64, Id)>,
     pub ambiguous: Vec<(u64, Id)>,
+    /// The first batch that holds an entry of [`Scan::ambiguous`] (0: none).
+    pub ambiguous_from: u64,
     pub rebuilt: u32,
     /// The slots of the last batch of an open generation that a crash
     /// tore: the open retires them in a new batch before it raises the
@@ -260,12 +262,23 @@ pub(crate) struct Known {
     pub last: u64,
     /// The high-water mark: a batch the metainfo proves durable.
     pub mark: u64,
+    /// The first batch whose damaged entries a crash may still explain, as
+    /// the metainfo records it (0: none). See [`Known::may_be_torn`].
+    pub ambiguous: u64,
     /// The metainfo's `seq`: every entry was written under it or an
     /// earlier one.
     pub seq: u64,
 }
 
 impl Known {
+    /// Whether an entry of `batch` that is damaged beside a valid record may
+    /// be a crash's work: the batch is above the mark, or at or after the
+    /// batch the metainfo names as ambiguous. An open's own batches and mark
+    /// raises do not end that: only a batch of the caller does.
+    fn may_be_torn(self, batch: u64) -> bool {
+        batch > self.mark || (self.ambiguous != 0 && batch >= self.ambiguous)
+    }
+
     fn is_stale(self, batch: u64) -> bool {
         generation_of(batch) < u64::from(self.generation) && batch > self.last
     }
@@ -824,7 +837,8 @@ pub(crate) async fn scan<F: LocalStorageFile>(
         for batch in batches {
             let successor = next.next();
             let judge = Judge {
-                is_last: batch.seq == last,
+                read_entries: batch.seq == last
+                    || (known.ambiguous != 0 && batch.seq >= known.ambiguous),
                 last_of_generation: successor
                     .is_none_or(|after| generation_of(after) != generation_of(batch.seq)),
                 tag,
@@ -848,8 +862,9 @@ pub(crate) async fn scan<F: LocalStorageFile>(
 /// What pass 2 knows of a batch beyond its slots.
 #[derive(Clone, Copy)]
 struct Judge {
-    /// The batch is the last in the log: its entries are read now.
-    is_last: bool,
+    /// The batch's entries are read now: it is the last in the log, or at
+    /// or after the batch the metainfo names as ambiguous.
+    read_entries: bool,
     /// The batch is the last that its open generation wrote.
     last_of_generation: bool,
     tag: u32,
@@ -917,12 +932,11 @@ async fn judge_batch<F: LocalStorageFile>(
     out: &mut Scan,
 ) -> Result<(), OpenError> {
     let Judge {
-        is_last,
+        read_entries,
         tag,
         known,
         ..
     } = judge;
-    let mark = known.mark;
     let crash_explains_lost = judge.crash_explains_lost(batch);
     for (index, found) in (0u16..).zip(batch.slots.iter()) {
         // Named by a retire record: nothing the caller needs, whatever the
@@ -980,7 +994,7 @@ async fn judge_batch<F: LocalStorageFile>(
         // corruption look alike, and it holds the latest stamps.
         let entry_damaged = match *found {
             Found::Headed(_) => true,
-            Found::Record(_) if is_last => {
+            Found::Record(_) if read_entries => {
                 last_entry_damaged(segment, &record, (tag, known)).await?
             }
             _ => false,
@@ -1000,11 +1014,14 @@ async fn judge_batch<F: LocalStorageFile>(
                     // only because no crash explains it.
                     if matches!(found, Found::Headed(_))
                         || record.flags & FLAG_ORDERED != 0
-                        || batch.seq <= mark
+                        || !known.may_be_torn(batch.seq)
                     {
                         out.corrupt.push((record.position, record.id));
                     } else {
                         out.ambiguous.push((record.position, record.id));
+                        if out.ambiguous_from == 0 {
+                            out.ambiguous_from = batch.seq;
+                        }
                     }
                 }
                 out.ops.push(Op::Put {

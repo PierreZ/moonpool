@@ -25,6 +25,7 @@ use super::state::{
 };
 use super::trust::{Kind, Trust};
 use super::{CALL_TIMEOUT, SecurityRecord, SecurityRecords, pause};
+use crate::carriers::Carriers;
 use crate::foundations::state::Board;
 use crate::foundations::{report_stats, rpc_config};
 
@@ -305,7 +306,7 @@ impl SecurityWorkload {
                 if let Some(token) = minted.token {
                     client = client.with_credentials(Credential::bearer(token));
                 }
-                let sent = client.send(&Probe { id, hold_ms: 0 });
+                let sent = client.send(&Probe::new(id, 0));
                 // Queued proves nothing; the handler's oracle judges it.
                 remote.ledger.outcome(
                     id,
@@ -399,7 +400,7 @@ impl SecurityWorkload {
         if let Some(token) = minted.token {
             client = client.with_credentials(Credential::bearer(token));
         }
-        let mut stream = match client.get_reply_stream(&Probe { id, hold_ms: 0 }) {
+        let mut stream = match client.get_reply_stream(&Probe::new(id, 0)) {
             Ok(stream) => stream,
             Err(error) => {
                 let outcome: Result<Option<Answer>, _> = Err(error);
@@ -532,10 +533,7 @@ impl SecurityWorkload {
             subject,
             asks: Arc::clone(&asks),
         });
-        let probe = Probe {
-            id,
-            hold_ms: ctx.random().random_range(200..1500),
-        };
+        let probe = Probe::new(id, ctx.random().random_range(200..1500));
         // Ask the script to cut this session while the call is held: the
         // call is then sent again, with a fresh credential, on the next one.
         if ctx.random().random_bool(0.5) {
@@ -650,6 +648,7 @@ impl Workload for SecurityWorkload {
     }
 
     async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
+        let _ = Carriers::tapped(ctx);
         let config_error = |error| SimulationError::InvalidState(format!("rpc config: {error}"));
         let (driver, rpc) = RpcDriver::client_only(ctx.providers().clone(), client_config())
             .map_err(config_error)?;
@@ -687,8 +686,19 @@ impl Workload for SecurityWorkload {
 
     async fn check(&mut self, ctx: &SimContext) -> SimulationResult<()> {
         let ledger = Ledger::of(ctx.state());
+        let carriers = Carriers::of(ctx.state());
         let mut one_way_executed = false;
         for (id, issued, receipts, class) in ledger.all() {
+            // A remote request, reliable ones too: one receipt at most per
+            // connection the network saw carry it. (A local caller's
+            // requests never cross the network.)
+            if issued.route != Route::Local {
+                assert_always!(
+                    receipts <= carriers.count(id),
+                    "a request reached its handler at most once per connection that carried it",
+                    { "id" => id, "receipts" => receipts, "carriers" => carriers.count(id) }
+                );
+            }
             match class {
                 Some(Class::Replied | Class::Executed) => {
                     assert_always!(

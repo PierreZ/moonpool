@@ -85,6 +85,7 @@ fn job(id: u64, expected: &Instance, hold_ms: u32) -> Job {
         boot: expected.boot,
         configuration: expected.configuration,
         hold_ms,
+        mark: crate::carriers::mark(id),
     }
 }
 
@@ -620,7 +621,7 @@ impl QualificationWorkload {
             subject,
             asks: Arc::clone(&asks),
         });
-        let probe = Probe { id, hold_ms: 0 };
+        let probe = Probe::new(id, 0);
         let outcome = moonpool_sim::select! {
             outcome = client.get_reply(&probe) => Some(outcome),
             _ = pause(ctx, Duration::from_secs(15)) => None,
