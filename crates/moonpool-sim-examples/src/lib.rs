@@ -14,21 +14,20 @@
 //! # Quick example
 //!
 //! The `sim-journal` binary, reduced: one node owns a `moonpool-journal`
-//! journal, attrition crashes it, and every boot checks that no acknowledged
-//! write was lost.
+//! journal on an honest disk, attrition crashes it, and every boot checks
+//! that no acknowledged write was lost.
 //!
 //! ```rust,no_run
 //! use std::time::Duration;
 //!
 //! use moonpool_sim::{
 //!     Attrition, AttritionScope, AttritionVictims, Chaos, ChaosMode, SimulationBuilder,
-//!     StorageFault, StorageFaultMask,
 //! };
-//! use moonpool_sim_examples::journal::{JournalNode, JournalWorkload};
+//! use moonpool_sim_examples::journal::{Disk, JournalNode, JournalWorkload};
 //! use moonpool_sim_examples::support::finish_or_exit_on_failure;
 //!
 //! let report = SimulationBuilder::new()
-//!     .processes(1, || Box::new(JournalNode))
+//!     .processes(1, || Box::new(JournalNode(Disk::Honest)))
 //!     .workload(JournalWorkload)
 //!     .enable_chaos([
 //!         Chaos::Attrition {
@@ -48,15 +47,9 @@
 //!         },
 //!         Chaos::Storage(ChaosMode::Random),
 //!     ])
-//!     // Damage that a lone node has no second copy to repair from.
-//!     .storage_fault_mask(
-//!         StorageFaultMask::all()
-//!             .without(StorageFault::Corruption)
-//!             .without(StorageFault::Eio)
-//!             .without(StorageFault::Misdirect)
-//!             .without(StorageFault::PhantomWrite)
-//!             .without(StorageFault::DiskFailure),
-//!     )
+//!     // The honest disk: only faults that never change bytes a sync
+//!     // reported durable, so the oracle refuses any damage report.
+//!     .storage_fault_mask(Disk::Honest.faults())
 //!     .chaos_duration(Duration::from_secs(30))
 //!     .set_debug_seeds(vec![42])
 //!     .set_iterations(1)

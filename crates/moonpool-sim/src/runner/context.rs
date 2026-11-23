@@ -212,10 +212,15 @@ impl<P: ProviderBundle> SimContext<P> {
     /// was aborted), the returned future never completes: the runner is
     /// about to drop it.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use moonpool_sim::{SimContext, SimulationResult};
+    /// # async fn local_node(_ctx: &SimContext) -> SimulationResult<()> { Ok(()) }
+    /// # struct Node;
+    /// # impl Node {
     /// async fn run(&mut self, ctx: &SimContext) -> SimulationResult<()> {
     ///     ctx.run_local("node", |ctx| async move { local_node(&ctx).await }).await
     /// }
+    /// # }
     /// ```
     pub async fn run_local<T, F>(&self, name: &str, body: impl FnOnce(SimContext<P>) -> F) -> T
     where
@@ -431,9 +436,23 @@ impl<P: ProviderBundle> SimContext<P> {
     /// independently. Returns `None` when no factory was configured, or when
     /// `S` is not the type the factory produced.
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # use moonpool_sim::{MetricSample, MetricsSource, SimContext};
+    /// # // A stand-in for moonpool-prometheus's `PrometheusSource`.
+    /// # struct PrometheusSource;
+    /// # struct Counter;
+    /// # impl Counter { fn inc(&self) {} }
+    /// # impl PrometheusSource {
+    /// #     fn counter(&self, _: &str, _: &str) -> std::io::Result<Counter> { Ok(Counter) }
+    /// # }
+    /// # impl MetricsSource for PrometheusSource {
+    /// #     fn collect(&self) -> Vec<MetricSample> { Vec::new() }
+    /// # }
+    /// # fn serve(ctx: &SimContext) -> std::io::Result<()> {
     /// let metrics = ctx.metrics::<PrometheusSource>().expect("metrics configured");
-    /// metrics.int_counter("requests_total", "Requests served")?.inc();
+    /// metrics.counter("requests_total", "Requests served")?.inc();
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// The source outlives process reboots (it is keyed by IP, not by process

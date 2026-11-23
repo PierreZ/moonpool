@@ -323,10 +323,19 @@ impl compio::buf::IoBuf for AlignedBuf {
     }
 }
 
+/// The length of an [`AlignedBuf`] never changes, as for compio's own
+/// `[u8; N]`: compio calls `set_len(n)` after a read of `n` bytes, and the
+/// count reaches the caller in the `BufResult` beside the buffer, so there
+/// is nothing to record here. A length past the buffer would break compio's
+/// contract, so it is refused in every build, not only in debug.
 #[cfg(feature = "compio-providers")]
 impl compio::buf::SetLen for AlignedBuf {
     unsafe fn set_len(&mut self, len: usize) {
-        debug_assert!(len <= self.len());
+        assert!(
+            len <= self.len(),
+            "set_len({len}) past an AlignedBuf of {} bytes",
+            self.len()
+        );
     }
 }
 
@@ -421,5 +430,21 @@ mod tests {
         // Slicing one aligned block off the front keeps the length legal but
         // moves the address off the boundary.
         assert!(constraints.check(0, &buf.as_slice()[1..513]).is_err());
+    }
+
+    #[cfg(feature = "compio-providers")]
+    #[test]
+    fn compio_set_len_keeps_the_length_and_refuses_past_it() {
+        use compio::buf::SetLen as _;
+        let mut buf = AlignedBuf::zeroed(512, 512);
+        // SAFETY: 100 <= 512 and every byte is initialized.
+        unsafe { buf.set_len(100) };
+        assert_eq!(buf.len(), 512, "a fixed-length buffer keeps its length");
+        let past = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // SAFETY: deliberately out of contract; set_len must refuse it
+            // before anything relies on it.
+            unsafe { buf.set_len(513) };
+        }));
+        assert!(past.is_err(), "a length past the buffer is refused");
     }
 }

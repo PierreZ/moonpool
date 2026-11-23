@@ -20,7 +20,7 @@ The method comes from Cirstea, Kuppe, Loillier and Merz, [Validating Traces of D
 | `trace_from_timeline` | `moonpool_sim::observability::tla` | Builds a `Trace` from the captured timeline |
 | the trace spec | your repository | Extends your spec and follows the trace, one event per step |
 
-`moonpool-tla` has no dependency. It does not need the simulator: a sans-I/O harness can record events itself and check them the same way. Running TLC needs the `tlc` launcher, which the nix dev shell installs (nixpkgs `tlaplus`). Set `MOONPOOL_TLC` to use another one.
+`moonpool-tla` has no dependency. It does not need the simulator: a sans-I/O harness can record events itself and check them the same way. Running TLC needs the `tlc` launcher, which the nix dev shell installs (nixpkgs `tlaplus`). Set `MOONPOOL_TLC` to use another one. A test that checks a trace with TLC fails when `tlc` is missing: it never skips.
 
 ## Recording a Run
 

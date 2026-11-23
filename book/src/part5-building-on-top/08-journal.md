@@ -617,6 +617,8 @@ The simulation had found this bug, and that change made the seeds pass
 without a change to the journal: the simulation then could not see the bug
 for a month. `JOURNAL_SIM_SEEDS` raises the seed count of each disk (a
 nightly workflow runs 15,000) and `JOURNAL_SIM_SEED` replays one seed.
+A value that is not a number stops the run, so a mistyped count never
+runs the default seeds in its place.
 
 `Durable::No` is a promise: no byte of the
 batch was issued (the commit failed before its first write, for example when

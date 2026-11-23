@@ -6,13 +6,19 @@
 //! chosen events, merged by that order. A workload's `check()` hands the
 //! trace to a [`moonpool_tla::TraceCheck`]:
 //!
-//! ```ignore
+//! ```no_run
+//! # use moonpool_sim::SimContext;
+//! # use moonpool_tla::{TraceCheck, Value};
+//! # fn check(ctx: &SimContext, spec_dir: &str) -> Result<(), moonpool_tla::CheckError> {
 //! let mut trace = moonpool_sim::observability::tla::trace_from_timeline(
 //!     ctx.observability(),
 //!     &["rm_prepare", "tm_commit", "rm_rcv_commit"],
 //! );
 //! trace.define("TraceRM", Value::str_set(["r1", "r2", "r3"]));
 //! let verdict = TraceCheck::new(spec_dir, "TwoPhaseTrace").check(&trace)?;
+//! # let _ = verdict;
+//! # Ok(())
+//! # }
 //! ```
 
 use moonpool_tla::{Trace, Value};

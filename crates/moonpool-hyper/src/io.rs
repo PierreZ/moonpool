@@ -86,14 +86,26 @@ impl<S: AsyncRead + Unpin> hyper::rt::Read for HyperIo<S> {
         // futures-io is impossible (its `poll_read` takes `&mut [u8]`), so
         // this zeroing is what the bridge costs, exactly as in
         // `tokio_util::compat::Compat`.
-        let n = ready!(Pin::new(&mut self.inner).poll_read(cx, buf.initialize_unfilled()))?;
+        let unfilled = buf.initialize_unfilled();
+        let len = unfilled.len();
+        let n = ready!(Pin::new(&mut self.inner).poll_read(cx, unfilled))?;
+
+        // `AsyncRead` is a safe trait: a buggy reader can return more than
+        // it was given. Trusting it would make the `advance` below
+        // undefined behaviour reachable from safe code, so refuse it here.
+        if n > len {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("reader returned {n} bytes for a {len}-byte buffer"),
+            )));
+        }
 
         // SAFETY: `advance(n)` requires that `n` more bytes of the unfilled
         // region are initialized and that `n` fits within it. Both hold: the
         // slice just passed to `poll_read` covers the entire unfilled region
         // and was fully initialized by `initialize_unfilled` above, and the
-        // `AsyncRead` contract bounds a successful read by the length of that
-        // slice, so `n <= buf.remaining()`. Nothing here de-initializes bytes.
+        // check above proves `n <= len`, the length of that region. Nothing
+        // here de-initializes bytes.
         unsafe {
             buf.advance(n);
         }
@@ -287,6 +299,34 @@ mod tests {
             Poll::Ready(Ok(()))
         ));
         assert_eq!(buf.filled(), b"hi".as_slice());
+    }
+
+    /// A reader that claims more bytes than the buffer it was given.
+    struct Overclaims;
+
+    impl AsyncRead for Overclaims {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len() + 1))
+        }
+    }
+
+    #[test]
+    fn a_reader_that_overclaims_is_an_error_not_an_advance() {
+        let mut stream = HyperIo::new(Overclaims);
+        let mut cx = Context::from_waker(noop_waker_ref());
+        let mut backing = [MaybeUninit::<u8>::uninit(); 8];
+        let mut buf = ReadBuf::uninit(&mut backing);
+
+        let Poll::Ready(Err(error)) = Pin::new(&mut stream).poll_read(&mut cx, buf.unfilled())
+        else {
+            panic!("an overclaiming read must fail");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(buf.filled().is_empty(), "nothing is marked filled");
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! - Disabled: Normal operation (no failure injection)
 //! - `AlwaysFail`: Always fail with `ConnectionRefused` when buggified
 //! - Probabilistic: refused with `connect_failure_probability`, otherwise hang
-//!   forever (tests timeout handling)
+//!   until the SYN timeout and fail with `TimedOut`
 //! - Can be disabled via configuration
 //! - Are deterministic across runs with the same seed
 
@@ -17,7 +17,6 @@ use moonpool_sim::{
 };
 use std::future::Future;
 use std::task::Poll;
-use std::time::Duration;
 
 /// Drive `future` against `sim` until it resolves or the world runs out of
 /// events. `None` means the future is still pending with nothing left that
@@ -210,48 +209,6 @@ fn test_connect_failure_requires_buggify() {
     });
 }
 
-/// Test connection failure with timeout handling (Probabilistic hang scenario)
-#[test]
-fn test_connect_failure_mode_probabilistic_with_timeout() {
-    local_runtime().block_on(async move {
-        moonpool_sim::set_sim_seed(42);
-        buggify_init(1.0);
-
-        let mut config = NetworkConfiguration::fast_local();
-        config.chaos.connect_failure_mode = ConnectFailureMode::Probabilistic;
-        config.chaos.connect_failure_probability = 0.0; // 100% hang (not error)
-
-        let mut sim = SimWorld::new_with_network_config(config);
-        let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
-
-        let addr = "hang-server";
-        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
-
-        // Use select! with a timeout to avoid actual hanging
-        // This simulates how production code should handle potential hangs
-        let timeout_duration = Duration::from_millis(100);
-
-        let connect_result = moonpool_sim::select! {
-            biased;
-            result = provider.connect(addr) => {
-                Some(result)
-            }
-            () = tokio::time::sleep(timeout_duration) => {
-                None
-            }
-        };
-
-        match connect_result {
-            Some(Ok(_)) => println!("Connection succeeded (no hang triggered)"),
-            Some(Err(e)) => println!("Connection failed with error: {e:?}"),
-            None => println!("Connection timed out (hang scenario)"),
-        }
-
-        buggify_reset();
-        println!("✅ Connection failure with timeout handling executed");
-    });
-}
-
 /// Test deterministic behavior with same seed
 #[test]
 fn test_connect_failure_deterministic() {
@@ -393,46 +350,43 @@ fn test_connect_failure_error_message_probabilistic() {
     });
 }
 
-/// Test interaction with `random_for_seed` config
-///
-/// NOTE: This test may hang forever when Probabilistic mode is selected (50% hang probability).
-/// FDB's Probabilistic mode simulates connections that hang forever without timeout.
-/// Run manually: cargo test `test_connect_failure_random_config` -- --ignored
+/// Every connect under a `random_for_seed` config ends: it succeeds, is
+/// refused (RST or host unreachable), or (a Probabilistic hang) times out at the SYN timeout. None
+/// stays pending once the world has no events left.
 #[test]
-#[ignore = "May hang forever with Probabilistic mode - requires manual testing"]
 fn test_connect_failure_random_config() {
-    local_runtime().block_on(async move {
-        moonpool_sim::set_sim_seed(11111);
+    for seed in [11111, 22222, 33333, 44444] {
+        moonpool_sim::set_sim_seed(seed);
         buggify_init(1.0);
-
-        // Use randomized config
         let config = NetworkConfiguration::random_for_seed();
-
-        println!(
-            "Random config: mode={:?}, probability={}",
-            config.chaos.connect_failure_mode, config.chaos.connect_failure_probability
-        );
+        let mode = config.chaos.connect_failure_mode;
 
         let mut sim = SimWorld::new_with_network_config(config);
         let provider = sim.network_provider("127.0.0.1".parse().expect("valid ip"));
-
         let addr = "random-config-server";
-        let _listener = sim.drive(provider.bind(addr)).await.unwrap();
+        let listener = settle(&mut sim, provider.bind(addr))
+            .expect("bind settles")
+            .expect("bind succeeds");
 
-        // Just verify it doesn't crash with random config
-        let mut success = 0;
-        let mut failed = 0;
-
-        for _ in 0..10 {
-            match provider.connect(addr).await {
-                Ok(_) => success += 1,
-                Err(_) => failed += 1,
+        for i in 0..20 {
+            match settle(&mut sim, provider.connect(addr)) {
+                Some(Ok(_)) => {
+                    settle(&mut sim, listener.accept())
+                        .expect("accept settles")
+                        .expect("accept succeeds");
+                }
+                Some(Err(e)) => assert!(
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::HostUnreachable
+                            | std::io::ErrorKind::TimedOut
+                    ),
+                    "seed {seed} ({mode:?}): connect {i} failed with {e}"
+                ),
+                None => panic!("seed {seed} ({mode:?}): connect {i} never ended"),
             }
         }
-
-        println!("Random config results: {success} success, {failed} failed");
-
         buggify_reset();
-        println!("✅ Connection failure with random config executed");
-    });
+    }
 }

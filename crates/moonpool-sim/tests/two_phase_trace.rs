@@ -25,8 +25,8 @@
 //! only at the outcome (no resource manager commits while another aborts)
 //! could see it.
 //!
-//! The tests need TLC (`tlc`, in the nix dev shell). Without it they are
-//! skipped, except in CI, where they fail.
+//! The tests need TLC (`tlc`, in the nix dev shell). Without it they
+//! fail: a missing checker is never a skip.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -365,18 +365,13 @@ fn spec_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/tla/two_phase")
 }
 
-/// Whether TLC can run here. Without it a test is skipped, but CI must have
-/// it: the nix dev shell installs `tlaplus`.
-fn tlc_or_skip() -> bool {
-    if TraceCheck::new(spec_dir(), "TwoPhaseTrace").tlc_available() {
-        return true;
-    }
+/// Fail the test when TLC (`tlc`, in the nix dev shell) cannot run here:
+/// a missing checker is a failure, never a skip.
+fn require_tlc() {
     assert!(
-        std::env::var_os("CI").is_none(),
-        "TLC is missing in CI: run the tests in the nix dev shell"
+        TraceCheck::new(spec_dir(), "TwoPhaseTrace").tlc_available(),
+        "TLC (`tlc`) is missing: run the tests in the nix dev shell"
     );
-    eprintln!("skipped: TLC (`tlc`) is not installed");
-    false
 }
 
 /// Run `seeds` seeds of the two-phase commit and return each verdict.
@@ -409,9 +404,7 @@ fn assert_caught(mutant: Mutant) {
 
 #[test]
 fn every_run_of_the_correct_code_is_accepted() {
-    if !tlc_or_skip() {
-        return;
-    }
+    require_tlc();
     let verdicts = run(Mutant::None, (1..=6).collect());
     assert!(
         verdicts.iter().all(Verdict::is_accepted),
@@ -421,21 +414,18 @@ fn every_run_of_the_correct_code_is_accepted() {
 
 #[test]
 fn a_commit_after_the_first_vote_is_rejected() {
-    if tlc_or_skip() {
-        assert_caught(Mutant::CommitOnFirstVote);
-    }
+    require_tlc();
+    assert_caught(Mutant::CommitOnFirstVote);
 }
 
 #[test]
 fn a_commit_without_the_message_is_rejected() {
-    if tlc_or_skip() {
-        assert_caught(Mutant::CommitWithoutMessage);
-    }
+    require_tlc();
+    assert_caught(Mutant::CommitWithoutMessage);
 }
 
 #[test]
 fn an_abort_after_the_commit_is_rejected() {
-    if tlc_or_skip() {
-        assert_caught(Mutant::AbortAfterCommit);
-    }
+    require_tlc();
+    assert_caught(Mutant::AbortAfterCommit);
 }
