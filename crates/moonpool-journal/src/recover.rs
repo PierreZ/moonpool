@@ -925,14 +925,18 @@ async fn judge_batch<F: LocalStorageFile>(
     let mark = known.mark;
     let crash_explains_lost = judge.crash_explains_lost(batch);
     for (index, found) in (0u16..).zip(batch.slots.iter()) {
+        // Named by a retire record: nothing the caller needs, whatever the
+        // slot reads as now. An open retired it because it read as torn,
+        // and the replay of that open left the position out; a later read
+        // that finds its entry whole (the fault that hid it was transient)
+        // must not bring it back.
+        if retires.contains_key(&(batch.seq, index)) {
+            continue;
+        }
         let record = match *found {
             Found::Rebuilt(record) => {
                 out.rebuilt += 1;
                 record
-            }
-            // Named by a retire record: nothing the caller needs.
-            Found::Lost | Found::Headed(_) if retires.contains_key(&(batch.seq, index)) => {
-                continue;
             }
             Found::Lost | Found::Headed(_) if crash_explains_lost => {
                 // Torn by a crash: never acknowledged, discarded. The open
@@ -1069,10 +1073,18 @@ async fn repair_batch<F: LocalStorageFile>(
         let proven =
             !unretired_loss && entries_prove(segment, slots, tag, |at| named(first + at)).await?;
         if proven {
+            // A retired slot is written back empty: its record would make
+            // it live again.
             writes.push((
                 segment_index,
                 batch.persist_at + block * BLOCK_U64,
-                encode_records(slots.iter().map(Found::proven)),
+                encode_records(slots.iter().enumerate().map(|(at, found)| {
+                    if named(first + at) {
+                        None
+                    } else {
+                        found.proven()
+                    }
+                })),
             ));
             repair.blocks_written += 1;
         } else {

@@ -598,10 +598,21 @@ impl DeliveryWorkload {
         bootstrap: &BootstrapClient<SimProviders, ScriptedResolver>,
     ) -> SimulationResult<()> {
         let Some(monitor) = rpc.failure_monitor() else {
-            return Ok(());
+            return Err(SimulationError::InvalidState(
+                "the delivery campaign runs with a failure monitor".to_string(),
+            ));
         };
+        // The directory read retries for two minutes of simulated time, and
+        // the server comes back from every crash: only the end of the run
+        // excuses a client that never found the service.
         let Some(mut execute) = self.discover(bootstrap).await else {
-            return Ok(());
+            if ctx.shutdown().is_cancelled() {
+                return Ok(());
+            }
+            return Err(SimulationError::InvalidState(format!(
+                "the first discovery failed: {}",
+                self.history.last().map_or("", String::as_str)
+            )));
         };
         for _ in 0..self.config.operations {
             if ctx.shutdown().is_cancelled() {
