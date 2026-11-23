@@ -1043,6 +1043,121 @@ fn a_lost_batch_in_the_middle_is_refused_not_read_as_the_end() {
     });
 }
 
+/// Read `len` bytes of `path` at `offset`.
+async fn bytes_at(sim: &mut SimWorld, path: String, offset: u64, len: u64) -> Vec<u8> {
+    run(sim, move |provider| async move {
+        let file = provider.open(&path, OpenOptions::read_write()).await?;
+        let mut bytes = vec![0; usize::try_from(len).expect("small")];
+        file.read_at(offset, &mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    })
+    .await
+    .expect("read a range")
+}
+
+/// Write `bytes` at `offset` of `path`, durably.
+async fn write_back(sim: &mut SimWorld, path: String, offset: u64, bytes: Vec<u8>) {
+    run(sim, move |provider| async move {
+        let file = provider.open(&path, OpenOptions::read_write()).await?;
+        file.write_at(offset, &bytes).await?;
+        file.sync_all().await
+    })
+    .await
+    .expect("write a range back");
+}
+
+/// A position whose entry the open found corrupt, written again: the
+/// rewrite is torn (its record and its payload damaged). The old entry is
+/// still reported, or the new one is: the position never reads as empty.
+///
+/// Before, the rewrite carried the retire record of the old slot. A crash
+/// that tore the rewrite's put kept that retire record, the open discarded
+/// the put as torn and ignored the old slot, and an acknowledged entry was
+/// gone with no report. The retire record now goes in a batch of its own,
+/// once the rewrite is durable.
+#[test]
+fn a_torn_rewrite_never_hides_the_entry_it_replaces() {
+    runtime().block_on(async {
+        for durability in BOTH {
+            let mut sim = sim(41);
+            let journal = five(&mut sim, durability).await;
+            let journal = put(&mut sim, journal, &[(11, 1, 300), (12, 1, 300)]).await;
+            let journal = put(&mut sim, journal, &[(13, 1, 300)]).await;
+            let (record, entry) = spots(&journal, 11);
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability).await.expect("opens");
+            assert_eq!(recovery.corrupt, vec![(11, id(11, 1))], "{durability:?}");
+            let journal = put(&mut sim, journal, &[(11, 2, 300)]).await;
+            let (record, entry) = spots(&journal, 11);
+            drop(journal);
+            flip(&mut sim, record.0, record.1).await;
+            flip(&mut sim, entry.0, entry.1).await;
+            let (journal, recovery) = reopen(&mut sim, durability)
+                .await
+                .unwrap_or_else(|error| panic!("{durability:?}: {error}"));
+            assert!(
+                matches!(journal.state(11), State::Corrupt { .. }),
+                "{durability:?}: {:?}, {recovery:?}",
+                journal.state(11)
+            );
+            assert!(
+                recovery.corrupt.iter().any(|(p, _)| *p == 11),
+                "{durability:?}: {recovery:?}"
+            );
+        }
+    });
+}
+
+/// The retire batch of an open, lost after the next batch landed (the
+/// disk rolled back a synced write). The slot it discarded looks whole
+/// again, and the walk of the entries goes straight to the next batch.
+/// Batch numbers have no gaps, so the open refuses with `LostBatch` instead
+/// of bringing the discarded entry back.
+#[test]
+fn a_lost_first_batch_of_an_open_is_refused_not_skipped() {
+    runtime().block_on(async {
+        let mut sim = sim(43);
+        let journal = five(&mut sim, Durability::Batched).await;
+        // 7's entry runs over two entry blocks.
+        let journal = put(&mut sim, journal, &[(6, 1, 300), (7, 1, 6000)]).await;
+        let (record, _) = spots(&journal, 7);
+        let header = header_spot(&journal, 7);
+        let layout = journal.layout(7).expect("live");
+        let (entry_path, entry_range) = (layout.entry.path, layout.entry.bytes);
+        let saved = bytes_at(
+            &mut sim,
+            entry_path.clone(),
+            entry_range.start,
+            entry_range.end - entry_range.start,
+        )
+        .await;
+        drop(journal);
+        // Torn by a crash, as the open sees it: discarded and retired. Its
+        // header is damaged, so nothing says how far its entry ran, and the
+        // retire batch's entry lands on 7's second block.
+        flip(&mut sim, record.0, record.1).await;
+        flip(&mut sim, header.0, header.1).await;
+        let (journal, recovery) = reopen(&mut sim, Durability::Batched).await.expect("opens");
+        assert_eq!(recovery.torn, 1, "{recovery:?}");
+        assert_eq!(journal.state(7), State::Empty);
+        let journal = put(&mut sim, journal, &[(8, 1, 300)]).await;
+        let next = journal.layout(8).expect("live").record;
+        drop(journal);
+        // The retire batch is gone: its persist block, and its entry under
+        // 7's old bytes.
+        let block = next.bytes.start / 4096 * 4096 - 4096;
+        zero(&mut sim, next.path, block, 4096).await;
+        write_back(&mut sim, entry_path, entry_range.start, saved).await;
+        let refused = reopen(&mut sim, Durability::Batched).await.map(drop);
+        assert!(
+            matches!(refused, Err(OpenError::LostBatch { .. })),
+            "{refused:?}"
+        );
+    });
+}
+
 /// Batches of positions 1..=5, three entry blocks each, then 6: the entry
 /// log of the first segment fills before its persist log, so batch 6 rolls
 /// to a second segment and the first keeps three persist blocks unwritten.

@@ -200,6 +200,8 @@ struct LedgerState {
     target: Option<Target>,
     /// A rebuild from the ledger is under way: the disk holds part of it.
     rebuilding: bool,
+    /// The node is writing damaged entries again: a crash may cut it.
+    rewriting: bool,
     /// Commits so far: each one's version makes its values unique.
     version: u64,
 }
@@ -367,7 +369,7 @@ async fn live(ctx: &SimContext, ledger: &Ledger) -> Ended {
         }
     };
     note_recovery(ctx, &recovery).await;
-    if let Err(error) = reconcile(&mut journal, ledger).await {
+    if let Err(error) = reconcile(ctx, &mut journal, ledger).await {
         return Ended::Commit(error);
     }
     run(ctx, journal, ledger).await
@@ -395,6 +397,7 @@ async fn rebuild(
 ) -> Result<Journal<SimStorageProvider>, Ended> {
     let (acked, floor, meta) = ledger.with(|state| {
         state.rebuilding = true;
+        state.rewriting = false;
         state.pending = None;
         state.target = None;
         (state.acked.clone(), state.floor, state.meta.clone())
@@ -546,9 +549,13 @@ impl Expected<'_> {
 /// again, clear a damaged entry nothing acknowledged, and adopt what the
 /// disk holds.
 async fn reconcile(
+    ctx: &SimContext,
     journal: &mut Journal<SimStorageProvider>,
     ledger: &Ledger,
 ) -> Result<(), CommitError> {
+    if ledger.with(|state| state.rewriting) {
+        assert_reachable!("a crash cut the rewrite of a damaged entry");
+    }
     let (acked, floor, meta, mut pending, last) = ledger.with(|state| {
         (
             state.acked.clone(),
@@ -626,6 +633,15 @@ async fn reconcile(
             batch.clear(*position..*position + 1);
         }
         batch.set_meta(journal.meta().to_vec());
+        ledger.with(|state| state.rewriting = true);
+        // A crash in the middle of the rewrite: the open after it must
+        // still report the damaged entry, or return the new copy, never
+        // forget the position (a torn rewrite once took the old slot's
+        // retire record with it).
+        if moonpool_sim::buggify!() {
+            let delay = Duration::from_millis(ctx.random().random_range(0..3));
+            let _ = ctx.crash_self(RebootKind::Crash, Some(delay));
+        }
         journal.commit(batch).await?;
     }
     ledger.with(|state| {
@@ -634,6 +650,7 @@ async fn reconcile(
         state.meta = journal.meta().to_vec();
         state.pending = None;
         state.target = None;
+        state.rewriting = false;
         // The open recorded the last batch it found, and a repair batch
         // carries the metainfo.
         state.last = LastBatch {
