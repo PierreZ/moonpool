@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.9.0] - 2026-11-24
+
+### 🚀 Features
+
+- **site**: Technique pages, playground, extras and the finished site ([#425](https://github.com/PierreZ/moonpool/pull/425))
+- **moonpool-rpc**: Mutual TLS, a certificate authority, and TLS under simulation
+- **moonpool-sim**: Workloads change the deployment mid-run through ctx.deployment()
+- **moonpool-sim**: SimulationBuilder::run returns Result
+- **moonpool-rpc**: Streams, balancing, security and qualification (P4–P7) ([#276](https://github.com/PierreZ/moonpool/pull/276))
+- **moonpool**: Metastable gRPC retry-storm example with an ASCII graph ([#193](https://github.com/PierreZ/moonpool/pull/193))
+- **sim**: Report application metrics from a custom registry ([#190](https://github.com/PierreZ/moonpool/pull/190))
+
+### 🐛 Bug Fixes
+
+- **moonpool-prometheus**: Refuse shape-mismatched re-registration; docs drifts (#476, #478) ([#523](https://github.com/PierreZ/moonpool/pull/523))
+- **moonpool-sim**: A seed must not pass on a stall, a cut sleep or a noisy check ([#392](https://github.com/PierreZ/moonpool/pull/392))
+
+### 📚 Documentation
+
+- Moonpool is no longer described as hobby-grade
+- Install snippets and the book name version 0.9
+- Rewrite the README, the book and the crate docs for every feature
+- **moonpool,moonpool-core**: Fix a doubled word and stale spawn_local wording
+
+### 🚜 Refactor
+
+- Remove RPC load balancing, JWT, the IP allow list and the metric query layer ([#540](https://github.com/PierreZ/moonpool/pull/540))
+- Remove the Orleans analysis, unused public items and six numeric assertion macros
+- Simplify and factorize every crate ([#274](https://github.com/PierreZ/moonpool/pull/274))
+- Simplify retained crate internals
+- Move rust crates under crates
+
+### ⚙️ Miscellaneous Tasks
+
+- Run the feature-gated metastable_grpc_retry_storm example test
+
+### 📦 Other
+
+- Bump flake and Rust 1.100.0; pass clippy pedantic with no allows ([#557](https://github.com/PierreZ/moonpool/pull/557))
+- Close packaging metadata gaps across the publishable crates
+
+
 ## [0.8.0] - 2026-07-09
 
 ### 🚀 Features

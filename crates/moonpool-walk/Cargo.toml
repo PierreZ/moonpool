@@ -17,8 +17,8 @@ categories.workspace = true
 # sans-I/O library can test itself with this crate and never pull in the
 # simulation runtime.
 [dependencies]
-moonpool-assertions = { path = "../moonpool-assertions", version = "0.8.0" }
-moonpool-buggify = { path = "../moonpool-buggify", version = "0.8.0" }
+moonpool-assertions = { path = "../moonpool-assertions", version = "0.9.0" }
+moonpool-buggify = { path = "../moonpool-buggify", version = "0.9.0" }
 
 [lints]
 workspace = true
@@ -26,4 +26,4 @@ workspace = true
 # Tests only: `tests/paxos.rs` gives a walk's events to TLC. The library does
 # not know a trace checker.
 [dev-dependencies]
-moonpool-tla = { path = "../moonpool-tla", version = "0.8.0" }
+moonpool-tla = { path = "../moonpool-tla", version = "0.9.0" }
