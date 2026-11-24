@@ -78,6 +78,28 @@ fn every_state_at_the_end_of_a_chunk_goes_on() {
     }
 }
 
+/// TLC prints its progress line from a thread of its own, between two
+/// prints of the spec. A long chunk (one that runs for minutes) has such a
+/// line in its output, and it must not become a part of a state that the
+/// next chunk starts from: that chunk would not parse.
+#[test]
+fn a_progress_line_of_tlc_is_not_a_part_of_a_state() {
+    require_tlc();
+    let reports = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/tlc-that-reports.sh");
+    let mut start = Trace::new();
+    start.define("TraceLimit", Value::Int(1000));
+    let mut live = check()
+        .tlc(reports)
+        .live("TraceNext")
+        .chunk(10)
+        .start(&start)
+        .expect("the spec folder keeps the contract");
+    live.event("flip", none());
+    incs(&mut live, 0, 30);
+    live.event("show", [("h", Value::Int(1))]);
+    assert_eq!(live.finish().expect("verdict"), Verdict::Accepted);
+}
+
 #[test]
 fn a_rejection_counts_from_the_first_event() {
     require_tlc();

@@ -12,7 +12,9 @@
 //!
 //! The hand-off: the wrapper module prints each state at the end of a
 //! chunk (the cursor one past the chunk's last event), and the next chunk
-//! starts from the set of those states, with the cursor back at 1. A
+//! starts from the set of those states, with the cursor back at 1. Each
+//! state and its two markers are one `PrintT`, so a line that TLC prints
+//! from another thread (its progress line) never falls inside a state. A
 //! printed state is a TLA+ value, so the next chunk reads it back: every
 //! model value in a state must be a name the spec declares (a constant
 //! that the configuration binds to the model value of the same name, as
@@ -43,9 +45,9 @@ pub const DEFAULT_BACKLOG: usize = 4;
 /// states, and a chunk of `n` events is a behaviour of `n + 1` states.
 pub const MAX_CHUNK: usize = 65_534;
 
-/// The line that the wrapper prints before a state at the end of a chunk.
+/// The string that opens a state printed at the end of a chunk.
 const END_OPEN: &str = "\"moonpool-tla end {\"";
-/// The line that the wrapper prints after it.
+/// The string that closes it.
 const END_CLOSE: &str = "\"moonpool-tla end }\"";
 
 /// How to check one stream of events live: built by [`TraceCheck::live`].
@@ -412,7 +414,7 @@ impl Worker {
             let _ = write!(
                 out,
                 "  /\\ IF {cursor} = Len(Trace) + 1\n     \
-                 THEN PrintT({END_OPEN}) /\\ PrintT([{}]) /\\ PrintT({END_CLOSE})\n     \
+                 THEN PrintT(<<{END_OPEN}, [{}], {END_CLOSE}>>)\n     \
                  ELSE TRUE\n",
                 fields.join(", ")
             );
@@ -436,23 +438,31 @@ fn no_error(run: &TlcRun) -> Result<Vec<String>, CheckError> {
 }
 
 /// The values printed between the end markers, each once.
+///
+/// The wrapper prints a state and its two markers in one `PrintT`, so the
+/// three are one print: TLC prints its own messages (the progress line it
+/// prints each minute) from another thread, and such a message falls
+/// before or after a print, never inside it. A state is the text between
+/// the two markers, without the commas of the tuple.
 fn end_states(output: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut states = Vec::new();
-    let mut open: Option<Vec<&str>> = None;
-    for line in output.lines() {
-        match (line.trim(), &mut open) {
-            (END_OPEN, None) => open = Some(Vec::new()),
-            (END_CLOSE, Some(lines)) => {
-                let state = lines.join("\n");
-                if seen.insert(state.clone()) {
-                    states.push(state);
-                }
-                open = None;
-            }
-            (_, Some(lines)) => lines.push(line),
-            (_, None) => {}
+    let mut rest = output;
+    while let Some(open) = rest.find(END_OPEN) {
+        let after = &rest[open + END_OPEN.len()..];
+        let Some(close) = after.find(END_CLOSE) else {
+            break;
+        };
+        let state = after[..close]
+            .trim()
+            .trim_start_matches(',')
+            .trim_end_matches(',')
+            .trim()
+            .to_owned();
+        if seen.insert(state.clone()) {
+            states.push(state);
         }
+        rest = &after[close + END_CLOSE.len()..];
     }
     states
 }
@@ -535,13 +545,28 @@ mod tests {
 
     #[test]
     fn the_end_states_are_read_once_each() {
-        let out = "\"moonpool-tla end {\"\n[l |-> 3, x |-> 2]\n\"moonpool-tla end }\"\n\
+        let out = "<<\"moonpool-tla end {\", [l |-> 3, x |-> 2], \"moonpool-tla end }\">>\n\
                    noise\n\
-                   \"moonpool-tla end {\"\n[ l |-> 3,\n  x |-> 4 ]\n\"moonpool-tla end }\"\n\
-                   \"moonpool-tla end {\"\n[l |-> 3, x |-> 2]\n\"moonpool-tla end }\"\n";
+                   << \"moonpool-tla end {\",\n  [ l |-> 3,\n    x |-> 4 ],\n  \"moonpool-tla end }\" >>\n\
+                   <<\"moonpool-tla end {\", [l |-> 3, x |-> 2], \"moonpool-tla end }\">>\n";
         assert_eq!(
             end_states(out),
-            ["[l |-> 3, x |-> 2]", "[ l |-> 3,\n  x |-> 4 ]"]
+            ["[l |-> 3, x |-> 2]", "[ l |-> 3,\n    x |-> 4 ]"]
+        );
+    }
+
+    /// TLC prints its progress line each minute from another thread. A
+    /// chunk that runs longer than a minute must not read that line as a
+    /// part of a state: the next chunk would not parse.
+    #[test]
+    fn a_tlc_message_is_never_read_as_a_state() {
+        let out = "Progress(123) at 2026-11-23 10:04:37: 9 states generated\n\
+                   <<\"moonpool-tla end {\", [l |-> 3, x |-> 2], \"moonpool-tla end }\">>\n\
+                   Progress(124) at 2026-11-23 10:05:37: 12 states generated\n\
+                   << \"moonpool-tla end {\",\n  [l |-> 3, x |-> 4],\n  \"moonpool-tla end }\" >>\n";
+        assert_eq!(
+            end_states(out),
+            ["[l |-> 3, x |-> 2]", "[l |-> 3, x |-> 4]"]
         );
     }
 
